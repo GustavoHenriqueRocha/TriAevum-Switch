@@ -637,8 +637,9 @@ GrassPlacementRule DeserializeGrassRule(const Json& document, size_t index, std:
                prefix + ".MaximumSlopeDegrees", result);
     ReadScalar(document, "NormalOffset", rule.NormalOffset,
                prefix + ".NormalOffset", result);
-    // Optional: absent means the whole mask applies (earlier files).
-    if (const Json* rects = FindMember(document, "ActiveRects"); rects != nullptr) {
+    // Optional: absent or null means the whole mask applies (earlier files and
+    // the title's shipped rules).
+    if (const Json* rects = FindMember(document, "ActiveRects"); rects != nullptr && !rects->is_null()) {
         bool valid = rects->is_array();
         for (size_t i = 0; valid && i < rects->size(); ++i) {
             const auto& entry = (*rects)[i];
