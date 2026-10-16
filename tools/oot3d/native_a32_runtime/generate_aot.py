@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -29,6 +30,12 @@ def operational_path(entry_id: str) -> Path:
         for key, value in config.get("variables", {}).items()
     }
     variables["repoRoot"] = str(REPO_ROOT)
+    # Non-author workspaces override any variable through the environment,
+    # e.g. OOT3D_OPERATIONAL_oot3dExtractRoot=/path/to/extract.
+    for key in list(variables):
+        override = os.environ.get("OOT3D_OPERATIONAL_" + key)
+        if override:
+            variables[key] = override
     row = next(
         entry for entry in config.get("entries", []) if entry.get("id") == entry_id
     )
@@ -38,6 +45,8 @@ def operational_path(entry_id: str) -> Path:
         for key, value in variables.items():
             expanded = expanded.replace("${" + key + "}", value)
         if expanded == previous:
+            if os.sep == "/":
+                expanded = expanded.replace("\\", "/")
             return Path(expanded)
     raise ValueError(f"operational input variables contain a cycle: {entry_id}")
 
