@@ -11,6 +11,17 @@
 #include <cstddef>
 #include <cstdint>
 
+// Hot/cold attributes for generated-code helpers (see oot3d_native_a32_memory.h).
+#ifndef OOT3D_AOT_HOT
+#if defined(__GNUC__) && !defined(__clang__)
+#define OOT3D_AOT_HOT inline __attribute__((always_inline))
+#define OOT3D_AOT_COLD __attribute__((noinline, cold))
+#else
+#define OOT3D_AOT_HOT inline
+#define OOT3D_AOT_COLD
+#endif
+#endif
+
 namespace Oot3dNativeGame {
 
 class NativeA32Memory;
@@ -83,7 +94,7 @@ struct Oot3dAotBlockEntryFilter final {
         Words[bitIndex >> 6U] |= uint64_t{1} << (bitIndex & 63U);
     }
 
-    bool MayContain(uint32_t pc) const noexcept {
+    OOT3D_AOT_HOT bool MayContain(uint32_t pc) const noexcept {
         const size_t bitIndex = BitIndex(pc);
         return (Words[bitIndex >> 6U] &
                 (uint64_t{1} << (bitIndex & 63U))) != 0U;
@@ -196,7 +207,7 @@ constexpr Oot3dAotExternalStateAccess Oot3dAotExternalStateAccessFor(
     }
 }
 
-inline bool Oot3dAotConsumeBlock(Oot3dWholeAotContext& context) noexcept {
+OOT3D_AOT_HOT bool Oot3dAotConsumeBlock(Oot3dWholeAotContext& context) noexcept {
     if (context.BlocksRemaining == 0U) {
         return false;
     }
@@ -256,15 +267,14 @@ inline bool Oot3dAotEnterBlock(
     return true;
 }
 
+// Cold half of the generated block entry: exact hook membership (sorted
+// search), state flush, callback and reload. Reached only when a callback is
+// installed and the no-false-negative bitmap does not exclude the PC.
 template <typename CommitState, typename ReloadState>
-inline bool Oot3dAotEnterBlock(
+OOT3D_AOT_COLD bool Oot3dAotEnterBlockSlow(
     Oot3dWholeAotContext& context, Oot3dWholeAotFrame& frame,
-    Oot3dAotArchitecturalState& state, uint32_t pc,
-    CommitState&& commitState, ReloadState&& reloadState) {
-    const bool firstBlock = context.BlocksConsumed == 0U;
-    if (!Oot3dAotConsumeBlock(context)) {
-        return false;
-    }
+    Oot3dAotArchitecturalState& state, uint32_t pc, bool firstBlock,
+    CommitState& commitState, ReloadState& reloadState) {
     if (!Oot3dAotShouldNotifyBlock(context, pc, firstBlock)) {
         return true;
     }
@@ -275,6 +285,31 @@ inline bool Oot3dAotEnterBlock(
     state.Reload(0x7FFFU, true);
     reloadState();
     return true;
+}
+
+// Hot half, inlined into every generated block: budget accounting plus the
+// two decisions that end almost every entry (no callback, or a bitmap
+// rejection). Both are exactly the early "false" results of
+// Oot3dAotShouldNotifyBlock, which the cold half still evaluates in full.
+template <typename CommitState, typename ReloadState>
+OOT3D_AOT_HOT bool Oot3dAotEnterBlock(
+    Oot3dWholeAotContext& context, Oot3dWholeAotFrame& frame,
+    Oot3dAotArchitecturalState& state, uint32_t pc,
+    CommitState&& commitState, ReloadState&& reloadState) {
+    const bool firstBlock = context.BlocksConsumed == 0U;
+    if (!Oot3dAotConsumeBlock(context)) {
+        return false;
+    }
+    if (context.BlockEntry == nullptr) [[likely]] {
+        return true;
+    }
+    if (context.BlockEntryPcCount != 0U &&
+        context.BlockEntryFilter != nullptr &&
+        !context.BlockEntryFilter->MayContain(pc)) [[likely]] {
+        return true;
+    }
+    return Oot3dAotEnterBlockSlow(context, frame, state, pc, firstBlock,
+                                  commitState, reloadState);
 }
 
 inline Oot3dWholeAotFlow Oot3dAotCallExternal(

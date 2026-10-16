@@ -25,6 +25,18 @@
 #include <bit>
 #include <cstdint>
 
+// GCC leaves these small fast paths out of line in the large generated
+// functions unless forced; the software fallbacks stay out of line.
+#ifndef OOT3D_AOT_HOT
+#if defined(__GNUC__) && !defined(__clang__)
+#define OOT3D_AOT_HOT inline __attribute__((always_inline))
+#define OOT3D_AOT_COLD __attribute__((noinline, cold))
+#else
+#define OOT3D_AOT_HOT inline
+#define OOT3D_AOT_COLD
+#endif
+#endif
+
 namespace Oot3dNativeGame {
 
 namespace VfpFastDetail {
@@ -56,7 +68,7 @@ inline constexpr std::uint32_t kIxc = 1U << 4U;
 
 // Round-to-nearest product with its IXC flag. False leaves the operation to
 // the software implementation.
-[[nodiscard]] inline bool Multiply(
+[[nodiscard]] OOT3D_AOT_HOT bool Multiply(
     std::uint32_t left, std::uint32_t right,
     oot3d::recomp::a32::VfpBinary32Result& result) noexcept {
     if (!OperandEligible(left) || !OperandEligible(right)) {
@@ -77,7 +89,7 @@ inline constexpr std::uint32_t kIxc = 1U << 4U;
     return true;
 }
 
-[[nodiscard]] inline bool Add(
+[[nodiscard]] OOT3D_AOT_HOT bool Add(
     std::uint32_t left, std::uint32_t right,
     oot3d::recomp::a32::VfpBinary32Result& result) noexcept {
     if (!OperandEligible(left) || !OperandEligible(right)) {
@@ -99,7 +111,7 @@ inline constexpr std::uint32_t kIxc = 1U << 4U;
 
 // Multiply-accumulate forms round the product, then the sum, and report the
 // union of both steps' flags.
-[[nodiscard]] inline bool MultiplyThenAdd(
+[[nodiscard]] OOT3D_AOT_HOT bool MultiplyThenAdd(
     std::uint32_t accumulator, std::uint32_t left, std::uint32_t right,
     std::uint32_t negateAccumulator, std::uint32_t negateProduct,
     oot3d::recomp::a32::VfpBinary32Result& result) noexcept {
@@ -115,7 +127,7 @@ inline constexpr std::uint32_t kIxc = 1U << 4U;
 
 } // namespace VfpFastDetail
 
-inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpAdd(
+OOT3D_AOT_HOT oot3d::recomp::a32::VfpBinary32Result Oot3dVfpAdd(
     std::uint32_t left, std::uint32_t right, std::uint32_t fpscr) noexcept {
     oot3d::recomp::a32::VfpBinary32Result result{};
     if ((fpscr & VfpFastDetail::kRoundingModeMask) == 0U &&
@@ -125,7 +137,7 @@ inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpAdd(
     return oot3d::recomp::a32::VfpBinary32Add(left, right, fpscr);
 }
 
-inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpSubtract(
+OOT3D_AOT_HOT oot3d::recomp::a32::VfpBinary32Result Oot3dVfpSubtract(
     std::uint32_t left, std::uint32_t right, std::uint32_t fpscr) noexcept {
     oot3d::recomp::a32::VfpBinary32Result result{};
     if ((fpscr & VfpFastDetail::kRoundingModeMask) == 0U &&
@@ -135,7 +147,7 @@ inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpSubtract(
     return oot3d::recomp::a32::VfpBinary32Subtract(left, right, fpscr);
 }
 
-inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpMultiply(
+OOT3D_AOT_HOT oot3d::recomp::a32::VfpBinary32Result Oot3dVfpMultiply(
     std::uint32_t left, std::uint32_t right, std::uint32_t fpscr) noexcept {
     oot3d::recomp::a32::VfpBinary32Result result{};
     if ((fpscr & VfpFastDetail::kRoundingModeMask) == 0U &&
@@ -145,7 +157,7 @@ inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpMultiply(
     return oot3d::recomp::a32::VfpBinary32Multiply(left, right, fpscr);
 }
 
-inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpNegativeMultiply(
+OOT3D_AOT_HOT oot3d::recomp::a32::VfpBinary32Result Oot3dVfpNegativeMultiply(
     std::uint32_t left, std::uint32_t right, std::uint32_t fpscr) noexcept {
     oot3d::recomp::a32::VfpBinary32Result result{};
     if ((fpscr & VfpFastDetail::kRoundingModeMask) == 0U &&
@@ -156,7 +168,7 @@ inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpNegativeMultiply(
 }
 
 // VMLA: accumulator + product.
-inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpMultiplyAccumulate(
+OOT3D_AOT_HOT oot3d::recomp::a32::VfpBinary32Result Oot3dVfpMultiplyAccumulate(
     std::uint32_t accumulator, std::uint32_t left, std::uint32_t right,
     std::uint32_t fpscr) noexcept {
     oot3d::recomp::a32::VfpBinary32Result result{};
@@ -170,7 +182,7 @@ inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpMultiplyAccumulate(
 }
 
 // VMLS: accumulator - product.
-inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpMultiplySubtract(
+OOT3D_AOT_HOT oot3d::recomp::a32::VfpBinary32Result Oot3dVfpMultiplySubtract(
     std::uint32_t accumulator, std::uint32_t left, std::uint32_t right,
     std::uint32_t fpscr) noexcept {
     oot3d::recomp::a32::VfpBinary32Result result{};
@@ -184,7 +196,7 @@ inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpMultiplySubtract(
 }
 
 // VNMLA: -accumulator - product.
-inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpNegativeMultiplyAccumulate(
+OOT3D_AOT_HOT oot3d::recomp::a32::VfpBinary32Result Oot3dVfpNegativeMultiplyAccumulate(
     std::uint32_t accumulator, std::uint32_t left, std::uint32_t right,
     std::uint32_t fpscr) noexcept {
     oot3d::recomp::a32::VfpBinary32Result result{};
@@ -198,7 +210,7 @@ inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpNegativeMultiplyAccumulate(
 }
 
 // VNMLS: -accumulator + product.
-inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpNegativeMultiplySubtract(
+OOT3D_AOT_HOT oot3d::recomp::a32::VfpBinary32Result Oot3dVfpNegativeMultiplySubtract(
     std::uint32_t accumulator, std::uint32_t left, std::uint32_t right,
     std::uint32_t fpscr) noexcept {
     oot3d::recomp::a32::VfpBinary32Result result{};
@@ -212,7 +224,7 @@ inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpNegativeMultiplySubtract(
 }
 
 // VCVT.F32.S32: exact unless |value| needs more than 24 significant bits.
-inline oot3d::recomp::a32::VfpBinary32Result Oot3dVfpFromSigned(
+OOT3D_AOT_HOT oot3d::recomp::a32::VfpBinary32Result Oot3dVfpFromSigned(
     std::uint32_t value, std::uint32_t fpscr) noexcept {
     if ((fpscr & VfpFastDetail::kRoundingModeMask) == 0U) [[likely]] {
         const std::int32_t integer = static_cast<std::int32_t>(value);

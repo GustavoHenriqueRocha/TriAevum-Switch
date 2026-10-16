@@ -19,6 +19,20 @@
 
 #include <nlohmann/json_fwd.hpp>
 
+// Hot/cold attributes for the typed AOT memory paths. Only GCC gets the
+// forced inline: its unit-growth limits otherwise leave nearly every
+// generated access as an out-of-line call. Other compilers keep their own
+// inlining decisions (measured separately on Windows).
+#ifndef OOT3D_AOT_HOT
+#if defined(__GNUC__) && !defined(__clang__)
+#define OOT3D_AOT_HOT inline __attribute__((always_inline))
+#define OOT3D_AOT_COLD __attribute__((noinline, cold))
+#else
+#define OOT3D_AOT_HOT inline
+#define OOT3D_AOT_COLD
+#endif
+#endif
+
 namespace Oot3dNativeGame {
 
 struct NativeA32MemoryRegionConfig {
@@ -161,9 +175,113 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
     // AOT code uses these non-virtual typed paths. Fully mapped guest pages
     // become one indexed host load; boundaries and protected pages preserve
     // the exact checked-memory behavior.
+    //
+    // Hot/cold split: the inline part handles only an untraced access that
+    // lies wholly inside one fast page. Everything else (null value, page
+    // boundary, unmapped/protected/watched page, write-trace fingerprinting)
+    // goes to ReadFastSlow/WriteFastSlow, which are the complete original
+    // bodies, so values, faults, traces and generations are unchanged.
     template <typename T>
-    bool ReadFast(uint32_t address, T* value,
-                  uint32_t* faultAddress = nullptr) const noexcept {
+    OOT3D_AOT_HOT bool ReadFast(uint32_t address, T* value,
+                                uint32_t* faultAddress = nullptr) const noexcept {
+        static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>);
+        static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
+                      sizeof(T) == 8);
+        static_assert(std::endian::native == std::endian::little);
+        const size_t offset = address & PageMask;
+        const FastPage* group = mFastPageGroups[address >> FastGroupShift].get();
+        if (value != nullptr && offset <= PageSize - sizeof(T) &&
+            group != nullptr && !mTraceWriteFingerprint) [[likely]] {
+            const uint8_t* source =
+                group[(address >> PageShift) & FastGroupPageMask].Read;
+            if (source != nullptr) [[likely]] {
+                std::memcpy(value, source + offset, sizeof(T));
+                return true;
+            }
+        }
+        return ReadFastSlow<T>(address, value, faultAddress);
+    }
+
+    template <typename T>
+    OOT3D_AOT_HOT bool WriteFast(uint32_t address, T value,
+                                 uint32_t* faultAddress = nullptr) noexcept {
+        static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>);
+        static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
+                      sizeof(T) == 8);
+        static_assert(std::endian::native == std::endian::little);
+        const size_t offset = address & PageMask;
+        FastPage* group = mFastPageGroups[address >> FastGroupShift].get();
+        if (offset <= PageSize - sizeof(T) && group != nullptr &&
+            !mTraceWriteFingerprint) [[likely]] {
+            auto& entry = group[(address >> PageShift) & FastGroupPageMask];
+            uint8_t* destination = entry.Write;
+            if (destination != nullptr) [[likely]] {
+                std::memcpy(destination + offset, &value, sizeof(T));
+                ++mWriteGeneration;
+                entry.WriteGeneration = CurrentRangeGeneration();
+                if (entry.WriteGeneration == 0U) [[unlikely]] mRangeVersionsValid = false;
+                return true;
+            }
+        }
+        return WriteFastSlow<T>(address, value, faultAddress);
+    }
+
+    // Multi-word guest transfers (LDM/STM). True only when every word lies on
+    // one untraced fast page; the effect is then exactly that of `count`
+    // consecutive ReadFast<uint32_t>/WriteFast<uint32_t> calls at ascending
+    // addresses: the same bytes, mWriteGeneration advanced by `count` and the
+    // page stamped with the generation of the last word. False means nothing
+    // was read or written; the caller then uses the per-word path, which keeps
+    // the exact fault order and partial-write behavior.
+    OOT3D_AOT_HOT bool ReadWordsFast(uint32_t address, uint32_t* values,
+                                     uint32_t count) const noexcept {
+        const size_t offset = address & PageMask;
+        const size_t bytes = size_t{count} * 4U;
+        const FastPage* group = mFastPageGroups[address >> FastGroupShift].get();
+        if (bytes > PageSize || offset > PageSize - bytes || group == nullptr ||
+            mTraceWriteFingerprint) [[unlikely]] {
+            return false;
+        }
+        const uint8_t* source =
+            group[(address >> PageShift) & FastGroupPageMask].Read;
+        if (source == nullptr) [[unlikely]] {
+            return false;
+        }
+        std::memcpy(values, source + offset, bytes);
+        return true;
+    }
+
+    OOT3D_AOT_HOT bool WriteWordsFast(uint32_t address, const uint32_t* values,
+                                      uint32_t count) noexcept {
+        const size_t offset = address & PageMask;
+        const size_t bytes = size_t{count} * 4U;
+        FastPage* group = mFastPageGroups[address >> FastGroupShift].get();
+        if (count == 0U || bytes > PageSize || offset > PageSize - bytes ||
+            group == nullptr || mTraceWriteFingerprint) [[unlikely]] {
+            return false;
+        }
+        auto& entry = group[(address >> PageShift) & FastGroupPageMask];
+        uint8_t* destination = entry.Write;
+        if (destination == nullptr) [[unlikely]] {
+            return false;
+        }
+        std::memcpy(destination + offset, values, bytes);
+        // Word-by-word writes stamp start+1 .. start+count; if any of those
+        // wraps to zero, range versions become invalid, as in WriteFast.
+        const uint64_t start = CurrentRangeGeneration();
+        mWriteGeneration += count;
+        entry.WriteGeneration = CurrentRangeGeneration();
+        if (start > UINT64_MAX - uint64_t{count}) [[unlikely]] {
+            mRangeVersionsValid = false;
+        }
+        return true;
+    }
+
+    // Complete original typed-access bodies, reached only when the inline
+    // fast path declines.
+    template <typename T>
+    OOT3D_AOT_COLD bool ReadFastSlow(uint32_t address, T* value,
+                                     uint32_t* faultAddress) const noexcept {
         static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>);
         static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
                       sizeof(T) == 8);
@@ -203,8 +321,8 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
     }
 
     template <typename T>
-    bool WriteFast(uint32_t address, T value,
-                   uint32_t* faultAddress = nullptr) noexcept {
+    OOT3D_AOT_COLD bool WriteFastSlow(uint32_t address, T value,
+                                      uint32_t* faultAddress) noexcept {
         static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>);
         static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
                       sizeof(T) == 8);

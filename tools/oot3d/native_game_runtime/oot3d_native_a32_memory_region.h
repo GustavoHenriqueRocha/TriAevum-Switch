@@ -73,6 +73,20 @@ class NativeA32UnobservedMemory final {
         return mMemory.WriteFast<T>(address, value, fault);
     }
 
+    // LDM/STM spans inside a region: publish the locally accumulated store
+    // count first so generations keep their per-store order, then use the
+    // ordinary span path (or let the caller fall back word by word).
+    OOT3D_REGION_INLINE bool ReadWordsFast(uint32_t address, uint32_t* values,
+                                           uint32_t count) noexcept {
+        return mMemory.ReadWordsFast(address, values, count);
+    }
+
+    OOT3D_REGION_INLINE bool WriteWordsFast(uint32_t address, const uint32_t* values,
+                                            uint32_t count) noexcept {
+        Commit();
+        return mMemory.WriteWordsFast(address, values, count);
+    }
+
     // A proven, nonaliasing carried-word copy loop. Validate its lookahead as
     // well as the stores; retain instruction order in the scalar fallback.
     bool CopyPairs(uint32_t& source, uint32_t& destination, uint32_t& count,
