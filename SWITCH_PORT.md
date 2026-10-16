@@ -1,0 +1,93 @@
+# Ocarina of Time 3D no Nintendo Switch — notas do port
+
+Este repositório é um **fork** do [TriAevum / Echoes of Time](https://github.com/coccofresco/TriAevum),
+de **coccofresco**: a recompilação AOT nativa de *The Legend of Zelda: Ocarina of Time 3D*. Todo o
+trabalho de recompilação, runtime, renderizador e ferramentas é do projeto original e dos projetos
+que ele credita (veja [README.md](README.md) e [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+Aqui estão as mudanças feitas para o **homebrew de Switch** (`.nro`) rodar e ficar jogável num
+console real, no branch `switch-port`.
+
+> **Nenhuma ROM, código do jogo, C++ gerado a partir do jogo ou asset é distribuído aqui.**
+> Você precisa do seu próprio dump decriptado do cartucho. Licença: GPL-3.0, como o original.
+
+## Estado (2026-10-16)
+
+- Roda no console (Erista, Atmosphère, aberto pelo Sphaira em modo título), testado por horas.
+- Velocidade de jogo correta; 30 FPS em cenas leves; cenas pesadas ainda limitadas pela CPU
+  (a lógica traduzida custa ~25–30 ms por passo a 1785 MHz). Trabalho de CPU em andamento.
+- Recomendado no sys-clk: CPU 1785 MHz e memória 1600 MHz.
+
+## O que foi corrigido / adicionado
+
+Bugs que impediam o Switch de rodar (só apareciam no console; o Eden escondia vários):
+
+| Problema | Causa | Correção |
+|---|---|---|
+| Build sem Vulkan quebrado | módulos DLSS/NGX e iMMERSE/MXAO incluíam `vulkan.h` | excluídos sem `THREE_DS_RECOMP_ENABLE_VULKAN` |
+| Crash ao iniciar | `-ffast-math` na ligação põe `crtfastmath.o` depois de `crtend.o` e o ld descarta o terminador do `.eh_frame`; toda exceção C++ abortava | ligação com `-fno-fast-math` |
+| Crash ao iniciar | `pthread_detach` do newlib do devkitA64 retorna `ENOSYS` | sem `detach()` no Switch |
+| Tela preta / shader falhando | apresentação paralela rodava GL numa thread sem contexto | contexto GL movido para a thread de render (`Submit`+`Drain`) |
+| Jogo em câmera lenta (½ velocidade) | 60 refreshes/s esperados, mas 1 por apresentação a 30 Hz | até 4 refreshes por apresentação |
+| Configurações não salvavam | FS do Horizon não renomeia por cima de arquivo | remove e renomeia |
+| Crash com warm-up em thread | contextos nvc0 compartilham push buffer sem lock | warm-up na thread de render |
+
+Desempenho e usabilidade:
+
+- **Cache de shaders em disco**: Mesa do devkitPro reconstruído com os patches de cache dos ports
+  de Wind Waker do centollOS (`MESA_SHADER_CACHE_DIR=sdmc:/switch/oot3dre/mesacache`); shaders já
+  vistos carregam em ~12 ms em vez de 1–3 s. Veja `docs/OOT3D_SWITCH_WHOLE_AOT_PORT.md`.
+- **Threads**: jogo sozinho no core 0; demais threads nos cores 1/2 com a prioridade do jogo e pilha
+  de 4 MiB (`oot3d_switch_threads.cpp`, `--wrap=pthread_create`).
+- **Render thread** (opcional): arquivo `config/parallel_presentation` no SD.
+- **Gerador AOT**: helpers quentes com caminho rápido inline e lento frio; LDM/STM por bloco;
+  literais PC-relativos dobrados; shards sem `-ffast-math` (exatidão do VFP).
+- **Orçamento de blocos** 2048 (era 128) no Switch.
+- **Perfil no console**: `logs/perf.txt` a cada 150 quadros (ms por fase + contadores do Mesa).
+- **TopScreen 3.0**: a 2.1.1 saiu do GameBanana; o importador agora aceita o pacote 3.0.
+- **ROM USA** aceita no build (adaptador USA→EUR canônico do próprio projeto).
+- **Caminhos de entrada** configuráveis por `OOT3D_OPERATIONAL_<variável>` (antes fixos no Windows do autor).
+- Ícone original para o `.nro` (`res/switch/icon.jpg`).
+
+## Como compilar (Linux)
+
+1. devkitPro (`switch-dev switch-sdl2 switch-mesa switch-glad switch-zlib`), `cmake`, Python 3 com `capstone`.
+2. Extraia a ROM com `tools/triaevum_release/ctr_rom.py` e, se for USA, aplique o adaptador
+   (`input_adapters.adapt_extracted_inputs` com a receita `oot3d-usa-input-canonical-eur-ef210566`).
+3. Gere o programa e o C++:
+   ```sh
+   export OOT3D_OPERATIONAL_oot3dExtractRoot=/caminho/extract   # exefs/code.bin, ncch0/exheader.bin
+   cd tools/oot3d/native_a32_runtime
+   python generate_whole_aot.py --output $W/gen/aot_program.json --inventory-output $W/gen/inventory.csv
+   python generate_whole_aot_cpp.py --program $W/gen/aot_program.json --selection whole_aot_functions.json \
+     --code $OOT3D_OPERATIONAL_oot3dExtractRoot/exefs/code.bin --output $W/gen/cpp --shards 256 --shard-strategy affinity
+   ```
+4. Configure e compile (~1h30 em 4 núcleos):
+   ```sh
+   cmake -S . -B build-switch -G Ninja -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake \
+     -DCMAKE_BUILD_TYPE=Release -DOOT3D_ENABLE_VULKAN_RENDERER=OFF \
+     -DOOT3D_WHOLE_AOT_PRODUCT_MODE=ON -DOOT3D_REQUIRE_WHOLE_AOT=ON -DOOT3D_REBUILD_WHOLE_AOT=ON \
+     -DOOT3D_REGENERATE_WHOLE_AOT=OFF -DOOT3D_WHOLE_AOT_GENERATED_DIR=$W/gen/cpp \
+     -DOOT3D_WHOLE_AOT_PROGRAM=$W/gen/aot_program.json \
+     -DOOT3D_WHOLE_AOT_CODE_BIN=... -DOOT3D_WHOLE_AOT_EXHEADER=...
+   cmake --build build-switch --target oot3d_native_game_nro
+   ```
+   (Para o Mesa com cache, veja a seção correspondente em `docs/OOT3D_SWITCH_WHOLE_AOT_PORT.md`.)
+5. Monte o SD com `scripts/switch/stage-product.sh` e copie `switch/oot3dre/` para o cartão.
+   Abra pelo Homebrew Menu **em modo título** (segurando R num jogo), não pelo álbum.
+
+## Diagnóstico no console
+
+- `sdmc:/switch/oot3dre/boot-status.txt` — etapa da inicialização e erro legível.
+- `logs/perf.txt` — FPS e ms por fase; `logs/oot3d_native_game.log`; `logs/glthread.txt`.
+- Crashes: `atmosphere/crash_reports/` (o `.nro` é carregado pelo hbloader; a base pode ser
+  achada alinhando os endereços de retorno com instruções `bl/blr` do ELF).
+
+## Referências e créditos
+
+- [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum) — projeto original (GPL-3.0).
+- TopScreen / Single Screen Experience — [GameBanana 695893](https://gamebanana.com/mods/695893).
+- [centollOS/SwitchWaker](https://github.com/centollOS/SwitchWaker) e
+  [SwitchWakerHD](https://github.com/centollOS/SwitchWakerHD) — patches de cache do Mesa,
+  placement de threads e o estudo de desempenho no Switch que guiou várias mudanças.
+- [fearkov/3dsrecomp](https://github.com/fearkov/3dsrecomp) — referência de técnicas de recompilação de 3DS.
+- Zelda3drecomp, Azahar, Ship of Harkinian / libultraship, NVIDIA NRI, devkitPro/libnx — via o projeto original.

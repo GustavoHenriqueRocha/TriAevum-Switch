@@ -1,3 +1,7 @@
+> **Fork com port para Nintendo Switch.** Este fork de [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum)
+> adiciona correções e otimizações para o homebrew de Switch — veja [SWITCH_PORT.md](SWITCH_PORT.md).
+> Todo o crédito do projeto é do autor original e dos projetos que ele credita abaixo. Nenhuma ROM é distribuída.
+
 # TriAevum — Echoes of Time
 
 A native PC AOT recompilation of *The Legend of Zelda: Ocarina of Time 3D*,
