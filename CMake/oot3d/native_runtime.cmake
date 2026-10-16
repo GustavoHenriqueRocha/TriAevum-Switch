@@ -74,11 +74,15 @@ set(OOT3D_WHOLE_AOT_SHARD_COUNT "256" CACHE STRING
 option(OOT3D_WHOLE_AOT_THINLTO
     "Compile and link the whole-AOT archive with LLVM ThinLTO" OFF)
 set(OOT3D_WHOLE_AOT_PROFILE_MODE "none" CACHE STRING
-    "LLVM whole-AOT profile mode: none, generate, use, or sample-use")
+    "Whole-AOT profile mode: none, generate, use, or sample-use (LLVM); none, generate or use (GCC)")
 set_property(CACHE OOT3D_WHOLE_AOT_PROFILE_MODE PROPERTY STRINGS
     none generate use sample-use)
 set(OOT3D_WHOLE_AOT_PROFILE_FILE "" CACHE FILEPATH
-    "LLVM indexed or sample profile consumed by whole-AOT profile-use")
+    "LLVM indexed or sample profile consumed by whole-AOT profile-use; with GCC, the directory holding the .gcda files")
+set(OOT3D_WHOLE_AOT_GCC_PROFILE_RUNTIME_DIR "sdmc:/switch/oot3dre/pgo" CACHE STRING
+    "GCC profile-generate: directory the instrumented program writes its .gcda files to")
+option(OOT3D_WHOLE_AOT_NATIVE_VFP_AARCH64
+    "Regenerate whole-AOT C++ with native AArch64 VFP (generate_whole_aot_cpp.py --native-vfp-aarch64)" OFF)
 set(OOT3D_WHOLE_AOT_ORDER_FILE "" CACHE FILEPATH
     "Optional linker symbol order file for the final whole-AOT consumer")
 if (OOT3D_WHOLE_AOT_PRODUCT_MODE AND NOT OOT3D_DIRECT_AOT_PLUGIN)
@@ -189,6 +193,18 @@ target_link_libraries(oot3d_native_a32_vfp_fast_tests PRIVATE
 target_compile_options(oot3d_native_a32_vfp_fast_tests PRIVATE "${WARNING_OVERRIDE}"
     $<IF:$<CXX_COMPILER_FRONTEND_VARIANT:MSVC>,/fp:strict,-ffp-model=strict>)
 oot3d_target_defaults(oot3d_native_a32_vfp_fast_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
+# Native AArch64 VFP (whole_aot_cpp.py --native-vfp-aarch64) against the
+# software implementation. Meaningful on AArch64 hosts (or qemu-aarch64);
+# elsewhere it checks the software fallbacks.
+add_executable(oot3d_native_a32_vfp_aarch64_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_a32_runtime/oot3d_native_a32_vfp_aarch64_tests.cpp
+)
+target_link_libraries(oot3d_native_a32_vfp_aarch64_tests PRIVATE
+    oot3d_native_a32_runtime)
+target_compile_options(oot3d_native_a32_vfp_aarch64_tests PRIVATE "${WARNING_OVERRIDE}"
+    $<IF:$<CXX_COMPILER_FRONTEND_VARIANT:MSVC>,/fp:strict,-ffp-contract=off>)
+oot3d_target_defaults(oot3d_native_a32_vfp_aarch64_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
 add_executable(pica_gi_geometry_tests EXCLUDE_FROM_ALL
     runtime/three_ds_recomp/tests/pica_gi_geometry_tests.cpp
@@ -374,11 +390,17 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
             target_compile_options(oot3d_native_whole_aot PRIVATE
                 -fno-fast-math -ffp-contract=off)
         endif()
+        set(_oot3d_whole_aot_gcc_profile OFF)
         if (OOT3D_WHOLE_AOT_THINLTO OR
             NOT OOT3D_WHOLE_AOT_PROFILE_MODE STREQUAL "none")
-            if (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+                NOT OOT3D_WHOLE_AOT_THINLTO AND
+                OOT3D_WHOLE_AOT_PROFILE_MODE MATCHES "^(generate|use)$")
+                set(_oot3d_whole_aot_gcc_profile ON)
+            elseif (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
                 message(FATAL_ERROR
-                    "Whole-AOT ThinLTO/profile modes require clang-cl/LLVM")
+                    "Whole-AOT ThinLTO/profile modes require clang-cl/LLVM; "
+                    "GCC supports OOT3D_WHOLE_AOT_PROFILE_MODE generate/use only")
             endif()
         endif()
         if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -400,7 +422,44 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
             target_compile_options(oot3d_native_whole_aot PRIVATE
                 -flto=thin)
         endif()
-        if (OOT3D_WHOLE_AOT_PROFILE_MODE STREQUAL "generate")
+        if (_oot3d_whole_aot_gcc_profile)
+            # GCC instrumentation (gcov) of the generated shards only. Both
+            # builds name each .gcda by its object path relative to their own
+            # build tree (-fprofile-prefix-path), so the instrumented and the
+            # optimized build may live in different build directories, but
+            # they must compile the same generated C++ from the same
+            # OOT3D_WHOLE_AOT_GENERATED_DIR path. Names are flat, e.g.
+            # CMakeFiles#oot3d_native_whole_aot.dir#home#...#oot3d_whole_aot_shard_000.gcda
+            if (OOT3D_WHOLE_AOT_PROFILE_MODE STREQUAL "generate")
+                target_compile_options(oot3d_native_whole_aot PRIVATE
+                    "-fprofile-generate=${OOT3D_WHOLE_AOT_GCC_PROFILE_RUNTIME_DIR}"
+                    "-fprofile-prefix-path=${CMAKE_BINARY_DIR}"
+                    -fprofile-update=single)
+                # Links libgcov into the final executable.
+                target_link_options(oot3d_native_whole_aot INTERFACE
+                    -fprofile-generate)
+                # Lets the program create the directory and flush counters
+                # before it is closed (oot3d_whole_aot_gcov.h).
+                set(OOT3D_WHOLE_AOT_GCOV_GENERATE ON)
+                target_compile_definitions(oot3d_native_whole_aot INTERFACE
+                    OOT3D_WHOLE_AOT_GCOV_GENERATE=1
+                    "OOT3D_WHOLE_AOT_GCOV_DIR=\"${OOT3D_WHOLE_AOT_GCC_PROFILE_RUNTIME_DIR}\"")
+            else()
+                if (NOT IS_DIRECTORY "${OOT3D_WHOLE_AOT_PROFILE_FILE}")
+                    message(FATAL_ERROR
+                        "With GCC, OOT3D_WHOLE_AOT_PROFILE_FILE must be the "
+                        "directory holding the collected .gcda files")
+                endif()
+                # Functions the training never reached keep their normal
+                # optimization instead of being optimized for size; shards
+                # without a .gcda are compiled as without a profile.
+                target_compile_options(oot3d_native_whole_aot PRIVATE
+                    "-fprofile-use=${OOT3D_WHOLE_AOT_PROFILE_FILE}"
+                    "-fprofile-prefix-path=${CMAKE_BINARY_DIR}"
+                    -fprofile-partial-training
+                    -Wno-missing-profile)
+            endif()
+        elseif (OOT3D_WHOLE_AOT_PROFILE_MODE STREQUAL "generate")
             target_compile_options(oot3d_native_whole_aot PRIVATE
                 -fprofile-instr-generate)
             set(_oot3d_clang_profile_runtime
@@ -473,6 +532,7 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
                     --output "${OOT3D_WHOLE_AOT_GENERATED_DIR}"
                     --shards "${OOT3D_WHOLE_AOT_SHARD_COUNT}"
                     --shard-strategy affinity
+                    $<$<BOOL:${OOT3D_WHOLE_AOT_NATIVE_VFP_AARCH64}>:--native-vfp-aarch64>
                 COMMAND ${CMAKE_COMMAND} -E touch
                     "${_oot3d_whole_aot_generation_stamp}"
                 DEPENDS

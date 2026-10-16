@@ -245,6 +245,13 @@ target_link_libraries(oot3d_native_game PRIVATE
     oot3d_native_control_config
     oot3d_ui_topscreen)
 target_sources(oot3d_native_game PRIVATE tools/oot3d/native_game_runtime/oot3d_game_language.cpp)
+if (OOT3D_WHOLE_AOT_GCOV_GENERATE)
+    # GCC profile-generate build of the whole-AOT shards (native_runtime.cmake):
+    # create the profile directory and flush counters while playing.
+    target_compile_definitions(oot3d_native_game PRIVATE
+        OOT3D_WHOLE_AOT_GCOV_GENERATE=1
+        "OOT3D_WHOLE_AOT_GCOV_DIR=\"${OOT3D_WHOLE_AOT_GCC_PROFILE_RUNTIME_DIR}\"")
+endif()
 if (TARGET oot3d_native_a32_aot OR TARGET oot3d_native_whole_aot OR
     OOT3D_DIRECT_AOT_PLUGIN)
     target_sources(oot3d_native_game PRIVATE

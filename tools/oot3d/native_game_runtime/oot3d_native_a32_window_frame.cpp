@@ -1,5 +1,6 @@
 // Native A32 window session: one frame of the loop and the renderer-side work it schedules.
 #include "oot3d_native_a32_window_session.h"
+#include "oot3d_whole_aot_gcov.h"
 #include <fstream>
 #include "fast/renderer3ds/pica_surface_debug.h"
 #include "oot3d_native_room_shadow_shell.h"
@@ -542,6 +543,7 @@ bool NativeA32WindowSession::RunFrame() {
 #if defined(__SWITCH__)
   gSwitchRuntimeHostFrames = runFrameCount;
   gSwitchRuntimeGuestFrames = frameCount;
+  Oot3dNativeGame::Oot3dWholeAotGcovFrame(runFrameCount);
   // Physical-console profile: every 150 host frames, append the rate and the
   // per-frame milliseconds of each phase over that window to logs/perf.txt.
   {

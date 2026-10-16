@@ -29,6 +29,7 @@
 #endif
 
 #if defined(__SWITCH__)
+#include "oot3d_whole_aot_gcov.h"
 void PlaceSwitchMainThread(); // oot3d_switch_threads.cpp
 #endif
 
@@ -172,6 +173,7 @@ int main(int argc, char** argv) {
         NativeGameArguments preparedArguments;
 #if defined(__SWITCH__)
         PlaceSwitchMainThread();
+        Oot3dNativeGame::Oot3dWholeAotGcovInitialize();
         // A Mesa built with its Horizon disk cache (see docs) stores compiled
         // GLSL and nvc0 code here; the stock devkitPro Mesa ignores these.
         setenv("MESA_SHADER_CACHE_DIR", "sdmc:/switch/oot3dre/mesacache", 0);
