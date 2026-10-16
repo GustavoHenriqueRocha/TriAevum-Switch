@@ -1,5 +1,9 @@
 #include "oot3d_native_render_command_stream.h"
 
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
+
 #include <stdexcept>
 #include <utility>
 
@@ -131,6 +135,12 @@ void NativeRenderCommandStream::StopWorker() {
 }
 
 void NativeRenderCommandStream::WorkerLoop() {
+#if defined(__SWITCH__)
+    // One step below the game and audio threads (0x2C): Horizon does not
+    // time-slice equal priorities, so a busy render worker sharing a core
+    // with the audio thread starved it and the sound crackled.
+    svcSetThreadPriority(threadGetCurHandle(), 0x2D);
+#endif
     std::unique_lock lock(mMutex);
     for (;;) {
         mWork.wait(lock, [&] { return mStop || !mQueue.empty(); });

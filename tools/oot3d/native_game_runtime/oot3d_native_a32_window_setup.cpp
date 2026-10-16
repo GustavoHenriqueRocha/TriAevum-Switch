@@ -1,5 +1,6 @@
 // Native A32 window session: setup (process image, host services, renderer, UI, initial state).
 #include "oot3d_native_a32_window_session.h"
+#include "oot3d_native_guest_overrides.h"
 #if defined(__SWITCH__)
 #include <EGL/egl.h>
 #include <glad/glad.h>
@@ -731,6 +732,17 @@ void NativeA32WindowSession::Setup() {
                                 kMinimumHostAudioPrebufferMilliseconds +
                             999U) /
                            1000U));
+#if defined(__SWITCH__)
+  // ~125 ms of queued audio: the console crackled whenever a frame ran long.
+  hostArgs.AudioDesiredBuffered = std::max<int32_t>(hostArgs.AudioDesiredBuffered, 4096);
+  {
+    // A/B switch for the hand-written guest functions (no rebuild needed).
+    std::error_code overridesError;
+    if (std::filesystem::exists("sdmc:/switch/oot3dre/config/no_guest_overrides", overridesError)) {
+      Oot3dNativeGame::SetOot3dGuestOverridesEnabled(false);
+    }
+  }
+#endif
   // The user's profiles beside the configuration; the release's defaults in
   // the runtime resources.
   sceneEnvironment = std::make_shared<Oot3dNativeGame::SceneEnvironmentRuntime>(
