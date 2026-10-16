@@ -1170,8 +1170,10 @@ void NativeA32WindowSession::Setup() {
   if (hostArgs.Renderer == "opengl") {
 #if defined(__SWITCH__)
     std::error_code optInError;
+    // On by default since it moved ~10 ms of GL work off the game thread on
+    // the console; config/serial_presentation turns it off.
     openGlWorker = parallelPresentation &&
-        std::filesystem::exists("sdmc:/switch/oot3dre/config/parallel_presentation", optInError);
+        !std::filesystem::exists("sdmc:/switch/oot3dre/config/serial_presentation", optInError);
 #endif
     parallelPresentation = openGlWorker;
   }

@@ -136,6 +136,13 @@ inline Config ResolveConfig(const std::optional<std::string>& antialiasing,
                             const std::optional<std::string>& upscaler,
                             const std::optional<std::string>& sharpen) {
     Config config;
+#if defined(__SWITCH__)
+    // Measured on the console: FSR 1 and 4x anisotropy cost only GPU time,
+    // which is idle there. A config file still overrides each (e.g. "linear"
+    // in config/upscaler, "1" in config/anisotropy).
+    config.Upscale = Upscaler::Fsr;
+    config.Anisotropy = 4U;
+#endif
     if (antialiasing.has_value()) {
         config.Aa = ParseAntialiasing(*antialiasing);
     }

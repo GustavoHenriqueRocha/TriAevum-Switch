@@ -100,6 +100,8 @@ Desempenho e usabilidade:
 - VFP nativo de ARM64 ligado (`--native-vfp-aarch64`), validado com 193 milhões de checagens no qemu.
 - Literais de texto reescritos pelo TopScreen excluídos da dobra de constantes.
 - Builds feitos numa máquina Ryzen 5 5600G (WSL2) com ccache: completo ~30–60 min, incremental ~1 min.
+- Padrões no Switch (sem arquivos no SD): render thread ligada, resolução 2×, FSR 1 e anisotrópico 4×.
+  Desligar com `config/serial_presentation`, `config/resolution_scale`=1, `config/upscaler`=linear, `config/anisotropy`=1.
 - Conhecido: HUD (corações/rupias) não aparece no console desde a primeira versão; minimapa aparece.
 
 ## Próximos passos

@@ -93,7 +93,7 @@ uint32_t ReadPicaGlResolutionScale() {
         std::ifstream file("sdmc:/switch/oot3dre/config/resolution_scale");
         std::string text;
         if (!file || !std::getline(file, text)) {
-            return 1U;
+            return 2U; // console default: 800x480 costs only idle GPU time
         }
         return ParsePicaGlResolutionScale(text);
 #else
