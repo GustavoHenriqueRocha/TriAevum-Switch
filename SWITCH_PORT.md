@@ -93,6 +93,15 @@ Desempenho e usabilidade:
 - Crashes: `atmosphere/crash_reports/` (o `.nro` é carregado pelo hbloader; a base pode ser
   achada alinhando os endereços de retorno com instruções `bl/blr` do ELF).
 
+### Atualização (2026-10-16, noite)
+- Perfil real no console (`config/guest_profile` → `logs/guest_profile.txt`): as funções mais caras
+  eram efeitos de áudio (reverb/eco) e `Runtime_Memcpy`; reescritas em C nativo como substituições
+  exatas (milhões de casos, zero diferenças) — ganho estimado ~4% da lógica.
+- VFP nativo de ARM64 ligado (`--native-vfp-aarch64`), validado com 193 milhões de checagens no qemu.
+- Literais de texto reescritos pelo TopScreen excluídos da dobra de constantes.
+- Builds feitos numa máquina Ryzen 5 5600G (WSL2) com ccache: completo ~30–60 min, incremental ~1 min.
+- Conhecido: HUD (corações/rupias) não aparece no console desde a primeira versão; minimapa aparece.
+
 ## Próximos passos
 
 Medição de referência (2026-10-16, console, CPU 1785 MHz, render thread ligada): a lógica do jogo
