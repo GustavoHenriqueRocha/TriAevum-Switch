@@ -48,6 +48,7 @@ static Result Run(bool candidate, unsigned budget, unsigned mode, bool fault,
             context.BlockEntryPcs = inside.data();
             context.BlockEntryPcCount = inside.size();
         }
+        context.RefreshBlockEntryGate();
     }
     Oot3dWholeAotFrame frame(result.Guest);
     Oot3dAotArchitecturalState state(result.Guest);

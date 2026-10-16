@@ -100,7 +100,30 @@ struct Oot3dAotBlockEntryFilter final {
         return (Words[bitIndex >> 6U] &
                 (uint64_t{1} << (bitIndex & 63U))) != 0U;
     }
+
+    static constexpr Oot3dAotBlockEntryFilter Everything() noexcept {
+        Oot3dAotBlockEntryFilter filter{};
+        for (auto& word : filter.Words) word = ~uint64_t{0};
+        return filter;
+    }
 };
+
+// Block-entry gate: one filter that is a superset of the blocks for which
+// Oot3dAotShouldNotifyBlock can return true. No callback: nothing passes. A
+// callback for every block (empty list) or a list without a filter: every
+// block passes and the exact decision is made in the cold path. Otherwise the
+// caller's filter, which already rejects only PCs outside the list.
+inline constexpr Oot3dAotBlockEntryFilter kOot3dAotBlockEntryGateNone{};
+inline constexpr Oot3dAotBlockEntryFilter kOot3dAotBlockEntryGateAll =
+    Oot3dAotBlockEntryFilter::Everything();
+
+constexpr const Oot3dAotBlockEntryFilter* Oot3dAotBlockEntryGateFor(
+    oot3d::recomp::a32::BlockEntryCallback blockEntry, size_t pcCount,
+    const Oot3dAotBlockEntryFilter* filter) noexcept {
+    if (blockEntry == nullptr) return &kOot3dAotBlockEntryGateNone;
+    if (pcCount == 0U || filter == nullptr) return &kOot3dAotBlockEntryGateAll;
+    return filter;
+}
 
 inline thread_local bool gOot3dWholeAotExecutionActive = false;
 inline thread_local Oot3dWholeAotObservableExitSnapshot
@@ -171,6 +194,18 @@ struct Oot3dWholeAotContext {
     bool SkipFirstBlockEntry = false;
     uint32_t BlocksRemaining = 0;
     uint32_t BlocksConsumed = 0;
+    // Derived from BlockEntry/BlockEntryPcCount/BlockEntryFilter when the
+    // context is initialized. Code that changes any of those three afterwards
+    // must call RefreshBlockEntryGate(), or blocks it newly hooks can be
+    // skipped by the generated block entry.
+    const Oot3dAotBlockEntryFilter* BlockEntryGate =
+        Oot3dAotBlockEntryGateFor(BlockEntry, BlockEntryPcCount,
+                                  BlockEntryFilter);
+
+    void RefreshBlockEntryGate() noexcept {
+        BlockEntryGate = Oot3dAotBlockEntryGateFor(
+            BlockEntry, BlockEntryPcCount, BlockEntryFilter);
+    }
 };
 
 struct Oot3dAotExternalStateAccess final {
@@ -295,28 +330,26 @@ OOT3D_AOT_COLD bool Oot3dAotEnterBlockSlow(
     return true;
 }
 
-// Hot half, inlined into every generated block: budget accounting plus the
-// two decisions that end almost every entry (no callback, or a bitmap
-// rejection). Both are exactly the early "false" results of
-// Oot3dAotShouldNotifyBlock, which the cold half still evaluates in full.
+// Hot half, inlined into every generated block: budget accounting plus one
+// gate test (BlockEntryGate). The gate passes every block for which
+// Oot3dAotShouldNotifyBlock can be true, so a rejection is exactly one of its
+// early "false" results; the cold half still evaluates it in full. The PC is a
+// literal, so the gate test is one load of a fixed word and one bit test.
+// "First block" is decided after consumption: BlocksConsumed was 0 before the
+// increment exactly when it is 1 after it.
 template <typename CommitState, typename ReloadState>
 OOT3D_AOT_HOT bool Oot3dAotEnterBlock(
     Oot3dWholeAotContext& context, Oot3dWholeAotFrame& frame,
     Oot3dAotArchitecturalState& state, uint32_t pc,
     CommitState&& commitState, ReloadState&& reloadState) {
-    const bool firstBlock = context.BlocksConsumed == 0U;
     if (!Oot3dAotConsumeBlock(context)) {
         return false;
     }
-    if (context.BlockEntry == nullptr) [[likely]] {
+    if (!context.BlockEntryGate->MayContain(pc)) [[likely]] {
         return true;
     }
-    if (context.BlockEntryPcCount != 0U &&
-        context.BlockEntryFilter != nullptr &&
-        !context.BlockEntryFilter->MayContain(pc)) [[likely]] {
-        return true;
-    }
-    return Oot3dAotEnterBlockSlow(context, frame, state, pc, firstBlock,
+    return Oot3dAotEnterBlockSlow(context, frame, state, pc,
+                                  context.BlocksConsumed == 1U,
                                   commitState, reloadState);
 }
 

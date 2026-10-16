@@ -212,13 +212,13 @@ template <class Tag, auto Member> struct ExposeMember {
     friend constexpr auto MemberOf(Tag) noexcept { return Member; }
 };
 struct FastGroupsTag { friend constexpr auto MemberOf(FastGroupsTag) noexcept; };
-struct WriteGenerationTag { friend constexpr auto MemberOf(WriteGenerationTag) noexcept; };
-struct GenerationBiasTag { friend constexpr auto MemberOf(GenerationBiasTag) noexcept; };
+// mRangeGeneration = geração arquitetural + viés de certificado, num só
+// contador: WriteFast faz ++ e carimba a página com o novo valor.
+struct RangeGenerationTag { friend constexpr auto MemberOf(RangeGenerationTag) noexcept; };
 struct RangeVersionsTag { friend constexpr auto MemberOf(RangeVersionsTag) noexcept; };
 struct TraceTag { friend constexpr auto MemberOf(TraceTag) noexcept; };
 template struct ExposeMember<FastGroupsTag, &NativeA32Memory::mFastPageGroups>;
-template struct ExposeMember<WriteGenerationTag, &NativeA32Memory::mWriteGeneration>;
-template struct ExposeMember<GenerationBiasTag, &NativeA32Memory::mRangeGenerationBias>;
+template struct ExposeMember<RangeGenerationTag, &NativeA32Memory::mRangeGeneration>;
 template struct ExposeMember<RangeVersionsTag, &NativeA32Memory::mRangeVersionsValid>;
 template struct ExposeMember<TraceTag, &NativeA32Memory::mTraceWriteFingerprint>;
 
@@ -251,8 +251,8 @@ inline bool ResolveSpan(NativeA32Memory& memory, uint32_t base, uint32_t size,
                         Span& span) noexcept {
     if (memory.*MemberOf(TraceTag{})) return false;
     auto* page = FastPageOf(memory, base, size);
-    if (page == nullptr || page->Write == nullptr || page->Read == nullptr ||
-        page->Read != page->Write) {
+    if (page == nullptr || page->Write == nullptr || page->Bytes == nullptr ||
+        page->Bytes != page->Write) {
         return false;
     }
     const uint32_t offset = base & kMemPageMask;
@@ -262,9 +262,8 @@ inline bool ResolveSpan(NativeA32Memory& memory, uint32_t base, uint32_t size,
 
 // O mesmo que WriteFast faz depois do memcpy num acerto do caminho rápido.
 inline void CommitFastWrite(NativeA32Memory& memory, uint64_t* stamp) noexcept {
-    auto& generation = memory.*MemberOf(WriteGenerationTag{});
-    ++generation;
-    *stamp = generation + memory.*MemberOf(GenerationBiasTag{});
+    auto& generation = memory.*MemberOf(RangeGenerationTag{});
+    *stamp = ++generation;
     if (*stamp == 0U) [[unlikely]] memory.*MemberOf(RangeVersionsTag{}) = false;
 }
 
@@ -1673,10 +1672,9 @@ bool Override_00371738(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         Overlaps(src, len, dst, len)) {
         return Decline(kIdx);
     }
-    auto& generation = memory.*MemberOf(WriteGenerationTag{});
-    const uint64_t bias = memory.*MemberOf(GenerationBiasTag{});
+    auto& generation = memory.*MemberOf(RangeGenerationTag{});
     // Nenhum carimbo pode dar a volta (a tradução invalidaria as versões).
-    if (generation + bias > UINT64_MAX - 64U - len) return Decline(kIdx);
+    if (generation > UINT64_MAX - 64U - len) return Decline(kIdx);
     Consume(context, blocks);
     // 0x00371738: push {r4-r10, lr}; subs r2, r2, #0x20
     {
@@ -1700,9 +1698,9 @@ bool Override_00371738(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
             auto* readPage = FastPageOf(memory, from, chunk);
             auto* writePage = FastPageOf(memory, to, chunk);
             std::memcpy(writePage->Write + (to & kMemPageMask),
-                        readPage->Read + (from & kMemPageMask), chunk);
+                        readPage->Bytes + (from & kMemPageMask), chunk);
             generation += chunk >> 2U;
-            writePage->WriteGeneration = generation + bias;
+            writePage->WriteGeneration = generation;
             done += chunk;
         }
         // Registradores da última volta (r3-r10 = as 8 palavras finais).

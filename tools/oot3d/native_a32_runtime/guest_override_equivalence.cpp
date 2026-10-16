@@ -188,6 +188,7 @@ Outcome Run(const GeneratedWholeAot::OverrideCase& testCase, bool patched,
             context.BlockEntryPcs = inside.data();
             context.BlockEntryPcCount = inside.size();
         }
+        context.RefreshBlockEntryGate();
     }
     context.SkipFirstBlockEntry = scenario.SkipFirst;
     context.BlocksRemaining = scenario.Budget;

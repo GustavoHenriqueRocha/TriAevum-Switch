@@ -177,11 +177,17 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
     // become one indexed host load; boundaries and protected pages preserve
     // the exact checked-memory behavior.
     //
-    // Hot/cold split: the inline part handles only an untraced access that
-    // lies wholly inside one fast page. Everything else (null value, page
-    // boundary, unmapped/protected/watched page, write-trace fingerprinting)
-    // goes to ReadFastSlow/WriteFastSlow, which are the complete original
-    // bodies, so values, faults, traces and generations are unchanged.
+    // Hot/cold split: the inline part handles only an access that lies wholly
+    // inside one fast page. Everything else (null value, page boundary,
+    // unmapped/protected/watched page, write-trace fingerprinting) goes to
+    // ReadFastSlow/WriteFastSlow, which are the complete original bodies, so
+    // values, faults, traces and generations are unchanged.
+    //
+    // Lean entries: write-trace fingerprinting is encoded in the page table
+    // instead of being tested on every access. While it is enabled every
+    // typed Read/Write entry is null (FastPage::Bytes keeps the page bytes for
+    // the slow path and the span helpers), so the inline paths need no flag
+    // test and a traced access still reaches the exact traced body.
     template <typename T>
     OOT3D_AOT_HOT bool ReadFast(uint32_t address, T* value,
                                 uint32_t* faultAddress = nullptr) const noexcept {
@@ -190,9 +196,9 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
                       sizeof(T) == 8);
         static_assert(std::endian::native == std::endian::little);
         const size_t offset = address & PageMask;
-        const FastPage* group = mFastPageGroups[address >> FastGroupShift].get();
+        const FastPage* group = mFastPageGroups[size_t{address} >> FastGroupShift].get();
         if (value != nullptr && offset <= PageSize - sizeof(T) &&
-            group != nullptr && !mTraceWriteFingerprint) [[likely]] {
+            group != nullptr) [[likely]] {
             const uint8_t* source =
                 group[(address >> PageShift) & FastGroupPageMask].Read;
             if (source != nullptr) [[likely]] {
@@ -211,16 +217,17 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
                       sizeof(T) == 8);
         static_assert(std::endian::native == std::endian::little);
         const size_t offset = address & PageMask;
-        FastPage* group = mFastPageGroups[address >> FastGroupShift].get();
-        if (offset <= PageSize - sizeof(T) && group != nullptr &&
-            !mTraceWriteFingerprint) [[likely]] {
+        FastPage* group = mFastPageGroups[size_t{address} >> FastGroupShift].get();
+        if (offset <= PageSize - sizeof(T) && group != nullptr) [[likely]] {
             auto& entry = group[(address >> PageShift) & FastGroupPageMask];
             uint8_t* destination = entry.Write;
             if (destination != nullptr) [[likely]] {
                 std::memcpy(destination + offset, &value, sizeof(T));
-                ++mWriteGeneration;
-                entry.WriteGeneration = CurrentRangeGeneration();
-                if (entry.WriteGeneration == 0U) [[unlikely]] mRangeVersionsValid = false;
+                // One counter carries both the architectural generation and
+                // the certificate epoch (see mRangeGeneration).
+                const uint64_t generation = ++mRangeGeneration;
+                entry.WriteGeneration = generation;
+                if (generation == 0U) [[unlikely]] mRangeVersionsValid = false;
                 return true;
             }
         }
@@ -228,9 +235,9 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
     }
 
     // Multi-word guest transfers (LDM/STM). True only when every word lies on
-    // one untraced fast page; the effect is then exactly that of `count`
+    // one fast page (traced pages have no typed entry); the effect is then exactly that of `count`
     // consecutive ReadFast<uint32_t>/WriteFast<uint32_t> calls at ascending
-    // addresses: the same bytes, mWriteGeneration advanced by `count` and the
+    // addresses: the same bytes, the generation advanced by `count` and the
     // page stamped with the generation of the last word. False means nothing
     // was read or written; the caller then uses the per-word path, which keeps
     // the exact fault order and partial-write behavior.
@@ -238,9 +245,8 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
                                      uint32_t count) const noexcept {
         const size_t offset = address & PageMask;
         const size_t bytes = size_t{count} * 4U;
-        const FastPage* group = mFastPageGroups[address >> FastGroupShift].get();
-        if (bytes > PageSize || offset > PageSize - bytes || group == nullptr ||
-            mTraceWriteFingerprint) [[unlikely]] {
+        const FastPage* group = mFastPageGroups[size_t{address} >> FastGroupShift].get();
+        if (bytes > PageSize || offset > PageSize - bytes || group == nullptr) [[unlikely]] {
             return false;
         }
         const uint8_t* source =
@@ -256,9 +262,9 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
                                       uint32_t count) noexcept {
         const size_t offset = address & PageMask;
         const size_t bytes = size_t{count} * 4U;
-        FastPage* group = mFastPageGroups[address >> FastGroupShift].get();
+        FastPage* group = mFastPageGroups[size_t{address} >> FastGroupShift].get();
         if (count == 0U || bytes > PageSize || offset > PageSize - bytes ||
-            group == nullptr || mTraceWriteFingerprint) [[unlikely]] {
+            group == nullptr) [[unlikely]] {
             return false;
         }
         auto& entry = group[(address >> PageShift) & FastGroupPageMask];
@@ -269,9 +275,9 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
         std::memcpy(destination + offset, values, bytes);
         // Word-by-word writes stamp start+1 .. start+count; if any of those
         // wraps to zero, range versions become invalid, as in WriteFast.
-        const uint64_t start = CurrentRangeGeneration();
-        mWriteGeneration += count;
-        entry.WriteGeneration = CurrentRangeGeneration();
+        const uint64_t start = mRangeGeneration;
+        mRangeGeneration += count;
+        entry.WriteGeneration = mRangeGeneration;
         if (start > UINT64_MAX - uint64_t{count}) [[unlikely]] {
             mRangeVersionsValid = false;
         }
@@ -295,7 +301,9 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
         const size_t offset = address & PageMask;
         if (offset <= PageSize - sizeof(T) &&
             mFastPageGroups[group] != nullptr) {
-            const uint8_t* source = mFastPageGroups[group][page].Read;
+            // Bytes, not Read: a traced page keeps its bytes here and the
+            // fast/checked cross-check below still runs exactly as before.
+            const uint8_t* source = mFastPageGroups[group][page].Bytes;
             if (source != nullptr) {
                 std::memcpy(value, source + offset, sizeof(T));
                 if (mTraceWriteFingerprint) [[unlikely]] {
@@ -337,19 +345,15 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
         if (offset <= PageSize - sizeof(T) &&
             mFastPageGroups[group] != nullptr) {
             auto& entry = mFastPageGroups[group][page];
+            // Null on every page while write tracing is enabled: a traced
+            // write then takes WriteSized, which records the same trace bytes,
+            // advances the generation and stamps the page identically.
             uint8_t* destination = entry.Write;
             if (destination != nullptr) {
                 std::memcpy(destination + offset, &value, sizeof(T));
-                if (mTraceWriteFingerprint) [[unlikely]] {
-                    RecordTracedWrite(
-                        address,
-                        std::span<const uint8_t>(
-                            reinterpret_cast<const uint8_t*>(&value),
-                            sizeof(value)));
-                }
-                ++mWriteGeneration;
-                entry.WriteGeneration = CurrentRangeGeneration();
-                if (entry.WriteGeneration == 0U) [[unlikely]] mRangeVersionsValid = false;
+                const uint64_t generation = ++mRangeGeneration;
+                entry.WriteGeneration = generation;
+                if (generation == 0U) [[unlikely]] mRangeVersionsValid = false;
                 return true;
             }
         }
@@ -370,7 +374,7 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
     // the checked path, and then nothing was read or written.
     bool SpanOnFastReadPage(uint32_t address, size_t size) const noexcept {
         return FastPageFor(address, size) != nullptr &&
-               FastPageFor(address, size)->Read != nullptr;
+               FastPageFor(address, size)->Bytes != nullptr;
     }
     bool SpanOnFastWritePage(uint32_t address, size_t size) const noexcept {
         return !mTraceWriteFingerprint && FastPageFor(address, size) != nullptr &&
@@ -378,10 +382,10 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
     }
     bool ReadBytesFast(uint32_t address, std::span<uint8_t> bytes) const noexcept {
         const FastPage* page = FastPageFor(address, bytes.size());
-        if (page == nullptr || page->Read == nullptr) {
+        if (page == nullptr || page->Bytes == nullptr) {
             return false;
         }
-        std::memcpy(bytes.data(), page->Read + (address & PageMask), bytes.size());
+        std::memcpy(bytes.data(), page->Bytes + (address & PageMask), bytes.size());
         return true;
     }
     bool WriteBytesFast(uint32_t address, std::span<const uint8_t> bytes) noexcept {
@@ -390,8 +394,7 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
             return false;
         }
         std::memcpy(page->Write + (address & PageMask), bytes.data(), bytes.size());
-        ++mWriteGeneration;
-        page->WriteGeneration = CurrentRangeGeneration();
+        page->WriteGeneration = ++mRangeGeneration;
         if (page->WriteGeneration == 0U) [[unlikely]] mRangeVersionsValid = false;
         return true;
     }
@@ -426,11 +429,19 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
         bool Executable = false;
     };
 
+    // Read/Write are the typed fast-path entries; both are null while write
+    // tracing is enabled. Bytes is the page's backing store whenever the page
+    // is directly addressable (mapped wholly by one region, not watched, not
+    // deferred), whatever the trace state: it is what Read used to be for the
+    // checked slow path and the span helpers. 32 bytes, so an entry index is
+    // a single shift.
     struct FastPage {
         const uint8_t* Read = nullptr;
         uint8_t* Write = nullptr;
         uint64_t WriteGeneration = 0;
+        const uint8_t* Bytes = nullptr;
     };
+    static_assert(sizeof(void*) != 8U || sizeof(FastPage) == 32U);
 
     Region* FindRegion(uint32_t address, size_t size);
     const Region* FindRegion(uint32_t address, size_t size) const;
@@ -444,6 +455,13 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
         return group ? &group[(address >> PageShift) & FastGroupPageMask] : nullptr;
     }
     void RebuildPageTable();
+    // Typed entries of one directly addressable page (bytes non-null) under
+    // the current trace and observation state.
+    void AssignFastPointers(size_t page, FastPage& entry, const uint8_t* bytes,
+                            bool writable) const noexcept;
+    // Re-derives Read/Write of every directly addressable page after the
+    // trace state changed. Generations and stamps are not touched.
+    void RefreshFastPointers() noexcept;
     [[nodiscard]] bool Watches(uint32_t address, size_t size) const noexcept {
         if (!mWatchActive) {
             return false;
@@ -487,7 +505,7 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
     static void SetError(std::string* error, std::string_view message);
     void NotifyObservedWrite(uint32_t address, size_t size);
     uint64_t CurrentRangeGeneration() const noexcept {
-        return mWriteGeneration + mRangeGenerationBias;
+        return mRangeGeneration;
     }
     void MarkRangeWritten(uint32_t address, size_t size, uint64_t generation) noexcept {
         if (generation == 0U || generation < CurrentRangeGeneration()) [[unlikely]]
@@ -512,12 +530,18 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
     static constexpr size_t FastGroupPageMask = FastGroupPageCount - 1U;
     static constexpr uint16_t AmbiguousPage = 0xFFFFU;
     std::vector<uint16_t> mPageRegions;
-    std::array<std::unique_ptr<FastPage[]>, FastGroupCount> mFastPageGroups;
-    uint64_t mWriteGeneration = 1;
-    // Cache certificates are not serialized. Replacing an image advances this
-    // epoch without changing the architectural write/exclusive generation.
+    // Certificate generation: the architectural write/exclusive generation
+    // (WriteGeneration()) plus mRangeGenerationBias, kept as one counter so a
+    // fast write advances and stamps it with a single load/add/store. Declared
+    // before the 32 KiB group table so the inline write reaches it with an
+    // immediate offset.
+    uint64_t mRangeGeneration = 1;
+    // Cache certificates are not serialized. Replacing an image advances the
+    // certificate epoch without changing the architectural generation, which
+    // is mRangeGeneration - mRangeGenerationBias (modulo 2^64).
     uint64_t mRangeGenerationBias = 0;
     bool mRangeVersionsValid = true;
+    std::array<std::unique_ptr<FastPage[]>, FastGroupCount> mFastPageGroups;
     uint64_t mWriteTraceFingerprint = 14695981039346656037ULL;
     bool mTraceWriteFingerprint = false;
     mutable uint64_t mFastReadMismatchCount = 0;

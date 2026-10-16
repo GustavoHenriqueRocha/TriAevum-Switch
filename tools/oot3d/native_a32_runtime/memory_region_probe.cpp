@@ -76,6 +76,7 @@ static Result Run(const TestFunction& function, bool candidate, unsigned budget,
         context.BlockEntry = Callback;
         context.BlockEntryUser = &result.Hooks;
         if (mode > 1) { context.BlockEntryPcs = hook.data(); context.BlockEntryPcCount = hook.size(); }
+        context.RefreshBlockEntryGate();
     }
     Oot3dWholeAotFrame frame(result.Guest);
     Oot3dAotArchitecturalState state(result.Guest);
