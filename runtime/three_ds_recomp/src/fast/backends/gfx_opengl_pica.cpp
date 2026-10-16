@@ -13,6 +13,8 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <cstdio>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <optional>
@@ -175,6 +177,126 @@ GLuint CompilePicaGlShader(GLenum stage, std::string_view source) {
         " source_bytes=" + std::to_string(source.size()) + "]");
 }
 
+void BindPicaGlProgramSamplers(GLuint program) {
+    for (GLint slot = 0; slot < 3; ++slot) {
+        const std::string name = "pica_texture" + std::to_string(slot);
+        const GLint location = glGetUniformLocation(program, name.c_str());
+        if (location >= 0) {
+            glUseProgram(program);
+            glUniform1i(location, slot + 1);
+        }
+    }
+    const GLint lighting = glGetUniformLocation(program, "pica_lighting_lut");
+    if (lighting >= 0) {
+        glUseProgram(program);
+        glUniform1i(lighting, 13);
+    }
+}
+
+#if defined(__SWITCH__)
+// Persistent program-binary cache. Mesa on the console compiles each PICA
+// program on first use, which takes long enough to stall loading screens and
+// scene changes on every launch. Linked programs are stored on the SD card
+// keyed by both translated sources and the driver identity; a binary the
+// driver rejects (or a different driver) simply falls back to compilation.
+constexpr const char* kPicaGlProgramCacheDirectory = "sdmc:/switch/oot3dre/shadercache";
+constexpr uint32_t kPicaGlProgramCacheMagic = 0x31434750U; // "PGC1"
+
+uint64_t HashPicaGlProgramKey(std::string_view vertex, std::string_view fragment) {
+    uint64_t hash = 1469598103934665603ULL;
+    const auto mix = [&](std::string_view text) {
+        for (const unsigned char byte : text) {
+            hash ^= byte;
+            hash *= 1099511628211ULL;
+        }
+        hash ^= 0xFFU;
+        hash *= 1099511628211ULL;
+    };
+    const auto glString = [](GLenum name) {
+        const auto* value = reinterpret_cast<const char*>(glGetString(name));
+        return std::string_view(value != nullptr ? value : "");
+    };
+    mix(glString(GL_VENDOR));
+    mix(glString(GL_RENDERER));
+    mix(glString(GL_VERSION));
+    mix(vertex);
+    mix(fragment);
+    return hash;
+}
+
+bool PicaGlProgramCacheAvailable() {
+    static const bool available = [] {
+        GLint formats = 0;
+        glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &formats);
+        std::error_code error;
+        std::filesystem::create_directories(kPicaGlProgramCacheDirectory, error);
+        std::ofstream(std::string(kPicaGlProgramCacheDirectory) + "/status.txt", std::ios::trunc)
+            << "binary_formats=" << formats << "\n";
+        return formats > 0 && !error;
+    }();
+    return available;
+}
+
+std::string PicaGlProgramCachePath(uint64_t key) {
+    char name[32];
+    std::snprintf(name, sizeof(name), "/%016llx.bin", static_cast<unsigned long long>(key));
+    return std::string(kPicaGlProgramCacheDirectory) + name;
+}
+
+GLuint LoadCachedPicaGlProgram(uint64_t key) {
+    std::ifstream file(PicaGlProgramCachePath(key), std::ios::binary);
+    if (!file) {
+        return 0U;
+    }
+    uint32_t header[3]{};
+    if (!file.read(reinterpret_cast<char*>(header), sizeof(header)) ||
+        header[0] != kPicaGlProgramCacheMagic || header[2] == 0U) {
+        return 0U;
+    }
+    std::vector<char> binary(header[2]);
+    if (!file.read(binary.data(), static_cast<std::streamsize>(binary.size()))) {
+        return 0U;
+    }
+    const GLuint program = glCreateProgram();
+    glProgramBinary(program, static_cast<GLenum>(header[1]), binary.data(),
+                    static_cast<GLsizei>(binary.size()));
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (linked != GL_TRUE) {
+        glDeleteProgram(program);
+        return 0U;
+    }
+    return program;
+}
+
+void StorePicaGlProgram(uint64_t key, GLuint program) {
+    GLint length = 0;
+    glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &length);
+    if (length <= 0) {
+        return;
+    }
+    std::vector<char> binary(static_cast<size_t>(length));
+    GLenum format = 0U;
+    GLsizei written = 0;
+    glGetProgramBinary(program, length, &written, &format, binary.data());
+    if (written <= 0) {
+        return;
+    }
+    // A new name per key: the Switch filesystem cannot rename over a file.
+    const auto path = PicaGlProgramCachePath(key);
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    const uint32_t header[3] = {kPicaGlProgramCacheMagic, static_cast<uint32_t>(format),
+                                static_cast<uint32_t>(written)};
+    file.write(reinterpret_cast<const char*>(header), sizeof(header));
+    file.write(binary.data(), written);
+    if (!file) {
+        file.close();
+        std::error_code error;
+        std::filesystem::remove(path, error);
+    }
+}
+#endif
+
 PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {
     std::string vertexSource;
     std::string fragmentSource;
@@ -190,12 +312,29 @@ PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {
             "PICA fragment shader translation failed: " + translateError);
     }
 
+#if defined(__SWITCH__)
+    const bool cacheAvailable = PicaGlProgramCacheAvailable();
+    const uint64_t cacheKey =
+        cacheAvailable ? HashPicaGlProgramKey(vertexSource, fragmentSource) : 0U;
+    if (cacheAvailable) {
+        if (const GLuint cached = LoadCachedPicaGlProgram(cacheKey); cached != 0U) {
+            BindPicaGlProgramSamplers(cached);
+            return {cached};
+        }
+    }
+#endif
+
     const GLuint vertex = CompilePicaGlShader(GL_VERTEX_SHADER, vertexSource);
     GLuint fragment = 0U;
     GLuint program = 0U;
     try {
         fragment = CompilePicaGlShader(GL_FRAGMENT_SHADER, fragmentSource);
         program = glCreateProgram();
+#if defined(__SWITCH__)
+        if (cacheAvailable) {
+            glProgramParameteri(program, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+        }
+#endif
         glAttachShader(program, vertex);
         glAttachShader(program, fragment);
         glLinkProgram(program);
@@ -210,20 +349,7 @@ PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {
             throw std::runtime_error(
                 "PICA OpenGL program link failed: " + log);
         }
-        for (GLint slot = 0; slot < 3; ++slot) {
-            const std::string name = "pica_texture" + std::to_string(slot);
-            const GLint location = glGetUniformLocation(program, name.c_str());
-            if (location >= 0) {
-                glUseProgram(program);
-                glUniform1i(location, slot + 1);
-            }
-        }
-        const GLint lighting =
-            glGetUniformLocation(program, "pica_lighting_lut");
-        if (lighting >= 0) {
-            glUseProgram(program);
-            glUniform1i(lighting, 13);
-        }
+        BindPicaGlProgramSamplers(program);
     } catch (...) {
         if (program != 0U) {
             glDeleteProgram(program);
@@ -234,6 +360,11 @@ PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {
     }
     glDeleteShader(fragment);
     glDeleteShader(vertex);
+#if defined(__SWITCH__)
+    if (cacheAvailable) {
+        StorePicaGlProgram(cacheKey, program);
+    }
+#endif
     return {program};
 }
 

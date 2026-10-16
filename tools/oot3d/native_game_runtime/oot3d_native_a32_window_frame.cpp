@@ -1,5 +1,6 @@
 // Native A32 window session: one frame of the loop and the renderer-side work it schedules.
 #include "oot3d_native_a32_window_session.h"
+#include <fstream>
 #include "fast/renderer3ds/pica_surface_debug.h"
 #include "oot3d_native_room_shadow_shell.h"
 
@@ -502,6 +503,37 @@ bool NativeA32WindowSession::RunFrame() {
 #if defined(__SWITCH__)
   gSwitchRuntimeHostFrames = runFrameCount;
   gSwitchRuntimeGuestFrames = frameCount;
+  // Physical-console profile: every 150 host frames, append the rate and the
+  // per-frame milliseconds of each phase over that window to logs/perf.txt.
+  {
+    static auto windowStart = std::chrono::steady_clock::now();
+    static std::array<double, 15> windowValues{};
+    static uint64_t windowHostFrames = 0U;
+    static uint64_t windowGuestFrames = 0U;
+    if (runFrameCount - windowHostFrames >= 150U) {
+      const auto now = std::chrono::steady_clock::now();
+      const double seconds = std::chrono::duration<double>(now - windowStart).count();
+      const auto values = phaseTiming.Values();
+      const uint64_t hostFrames = runFrameCount - windowHostFrames;
+      static constexpr std::array<const char*, 15> kNames{
+          "guest", "frame_start", "host_frame_start", "input", "renderer_frame_start",
+          "dsp_mix", "audio_out", "pica_submit", "pica_plan", "pica_backend",
+          "pica_diag", "visual_present", "visual_replay", "present", "pacing_wait"};
+      std::ofstream perf("sdmc:/switch/oot3dre/logs/perf.txt", std::ios::app);
+      perf << "host_frames=" << runFrameCount << " fps=" << (hostFrames / seconds)
+           << " guest_fps=" << ((frameCount - windowGuestFrames) / seconds) << " ms/frame:";
+      for (size_t index = 0; index < values.size(); ++index) {
+        perf << ' ' << kNames[index] << '='
+             << ((values[index] - windowValues[index]) * 1000.0 / hostFrames);
+      }
+      perf << " guest_in_pica=" << phaseTiming.GuestInsidePicaSubmitSeconds
+           << " total_ms=" << (seconds * 1000.0 / hostFrames) << '\n';
+      windowStart = now;
+      windowValues = values;
+      windowHostFrames = runFrameCount;
+      windowGuestFrames = frameCount;
+    }
+  }
   // Write once at the first frame and at most once more when a persistent
   // geometry is first observed. Periodic receipt writes would put
   // synchronous SD filesystem work directly in the presentation loop.
