@@ -30,15 +30,12 @@ inline constexpr uint32_t kOot3dOriginalSimulationRateHz = 30U;
 inline constexpr int16_t kOot3dOriginalUpdateRate = 2;
 inline constexpr uint32_t kOot3dNativeTimeUnitsPerSecond =
     kOot3dOriginalSimulationRateHz * kOot3dOriginalUpdateRate;
-#if defined(__SWITCH__)
-// A slow Switch frame must not schedule two complete CTR refresh/render
-// passes into the following presentation. Dropping the missed refresh keeps
-// the renderer out of a self-sustaining catch-up spiral; at full speed this
-// does not change the native 30 Hz simulation contract.
-inline constexpr uint32_t kMaximumGuestRefreshesPerPresentation = 1U;
-#else
+// Guest refreshes advance at kOot3dNativeTimeUnitsPerSecond (60 Hz) and the
+// game steps once every two of them. The Switch presents at 30 Hz, so a cap
+// of one refresh per presentation fed the game 30 refreshes a second and ran
+// it at half speed on the console (slow motion; Eden hid it). Two per
+// presentation keeps real time at 30 Hz presentation.
 inline constexpr uint32_t kMaximumGuestRefreshesPerPresentation = 2U;
-#endif
 inline constexpr uint32_t kMaximumDeferredGuestRefreshes = 8U;
 
 enum class GameplayTimingMode : uint8_t {
