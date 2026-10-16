@@ -12,7 +12,9 @@ import json
 from pathlib import Path
 import zipfile
 
-from tools.oot3d.decomp_support.scripts.build_topscreen_texture_override_pack import read_level3_romfs_file
+from tools.oot3d.decomp_support.scripts.build_topscreen_texture_override_pack import (
+    read_level3_romfs_file, verify_topscreen_30_archive,
+)
 from tools.oot3d.decomp_support.scripts.qbf_font import MAX_FONT_BYTES, pair_font_coverage, parse_qbf
 
 
@@ -20,13 +22,22 @@ FONT_SOURCES = (
     ("message/eu/ltn16.qbf", "TopScreen2.1.1/EUR/4K Textures/load/mods/0004000000033600/romfs/message/eu/ltn16.qbf"),
     ("message/us/ltn16.qbf", "TopScreen2.1.1/USA/4K Textures/load/mods/0004000000033500/romfs/message/us/ltn16.qbf"),
 )
+# TopScreen 3.0 ships the same 64x64 HD Latin font only in its Emulator
+# variant. Its message/sys8.qbf uses an encoding qbf_font does not pair yet.
+FONT_SOURCES_30 = (
+    ("message/eu/ltn16.qbf", "SingleScreen_3.0/EUR/Emulator/load/mods/0004000000033600/romfs/message/eu/ltn16.qbf"),
+    ("message/us/ltn16.qbf", "SingleScreen_3.0/USA/Emulator/load/mods/0004000000033500/romfs/message/us/ltn16.qbf"),
+)
 
 
 def prepare_font_pack(*, archive: Path, romfs: Path, output: Path) -> dict:
     assets = {}
     fonts = []
     with zipfile.ZipFile(archive) as source:
-        for native_path, archive_path in FONT_SOURCES:
+        topscreen_30 = any(name.startswith("SingleScreen_3.0/") for name in source.namelist())
+        if topscreen_30:
+            verify_topscreen_30_archive(archive)
+        for native_path, archive_path in FONT_SOURCES_30 if topscreen_30 else FONT_SOURCES:
             try:
                 native = parse_qbf(read_level3_romfs_file(romfs, native_path))
             except FileNotFoundError:

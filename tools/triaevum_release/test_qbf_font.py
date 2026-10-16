@@ -7,7 +7,7 @@ from unittest.mock import patch
 import zipfile
 
 from tools.oot3d.decomp_support.scripts.qbf_font import parse_qbf, pair_font_coverage
-from tools.oot3d.decomp_support.scripts.prepare_qbf_font_pack import FONT_SOURCES, prepare_font_pack
+from tools.oot3d.decomp_support.scripts.prepare_qbf_font_pack import FONT_SOURCES, FONT_SOURCES_30, prepare_font_pack
 
 
 def font_bytes(size=16, records=((32, 0, b"\x06\x04\0\0"), (42, 1, b"\x05\x06\0\0"))):
@@ -95,6 +95,30 @@ class QbfFontTests(unittest.TestCase):
                 self.assertEqual(len(prepared.namelist()), 3)
                 self.assertEqual(json.loads(prepared.read("manifest.json")), manifest)
             self.assertNotIn(b"DO NOT IMPORT", first)
+
+    def test_topscreen_30_emulator_font_is_verified_then_imported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive, output = root / "singlescreen_30.zip", root / "font.zip"
+            with zipfile.ZipFile(archive, "w") as source:
+                source.writestr(FONT_SOURCES_30[1][1], font_bytes(64))
+                source.writestr("SingleScreen_3.0/USA/Emulator/load/mods/0004000000033500/romfs/message/sys8.qbf",
+                                b"NOT PAIRED")
+            def read_font(_, path):
+                if path == FONT_SOURCES_30[1][0]:
+                    return font_bytes()
+                raise FileNotFoundError(path)
+            module = "tools.oot3d.decomp_support.scripts.prepare_qbf_font_pack"
+            with patch(f"{module}.read_level3_romfs_file", side_effect=read_font):
+                with self.assertRaisesRegex(ValueError, "failed verification"):
+                    prepare_font_pack(archive=archive, romfs=root / "romfs", output=output)
+                self.assertFalse(output.exists())
+                with patch(f"{module}.verify_topscreen_30_archive") as verify:
+                    manifest = prepare_font_pack(archive=archive, romfs=root / "romfs", output=output)
+                verify.assert_called_once_with(archive)
+            self.assertEqual([font["romfs_path"] for font in manifest["fonts"]],
+                             ["message/us/ltn16.qbf"])
+            self.assertNotIn(b"NOT PAIRED", output.read_bytes())
 
     def test_invalid_import_does_not_replace_existing_output(self):
         with tempfile.TemporaryDirectory() as directory:
