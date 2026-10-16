@@ -50,23 +50,34 @@ def function_stats(function: dict, blocks: list[dict]) -> dict[str, int]:
     }
 
 
-def parse_switch_profile(path: Path) -> dict[int, float]:
-    weights: dict[int, float] = {}
+def parse_switch_profile(path: Path, overhead_ns: float | None) -> tuple[dict[int, float], float]:
+    """ms por bloco, descontada a sobrecarga do perfil por entrada de bloco.
+
+    Sem --overhead-ns, a sobrecarga é estimada como o 2º percentil de
+    ns/entrada entre os blocos com muitas entradas (blocos quase vazios custam
+    praticamente só a sobrecarga).
+    """
+    rows: list[tuple[int, float, int]] = []
     section = None
     for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("# funcoes"):
-            section = "functions"
+        if line.startswith("#"):
+            section = "blocks" if line.startswith("# blocos") else None
             continue
-        if line.startswith("# blocos"):
-            section = "blocks"
-            continue
-        if not line.startswith("0x"):
+        if section != "blocks" or not line.startswith("0x"):
             continue
         fields = line.split()
-        if section == "blocks":
+        try:
             # pc | %tempo | ms | entradas | ns
-            weights[int(fields[0], 16)] = weights.get(int(fields[0], 16), 0.0) + float(fields[2])
-    return weights
+            rows.append((int(fields[0], 16), float(fields[2]), int(fields[3])))
+        except (IndexError, ValueError):
+            continue
+    if overhead_ns is None:
+        busy = sorted(ms * 1e6 / count for _, ms, count in rows if count >= 10000)
+        overhead_ns = busy[len(busy) // 50] if busy else 0.0
+    weights: dict[int, float] = {}
+    for pc, ms, count in rows:
+        weights[pc] = weights.get(pc, 0.0) + max(0.0, ms - overhead_ns * count * 1e-6)
+    return weights, overhead_ns
 
 
 def main() -> int:
@@ -78,6 +89,8 @@ def main() -> int:
     source.add_argument("--coverage-profile", type=Path)
     parser.add_argument("--manifest", type=Path, default=HERE / "guest_overrides.json")
     parser.add_argument("--top", type=int, default=30)
+    parser.add_argument("--overhead-ns", type=float,
+                        help="sobrecarga do perfil por entrada de bloco (padrão: estimada)")
     parser.add_argument("--export-function-map", type=Path)
     parser.add_argument("--markdown", action="store_true")
     args = parser.parse_args()
@@ -108,7 +121,9 @@ def main() -> int:
         total = float(data["total_samples"])
     elif args.switch_profile:
         unit = "ms"
-        for pc, value in parse_switch_profile(args.switch_profile).items():
+        blockWeights, overhead = parse_switch_profile(args.switch_profile, args.overhead_ns)
+        print(f"# sobrecarga do perfil descontada: {overhead:.1f} ns por entrada de bloco")
+        for pc, value in blockWeights.items():
             index = bisect_right(entries, pc) - 1
             if index >= 0:
                 weights[entries[index]] = weights.get(entries[index], 0.0) + value

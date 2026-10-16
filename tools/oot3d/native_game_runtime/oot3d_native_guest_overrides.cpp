@@ -25,6 +25,8 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
+#include <type_traits>
 
 namespace Oot3dNativeGame {
 
@@ -47,6 +49,9 @@ enum OverrideIndex : size_t {
     kIdx003325F0,
     kIdx00307C94,
     kIdx003727F0,
+    kIdx004A022C,
+    kIdx004A0338,
+    kIdx00371738,
     kOverrideCount,
 };
 
@@ -59,6 +64,9 @@ Oot3dGuestOverrideInfo gOverrides[kOverrideCount] = {
     {0x003325F0U, "Math3D_CylOutsideCylDist"},
     {0x00307C94U, "PicaCommandWriter_UploadVertexFloatUniforms"},
     {0x003727F0U, "Math_SinF"},
+    {0x004A022CU, "AudioEffect_ProcessFourChannelDelay"},
+    {0x004A0338U, "AudioEffect_ProcessStereoReverb"},
+    {0x00371738U, "Runtime_Memcpy"},
 };
 
 constexpr uint32_t kFpscrTrapMask = 0x00379F00U; // LEN/STRIDE e habilitação de exceções
@@ -150,6 +158,126 @@ inline uint32_t Read32(NativeA32Memory& memory, uint32_t address) noexcept {
     uint32_t value = 0U;
     memory.ReadFast<uint32_t>(address, &value);
     return value;
+}
+
+// [a, a + alen) e [b, b + blen) se cruzam (aritmética de 64 bits).
+inline bool Overlaps(uint32_t a, uint32_t alen, uint32_t b, uint32_t blen) noexcept {
+    return uint64_t{a} < uint64_t{b} + blen && uint64_t{b} < uint64_t{a} + alen;
+}
+
+// Leitura de `size` bytes que cabe numa só página rápida (condição exata do
+// caminho rápido de ReadFast<T> para T de `size` bytes).
+inline bool SinglePageReadable(const NativeA32Memory& memory, uint32_t address,
+                               uint32_t size) noexcept {
+    return memory.SpanOnFastReadPage(address, size);
+}
+
+// Registradores guest em variáveis locais, com saída exata por limite de
+// orçamento de blocos: Enter() faz o que Oot3dAotEnterBlock faria num bloco
+// sem gancho; quando o orçamento acaba, BlockLimit() grava o estado como a
+// tradução deixaria naquele ponto (registradores e flags preguiçosas) e
+// devolve o mesmo fluxo de saída.
+struct LocalGuest {
+    Oot3dWholeAotContext& Context;
+    Oot3dAotArchitecturalState& State;
+    std::array<uint32_t, 15> R;
+    Oot3dAotLazyFlags Flags;
+
+    LocalGuest(Oot3dWholeAotContext& context, Oot3dAotArchitecturalState& state) noexcept
+        : Context(context), State(state), R(state.R), Flags(state.Flags) {}
+
+    bool Enter() noexcept {
+        if (Context.BlocksRemaining == 0U) return false;
+        --Context.BlocksRemaining;
+        ++Context.BlocksConsumed;
+        return true;
+    }
+    void Flush() noexcept {
+        State.R = R;
+        State.Flags = Flags;
+    }
+    Oot3dWholeAotFlow BlockLimit(uint32_t pc) noexcept {
+        Flush();
+        return Oot3dAotBlockLimit(Context, pc);
+    }
+};
+
+// Acesso à tabela de páginas rápidas de NativeA32Memory sem mudar o cabeçalho
+// (que é incluído por todos os shards: mudá-lo recompilaria os 256). Usa a
+// regra padrão de que instanciações explícitas podem nomear membros privados.
+// As constantes abaixo espelham as de oot3d_native_a32_memory.h e
+// ResolveFast* reproduz FastPageFor + o teste do caminho rápido de
+// ReadFast/WriteFast; CommitFastWrite reproduz a contabilidade de WriteFast.
+template <class Tag, auto Member> struct ExposeMember {
+    friend constexpr auto MemberOf(Tag) noexcept { return Member; }
+};
+struct FastGroupsTag { friend constexpr auto MemberOf(FastGroupsTag) noexcept; };
+struct WriteGenerationTag { friend constexpr auto MemberOf(WriteGenerationTag) noexcept; };
+struct GenerationBiasTag { friend constexpr auto MemberOf(GenerationBiasTag) noexcept; };
+struct RangeVersionsTag { friend constexpr auto MemberOf(RangeVersionsTag) noexcept; };
+struct TraceTag { friend constexpr auto MemberOf(TraceTag) noexcept; };
+template struct ExposeMember<FastGroupsTag, &NativeA32Memory::mFastPageGroups>;
+template struct ExposeMember<WriteGenerationTag, &NativeA32Memory::mWriteGeneration>;
+template struct ExposeMember<GenerationBiasTag, &NativeA32Memory::mRangeGenerationBias>;
+template struct ExposeMember<RangeVersionsTag, &NativeA32Memory::mRangeVersionsValid>;
+template struct ExposeMember<TraceTag, &NativeA32Memory::mTraceWriteFingerprint>;
+
+constexpr uint32_t kMemPageShift = 12U;     // NativeA32Memory::PageShift
+constexpr uint32_t kMemGroupShift = 20U;    // NativeA32Memory::FastGroupShift
+constexpr uint32_t kMemGroupPageMask = 0xFFU;
+constexpr uint32_t kMemPageMask = 0xFFFU;
+constexpr uint32_t kMemPageSize = 0x1000U;
+
+// Página rápida de [address, address + size) (nula se cruza página).
+inline auto* FastPageOf(NativeA32Memory& memory, uint32_t address, uint32_t size) noexcept {
+    auto& groups = memory.*MemberOf(FastGroupsTag{});
+    using Page = std::remove_reference_t<decltype(groups[0][0])>;
+    const uint32_t offset = address & kMemPageMask;
+    if (size == 0U || size > kMemPageSize - offset) return static_cast<Page*>(nullptr);
+    auto& group = groups[address >> kMemGroupShift];
+    return group ? &group[(address >> kMemPageShift) & kMemGroupPageMask]
+                 : static_cast<Page*>(nullptr);
+}
+
+// Intervalo resolvido uma vez para os laços de áudio: leituras e escritas
+// pelo ponteiro da página rápida, com a mesma geração/carimbo de WriteFast.
+struct Span {
+    uint8_t* Bytes = nullptr;
+    uint64_t* Stamp = nullptr;
+    uint32_t Base = 0U;
+};
+
+inline bool ResolveSpan(NativeA32Memory& memory, uint32_t base, uint32_t size,
+                        Span& span) noexcept {
+    if (memory.*MemberOf(TraceTag{})) return false;
+    auto* page = FastPageOf(memory, base, size);
+    if (page == nullptr || page->Write == nullptr || page->Read == nullptr ||
+        page->Read != page->Write) {
+        return false;
+    }
+    const uint32_t offset = base & kMemPageMask;
+    span = {page->Write + offset, &page->WriteGeneration, base};
+    return true;
+}
+
+// O mesmo que WriteFast faz depois do memcpy num acerto do caminho rápido.
+inline void CommitFastWrite(NativeA32Memory& memory, uint64_t* stamp) noexcept {
+    auto& generation = memory.*MemberOf(WriteGenerationTag{});
+    ++generation;
+    *stamp = generation + memory.*MemberOf(GenerationBiasTag{});
+    if (*stamp == 0U) [[unlikely]] memory.*MemberOf(RangeVersionsTag{}) = false;
+}
+
+inline uint32_t SpanLoad(const Span& span, uint32_t address) noexcept {
+    uint32_t value;
+    std::memcpy(&value, span.Bytes + (address - span.Base), 4U);
+    return value;
+}
+
+inline void SpanStore(NativeA32Memory& memory, const Span& span, uint32_t address,
+                      uint32_t value) noexcept {
+    std::memcpy(span.Bytes + (address - span.Base), &value, 4U);
+    CommitFastWrite(memory, span.Stamp);
 }
 
 inline Oot3dAotFlagMask Mask(uint8_t bits) noexcept {
@@ -937,6 +1065,740 @@ bool Override_003727F0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     guest.fpscr = fpscr;
     Consume(context, blocks);
     flow = Oot3dAotBranch(target);
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// Efeitos de áudio do DSP (aritmética inteira, 160 amostras por canal).
+// Mesmo contrato das demais, com uma diferença: o orçamento de blocos é
+// respeitado bloco a bloco (LocalGuest::Enter). Se ele acabar no meio do
+// laço, a função sai com BlockLimit no mesmo PC e com o mesmo estado que a
+// tradução teria naquele ponto, e o despachante retoma pela tradução.
+// Leituras e escritas continuam todas pelas mesmas chamadas ReadFast/WriteFast
+// e na mesma ordem; a validação inicial garante que nenhuma falha e que as
+// escritas nos buffers não alcançam a pilha nem os campos do objeto (de onde
+// saem os ponteiros e coeficientes validados).
+
+// 0x004A022C: atraso de até 4 canais. r0 = estado do efeito, r1 = 4 ponteiros
+// de entrada/saída. Por amostra: d = atraso[i]; s = round0(d * ganho >> 7);
+// y = (k1 * (x - s) + k2 * fb) >> 7; fb = atraso[i] = y; x = d.
+bool Override_004A022C(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state,
+                       Oot3dWholeAotFlow& flow) noexcept {
+    constexpr size_t kIdx = kIdx004A022C;
+    static_cast<void>(frame);
+    auto& memory = context.Memory;
+    const uint32_t obj = state.R[0];
+    const uint32_t list = state.R[1];
+    const uint32_t sp0 = state.R[13];
+    if (Hooked(context, 0x004A022CU, 0x004A0334U) ||
+        !Readable(memory, obj + 0x56U, 1U, 1U)) {
+        return Decline(kIdx);
+    }
+    uint8_t enabled = 0U;
+    memory.ReadFast<uint8_t>(obj + 0x56U, &enabled);
+    if (enabled != 0U) {
+        // Validação de tudo que o caminho completo acessa.
+        const uint32_t stackLow = sp0 - 52U;
+        if (!Writable(memory, stackLow, 52U) || !Readable(memory, stackLow, 52U) ||
+            !Readable(memory, list, 16U) || !Readable(memory, obj + 0x1CU, 0x3CU) ||
+            !Writable(memory, obj + 0x2CU, 16U) || !Writable(memory, obj + 0x40U, 4U) ||
+            !Readable(memory, obj + 0x55U, 1U, 1U) ||
+            Overlaps(list, 16U, stackLow, 52U) || Overlaps(obj + 0x1CU, 0x3CU, stackLow, 52U)) {
+            return Decline(kIdx);
+        }
+        uint8_t channels = 0U;
+        memory.ReadFast<uint8_t>(obj + 0x55U, &channels);
+        if (channels > 4U) return Decline(kIdx);
+        const uint32_t frameIndex = Read32(memory, obj + 0x40U);
+        const uint32_t base = (frameIndex + (frameIndex << 2U)) << 5U;
+        for (uint32_t ch = 0; ch < channels; ++ch) {
+            const uint32_t io = Read32(memory, list + 4U * ch);
+            const uint32_t delay = Read32(memory, obj + 0x1CU + 4U * ch) + (base << 2U);
+            for (const uint32_t buffer : {io, delay}) {
+                if (!Writable(memory, buffer, 640U) || !Readable(memory, buffer, 640U) ||
+                    Overlaps(buffer, 640U, stackLow, 52U) ||
+                    Overlaps(buffer, 640U, obj + 0x1CU, 0x3CU)) {
+                    return Decline(kIdx);
+                }
+            }
+        }
+    }
+    LocalGuest g(context, state);
+    auto& R = g.R;
+    auto& flags = g.Flags;
+    // 0x004A022C
+    if (!g.Enter()) { flow = g.BlockLimit(0x004A022CU); return Accept(kIdx); }
+    R[2] = enabled;
+    flags.SetSubtract(R[2], 0U, Mask(0xFU));
+    if (flags.Z()) {
+        g.Flush();
+        flow = Oot3dAotReturned(R[14]);
+        return Accept(kIdx);
+    }
+    // 0x004A0238: push {r4-r11, lr}; sub sp, #16; cópia dos 4 ponteiros
+    if (!g.Enter()) { flow = g.BlockLimit(0x004A0238U); return Accept(kIdx); }
+    {
+        const uint32_t pushed[9] = {R[4], R[5], R[6], R[7], R[8], R[9], R[10], R[11], R[14]};
+        for (uint32_t i = 0; i < 9U; ++i) memory.WriteFast<uint32_t>(R[13] - 36U + 4U * i, pushed[i]);
+        R[13] -= 36U + 16U;
+    }
+    R[7] = 0U;
+    R[2] = Read32(memory, R[1]);
+    memory.WriteFast<uint32_t>(R[13], R[2]);
+    R[2] = Read32(memory, R[1] + 4U);
+    memory.WriteFast<uint32_t>(R[13] + 4U, R[2]);
+    R[2] = Read32(memory, R[1] + 8U);
+    memory.WriteFast<uint32_t>(R[13] + 8U, R[2]);
+    R[1] = Read32(memory, R[1] + 12U);
+    memory.WriteFast<uint32_t>(R[13] + 12U, R[1]);
+    R[1] = Read32(memory, R[0] + 0x40U);
+    R[1] = R[1] + (R[1] << 2U);
+    R[8] = R[1] << 5U;
+    {
+        uint8_t value = 0U;
+        memory.ReadFast<uint8_t>(R[0] + 0x55U, &value);
+        R[1] = value;
+    }
+    flags.SetSubtract(R[1], 0U, Mask(0x6U));
+    if (flags.C() && !flags.Z()) {
+        // 0x004A027C
+        if (!g.Enter()) { flow = g.BlockLimit(0x004A027CU); return Accept(kIdx); }
+        R[9] = R[13];
+        while (true) {
+            // 0x004A0280: preparação do canal r7
+            if (!g.Enter()) { flow = g.BlockLimit(0x004A0280U); return Accept(kIdx); }
+            R[1] = R[0] + (R[7] << 2U);
+            R[4] = Read32(memory, R[9] + (R[7] << 2U));
+            R[5] = Read32(memory, R[1] + 0x1CU);
+            R[6] = R[1] + 44U;
+            R[2] = R[8];
+            R[1] = 0U;
+            // Caminho rápido do laço de amostras: buffers e campos do objeto
+            // resolvidos uma vez (cada um numa só página rápida).
+            Span delaySpan, ioSpan, objSpan;
+            const bool fast =
+                ResolveSpan(memory, R[5] + (R[2] << 2U), 640U, delaySpan) &&
+                ResolveSpan(memory, R[4], 640U, ioSpan) &&
+                ResolveSpan(memory, R[0] + 0x2CU, 0x24U, objSpan);
+            while (true) {
+                if (fast && context.BlocksRemaining >= 3U) {
+                    // 0x004A0298, 0x004A02BC/0x004A02A4, 0x004A02C8
+                    Consume(context, 3U);
+                    R[3] = SpanLoad(delaySpan, R[5] + (R[2] << 2U));
+                    flags.SetSubtract(R[3], 0U, Mask(0x9U));
+                    R[10] = SpanLoad(objSpan, R[0] + 0x44U);
+                    if (flags.N() == flags.V()) {
+                        R[12] = Oot3dAotAsr(R[10] * R[3], 7U);
+                    } else {
+                        R[12] = 0U - Oot3dAotAsr(R[10] * (0U - R[3]), 7U);
+                    }
+                    R[10] = SpanLoad(ioSpan, R[4] + (R[1] << 2U));
+                    R[11] = SpanLoad(objSpan, R[6]);
+                    R[14] = SpanLoad(objSpan, R[0] + 0x48U);
+                    R[12] = R[10] - R[12];
+                    R[10] = SpanLoad(objSpan, R[0] + 0x4CU) * R[11];
+                    R[12] = Oot3dAotAsr(R[14] * R[12] + R[10], 7U);
+                    SpanStore(memory, objSpan, R[6], R[12]);
+                    SpanStore(memory, delaySpan, R[5] + (R[2] << 2U), R[12]);
+                    SpanStore(memory, ioSpan, R[4] + (R[1] << 2U), R[3]);
+                    R[1] += 1U;
+                    flags.SetSubtract(R[1], 0x000000A0U, Mask(0x2U));
+                    R[2] += 1U;
+                    if (flags.C()) break;
+                    continue;
+                }
+                // 0x004A0298
+                if (!g.Enter()) { flow = g.BlockLimit(0x004A0298U); return Accept(kIdx); }
+                R[3] = Read32(memory, R[5] + (R[2] << 2U));
+                flags.SetSubtract(R[3], 0U, Mask(0x9U));
+                if (flags.N() == flags.V()) {
+                    // 0x004A02BC
+                    if (!g.Enter()) { flow = g.BlockLimit(0x004A02BCU); return Accept(kIdx); }
+                    R[10] = Read32(memory, R[0] + 0x44U);
+                    R[12] = R[10] * R[3];
+                    R[12] = Oot3dAotAsr(R[12], 7U);
+                } else {
+                    // 0x004A02A4
+                    if (!g.Enter()) { flow = g.BlockLimit(0x004A02A4U); return Accept(kIdx); }
+                    R[10] = Read32(memory, R[0] + 0x44U);
+                    R[12] = 0U - R[3];
+                    R[12] = R[10] * R[12];
+                    R[12] = Oot3dAotAsr(R[12], 7U);
+                    R[12] = 0U - R[12];
+                }
+                // 0x004A02C8
+                if (!g.Enter()) { flow = g.BlockLimit(0x004A02C8U); return Accept(kIdx); }
+                R[10] = Read32(memory, R[4] + (R[1] << 2U));
+                R[11] = Read32(memory, R[6]);
+                R[14] = Read32(memory, R[0] + 0x48U);
+                R[12] = R[10] - R[12];
+                R[10] = Read32(memory, R[0] + 0x4CU);
+                R[10] = R[10] * R[11];
+                R[12] = R[14] * R[12] + R[10];
+                R[12] = Oot3dAotAsr(R[12], 7U);
+                memory.WriteFast<uint32_t>(R[6], R[12]);
+                memory.WriteFast<uint32_t>(R[5] + (R[2] << 2U), R[12]);
+                memory.WriteFast<uint32_t>(R[4] + (R[1] << 2U), R[3]);
+                R[1] += 1U;
+                flags.SetSubtract(R[1], 0x000000A0U, Mask(0x2U));
+                R[2] += 1U;
+                if (flags.C()) break;
+            }
+            // 0x004A0304
+            if (!g.Enter()) { flow = g.BlockLimit(0x004A0304U); return Accept(kIdx); }
+            {
+                uint8_t value = 0U;
+                memory.ReadFast<uint8_t>(R[0] + 0x55U, &value);
+                R[1] = value;
+            }
+            R[7] += 1U;
+            flags.SetSubtract(R[1], R[7], Mask(0x6U));
+            if (!(flags.C() && !flags.Z())) break;
+        }
+    }
+    // 0x004A0314: avança o índice circular de quadros e retorna
+    if (!g.Enter()) { flow = g.BlockLimit(0x004A0314U); return Accept(kIdx); }
+    R[1] = Read32(memory, R[0] + 0x40U);
+    R[1] += 1U;
+    memory.WriteFast<uint32_t>(R[0] + 0x40U, R[1]);
+    R[2] = Read32(memory, R[0] + 0x3CU);
+    flags.SetSubtract(R[1], R[2], Mask(0xFU));
+    if (flags.C()) {
+        R[1] = 0U;
+        memory.WriteFast<uint32_t>(R[0] + 0x40U, R[1]);
+    }
+    R[13] += 16U;
+    uint32_t popped[9];
+    for (uint32_t i = 0; i < 9U; ++i) popped[i] = Read32(memory, R[13] + 4U * i);
+    for (uint32_t i = 0; i < 8U; ++i) R[4 + i] = popped[i];
+    R[13] += 36U;
+    g.Flush();
+    flow = Oot3dAotReturned(popped[8]);
+    return Accept(kIdx);
+}
+
+// 0x004A0338: reverberação estéreo (2 canais x 160 amostras), cinco linhas de
+// atraso circulares (índices em 0x9C/0xA4/0xB0/0xB4/0xC4, limites em
+// 0x98/0xA0/0xA8/0xAC/0xC0), filtros com arredondamento simétrico (o sinal é
+// tirado antes do >> 7) e realimentação; a saída é gravada no próprio buffer
+// de entrada de cada canal.
+bool Override_004A0338(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state,
+                       Oot3dWholeAotFlow& flow) noexcept {
+    constexpr size_t kIdx = kIdx004A0338;
+    static_cast<void>(frame);
+    auto& memory = context.Memory;
+    const uint32_t obj = state.R[0];
+    const uint32_t list = state.R[1];
+    const uint32_t sp0 = state.R[13];
+    if (Hooked(context, 0x004A0338U, 0x004A0570U) ||
+        !Readable(memory, obj + 0x100U, 1U, 1U)) {
+        return Decline(kIdx);
+    }
+    uint8_t enabled = 0U;
+    memory.ReadFast<uint8_t>(obj + 0x100U, &enabled);
+    constexpr uint32_t kObjLow = 0x38U, kObjSize = 0x104U - 0x38U;
+    if (enabled != 0U) {
+        const uint32_t stackLow = sp0 - 72U;
+        if (!Writable(memory, stackLow, 72U) || !Readable(memory, stackLow, 72U) ||
+            !Readable(memory, list, 16U) || !Readable(memory, obj + kObjLow, kObjSize - 4U) ||
+            !Writable(memory, obj + 0x98U, 0x30U) || !Writable(memory, obj + 0xCCU, 8U) ||
+            !SinglePageReadable(memory, obj + 0xB0U, 8U) ||
+            Overlaps(list, 16U, stackLow, 72U) ||
+            Overlaps(obj + kObjLow, kObjSize, stackLow, 72U)) {
+            return Decline(kIdx);
+        }
+        const uint32_t i3 = Read32(memory, obj + 0x9CU), i12 = Read32(memory, obj + 0xA4U);
+        const uint32_t i4 = Read32(memory, obj + 0xB0U), i5 = Read32(memory, obj + 0xB4U);
+        const uint32_t i6 = Read32(memory, obj + 0xC4U);
+        for (uint32_t ch = 0; ch < 2U; ++ch) {
+            const uint32_t buffers[6] = {
+                Read32(memory, obj + 0x38U + 4U * ch) + (i3 << 2U),
+                Read32(memory, obj + 0x48U + 4U * ch) + (i12 << 2U),
+                Read32(memory, obj + 0x58U + 8U * ch) + (i4 << 2U),
+                Read32(memory, obj + 0x5CU + 8U * ch) + (i5 << 2U),
+                Read32(memory, obj + 0x78U + 4U * ch) + (i6 << 2U),
+                Read32(memory, list + 4U * ch),
+            };
+            for (const uint32_t buffer : buffers) {
+                if (!Writable(memory, buffer, 640U) || !Readable(memory, buffer, 640U) ||
+                    Overlaps(buffer, 640U, stackLow, 72U) ||
+                    Overlaps(buffer, 640U, obj + kObjLow, kObjSize)) {
+                    return Decline(kIdx);
+                }
+            }
+        }
+    }
+    LocalGuest g(context, state);
+    auto& R = g.R;
+    auto& flags = g.Flags;
+    // 0x004A0338
+    if (!g.Enter()) { flow = g.BlockLimit(0x004A0338U); return Accept(kIdx); }
+    R[2] = enabled;
+    flags.SetSubtract(R[2], 0U, Mask(0xFU));
+    if (flags.Z()) {
+        g.Flush();
+        flow = Oot3dAotReturned(R[14]);
+        return Accept(kIdx);
+    }
+    // 0x004A0344: push {r4-r11, lr}; sub sp, #36; cópia dos 4 ponteiros
+    if (!g.Enter()) { flow = g.BlockLimit(0x004A0344U); return Accept(kIdx); }
+    {
+        const uint32_t pushed[9] = {R[4], R[5], R[6], R[7], R[8], R[9], R[10], R[11], R[14]};
+        for (uint32_t i = 0; i < 9U; ++i) memory.WriteFast<uint32_t>(R[13] - 36U + 4U * i, pushed[i]);
+        R[13] -= 36U + 36U;
+    }
+    R[10] = 0U;
+    R[2] = Read32(memory, R[1]);
+    memory.WriteFast<uint32_t>(R[13] + 0x10U, R[2]);
+    R[2] = Read32(memory, R[1] + 4U);
+    memory.WriteFast<uint32_t>(R[13] + 0x14U, R[2]);
+    R[2] = Read32(memory, R[1] + 8U);
+    memory.WriteFast<uint32_t>(R[13] + 0x18U, R[2]);
+    R[1] = Read32(memory, R[1] + 12U);
+    memory.WriteFast<uint32_t>(R[13] + 0x1CU, R[1]);
+    while (true) {
+        // 0x004A0370: preparação do canal r10
+        if (!g.Enter()) { flow = g.BlockLimit(0x004A0370U); return Accept(kIdx); }
+        R[3] = Read32(memory, R[0] + 0x9CU);
+        {
+            uint64_t pair = 0U;
+            memory.ReadFast<uint64_t>(R[0] + 0xB0U, &pair);
+            R[4] = static_cast<uint32_t>(pair);
+            R[5] = static_cast<uint32_t>(pair >> 32U);
+        }
+        R[9] = R[0] + (R[10] << 2U);
+        R[6] = Read32(memory, R[0] + 0xC4U);
+        R[2] = Read32(memory, R[9] + 0x38U);
+        R[12] = Read32(memory, R[0] + 0xA4U);
+        R[7] = Read32(memory, R[9] + 0x48U);
+        memory.WriteFast<uint32_t>(R[13] + 0xCU, R[2]);
+        R[2] = R[0] + (R[10] << 3U);
+        R[1] = 0U;
+        memory.WriteFast<uint32_t>(R[13] + 0x20U, R[2]);
+        memory.WriteFast<uint32_t>(R[13] + 0x8U, R[7]);
+        Span stackSpan, objSpan, aSpan, bSpan, cSpan, dSpan, eSpan, ioSpan;
+        bool fast = ResolveSpan(memory, R[13], 0x24U, stackSpan) &&
+                    ResolveSpan(memory, R[0] + 0x38U, 0xB4U, objSpan);
+        if (fast) {
+            const uint32_t pointerC = SpanLoad(objSpan, R[0] + (R[10] << 3U) + 0x58U);
+            const uint32_t pointerD = SpanLoad(objSpan, R[0] + (R[10] << 3U) + 0x5CU);
+            const uint32_t pointerE = SpanLoad(objSpan, R[9] + 0x78U);
+            const uint32_t pointerIo = SpanLoad(stackSpan, R[13] + 0x10U + (R[10] << 2U));
+            const uint32_t pointerA = SpanLoad(stackSpan, R[13] + 0xCU);
+            const uint32_t pointerB = SpanLoad(stackSpan, R[13] + 0x8U);
+            fast = ResolveSpan(memory, pointerA + (R[3] << 2U), 640U, aSpan) &&
+                   ResolveSpan(memory, pointerB + (R[12] << 2U), 640U, bSpan) &&
+                   ResolveSpan(memory, pointerC + (R[4] << 2U), 640U, cSpan) &&
+                   ResolveSpan(memory, pointerD + (R[5] << 2U), 640U, dSpan) &&
+                   ResolveSpan(memory, pointerE + (R[6] << 2U), 640U, eSpan) &&
+                   ResolveSpan(memory, pointerIo, 640U, ioSpan);
+        }
+        while (true) {
+            if (fast && context.BlocksRemaining >= 9U) {
+                // Mesmo corpo de 0x004A03A0..0x004A04B4 pelos intervalos resolvidos.
+                uint32_t blocks = 7U;
+                const auto stack = [&](uint32_t offset) { return SpanLoad(stackSpan, R[13] + offset); };
+                const auto field = [&](uint32_t offset) { return SpanLoad(objSpan, R[0] + offset); };
+                R[2] = R[13] + 0x10U;
+                R[7] = stack(0xCU);
+                R[2] = stack(0x10U + (R[10] << 2U));
+                R[11] = field(0xDCU);
+                R[8] = SpanLoad(aSpan, R[7] + (R[3] << 2U));
+                R[2] = SpanLoad(ioSpan, R[2] + (R[1] << 2U));
+                SpanStore(memory, aSpan, R[7] + (R[3] << 2U), R[2]);
+                R[7] = stack(0x8U);
+                R[14] = stack(0x8U);
+                R[11] = R[8] * R[11];
+                R[7] = SpanLoad(bSpan, R[7] + (R[12] << 2U));
+                SpanStore(memory, bSpan, R[14] + (R[12] << 2U), R[2]);
+                R[2] = stack(0x20U);
+                R[8] = SpanLoad(objSpan, R[2] + 0x58U);
+                R[2] = SpanLoad(cSpan, R[8] + (R[4] << 2U));
+                SpanStore(memory, stackSpan, R[13] + 0x4U, R[11]);
+                flags.SetSubtract(R[2], 0U, Mask(0x9U));
+                if (flags.N() == flags.V()) {
+                    R[11] = Oot3dAotAsr(field(0xB8U) * R[2], 7U);
+                } else {
+                    R[14] = field(0xB8U);
+                    R[11] = 0U - Oot3dAotAsr(R[14] * (0U - R[2]), 7U);
+                }
+                R[11] = R[11] + R[7];
+                SpanStore(memory, cSpan, R[8] + (R[4] << 2U), R[11]);
+                SpanStore(memory, stackSpan, R[13], R[2]);
+                R[2] = stack(0x20U);
+                R[8] = SpanLoad(objSpan, R[2] + 0x5CU);
+                R[2] = SpanLoad(dSpan, R[8] + (R[5] << 2U));
+                flags.SetSubtract(R[2], 0U, Mask(0x9U));
+                if (flags.N() == flags.V()) {
+                    R[11] = Oot3dAotAsr(field(0xBCU) * R[2], 7U);
+                } else {
+                    R[14] = field(0xBCU);
+                    R[11] = 0U - Oot3dAotAsr(R[14] * (0U - R[2]), 7U);
+                }
+                R[7] = R[7] + R[11];
+                SpanStore(memory, dSpan, R[8] + (R[5] << 2U), R[7]);
+                R[7] = stack(0x0U);
+                R[11] = SpanLoad(objSpan, R[9] + 0x78U);
+                R[8] = R[7] - R[2];
+                R[2] = field(0xC8U);
+                R[7] = SpanLoad(eSpan, R[11] + (R[6] << 2U));
+                R[14] = R[7];
+                flags.SetSubtract(R[7], 0U, Mask(0x9U));
+                if (flags.N() == flags.V()) {
+                    R[14] = Oot3dAotAsr(R[14] * R[2], 7U);
+                } else {
+                    ++blocks; // 0x004A0480
+                    R[14] = 0U - Oot3dAotAsr((0U - R[14]) * R[2], 7U);
+                }
+                flags.SetAdd(R[8], R[14], Mask(0x8U));
+                R[8] = R[8] + R[14];
+                SpanStore(memory, eSpan, R[11] + (R[6] << 2U), R[8]);
+                if (!flags.N()) {
+                    R[2] = Oot3dAotAsr(R[8] * R[2], 7U);
+                } else {
+                    ++blocks; // 0x004A04A4
+                    R[8] = 0U - R[8];
+                    R[2] = 0U - Oot3dAotAsr(R[8] * R[2], 7U);
+                }
+                R[8] = SpanLoad(objSpan, R[9] + 0xCCU);
+                R[2] = R[7] - R[2];
+                R[7] = field(0xE8U);
+                R[8] = R[8] + R[2];
+                R[3] += 1U;
+                R[12] += 1U;
+                R[7] = R[7] * R[8];
+                R[4] += 1U;
+                R[5] += 1U;
+                R[6] += 1U;
+                R[2] = R[2] - Oot3dAotAsr(R[7], 7U);
+                SpanStore(memory, objSpan, R[9] + 0xCCU, R[2]);
+                R[8] = field(0xE0U);
+                R[7] = stack(0x4U);
+                R[2] = R[2] * R[8] + R[7];
+                R[7] = R[13] + 0x10U;
+                R[7] = stack(0x10U + (R[10] << 2U));
+                R[2] = Oot3dAotAsr(R[2], 7U);
+                SpanStore(memory, ioSpan, R[7] + (R[1] << 2U), R[2]);
+                R[1] += 1U;
+                flags.SetSubtract(R[1], 0x000000A0U, Mask(0x9U));
+                Consume(context, blocks);
+                if (flags.N() == flags.V()) break;
+                continue;
+            }
+            // 0x004A03A0
+            if (!g.Enter()) { flow = g.BlockLimit(0x004A03A0U); return Accept(kIdx); }
+            R[2] = R[13] + 0x10U;
+            R[7] = Read32(memory, R[13] + 0xCU);
+            R[2] = Read32(memory, R[2] + (R[10] << 2U));
+            R[11] = Read32(memory, R[0] + 0xDCU);
+            R[8] = Read32(memory, R[7] + (R[3] << 2U));
+            R[2] = Read32(memory, R[2] + (R[1] << 2U));
+            memory.WriteFast<uint32_t>(R[7] + (R[3] << 2U), R[2]);
+            R[7] = Read32(memory, R[13] + 0x8U);
+            R[14] = Read32(memory, R[13] + 0x8U);
+            R[11] = R[8] * R[11];
+            R[7] = Read32(memory, R[7] + (R[12] << 2U));
+            memory.WriteFast<uint32_t>(R[14] + (R[12] << 2U), R[2]);
+            R[2] = Read32(memory, R[13] + 0x20U);
+            R[8] = Read32(memory, R[2] + 0x58U);
+            R[2] = Read32(memory, R[8] + (R[4] << 2U));
+            memory.WriteFast<uint32_t>(R[13] + 0x4U, R[11]);
+            flags.SetSubtract(R[2], 0U, Mask(0x9U));
+            if (flags.N() == flags.V()) {
+                // 0x004A0400
+                if (!g.Enter()) { flow = g.BlockLimit(0x004A0400U); return Accept(kIdx); }
+                R[11] = Read32(memory, R[0] + 0xB8U);
+                R[11] = R[11] * R[2];
+                R[11] = Oot3dAotAsr(R[11], 7U);
+            } else {
+                // 0x004A03E8
+                if (!g.Enter()) { flow = g.BlockLimit(0x004A03E8U); return Accept(kIdx); }
+                R[14] = Read32(memory, R[0] + 0xB8U);
+                R[11] = 0U - R[2];
+                R[11] = R[14] * R[11];
+                R[11] = Oot3dAotAsr(R[11], 7U);
+                R[11] = 0U - R[11];
+            }
+            // 0x004A040C
+            if (!g.Enter()) { flow = g.BlockLimit(0x004A040CU); return Accept(kIdx); }
+            R[11] = R[11] + R[7];
+            memory.WriteFast<uint32_t>(R[8] + (R[4] << 2U), R[11]);
+            memory.WriteFast<uint32_t>(R[13], R[2]);
+            R[2] = Read32(memory, R[13] + 0x20U);
+            R[8] = Read32(memory, R[2] + 0x5CU);
+            R[2] = Read32(memory, R[8] + (R[5] << 2U));
+            flags.SetSubtract(R[2], 0U, Mask(0x9U));
+            if (flags.N() == flags.V()) {
+                // 0x004A0444
+                if (!g.Enter()) { flow = g.BlockLimit(0x004A0444U); return Accept(kIdx); }
+                R[11] = Read32(memory, R[0] + 0xBCU);
+                R[11] = R[11] * R[2];
+                R[11] = Oot3dAotAsr(R[11], 7U);
+            } else {
+                // 0x004A042C
+                if (!g.Enter()) { flow = g.BlockLimit(0x004A042CU); return Accept(kIdx); }
+                R[14] = Read32(memory, R[0] + 0xBCU);
+                R[11] = 0U - R[2];
+                R[11] = R[14] * R[11];
+                R[11] = Oot3dAotAsr(R[11], 7U);
+                R[11] = 0U - R[11];
+            }
+            // 0x004A0450
+            if (!g.Enter()) { flow = g.BlockLimit(0x004A0450U); return Accept(kIdx); }
+            R[7] = R[7] + R[11];
+            memory.WriteFast<uint32_t>(R[8] + (R[5] << 2U), R[7]);
+            R[7] = Read32(memory, R[13]);
+            R[11] = Read32(memory, R[9] + 0x78U);
+            R[8] = R[7] - R[2];
+            R[2] = Read32(memory, R[0] + 0xC8U);
+            R[7] = Read32(memory, R[11] + (R[6] << 2U));
+            R[14] = R[7];
+            flags.SetSubtract(R[7], 0U, Mask(0x9U));
+            if (flags.N() == flags.V()) {
+                R[14] = R[14] * R[2];
+                R[14] = Oot3dAotAsr(R[14], 7U);
+            } else {
+                // 0x004A0480
+                if (!g.Enter()) { flow = g.BlockLimit(0x004A0480U); return Accept(kIdx); }
+                R[14] = 0U - R[14];
+                R[14] = R[14] * R[2];
+                R[14] = Oot3dAotAsr(R[14], 7U);
+                R[14] = 0U - R[14];
+            }
+            // 0x004A0490
+            if (!g.Enter()) { flow = g.BlockLimit(0x004A0490U); return Accept(kIdx); }
+            flags.SetAdd(R[8], R[14], Mask(0x8U));
+            R[8] = R[8] + R[14];
+            memory.WriteFast<uint32_t>(R[11] + (R[6] << 2U), R[8]);
+            if (!flags.N()) {
+                R[2] = R[8] * R[2];
+                R[2] = Oot3dAotAsr(R[2], 7U);
+            } else {
+                // 0x004A04A4
+                if (!g.Enter()) { flow = g.BlockLimit(0x004A04A4U); return Accept(kIdx); }
+                R[8] = 0U - R[8];
+                R[2] = R[8] * R[2];
+                R[2] = Oot3dAotAsr(R[2], 7U);
+                R[2] = 0U - R[2];
+            }
+            // 0x004A04B4
+            if (!g.Enter()) { flow = g.BlockLimit(0x004A04B4U); return Accept(kIdx); }
+            R[8] = Read32(memory, R[9] + 0xCCU);
+            R[2] = R[7] - R[2];
+            R[7] = Read32(memory, R[0] + 0xE8U);
+            R[8] = R[8] + R[2];
+            R[3] += 1U;
+            R[12] += 1U;
+            R[7] = R[7] * R[8];
+            R[4] += 1U;
+            R[5] += 1U;
+            R[6] += 1U;
+            R[2] = R[2] - Oot3dAotAsr(R[7], 7U);
+            memory.WriteFast<uint32_t>(R[9] + 0xCCU, R[2]);
+            R[8] = Read32(memory, R[0] + 0xE0U);
+            R[7] = Read32(memory, R[13] + 0x4U);
+            R[2] = R[2] * R[8] + R[7];
+            R[7] = R[13] + 0x10U;
+            R[7] = Read32(memory, R[7] + (R[10] << 2U));
+            R[2] = Oot3dAotAsr(R[2], 7U);
+            memory.WriteFast<uint32_t>(R[7] + (R[1] << 2U), R[2]);
+            R[1] += 1U;
+            flags.SetSubtract(R[1], 0x000000A0U, Mask(0x9U));
+            if (flags.N() == flags.V()) break;
+        }
+        // 0x004A050C
+        if (!g.Enter()) { flow = g.BlockLimit(0x004A050CU); return Accept(kIdx); }
+        R[10] += 1U;
+        flags.SetSubtract(R[10], 0x00000002U, Mask(0x9U));
+        if (flags.N() == flags.V()) break;
+    }
+    // 0x004A0518: grava os índices circulares (com volta ao limite) e retorna
+    if (!g.Enter()) { flow = g.BlockLimit(0x004A0518U); return Accept(kIdx); }
+    R[2] = Read32(memory, R[0] + 0x98U);
+    R[1] = 0U;
+    const auto wrap = [&](uint32_t limitOffset, uint32_t index, uint32_t fieldOffset,
+                          uint8_t mask) {
+        R[2] = Read32(memory, R[0] + limitOffset);
+        flags.SetSubtract(R[2], index, Mask(mask));
+        memory.WriteFast<uint32_t>(R[0] + fieldOffset,
+                                   flags.C() && !flags.Z() ? index : R[1]);
+    };
+    flags.SetSubtract(R[2], R[3], Mask(0x6U));
+    memory.WriteFast<uint32_t>(R[0] + 0x9CU, flags.C() && !flags.Z() ? R[3] : R[1]);
+    wrap(0xA0U, R[12], 0xA4U, 0x6U);
+    wrap(0xA8U, R[4], 0xB0U, 0x6U);
+    wrap(0xACU, R[5], 0xB4U, 0x6U);
+    wrap(0xC0U, R[6], 0xC4U, 0xFU);
+    R[13] += 36U;
+    uint32_t popped[9];
+    for (uint32_t i = 0; i < 9U; ++i) popped[i] = Read32(memory, R[13] + 4U * i);
+    for (uint32_t i = 0; i < 8U; ++i) R[4 + i] = popped[i];
+    R[13] += 36U;
+    g.Flush();
+    flow = Oot3dAotReturned(popped[8]);
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// 0x00371738 Runtime_Memcpy (folha; cópia de palavras com src/dst alinhados
+// pelo chamador): push {r4-r10, lr}; voltas de 32 bytes (ldm/ldm/stm/stm,
+// 1 bloco por volta); depois 16 e 8 bytes conforme os bits 4 e 3 de r2, pop,
+// 4 bytes (bit 2) e, se sobrar, 2 e 1 bytes no bloco 0x00371794.
+// O laço vira cópias por trecho de página: a tradução escreve palavra a
+// palavra em ordem crescente de endereço (geração +1 por palavra, página
+// carimbada com a geração da última palavra escrita nela), e isso é
+// reproduzido trecho a trecho. Exige src e dst alinhados a 4, sem
+// sobreposição entre origem e destino (cada região do mapa tem bytes
+// próprios, então intervalos guest disjuntos são disjuntos no host) e tudo
+// em páginas rápidas; o resto (cabeçalho e cauda) usa as mesmas chamadas
+// ReadWordsFast/WriteWordsFast/ReadFast/WriteFast da tradução.
+bool Override_00371738(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state,
+                       Oot3dWholeAotFlow& flow) noexcept {
+    constexpr size_t kIdx = kIdx00371738;
+    static_cast<void>(frame);
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    auto& flags = state.Flags;
+    const uint32_t dst = R[0], src = R[1], len = R[2], sp = R[13];
+    if (Hooked(context, 0x00371738U, 0x003717A8U)) return Decline(kIdx);
+    const uint32_t loops = len >> 5U;
+    // 0x00371738 [+ 0x00371744 + voltas em 0x00371750] + 0x0037176C [+ 0x00371794]
+    const uint32_t blocks = 2U + (loops != 0U ? 1U + loops : 0U) + ((len & 3U) != 0U ? 1U : 0U);
+    if (len > 0x00100000U || ((src | dst) & 3U) != 0U || !Budget(context, blocks) ||
+        !Writable(memory, sp - 32U, 32U) || !Readable(memory, sp - 32U, 32U) ||
+        !Readable(memory, src, len) || !Writable(memory, dst, len) ||
+        Overlaps(src, len, dst, len)) {
+        return Decline(kIdx);
+    }
+    auto& generation = memory.*MemberOf(WriteGenerationTag{});
+    const uint64_t bias = memory.*MemberOf(GenerationBiasTag{});
+    // Nenhum carimbo pode dar a volta (a tradução invalidaria as versões).
+    if (generation + bias > UINT64_MAX - 64U - len) return Decline(kIdx);
+    Consume(context, blocks);
+    // 0x00371738: push {r4-r10, lr}; subs r2, r2, #0x20
+    {
+        const uint32_t firstAddress = sp - 32U;
+        const uint32_t words[8] = {R[4], R[5], R[6], R[7], R[8], R[9], R[10], R[14]};
+        if (!memory.WriteWordsFast(firstAddress, words, 8U)) {
+            for (uint32_t i = 0; i < 8U; ++i) memory.WriteFast<uint32_t>(firstAddress + 4U * i, words[i]);
+        }
+        R[13] = firstAddress;
+    }
+    flags.SetSubtract(R[2], 0x20U, Mask(0x3U));
+    R[2] -= 0x20U;
+    if (loops != 0U) {
+        // 0x00371744 + 0x00371750 x voltas: copia 32 * voltas bytes.
+        const uint32_t bytes = loops << 5U;
+        uint32_t done = 0U;
+        while (done < bytes) {
+            const uint32_t from = src + done, to = dst + done;
+            const uint32_t chunk = std::min({bytes - done, kMemPageSize - (from & kMemPageMask),
+                                             kMemPageSize - (to & kMemPageMask)});
+            auto* readPage = FastPageOf(memory, from, chunk);
+            auto* writePage = FastPageOf(memory, to, chunk);
+            std::memcpy(writePage->Write + (to & kMemPageMask),
+                        readPage->Read + (from & kMemPageMask), chunk);
+            generation += chunk >> 2U;
+            writePage->WriteGeneration = generation + bias;
+            done += chunk;
+        }
+        // Registradores da última volta (r3-r10 = as 8 palavras finais).
+        const uint32_t last = src + bytes - 32U;
+        for (uint32_t i = 0; i < 8U; ++i) R[3 + i] = Read32(memory, last + 4U * i);
+        R[0] = dst + bytes;
+        R[1] = src + bytes;
+        flags.SetSubtract(len - bytes, 0x20U, Mask(0x3U));
+        R[2] = len - bytes - 0x20U;
+    }
+    // 0x0037176C
+    {
+        const auto shifted = Oot3dAotShiftImmediate(R[2], 0U, 28U, flags.C());
+        R[12] = shifted.Value;
+        Oot3dAotSetLogicalFlags(flags, R[12], shifted.Carry, Mask(0xAU));
+    }
+    if (flags.C()) {
+        uint32_t words[4];
+        if (!memory.ReadWordsFast(R[1], words, 4U)) {
+            for (uint32_t i = 0; i < 4U; ++i) memory.ReadFast<uint32_t>(R[1] + 4U * i, &words[i]);
+        }
+        R[3] = words[0];
+        R[4] = words[1];
+        R[12] = words[2];
+        R[14] = words[3];
+        R[1] += 16U;
+        const uint32_t out[4] = {R[3], R[4], R[12], R[14]};
+        if (!memory.WriteWordsFast(R[0], out, 4U)) {
+            for (uint32_t i = 0; i < 4U; ++i) memory.WriteFast<uint32_t>(R[0] + 4U * i, out[i]);
+        }
+        R[0] += 16U;
+    }
+    if (flags.N()) {
+        uint32_t words[2];
+        if (!memory.ReadWordsFast(R[1], words, 2U)) {
+            for (uint32_t i = 0; i < 2U; ++i) memory.ReadFast<uint32_t>(R[1] + 4U * i, &words[i]);
+        }
+        R[3] = words[0];
+        R[4] = words[1];
+        R[1] += 8U;
+        if (!memory.WriteWordsFast(R[0], words, 2U)) {
+            for (uint32_t i = 0; i < 2U; ++i) memory.WriteFast<uint32_t>(R[0] + 4U * i, words[i]);
+        }
+        R[0] += 8U;
+    }
+    {
+        uint32_t words[8];
+        if (!memory.ReadWordsFast(R[13], words, 8U)) {
+            for (uint32_t i = 0; i < 8U; ++i) memory.ReadFast<uint32_t>(R[13] + 4U * i, &words[i]);
+        }
+        for (uint32_t i = 0; i < 7U; ++i) R[4 + i] = words[i];
+        R[14] = words[7];
+        R[13] += 32U;
+    }
+    {
+        const auto shifted = Oot3dAotShiftImmediate(R[2], 0U, 30U, flags.C());
+        R[12] = shifted.Value;
+        Oot3dAotSetLogicalFlags(flags, R[12], shifted.Carry, Mask(0xEU));
+    }
+    if (flags.C()) {
+        R[3] = Read32(memory, R[1]);
+        R[1] += 4U;
+        memory.WriteFast<uint32_t>(R[0], R[3]);
+        R[0] += 4U;
+    }
+    if (flags.Z()) {
+        flow = Oot3dAotReturned(R[14]);
+        return Accept(kIdx);
+    }
+    // 0x00371794
+    {
+        const auto shifted = Oot3dAotShiftImmediate(R[2], 0U, 31U, flags.C());
+        R[2] = shifted.Value;
+        Oot3dAotSetLogicalFlags(flags, R[2], shifted.Carry, Mask(0xEU));
+    }
+    if (flags.C()) {
+        uint16_t value = 0U;
+        memory.ReadFast<uint16_t>(R[1], &value);
+        R[3] = value;
+        R[1] += 2U;
+    }
+    if (flags.N()) {
+        uint8_t value = 0U;
+        memory.ReadFast<uint8_t>(R[1], &value);
+        R[2] = value;
+        R[1] += 1U;
+    }
+    if (flags.C()) {
+        memory.WriteFast<uint16_t>(R[0], static_cast<uint16_t>(R[3]));
+        R[0] += 2U;
+    }
+    if (flags.N()) {
+        memory.WriteFast<uint8_t>(R[0], static_cast<uint8_t>(R[2]));
+        R[0] += 1U;
+    }
+    flow = Oot3dAotReturned(R[14]);
     return Accept(kIdx);
 }
 

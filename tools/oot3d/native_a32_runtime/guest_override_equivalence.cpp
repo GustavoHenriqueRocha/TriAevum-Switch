@@ -282,7 +282,151 @@ bool SameMemory(NativeA32Memory& a, NativeA32Memory& b, bool full,
 void Prepare(uint32_t entry, Rng& rng, Scenario& s,
              const std::function<void(uint32_t, uint32_t)>& poke) {
     auto& g = s.Guest;
+    // Alocador simples na metade baixa da RAM (a pilha fica na metade alta).
+    uint32_t next = kRamBase + (rng.Below(64U) << 2U);
+    const auto alloc = [&](uint32_t bytes) {
+        const uint32_t address = next;
+        next += (bytes + 3U) & ~3U;
+        return address;
+    };
+    // Amostras de áudio: pequenas, grandes (estouro em mul/mla), extremos.
+    const auto sample = [&]() -> uint32_t {
+        switch (rng.Below(8U)) {
+        case 0: return 0U;
+        case 1: return rng.Chance(50) ? 0x80000000U : 0x7FFFFFFFU;
+        case 2: case 3: return rng.U32();
+        default: return static_cast<uint32_t>(static_cast<int32_t>(rng.Below(65536U)) - 32768);
+        }
+    };
+    const auto coefficient = [&]() -> uint32_t {
+        return rng.Chance(70) ? rng.Below(256U) : (rng.Chance(50) ? rng.U32() : sample());
+    };
+    const auto samples = [&](uint32_t address, uint32_t count) {
+        for (uint32_t i = 0; i < count; ++i) poke(address + 4U * i, sample());
+    };
+    // Buffer de 640 bytes: quase sempre o alocado; às vezes em outra região
+    // rápida (dados), atravessando página, desalinhado, somente leitura, não
+    // mapeado, sobre o objeto ou aleatório (esses últimos devem ser recusados).
+    std::vector<uint32_t> buffers;
+    const auto buffer = [&](uint32_t normal, uint32_t obj) -> uint32_t {
+        uint32_t chosen = normal;
+        if (rng.Chance(95)) {
+        } else switch (rng.Below(9U)) {
+        case 0: chosen = kDataBase + (rng.Below(kDataEnd - kDataBase - 640U) & ~3U); break;
+        case 1: chosen = kRamBase + 0x1000U * (1U + rng.Below(3U)) - 4U * (1U + rng.Below(159U)); break;
+        case 2: chosen = normal + 1U + rng.Below(3U); break;
+        case 3: chosen = kRomBase + (rng.Below(kRomSize) & ~3U); break;
+        case 4: chosen = kUnmapped + (rng.Below(0x1000U) & ~3U); break;
+        case 5: chosen = obj + 4U * rng.Below(0x40U) - 600U; break;
+        case 6: if (!buffers.empty()) chosen = buffers[rng.Below(static_cast<uint32_t>(buffers.size()))]; break;
+        case 7: chosen = kTextBase + (rng.Below(0x1000U) & ~3U); break;
+        default: chosen = rng.U32(); break;
+        }
+        buffers.push_back(chosen);
+        return chosen;
+    };
+    const auto objectAddress = [&](uint32_t size) {
+        // Às vezes o objeto encosta no fim de uma página (campos em duas páginas).
+        if (rng.Chance(8)) return kRamBase + 0x3000U - 4U * rng.Below(size / 4U);
+        return alloc(size);
+    };
     switch (entry) {
+    case 0x00371738U: { // Runtime_Memcpy
+        if (!rng.Chance(94)) break;
+        uint32_t len = 0U;
+        switch (rng.Below(8U)) {
+        case 0: len = rng.Below(32U); break;
+        case 1: len = rng.Below(160U); break;
+        case 2: len = 32U * rng.Below(64U); break;
+        case 3: len = 32U * rng.Below(64U) + rng.Below(32U); break;
+        case 4: len = rng.Below(0x1800U); break;
+        case 5: len = 0x1000U + rng.Below(0x2000U); break;
+        case 6: len = rng.Chance(50) ? rng.U32() : 0xFFFFFFE0U + rng.Below(32U); break;
+        default: len = rng.Below(700U); break;
+        }
+        const auto place = [&](uint32_t other) -> uint32_t {
+            const uint32_t room = len < 0x3800U ? 0x3800U - len : 4U;
+            switch (rng.Below(20U)) {
+            case 0: return kDataBase + (rng.Below(kDataEnd - kDataBase - 0x4000U) & ~3U);
+            case 1: return kRamBase + 0x1000U * (1U + rng.Below(3U)) - 4U * rng.Below(40U);
+            case 2: return other + 4U * rng.Below(64U) - 128U;          // sobreposição
+            case 3: return (kRamBase + rng.Below(room)) | (1U + rng.Below(3U)); // desalinhado
+            case 4: return g.r[13] - 4U * rng.Below(48U);                // sobre a pilha
+            case 5: return kRomBase + (rng.Below(kRomSize) & ~3U);
+            case 6: return kTextBase + (rng.Below(0x1000U) & ~3U);
+            case 7: return kUnmapped + (rng.Below(0x1000U) & ~3U);
+            case 8: return rng.U32() & ~3U;
+            default: return (kRamBase + rng.Below(room)) & ~3U;
+            }
+        };
+        const uint32_t dst = place(g.r[1]);
+        const uint32_t src = place(dst);
+        g.r[0] = dst;
+        g.r[1] = src;
+        g.r[2] = len;
+        if (rng.Chance(30)) s.Budget = rng.Below(len / 32U + 6U);
+        break;
+    }
+    case 0x004A022CU: { // atraso de 4 canais
+        if (!rng.Chance(92)) break;
+        const uint32_t obj = objectAddress(0x60U);
+        const uint32_t channels = rng.Chance(95) ? rng.Below(5U) : 5U + rng.Below(3U);
+        const uint32_t enabled = rng.Chance(90) ? 1U + rng.Below(255U) : 0U;
+        poke(obj + 0x54U, (rng.U32() & 0xFF0000FFU) | (channels << 8U) | (enabled << 16U));
+        const uint32_t frameIndex = rng.Below(4U);
+        poke(obj + 0x40U, frameIndex);
+        poke(obj + 0x3CU, rng.Chance(80) ? frameIndex + 1U + rng.Below(3U) : rng.Below(4U));
+        for (uint32_t offset : {0x44U, 0x48U, 0x4CU}) poke(obj + offset, coefficient());
+        const uint32_t list = alloc(16U);
+        for (uint32_t ch = 0; ch < 4U; ++ch) {
+            poke(obj + 0x2CU + 4U * ch, sample());
+            const uint32_t io = alloc(640U);
+            const uint32_t delay = alloc(640U);
+            samples(io, 160U);
+            samples(delay, 160U);
+            uint32_t ioPointer = io;
+            if (rng.Chance(3)) ioPointer = delay;              // processamento no lugar
+            if (rng.Chance(2)) ioPointer = g.r[13] - 256U;     // sobre a pilha: recusa
+            poke(list + 4U * ch, buffer(ioPointer, obj));
+            poke(obj + 0x1CU + 4U * ch, buffer(delay, obj) - frameIndex * 640U);
+        }
+        g.r[0] = obj;
+        g.r[1] = list;
+        if (rng.Chance(40)) s.Budget = rng.Below(2200U);
+        break;
+    }
+    case 0x004A0338U: { // reverberação estéreo
+        if (!rng.Chance(92)) break;
+        const uint32_t obj = objectAddress(0x104U);
+        poke(obj + 0x100U, (rng.U32() & 0xFFFFFF00U) | (rng.Chance(90) ? 1U + rng.Below(255U) : 0U));
+        // (índice, campo do índice, campo do limite, base do ponteiro, passo)
+        const uint32_t fields[5][4] = {
+            {0x9CU, 0x98U, 0x38U, 4U}, {0xA4U, 0xA0U, 0x48U, 4U}, {0xB0U, 0xA8U, 0x58U, 8U},
+            {0xB4U, 0xACU, 0x5CU, 8U}, {0xC4U, 0xC0U, 0x78U, 4U},
+        };
+        for (const auto& field : fields) {
+            const uint32_t index = rng.Below(40U);
+            poke(obj + field[0], index);
+            poke(obj + field[1], rng.Chance(70) ? index + 160U + rng.Below(40U) : rng.Below(400U));
+            for (uint32_t ch = 0; ch < 2U; ++ch) {
+                const uint32_t line = alloc(640U);
+                samples(line, 160U);
+                poke(obj + field[2] + field[3] * ch, buffer(line, obj) - index * 4U);
+            }
+        }
+        for (uint32_t offset : {0xB8U, 0xBCU, 0xC8U, 0xDCU, 0xE0U, 0xE8U}) poke(obj + offset, coefficient());
+        for (uint32_t ch = 0; ch < 2U; ++ch) poke(obj + 0xCCU + 4U * ch, sample());
+        const uint32_t list = alloc(16U);
+        for (uint32_t ch = 0; ch < 4U; ++ch) {
+            const uint32_t io = alloc(640U);
+            samples(io, 160U);
+            poke(list + 4U * ch, buffer(rng.Chance(2) ? g.r[13] - 300U : io, obj));
+        }
+        g.r[0] = obj;
+        g.r[1] = list;
+        if (rng.Chance(40)) s.Budget = rng.Below(3200U);
+        break;
+    }
     case 0x002F9430U: { // PauseRenderBuffer_SetVec2Range
         if (rng.Chance(85)) {
             g.r[2] = rng.Chance(10) ? 0U : (rng.Chance(5) ? 0x80000000U | rng.U32() : rng.Below(24U) + 1U);
@@ -400,7 +544,10 @@ int main(int argc, char** argv) {
         const uint64_t callsBefore = info ? info->Calls : 0U;
         const uint64_t declinedBefore = info ? info->Declined : 0U;
         uint64_t flows[6] = {};
-        std::vector<Scenario> accepted; // para o microbenchmark
+        // Para o microbenchmark: cenários aceitos pela versão nativa, com a RAM
+        // exatamente como estava antes da chamada e sem orçamento curto.
+        std::vector<std::pair<Scenario, std::vector<uint8_t>>> accepted;
+        const bool benchEnabled = std::getenv("GUEST_OVERRIDE_BENCH") != nullptr;
         bool failed = false;
         for (uint64_t trial = 0; trial < trials && !failed; ++trial) {
             Scenario s;
@@ -449,12 +596,18 @@ int main(int argc, char** argv) {
                     if (memory->IsWritable(address, 4U)) memory->WriteHost<uint32_t>(address, value);
                 }
             }
+            std::vector<uint8_t> snapshot;
+            if (benchEnabled && accepted.size() < 256U && !s.Trace && s.HookMode == 0U &&
+                s.Budget == (1U << 20U) && (s.Guest.fpscr & 0x00C00000U) == 0U) {
+                snapshot.resize(kRamSize);
+                memoryA.ReadBytes(kRamBase, snapshot);
+            }
             const Outcome a = Run(testCase, false, s, memoryA);
             const uint64_t callsBeforeTrial = info ? info->Calls : 0U;
             const Outcome b = Run(testCase, true, s, memoryB);
-            if (info && info->Calls != callsBeforeTrial && accepted.size() < 512U &&
-                !s.Trace && s.HookMode == 0U) {
-                accepted.push_back(s);
+            if (!snapshot.empty() && info && info->Calls != callsBeforeTrial &&
+                a.Consumed > 3U) { // caminho completo, não só o retorno antecipado
+                accepted.emplace_back(s, std::move(snapshot));
             }
             ++flows[std::min<size_t>(static_cast<size_t>(a.Flow.Kind), 5U)];
             std::string why = Mismatch(a, b);
@@ -492,35 +645,51 @@ int main(int argc, char** argv) {
                     " nsup=%" PRIu64 "]\n",
                     failed ? "FALHOU" : "OK    ", testCase.Entry, testCase.Name, trials,
                     calls, declined, flows[0], flows[1], flows[3], flows[4], flows[5]);
-        if (std::getenv("GUEST_OVERRIDE_BENCH") != nullptr && !accepted.empty() && !failed) {
+        if (benchEnabled && !accepted.empty() && !failed) {
             // Microbenchmark no host (x86): mesmo conjunto de entradas aceitas,
             // tradução contra substituição; só indicativo da diferença relativa.
+            // A tradução roda na memória A e a nativa na B: como as duas fazem
+            // as mesmas escritas, as memórias continuam iguais para o próximo caso.
+            // Cada chamada parte da mesma RAM (restaurada fora da medição), e o
+            // tempo é medido chamada a chamada com o contador de ciclos.
+            std::vector<uint8_t> ram(kRamSize);
             const auto bench = [&](bool native) {
-                const int rounds = 200;
-                const auto start = std::chrono::steady_clock::now();
-                for (int round = 0; round < rounds; ++round) {
-                    for (const auto& scenario : accepted) {
+                NativeA32Memory& memory = native ? memoryB : memoryA;
+                memory.ReadBytes(kRamBase, ram);
+                uint64_t cycles = 0U, calls = 0U;
+                for (int round = 0; round < 20; ++round) {
+                    for (const auto& [scenario, image] : accepted) {
+                        memory.WriteBytes(kRamBase, image);
                         a32::GuestState guest = scenario.Guest;
                         Oot3dWholeAotStats stats{};
-                        Oot3dWholeAotContext context{memoryB, memoryB, stats};
+                        Oot3dWholeAotContext context{memory, memory, stats};
                         context.BlocksRemaining = 1U << 20U;
                         Oot3dWholeAotFrame frame(guest);
                         Oot3dAotArchitecturalState state(guest);
                         Oot3dWholeAotFlow flow{};
+                        const uint64_t start = __builtin_ia32_rdtsc();
                         if (!native || !testCase.Native(frame, context, state, flow)) {
                             flow = testCase.Translated(frame, context, state, testCase.Entry);
                         }
                         asm volatile("" : : "r"(&flow), "r"(&guest) : "memory");
+                        cycles += __builtin_ia32_rdtsc() - start;
+                        ++calls;
                     }
                 }
-                const double ns = std::chrono::duration<double, std::nano>(
-                    std::chrono::steady_clock::now() - start).count();
-                return ns / (rounds * static_cast<double>(accepted.size()));
+                memory.WriteBytes(kRamBase, ram);
+                return static_cast<double>(cycles) / static_cast<double>(calls);
             };
             const double translated = bench(false);
             const double native = bench(true);
-            std::printf("  bench %08X: traduzida %.1f ns/chamada, nativa %.1f ns/chamada (%.2fx)\n",
+            std::printf("  bench %08X: traduzida %.0f ciclos TSC/chamada, nativa %.0f (%.2fx)\n",
                         testCase.Entry, translated, native, translated / native);
+            std::string where;
+            if (!SameMemory(memoryA, memoryB, true, &where) ||
+                memoryA.WriteGeneration() != memoryB.WriteGeneration()) {
+                std::printf("FALHA %08X memoria diverge depois do bench (%s)\n",
+                            testCase.Entry, where.c_str());
+                ++failures;
+            }
         }
     }
     return failures == 0 ? 0 : 1;

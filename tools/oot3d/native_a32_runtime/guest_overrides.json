@@ -2,6 +2,9 @@
   "format": "oot3d_guest_overrides_v1",
   "description": "Funcoes guest com substituicao nativa escrita a mao (tools/oot3d/native_game_runtime/oot3d_native_guest_overrides.cpp), ligadas no C++ gerado por apply_guest_overrides.py. So entram aqui depois de passar em run_guest_override_equivalence.py sem nenhuma diferenca. Amostras: perfil de blocos Kokiri (profiles/navi_kokiri_main_forest_source_coverage.json).",
   "overrides": [
+    {"entry": "0x004A0338", "name": "AudioEffect_ProcessStereoReverb", "switch_share": "5.35%"},
+    {"entry": "0x004A022C", "name": "AudioEffect_ProcessFourChannelDelay", "switch_share": "2.02%"},
+    {"entry": "0x00371738", "name": "Runtime_Memcpy", "switch_share": "1.38%"},
     {"entry": "0x003727F0", "name": "Math_SinF", "kokiri_share": "1.00%"},
     {"entry": "0x00307C94", "name": "PicaCommandWriter_UploadVertexFloatUniforms", "kokiri_share": "1.03%"},
     {"entry": "0x003325F0", "name": "Math3D_CylOutsideCylDist", "kokiri_share": "0.64%"},
