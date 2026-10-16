@@ -1108,13 +1108,34 @@ void NativeA32WindowSession::Setup() {
   // An OpenGL context is current only on the thread that created it; the
   // worker would issue GL calls without one (glCreateShader returns 0 and
   // glGetString null, as first seen on the Switch homebrew).
-  if (hostArgs.Renderer == "opengl") parallelPresentation = false;
+  // The Switch can opt back in: the GL context then moves to the worker.
+  bool openGlWorker = false;
+  if (hostArgs.Renderer == "opengl") {
+#if defined(__SWITCH__)
+    std::error_code optInError;
+    openGlWorker = parallelPresentation &&
+        std::filesystem::exists("sdmc:/switch/oot3dre/config/parallel_presentation", optInError);
+#endif
+    parallelPresentation = openGlWorker;
+  }
   fast3dGui = dynamic_cast<Fast::Fast3dGui*>(gui.get());
   if (parallelPresentation) {
     // Renderer timings accumulate apart and merge once the stream drains.
     rendererTiming = &workerPhaseTiming;
     renderStream.SetMode(
         Oot3dNativeGame::NativeRenderCommandStream::Mode::Worker);
+    if (openGlWorker) {
+      // Release the context here and make it current on the render worker,
+      // which from now on issues every renderer command.
+      SDL_Window* glWindow = SDL_GL_GetCurrentWindow();
+      SDL_GLContext glContext = SDL_GL_GetCurrentContext();
+      SDL_GL_MakeCurrent(glWindow, nullptr);
+      renderStream.Run([glWindow, glContext] {
+        if (SDL_GL_MakeCurrent(glWindow, glContext) != 0) {
+          throw std::runtime_error(std::string("render worker GL context: ") + SDL_GetError());
+        }
+      });
+    }
     // The ImGui overlay (and the display composition it triggers) renders
     // in renderer order, from a copy of each frame's draw data.
     if (fast3dGui != nullptr) {

@@ -116,6 +116,16 @@ AtomicConfigWriteResult WriteConfigFileAtomically(
     std::error_code replaceError;
     std::filesystem::rename(
         temporary, target, replaceError);
+#if defined(__SWITCH__)
+    // Horizon's FS cannot rename over an existing file (EEXIST). Removing the
+    // target first loses atomicity only for the instant between the calls.
+    if (replaceError == std::errc::file_exists) {
+        std::error_code removeError;
+        std::filesystem::remove(target, removeError);
+        replaceError.clear();
+        std::filesystem::rename(temporary, target, replaceError);
+    }
+#endif
     if (replaceError) {
         std::error_code cleanupError;
         std::filesystem::remove(temporary, cleanupError);
