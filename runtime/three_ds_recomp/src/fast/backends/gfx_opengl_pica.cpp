@@ -2,6 +2,11 @@
 
 #include "fast/backends/gfx_opengl.h"
 
+#if defined(__SWITCH__)
+#include <EGL/egl.h>
+#include <pthread.h>
+#endif
+
 #include "fast/oot3d/pica_geometry_registry.h"
 #include "fast/oot3d/pica_shadow2d.h"
 #include "fast/renderer3ds/pica_composition_schedule.h"
@@ -13,6 +18,9 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <chrono>
+#include <memory>
+#include <mutex>
 #include <cstdio>
 #include <filesystem>
 #include <limits>
@@ -193,14 +201,59 @@ void BindPicaGlProgramSamplers(GLuint program) {
     }
 }
 
+GLuint LinkPicaGlProgram(std::string_view vertexSource, std::string_view fragmentSource) {
+    const GLuint vertex = CompilePicaGlShader(GL_VERTEX_SHADER, vertexSource);
+    GLuint fragment = 0U;
+    GLuint program = 0U;
+    try {
+        fragment = CompilePicaGlShader(GL_FRAGMENT_SHADER, fragmentSource);
+        program = glCreateProgram();
+        glAttachShader(program, vertex);
+        glAttachShader(program, fragment);
+        glLinkProgram(program);
+        GLint linked = GL_FALSE;
+        glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        if (linked != GL_TRUE) {
+            GLint logLength = 0;
+            glGetProgramiv(program, GL_INFO_LOG_LENGTH, &logLength);
+            std::string log(
+                static_cast<size_t>(std::max(logLength, 1)), '\0');
+            glGetProgramInfoLog(program, logLength, nullptr, log.data());
+            throw std::runtime_error(
+                "PICA OpenGL program link failed: " + log);
+        }
+    } catch (...) {
+        if (program != 0U) {
+            glDeleteProgram(program);
+        }
+        glDeleteShader(fragment);
+        glDeleteShader(vertex);
+        throw;
+    }
+    glDeleteShader(fragment);
+    glDeleteShader(vertex);
+    return program;
+}
+
 #if defined(__SWITCH__)
-// Persistent program-binary cache. Mesa on the console compiles each PICA
-// program on first use, which takes long enough to stall loading screens and
-// scene changes on every launch. Linked programs are stored on the SD card
-// keyed by both translated sources and the driver identity; a binary the
-// driver rejects (or a different driver) simply falls back to compilation.
+// Background shader warm-up. The console's Mesa driver exposes no program
+// binary formats, so linked programs cannot be stored. Instead every program
+// the game links records its translated sources on the SD card, and on the
+// next launch a thread with a shared, surfaceless EGL context links them all
+// on a spare core. The render thread takes a ready program instead of
+// stalling for ~0.1-0.4 s on its first use.
 constexpr const char* kPicaGlProgramCacheDirectory = "sdmc:/switch/oot3dre/shadercache";
-constexpr uint32_t kPicaGlProgramCacheMagic = 0x31434750U; // "PGC1"
+constexpr uint32_t kPicaGlProgramSourceMagic = 0x31534750U; // "PGS1"
+
+struct PicaGlWarmup {
+    std::mutex Mutex;
+    std::unordered_map<uint64_t, GLuint> Ready;
+};
+
+PicaGlWarmup& PicaGlWarmupState() {
+    static auto* state = new PicaGlWarmup(); // shared with the warm-up thread; never destroyed
+    return *state;
+}
 
 uint64_t HashPicaGlProgramKey(std::string_view vertex, std::string_view fragment) {
     uint64_t hash = 1469598103934665603ULL;
@@ -212,88 +265,155 @@ uint64_t HashPicaGlProgramKey(std::string_view vertex, std::string_view fragment
         hash ^= 0xFFU;
         hash *= 1099511628211ULL;
     };
-    const auto glString = [](GLenum name) {
-        const auto* value = reinterpret_cast<const char*>(glGetString(name));
-        return std::string_view(value != nullptr ? value : "");
-    };
-    mix(glString(GL_VENDOR));
-    mix(glString(GL_RENDERER));
-    mix(glString(GL_VERSION));
     mix(vertex);
     mix(fragment);
     return hash;
 }
 
-bool PicaGlProgramCacheAvailable() {
-    static const bool available = [] {
-        GLint formats = 0;
-        glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &formats);
-        std::error_code error;
-        std::filesystem::create_directories(kPicaGlProgramCacheDirectory, error);
-        std::ofstream(std::string(kPicaGlProgramCacheDirectory) + "/status.txt", std::ios::trunc)
-            << "binary_formats=" << formats << "\n";
-        return formats > 0 && !error;
-    }();
-    return available;
-}
-
-std::string PicaGlProgramCachePath(uint64_t key) {
+std::string PicaGlProgramSourcePath(uint64_t key) {
     char name[32];
-    std::snprintf(name, sizeof(name), "/%016llx.bin", static_cast<unsigned long long>(key));
+    std::snprintf(name, sizeof(name), "/%016llx.src", static_cast<unsigned long long>(key));
     return std::string(kPicaGlProgramCacheDirectory) + name;
 }
 
-GLuint LoadCachedPicaGlProgram(uint64_t key) {
-    std::ifstream file(PicaGlProgramCachePath(key), std::ios::binary);
-    if (!file) {
-        return 0U;
-    }
-    uint32_t header[3]{};
-    if (!file.read(reinterpret_cast<char*>(header), sizeof(header)) ||
-        header[0] != kPicaGlProgramCacheMagic || header[2] == 0U) {
-        return 0U;
-    }
-    std::vector<char> binary(header[2]);
-    if (!file.read(binary.data(), static_cast<std::streamsize>(binary.size()))) {
-        return 0U;
-    }
-    const GLuint program = glCreateProgram();
-    glProgramBinary(program, static_cast<GLenum>(header[1]), binary.data(),
-                    static_cast<GLsizei>(binary.size()));
-    GLint linked = GL_FALSE;
-    glGetProgramiv(program, GL_LINK_STATUS, &linked);
-    if (linked != GL_TRUE) {
-        glDeleteProgram(program);
-        return 0U;
-    }
-    return program;
-}
-
-void StorePicaGlProgram(uint64_t key, GLuint program) {
-    GLint length = 0;
-    glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &length);
-    if (length <= 0) {
+void RecordPicaGlProgramSource(uint64_t key, std::string_view vertex, std::string_view fragment) {
+    const auto path = PicaGlProgramSourcePath(key);
+    std::error_code error;
+    if (std::filesystem::exists(path, error)) {
         return;
     }
-    std::vector<char> binary(static_cast<size_t>(length));
-    GLenum format = 0U;
-    GLsizei written = 0;
-    glGetProgramBinary(program, length, &written, &format, binary.data());
-    if (written <= 0) {
-        return;
-    }
-    // A new name per key: the Switch filesystem cannot rename over a file.
-    const auto path = PicaGlProgramCachePath(key);
+    std::filesystem::create_directories(kPicaGlProgramCacheDirectory, error);
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    const uint32_t header[3] = {kPicaGlProgramCacheMagic, static_cast<uint32_t>(format),
-                                static_cast<uint32_t>(written)};
+    const uint32_t header[3] = {kPicaGlProgramSourceMagic, static_cast<uint32_t>(vertex.size()),
+                                static_cast<uint32_t>(fragment.size())};
     file.write(reinterpret_cast<const char*>(header), sizeof(header));
-    file.write(binary.data(), written);
+    file.write(vertex.data(), static_cast<std::streamsize>(vertex.size()));
+    file.write(fragment.data(), static_cast<std::streamsize>(fragment.size()));
     if (!file) {
         file.close();
-        std::error_code error;
         std::filesystem::remove(path, error);
     }
+}
+
+bool ReadPicaGlProgramSource(const std::filesystem::path& path, std::string& vertex,
+                             std::string& fragment) {
+    std::ifstream file(path, std::ios::binary);
+    uint32_t header[3]{};
+    if (!file.read(reinterpret_cast<char*>(header), sizeof(header)) ||
+        header[0] != kPicaGlProgramSourceMagic) {
+        return false;
+    }
+    vertex.resize(header[1]);
+    fragment.resize(header[2]);
+    return static_cast<bool>(file.read(vertex.data(), header[1])) &&
+           static_cast<bool>(file.read(fragment.data(), header[2]));
+}
+
+struct PicaGlWarmupJob {
+    EGLDisplay Display = EGL_NO_DISPLAY;
+    EGLContext Context = EGL_NO_CONTEXT;
+    std::vector<std::filesystem::path> Sources;
+};
+
+void* RunPicaGlWarmup(void* argument) {
+    std::unique_ptr<PicaGlWarmupJob> job(static_cast<PicaGlWarmupJob*>(argument));
+    if (eglMakeCurrent(job->Display, EGL_NO_SURFACE, EGL_NO_SURFACE, job->Context) != EGL_TRUE) {
+        return nullptr;
+    }
+    auto& state = PicaGlWarmupState();
+    size_t linked = 0U;
+    size_t failed = 0U;
+    const auto started = std::chrono::steady_clock::now();
+    for (const auto& path : job->Sources) {
+        uint64_t key = 0U;
+        try {
+            key = std::stoull(path.stem().string(), nullptr, 16);
+        } catch (...) {
+            continue;
+        }
+        std::string vertex;
+        std::string fragment;
+        if (!ReadPicaGlProgramSource(path, vertex, fragment) ||
+            HashPicaGlProgramKey(vertex, fragment) != key) {
+            ++failed;
+            continue;
+        }
+        try {
+            const GLuint program = LinkPicaGlProgram(vertex, fragment);
+            glFinish(); // complete before another context uses the object
+            std::lock_guard lock(state.Mutex);
+            state.Ready.emplace(key, program);
+            ++linked;
+        } catch (...) {
+            ++failed;
+        }
+    }
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    std::ofstream(std::string(kPicaGlProgramCacheDirectory) + "/status.txt", std::ios::trunc)
+        << "warmup_sources=" << job->Sources.size() << "\nwarmup_linked=" << linked
+        << "\nwarmup_failed=" << failed << "\nwarmup_seconds=" << seconds << '\n';
+    eglMakeCurrent(job->Display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    return nullptr;
+}
+
+// Called once from the render thread with its context current.
+void StartPicaGlWarmup() {
+    const auto status = [](const std::string& text) {
+        std::error_code error;
+        std::filesystem::create_directories(kPicaGlProgramCacheDirectory, error);
+        std::ofstream(std::string(kPicaGlProgramCacheDirectory) + "/status.txt", std::ios::trunc)
+            << text << '\n';
+    };
+    auto job = std::make_unique<PicaGlWarmupJob>();
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(kPicaGlProgramCacheDirectory, error)) {
+        if (entry.path().extension() == ".src") {
+            job->Sources.push_back(entry.path());
+        }
+    }
+    if (job->Sources.empty()) {
+        status("warmup_sources=0");
+        return;
+    }
+    job->Display = eglGetCurrentDisplay();
+    const EGLContext shared = eglGetCurrentContext();
+    EGLint configId = 0;
+    EGLConfig config = nullptr;
+    EGLint configs = 0;
+    const EGLint configAttributes[] = {EGL_CONFIG_ID, 0, EGL_NONE};
+    if (shared == EGL_NO_CONTEXT ||
+        eglQueryContext(job->Display, shared, EGL_CONFIG_ID, &configId) != EGL_TRUE) {
+        status("warmup_error=no current EGL context");
+        return;
+    }
+    EGLint chosen[] = {EGL_CONFIG_ID, configId, EGL_NONE};
+    (void)configAttributes;
+    if (eglChooseConfig(job->Display, chosen, &config, 1, &configs) != EGL_TRUE || configs != 1) {
+        status("warmup_error=config lookup failed");
+        return;
+    }
+    const EGLint contextAttributes[] = {
+        EGL_CONTEXT_MAJOR_VERSION, 4,
+        EGL_CONTEXT_MINOR_VERSION, 3,
+        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+        EGL_NONE};
+    eglBindAPI(EGL_OPENGL_API);
+    job->Context = eglCreateContext(job->Display, config, shared, contextAttributes);
+    if (job->Context == EGL_NO_CONTEXT) {
+        status("warmup_error=eglCreateContext " + std::to_string(eglGetError()));
+        return;
+    }
+    pthread_attr_t attributes;
+    pthread_attr_init(&attributes);
+    pthread_attr_setstacksize(&attributes, 4U * 1024U * 1024U); // Mesa's compiler recurses deeply
+    pthread_t thread;
+    auto* raw = job.release();
+    if (pthread_create(&thread, &attributes, RunPicaGlWarmup, raw) != 0) {
+        std::unique_ptr<PicaGlWarmupJob> reclaimed(raw);
+        status("warmup_error=pthread_create");
+    }
+    pthread_attr_destroy(&attributes);
 }
 #endif
 
@@ -313,57 +433,25 @@ PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {
     }
 
 #if defined(__SWITCH__)
-    const bool cacheAvailable = PicaGlProgramCacheAvailable();
-    const uint64_t cacheKey =
-        cacheAvailable ? HashPicaGlProgramKey(vertexSource, fragmentSource) : 0U;
-    if (cacheAvailable) {
-        if (const GLuint cached = LoadCachedPicaGlProgram(cacheKey); cached != 0U) {
-            BindPicaGlProgramSamplers(cached);
-            return {cached};
+    static const bool warmupStarted = (StartPicaGlWarmup(), true);
+    (void)warmupStarted;
+    const uint64_t cacheKey = HashPicaGlProgramKey(vertexSource, fragmentSource);
+    {
+        auto& state = PicaGlWarmupState();
+        std::unique_lock lock(state.Mutex);
+        if (const auto found = state.Ready.find(cacheKey); found != state.Ready.end()) {
+            const GLuint program = found->second;
+            state.Ready.erase(found);
+            lock.unlock();
+            BindPicaGlProgramSamplers(program);
+            return {program};
         }
     }
 #endif
-
-    const GLuint vertex = CompilePicaGlShader(GL_VERTEX_SHADER, vertexSource);
-    GLuint fragment = 0U;
-    GLuint program = 0U;
-    try {
-        fragment = CompilePicaGlShader(GL_FRAGMENT_SHADER, fragmentSource);
-        program = glCreateProgram();
+    const GLuint program = LinkPicaGlProgram(vertexSource, fragmentSource);
+    BindPicaGlProgramSamplers(program);
 #if defined(__SWITCH__)
-        if (cacheAvailable) {
-            glProgramParameteri(program, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
-        }
-#endif
-        glAttachShader(program, vertex);
-        glAttachShader(program, fragment);
-        glLinkProgram(program);
-        GLint linked = GL_FALSE;
-        glGetProgramiv(program, GL_LINK_STATUS, &linked);
-        if (linked != GL_TRUE) {
-            GLint logLength = 0;
-            glGetProgramiv(program, GL_INFO_LOG_LENGTH, &logLength);
-            std::string log(
-                static_cast<size_t>(std::max(logLength, 1)), '\0');
-            glGetProgramInfoLog(program, logLength, nullptr, log.data());
-            throw std::runtime_error(
-                "PICA OpenGL program link failed: " + log);
-        }
-        BindPicaGlProgramSamplers(program);
-    } catch (...) {
-        if (program != 0U) {
-            glDeleteProgram(program);
-        }
-        glDeleteShader(fragment);
-        glDeleteShader(vertex);
-        throw;
-    }
-    glDeleteShader(fragment);
-    glDeleteShader(vertex);
-#if defined(__SWITCH__)
-    if (cacheAvailable) {
-        StorePicaGlProgram(cacheKey, program);
-    }
+    RecordPicaGlProgramSource(cacheKey, vertexSource, fragmentSource);
 #endif
     return {program};
 }
