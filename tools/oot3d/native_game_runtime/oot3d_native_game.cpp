@@ -28,6 +28,10 @@
 #include "triaevum_title_plugin_loader.h"
 #endif
 
+#if defined(__SWITCH__)
+void PlaceSwitchMainThread(); // oot3d_switch_threads.cpp
+#endif
+
 namespace {
 
 #if defined(__SWITCH__)
@@ -167,6 +171,7 @@ int main(int argc, char** argv) {
         Oot3dNativeGameLaunch launch;
         NativeGameArguments preparedArguments;
 #if defined(__SWITCH__)
+        PlaceSwitchMainThread();
         // SDL's positional face-button convention is useful for portable PC
         // layouts, but the Switch build should follow the labels printed on
         // Joy-Con and Pro Controllers: A is A, B is B, and so on.
