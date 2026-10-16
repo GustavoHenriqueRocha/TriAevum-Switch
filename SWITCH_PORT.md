@@ -43,6 +43,13 @@ Desempenho e usabilidade:
   (ausente = 1, comportamento original). Alvos PICA, depth/stencil, sombras e imagens de display
   transfer ficam N× maiores; viewport/scissor/blits escalados; custo só de GPU. 3 = 1200×720
   (encaixe 1:1 no portátil). No desktop: `TRIAEVUM_GL_RESOLUTION_SCALE=2`.
+- **Pós-processamento GL** (opcional, tudo desligado sem os arquivos; lidos uma vez, só GPU), em
+  `config/` no SD (desktop: variável `TRIAEVUM_GL_<NOME>`):
+  `antialiasing` = `fxaa` ou `smaa` (mesmos shaders/preset do caminho NRI do PC);
+  `upscaler` = `fsr` (AMD FSR 1: EASU amplia a imagem N× até a janela, RCAS dá nitidez);
+  `sharpen` = `0.0`–`1.0` (força linear do RCAS; com `fsr` o padrão é `0.2`, `0` desliga o RCAS);
+  `anisotropy` = `2`/`4`/`8`/`16` (só texturas PICA com filtro linear e mipmaps).
+  Ordem: render N× → AA → EASU → RCAS → janela. Só na tela de cima (apresentação opaca).
 - **Gerador AOT**: helpers quentes com caminho rápido inline e lento frio; LDM/STM por bloco;
   literais PC-relativos dobrados; shards sem `-ffast-math` (exatidão do VFP).
 - **Orçamento de blocos** 2048 (era 128) no Switch.

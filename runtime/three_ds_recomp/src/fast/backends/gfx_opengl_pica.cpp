@@ -8,8 +8,10 @@
 #endif
 
 
+#include "fast/backends/gfx_opengl_pica_post.h"
 #include "fast/oot3d/pica_geometry_registry.h"
 #include "fast/oot3d/pica_shadow2d.h"
+#include "fast/oot3d/smaa_lookup_data.h"
 #include "fast/renderer3ds/pica_composition_schedule.h"
 #include "fast/renderer3ds/pica_gl_shader_dialect.h"
 #include "oot3d/renderer/pica_texture_decode.h"
@@ -102,6 +104,37 @@ uint32_t ReadPicaGlResolutionScale() {
     return scale;
 }
 
+// Optional scanout post-processing and texture filtering (all off unless a
+// file exists), read once like the resolution scale: on the Switch from
+// sdmc:/switch/oot3dre/config/{antialiasing,anisotropy,upscaler,sharpen};
+// elsewhere from TRIAEVUM_GL_{ANTIALIASING,ANISOTROPY,UPSCALER,SHARPEN}.
+// See gfx_opengl_pica_post.h for the accepted values.
+std::optional<std::string> ReadPicaGlConfigText(const char* file,
+                                                const char* environment) {
+#if defined(__SWITCH__)
+    (void)environment;
+    std::ifstream stream(std::string("sdmc:/switch/oot3dre/config/") + file);
+    std::string text;
+    if (!stream || !std::getline(stream, text)) {
+        return std::nullopt;
+    }
+    return text;
+#else
+    (void)file;
+    const char* value = std::getenv(environment);
+    return value != nullptr ? std::optional<std::string>(value) : std::nullopt;
+#endif
+}
+
+const PicaGlPost::Config& ReadPicaGlPostConfig() {
+    static const PicaGlPost::Config config = PicaGlPost::ResolveConfig(
+        ReadPicaGlConfigText("antialiasing", "TRIAEVUM_GL_ANTIALIASING"),
+        ReadPicaGlConfigText("anisotropy", "TRIAEVUM_GL_ANISOTROPY"),
+        ReadPicaGlConfigText("upscaler", "TRIAEVUM_GL_UPSCALER"),
+        ReadPicaGlConfigText("sharpen", "TRIAEVUM_GL_SHARPEN"));
+    return config;
+}
+
 struct PicaGlTargetKey {
     uint64_t Namespace = 0U;
     uint32_t ColorAddress = 0U;
@@ -188,6 +221,51 @@ struct PicaGlDisplay {
     uint32_t Width = 0U;
     uint32_t Height = 0U;
     bool Initialized = false;
+};
+
+// Intermediate image of the scanout post-processing chain. Reallocated only
+// when its extent changes (first frame, dock/undock), never per frame.
+struct PicaGlPostImage {
+    GLuint Framebuffer = 0U;
+    GLuint Texture = 0U;
+    uint32_t Width = 0U;
+    uint32_t Height = 0U;
+};
+
+struct PicaGlPostProgram {
+    GLuint Handle = 0U;
+    GLint Orient = -1;
+    GLint FlipY = -1;
+    GLint OutputSize = -1;
+    std::array<GLint, 4> Params{-1, -1, -1, -1};
+    // Last uploaded values: uniforms are re-sent only when they change, so
+    // a steady frame issues no glUniform calls for the chain.
+    int LastOrient = -1;
+    int LastFlipY = -1;
+    uint64_t LastOutputKey = 0U;
+    uint64_t LastInputKey = 0U;
+    int LastResample = -1;
+};
+
+struct PicaGlPostState {
+    // Effective configuration (effects whose setup failed are turned off).
+    PicaGlPost::Config Config;
+    PicaGlPostProgram Fxaa;
+    PicaGlPostProgram SmaaEdges;
+    PicaGlPostProgram SmaaWeights;
+    PicaGlPostProgram SmaaBlend;
+    PicaGlPostProgram Easu;
+    PicaGlPostProgram Rcas;
+    GLuint SmaaArea = 0U;
+    GLuint SmaaSearch = 0U;
+    // Anti-aliased image, source (render x scale) extent.
+    PicaGlPostImage Color;
+    // SMAA edges and blend weights, source extent.
+    PicaGlPostImage Edges;
+    PicaGlPostImage Weights;
+    // EASU output, portrait extent of the window viewport (only when RCAS
+    // follows; otherwise EASU draws the window directly).
+    PicaGlPostImage Upscaled;
 };
 
 struct PicaGlAttributeState {
@@ -780,8 +858,476 @@ struct GfxRenderingAPIOGL::NativePicaState {
     uint64_t UniformUploads = 0U;
     uint64_t UniformUploadBytes = 0U;
     uint32_t ResolutionScale = 1U;
+    PicaGlPostState Post;
 #endif
 };
+
+#if !defined(USE_OPENGLES) && !defined(__APPLE__)
+namespace {
+
+// GL 4.6 / ARB_texture_filter_anisotropic / EXT_texture_filter_anisotropic
+// share these enums; the Switch glad header (GL 4.3) does not define them.
+#ifndef GL_TEXTURE_MAX_ANISOTROPY
+#define GL_TEXTURE_MAX_ANISOTROPY 0x84FE
+#endif
+#ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY 0x84FF
+#endif
+
+// Init-time only: the extension list is walked once.
+bool PicaGlAnisotropySupported() {
+    GLint major = 0;
+    GLint minor = 0;
+    glGetIntegerv(GL_MAJOR_VERSION, &major);
+    glGetIntegerv(GL_MINOR_VERSION, &minor);
+    if (major > 4 || (major == 4 && minor >= 6)) {
+        return true;
+    }
+    GLint count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+    for (GLint index = 0; index < count; ++index) {
+        const auto* name = reinterpret_cast<const char*>(
+            glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(index)));
+        if (name != nullptr &&
+            (std::strcmp(name, "GL_EXT_texture_filter_anisotropic") == 0 ||
+             std::strcmp(name, "GL_ARB_texture_filter_anisotropic") == 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void DeletePicaGlPostImage(PicaGlPostImage& image) {
+    glDeleteFramebuffers(1, &image.Framebuffer);
+    glDeleteTextures(1, &image.Texture);
+    image = {};
+}
+
+void DeletePicaGlPostProgram(PicaGlPostProgram& program) {
+    glDeleteProgram(program.Handle);
+    program = {};
+}
+
+void DeletePicaGlPost(PicaGlPostState& post) {
+    DeletePicaGlPostProgram(post.Fxaa);
+    DeletePicaGlPostProgram(post.SmaaEdges);
+    DeletePicaGlPostProgram(post.SmaaWeights);
+    DeletePicaGlPostProgram(post.SmaaBlend);
+    DeletePicaGlPostProgram(post.Easu);
+    DeletePicaGlPostProgram(post.Rcas);
+    glDeleteTextures(1, &post.SmaaArea);
+    glDeleteTextures(1, &post.SmaaSearch);
+    post.SmaaArea = 0U;
+    post.SmaaSearch = 0U;
+    DeletePicaGlPostImage(post.Color);
+    DeletePicaGlPostImage(post.Edges);
+    DeletePicaGlPostImage(post.Weights);
+    DeletePicaGlPostImage(post.Upscaled);
+}
+
+void SetPicaGlPostSampling(GLenum filter) {
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    static_cast<GLint>(filter));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                    static_cast<GLint>(filter));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+}
+
+// Steady state is one comparison; GL work only when the extent changes.
+bool EnsurePicaGlPostImage(PicaGlPostImage& image, GLenum format,
+                           uint32_t width, uint32_t height) {
+    if (image.Texture != 0U && image.Width == width &&
+        image.Height == height) {
+        return true;
+    }
+    if (image.Texture == 0U) {
+        glGenTextures(1, &image.Texture);
+        glGenFramebuffers(1, &image.Framebuffer);
+    }
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, image.Texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(format),
+                 static_cast<GLsizei>(width), static_cast<GLsizei>(height),
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    SetPicaGlPostSampling(GL_LINEAR);
+    glBindFramebuffer(GL_FRAMEBUFFER, image.Framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, image.Texture, 0);
+    image.Width = width;
+    image.Height = height;
+    return glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+           GL_FRAMEBUFFER_COMPLETE;
+}
+
+GLuint CreatePicaGlPostLookup(const std::vector<uint8_t>& rgba8,
+                              uint32_t width, uint32_t height) {
+    GLuint texture = 0U;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(width),
+                 static_cast<GLsizei>(height), 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 rgba8.data());
+    // Same sampler as the NRI path (SMAA addresses lookup texel centres).
+    SetPicaGlPostSampling(GL_LINEAR);
+    return texture;
+}
+
+PicaGlPostProgram CreatePicaGlPostProgram(
+    std::string_view vertexSource, const std::string& fragmentSource,
+    std::initializer_list<const char*> parameters) {
+    PicaGlPostProgram program;
+    program.Handle = LinkPicaGlProgram(vertexSource, fragmentSource);
+    program.Orient = glGetUniformLocation(program.Handle, "pica_post_orient");
+    program.FlipY = glGetUniformLocation(program.Handle, "pica_flip_y");
+    program.OutputSize =
+        glGetUniformLocation(program.Handle, "pica_post_output_size");
+    size_t index = 0U;
+    for (const char* name : parameters) {
+        program.Params[index++] = glGetUniformLocation(program.Handle, name);
+    }
+    return program;
+}
+
+void LogPicaGlPost(const std::string& message) {
+    std::fprintf(stderr, "[pica-gl] %s\n", message.c_str());
+}
+
+// Builds only the programs the configuration needs, at init. A failure
+// turns that effect off instead of failing the renderer.
+void InitPicaGlPost(PicaGlPostState& post, std::string_view vertexSource) {
+    post.Config = ReadPicaGlPostConfig();
+    auto& config = post.Config;
+    if (config.Anisotropy > 1U) {
+        GLfloat maximum = 0.0F;
+        if (PicaGlAnisotropySupported()) {
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &maximum);
+        }
+        config.Anisotropy = std::min<uint32_t>(
+            config.Anisotropy,
+            static_cast<uint32_t>(std::max(maximum, 0.0F)));
+        if (config.Anisotropy <= 1U) {
+            config.Anisotropy = 0U;
+            LogPicaGlPost("filtro anisotropico indisponivel neste driver");
+        }
+    }
+    if (config.Aa == PicaGlPost::Antialiasing::Fxaa) {
+        try {
+            post.Fxaa = CreatePicaGlPostProgram(
+                vertexSource, PicaGlPost::BuildFxaaFragmentShader(),
+                {"scanout.inverse_size"});
+        } catch (const std::exception& exception) {
+            LogPicaGlPost(std::string("FXAA desligado: ") + exception.what());
+            config.Aa = PicaGlPost::Antialiasing::Off;
+        }
+    } else if (config.Aa == PicaGlPost::Antialiasing::Smaa) {
+        try {
+            const auto lookup = Oot3d::DecodeSmaaLookupData();
+            if (!lookup.Valid()) {
+                throw std::runtime_error("SMAA lookup data is invalid");
+            }
+            using Stage = PicaGlPost::SmaaStage;
+            post.SmaaEdges = CreatePicaGlPostProgram(
+                vertexSource,
+                PicaGlPost::BuildSmaaFragmentShader(Stage::EdgeDetection),
+                {"pica_smaa_metrics"});
+            post.SmaaWeights = CreatePicaGlPostProgram(
+                vertexSource,
+                PicaGlPost::BuildSmaaFragmentShader(
+                    Stage::BlendWeightCalculation),
+                {"pica_smaa_metrics"});
+            post.SmaaBlend = CreatePicaGlPostProgram(
+                vertexSource,
+                PicaGlPost::BuildSmaaFragmentShader(
+                    Stage::NeighborhoodBlending),
+                {"pica_smaa_metrics"});
+            post.SmaaArea = CreatePicaGlPostLookup(
+                lookup.AreaRgba8, Oot3d::SmaaLookupData::AreaWidth,
+                Oot3d::SmaaLookupData::AreaHeight);
+            post.SmaaSearch = CreatePicaGlPostLookup(
+                lookup.SearchRgba8, Oot3d::SmaaLookupData::SearchWidth,
+                Oot3d::SmaaLookupData::SearchHeight);
+        } catch (const std::exception& exception) {
+            LogPicaGlPost(std::string("SMAA desligado: ") + exception.what());
+            DeletePicaGlPostProgram(post.SmaaEdges);
+            DeletePicaGlPostProgram(post.SmaaWeights);
+            DeletePicaGlPostProgram(post.SmaaBlend);
+            glDeleteTextures(1, &post.SmaaArea);
+            glDeleteTextures(1, &post.SmaaSearch);
+            post.SmaaArea = 0U;
+            post.SmaaSearch = 0U;
+            config.Aa = PicaGlPost::Antialiasing::Off;
+        }
+    }
+    if (config.Upscale == PicaGlPost::Upscaler::Fsr) {
+        try {
+            post.Easu = CreatePicaGlPostProgram(
+                vertexSource, PicaGlPost::BuildEasuFragmentShader(),
+                {"pica_easu_con0", "pica_easu_con1", "pica_easu_con2",
+                 "pica_easu_con3"});
+        } catch (const std::exception& exception) {
+            LogPicaGlPost(std::string("FSR EASU desligado: ") +
+                          exception.what());
+            config.Upscale = PicaGlPost::Upscaler::Linear;
+        }
+    }
+    if (config.Sharpen > 0.0F) {
+        try {
+            post.Rcas = CreatePicaGlPostProgram(
+                vertexSource, PicaGlPost::BuildRcasFragmentShader(),
+                {"pica_rcas_con", "pica_rcas_resample"});
+            const auto con = PicaGlPost::FsrRcasConstants(config.Sharpen);
+            glUseProgram(post.Rcas.Handle);
+            glUniform4ui(post.Rcas.Params[0], con[0], con[1], con[2], con[3]);
+        } catch (const std::exception& exception) {
+            LogPicaGlPost(std::string("RCAS desligado: ") + exception.what());
+            config.Sharpen = 0.0F;
+        }
+    }
+    if (config.ScanoutEffects() || config.Anisotropy != 0U) {
+        static constexpr std::array<const char*, 3> kAa{"off", "fxaa", "smaa"};
+        char summary[160];
+        std::snprintf(summary, sizeof(summary),
+                      "pos-processamento: aa=%s upscaler=%s sharpen=%.2f "
+                      "anisotropia=%u",
+                      kAa[static_cast<size_t>(config.Aa)],
+                      config.Upscale == PicaGlPost::Upscaler::Fsr ? "fsr"
+                                                                  : "linear",
+                      static_cast<double>(config.Sharpen),
+                      static_cast<unsigned>(config.Anisotropy));
+        LogPicaGlPost(summary);
+    }
+}
+
+uint64_t PicaGlPostExtentKey(uint32_t width, uint32_t height) {
+    return (static_cast<uint64_t>(width) << 32U) | height;
+}
+
+// Uploads the destination description of the bound post program when it
+// changed.
+void SetPicaGlPostDestination(PicaGlPostProgram& program, bool window,
+                              bool flip, uint32_t width, uint32_t height) {
+    const int orient = window ? 1 : 0;
+    if (program.LastOrient != orient) {
+        glUniform1i(program.Orient, orient);
+        program.LastOrient = orient;
+    }
+    const int flipY = window && flip ? 1 : 0;
+    if (program.LastFlipY != flipY) {
+        glUniform1i(program.FlipY, flipY);
+        program.LastFlipY = flipY;
+    }
+    const uint64_t key = PicaGlPostExtentKey(width, height);
+    if (program.LastOutputKey != key) {
+        glUniform2f(program.OutputSize, static_cast<float>(width),
+                    static_cast<float>(height));
+        program.LastOutputKey = key;
+    }
+}
+
+void DrawPicaGlPostTriangle(GLuint source) {
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, source);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+}
+
+void BeginPicaGlPostImage(const PicaGlPostImage& image) {
+    glBindFramebuffer(GL_FRAMEBUFFER, image.Framebuffer);
+    glViewport(0, 0, static_cast<GLsizei>(image.Width),
+               static_cast<GLsizei>(image.Height));
+}
+
+void SetPicaGlSmaaMetrics(PicaGlPostProgram& program, uint32_t width,
+                          uint32_t height) {
+    const uint64_t key = PicaGlPostExtentKey(width, height);
+    if (program.LastInputKey != key) {
+        glUniform4f(program.Params[0], 1.0F / static_cast<float>(width),
+                    1.0F / static_cast<float>(height),
+                    static_cast<float>(width), static_cast<float>(height));
+        program.LastInputKey = key;
+    }
+}
+
+void DrawPicaGlFxaa(PicaGlPostProgram& program, GLuint source,
+                    uint32_t sourceWidth, uint32_t sourceHeight, bool window,
+                    bool flip, uint32_t outputWidth, uint32_t outputHeight) {
+    glUseProgram(program.Handle);
+    SetPicaGlPostDestination(program, window, flip, outputWidth, outputHeight);
+    const uint64_t key = PicaGlPostExtentKey(sourceWidth, sourceHeight);
+    if (program.LastInputKey != key) {
+        glUniform2f(program.Params[0], 1.0F / static_cast<float>(sourceWidth),
+                    1.0F / static_cast<float>(sourceHeight));
+        program.LastInputKey = key;
+    }
+    DrawPicaGlPostTriangle(source);
+}
+
+void DrawPicaGlEasu(PicaGlPostProgram& program, GLuint source,
+                    uint32_t sourceWidth, uint32_t sourceHeight, bool window,
+                    bool flip, uint32_t outputWidth, uint32_t outputHeight) {
+    glUseProgram(program.Handle);
+    SetPicaGlPostDestination(program, window, flip, outputWidth, outputHeight);
+    // Extents are below 2^16, so this packs both pairs without collisions.
+    const uint64_t key =
+        (static_cast<uint64_t>(sourceWidth) << 48U) |
+        (static_cast<uint64_t>(sourceHeight) << 32U) |
+        (static_cast<uint64_t>(outputWidth) << 16U) | outputHeight;
+    if (program.LastInputKey != key) {
+        const auto con = PicaGlPost::FsrEasuConstants(
+            static_cast<float>(sourceWidth), static_cast<float>(sourceHeight),
+            static_cast<float>(outputWidth), static_cast<float>(outputHeight));
+        for (size_t index = 0U; index < 4U; ++index) {
+            glUniform4ui(program.Params[index], con[index * 4U],
+                         con[index * 4U + 1U], con[index * 4U + 2U],
+                         con[index * 4U + 3U]);
+        }
+        program.LastInputKey = key;
+    }
+    DrawPicaGlPostTriangle(source);
+}
+
+// Runs the configured chain for one Replace-mode scanout and draws its last
+// pass into the window viewport. The caller has prepared the window (cleared,
+// blend/depth/stencil/scissor off) and bound the VAO. Steady-state cost per
+// pass: one FBO bind, viewport, program, texture bind and draw; no
+// allocation, no queries.
+void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
+                       const PicaGlDisplay& display, bool flip,
+                       GLint viewportX, GLint viewportY,
+                       GLsizei viewportWidth, GLsizei viewportHeight) {
+    auto& post = state.Post;
+    auto& config = post.Config;
+    const uint32_t sourceWidth = display.Width * state.ResolutionScale;
+    const uint32_t sourceHeight = display.Height * state.ResolutionScale;
+    // The window viewport, in the portrait layout of the source image.
+    const uint32_t outputWidth = static_cast<uint32_t>(viewportHeight);
+    const uint32_t outputHeight = static_cast<uint32_t>(viewportWidth);
+
+    // EASU only enlarges; at 1:1 (e.g. scale 3 on the 720p handheld screen)
+    // FSR reduces to RCAS.
+    const bool easu = config.Upscale == PicaGlPost::Upscaler::Fsr &&
+                      (outputWidth > sourceWidth || outputHeight > sourceHeight);
+    const bool rcas = config.Sharpen > 0.0F;
+    // FXAA alone near 1:1 samples the source from the window pass, exactly
+    // like the PC scanout. When the window has at least twice the source's
+    // pixels (scale 1-2, or docked), FXAA at source size plus the plain
+    // scanout is cheaper (measured), and it resolves into an image first.
+    const uint64_t sourcePixels =
+        static_cast<uint64_t>(sourceWidth) * sourceHeight;
+    const uint64_t outputPixels =
+        static_cast<uint64_t>(outputWidth) * outputHeight;
+    const bool fxaaInWindow =
+        config.Aa == PicaGlPost::Antialiasing::Fxaa && !easu && !rcas &&
+        outputPixels < sourcePixels * 2U;
+
+    GLuint current = display.Color;
+    uint32_t currentWidth = sourceWidth;
+    uint32_t currentHeight = sourceHeight;
+    bool complete = true;
+
+    if (config.Aa == PicaGlPost::Antialiasing::Smaa) {
+        complete = EnsurePicaGlPostImage(post.Edges, GL_RG8, sourceWidth,
+                                         sourceHeight) &&
+                   EnsurePicaGlPostImage(post.Weights, GL_RGBA8, sourceWidth,
+                                         sourceHeight) &&
+                   EnsurePicaGlPostImage(post.Color, GL_RGBA8, sourceWidth,
+                                         sourceHeight);
+        if (complete) {
+            BeginPicaGlPostImage(post.Edges);
+            // The official edge pass discards edge-free pixels.
+            glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glUseProgram(post.SmaaEdges.Handle);
+            SetPicaGlSmaaMetrics(post.SmaaEdges, sourceWidth, sourceHeight);
+            DrawPicaGlPostTriangle(current);
+
+            BeginPicaGlPostImage(post.Weights);
+            glUseProgram(post.SmaaWeights.Handle);
+            SetPicaGlSmaaMetrics(post.SmaaWeights, sourceWidth, sourceHeight);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, post.SmaaArea);
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, post.SmaaSearch);
+            DrawPicaGlPostTriangle(post.Edges.Texture);
+
+            BeginPicaGlPostImage(post.Color);
+            glUseProgram(post.SmaaBlend.Handle);
+            SetPicaGlSmaaMetrics(post.SmaaBlend, sourceWidth, sourceHeight);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, post.Weights.Texture);
+            DrawPicaGlPostTriangle(current);
+            current = post.Color.Texture;
+        }
+    } else if (config.Aa == PicaGlPost::Antialiasing::Fxaa && !fxaaInWindow) {
+        complete = EnsurePicaGlPostImage(post.Color, GL_RGBA8, sourceWidth,
+                                         sourceHeight);
+        if (complete) {
+            BeginPicaGlPostImage(post.Color);
+            DrawPicaGlFxaa(post.Fxaa, current, sourceWidth, sourceHeight,
+                           false, flip, sourceWidth, sourceHeight);
+            current = post.Color.Texture;
+        }
+    }
+    if (complete && easu && rcas) {
+        complete = EnsurePicaGlPostImage(post.Upscaled, GL_RGBA8, outputWidth,
+                                         outputHeight);
+        if (complete) {
+            BeginPicaGlPostImage(post.Upscaled);
+            DrawPicaGlEasu(post.Easu, current, currentWidth, currentHeight,
+                           false, flip, outputWidth, outputHeight);
+            current = post.Upscaled.Texture;
+            currentWidth = outputWidth;
+            currentHeight = outputHeight;
+        }
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
+    if (!complete) {
+        // An intermediate image could not be attached: keep the plain
+        // scanout from now on rather than a broken chain.
+        LogPicaGlPost("imagem intermediaria incompleta; pos-processamento "
+                      "desligado");
+        config.Aa = PicaGlPost::Antialiasing::Off;
+        config.Upscale = PicaGlPost::Upscaler::Linear;
+        config.Sharpen = 0.0F;
+        current = display.Color;
+    } else if (rcas) {
+        glUseProgram(post.Rcas.Handle);
+        SetPicaGlPostDestination(post.Rcas, true, flip, outputWidth,
+                                 outputHeight);
+        const int resample =
+            currentWidth != outputWidth || currentHeight != outputHeight ? 1
+                                                                         : 0;
+        if (post.Rcas.LastResample != resample) {
+            glUniform1i(post.Rcas.Params[1], resample);
+            post.Rcas.LastResample = resample;
+        }
+        DrawPicaGlPostTriangle(current);
+        return;
+    } else if (easu) {
+        DrawPicaGlEasu(post.Easu, current, currentWidth, currentHeight, true,
+                       flip, outputWidth, outputHeight);
+        return;
+    } else if (fxaaInWindow) {
+        DrawPicaGlFxaa(post.Fxaa, current, currentWidth, currentHeight, true,
+                       flip, outputWidth, outputHeight);
+        return;
+    }
+    // AA alone resolved into an image (or the fallback): the plain scanout
+    // of the current image.
+    glUseProgram(state.ScanoutProgram);
+    if (state.ScanoutFlipLocation >= 0) {
+        glUniform1i(state.ScanoutFlipLocation, flip ? 1 : 0);
+    }
+    DrawPicaGlPostTriangle(current);
+}
+
+} // namespace
+#endif
 
 GfxRenderingAPIOGL::GfxRenderingAPIOGL() = default;
 
@@ -886,6 +1432,9 @@ void main() {
     }
     glDeleteShader(fragment);
     glDeleteShader(vertex);
+    // Optional scanout effects and anisotropy; nothing is created when the
+    // configuration files are absent.
+    InitPicaGlPost(state.Post, kScanoutVertex);
 #endif
 }
 
@@ -913,6 +1462,7 @@ void GfxRenderingAPIOGL::ShutdownNativePica() noexcept {
     for (auto& [identity, geometry] : state.GeometryBuffers) {
         glDeleteBuffers(1, &geometry.Handle);
     }
+    DeletePicaGlPost(state.Post);
     glDeleteProgram(state.ScanoutProgram);
     glDeleteTextures(1, &state.FallbackColor);
     glDeleteTextures(1, &state.FallbackInteger);
@@ -1201,6 +1751,17 @@ PicaGlTexture& GetPicaGlTexture(
                             PicaGlMinFilter(texture, mipLevels));
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
                             texture.MagLinear ? GL_LINEAR : GL_NEAREST);
+            // Optional anisotropic filtering, set once per texture object:
+            // only for a linear minification filter over a real mip chain,
+            // so NEAREST and unmipmapped sampling keep the PICA result.
+            if (state.Post.Config.Anisotropy > 1U && texture.MinLinear &&
+                mipLevels > 1U &&
+                std::min<uint32_t>(texture.MaxMipLevel, mipLevels - 1U) >
+                    texture.MinMipLevel) {
+                glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY,
+                                static_cast<GLfloat>(
+                                    state.Post.Config.Anisotropy));
+            }
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL,
                             texture.MinMipLevel);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL,
@@ -2003,7 +2564,6 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
                            viewportWidth, viewportHeight);
             }
             glBindVertexArray(mNativePica->VertexArray);
-            glUseProgram(mNativePica->ScanoutProgram);
             const bool transferInputLinear =
                 (transfer.Flags & (1U << 1U)) != 0U;
             const bool dontSwizzle =
@@ -2012,12 +2572,23 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
                 ((!transferInputLinear !=
                   (transferInputLinear != dontSwizzle)) ^
                  ((transfer.Flags & 1U) != 0U));
-            if (mNativePica->ScanoutFlipLocation >= 0) {
-                glUniform1i(mNativePica->ScanoutFlipLocation, flip ? 1 : 0);
+            // Opaque (top-screen) presentations may run the optional
+            // AA/FSR/sharpen chain; alpha overlays never do, as on PC.
+            if (transfer.PresentationMode !=
+                    GfxNativePicaPresentationMode::AlphaOverlay &&
+                mNativePica->Post.Config.ScanoutEffects()) {
+                PresentPicaGlPost(*mNativePica, display, flip, viewportX,
+                                  viewportY, viewportWidth, viewportHeight);
+            } else {
+                glUseProgram(mNativePica->ScanoutProgram);
+                if (mNativePica->ScanoutFlipLocation >= 0) {
+                    glUniform1i(mNativePica->ScanoutFlipLocation,
+                                flip ? 1 : 0);
+                }
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, display.Color);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
             }
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, display.Color);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
             mNativePica->LastPresented = transfer;
         }
         InvalidateLegacyStateAfterPica();
