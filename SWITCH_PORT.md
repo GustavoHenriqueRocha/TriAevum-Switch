@@ -86,6 +86,38 @@ Desempenho e usabilidade:
 - Crashes: `atmosphere/crash_reports/` (o `.nro` é carregado pelo hbloader; a base pode ser
   achada alinhando os endereços de retorno com instruções `bl/blr` do ELF).
 
+## Próximos passos
+
+Medição de referência (2026-10-16, console, CPU 1785 MHz, render thread ligada): a lógica do jogo
+custa ~17,5 ms por refresh (~35 ms por passo de jogo); o jogo roda a ~72% da velocidade nas cenas
+pesadas. Meta: ≤ 33 ms por passo (velocidade real a 30 FPS), depois 60 FPS por interpolação.
+
+Desempenho (prioridade):
+1. Validar no console a recompilação com hot/cold split, LDM/STM por span e literais dobrados.
+2. VFP nativo de ARM64 (opção do gerador, exato contra o oráculo de ~86 mi casos) — em andamento.
+3. PGO com GCC (build instrumentado → jogar → .gcda por FTP → build final) — em preparação.
+4. Decompilação parcial: profiler leve no Switch + funções quentes reescritas em C nativo com
+   teste de equivalência (overrides) — em andamento.
+5. "Modo enxuto": contar gerações de escrita só nas páginas relevantes à GPU/savestate, tirar
+   trace/estatísticas do caminho quente.
+6. `--local-state` (registradores do guest em locais) depois do inline.
+7. glthread do Mesa (compilado; ligar atrás de config e medir).
+8. Fastmem (reserva do espaço de endereços do 3DS, acesso sem checagem) — grande.
+9. Longo prazo: deko3d no lugar de OpenGL/Mesa.
+
+Imagem (só GPU, sem custo de CPU; cada item atrás de um arquivo em `config/`):
+- Resolução interna 1×/2×/3× — feito (`config/resolution_scale`).
+- FSR 1 (EASU+RCAS) como upscaler, FXAA/SMAA, filtro anisotrópico, nitidez — em andamento.
+- Interpolação para 60 FPS (`native30_interpolated`) quando a lógica couber em 33 ms.
+- Oclusão ambiente leve só se sobrar GPU no portátil.
+
+Ferramentas e distribuição:
+- ccache nos builds (instalado); usar um PC mais forte (Ryzen 5 5600G) como máquina de build.
+- "Forge para Switch": script único que, a partir da ROM do usuário, extrai, adapta, gera o C++,
+  compila com devkitPro e monta `switch/oot3dre/` (o `.nro` nunca é distribuído).
+- A longo prazo: recompilador genérico 3DS→Switch juntando a descoberta de funções do
+  fearkov/3dsrecomp com o runtime de Switch do TriAevum.
+
 ## Referências e créditos
 
 - [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum) — projeto original (GPL-3.0).
