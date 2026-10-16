@@ -251,6 +251,7 @@ if (TARGET oot3d_native_a32_aot OR TARGET oot3d_native_whole_aot OR
         tools/oot3d/native_game_runtime/oot3d_native_a32_window.cpp
         tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp
         tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp
+        tools/oot3d/native_game_runtime/oot3d_native_guest_profile.cpp
         tools/oot3d/native_game_runtime/oot3d_native_a32_window_savestate.cpp
         tools/oot3d/native_game_runtime/oot3d_native_a32_candidate_dispatch.cpp
         tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp

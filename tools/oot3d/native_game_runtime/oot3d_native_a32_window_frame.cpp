@@ -506,6 +506,39 @@ bool NativeA32WindowSession::RunFrame() {
   cpuPresent.Stop();
   ++presentationFrameCount;
   ++runFrameCount;
+  if (guestProfiler.Active()) {
+    // Perfil guest por amostragem de quadros: nos quadros medidos o perfil
+    // recebe todos os blocos; nos outros volta o callback original com o
+    // filtro de ganchos, e o jogo roda na velocidade normal.
+    const bool sample = guestProfiler.OnHostFrame(runFrameCount);
+    if (sample != guestProfilerInstalled && processStorage) {
+      guestProfilerInstalled = sample;
+      const bool forAll =
+          launch.ProfileA32Blocks || widescreenProjection.TraceA32Blocks;
+      if (sample) {
+        processStorage->SetBlockEntryCallback(
+            &Oot3dNativeGame::GuestBlockProfiler::OnBlockEntry, &guestProfiler,
+            std::vector<uint32_t>{});
+        nativeCandidateDispatch.BlockEntry =
+            &Oot3dNativeGame::GuestBlockProfiler::OnBlockEntry;
+        nativeCandidateDispatch.BlockEntryUser = &guestProfiler;
+        nativeBlockEntryPcs = {};
+      } else {
+        processStorage->SetBlockEntryCallback(
+            &ApplyNativeWidescreenProjectionPolicy, &widescreenProjection,
+            forAll ? std::vector<uint32_t>{} : blockEntryHooks);
+        nativeCandidateDispatch.BlockEntry = &ApplyNativeWidescreenProjectionPolicy;
+        nativeCandidateDispatch.BlockEntryUser = &widescreenProjection;
+        nativeBlockEntryPcs = forAll ? std::span<const uint32_t>{}
+                                     : std::span<const uint32_t>{blockEntryHooks};
+      }
+      nativeCandidateDispatch.BlockEntryPcs = nativeBlockEntryPcs;
+      nativeCandidateDispatch.MassAotBlockEntryFilter =
+          Oot3dNativeGame::BuildOot3dMassAotPcFilter(nativeBlockEntryPcs,
+                                                     nativeBlockEntryPcs.empty());
+      guestProfiler.Interrupt();
+    }
+  }
 #if defined(__SWITCH__)
   gSwitchRuntimeHostFrames = runFrameCount;
   gSwitchRuntimeGuestFrames = frameCount;

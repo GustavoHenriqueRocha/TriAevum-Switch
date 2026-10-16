@@ -10,8 +10,14 @@
 #include "oot3d_whole_aot_generated.h"
 #endif
 
+#if defined(OOT3D_GUEST_OVERRIDES)
+#include "oot3d_native_guest_overrides.h"
+#endif
+
 #include <algorithm>
 #include <array>
+#include <cinttypes>
+#include <cstdio>
 #include <bit>
 #include <chrono>
 #include <cstddef>
@@ -1132,6 +1138,34 @@ Oot3dBlockEntrySelection SelectBlockEntries(
 }
 
 } // namespace
+
+void SetOot3dGuestOverridesActive(bool enabled) noexcept {
+#if defined(OOT3D_GUEST_OVERRIDES)
+    SetOot3dGuestOverridesEnabled(enabled);
+#else
+    static_cast<void>(enabled);
+#endif
+}
+
+std::string DescribeOot3dGuestOverrides() {
+#if defined(OOT3D_GUEST_OVERRIDES)
+    std::string text = Oot3dGuestOverridesEnabled()
+        ? "# substituicoes nativas: ligadas\n"
+        : "# substituicoes nativas: desligadas (config/guest_overrides_off)\n";
+    const auto* table = Oot3dGuestOverrideTable();
+    for (size_t i = 0; i < Oot3dGuestOverrideCount(); ++i) {
+        char line[160];
+        std::snprintf(line, sizeof(line),
+                      "0x%08X nativa=%" PRIu64 " recusou=%" PRIu64 " %s\n",
+                      table[i].Entry, table[i].Calls, table[i].Declined,
+                      table[i].Name);
+        text += line;
+    }
+    return text;
+#else
+    return "# substituicoes nativas: nao compiladas neste build\n";
+#endif
+}
 
 bool Oot3dWholeAotAvailable() noexcept {
 #if defined(OOT3D_NATIVE_GENERATED_WHOLE_AOT)

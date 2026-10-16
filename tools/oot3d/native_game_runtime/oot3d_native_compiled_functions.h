@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace Oot3dNativeGame {
@@ -44,6 +45,12 @@ struct Oot3dWholeAotExternalTarget {
 };
 
 bool Oot3dWholeAotAvailable() noexcept;
+
+// Substituições nativas de funções guest (oot3d_native_guest_overrides).
+// Sem efeito quando o build não as compila (módulo whole-AOT pré-compilado).
+void SetOot3dGuestOverridesActive(bool enabled) noexcept;
+// Uma linha por substituição: entrada, nome, execuções nativas e recusas.
+std::string DescribeOot3dGuestOverrides();
 std::span<const uint32_t> Oot3dCompiledFunctionEntryPoints(
     bool includeWholeAot = true,
     bool includeManualCompiledFunctions = true) noexcept;

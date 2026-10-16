@@ -40,6 +40,7 @@
 #include "fast/oot3d/grass_interaction_bridge.h"
 #include "oot3d_native_a32_timing_probe.h"
 #include "oot3d_native_compiled_functions.h"
+#include "oot3d_native_guest_profile.h"
 #include "oot3d_native_controls_settings_panel.h"
 #include "oot3d_native_frame_rate.h"
 #include "oot3d_native_game_bootstrap.h"
@@ -383,6 +384,9 @@ private:
   Oot3dNativeGame::NativeA32PlayerTemporalBridge playerTemporalBridge;
   NativeWidescreenProjectionState widescreenProjection;
   std::optional<ScopedA32BlockTraceWriter> blockTraceWriterStorage;
+  // Perfil por função do código guest (config/guest_profile); inativo por padrão.
+  Oot3dNativeGame::GuestBlockProfiler guestProfiler;
+  bool guestProfilerInstalled = true;
   std::vector<uint32_t> blockEntryHooks{};
   std::span<const uint32_t> picaCompositionHooks{};
   std::span<const uint32_t> typedGameplayObservableExitHooks{};

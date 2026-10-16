@@ -70,6 +70,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="keep PC-relative literal loads from the read-only text segment "
              "as memory reads instead of folding them to constants",
     )
+    parser.add_argument(
+        "--guest-overrides", type=Path, nargs="?", const=Path(__file__).resolve().with_name("guest_overrides.json"),
+        default=None,
+        help="liga as substituições nativas listadas (padrão: guest_overrides.json) "
+             "nos shards gerados; ver apply_guest_overrides.py",
+    )
     args = parser.parse_args(argv)
     if args.shards <= 0:
         parser.error("--shards must be positive")
@@ -89,6 +95,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         local_state=args.local_state,
         fold_literals=not args.no_literal_folding,
     )
+    if args.guest_overrides is not None:
+        from apply_guest_overrides import apply as apply_overrides, load_manifest
+        located = apply_overrides(
+            args.output,
+            [item["entry"] for item in load_manifest(args.guest_overrides)])
+        print(f"Substituições nativas ligadas: {len(located)} função(ões)")
     functions = manifest["functions"]
     print(
         f"Whole-function C++ AOT: {len(functions)} function(s), "

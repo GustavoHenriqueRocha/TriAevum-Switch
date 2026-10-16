@@ -1,0 +1,14 @@
+{
+  "format": "oot3d_guest_overrides_v1",
+  "description": "Funcoes guest com substituicao nativa escrita a mao (tools/oot3d/native_game_runtime/oot3d_native_guest_overrides.cpp), ligadas no C++ gerado por apply_guest_overrides.py. So entram aqui depois de passar em run_guest_override_equivalence.py sem nenhuma diferenca. Amostras: perfil de blocos Kokiri (profiles/navi_kokiri_main_forest_source_coverage.json).",
+  "overrides": [
+    {"entry": "0x003727F0", "name": "Math_SinF", "kokiri_share": "1.00%"},
+    {"entry": "0x00307C94", "name": "PicaCommandWriter_UploadVertexFloatUniforms", "kokiri_share": "1.03%"},
+    {"entry": "0x003325F0", "name": "Math3D_CylOutsideCylDist", "kokiri_share": "0.64%"},
+    {"entry": "0x0036E168", "name": "Math_SmoothStepToF", "kokiri_share": "0.61%"},
+    {"entry": "0x002F9430", "name": "PauseRenderBuffer_SetVec2Range", "kokiri_share": "0.54%"},
+    {"entry": "0x00372070", "name": "oot3d_translate_mtx3x4_local", "kokiri_share": "0.44%"},
+    {"entry": "0x003094CC", "name": "FUN_003094cc", "kokiri_share": "0.41%"},
+    {"entry": "0x002CDE90", "name": "FUN_002cde90", "kokiri_share": "0.36%"}
+  ]
+}

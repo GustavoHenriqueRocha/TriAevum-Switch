@@ -179,6 +179,41 @@ void NativeA32WindowSession::Setup() {
   widescreenProjection.CollectExtendedDiagnostics = launch.ExtendedDiagnostics;
   widescreenProjection.ProfileA32Blocks = launch.ProfileA32Blocks;
   widescreenProjection.TraceA32Blocks = !launch.A32BlockTracePath.empty();
+  {
+    // Perfil por função do código guest e chave das substituições nativas.
+    // Os dois só leem arquivos de configuração; sem eles nada muda.
+    std::filesystem::path guestProfileConfig;
+#if defined(__SWITCH__)
+    guestProfileConfig = "sdmc:/switch/oot3dre/config/guest_profile";
+    const std::filesystem::path guestProfileOutput =
+        "sdmc:/switch/oot3dre/logs/guest_profile.txt";
+    const std::filesystem::path guestFunctionMap =
+        "sdmc:/switch/oot3dre/config/guest_functions.txt";
+    std::error_code overridesError;
+    Oot3dNativeGame::SetOot3dGuestOverridesActive(!std::filesystem::exists(
+        "sdmc:/switch/oot3dre/config/guest_overrides_off", overridesError));
+#else
+    if (const char *path = std::getenv("TRIAEVUM_GUEST_PROFILE")) {
+      guestProfileConfig = path;
+    }
+    const std::filesystem::path guestProfileOutput = "guest_profile.txt";
+    const std::filesystem::path guestFunctionMap = "guest_functions.txt";
+    if (const char *overrides = std::getenv("TRIAEVUM_GUEST_OVERRIDES")) {
+      Oot3dNativeGame::SetOot3dGuestOverridesActive(
+          std::string_view(overrides) != "0");
+    }
+#endif
+    Oot3dNativeGame::GuestProfileOptions guestProfileOptions;
+    if (Oot3dNativeGame::GuestBlockProfiler::LoadConfig(
+            guestProfileConfig, guestProfileOutput, guestFunctionMap,
+            &guestProfileOptions)) {
+      // Segmento de texto do OoT3D (ExHeader): 0x00100000..0x004CA000.
+      guestProfiler.Start(guestProfileOptions, 0x00100000U, 0x003CA000U);
+      guestProfiler.SetAppendix([](std::ostream &out) {
+        out << Oot3dNativeGame::DescribeOot3dGuestOverrides();
+      });
+    }
+  }
   auto &blockTraceWriter = blockTraceWriterStorage.emplace(
       launch.A32BlockTracePath, widescreenProjection);
   blockEntryHooks = std::vector<uint32_t>{
@@ -552,13 +587,23 @@ void NativeA32WindowSession::Setup() {
   widescreenProjection.TopScreenUiProfile =
       launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen;
   widescreenProjection.TopScreenConfig = activeTopScreenConfig;
+  const bool blockEntryForAll =
+      launch.ProfileA32Blocks || widescreenProjection.TraceA32Blocks;
+  if (guestProfiler.Active()) {
+    // O perfil vê todos os blocos e repassa à política só os ganchos dela.
+    guestProfiler.Chain(&ApplyNativeWidescreenProjectionPolicy,
+                        &widescreenProjection, blockEntryHooks,
+                        blockEntryForAll);
+  }
   nativeBlockEntryPcs =
-      launch.ProfileA32Blocks || widescreenProjection.TraceA32Blocks
+      blockEntryForAll || guestProfiler.Active()
           ? std::span<const uint32_t>{}
           : std::span<const uint32_t>{blockEntryHooks};
   nativeCandidateDispatch = NativeCandidateDispatchState{
-      &ApplyNativeWidescreenProjectionPolicy,
-      &widescreenProjection,
+      guestProfiler.Active() ? &Oot3dNativeGame::GuestBlockProfiler::OnBlockEntry
+                             : &ApplyNativeWidescreenProjectionPolicy,
+      guestProfiler.Active() ? static_cast<void *>(&guestProfiler)
+                             : static_cast<void *>(&widescreenProjection),
       nativeBlockEntryPcs,
       Oot3dNativeGame::BuildOot3dMassAotPcFilter(nativeBlockEntryPcs,
                                                  nativeBlockEntryPcs.empty()),
@@ -875,11 +920,17 @@ void NativeA32WindowSession::Setup() {
 #endif
 
   UpdateScenePresentation();
-  process.SetBlockEntryCallback(
-      &ApplyNativeWidescreenProjectionPolicy, &widescreenProjection,
-      launch.ProfileA32Blocks || widescreenProjection.TraceA32Blocks
-          ? std::vector<uint32_t>{}
-          : blockEntryHooks);
+  if (guestProfiler.Active()) {
+    process.SetBlockEntryCallback(
+        &Oot3dNativeGame::GuestBlockProfiler::OnBlockEntry, &guestProfiler,
+        std::vector<uint32_t>{});
+  } else {
+    process.SetBlockEntryCallback(
+        &ApplyNativeWidescreenProjectionPolicy, &widescreenProjection,
+        launch.ProfileA32Blocks || widescreenProjection.TraceA32Blocks
+            ? std::vector<uint32_t>{}
+            : blockEntryHooks);
+  }
 #if defined(__SWITCH__)
   WriteSwitchBootStage("guest_callbacks_initialized");
 #endif

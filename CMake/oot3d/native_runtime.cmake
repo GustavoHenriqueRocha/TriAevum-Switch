@@ -334,10 +334,14 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
     if (OOT3D_REBUILD_WHOLE_AOT)
         file(GLOB _oot3d_whole_aot_generated_shards CONFIGURE_DEPENDS
             "${OOT3D_WHOLE_AOT_GENERATED_DIR}/oot3d_whole_aot_shard_*.cpp")
+        # As substituições nativas escritas à mão (guest_overrides.json,
+        # ligadas nos shards por apply_guest_overrides.py) ficam no mesmo
+        # arquivo que os shards que as chamam.
         add_library(oot3d_native_whole_aot STATIC EXCLUDE_FROM_ALL
             ${_oot3d_whole_aot_generated_header}
             ${_oot3d_whole_aot_generated_source}
-            ${_oot3d_whole_aot_generated_shards})
+            ${_oot3d_whole_aot_generated_shards}
+            tools/oot3d/native_game_runtime/oot3d_native_guest_overrides.cpp)
         target_include_directories(oot3d_native_whole_aot PRIVATE
             ${OOT3D_WHOLE_AOT_GENERATED_DIR}
             tools/oot3d/native_game_runtime
@@ -557,6 +561,8 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
         if (OOT3D_REBUILD_WHOLE_AOT)
             target_compile_definitions(oot3d_native_whole_aot PRIVATE
                 OOT3D_NATIVE_GENERATED_WHOLE_AOT=1)
+            target_compile_definitions(oot3d_native_a32_process PRIVATE
+                OOT3D_GUEST_OVERRIDES=1)
         endif()
     endif()
 endif()
