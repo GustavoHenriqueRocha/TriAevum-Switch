@@ -369,7 +369,16 @@ PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {
     }
 
 #if defined(__SWITCH__)
-    static const bool warmupStarted = (StartPicaGlWarmup(), true);
+    // Linking every recorded program up front took minutes on the console
+    // (1-3 s per program with the stock Mesa). The warm-up stays available
+    // for a Mesa built with its disk cache, behind config/shader_warmup.
+    static const bool warmupStarted = [] {
+        std::error_code error;
+        if (std::filesystem::exists("sdmc:/switch/oot3dre/config/shader_warmup", error)) {
+            StartPicaGlWarmup();
+        }
+        return true;
+    }();
     (void)warmupStarted;
     const uint64_t cacheKey = HashPicaGlProgramKey(vertexSource, fragmentSource);
     {

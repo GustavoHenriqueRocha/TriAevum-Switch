@@ -420,6 +420,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         AUTHOR "OoT3D Recompiled contributors"
         VERSION "0.1.0")
     nx_create_nro(oot3d_native_game
-        NACP oot3d_native_game.nacp)
+        NACP oot3d_native_game.nacp
+        ICON ${CMAKE_CURRENT_SOURCE_DIR}/res/switch/icon.jpg)
 endif()
 set_property(TARGET oot3d_native_game PROPERTY FOLDER Tools)

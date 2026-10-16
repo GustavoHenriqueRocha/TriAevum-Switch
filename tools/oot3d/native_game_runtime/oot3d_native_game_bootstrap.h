@@ -78,7 +78,10 @@ struct Oot3dNativeGameLaunch {
     // Bound the native C++ guest call chain on Horizon's smaller homebrew
     // main stack. The command-line override is also available on desktop so
     // the exact Switch dispatch policy can be benchmarked before packaging.
-    uint32_t WholeAotBlockBudget = 128U;
+    // Native frames of the generated code measure at most 240 bytes, so 2048
+    // nested blocks stay under ~0.5 MiB of the 1 MiB main stack while cutting
+    // the unwind-and-redispatch exits that 128 forced every few blocks.
+    uint32_t WholeAotBlockBudget = 2048U;
 #else
     uint32_t WholeAotBlockBudget = 1'000'000U;
 #endif
