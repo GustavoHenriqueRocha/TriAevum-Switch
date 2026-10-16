@@ -2,10 +2,6 @@
 
 #include "fast/backends/gfx_opengl.h"
 
-#if defined(__SWITCH__)
-#include <EGL/egl.h>
-#include <pthread.h>
-#endif
 
 #include "fast/oot3d/pica_geometry_registry.h"
 #include "fast/oot3d/pica_shadow2d.h"
@@ -236,12 +232,11 @@ GLuint LinkPicaGlProgram(std::string_view vertexSource, std::string_view fragmen
 }
 
 #if defined(__SWITCH__)
-// Background shader warm-up. The console's Mesa driver exposes no program
-// binary formats, so linked programs cannot be stored. Instead every program
-// the game links records its translated sources on the SD card, and on the
-// next launch a thread with a shared, surfaceless EGL context links them all
-// on a spare core. The render thread takes a ready program instead of
-// stalling for ~0.1-0.4 s on its first use.
+// Shader warm-up. The console's Mesa driver exposes no program binary
+// formats, so linked programs cannot be stored. Instead every program the
+// game links records its translated sources on the SD card, and the next
+// launch links them all before the first draw (StartPicaGlWarmup) instead of
+// stalling for ~0.1-0.4 s at each first use during play.
 constexpr const char* kPicaGlProgramCacheDirectory = "sdmc:/switch/oot3dre/shadercache";
 constexpr uint32_t kPicaGlProgramSourceMagic = 0x31534750U; // "PGS1"
 
@@ -309,40 +304,41 @@ bool ReadPicaGlProgramSource(const std::filesystem::path& path, std::string& ver
            static_cast<bool>(file.read(fragment.data(), header[2]));
 }
 
-struct PicaGlWarmupJob {
-    EGLDisplay Display = EGL_NO_DISPLAY;
-    EGLContext Context = EGL_NO_CONTEXT;
-    std::vector<std::filesystem::path> Sources;
-};
-
-void* RunPicaGlWarmup(void* argument) {
-    std::unique_ptr<PicaGlWarmupJob> job(static_cast<PicaGlWarmupJob*>(argument));
-    if (eglMakeCurrent(job->Display, EGL_NO_SURFACE, EGL_NO_SURFACE, job->Context) != EGL_TRUE) {
-        return nullptr;
-    }
+// Called once from the render thread, with its context current, before the
+// first PICA program is needed. A shared context on another thread would be
+// faster but is unsafe here: nvc0 contexts in one share group use the same
+// push buffer without a lock, and the main thread's next buffer upload
+// crashed in pushbuf_submit while the warm-up thread linked. So the recorded
+// programs are linked synchronously, as one pause at start-up instead of
+// stalls in play.
+void StartPicaGlWarmup() {
     auto& state = PicaGlWarmupState();
+    std::error_code error;
+    size_t sources = 0U;
     size_t linked = 0U;
     size_t failed = 0U;
     const auto started = std::chrono::steady_clock::now();
-    for (const auto& path : job->Sources) {
+    for (const auto& entry : std::filesystem::directory_iterator(kPicaGlProgramCacheDirectory, error)) {
+        if (entry.path().extension() != ".src") {
+            continue;
+        }
+        ++sources;
         uint64_t key = 0U;
         try {
-            key = std::stoull(path.stem().string(), nullptr, 16);
+            key = std::stoull(entry.path().stem().string(), nullptr, 16);
         } catch (...) {
+            ++failed;
             continue;
         }
         std::string vertex;
         std::string fragment;
-        if (!ReadPicaGlProgramSource(path, vertex, fragment) ||
+        if (!ReadPicaGlProgramSource(entry.path(), vertex, fragment) ||
             HashPicaGlProgramKey(vertex, fragment) != key) {
             ++failed;
             continue;
         }
         try {
-            const GLuint program = LinkPicaGlProgram(vertex, fragment);
-            glFinish(); // complete before another context uses the object
-            std::lock_guard lock(state.Mutex);
-            state.Ready.emplace(key, program);
+            state.Ready.emplace(key, LinkPicaGlProgram(vertex, fragment));
             ++linked;
         } catch (...) {
             ++failed;
@@ -350,70 +346,10 @@ void* RunPicaGlWarmup(void* argument) {
     }
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    std::filesystem::create_directories(kPicaGlProgramCacheDirectory, error);
     std::ofstream(std::string(kPicaGlProgramCacheDirectory) + "/status.txt", std::ios::trunc)
-        << "warmup_sources=" << job->Sources.size() << "\nwarmup_linked=" << linked
+        << "warmup_sources=" << sources << "\nwarmup_linked=" << linked
         << "\nwarmup_failed=" << failed << "\nwarmup_seconds=" << seconds << '\n';
-    eglMakeCurrent(job->Display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    return nullptr;
-}
-
-// Called once from the render thread with its context current.
-void StartPicaGlWarmup() {
-    const auto status = [](const std::string& text) {
-        std::error_code error;
-        std::filesystem::create_directories(kPicaGlProgramCacheDirectory, error);
-        std::ofstream(std::string(kPicaGlProgramCacheDirectory) + "/status.txt", std::ios::trunc)
-            << text << '\n';
-    };
-    auto job = std::make_unique<PicaGlWarmupJob>();
-    std::error_code error;
-    for (const auto& entry : std::filesystem::directory_iterator(kPicaGlProgramCacheDirectory, error)) {
-        if (entry.path().extension() == ".src") {
-            job->Sources.push_back(entry.path());
-        }
-    }
-    if (job->Sources.empty()) {
-        status("warmup_sources=0");
-        return;
-    }
-    job->Display = eglGetCurrentDisplay();
-    const EGLContext shared = eglGetCurrentContext();
-    EGLint configId = 0;
-    EGLConfig config = nullptr;
-    EGLint configs = 0;
-    const EGLint configAttributes[] = {EGL_CONFIG_ID, 0, EGL_NONE};
-    if (shared == EGL_NO_CONTEXT ||
-        eglQueryContext(job->Display, shared, EGL_CONFIG_ID, &configId) != EGL_TRUE) {
-        status("warmup_error=no current EGL context");
-        return;
-    }
-    EGLint chosen[] = {EGL_CONFIG_ID, configId, EGL_NONE};
-    (void)configAttributes;
-    if (eglChooseConfig(job->Display, chosen, &config, 1, &configs) != EGL_TRUE || configs != 1) {
-        status("warmup_error=config lookup failed");
-        return;
-    }
-    const EGLint contextAttributes[] = {
-        EGL_CONTEXT_MAJOR_VERSION, 4,
-        EGL_CONTEXT_MINOR_VERSION, 3,
-        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-        EGL_NONE};
-    eglBindAPI(EGL_OPENGL_API);
-    job->Context = eglCreateContext(job->Display, config, shared, contextAttributes);
-    if (job->Context == EGL_NO_CONTEXT) {
-        status("warmup_error=eglCreateContext " + std::to_string(eglGetError()));
-        return;
-    }
-    pthread_attr_t attributes;
-    pthread_attr_init(&attributes);
-    pthread_attr_setstacksize(&attributes, 4U * 1024U * 1024U); // Mesa's compiler recurses deeply
-    pthread_t thread;
-    auto* raw = job.release();
-    if (pthread_create(&thread, &attributes, RunPicaGlWarmup, raw) != 0) {
-        std::unique_ptr<PicaGlWarmupJob> reclaimed(raw);
-        status("warmup_error=pthread_create");
-    }
-    pthread_attr_destroy(&attributes);
 }
 #endif
 
