@@ -2326,6 +2326,8 @@ void WriteNativeA32WindowRuntimeSummary(const NativeA32WindowSummaryInputs &in) 
                     nativeCandidateDispatch.PauseTransaction->StartCloses()},
                    {"topscreen_pause_system_open_calls",
                     nativeCandidateDispatch.PauseTransaction->SystemOpens()},
+                   {"topscreen_pause_select_save_calls",
+                    nativeCandidateDispatch.PauseTransaction->SelectSaves()},
                    {"topscreen_pause_retired_transactions",
                     nativeCandidateDispatch.PauseTransaction->Retired()},
                    {"topscreen_item_description_toggles",

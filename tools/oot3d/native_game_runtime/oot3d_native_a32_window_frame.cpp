@@ -1637,6 +1637,17 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
       inputFrame.Hid.Buttons &=
           ~button(Oot3dNativeGame::NativeA32HidButton::Select);
     }
+    // 2.1.1 0x005D5BC0..0x005D5C70 (issue 80): the source port disables the
+    // native Save route at 0x0042EC2C, so SELECT opens Save/Quit through the
+    // pause transaction, delivered at the native UI input boundary.
+    if (selectPressed &&
+        activeTopScreenConfig.SelectAction ==
+            Oot3dNativeGame::TopScreenSelectAction::SaveScreen) {
+      nativeCandidateDispatch.PauseTransaction->RequestSelectSave();
+      nativeCandidateDispatch.ItemDescription->Hide();
+      inputFrame.Hid.Buttons &=
+          ~button(Oot3dNativeGame::NativeA32HidButton::Select);
+    }
 
     if (gameplayViewPressed || gameplayOcarinaPressed) {
       ++nativeCandidateDispatch.TopScreenGameplayDpadAttempts;
