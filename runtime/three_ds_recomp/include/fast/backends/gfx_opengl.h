@@ -211,7 +211,7 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     GLuint mOot3dShadow2dDepthEncodeProgram = 0;
     GLint mOot3dShadow2dDepthEncodePositionLocation = -1;
 #if defined(__APPLE__) || defined(__SWITCH__) || defined(USE_OPENGLES)
-    GLuint mOpenglVao;
+    GLuint mOpenglVao = 0;
 #endif
 
     uint32_t mFrameCount = 0;

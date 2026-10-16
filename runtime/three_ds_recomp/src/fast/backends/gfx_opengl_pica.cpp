@@ -1477,6 +1477,18 @@ void GfxRenderingAPIOGL::ShutdownNativePica() noexcept {
 }
 
 void GfxRenderingAPIOGL::InvalidateLegacyStateAfterPica() noexcept {
+    // The PICA path binds its own vertex array object and leaves it bound.
+    // Every legacy (Fast3D) draw after it - the host UI overlay: TopScreen
+    // hearts, rupee counter, item icons - would otherwise set its attribute
+    // pointers on the PICA VAO, inheriting the per-instance divisors of PICA
+    // fixed attributes (one value for the whole quad: transparent or flat
+    // sprites) and silently invalidating the PICA attribute cache. Restore the
+    // VAO the legacy path was initialised with.
+#if defined(__APPLE__) || defined(__SWITCH__) || defined(USE_OPENGLES)
+    glBindVertexArray(mOpenglVao);
+#else
+    glBindVertexArray(0U);
+#endif
     mLastLoadedShader = nullptr;
     mCurrentArrayBuffer = 0U;
     mLastActiveTexture = -1;
