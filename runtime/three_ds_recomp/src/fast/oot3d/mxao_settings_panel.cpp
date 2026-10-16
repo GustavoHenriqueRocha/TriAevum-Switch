@@ -3,12 +3,19 @@
 // (TriaevumMxaoUi, from the original); without the module MXAO cannot be
 // selected and nothing is drawn.
 #include "fast/oot3d/graphics_settings_window.h"
+#ifdef ENABLE_OOT3D_VULKAN
 #include "fast/oot3d/immerse_module_loader.h"
+#endif
 #include "fast/oot3d/settings_panel_widgets.h"
 #include <type_traits>
 
 namespace Fast::Oot3d {
 bool GraphicsSettingsPanel::DrawMxaoSettings(EffectsSettings& effects) {
+#ifndef ENABLE_OOT3D_VULKAN
+    // MXAO is a Vulkan pass; OpenGL-only ports such as Switch never offer it.
+    (void)effects;
+    return false;
+#else
     const auto* module = ImmerseModule();
     if (module == nullptr || module->MxaoUi == nullptr)
         return false;
@@ -69,14 +76,17 @@ bool GraphicsSettingsPanel::DrawMxaoSettings(EffectsSettings& effects) {
     }
     combo(ui.DebugView, effects.MxaoDebug);
     return changed;
+#endif
 }
 
 void GraphicsSettingsPanel::DrawMxaoCredits() {
+#ifdef ENABLE_OOT3D_VULKAN
     const auto* module = ImmerseModule();
     if (module == nullptr || module->MxaoUi == nullptr)
         return;
     ImGui::SeparatorText(module->MxaoUi->CreditsTitle);
     for (const char* line : module->MxaoUi->Credits)
         ImGui::TextWrapped("%s", line);
+#endif
 }
 } // namespace Fast::Oot3d

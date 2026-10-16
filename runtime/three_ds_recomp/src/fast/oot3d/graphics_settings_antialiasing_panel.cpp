@@ -1,5 +1,7 @@
 #include "fast/oot3d/graphics_settings_window.h"
+#ifdef ENABLE_OOT3D_VULKAN
 #include "fast/oot3d/dlss_module_loader.h"
+#endif
 #include "fast/oot3d/settings_panel_widgets.h"
 
 namespace Fast::Oot3d {
@@ -65,9 +67,11 @@ bool GraphicsSettingsPanel::DrawAntialiasingSettings(
                 ImGui::SetTooltip("Transformer: the sharpest, most stable image. CNN: the convolutional network "
                                   "(preset F at Ultra performance), about half the transformer's cost. Default: "
                                   "the runtime's choice, the most expensive on the RTX 3060 measured.");
+#ifdef ENABLE_OOT3D_VULKAN
             // NVIDIA's DLSS SDK licence: DLSS is credited where it is offered.
             if (const auto* module = DlssModule(); module != nullptr && module->Attribution != nullptr)
                 ImGui::TextWrapped("%s", module->Attribution);
+#endif
         }
         // Only NIS and FSR consume this setting. DLSS and XeSS do not.
         if (settings.Upscaler == UpscalerProvider::Nis || settings.Upscaler == UpscalerProvider::Fsr)

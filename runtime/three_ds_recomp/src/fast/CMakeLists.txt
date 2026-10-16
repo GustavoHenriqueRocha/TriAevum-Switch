@@ -175,7 +175,10 @@ if(NOT THREE_DS_RECOMP_ENABLE_VULKAN)
         "oot3d/pica_nri_pipeline_state.cpp"
         "oot3d/pica_pipeline_preparation.cpp"
         "oot3d/pica_builtin_fragment_families.cpp"
-        "oot3d/pica_guide_sampling_barriers.cpp")
+        "oot3d/pica_guide_sampling_barriers.cpp"
+        "oot3d/dlss_module_loader.cpp"
+        "oot3d/nri_ngx_vulkan_requirements.cpp"
+        "oot3d/immerse_module_loader.cpp")
 endif()
 source_group("oot3d" FILES ${Source_Files__Oot3dRenderer})
 target_sources(three_ds_recomp_runtime PRIVATE ${Source_Files__Oot3dRenderer})
