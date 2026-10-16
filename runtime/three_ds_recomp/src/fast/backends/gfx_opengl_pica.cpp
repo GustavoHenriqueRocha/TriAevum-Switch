@@ -2,6 +2,11 @@
 
 #include "fast/backends/gfx_opengl.h"
 
+#if defined(__SWITCH__)
+#include <EGL/egl.h>
+#include <switch.h>
+#endif
+
 
 #include "fast/oot3d/pica_geometry_registry.h"
 #include "fast/oot3d/pica_shadow2d.h"
@@ -178,7 +183,12 @@ GLuint CompilePicaGlShader(GLenum stage, std::string_view source) {
         " [shader=" + std::to_string(shader) + " glError=" + std::to_string(error) +
         " GL_VERSION=" + glString(GL_VERSION) +
         " GLSL=" + glString(GL_SHADING_LANGUAGE_VERSION) +
-        " source_bytes=" + std::to_string(source.size()) + "]");
+        " source_bytes=" + std::to_string(source.size()) +
+#if defined(__SWITCH__)
+        " thread=" + std::to_string(threadGetCurHandle()) +
+        " egl_ctx=" + std::to_string(reinterpret_cast<uintptr_t>(eglGetCurrentContext())) +
+#endif
+        "]");
 }
 
 void BindPicaGlProgramSamplers(GLuint program) {

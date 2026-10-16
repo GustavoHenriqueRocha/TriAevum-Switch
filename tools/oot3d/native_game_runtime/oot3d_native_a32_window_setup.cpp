@@ -1,5 +1,11 @@
 // Native A32 window session: setup (process image, host services, renderer, UI, initial state).
 #include "oot3d_native_a32_window_session.h"
+#if defined(__SWITCH__)
+#include <EGL/egl.h>
+#include <glad/glad.h>
+#include <switch.h>
+#include <fstream>
+#endif
 #include "oot3d_native_direct_aot.h"
 #include "oot3d_title_grass_rules.h"
 #include "fast/oot3d/graphics_settings_persistence.h"
@@ -1129,12 +1135,38 @@ void NativeA32WindowSession::Setup() {
       // which from now on issues every renderer command.
       SDL_Window* glWindow = SDL_GL_GetCurrentWindow();
       SDL_GLContext glContext = SDL_GL_GetCurrentContext();
-      SDL_GL_MakeCurrent(glWindow, nullptr);
-      renderStream.Run([glWindow, glContext] {
-        if (SDL_GL_MakeCurrent(glWindow, glContext) != 0) {
+#if defined(__SWITCH__)
+      std::ofstream glTrace("sdmc:/switch/oot3dre/logs/glthread.txt", std::ios::trunc);
+      glTrace << "main thread=" << threadGetCurHandle() << " sdl_window=" << glWindow
+              << " sdl_ctx=" << glContext << " egl_ctx=" << eglGetCurrentContext()
+              << " egl_draw=" << eglGetCurrentSurface(EGL_DRAW)
+              << " gl_version=" << (glGetString(GL_VERSION) != nullptr) << '\n';
+#endif
+      const int releaseResult = SDL_GL_MakeCurrent(glWindow, nullptr);
+#if defined(__SWITCH__)
+      glTrace << "release=" << releaseResult << " err=" << SDL_GetError()
+              << " egl_ctx_after=" << eglGetCurrentContext() << " egl_error=" << eglGetError() << '\n';
+      glTrace.flush();
+#else
+      (void)releaseResult;
+#endif
+      // Run() executes on the calling thread once the queue drains; only
+      // Submit() reaches the worker. Drain() then waits for it (and rethrows).
+      renderStream.Submit([glWindow, glContext] {
+        const int result = SDL_GL_MakeCurrent(glWindow, glContext);
+#if defined(__SWITCH__)
+        std::ofstream trace("sdmc:/switch/oot3dre/logs/glthread.txt", std::ios::app);
+        trace << "worker thread=" << threadGetCurHandle() << " make_current=" << result
+              << " err=" << SDL_GetError() << " egl_error=" << eglGetError()
+              << " egl_ctx=" << eglGetCurrentContext() << " sdl_ctx=" << SDL_GL_GetCurrentContext()
+              << " gl_version=" << (glGetString(GL_VERSION) != nullptr ? reinterpret_cast<const char*>(glGetString(GL_VERSION)) : "(null)")
+              << '\n';
+#endif
+        if (result != 0) {
           throw std::runtime_error(std::string("render worker GL context: ") + SDL_GetError());
         }
       });
+      renderStream.Drain();
     }
     // The ImGui overlay (and the display composition it triggers) renders
     // in renderer order, from a copy of each frame's draw data.
