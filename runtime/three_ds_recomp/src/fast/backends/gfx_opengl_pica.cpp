@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <optional>
@@ -155,10 +156,23 @@ GLuint CompilePicaGlShader(GLenum stage, std::string_view source) {
     glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLength);
     std::string log(static_cast<size_t>(std::max(logLength, 1)), '\0');
     glGetShaderInfoLog(shader, logLength, nullptr, log.data());
+    log.resize(std::strlen(log.c_str()));
+    const GLenum error = glGetError();
     glDeleteShader(shader);
+    const char* stageName = stage == GL_VERTEX_SHADER ? "vertex" : "fragment";
+    // An empty driver log says little; record the context and the source so
+    // a failure on a new driver (e.g. Switch Mesa) can be reproduced offline.
+    const auto glString = [](GLenum name) {
+        const auto* value = reinterpret_cast<const char*>(glGetString(name));
+        return std::string(value != nullptr ? value : "(null)");
+    };
+    std::ofstream(std::string("logs/failed_pica_") + stageName + ".glsl", std::ios::trunc) << source;
     throw std::runtime_error(
-        std::string(stage == GL_VERTEX_SHADER ? "vertex" : "fragment") +
-        " PICA OpenGL shader failed: " + log);
+        std::string(stageName) + " PICA OpenGL shader failed: " + log +
+        " [shader=" + std::to_string(shader) + " glError=" + std::to_string(error) +
+        " GL_VERSION=" + glString(GL_VERSION) +
+        " GLSL=" + glString(GL_SHADING_LANGUAGE_VERSION) +
+        " source_bytes=" + std::to_string(source.size()) + "]");
 }
 
 PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {

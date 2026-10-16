@@ -1105,6 +1105,10 @@ void NativeA32WindowSession::Setup() {
                std::string_view(parallelPresentationEnvironment) == "1")
           ? std::string_view(parallelPresentationEnvironment) == "1"
           : launch.ParallelPresentation;
+  // An OpenGL context is current only on the thread that created it; the
+  // worker would issue GL calls without one (glCreateShader returns 0 and
+  // glGetString null, as first seen on the Switch homebrew).
+  if (hostArgs.Renderer == "opengl") parallelPresentation = false;
   fast3dGui = dynamic_cast<Fast::Fast3dGui*>(gui.get());
   if (parallelPresentation) {
     // Renderer timings accumulate apart and merge once the stream drains.
