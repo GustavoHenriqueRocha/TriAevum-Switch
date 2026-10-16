@@ -4,6 +4,12 @@
 #include "fast/renderer3ds/pica_surface_debug.h"
 #include "oot3d_native_room_shadow_shell.h"
 
+extern "C" {
+// Provided only by a Mesa built with the Horizon shader cache (mesa_switch.h).
+unsigned mesa_switch_get_stats(uint64_t* out, unsigned count) __attribute__((weak));
+const char* mesa_switch_shader_cache_status(void) __attribute__((weak));
+}
+
 namespace Oot3dA32Window {
 
 namespace {
@@ -527,7 +533,30 @@ bool NativeA32WindowSession::RunFrame() {
              << ((values[index] - windowValues[index]) * 1000.0 / hostFrames);
       }
       perf << " guest_in_pica=" << phaseTiming.GuestInsidePicaSubmitSeconds
-           << " total_ms=" << (seconds * 1000.0 / hostFrames) << '\n';
+           << " total_ms=" << (seconds * 1000.0 / hostFrames);
+      // Totals of a Mesa built with the Horizon shader cache (absent from
+      // the stock devkitPro library, hence weak).
+      if (mesa_switch_get_stats != nullptr) {
+        static constexpr std::array<const char*, 25> kMesaNames{
+            "glsl_compiles", "glsl_compile_ms", "glsl_compiles_skipped", "links", "link_ms",
+            "link_glsl_ms", "link_st_ms", "links_from_cache", "nvc0_translates", "nvc0_translate_ms",
+            "nvc0_cache_hits", "binary_loads", "binary_load_fails", "binary_load_ms", "binary_saves",
+            "binary_save_ms", "cache_gets", "cache_get_hits", "cache_get_ms", "cache_corrupt",
+            "cache_puts", "cache_put_bytes", "cache_put_ms", "cache_puts_dropped", "cache_has_key_hits"};
+        std::array<uint64_t, 32> mesa{};
+        const unsigned count = std::min<unsigned>(
+            mesa_switch_get_stats(mesa.data(), static_cast<unsigned>(mesa.size())), kMesaNames.size());
+        perf << " mesa:";
+        for (unsigned index = 0; index < count; ++index) {
+          const bool nanoseconds = std::string_view(kMesaNames[index]).ends_with("_ms");
+          perf << ' ' << kMesaNames[index] << '='
+               << (nanoseconds ? mesa[index] / 1000000U : mesa[index]);
+        }
+        if (mesa_switch_shader_cache_status != nullptr) {
+          perf << " cache_status=\"" << mesa_switch_shader_cache_status() << '"';
+        }
+      }
+      perf << '\n';
       windowStart = now;
       windowValues = values;
       windowHostFrames = runFrameCount;

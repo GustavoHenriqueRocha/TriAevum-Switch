@@ -363,6 +363,13 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
             target_compile_options(oot3d_native_whole_aot PRIVATE
                 -finline-functions)
         endif()
+        if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+            # The Switch release flags carry -ffast-math, which breaks the
+            # exact VFP emulation of the generated code (cumulative IXC flags
+            # diverge from the reference tests). Gameplay code stays exact.
+            target_compile_options(oot3d_native_whole_aot PRIVATE
+                -fno-fast-math -ffp-contract=off)
+        endif()
         if (OOT3D_WHOLE_AOT_THINLTO OR
             NOT OOT3D_WHOLE_AOT_PROFILE_MODE STREQUAL "none")
             if (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
