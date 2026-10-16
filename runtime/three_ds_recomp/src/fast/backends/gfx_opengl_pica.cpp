@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <chrono>
@@ -51,6 +52,54 @@ uint64_t HashBytes(std::span<const uint8_t> bytes) {
         hash = (hash ^ value) * 1099511628211ULL;
     }
     return hash == 0U ? 1U : hash;
+}
+
+// Internal resolution scale (integer, like Citra/Azahar's "resolution
+// scale"). Every PICA render target -- color, depth/stencil and the Shadow2D
+// image -- and every display-transfer image is allocated N times larger per
+// axis; viewport, scissor and transfer blits are multiplied by N and the
+// scanout samples the large image. Keys, guest addresses and logical extents
+// stay native, so N=1 issues exactly the same GL calls as before. The GL
+// backend never reads PICA pixels back into guest memory (sampled textures
+// are always decoded from guest bytes; only the live Shadow2D image is
+// shared, and its consumer filters it through textureSize()), so no
+// downsample path is needed.
+//
+// Read once: on the Switch from sdmc:/switch/oot3dre/config/resolution_scale
+// (text "1", "2" or "3"); elsewhere from TRIAEVUM_GL_RESOLUTION_SCALE.
+// Missing or invalid means 1.
+constexpr uint32_t kPicaGlMaxResolutionScale = 3U;
+
+uint32_t ParsePicaGlResolutionScale(std::string_view text) {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t' ||
+                             text.front() == '\n' || text.front() == '\r')) {
+        text.remove_prefix(1U);
+    }
+    if (text.empty() || text.front() < '1' || text.front() > '9') {
+        return 1U;
+    }
+    if (text.size() > 1U && text[1] >= '0' && text[1] <= '9') {
+        return 1U;
+    }
+    const uint32_t value = static_cast<uint32_t>(text.front() - '0');
+    return std::min(value, kPicaGlMaxResolutionScale);
+}
+
+uint32_t ReadPicaGlResolutionScale() {
+    static const uint32_t scale = [] {
+#if defined(__SWITCH__)
+        std::ifstream file("sdmc:/switch/oot3dre/config/resolution_scale");
+        std::string text;
+        if (!file || !std::getline(file, text)) {
+            return 1U;
+        }
+        return ParsePicaGlResolutionScale(text);
+#else
+        const char* value = std::getenv("TRIAEVUM_GL_RESOLUTION_SCALE");
+        return value != nullptr ? ParsePicaGlResolutionScale(value) : 1U;
+#endif
+    }();
+    return scale;
 }
 
 struct PicaGlTargetKey {
@@ -117,6 +166,9 @@ struct PicaGlProgram {
 };
 
 struct PicaGlTarget {
+    // Allocated extent: the key's native extent times the resolution scale.
+    uint32_t Width = 0U;
+    uint32_t Height = 0U;
     GLuint Framebuffer = 0U;
     GLuint Color = 0U;
     GLuint DepthStencil = 0U;
@@ -132,6 +184,7 @@ struct PicaGlTexture {
 struct PicaGlDisplay {
     GLuint Framebuffer = 0U;
     GLuint Color = 0U;
+    // Native (guest) extent; the texture is Width/Height times the scale.
     uint32_t Width = 0U;
     uint32_t Height = 0U;
     bool Initialized = false;
@@ -726,6 +779,7 @@ struct GfxRenderingAPIOGL::NativePicaState {
     uint64_t GeometryStreamingUploadBytes = 0U;
     uint64_t UniformUploads = 0U;
     uint64_t UniformUploadBytes = 0U;
+    uint32_t ResolutionScale = 1U;
 #endif
 };
 
@@ -741,6 +795,20 @@ void GfxRenderingAPIOGL::InitNativePica() {
 #if !defined(USE_OPENGLES) && !defined(__APPLE__)
     auto& state = *mNativePica;
     state.GeometryCacheEnabled = mNativePicaGeometryCacheEnabled;
+    state.ResolutionScale = ReadPicaGlResolutionScale();
+    if (state.ResolutionScale > 1U) {
+        // Keep the largest PICA target (1024 per axis) within the driver's
+        // limits; otherwise fall back to a smaller scale.
+        GLint maxTexture = 0;
+        GLint maxRenderbuffer = 0;
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexture);
+        glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &maxRenderbuffer);
+        const GLint limit = std::min(maxTexture, maxRenderbuffer);
+        while (state.ResolutionScale > 1U &&
+               static_cast<GLint>(1024U * state.ResolutionScale) > limit) {
+            --state.ResolutionScale;
+        }
+    }
     glGenVertexArrays(1, &state.VertexArray);
     glGenBuffers(static_cast<GLsizei>(state.VertexBuffers.size()),
                  state.VertexBuffers.data());
@@ -939,10 +1007,14 @@ PicaGlTarget& GetPicaGlTarget(
         return found->second;
     }
     auto& target = found->second;
+    target.Width = static_cast<uint32_t>(key.Width) * state.ResolutionScale;
+    target.Height = static_cast<uint32_t>(key.Height) * state.ResolutionScale;
     try {
         glGenTextures(1, &target.Color);
         glBindTexture(GL_TEXTURE_2D, target.Color);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, key.Width, key.Height, 0,
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+                     static_cast<GLsizei>(target.Width),
+                     static_cast<GLsizei>(target.Height), 0,
                      GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -950,7 +1022,8 @@ PicaGlTarget& GetPicaGlTarget(
         glGenRenderbuffers(1, &target.DepthStencil);
         glBindRenderbuffer(GL_RENDERBUFFER, target.DepthStencil);
         glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
-                              key.Width, key.Height);
+                              static_cast<GLsizei>(target.Width),
+                              static_cast<GLsizei>(target.Height));
 
         glGenFramebuffers(1, &target.Framebuffer);
         glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
@@ -965,7 +1038,11 @@ PicaGlTarget& GetPicaGlTarget(
 
         glGenTextures(1, &target.Shadow);
         glBindTexture(GL_TEXTURE_2D, target.Shadow);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32UI, key.Width, key.Height, 0,
+        // The shadow producer addresses this image with gl_FragCoord and the
+        // consumer filters it through textureSize(), so both follow the scale.
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32UI,
+                     static_cast<GLsizei>(target.Width),
+                     static_cast<GLsizei>(target.Height), 0,
                      GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -1259,8 +1336,10 @@ PicaGlDisplay& GetPicaGlDisplay(
     }
     glGenTextures(1, &display.Color);
     glBindTexture(GL_TEXTURE_2D, display.Color);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
-                 GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+                 static_cast<GLsizei>(width * state.ResolutionScale),
+                 static_cast<GLsizei>(height * state.ResolutionScale), 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1691,21 +1770,31 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             glCullFace(draw.FramebufferFlipped ? GL_FRONT : GL_BACK);
         }
 
-        glViewport(static_cast<GLint>(draw.ViewportX),
-                   static_cast<GLint>(draw.ViewportY),
-                   static_cast<GLsizei>(draw.ViewportWidth),
-                   static_cast<GLsizei>(draw.ViewportHeight));
+        // Guest viewport and scissor are in native pixels; the target holds
+        // ResolutionScale host pixels per native pixel on each axis. The
+        // guest values are truncated first, so N=1 is the original call and
+        // N>1 covers exactly the same native pixels.
+        const GLint resolutionScale =
+            static_cast<GLint>(mNativePica->ResolutionScale);
+        glViewport(static_cast<GLint>(draw.ViewportX) * resolutionScale,
+                   static_cast<GLint>(draw.ViewportY) * resolutionScale,
+                   static_cast<GLsizei>(draw.ViewportWidth) * resolutionScale,
+                   static_cast<GLsizei>(draw.ViewportHeight) * resolutionScale);
         glEnable(GL_SCISSOR_TEST);
         if (draw.ScissorMode == 3U) {
-            glScissor(draw.ScissorX1, draw.ScissorY1,
-                      draw.ScissorX2 >= draw.ScissorX1
-                          ? draw.ScissorX2 - draw.ScissorX1 + 1U
-                          : 0U,
-                      draw.ScissorY2 >= draw.ScissorY1
-                          ? draw.ScissorY2 - draw.ScissorY1 + 1U
-                          : 0U);
+            const GLsizei scissorWidth = draw.ScissorX2 >= draw.ScissorX1
+                ? static_cast<GLsizei>(draw.ScissorX2 - draw.ScissorX1 + 1U)
+                : 0;
+            const GLsizei scissorHeight = draw.ScissorY2 >= draw.ScissorY1
+                ? static_cast<GLsizei>(draw.ScissorY2 - draw.ScissorY1 + 1U)
+                : 0;
+            glScissor(static_cast<GLint>(draw.ScissorX1) * resolutionScale,
+                      static_cast<GLint>(draw.ScissorY1) * resolutionScale,
+                      scissorWidth * resolutionScale,
+                      scissorHeight * resolutionScale);
         } else {
-            glScissor(0, 0, draw.FramebufferWidth, draw.FramebufferHeight);
+            glScissor(0, 0, static_cast<GLsizei>(target.Width),
+                      static_cast<GLsizei>(target.Height));
         }
 
         const GLenum topology = ToPicaGlTopology(draw.Topology);
@@ -1847,11 +1936,17 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
         glBindFramebuffer(GL_READ_FRAMEBUFFER, source->second.Framebuffer);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, display.Framebuffer);
         glDisable(GL_SCISSOR_TEST);
+        // Both images hold ResolutionScale host pixels per native pixel. A
+        // 2:1 linear blit samples each destination centre on the boundary of
+        // two source texels, so the PICA box filter stays exact at any scale.
+        const uint32_t resolutionScale = mNativePica->ResolutionScale;
         glBlitFramebuffer(
-            0, 0, static_cast<GLint>(outputWidth * horizontalSamples),
-            static_cast<GLint>(outputHeight * verticalSamples),
-            0, 0, static_cast<GLint>(outputWidth),
-            static_cast<GLint>(outputHeight), GL_COLOR_BUFFER_BIT,
+            0, 0,
+            static_cast<GLint>(outputWidth * horizontalSamples * resolutionScale),
+            static_cast<GLint>(outputHeight * verticalSamples * resolutionScale),
+            0, 0, static_cast<GLint>(outputWidth * resolutionScale),
+            static_cast<GLint>(outputHeight * resolutionScale),
+            GL_COLOR_BUFFER_BIT,
             scaling == 0U ? GL_NEAREST : GL_LINEAR);
         display.Initialized = true;
 
@@ -1872,6 +1967,9 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
             }
             // The transfer image is stored in the CTR's physical portrait
             // layout; presentation uses the transposed logical dimensions.
+            // The placement uses the native extent; the sampled image holds
+            // ResolutionScale times as many pixels (e.g. 3x: 1200x720, an
+            // exact 1:1 fit of the 1280x720 handheld screen).
             const float scale = std::min(
                 static_cast<float>(windowWidth) / outputHeight,
                 static_cast<float>(windowHeight) / outputWidth);

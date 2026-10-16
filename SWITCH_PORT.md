@@ -39,6 +39,10 @@ Desempenho e usabilidade:
 - **Threads**: jogo sozinho no core 0; demais threads nos cores 1/2 com a prioridade do jogo e pilha
   de 4 MiB (`oot3d_switch_threads.cpp`, `--wrap=pthread_create`).
 - **Render thread** (opcional): arquivo `config/parallel_presentation` no SD.
+- **Resolução interna** (opcional): arquivo `config/resolution_scale` no SD com `1`, `2` ou `3`
+  (ausente = 1, comportamento original). Alvos PICA, depth/stencil, sombras e imagens de display
+  transfer ficam N× maiores; viewport/scissor/blits escalados; custo só de GPU. 3 = 1200×720
+  (encaixe 1:1 no portátil). No desktop: `TRIAEVUM_GL_RESOLUTION_SCALE=2`.
 - **Gerador AOT**: helpers quentes com caminho rápido inline e lento frio; LDM/STM por bloco;
   literais PC-relativos dobrados; shards sem `-ffast-math` (exatidão do VFP).
 - **Orçamento de blocos** 2048 (era 128) no Switch.
