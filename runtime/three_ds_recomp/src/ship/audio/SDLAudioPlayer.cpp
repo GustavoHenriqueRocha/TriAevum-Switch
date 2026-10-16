@@ -21,6 +21,8 @@ void SDLAudioPlayer::DoClose() {
 }
 
 bool SDLAudioPlayer::DoInit() {
+    // The guest mixes at 32728 Hz; Horizon plays 48 kHz, so SDL resamples.
+    SDL_SetHint(SDL_HINT_AUDIO_RESAMPLING_MODE, "high");
     if (SDL_Init(SDL_INIT_AUDIO) != 0) {
         SPDLOG_ERROR("SDL init error: {}", SDL_GetError());
         return false;
@@ -54,7 +56,15 @@ int SDLAudioPlayer::Buffered() {
 }
 
 void SDLAudioPlayer::DoPlay(const uint8_t* buf, size_t len) {
-    if (Buffered() < 6000) {
+#if defined(__SWITCH__)
+    // The recompiled game delivers audio in bursts (two guest refreshes after
+    // a long frame); dropping a whole chunk at 6000 queued samples was heard
+    // as crackling on the console. Allow ~0.5 s before dropping.
+    constexpr int kMaximumQueuedSamples = 16384;
+#else
+    constexpr int kMaximumQueuedSamples = 6000;
+#endif
+    if (Buffered() < kMaximumQueuedSamples) {
         // Don't fill the audio buffer too much in case this happens
         SDL_QueueAudio(mDevice, buf, len);
     }
