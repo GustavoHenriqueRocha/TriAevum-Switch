@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Build the optional TopScreen CTXB payload override pack."""
+"""Build the optional TopScreen O3TU v2 texture override pack.
+
+Accepts the official TopScreen 2.1.1 archive (localized CTXB overrides plus
+custom_menu00/custom_font00) or the verified TopScreen 3.0 archive
+(custom_ui01 relocated into the 2.1.1 profile-texture layout).
+"""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import struct
 import zipfile
 from pathlib import Path
@@ -38,6 +44,162 @@ PICA_FORMATS = {
 }
 NCCH_ROMFS_SUPERBLOCK_SIZE = 0x1000
 INVALID_ROMFS_OFFSET = 0xFFFFFFFF
+
+# TopScreen / Single Screen Experience 3.0 (GameBanana 695893). 2.1.1 is no
+# longer downloadable; 3.0 replaces the localized menu CTXBs and the separate
+# custom_menu00/custom_font00 atlases with one 512x256 ETC1A4 atlas,
+# romfs/menu/custom_ui01.ctxb (byte-identical for every region and target).
+TOPSCREEN_30_ARCHIVE_BYTES = 28_883_512
+TOPSCREEN_30_ARCHIVE_SHA256 = (
+    "5668640fec8dc2b47b4516fd0b871c4d7d90ca1c2203acc2a22adb59aaab5993")
+TOPSCREEN_30_UI_ATLAS_SHA256 = (
+    "20290e417c56973cd19daa1f61a6c3963f075d61776db3d996954ee3296d07d8")
+TOPSCREEN_30_ROOT = "SingleScreen_3.0"
+TOPSCREEN_30_TITLE_IDS = {
+    "EUR": "0004000000033600",
+    "USA": "0004000000033500",
+    "JPN": "0004000000033400",
+}
+TOPSCREEN_30_TARGET_ROMFS = (
+    "Emulator/load/mods/{title_id}/romfs/",
+    "3DS Hardware/luma/titles/{title_id}/romfs/",
+)
+TOPSCREEN_30_UI_ATLAS = "menu/custom_ui01.ctxb"
+TOPSCREEN_30_UI_ATLAS_SEMANTIC = "oot3d/topscreen/3.0/ui_atlas"
+TOPSCREEN_211_MENU_ATLAS_SEMANTIC = PROFILE_TEXTURES[0][1]
+TOPSCREEN_211_FONT_ATLAS_SEMANTIC = PROFILE_TEXTURES[1][1]
+TOPSCREEN_211_MENU_ATLAS_SIZE = (512, 512)
+# Source rectangles are the 3.0 payload's own float rect table (Emulator
+# code.ips, EUR and USA: 0x0060A6F8, 0x0060A708, 0x0060A718). Destinations are
+# the 2.1.1 rectangles hard-coded by the native consumers:
+# kSelectTemplate/kQuestionTemplate (oot3d_top_screen_items_hint.cpp) and the
+# 2.1.1 rect 0x005E1894 cycle mark (oot3d_top_screen_dpad_presentation.cpp).
+# Sizes are identical in both versions, so relocation is exact.
+TOPSCREEN_30_MENU_ATLAS_REGIONS = (
+    ("items_hint_select", (277, 222, 64, 16), (434, 410)),
+    ("items_hint_question", (344, 222, 16, 16), (492, 104)),
+    ("dpad_cycle_mark", (320, 3, 40, 40), (458, 2)),
+)
+# One texel of the 3.0 neighbourhood is carried along so bilinear sampling at
+# region edges sees what the 3.0 payload itself samples there.
+TOPSCREEN_30_REGION_MARGIN = 1
+PICA_FORMAT_RGBA8 = 0
+PICA_FORMAT_ETC1A4 = 13
+ETC1_MODIFIERS = (
+    (2, 8), (5, 17), (9, 29), (13, 42),
+    (18, 60), (24, 80), (33, 106), (47, 183),
+)
+
+
+def morton8(x: int, y: int) -> int:
+    return ((x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) |
+            ((x & 4) << 2) | ((y & 4) << 3))
+
+
+def _etc1_block_rgb(word: int) -> list[tuple[int, int, int]]:
+    """Return 16 RGB texels of one ETC1 block indexed by x * 4 + y."""
+    differential = (word >> 33) & 1
+    flip = (word >> 32) & 1
+    tables = ((word >> 37) & 7, (word >> 34) & 7)
+    if differential:
+        def signed3(value: int) -> int:
+            return value - 8 if value & 4 else value
+
+        def expand5(value: int) -> int:
+            return (value << 3) | (value >> 2)
+
+        base = ((word >> 59) & 31, (word >> 51) & 31, (word >> 43) & 31)
+        delta = (signed3((word >> 56) & 7), signed3((word >> 48) & 7),
+                 signed3((word >> 40) & 7))
+        colors = (tuple(expand5(c) for c in base),
+                  tuple(expand5((c + d) & 31) for c, d in zip(base, delta)))
+    else:
+        colors = (
+            tuple(((word >> shift) & 15) * 17 for shift in (60, 52, 44)),
+            tuple(((word >> shift) & 15) * 17 for shift in (56, 48, 40)),
+        )
+    texels = []
+    for x in range(4):
+        for y in range(4):
+            index = x * 4 + y
+            second = (y >= 2) if flip else (x >= 2)
+            small, large = ETC1_MODIFIERS[tables[second]]
+            modifier = large if (word >> index) & 1 else small
+            if (word >> (16 + index)) & 1:
+                modifier = -modifier
+            texels.append(tuple(
+                min(255, max(0, c + modifier)) for c in colors[second]))
+    return texels
+
+
+def decode_etc1a4(payload: bytes, width: int, height: int) -> bytearray:
+    """Decode a tiled PICA ETC1A4 payload to linear top-down RGBA8.
+
+    Mirrors Oot3d::Renderer::DecodePicaTextureRgba8 (no vertical flip), so
+    pixel coordinates match the UV rectangles used by the native consumers.
+    """
+    if width % 8 or height % 8:
+        raise ValueError("ETC1A4 dimensions must be multiples of 8")
+    if len(payload) != width * height:
+        raise ValueError("ETC1A4 payload size mismatch")
+    rgba = bytearray(width * height * 4)
+    offset = 0
+    for tile_y in range(0, height, 8):
+        for tile_x in range(0, width, 8):
+            for block_x, block_y in ((0, 0), (4, 0), (0, 4), (4, 4)):
+                alpha, color = struct.unpack_from("<QQ", payload, offset)
+                offset += 16
+                texels = _etc1_block_rgb(color)
+                for x in range(4):
+                    for y in range(4):
+                        index = x * 4 + y
+                        destination = ((tile_y + block_y + y) * width +
+                                       tile_x + block_x + x) * 4
+                        rgba[destination:destination + 3] = bytes(
+                            texels[index])
+                        rgba[destination + 3] = (
+                            (alpha >> (4 * index)) & 15) * 17
+    return rgba
+
+
+def encode_rgba8_tiled(rgba: bytes, width: int, height: int) -> bytes:
+    """Encode linear RGBA8 as the PICA tiled RGBA8 (native format 0)."""
+    if width % 8 or height % 8 or len(rgba) != width * height * 4:
+        raise ValueError("invalid RGBA8 image")
+    output = bytearray(width * height * 4)
+    tiles_x = width // 8
+    for y in range(height):
+        for x in range(width):
+            source = (y * width + x) * 4
+            pixel = ((y // 8) * tiles_x + x // 8) * 64 + morton8(x % 8, y % 8)
+            red, green, blue, alpha = rgba[source:source + 4]
+            output[pixel * 4:pixel * 4 + 4] = bytes(
+                (alpha, blue, green, red))
+    return bytes(output)
+
+
+def compose_topscreen_30_menu_atlas(ui_atlas_rgba: bytes, width: int,
+                                    height: int) -> bytes:
+    """Relocate the 3.0 Items-hint/D-pad sprites into the 2.1.1 layout."""
+    atlas_width, atlas_height = TOPSCREEN_211_MENU_ATLAS_SIZE
+    composed = bytearray(atlas_width * atlas_height * 4)
+    margin = TOPSCREEN_30_REGION_MARGIN
+    for label, (sx, sy, sw, sh), (dx, dy) in TOPSCREEN_30_MENU_ATLAS_REGIONS:
+        if (sx + sw > width or sy + sh > height or
+                dx + sw > atlas_width or dy + sh > atlas_height):
+            raise ValueError(f"TopScreen 3.0 region out of bounds: {label}")
+        for row in range(-margin, sh + margin):
+            for column in range(-margin, sw + margin):
+                source_x, source_y = sx + column, sy + row
+                target_x, target_y = dx + column, dy + row
+                if not (0 <= source_x < width and 0 <= source_y < height and
+                        0 <= target_x < atlas_width and
+                        0 <= target_y < atlas_height):
+                    continue
+                source = (source_y * width + source_x) * 4
+                target = (target_y * atlas_width + target_x) * 4
+                composed[target:target + 4] = ui_atlas_rgba[source:source + 4]
+    return bytes(composed)
 
 
 def fnv1a64(data: bytes) -> int:
@@ -151,11 +313,19 @@ def read_level3_romfs_file(image: Path, relative_path: str) -> bytes:
 def build_texture_pack(*, archive: Path | None = None,
                        mod_romfs: Path | None = None,
                        original_romfs: Path | None = None,
-                       original_romfs_image: Path | None = None) -> bytes:
+                       original_romfs_image: Path | None = None,
+                       region: str | None = None) -> bytes:
     if (archive is None) == (mod_romfs is None):
         raise ValueError("provide exactly one replacement source")
     if (original_romfs is None) == (original_romfs_image is None):
         raise ValueError("provide exactly one original RomFS source")
+    if archive is not None and is_topscreen_30_archive(archive):
+        verify_topscreen_30_archive(archive)
+        if region is None:
+            region = detect_romfs_region(
+                original_romfs=original_romfs,
+                original_romfs_image=original_romfs_image)
+        return build_topscreen_30_pack(archive=archive, region=region)
     entries_by_original: dict[int, tuple[int, bytes, str]] = {}
     profile_textures: list[tuple[str, int, int, int, bytes]] = []
 
@@ -247,7 +417,13 @@ def build_texture_pack(*, archive: Path | None = None,
         for original_hash, (replacement_hash, payload, _) in
         entries_by_original.items()
     ]
+    return serialize_pack(entries, profile_textures)
 
+
+def serialize_pack(
+        entries: list[tuple[int, int, bytes]],
+        profile_textures: list[tuple[str, int, int, int, bytes]]) -> bytes:
+    """Serialize O3TU v2 exactly as TopScreenTextureOverridePack parses it."""
     output = bytearray(b"O3TU")
     output += struct.pack("<III", 2, len(entries), len(profile_textures))
     for original_hash, replacement_hash, payload in entries:
@@ -263,6 +439,100 @@ def build_texture_pack(*, archive: Path | None = None,
     return bytes(output)
 
 
+def is_topscreen_30_archive(archive: Path) -> bool:
+    with zipfile.ZipFile(archive) as source:
+        return any(name.startswith(TOPSCREEN_30_ROOT + "/")
+                   for name in source.namelist())
+
+
+def verify_topscreen_30_archive(archive: Path) -> None:
+    size = archive.stat().st_size
+    digest = hashlib.sha256()
+    with archive.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if (size != TOPSCREEN_30_ARCHIVE_BYTES or
+            digest.hexdigest() != TOPSCREEN_30_ARCHIVE_SHA256):
+        raise ValueError(
+            "TopScreen 3.0 archive failed verification: expected "
+            f"{TOPSCREEN_30_ARCHIVE_BYTES} bytes, SHA-256 "
+            f"{TOPSCREEN_30_ARCHIVE_SHA256}; got {size} bytes, "
+            f"{digest.hexdigest()}")
+
+
+def detect_romfs_region(*, original_romfs: Path | None = None,
+                        original_romfs_image: Path | None = None) -> str:
+    """Identify EUR/USA from the original RomFS message directories."""
+    def exists(relative_path: str) -> bool:
+        if original_romfs is not None:
+            return (original_romfs / relative_path).is_file()
+        try:
+            read_level3_romfs_file(original_romfs_image, relative_path)
+        except FileNotFoundError:
+            return False
+        return True
+
+    found = [region for region, path in (("USA", "message/us/ltn16.qbf"),
+                                         ("EUR", "message/eu/ltn16.qbf"))
+             if exists(path)]
+    if len(found) != 1:
+        raise ValueError(
+            "cannot identify the RomFS region; pass --region EUR, USA or JPN")
+    return found[0]
+
+
+def build_topscreen_30_pack(*, archive: Path, region: str) -> bytes:
+    """Build an O3TU v2 pack from the TopScreen 3.0 archive.
+
+    3.0 ships no localized CTXB replacements, so the pack has no hash-matched
+    entries. Profile textures:
+    - 2.1.1 ``menu_atlas``: 512x512 RGBA8 in the 2.1.1 layout, holding the
+      exact 3.0 Items-hint and D-pad cycle sprites at the 2.1.1 coordinates the
+      native consumers sample (unchanged C++).
+    - 2.1.1 ``font_atlas``: custom_ui01 itself; 3.0 merged the custom_font00
+      glyphs into it. The runtime only requires this semantic to exist.
+    - ``oot3d/topscreen/3.0/ui_atlas``: custom_ui01 verbatim (512x256 ETC1A4).
+    Executable patches, the Link model, stage_grid.bin and QBF fonts are never
+    read.
+    """
+    title_id = TOPSCREEN_30_TITLE_IDS.get(region)
+    if title_id is None:
+        raise ValueError(f"unsupported TopScreen 3.0 region: {region}")
+    with zipfile.ZipFile(archive) as source:
+        names = set(source.namelist())
+        data = None
+        for target in TOPSCREEN_30_TARGET_ROMFS:
+            name = (f"{TOPSCREEN_30_ROOT}/{region}/"
+                    f"{target.format(title_id=title_id)}{TOPSCREEN_30_UI_ATLAS}")
+            if name in names:
+                data = source.read(name)
+                break
+    if data is None:
+        raise ValueError(f"archive has no TopScreen 3.0 {region} UI atlas")
+    if hashlib.sha256(data).hexdigest() != TOPSCREEN_30_UI_ATLAS_SHA256:
+        raise ValueError("unexpected TopScreen 3.0 custom_ui01.ctxb")
+    if len(data) < CTXB_HEADER_SIZE or data[:4] != b"ctxb":
+        raise ValueError("invalid TopScreen 3.0 custom_ui01.ctxb")
+    width, height, raw_format, raw_type = struct.unpack_from(
+        "<HHHH", data, 0x2C)
+    if PICA_FORMATS.get((raw_format, raw_type)) != PICA_FORMAT_ETC1A4:
+        raise ValueError("TopScreen 3.0 UI atlas is not ETC1A4")
+    payload = data[CTXB_HEADER_SIZE:]
+    ui_rgba = decode_etc1a4(payload, width, height)
+    menu_width, menu_height = TOPSCREEN_211_MENU_ATLAS_SIZE
+    menu_payload = encode_rgba8_tiled(
+        compose_topscreen_30_menu_atlas(ui_rgba, width, height),
+        menu_width, menu_height)
+    return serialize_pack([], [
+        (TOPSCREEN_211_MENU_ATLAS_SEMANTIC, menu_width, menu_height,
+         PICA_FORMAT_RGBA8, menu_payload),
+        (TOPSCREEN_211_FONT_ATLAS_SEMANTIC, width, height,
+         PICA_FORMAT_ETC1A4, payload),
+        (TOPSCREEN_30_UI_ATLAS_SEMANTIC, width, height,
+         PICA_FORMAT_ETC1A4, payload),
+    ])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     source = parser.add_mutually_exclusive_group(required=True)
@@ -272,11 +542,15 @@ def main() -> int:
     originals.add_argument("--original-romfs", type=Path)
     originals.add_argument("--original-romfs-image", type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--region", choices=sorted(TOPSCREEN_30_TITLE_IDS),
+        help="TopScreen 3.0 region variant (default: detected from RomFS)")
     args = parser.parse_args()
     output = build_texture_pack(
         archive=args.archive, mod_romfs=args.mod_romfs,
         original_romfs=args.original_romfs,
-        original_romfs_image=args.original_romfs_image)
+        original_romfs_image=args.original_romfs_image,
+        region=args.region)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(output)
     print(f"wrote {len(output)} bytes: {args.output}")

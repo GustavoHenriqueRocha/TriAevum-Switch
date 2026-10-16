@@ -19,6 +19,11 @@ topscreen_config=${repo_root}/config/topscreen_ui.switch.json
 controls_config=${repo_root}/config/oot3d_controls.switch.json
 topscreen_pack=${4:-${OOT3D_TOPSCREEN_PACK:-}}
 topscreen_archive=${OOT3D_TOPSCREEN_211_ARCHIVE:-}
+topscreen_archive_label=2_1_1
+if [[ -z ${topscreen_archive} && -n ${OOT3D_TOPSCREEN_30_ARCHIVE:-} ]]; then
+    topscreen_archive=${OOT3D_TOPSCREEN_30_ARCHIVE}
+    topscreen_archive_label=3_0
+fi
 
 for input in "${nro}" "${game_dir}/code.bin" "${game_dir}/exheader.bin" \
              "${game_dir}/romfs.bin" \
@@ -35,10 +40,11 @@ if [[ -z ${topscreen_pack} ]]; then
         printf '%s\n' \
             'TopScreen input is missing. Pass an O3TU v2 pack as argument 4,' \
             'set OOT3D_TOPSCREEN_PACK, or set OOT3D_TOPSCREEN_211_ARCHIVE' \
-            'to the original TopScreen 2.1.1 zip.' >&2
+            'to the original TopScreen 2.1.1 zip (or OOT3D_TOPSCREEN_30_ARCHIVE' \
+            'to the verified TopScreen 3.0 zip).' >&2
         exit 2
     fi
-    topscreen_pack=${repo_root}/build-switch-product/topscreen_2_1_1.o3tu
+    topscreen_pack=${repo_root}/build-switch-product/topscreen_${topscreen_archive_label}.o3tu
     python3 \
         "${repo_root}/tools/oot3d/decomp_support/scripts/build_topscreen_texture_override_pack.py" \
         --archive "${topscreen_archive}" \
@@ -49,7 +55,7 @@ elif [[ ! -s ${topscreen_pack} ]]; then
         "${topscreen_pack}" >&2
     exit 2
 fi
-pack_version=$(xxd -p -l 4 -s 4 "${topscreen_pack}")
+pack_version=$(od -An -tx1 -j4 -N4 "${topscreen_pack}" | tr -d ' \n')
 if [[ ${pack_version} != 02000000 ]]; then
     printf 'Switch TopScreen pack must use O3TU v2: %s\n' \
         "${topscreen_pack}" >&2

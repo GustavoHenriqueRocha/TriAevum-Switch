@@ -115,3 +115,59 @@ under `I:/oot3dre_work/grass-outline-verification/native-fog-topscreen-02` and
 The local candidate's Forge and private install have been updated. A new public
 release archive has **not** been promoted or audited by this change; use the
 normal allowlist release workflow, never distribute that installed directory.
+
+## TopScreen 3.0 (Switch/developer path)
+
+TopScreen 2.1.1 is no longer downloadable from GameBanana; only "Single Screen
+Experience" 3.0 is. The pack builder also accepts that archive, verified exactly:
+
+- Archive: 28,883,512 bytes; SHA-256
+  `5668640fec8dc2b47b4516fd0b871c4d7d90ca1c2203acc2a22adb59aaab5993`.
+- Layout: `SingleScreen_3.0/<EUR|USA|JPN>/<Emulator|3DS Hardware>/...`.
+  Each RomFS contains `menu/custom_ui01.ctxb` (byte-identical everywhere,
+  SHA-256 `20290e41...6d07d8`), `actor/zelda_link_ext.zar`, `stage_grid.bin`;
+  the Emulator variant adds HD `message/<eu|us>/ltn16.qbf` and
+  `message/sys8.qbf`; every variant has `code.ips` and `exheader.bin`.
+
+### What changed relative to 2.1.1
+
+- No localized `menu_top_parts00`/`menu_cursor00` CTXBs: 3.0 leaves the native
+  menu textures untouched, so the pack has **zero** hash-matched CTXB entries.
+- `custom_menu00` + `custom_font00` became one 512x256 ETC1A4 atlas,
+  `custom_ui01.ctxb`, which also holds the payload's own glyph font, buttons,
+  the "Mod Options" panel, SELECT/START labels and the cycle arrows.
+- The 3.0 payload (Emulator `code.ips`, EUR and USA identical) keeps the same
+  sprite sizes in its float rect table: SELECT `(277,222,64,16)` at
+  0x0060A6F8, the round "?" `(344,222,16,16)` at 0x0060A708 and the cycle mark
+  `(320,3,40,40)` at 0x0060A718. The native consumers sample the 2.1.1
+  rectangles `(434,410,64,16)`, `(492,104,16,16)` and `(458,2,40,40)`.
+
+### Pack produced from 3.0
+
+No C++ changes. The builder emits O3TU v2 with three profile textures:
+
+| Semantic | Content |
+|---|---|
+| `oot3d/topscreen/2.1.1/menu_atlas` | 512x512 RGBA8; the three 3.0 sprites (plus one texel of their 3.0 neighbourhood) copied to the 2.1.1 rectangles, transparent elsewhere |
+| `oot3d/topscreen/2.1.1/font_atlas` | `custom_ui01` verbatim (3.0 merged the custom font into it; the runtime only requires the semantic) |
+| `oot3d/topscreen/3.0/ui_atlas` | `custom_ui01` verbatim, for future native 3.0 consumers |
+
+The Switch gate (`topscreen_211_assets=1`) therefore holds. The region is
+detected from the original RomFS (`message/us` or `message/eu`) or given with
+`--region`. Executable patches, `exheader.bin`, `zelda_link_ext.zar`,
+`stage_grid.bin` and the 4K PNG are never read.
+
+```sh
+python3 tools/oot3d/decomp_support/scripts/build_topscreen_texture_override_pack.py \
+    --archive singlescreen_30.zip --original-romfs-image romfs.bin \
+    --output topscreen_3_0.o3tu
+# or: OOT3D_TOPSCREEN_30_ARCHIVE=singlescreen_30.zip scripts/switch/stage-product.sh ...
+```
+
+`prepare_qbf_font_pack.py` also accepts the verified 3.0 archive and pairs its
+Emulator `ltn16.qbf` (64x64 HD, same contract as 2.1.1). Its `sys8.qbf`
+(1,575,184 bytes vs 26,896 native) uses an encoding the QBF pairing does not
+support and is not imported. Forge recipes still pin 2.1.1 only.
+
+Not yet verified on hardware: the Items hint and the D-pad cycle marks with 3.0
+art, and the pause screens with native (not 2.1.1-modified) menu textures.
