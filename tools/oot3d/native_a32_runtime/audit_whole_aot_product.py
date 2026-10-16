@@ -113,7 +113,14 @@ def audit_product(
         "ExHeader byte size does not match the product contract",
     )
     expect(
-        _sha256(exheader_path) == str(exheader_contract["sha256"]).lower(),
+        _sha256(exheader_path)
+        in {
+            str(digest).lower()
+            for digest in [
+                exheader_contract["sha256"],
+                *exheader_contract.get("accepted_variant_sha256", []),
+            ]
+        },
         "ExHeader SHA-256 does not match the product contract",
     )
     exheader = exheader_path.read_bytes()

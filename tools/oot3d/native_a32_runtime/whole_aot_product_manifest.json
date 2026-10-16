@@ -9,7 +9,11 @@
     "exheader": {
       "operational_id": "oot3d_exheader",
       "bytes": 2048,
-      "sha256": "9f065aec342b7df2421998deacedde44d475d36264f861cffd3381a1adf8900a"
+      "sha256": "9f065aec342b7df2421998deacedde44d475d36264f861cffd3381a1adf8900a",
+      "accepted_variant_sha256": [
+        "a584b067427f81edcca739497ec7b4ce1217eb9612090e6ae5b846e5674d12c1",
+        "dbe5fa0174d73bffb75d7cf0fbaa05d3e0ee080df0e257afc58b6c45ae5de3d0"
+      ]
     },
     "base": 1048576,
     "entrypoint": 1048576,
