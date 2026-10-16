@@ -76,6 +76,12 @@ void ArmLaunchMarker(const std::string& configurationPath) {
         std::filesystem::create_directories(marker.parent_path(), error);
     std::ofstream(marker) << "TriAevum launch in progress\n";
     LaunchMarker() = marker;
+#if defined(__SWITCH__)
+    // devkitA64's newlib returns ENOSYS from pthread_detach, so
+    // std::thread::detach() always throws on Horizon. The marker is removed
+    // on a clean exit (ClearLaunchMarkerForDemo) instead of after a minute.
+    return;
+#endif
     std::thread([marker] {
         std::this_thread::sleep_for(std::chrono::seconds(60));
         std::error_code removed;

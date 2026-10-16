@@ -137,6 +137,11 @@ set(CMAKE_C_FLAGS_DEBUG "-g -ffast-math -DDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -ffast-math -DDEBUG")
 set(CMAKE_C_FLAGS_RELEASE "-O3 -ffast-math -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -ffast-math -DNDEBUG")
+# Linking with -ffast-math appends crtfastmath.o after crtend.o, and ld then
+# drops crtend's .eh_frame terminator. libnx registers .eh_frame at startup
+# (no .eh_frame_hdr), so the unwinder walks past the end and aborts on the
+# first C++ exception. Compilation keeps the flag; only the link drops it.
+add_link_options(-fno-fast-math)
 else()
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
