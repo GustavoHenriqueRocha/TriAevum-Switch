@@ -27,6 +27,44 @@ class LoweringError(ValueError):
     pass
 
 
+# Text-segment words that host code rewrites at run time, so their loads must
+# stay real memory reads. Only WriteHostBytes can modify the read-only text
+# segment (GetWritePointer, WriteBytes-style guest paths and Fill refuse
+# non-writable regions).
+# - 0x003CC430: Obj_Mure retirement margin, restored by
+#   AssertObjMureDistances (oot3d_native_a32_actor_visibility.cpp).
+HOST_WRITTEN_TEXT_RANGES: tuple[tuple[int, int], ...] = ((0x003CC430, 4),)
+
+
+@dataclass(frozen=True)
+class LiteralImage:
+    """The immutable text segment used to fold PC-relative literal loads.
+
+    `base`/`size` are the structural program's text range, which the product
+    audit ties to the ExHeader text segment; the process manifest maps that
+    segment read-only, so guest stores to it fault and never change bytes.
+    """
+
+    base: int
+    data: bytes
+    excluded: tuple[tuple[int, int], ...] = HOST_WRITTEN_TEXT_RANGES
+
+    def word(self, address: int, size: int) -> int | None:
+        if address < self.base or address + size > self.base + len(self.data):
+            return None
+        if any(address < start + length and start < address + size
+               for start, length in self.excluded):
+            return None
+        offset = address - self.base
+        return int.from_bytes(self.data[offset:offset + size], "little")
+
+
+# Set by generate() while rendering; None disables literal folding (unit
+# tests that call the emitters directly keep the original memory reads).
+_LITERAL_IMAGE: LiteralImage | None = None
+_FOLDED_LITERALS: set[int] = set()
+
+
 def _cpp_flag_mask(mask: Flag) -> str:
     return f"static_cast<Oot3dAotFlagMask>(0x{int(mask):X}U)"
 
@@ -999,6 +1037,37 @@ def _emit_single_memory(
     offset = _shifted_register(raw, pc) if register_offset else f"0x{raw & 0xFFF:X}U"
     base = _reg(rn, pc)
     operator = "+" if add_offset else "-"
+    if (
+        _LITERAL_IMAGE is not None
+        and load
+        and rn == 15
+        and not register_offset
+        and pre_index
+        and not writeback
+        and not (rd == 15 and (not allow_pc_load or byte_transfer))
+    ):
+        # LDR/LDRB rd, [pc, #imm]: a literal-pool read from the immutable text
+        # segment always yields the code.bin bytes and can never fault.
+        address = (pc + 8 + (raw & 0xFFF if add_offset else -(raw & 0xFFF))) & 0xFFFFFFFF
+        size = 1 if byte_transfer else 4
+        literal = _LITERAL_IMAGE.word(address, size)
+        if literal is not None:
+            _FOLDED_LITERALS.add(address)
+            value_type = "uint8_t" if byte_transfer else "uint32_t"
+            body = [
+                f"const {value_type} value = 0x{literal:0{size * 2}X}U; "
+                f"// literal at 0x{address:08X}",
+            ]
+            if rd != 15:
+                body.append(f"{_reg(rd)} = value;")
+            elif internal_pc_targets:
+                body.append("switch (value) {")
+                for target in sorted(internal_pc_targets):
+                    body.extend([f"case 0x{target:08X}U:", f"    goto block_{target:08X};"])
+                body.extend(["default:", "    return Oot3dAotBranch(value);", "}"])
+            else:
+                body.append("return Oot3dAotBranch(value);")
+            return _conditional(raw, body)
     body = [
         f"const uint32_t updatedAddress = {base} {operator} {offset};",
         f"const uint32_t address = {'updatedAddress' if pre_index else base};",
@@ -1074,6 +1143,54 @@ def _emit_block_transfer(item: Instruction) -> list[str]:
         first = f"{_reg(rn)} - {adjustment}U"
         updated = f"{_reg(rn)} - {byte_count}U"
     body = [f"const uint32_t firstAddress = {first};"]
+    count = len(registers)
+    if count >= 2:
+        # One page check and one copy when the whole transfer lies on a single
+        # untraced fast page; otherwise the exact word-by-word path below,
+        # which keeps fault order and partial writes. Values are snapshotted
+        # first: the transfer itself never changes a source register.
+        if load:
+            body.append(f"uint32_t spanWords[{count}];")
+            head = (f"if (!context.Memory.ReadWordsFast("
+                    f"firstAddress, spanWords, {count}U)) {{")
+            fallback = [
+                line
+                for offset in range(count)
+                for line in (
+                    "    if (!context.Memory.ReadFast<uint32_t>(",
+                    f"            firstAddress + {offset * 4}U, &spanWords[{offset}])) {{",
+                    f"        return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
+                    f"                                   firstAddress + {offset * 4}U);",
+                    "    }",
+                )
+            ]
+        else:
+            sources = ", ".join(_reg(register, pc) for register in registers)
+            body.append(f"const uint32_t spanWords[{count}] = {{{sources}}};")
+            head = (f"if (!context.Memory.WriteWordsFast("
+                    f"firstAddress, spanWords, {count}U)) {{")
+            fallback = [
+                line
+                for offset in range(count)
+                for line in (
+                    "    if (!context.Memory.WriteFast<uint32_t>(",
+                    f"            firstAddress + {offset * 4}U, spanWords[{offset}])) {{",
+                    f"        return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
+                    f"                                   firstAddress + {offset * 4}U);",
+                    "    }",
+                )
+            ]
+        body.extend([head, *fallback, "}"])
+        if load:
+            for offset, register in enumerate(registers):
+                if register != 15:
+                    body.append(f"{_reg(register)} = spanWords[{offset}];")
+        if writeback:
+            body.append(f"{_reg(rn)} = {updated};")
+        if load and 15 in registers:
+            body.append(
+                f"return Oot3dAotReturned(spanWords[{registers.index(15)}]);")
+        return _conditional(raw, body)
     if load:
         for offset, register in enumerate(registers):
             body.extend(
@@ -1999,6 +2116,8 @@ def _render_function(
         if memory_view:
             line = line.replace("context.Memory.ReadFast<", "regionMemory.ReadFast<")
             line = line.replace("context.Memory.WriteFast<", "regionMemory.WriteFast<")
+            line = line.replace("context.Memory.ReadWordsFast(", "regionMemory.ReadWordsFast(")
+            line = line.replace("context.Memory.WriteWordsFast(", "regionMemory.WriteWordsFast(")
         for helper in promoted_helpers:
             line = line.replace(f"{helper}(frame,", f"{helper}(state,")
         line = line.replace(
@@ -2878,7 +2997,9 @@ def generate(
     region_entries: frozenset[int] = frozenset(),
     memory_entries: frozenset[int] = frozenset(),
     local_state: bool = False,
+    fold_literals: bool = True,
 ) -> dict[str, object]:
+    global _LITERAL_IMAGE
     if shard_count <= 0:
         raise ValueError("whole-AOT shard count must be positive")
     if shard_strategy not in {"stable", "balanced", "incremental", "affinity"}:
@@ -2917,6 +3038,7 @@ def generate(
             "memory_regions": sorted(memory_entries),
             "memory_region_contract_sha256": memory_contract,
             **({"local_state": True} if local_state else {}),
+            "literal_folding": fold_literals,
         }
         files = cached.get("files", {})
         cached_shards = {
@@ -2936,6 +3058,40 @@ def generate(
         raise ValueError("code.bin does not match the structural AOT program")
     selection = json.loads(selection_bytes)
     functions, external_entries = _load_functions(program, selection, code)
+    _FOLDED_LITERALS.clear()
+    _LITERAL_IMAGE = None
+    # Without a declared text size (minimal fixtures) nothing is folded.
+    if fold_literals and program.get("executable_size") is not None:
+        text_size = int(program["executable_size"])
+        if not 0 < text_size <= len(code):
+            raise ValueError("program executable size does not fit code.bin")
+        _LITERAL_IMAGE = LiteralImage(int(program["base"]), code[:text_size])
+    try:
+        return _generate_files(
+            output, functions, external_entries, shard_count, shard_strategy,
+            region_entries, memory_entries, local_state, fold_literals,
+            memory_contract, program_sha256, selection_sha256, code_sha256,
+            generator_sha256)
+    finally:
+        _LITERAL_IMAGE = None
+
+
+def _generate_files(
+    output: Path,
+    functions: tuple[Function, ...],
+    external_entries: frozenset[int],
+    shard_count: int,
+    shard_strategy: str,
+    region_entries: frozenset[int],
+    memory_entries: frozenset[int],
+    local_state: bool,
+    fold_literals: bool,
+    memory_contract: str,
+    program_sha256: str,
+    selection_sha256: str,
+    code_sha256: str,
+    generator_sha256: str,
+) -> dict[str, object]:
     if region_entries - {function.entry for function in functions}:
         raise ValueError("callback-free regions must be selected function entries")
     if memory_entries - {function.entry for function in functions}:
@@ -3025,6 +3181,11 @@ def generate(
         "memory_regions": sorted(memory_entries),
         "memory_region_contract_sha256": memory_contract,
         **({"local_state": True} if local_state else {}),
+        "literal_folding": fold_literals,
+        "folded_literal_addresses": len(_FOLDED_LITERALS),
+        "folding_excluded_ranges": [
+            [start, length] for start, length in HOST_WRITTEN_TEXT_RANGES
+        ] if fold_literals else [],
         "shards": shard_records,
         "functions": [
             {

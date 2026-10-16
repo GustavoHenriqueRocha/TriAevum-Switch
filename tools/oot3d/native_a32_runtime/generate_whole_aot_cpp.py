@@ -65,6 +65,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--local-state", action="store_true",
         help="experimental: keep promoted GPRs/flags in locals in every function",
     )
+    parser.add_argument(
+        "--no-literal-folding", action="store_true",
+        help="keep PC-relative literal loads from the read-only text segment "
+             "as memory reads instead of folding them to constants",
+    )
     args = parser.parse_args(argv)
     if args.shards <= 0:
         parser.error("--shards must be positive")
@@ -82,6 +87,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         region_entries=frozenset(args.callback_free_region),
         memory_entries=frozenset(args.memory_region),
         local_state=args.local_state,
+        fold_literals=not args.no_literal_folding,
     )
     functions = manifest["functions"]
     print(
