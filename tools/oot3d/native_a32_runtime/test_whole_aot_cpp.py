@@ -323,6 +323,48 @@ class WholeAotCppTests(unittest.TestCase):
             self.assertIn("a32::VfpBinary32FromUnsigned(", source)
             self.assertNotIn("a32::VfpBinary32Add(", source)
 
+    def test_native_vfp_aarch64_is_opt_in_and_cache_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs = self.write_inputs(
+                root,
+                # VADD, VMLA, VNMLS, VDIV, VSQRT, VCVT.S32.F32, VCVT.F32.U32,
+                # VCMP, VCMPE, VABS, VMRS r0, VMSR, VMRS APSR_nzcv.
+                words(0xEE300A00, 0xEE000A00, 0xEE100A00, 0xEE800A00,
+                      0xEEB10AC0, 0xEEBD0AC0, 0xEEB80A40, 0xEEB40A40,
+                      0xEEB40AC0, 0xEEB00AC0, 0xEEF10A10, 0xEEE10A10,
+                      0xEEF1FA10, 0xE12FFF1E),
+            )
+            output = root / "output"
+            generate(*inputs, output)
+            original = (output / SOURCE_NAME).read_bytes()
+            self.assertNotIn(b"Oot3dVfpNative", original)
+            self.assertNotIn(b"Oot3dGuestFp", original)
+            manifest = generate(*inputs, output, native_vfp_aarch64=True)
+            self.assertTrue(manifest["native_vfp_aarch64"])
+            source = (output / SOURCE_NAME).read_text(encoding="utf-8")
+            for operation in (
+                "Oot3dVfpNativeAdd(", "Oot3dVfpNativeMultiplyAccumulate(",
+                "Oot3dVfpNativeNegativeMultiplySubtract(", "Oot3dVfpNativeDivide(",
+                "Oot3dVfpNativeSquareRoot(", "Oot3dVfpNativeToSigned(",
+                "Oot3dVfpNativeFromUnsigned(",
+            ):
+                self.assertIn(operation, source)
+            self.assertEqual(source.count("Oot3dVfpNativeCompare("), 2)
+            self.assertIn("    true, frame.Guest.fpscr);", source)
+            self.assertIn("Oot3dGuestFpScope guestFpScope(state.fpscr);", source)
+            self.assertIn("Oot3dGuestFpFoldFlags(frame.Guest.fpscr);", source)
+            self.assertIn("Oot3dGuestFpLoadControl(frame.Guest.fpscr);", source)
+            # Only the software lowering's helpers would appear otherwise.
+            self.assertNotIn("Oot3dVfpAdd(", source)
+            self.assertNotIn("a32::VfpBinary32", source)
+            self.assertNotIn("Oot3dAotCommitVfp", source)
+            # VABS stays a bit operation; mode checks stay in front of each op.
+            self.assertIn("& 0x7FFFFFFFU;", source)
+            self.assertIn("(frame.Guest.fpscr & 0x00379F00U) != 0U", source)
+            generate(*inputs, output)
+            self.assertEqual(original, (output / SOURCE_NAME).read_bytes())
+
     def test_emits_exact_vfp_square_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

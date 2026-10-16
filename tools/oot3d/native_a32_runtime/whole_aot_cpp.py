@@ -33,7 +33,19 @@ class LoweringError(ValueError):
 # non-writable regions).
 # - 0x003CC430: Obj_Mure retirement margin, restored by
 #   AssertObjMureDistances (oot3d_native_a32_actor_visibility.cpp).
-HOST_WRITTEN_TEXT_RANGES: tuple[tuple[int, int], ...] = ((0x003CC430, 4),)
+# Text words the host rewrites at run time, never folded into constants:
+# actor visibility (AssertObjMureDistances) and the TopScreen layout patches
+# inside text (kVerifiedLayoutPatches: gear texture filters, dungeon map).
+HOST_WRITTEN_TEXT_RANGES: tuple[tuple[int, int], ...] = (
+    (0x003CC430, 4),
+    (0x004673BC, 4),
+    (0x00467688, 4),
+    (0x002F0404, 4),
+    (0x002F0410, 4),
+    (0x0044262C, 4),
+    (0x0044264C, 4),
+    (0x0042D9F0, 4),
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +75,11 @@ class LiteralImage:
 # tests that call the emitters directly keep the original memory reads).
 _LITERAL_IMAGE: LiteralImage | None = None
 _FOLDED_LITERALS: set[int] = set()
+# Set by generate(): scalar binary32 VFP through native AArch64 instructions
+# with the guest FPSCR mode in FPCR (oot3d_native_a32_vfp_aarch64.h). Off by
+# default; the emitted code still compiles to the software operations on
+# other hosts.
+_NATIVE_VFP_AARCH64 = False
 
 
 def _cpp_flag_mask(mask: Flag) -> str:
@@ -1251,6 +1268,63 @@ def _vfp_binary64_supported(raw: int) -> bool:
     return False
 
 
+_NATIVE_VFP_TERNARY = {
+    0x0E000A00: "Oot3dVfpNativeMultiplyAccumulate",
+    0x0E000A40: "Oot3dVfpNativeMultiplySubtract",
+    0x0E100A40: "Oot3dVfpNativeNegativeMultiplyAccumulate",
+    0x0E100A00: "Oot3dVfpNativeNegativeMultiplySubtract",
+}
+_NATIVE_VFP_BINARY = {
+    0x0E200A00: "Oot3dVfpNativeMultiply",
+    0x0E200A40: "Oot3dVfpNativeNegativeMultiply",
+    0x0E300A00: "Oot3dVfpNativeAdd",
+    0x0E300A40: "Oot3dVfpNativeSubtract",
+    0x0E800A00: "Oot3dVfpNativeDivide",
+}
+_NATIVE_VFP_UNARY = {
+    0x0EB10AC0: "Oot3dVfpNativeSquareRoot",
+    0x0EB80AC0: "Oot3dVfpNativeFromSigned",
+    0x0EB80A40: "Oot3dVfpNativeFromUnsigned",
+    0x0EBC0AC0: "Oot3dVfpNativeToUnsigned",
+    0x0EBD0AC0: "Oot3dVfpNativeToSigned",
+}
+
+
+def _emit_native_vfp(
+    raw: int, pc: int, destination: int, left: int, right: int
+) -> list[str] | None:
+    """Scalar binary32 data processing through oot3d_native_a32_vfp_aarch64.h.
+
+    None leaves the instruction to the software lowering (VABS/VNEG stay
+    integer bit operations there)."""
+    del pc
+    ternary = raw & 0x0FB00F50
+    operation = _NATIVE_VFP_TERNARY.get(ternary)
+    if operation is not None:
+        return [
+            f"{operation}({_lane(destination)}, {_lane(destination)},",
+            f"    {_lane(left)}, {_lane(right)}, frame.Guest.fpscr);",
+        ]
+    operation = _NATIVE_VFP_BINARY.get(ternary)
+    if operation is not None:
+        return [
+            f"{operation}({_lane(destination)}, {_lane(left)}, {_lane(right)},",
+            "    frame.Guest.fpscr);",
+        ]
+    unary = raw & 0x0FBF0FD0
+    operation = _NATIVE_VFP_UNARY.get(unary)
+    if operation is not None:
+        return [
+            f"{operation}({_lane(destination)}, {_lane(right)}, frame.Guest.fpscr);",
+        ]
+    if unary in {0x0EB40A40, 0x0EB40AC0}:
+        return [
+            f"Oot3dVfpNativeCompare({_lane(destination)}, {_lane(right)},",
+            f"    {'true' if unary == 0x0EB40AC0 else 'false'}, frame.Guest.fpscr);",
+        ]
+    return None
+
+
 def _emit_vfp(item: Instruction) -> list[str]:
     raw = item.raw
     pc = item.pc
@@ -1479,14 +1553,20 @@ def _emit_vfp(item: Instruction) -> list[str]:
             statement = (
                 "state.Flags.AssignPackedNzcv(frame.Guest.fpscr);"
             )
-        else:
-            statement = f"{_reg(core)} = frame.Guest.fpscr;"
-        return _conditional(raw, [statement])
+            return _conditional(raw, [statement])
+        statements = [f"{_reg(core)} = frame.Guest.fpscr;"]
+        if _NATIVE_VFP_AARCH64:
+            # The cumulative flags accumulate in FPSR until read.
+            statements.insert(0, "Oot3dGuestFpFoldFlags(frame.Guest.fpscr);")
+        return _conditional(raw, statements)
     if (raw & 0x0FFF0FFF) == 0x0EE10A10:
         core = (raw >> 12) & 0xF
         if core == 15:
             raise LoweringError(f"VMSR uses PC at 0x{pc:08X}")
-        return _conditional(raw, [f"frame.Guest.fpscr = {_reg(core, pc)};"])
+        statements = [f"frame.Guest.fpscr = {_reg(core, pc)};"]
+        if _NATIVE_VFP_AARCH64:
+            statements.append("Oot3dGuestFpLoadControl(frame.Guest.fpscr);")
+        return _conditional(raw, statements)
     if _vfp_binary64_supported(raw):
         return _conditional(
             raw,
@@ -1523,6 +1603,11 @@ def _emit_vfp(item: Instruction) -> list[str]:
         f"    return {{Oot3dWholeAotFlowKind::Unsupported, 0x{pc:08X}U, 0x{raw:08X}U}};",
         "}",
     ])
+    if _NATIVE_VFP_AARCH64:
+        native = _emit_native_vfp(raw, pc, destination, left, right)
+        if native is not None:
+            body.extend(native)
+            return _conditional(raw, body)
     if operation is not None:
         arguments = [
             _lane(destination),
@@ -2202,6 +2287,14 @@ def _render_region_function(
     return lines
 
 
+def _native_vfp_entry_lines() -> list[str]:
+    # Guest FPSCR mode in FPCR for the whole call; FPSR folded back into the
+    # guest FPSCR on every exit, including an observable-exit unwind.
+    if not _NATIVE_VFP_AARCH64:
+        return []
+    return ["        Oot3dGuestFpScope guestFpScope(state.fpscr);"]
+
+
 def _render_header() -> str:
     return """#pragma once
 
@@ -2342,6 +2435,7 @@ def _render_source(
             "    bool restoreObservableExitState = false;",
             "    try {",
             "        Oot3dWholeAotExecutionScope executionScope;",
+            *_native_vfp_entry_lines(),
             "        switch (pc) {",
         ]
     )
@@ -2625,6 +2719,7 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
             "    bool restoreObservableExitState = false;",
             "    try {",
             "        Oot3dWholeAotExecutionScope executionScope;",
+            *_native_vfp_entry_lines(),
             "        flow = entry->Execute(frame, context, promotedState, pc);",
             "        while ((flow.Kind == Oot3dWholeAotFlowKind::Returned ||",
             "                flow.Kind == Oot3dWholeAotFlowKind::Branch) &&",
@@ -2998,8 +3093,9 @@ def generate(
     memory_entries: frozenset[int] = frozenset(),
     local_state: bool = False,
     fold_literals: bool = True,
+    native_vfp_aarch64: bool = False,
 ) -> dict[str, object]:
-    global _LITERAL_IMAGE
+    global _LITERAL_IMAGE, _NATIVE_VFP_AARCH64
     if shard_count <= 0:
         raise ValueError("whole-AOT shard count must be positive")
     if shard_strategy not in {"stable", "balanced", "incremental", "affinity"}:
@@ -3039,13 +3135,17 @@ def generate(
             "memory_region_contract_sha256": memory_contract,
             **({"local_state": True} if local_state else {}),
             "literal_folding": fold_literals,
+            **({"native_vfp_aarch64": True} if native_vfp_aarch64 else {}),
         }
         files = cached.get("files", {})
         cached_shards = {
             name for name in files if name.startswith(SHARD_PREFIX)
         }
         disk_shards = {path.name for path in output.glob(f"{SHARD_PREFIX}*")}
-        if all(cached.get(key) == value for key, value in expected.items()) and all(
+        if all(cached.get(key) == value for key, value in expected.items()) and (
+            # Absent in manifests of the default (software) lowering.
+            cached.get("native_vfp_aarch64", False) == native_vfp_aarch64
+        ) and all(
             (output / name).is_file() and
             _sha256((output / name).read_bytes()) == digest
             for name, digest in files.items()
@@ -3066,6 +3166,7 @@ def generate(
         if not 0 < text_size <= len(code):
             raise ValueError("program executable size does not fit code.bin")
         _LITERAL_IMAGE = LiteralImage(int(program["base"]), code[:text_size])
+    _NATIVE_VFP_AARCH64 = native_vfp_aarch64
     try:
         return _generate_files(
             output, functions, external_entries, shard_count, shard_strategy,
@@ -3074,6 +3175,7 @@ def generate(
             generator_sha256)
     finally:
         _LITERAL_IMAGE = None
+        _NATIVE_VFP_AARCH64 = False
 
 
 def _generate_files(
@@ -3182,6 +3284,7 @@ def _generate_files(
         "memory_region_contract_sha256": memory_contract,
         **({"local_state": True} if local_state else {}),
         "literal_folding": fold_literals,
+        **({"native_vfp_aarch64": True} if _NATIVE_VFP_AARCH64 else {}),
         "folded_literal_addresses": len(_FOLDED_LITERALS),
         "folding_excluded_ranges": [
             [start, length] for start, length in HOST_WRITTEN_TEXT_RANGES

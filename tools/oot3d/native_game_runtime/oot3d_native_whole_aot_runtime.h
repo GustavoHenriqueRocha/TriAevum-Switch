@@ -3,6 +3,7 @@
 #include "recomp/a32_runtime.h"
 #include "recomp/a32_vfp_binary64.h"
 #include "oot3d_aot_architectural_state.h"
+#include "oot3d_native_a32_vfp_aarch64.h"
 #include "oot3d_native_a32_vfp_fast.h"
 #include "oot3d_native_a32_vfp_ops.h"
 
@@ -245,6 +246,7 @@ inline bool Oot3dAotEnterBlock(
     if (!Oot3dAotShouldNotifyBlock(context, pc, firstBlock)) {
         return true;
     }
+    Oot3dGuestFpHostCallScope hostFp(frame.Guest.fpscr);
     context.BlockEntry(pc, frame.Guest, context.CallbackMemory,
                        context.BlockEntryUser);
     return true;
@@ -261,8 +263,11 @@ inline bool Oot3dAotEnterBlock(
         return true;
     }
     state.Flush(0x7FFFU, true);
-    context.BlockEntry(pc, frame.Guest, context.CallbackMemory,
-                       context.BlockEntryUser);
+    {
+        Oot3dGuestFpHostCallScope hostFp(frame.Guest.fpscr);
+        context.BlockEntry(pc, frame.Guest, context.CallbackMemory,
+                           context.BlockEntryUser);
+    }
     state.Reload(0x7FFFU, true);
     return true;
 }
@@ -280,8 +285,11 @@ OOT3D_AOT_COLD bool Oot3dAotEnterBlockSlow(
     }
     commitState();
     state.Flush(0x7FFFU, true);
-    context.BlockEntry(pc, frame.Guest, context.CallbackMemory,
-                       context.BlockEntryUser);
+    {
+        Oot3dGuestFpHostCallScope hostFp(frame.Guest.fpscr);
+        context.BlockEntry(pc, frame.Guest, context.CallbackMemory,
+                           context.BlockEntryUser);
+    }
     state.Reload(0x7FFFU, true);
     reloadState();
     return true;
@@ -320,6 +328,7 @@ inline Oot3dWholeAotFlow Oot3dAotCallExternal(
     if (context.ExternalCall == nullptr) {
         return {Oot3dWholeAotFlowKind::Unsupported, entry, 0};
     }
+    Oot3dGuestFpHostCallScope hostFp(frame.Guest.fpscr);
     return context.ExternalCall(entry, frame, context.Memory);
 }
 

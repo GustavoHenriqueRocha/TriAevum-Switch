@@ -76,6 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="liga as substituições nativas listadas (padrão: guest_overrides.json) "
              "nos shards gerados; ver apply_guest_overrides.py",
     )
+    parser.add_argument(
+        "--native-vfp-aarch64", action="store_true",
+        help="execute scalar binary32 VFP with native AArch64 instructions, "
+             "the guest FPSCR mode loaded in FPCR and flags accumulated in "
+             "FPSR (exact; software operations on other hosts)",
+    )
     args = parser.parse_args(argv)
     if args.shards <= 0:
         parser.error("--shards must be positive")
@@ -94,6 +100,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         memory_entries=frozenset(args.memory_region),
         local_state=args.local_state,
         fold_literals=not args.no_literal_folding,
+        native_vfp_aarch64=args.native_vfp_aarch64,
     )
     if args.guest_overrides is not None:
         from apply_guest_overrides import apply as apply_overrides, load_manifest

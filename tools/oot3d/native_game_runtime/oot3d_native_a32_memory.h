@@ -1,6 +1,7 @@
 #pragma once
 
 #include "recomp/a32_runtime.h"
+#include "oot3d_guest_fp_environment.h"
 
 #include <array>
 #include <bit>
@@ -311,6 +312,9 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
                 return true;
             }
         }
+        // Device and service handlers run under the host FPCR; the guest's
+        // FPCR and accumulated FPSR flags are restored afterwards.
+        const Oot3dNativeGame::Oot3dGuestFpSlowPathScope hostFp;
         uint64_t decoded = 0;
         if (!ReadSized(address, static_cast<uint8_t>(sizeof(T)), &decoded,
                        faultAddress)) {
@@ -349,6 +353,7 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
                 return true;
             }
         }
+        const Oot3dNativeGame::Oot3dGuestFpSlowPathScope hostFp;
         return WriteSized(address, static_cast<uint8_t>(sizeof(T)), value,
                           faultAddress);
     }
