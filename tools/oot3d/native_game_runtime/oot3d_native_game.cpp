@@ -172,6 +172,10 @@ int main(int argc, char** argv) {
         NativeGameArguments preparedArguments;
 #if defined(__SWITCH__)
         PlaceSwitchMainThread();
+        // A Mesa built with its Horizon disk cache (see docs) stores compiled
+        // GLSL and nvc0 code here; the stock devkitPro Mesa ignores these.
+        setenv("MESA_SHADER_CACHE_DIR", "sdmc:/switch/oot3dre/mesacache", 0);
+        setenv("MESA_GLSL_CACHE_MAX_SIZE", "128M", 0);
         // SDL's positional face-button convention is useful for portable PC
         // layouts, but the Switch build should follow the labels printed on
         // Joy-Con and Pro Controllers: A is A, B is B, and so on.

@@ -275,3 +275,23 @@ validation remains authoritative.
 The renderer demonstration port is useful only as a platform/emulator smoke
 test. It isolates the Maxwell warnings but is not accepted as gameplay evidence
 for this product.
+
+## Mesa with its Horizon disk shader cache (2026-10-16)
+
+The stock devkitPro `switch-mesa` reports `GL_NUM_PROGRAM_BINARY_FORMATS=0`
+and compiles every PICA program from scratch on each launch (1-3 s each on the
+console). Rebuilt with the disk-cache patches of centollOS/SwitchWaker and
+SwitchWakerHD (plus a `thrd_success == 4` fix for newlib) it caches GLSL and
+nvc0 code under `MESA_SHADER_CACHE_DIR`, which the homebrew sets to
+`sdmc:/switch/oot3dre/mesacache` before SDL creates the context. Link against
+that build by putting its `lib` first:
+
+```sh
+cmake -S . -B build-switch \
+  -DEGL_LIBRARY=$MESA/lib/libEGL.a -DGLAPI_LIBRARY=$MESA/lib/libglapi.a \
+  "-DCMAKE_EXE_LINKER_FLAGS=-L$MESA/lib -L$DEVKITPRO/libnx/lib -L$DEVKITPRO/portlibs/switch/lib -fPIE -specs=$DEVKITPRO/libnx/switch.specs"
+```
+
+(SDL2 pulls `-lEGL` after the explicit archive, so the search path must find
+the rebuilt library first.) With the cache active the recorded PICA program
+sources in `shadercache/*.src` are linked at start-up, bounded to 4 seconds.

@@ -317,12 +317,19 @@ void StartPicaGlWarmup() {
     size_t sources = 0U;
     size_t linked = 0U;
     size_t failed = 0U;
+    size_t skipped = 0U;
     const auto started = std::chrono::steady_clock::now();
     for (const auto& entry : std::filesystem::directory_iterator(kPicaGlProgramCacheDirectory, error)) {
         if (entry.path().extension() != ".src") {
             continue;
         }
         ++sources;
+        // Programs already in Mesa's disk cache link in ~12 ms; one that is not
+        // takes 1-3 s. Bound the pause; the rest compile on first use as before.
+        if (std::chrono::steady_clock::now() - started > std::chrono::seconds(4)) {
+            ++skipped;
+            continue;
+        }
         uint64_t key = 0U;
         try {
             key = std::stoull(entry.path().stem().string(), nullptr, 16);
@@ -347,9 +354,11 @@ void StartPicaGlWarmup() {
     const double seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     std::filesystem::create_directories(kPicaGlProgramCacheDirectory, error);
+    GLint binaryFormats = 0;
+    glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &binaryFormats);
     std::ofstream(std::string(kPicaGlProgramCacheDirectory) + "/status.txt", std::ios::trunc)
-        << "warmup_sources=" << sources << "\nwarmup_linked=" << linked
-        << "\nwarmup_failed=" << failed << "\nwarmup_seconds=" << seconds << '\n';
+        << "binary_formats=" << binaryFormats << "\nwarmup_sources=" << sources << "\nwarmup_linked=" << linked
+        << "\nwarmup_failed=" << failed << "\nwarmup_skipped=" << skipped << "\nwarmup_seconds=" << seconds << '\n';
 }
 #endif
 
@@ -373,8 +382,13 @@ PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {
     // (1-3 s per program with the stock Mesa). The warm-up stays available
     // for a Mesa built with its disk cache, behind config/shader_warmup.
     static const bool warmupStarted = [] {
+        // A Mesa with its disk cache reports a program binary format; then a
+        // recorded program loads in ~12 ms and warming all of them is cheap.
+        GLint binaryFormats = 0;
+        glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &binaryFormats);
         std::error_code error;
-        if (std::filesystem::exists("sdmc:/switch/oot3dre/config/shader_warmup", error)) {
+        if (binaryFormats > 0 ||
+            std::filesystem::exists("sdmc:/switch/oot3dre/config/shader_warmup", error)) {
             StartPicaGlWarmup();
         }
         return true;
