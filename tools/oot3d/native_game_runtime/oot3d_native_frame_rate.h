@@ -34,8 +34,15 @@ inline constexpr uint32_t kOot3dNativeTimeUnitsPerSecond =
 // game steps once every two of them. The Switch presents at 30 Hz, so a cap
 // of one refresh per presentation fed the game 30 refreshes a second and ran
 // it at half speed on the console (slow motion; Eden hid it). Two per
-// presentation keeps real time at 30 Hz presentation.
+// presentation keep real time at 30 Hz presentation.
+#if defined(__SWITCH__)
+// A presentation that overruns 33 ms would otherwise lose game time (25 fps
+// played at 83% speed); up to four refreshes (two game steps) under one
+// presentation keep real-time speed, skipping a drawn frame instead.
+inline constexpr uint32_t kMaximumGuestRefreshesPerPresentation = 4U;
+#else
 inline constexpr uint32_t kMaximumGuestRefreshesPerPresentation = 2U;
+#endif
 inline constexpr uint32_t kMaximumDeferredGuestRefreshes = 8U;
 
 enum class GameplayTimingMode : uint8_t {
