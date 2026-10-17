@@ -599,6 +599,8 @@ struct NativeCandidateDispatchState {
   uint32_t TopScreenGameOverDrawPhase = 0U;
   std::array<uint32_t, 5> TopScreenGameOverDrawRegisters{};
   Oot3dNativeGame::TopScreenPauseChildState TopScreenGameOverChildRestore{};
+  // config/debug_force_game_over (desligado sem o arquivo).
+  Oot3dNativeGame::TopScreenDebugGameOverState TopScreenDebugGameOver{};
   Oot3dNativeGame::TopScreenPauseControllerState TopScreenPauseController;
   uint8_t TopScreenPauseControllerDrawPhase = 0U;
   std::array<uint32_t, 2> TopScreenPauseControllerVisibleRenderers{};

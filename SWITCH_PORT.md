@@ -506,6 +506,29 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
 - Shaders: o especializado já tem os ramos resolvidos na geração; sem medição por programa não
   compensa invalidar o cache de shaders.
 
+### Game Over sem o prompt "Continuar?/Salvar?" (2026-10-17)
+- Sintoma: ao morrer, o "GAME OVER" aparece (com o fade correndo rápido demais) e as escolhas nunca
+  aparecem (no máximo um quadro); a camada do controlador do Game Over some. Não dependia do Mesa.
+- Causa: o Game Over do OoT3D é desenhado pelo controlador da tela de baixo; o TopScreen migra as
+  escolhas para a tela de cima depois de 60 desenhos de atraso + 24 passos de fade (2.1.1
+  `005CF75C`/`005CFB38`) e as compõe no quadro (viewport 0,40,480,320, `PauseUi_Draw` auxiliar, depois
+  o desenho nativo `0x00427A3C`; `docs/TRIAEVUM_ISSUES_45_46.md`). No produto isso é feito pelo gancho
+  na entrada `0x00427A3C`. Desde o commit do upstream que ligou o source port inteiro nos builds de
+  produto (80ef0f6), a chamada `0x00300544` também rodava a rota do mod com o MESMO estado: atraso e
+  fade andavam duas vezes por quadro e, terminado o fade, a chamada suprimia o desenho nativo, então o
+  gancho de `0x00427A3C` (que desenha as escolhas) nunca mais rodava.
+- Correção: com o gancho de `0x00427A3C` ativo (produto), a chamada `0x00300544` só desvia para o
+  desenho nativo na cena 3 (Game Over); a cena 7 e os builds de desenvolvimento seguem a rota do mod.
+  Política em `TopScreenRendererVisibilityCallDefersToGameOverDraw`
+  (`oot3d_top_screen_mod_profile_pause.cpp`); teste em `oot3d_top_screen_mod_profile_tests`
+  (simula os quadros: antes ≤ 1 quadro composto, agora todo quadro a partir do 84º).
+- **Teste no console** (`config/debug_force_game_over`, desligado sem o arquivo): zera a vida uma
+  vez depois de N segundos de jogo normal (texto do arquivo = N; vazio = 10; `0`/`off` desliga),
+  pela memória do SaveContext (`0x0058799C`); a morte, o Game Over e as escolhas são os nativos.
+  Desktop: `TRIAEVUM_DEBUG_FORCE_GAME_OVER=10`. Carregue um save, espere, e confira: "GAME OVER",
+  depois "Salvar?" Sim/Não centralizado, depois "Continuar?"; Não/Sim devem voltar ao jogo com 3
+  corações ou ir para o título. Apague o arquivo depois (dispara uma vez por sessão).
+
 ## Próximos passos
 
 - Ideias futuras (pedido do usuário, 2026-10-17):

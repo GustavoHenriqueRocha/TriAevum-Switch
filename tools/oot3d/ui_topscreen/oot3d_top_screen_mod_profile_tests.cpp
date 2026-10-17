@@ -3220,6 +3220,110 @@ int main() {
               visibilityState.DelayCalls == 60,
           "resumed choices must use the centered draw on their first frame");
 
+  // Produto: a chamada 0x00300544 e o gancho de 0x00427A3C dividiam o mesmo
+  // estado de atraso/fade. Simula um quadro (chamada, depois o desenho nativo
+  // se ela não suprimir) e conta os quadros em que o gancho compõe as
+  // escolhas (FadeStep == 24 na entrada nativa).
+  {
+    TopScreenRendererVisibilityInputs callsite;
+    callsite.ControllerAddress = visibilityController;
+    callsite.HasCallScene = true;
+    callsite.CallSceneMode = 3U;
+    callsite.CallSceneSequence = 5U;
+    Require(!TopScreenRendererVisibilityCallDefersToGameOverDraw(false, callsite),
+            "developer builds (no native-draw hook) keep the call-site route");
+    TopScreenRendererVisibilityInputs sceneSeven = callsite;
+    sceneSeven.CallSceneMode = 7U;
+    Require(!TopScreenRendererVisibilityCallDefersToGameOverDraw(true, sceneSeven),
+            "scene mode 7 keeps the call-site route");
+    Require(TopScreenRendererVisibilityCallDefersToGameOverDraw(true, callsite),
+            "GameOver scene must defer to the native-draw hook");
+    gameOverDraw.SceneSequence = 5U;
+    auto simulate = [&](bool hookActive, unsigned frames, unsigned *firstComposed) {
+      Require(visibilityMemory.Write32(visibilityController + 0xAF8U,
+                                       visibilityRenderer) &&
+                  visibilityMemory.Write32(visibilityOwnerSlot, 0U) &&
+                  visibilityMemory.Write8(visibilityRenderer + 0x6CU, 1U),
+              "cannot seed GameOver frame simulation");
+      TopScreenRendererVisibilityRouteState shared;
+      unsigned composed = 0U;
+      *firstComposed = frames;
+      for (unsigned frame = 0U; frame < frames; ++frame) {
+        bool nativeDraw = true;
+        if (!TopScreenRendererVisibilityCallDefersToGameOverDraw(hookActive,
+                                                                 callsite)) {
+          TopScreenRendererVisibilityAction action;
+          Require(ResolveTopScreenRendererVisibilityRoute(
+                      visibilityMemory, callsite, &shared, &action, &error),
+                  "GameOver call-site route failed");
+          nativeDraw = action == TopScreenRendererVisibilityAction::NativeDraw;
+        }
+        if (!nativeDraw)
+          continue;
+        Require(PrepareTopScreenGameOverDraw(visibilityMemory,
+                                             visibilityController, gameOverDraw,
+                                             false, &shared, &error),
+                "GameOver native-draw hook failed");
+        if (shared.FadeStep == 24) {
+          if (composed == 0U)
+            *firstComposed = frame;
+          ++composed;
+        }
+      }
+      return composed;
+    };
+    unsigned first = 0U;
+    // Antes da correção: atraso/fade em dobro e, depois, desenho suprimido.
+    Require(simulate(false, 300U, &first) <= 1U,
+            "regression model: shared route must starve the native-draw hook");
+    // Com a correção: 60 quadros de atraso, 24 de fade, depois todo quadro.
+    Require(simulate(true, 300U, &first) == 300U - 83U && first == 83U,
+            "GameOver choices must be composed on every frame after the fade");
+  }
+
+  // config/debug_force_game_over
+  Require(ParseTopScreenDebugGameOverCalls("") == 300U &&
+              ParseTopScreenDebugGameOverCalls(" 5\r\n") == 150U &&
+              ParseTopScreenDebugGameOverCalls("0") == 0U &&
+              ParseTopScreenDebugGameOverCalls("off") == 0U &&
+              ParseTopScreenDebugGameOverCalls("99999") == 0U,
+          "debug_force_game_over parsing");
+  {
+    TopScreenPauseDrawInputs play;
+    play.HasScene = true;
+    play.SceneMode = 3U;
+    play.SceneVariant = 2U;
+    TopScreenDebugGameOverState debug;
+    Require(!AdvanceTopScreenDebugGameOver(play, 48, &debug),
+            "disabled debug_force_game_over must never fire");
+    debug.RequiredCalls = 3U;
+    Require(!AdvanceTopScreenDebugGameOver(play, 48, &debug) &&
+                !AdvanceTopScreenDebugGameOver(play, 48, &debug),
+            "debug_force_game_over fired early");
+    TopScreenPauseDrawInputs loading = play;
+    loading.NativeTransitionActive = true;
+    Require(!AdvanceTopScreenDebugGameOver(loading, 48, &debug) &&
+                debug.EligibleCalls == 0U,
+            "transitions must restart the debug countdown");
+    TopScreenPauseDrawInputs dead = play;
+    dead.SceneSequence = 4U;
+    Require(!AdvanceTopScreenDebugGameOver(dead, 48, &debug) &&
+                !AdvanceTopScreenDebugGameOver(play, 0, &debug),
+            "GameOver or zero health must not count");
+    Require(!AdvanceTopScreenDebugGameOver(play, 48, &debug) &&
+                !AdvanceTopScreenDebugGameOver(play, 48, &debug) &&
+                AdvanceTopScreenDebugGameOver(play, 48, &debug) && debug.Fired &&
+                !AdvanceTopScreenDebugGameOver(play, 48, &debug),
+            "debug_force_game_over must fire exactly once");
+    TopScreenPauseDrawInputs title = play;
+    title.RuntimeMode = 1U;
+    title.EntranceIndex = 0xFFF3U;
+    TopScreenDebugGameOverState titleDebug;
+    titleDebug.RequiredCalls = 1U;
+    Require(!AdvanceTopScreenDebugGameOver(title, 48, &titleDebug),
+            "the title demo must not be killed");
+  }
+
   controllerInputs.Pause.HasScene = true;
   controllerInputs.Pause.SceneMode = 3U;
   controllerInputs.RendererAddress = visibilityRenderer;

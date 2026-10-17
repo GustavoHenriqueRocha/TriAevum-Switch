@@ -575,6 +575,54 @@ bool PrepareTopScreenGameOverDraw(
                                                   &action, error);
 }
 
+bool TopScreenRendererVisibilityCallDefersToGameOverDraw(
+    bool gameOverDrawHookActive,
+    const TopScreenRendererVisibilityInputs &inputs) noexcept {
+  return gameOverDrawHookActive && inputs.HasCallScene &&
+         inputs.CallSceneMode == 3U;
+}
+
+std::uint32_t ParseTopScreenDebugGameOverCalls(std::string_view text) noexcept {
+  constexpr std::uint32_t kCallsPerSecond = 30U;
+  constexpr std::uint32_t kDefaultSeconds = 10U;
+  while (!text.empty() && (text.front() == ' ' || text.front() == '\t' ||
+                           text.front() == '\r' || text.front() == '\n'))
+    text.remove_prefix(1U);
+  while (!text.empty() && (text.back() == ' ' || text.back() == '\t' ||
+                           text.back() == '\r' || text.back() == '\n'))
+    text.remove_suffix(1U);
+  if (text.empty())
+    return kDefaultSeconds * kCallsPerSecond;
+  std::uint32_t seconds = 0U;
+  for (const char c : text) {
+    if (c < '0' || c > '9')
+      return 0U;
+    seconds = seconds * 10U + static_cast<std::uint32_t>(c - '0');
+    if (seconds > 3600U)
+      return 0U;
+  }
+  return seconds * kCallsPerSecond;
+}
+
+bool AdvanceTopScreenDebugGameOver(const TopScreenPauseDrawInputs &inputs,
+                                   std::int16_t health,
+                                   TopScreenDebugGameOverState *state) noexcept {
+  if (state == nullptr || state->RequiredCalls == 0U || state->Fired)
+    return false;
+  const bool gameplay = inputs.HasScene && inputs.SceneMode == 3U &&
+                        inputs.SceneVariant == 2U && inputs.SceneSequence == 0U &&
+                        inputs.RuntimeMode == 0U && !inputs.NativeTransitionActive &&
+                        !IsTopScreenTitleDemoRuntime(inputs) && health > 0;
+  if (!gameplay) {
+    state->EligibleCalls = 0U;
+    return false;
+  }
+  if (++state->EligibleCalls < state->RequiredCalls)
+    return false;
+  state->Fired = true;
+  return true;
+}
+
 bool ReadTopScreenPauseControllerInputs(NativeA32Memory &memory,
                                         TopScreenPauseControllerInputs *inputs,
                                         std::string *error) {

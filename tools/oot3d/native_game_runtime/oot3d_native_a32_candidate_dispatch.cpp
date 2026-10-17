@@ -131,6 +131,17 @@ bool ExecuteTopScreenUiSourcePortBlock(
     if (!Oot3dNativeGame::ReadTopScreenPauseDrawInputs(memory, &globalInputs)) {
       return false;
     }
+    if (dispatch.TopScreenDebugGameOver.RequiredCalls != 0U) {
+      std::uint16_t health = 0U;
+      if (memory.Read16(Oot3dNativeGame::kTopScreenSaveContextHealth, &health) &&
+          Oot3dNativeGame::AdvanceTopScreenDebugGameOver(
+              globalInputs, static_cast<std::int16_t>(health),
+              &dispatch.TopScreenDebugGameOver)) {
+        // config/debug_force_game_over: a morte segue o caminho nativo.
+        memory.Write16(Oot3dNativeGame::kTopScreenSaveContextHealth, 0U);
+        std::fprintf(stderr, "[topscreen] debug_force_game_over: vida zerada\n");
+      }
+    }
     Oot3dNativeGame::TopScreenRendererVisibilityInputs inputs;
     inputs.ControllerAddress = state.r[0];
     inputs.HasCallScene = state.r[1] != 0U;
@@ -149,6 +160,15 @@ bool ExecuteTopScreenUiSourcePortBlock(
          !memory.Read32(state.r[1] + 0x104U, &inputs.CallSceneSubmode) ||
          !memory.Read16(state.r[1] + 0x318CU, &inputs.CallSceneSequence))) {
       return false;
+    }
+    // Produto: o gancho de 0x00427A3C é o dono do Game Over (ver
+    // TopScreenRendererVisibilityCallDefersToGameOverDraw).
+    if (Oot3dNativeGame::TopScreenRendererVisibilityCallDefersToGameOverDraw(
+            std::binary_search(dispatch.ProductTopScreenBlocks.begin(),
+                               dispatch.ProductTopScreenBlocks.end(),
+                               kPauseRendererVisibilityNativeDraw),
+            inputs)) {
+      return branchFromCallsite(kPauseRendererVisibilityNativeDraw, pc + 4U);
     }
     Oot3dNativeGame::TopScreenRendererVisibilityAction action;
     if (!Oot3dNativeGame::ResolveTopScreenRendererVisibilityRoute(

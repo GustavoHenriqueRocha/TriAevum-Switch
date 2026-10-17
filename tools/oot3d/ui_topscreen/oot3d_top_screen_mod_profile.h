@@ -835,6 +835,40 @@ bool PrepareTopScreenGameOverDraw(
     NativeA32Memory &memory, std::uint32_t controller,
     const TopScreenPauseDrawInputs &inputs, bool runtimeSceneLatch,
     TopScreenRendererVisibilityRouteState *state, std::string *error = nullptr);
+// Quem cuida do Game Over (cena 3) na chamada nativa 0x00300544.
+// No produto o gancho da entrada 0x00427A3C (PrepareTopScreenGameOverDraw +
+// composição viewport 0,40,480,320 / PauseUi_Draw / desenho nativo) já faz o
+// atraso, o fade e a migração das escolhas, com o MESMO estado. Se a chamada
+// também rodasse ResolveTopScreenRendererVisibilityRoute, o atraso/fade
+// andariam duas vezes por quadro e, ao fim do fade, a chamada suprimiria o
+// desenho nativo: a entrada 0x00427A3C nunca mais rodaria e o prompt
+// "Continuar?/Salvar?" não apareceria (no máximo um quadro). Com o gancho
+// ativo a chamada só desvia para o desenho nativo; a cena 7 e os builds de
+// desenvolvimento (sem o gancho) continuam no caminho do mod.
+bool TopScreenRendererVisibilityCallDefersToGameOverDraw(
+    bool gameOverDrawHookActive,
+    const TopScreenRendererVisibilityInputs &inputs) noexcept;
+
+// Depuração (config/debug_force_game_over no SD; fora do Switch a variável
+// TRIAEVUM_DEBUG_FORCE_GAME_OVER): zera a vida uma vez depois de N segundos
+// de jogo normal (cena 3, variante 2, sem Game Over, transição ou demo do
+// título), para chegar à tela de Game Over sem procurar um inimigo.
+struct TopScreenDebugGameOverState {
+  std::uint32_t RequiredCalls = 0; // 0 = desligado
+  std::uint32_t EligibleCalls = 0;
+  bool Fired = false;
+};
+// Texto do arquivo: vazio = 10 s; número inteiro 1..3600 = segundos;
+// "0", "off" ou inválido = desligado. Devolve as chamadas por quadro nativo
+// (30 por segundo) ou 0.
+std::uint32_t ParseTopScreenDebugGameOverCalls(std::string_view text) noexcept;
+// Uma chamada por desenho nativo (0x00300544). Devolve true no único quadro
+// em que a vida deve ser zerada.
+bool AdvanceTopScreenDebugGameOver(const TopScreenPauseDrawInputs &inputs,
+                                   std::int16_t health,
+                                   TopScreenDebugGameOverState *state) noexcept;
+inline constexpr std::uint32_t kTopScreenSaveContextHealth = 0x0058799CU;
+
 bool ReadTopScreenPauseControllerInputs(NativeA32Memory &memory,
                                         TopScreenPauseControllerInputs *inputs,
                                         std::string *error = nullptr);

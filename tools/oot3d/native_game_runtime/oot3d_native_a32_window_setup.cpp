@@ -706,6 +706,23 @@ void NativeA32WindowSession::Setup() {
       launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen;
   // After the rebuild above, which would discard an earlier assignment.
   nativeCandidateDispatch.ProductTopScreenBlocks = std::move(productTopScreenBlocks);
+  if (nativeCandidateDispatch.TopScreenUiProfile) {
+    // Depuração: força o Game Over depois de N segundos de jogo (o texto do
+    // arquivo é N; vazio = 10). Sem o arquivo/variável, nada muda.
+#if defined(__SWITCH__)
+    std::ifstream debugGameOver("sdmc:/switch/oot3dre/config/debug_force_game_over");
+    if (debugGameOver) {
+      std::string text;
+      std::getline(debugGameOver, text);
+      nativeCandidateDispatch.TopScreenDebugGameOver.RequiredCalls =
+          Oot3dNativeGame::ParseTopScreenDebugGameOverCalls(text);
+    }
+#else
+    if (const char *text = std::getenv("TRIAEVUM_DEBUG_FORCE_GAME_OVER"))
+      nativeCandidateDispatch.TopScreenDebugGameOver.RequiredCalls =
+          Oot3dNativeGame::ParseTopScreenDebugGameOverCalls(text);
+#endif
+  }
   widescreenProjection.TopScreenInput =
       &nativeCandidateDispatch.TopScreenInput;
   widescreenProjection.TopScreenInputClock =
