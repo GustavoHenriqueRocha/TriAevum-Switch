@@ -36,6 +36,100 @@
 
 namespace Oot3dNativeGame {
 
+// Typed guest accesses and type-based alias analysis (GCC).
+//
+// A guest store written as std::memcpy into uint8_t* is an access of the
+// "any type" alias set: GCC must assume it may modify every object, so after
+// each inlined guest store it reloads the guest registers it had in host
+// registers (Oot3dAotArchitecturalState::R, the lazy flags), the block
+// budget, the memory object pointer, the page-table group pointers and the
+// generation counter. A guest load written as std::memcpy is a read of the
+// same set, so every pending store to that state has to be completed before
+// it and cannot be merged or dropped across it.
+//
+// The inline fast paths therefore access guest bytes through GuestCell, a
+// packed union of enum types that exist only here:
+//  - a member access to a union uses the alias set of the union, so loads and
+//    stores of all four sizes share one alias set and stay ordered among
+//    themselves (overlapping or unaligned STR/STRB/LDRH keep their order and
+//    value forwarding);
+//  - enum classes, unlike char/unsigned char/std::byte, do not alias
+//    everything, and the union contains no character type, so its alias set
+//    is disjoint from the host state (uint32_t/uint64_t/bool/pointer fields);
+//  - every other path to guest bytes (slow paths, WriteBytes/ReadBytes,
+//    spans, regions, native helpers) uses std::memcpy or character pointers,
+//    which alias everything and so stay ordered with the cell accesses.
+//
+// Contract: in a function that inlines ReadFast/WriteFast/ReadWordsFast/
+// WriteWordsFast, guest bytes may be accessed only through these helpers,
+// std::memcpy, character types or std::byte, never through other typed
+// lvalues (a uint32_t* or float* into guest memory, for example), which GCC
+// would consider unrelated to the cell. Calls that are not inlined are
+// unaffected. Other compilers, or OOT3D_GUEST_ACCESS_MEMCPY, use
+// std::memcpy for every access.
+#if defined(__GNUC__) && !defined(__clang__) && !defined(OOT3D_GUEST_ACCESS_MEMCPY)
+#define OOT3D_GUEST_ACCESS_CELL 1
+enum class GuestCell8 : uint8_t {};
+enum class GuestCell16 : uint16_t {};
+enum class GuestCell32 : uint32_t {};
+enum class GuestCell64 : uint64_t {};
+union __attribute__((packed)) GuestCell {
+    GuestCell8 U8;
+    GuestCell16 U16;
+    GuestCell32 U32;
+    GuestCell64 U64;
+};
+static_assert(sizeof(GuestCell) == 8U && alignof(GuestCell) == 1U);
+#endif
+
+// Stores `value` (little endian, any alignment) at `destination`: the same
+// bytes as std::memcpy(destination, &value, sizeof(T)).
+template <typename T>
+OOT3D_AOT_HOT void StoreGuestValue(uint8_t* destination, T value) noexcept {
+    static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>);
+    static_assert(std::endian::native == std::endian::little);
+#if defined(OOT3D_GUEST_ACCESS_CELL)
+    auto* cell = reinterpret_cast<GuestCell*>(destination);
+    if constexpr (sizeof(T) == 1U) {
+        cell->U8 = static_cast<GuestCell8>(value);
+    } else if constexpr (sizeof(T) == 2U) {
+        cell->U16 = static_cast<GuestCell16>(value);
+    } else if constexpr (sizeof(T) == 4U) {
+        cell->U32 = static_cast<GuestCell32>(value);
+    } else {
+        static_assert(sizeof(T) == 8U);
+        cell->U64 = static_cast<GuestCell64>(value);
+    }
+#else
+    std::memcpy(destination, &value, sizeof(T));
+#endif
+}
+
+// Loads a T (little endian, any alignment) from `source`: the same value as
+// std::memcpy(&value, source, sizeof(T)).
+template <typename T>
+OOT3D_AOT_HOT T LoadGuestValue(const uint8_t* source) noexcept {
+    static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>);
+    static_assert(std::endian::native == std::endian::little);
+#if defined(OOT3D_GUEST_ACCESS_CELL)
+    const auto* cell = reinterpret_cast<const GuestCell*>(source);
+    if constexpr (sizeof(T) == 1U) {
+        return static_cast<T>(cell->U8);
+    } else if constexpr (sizeof(T) == 2U) {
+        return static_cast<T>(cell->U16);
+    } else if constexpr (sizeof(T) == 4U) {
+        return static_cast<T>(cell->U32);
+    } else {
+        static_assert(sizeof(T) == 8U);
+        return static_cast<T>(cell->U64);
+    }
+#else
+    T value;
+    std::memcpy(&value, source, sizeof(T));
+    return value;
+#endif
+}
+
 struct NativeA32MemoryRegionConfig {
     std::string Name;
     uint32_t BaseAddress = 0;
@@ -202,7 +296,7 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
             const uint8_t* source =
                 group[(address >> PageShift) & FastGroupPageMask].Read;
             if (source != nullptr) [[likely]] {
-                std::memcpy(value, source + offset, sizeof(T));
+                *value = LoadGuestValue<T>(source + offset);
                 return true;
             }
         }
@@ -222,7 +316,7 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
             auto& entry = group[(address >> PageShift) & FastGroupPageMask];
             uint8_t* destination = entry.Write;
             if (destination != nullptr) [[likely]] {
-                std::memcpy(destination + offset, &value, sizeof(T));
+                StoreGuestValue<T>(destination + offset, value);
                 // One counter carries both the architectural generation and
                 // the certificate epoch (see mRangeGeneration).
                 const uint64_t generation = ++mRangeGeneration;
@@ -254,7 +348,12 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
         if (source == nullptr) [[unlikely]] {
             return false;
         }
-        std::memcpy(values, source + offset, bytes);
+        // Word loads (see LoadGuestValue); `count` is a literal at every
+        // generated call site.
+        for (uint32_t index = 0; index < count; ++index) {
+            values[index] =
+                LoadGuestValue<uint32_t>(source + offset + size_t{index} * 4U);
+        }
         return true;
     }
 
@@ -272,7 +371,12 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
         if (destination == nullptr) [[unlikely]] {
             return false;
         }
-        std::memcpy(destination + offset, values, bytes);
+        // Word stores (see StoreGuestValue); `count` is a literal at every
+        // generated call site.
+        for (uint32_t index = 0; index < count; ++index) {
+            StoreGuestValue<uint32_t>(destination + offset + size_t{index} * 4U,
+                                      values[index]);
+        }
         // Word-by-word writes stamp start+1 .. start+count; if any of those
         // wraps to zero, range versions become invalid, as in WriteFast.
         const uint64_t start = mRangeGeneration;
