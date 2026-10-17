@@ -10,6 +10,7 @@ set(_oot3d_native_a32_ctr_host_sources
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_dsp.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_state.cpp
+    tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_time.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_dsp_hle.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_dsp_memory_adapter.cpp
     tools/oot3d/third_party/azahar_audio/audio_core/codec.cpp
