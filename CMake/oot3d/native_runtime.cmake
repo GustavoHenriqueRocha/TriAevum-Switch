@@ -85,10 +85,18 @@ set_property(CACHE OOT3D_WHOLE_AOT_SHARD_STRATEGY PROPERTY STRINGS
 # Tempo de compilação dos shards (medições no commit que criou estas opções): as funções
 # guest gigantes gastam 50-65% do tempo no sched1 e 15-45% no PRE/gcse do RTL.
 # 0 / vazio = comportamento anterior (C++ e flags idênticos).
+# PGO (GCC): o atributo não muda o profile_id (nome mangled), o checksum de
+# linhas nem o de CFG de nenhuma função (comparado nos .gcno/__gcov* dos
+# shards 003 e 007), então os .gcda valem com ou sem ele. No build
+# "generate" pode marcar todas as gigantes (não afeta o binário final). No
+# "use", -fprofile-partial-training otimiza para velocidade as funções que a
+# coleta não executou, então marque só as frias da coleta: gere a lista com
+# whole_aot_hot_from_gcda.py a partir dos .gcda e passe-a em
+# OOT3D_WHOLE_AOT_HOT_FUNCTIONS (as funções executadas saem byte a byte iguais).
 set(OOT3D_WHOLE_AOT_GIANT_FUNCTION_INSTRUCTIONS "0" CACHE STRING
     "Marca funções com >= N instruções guest (exceto as quentes) sem sched1/gcse-after-reload; 0 desliga")
 set(OOT3D_WHOLE_AOT_HOT_FUNCTIONS "" CACHE FILEPATH
-    "Lista de funções quentes (whole_aot_hot_functions.py) que nunca perdem otimizações")
+    "Lista de funções quentes (whole_aot_hot_functions.py ou whole_aot_hot_from_gcda.py) que nunca perdem otimizações")
 set(OOT3D_WHOLE_AOT_GCSE_MEMORY_KB "" CACHE STRING
     "--param=max-gcse-memory para os shards (GCC); só funções gigantes pulam o PRE do RTL; vazio = padrão do GCC")
 option(OOT3D_WHOLE_AOT_THINLTO
