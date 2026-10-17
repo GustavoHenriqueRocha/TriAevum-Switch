@@ -211,6 +211,14 @@ int main(int argc, char** argv) {
             const_cast<char*>("--presentation-rate"),
             const_cast<char*>("30"),
         };
+        // config/fps60: game logic stays at 30 steps per second and the
+        // runtime interpolates an extra frame between steps (60 Hz output).
+        // Doubles the GPU and render-thread work; pair it with a lower
+        // config/resolution_scale.
+        if (std::ifstream("sdmc:/switch/oot3dre/config/fps60")) {
+            homebrewArguments[18] = const_cast<char*>("native30_interpolated");
+            homebrewArguments[20] = const_cast<char*>("60");
+        }
         if (argc <= 1) {
             argc = static_cast<int>(homebrewArguments.size());
             argv = homebrewArguments.data();
