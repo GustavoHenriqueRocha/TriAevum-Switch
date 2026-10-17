@@ -400,14 +400,16 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
       }
       // 3.0 0x005DCC90: the cross takes 0x005CCF6C on top of the HUD alpha.
       bool nestedOwner = false;
+      float dpadAlpha = 1.0F;
       if (ReadTopScreenPlayerNestedOwner(mMemory, &nestedOwner)) {
-        const float dpadAlpha = ResolveTopScreenDpadGroupAlpha(itemOpacity, nestedOwner);
+        dpadAlpha = ResolveTopScreenDpadGroupAlpha(itemOpacity, nestedOwner);
         for (std::size_t index = clusterStart; index < clusterEnd; ++index)
           if (output[index].source_quad == 5U) output[index].color.alpha *= dpadAlpha;
       }
       TopScreenDpadPresentationState dpadState;
       if (ReadTopScreenDpadPresentationState(mMemory, &dpadState)) {
         dpadState.ItemOpacity = itemOpacity;
+        dpadState.GroupAlpha = dpadAlpha;
         (void)AppendTopScreenDpadPresentation(
             mTopScreenConfig, dpadState, auxiliaryInputs, mTopScreenViewAlpha,
             itemIcons.value_or(oot3d::ui::UiTextureIdentity{}), *texture, output);

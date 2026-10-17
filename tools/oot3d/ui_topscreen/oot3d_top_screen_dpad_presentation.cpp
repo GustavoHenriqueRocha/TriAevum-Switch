@@ -181,6 +181,8 @@ std::size_t AppendTopScreenDpadPresentation(
       p.color.alpha *= state.ItemOpacity.ItemZl;
     else if (actions[direction] == TopScreenDpadAction::Ocarina)
       p.color.alpha *= state.ItemOpacity.Ocarina;
+    else
+      p.color.alpha *= state.GroupAlpha;
     p.destination = {kCenterX[direction] - kIconSize / 2,
                      kCenterY[direction] - kIconSize / 2, kIconSize, kIconSize};
     if (actions[direction] == TopScreenDpadAction::MinimapToggle) {
@@ -215,7 +217,7 @@ std::size_t AppendTopScreenDpadPresentation(
     p.source_quad = static_cast<std::uint32_t>(4 + direction);
     p.layer = 14;
     p.texture.semantic_name = kTopScreen211MenuAtlasSemantic;
-    p.color = {1, 1, 1, std::clamp(alpha, 0.0F, 1.0F)};
+    p.color = {1, 1, 1, std::clamp(alpha, 0.0F, 1.0F) * state.GroupAlpha};
     const float shift = action == TopScreenDpadAction::SwordToggle && direction < 2 ? 2.0F : 0.0F;
     p.destination = {kCenterX[direction] - 7.0F + shift,
                      kCenterY[direction] - 8.0F, 14.0F, 14.0F};
