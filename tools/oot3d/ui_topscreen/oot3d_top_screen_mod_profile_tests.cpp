@@ -2055,12 +2055,48 @@ int main() {
   }};
   const auto questStats = TransformTopScreenQuestGeometry(
       questQuads, {0U, false, false, 0.0F, 0.0F});
+  // 3.0 0x005C89D0: the square A quad is normalized to 32 px about (288, 24).
   Require(questStats.QuadsVisited == 3U && questStats.QuadsTranslated == 2U &&
               questStats.QuadsScaled == 1U && questStats.QuadsHidden == 1U &&
               questQuads[0][0].X == 490.0F && questQuads[0][0].Y == 290.0F &&
-              questQuads[1][0].X == 278.5F && questQuads[1][0].Y == 14.5F &&
+              questQuads[1][0].X == 272.0F && questQuads[1][0].Y == 8.0F &&
+              questQuads[1][3].X == 304.0F && questQuads[1][3].Y == 40.0F &&
               questQuads[1][0].Z == 2.0F && questQuads[2][0].X == 200.0F,
           "TopScreen quest geometry transform is incorrect");
+
+  // The native A ring (38 px) and its label (64x18, the native riding pose
+  // dumped from the Epona fence-jump spawn): the label is not square and
+  // takes 0.68; both centre on (288, 24) (no button group option here).
+  const auto nativeQuad = [](float x0, float y0, float x1, float y1) {
+    return std::array<TopScreenVec3, 4>{
+        {{x0, y0, 0.0F}, {x1, y0, 0.0F}, {x0, y1, 0.0F}, {x1, y1, 0.0F}}};
+  };
+  std::array<std::array<TopScreenVec3, 4>, 2> actionQuads{
+      {nativeQuad(349.0F, 160.0F, 387.0F, 198.0F),
+       nativeQuad(336.0F, 172.0F, 400.0F, 190.0F)}};
+  TopScreenQuestGeometryContext actionContext;
+  actionContext.PlayerSpecialState = true;
+  const auto actionStats = TransformTopScreenQuestGeometry(actionQuads, actionContext);
+  const auto nearAction = [](float actual, float expected) {
+    return std::abs(actual - expected) < 0.001F;
+  };
+  Require(actionStats.QuadsScaled == 2U && actionStats.QuadsHidden == 0U &&
+              nearAction(actionQuads[0][0].X, 272.0F) &&
+              nearAction(actionQuads[0][3].X, 304.0F) &&
+              nearAction(actionQuads[0][0].Y, 8.0F) && nearAction(actionQuads[0][3].Y, 40.0F) &&
+              nearAction(actionQuads[1][3].X - actionQuads[1][0].X, 43.52F) &&
+              nearAction(actionQuads[1][3].Y - actionQuads[1][0].Y, 12.24F) &&
+              nearAction((actionQuads[1][0].X + actionQuads[1][3].X) * 0.5F, 288.0F) &&
+              nearAction((actionQuads[1][0].Y + actionQuads[1][3].Y) * 0.5F, 24.0F),
+          "3.0 A group normalization diverged");
+  actionQuads = {nativeQuad(349.0F, 160.0F, 387.0F, 198.0F),
+                 nativeQuad(336.0F, 172.0F, 400.0F, 190.0F)};
+  actionContext.ActionLabelHidden = true;
+  const auto hiddenLabelStats = TransformTopScreenQuestGeometry(actionQuads, actionContext);
+  Require(hiddenLabelStats.QuadsHidden == 1U && nearAction(actionQuads[0][0].X, 272.0F) &&
+              nearAction(actionQuads[1][0].X, 468.0F) &&
+              nearAction(actionQuads[1][0].Y, 291.0F),
+          "3.0 0x005DA3D4 did not hide only the A label");
 
   std::array<std::array<TopScreenVec3, 4>, 1> offsetQuest{
       {{{{80.0F, 140.0F, 0.0F},
@@ -2439,6 +2475,17 @@ int main() {
                 mapQuad[0][1].X - mapQuad[0][0].X == 8,
             "map marker was rescaled or inset independently of its native map");
   }
+  Require(!decodedContext.ActionLabelHidden &&
+              questStateMemory.Write32(0x004FC648U + 0x48U, 4U) &&
+              ReadTopScreenQuestGeometryContext(questStateMemory, &decodedContext,
+                                                &projectionState, &error) &&
+              decodedContext.ActionLabelHidden &&
+              questStateMemory.Write32(0x004FC648U + 0x48U, 2U) &&
+              ReadTopScreenQuestGeometryContext(questStateMemory, &decodedContext,
+                                                &projectionState, &error) &&
+              !decodedContext.ActionLabelHidden &&
+              questStateMemory.Write32(0x004FC648U + 0x48U, 0U),
+          "Quest alternate HUD mode 1/4 did not hide the A label");
   projectionState.NativeQuestGate = false;
   Require(questStateMemory.Write32(0x00504484U, 1U) &&
               ReadTopScreenQuestGeometryContext(questStateMemory,

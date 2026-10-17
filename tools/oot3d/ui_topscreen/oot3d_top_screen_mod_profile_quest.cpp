@@ -62,12 +62,35 @@ TopScreenQuestGeometryStats TransformTopScreenQuestGeometry(
         constexpr float targetX = 288.0F;
         constexpr float targetY = 24.0F;
         if (!context.PlayerSpecialState || centerY < 195.0F) {
-          for (auto &vertex : quad) {
-            vertex.X = targetX + (vertex.X - centerX) * 0.95F;
-            vertex.Y = targetY + (vertex.Y - centerY) * 0.95F;
+          // SingleScreen 3.0 0x005C89D0..0x005C8B8C: the A ring and icons
+          // (bounds within 0.6..1.4 of square) are normalized to 32 px, the
+          // B circle's size; the wide label takes 0.68. This tree has no
+          // button group size/offset option, so both stay centred on
+          // (288, 24); the HUD scale below then gives 3.0's
+          // 400 + s(288 - 400) - margin, 24s + margin.
+          float minimumX = quad[0].X, maximumX = quad[0].X;
+          float minimumY = quad[0].Y, maximumY = quad[0].Y;
+          for (const auto &vertex : quad) {
+            minimumX = std::min(minimumX, vertex.X);
+            maximumX = std::max(maximumX, vertex.X);
+            minimumY = std::min(minimumY, vertex.Y);
+            maximumY = std::max(maximumY, vertex.Y);
           }
-          ++stats.QuadsTranslated;
-          ++stats.QuadsScaled;
+          const float width = maximumX - minimumX;
+          const float height = maximumY - minimumY;
+          const bool square = width > 1.0F && height > 1.0F &&
+                              height * 1.4F >= width && height * 0.6F <= width;
+          if (!square && context.ActionLabelHidden) {
+            translateTo(quad, centerX, centerY, 500.0F, 300.0F, true);
+          } else {
+            const float size = square ? 32.0F / width : 0.68F;
+            for (auto &vertex : quad) {
+              vertex.X = targetX + (vertex.X - centerX) * size;
+              vertex.Y = targetY + (vertex.Y - centerY) * size;
+            }
+            ++stats.QuadsTranslated;
+            ++stats.QuadsScaled;
+          }
         } else {
           translateTo(quad, centerX, centerY, 500.0F, 300.0F, true);
         }
@@ -161,6 +184,13 @@ bool ReadTopScreenQuestGeometryContext(
       specialMode = specialValue != 0U;
     }
   }
+  std::uint32_t alternateHudMode = 0U;
+  if (!memory.Read32(0x004FC648U + 0x48U, &alternateHudMode)) {
+    if (error != nullptr)
+      *error = "cannot read Quest alternate HUD mode";
+    return false;
+  }
+  context->ActionLabelHidden = alternateHudMode == 1U || alternateHudMode == 4U;
   context->PauseState = pauseState;
   // The alternate gameplay HUD owner is not an open pause page. In
   // particular, riding must still relocate the native A/B geometry.
