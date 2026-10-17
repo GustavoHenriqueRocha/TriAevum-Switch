@@ -3,6 +3,7 @@
 #include "oot3d_host_audio_resampler.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -26,7 +27,7 @@ namespace Oot3dNativeGame {
 // last period (a seamless loop by construction) under a fade, so a late guest
 // frame is heard as a short held note instead of a hole in the output.
 //
-// With ratio 1 and nothing pending the input is copied unchanged.
+// With ratio 1 the input is copied unchanged, one period late.
 class HostAudioStretcher {
   public:
     static constexpr size_t MinimumPeriod = 64;   // ~511 Hz at 32728 Hz
@@ -39,6 +40,9 @@ class HostAudioStretcher {
         size_t ConcealFadeFrames = 2600;  // ~80 ms
         // Gain recovery after a concealment that faded.
         size_t RecoverFrames = 256;
+        // Frames always kept pending (~12 ms): the material a concealment
+        // loops. 0 makes ratio 1 a zero-latency copy.
+        size_t HoldbackFrames = MaximumPeriod;
     };
 
     HostAudioStretcher();
@@ -51,6 +55,8 @@ class HostAudioStretcher {
                  size_t concealFrames, std::vector<int16_t>& output);
 
     void Reset();
+    // Emits every pending frame unchanged (end of a stream; tests).
+    void Drain(std::vector<int16_t>& output);
 
     size_t PendingFrames() const { return mPending.size() / 2U; }
     bool Concealing() const { return mConcealedRun != 0; }
@@ -82,6 +88,7 @@ class HostAudioStretcher {
     std::vector<int16_t> mHistory;   // last emitted frames, before gain
     std::vector<int16_t> mScratch;
     double mCredit = 0.0;            // frames still to insert (+) or remove (-)
+    int mCreditDirection = 0;        // +1 inserting, -1 removing, 0 neither
     float mGain = 1.0F;
     float mGainStep = 0.0F;
     float mGainTarget = 1.0F;
@@ -115,6 +122,8 @@ class HostAudioStream {
         uint32_t PollMicroseconds = 4000;
         // Thread priority on the Switch (0 keeps the inherited one).
         int SwitchPriority = 0x2B;
+        // Wall clock in seconds (tests); empty = steady_clock.
+        std::function<double()> Clock;
     };
     struct Stats {
         uint64_t Pumps = 0;
@@ -126,6 +135,7 @@ class HostAudioStream {
         int32_t MinimumQueued = 0;       // since the last TakeWindowStats
         double MaximumPumpMilliseconds = 0.0;
         double PumpMilliseconds = 0.0;   // total
+        double GameSpeed = 1.0;          // smoothed DSP delivery / nominal
     };
 
     HostAudioStream(Options options, Sink sink);
@@ -151,6 +161,19 @@ class HostAudioStream {
   private:
     void WorkerMain();
     double StretchRatio(double level) const;
+    int32_t CriticalFrames() const;
+    double NowSeconds() const;
+    void UpdateSpeed(double now, size_t inputFrames);
+
+    // Queue levels, as fractions of Options::TargetFrames, outside which the
+    // stretcher acts (in between only the inaudible rate trim does).
+    static constexpr double kInsertBelowLevel = 0.3;
+    static constexpr double kRemoveAboveLevel = 2.6;
+    // Sustained slowdown: entered below this game speed, left above the
+    // other; while in it the tempo follows the speed under this queue level.
+    static constexpr double kSlowGameEnterSpeed = 0.93;
+    static constexpr double kSlowGameLeaveSpeed = 0.97;
+    static constexpr double kSlowGameHoldLevel = 0.75;
 
     Options mOptions;
     Sink mSink;
@@ -158,6 +181,10 @@ class HostAudioStream {
     HostAudioStretcher mStretcher;
     double mQueueEstimate = -1.0;
     bool mPrimed = false;
+    double mSpeedEstimate = 1.0;
+    double mSpeedWindowStart = -1.0;
+    uint64_t mSpeedWindowFrames = 0;
+    bool mSlowGame = false;
     std::vector<int16_t> mWork;
     std::vector<int16_t> mStretched;
     std::vector<int16_t> mResampled;
@@ -165,6 +192,15 @@ class HostAudioStream {
     mutable std::mutex mStatsMutex;
     Stats mStats;
     int32_t mWindowMinimumQueued = -1;
+    // Per perf window (reset by PerfSummary): device drain and input rates.
+    int32_t mLastQueuedAfter = -1;
+    uint64_t mWindowConsumedFrames = 0;
+    uint64_t mWindowInputFrames = 0;
+    double mWindowQueuedSum = 0.0;
+    uint64_t mWindowQueuedCount = 0;
+    bool mWindowStarted = false;
+    double mWindowStart = 0.0;  // NowSeconds()
+    double mRateAdjustment = 0.0;
 
     std::mutex mPumpMutex;   // held by Pump and Flush
     std::mutex mInputMutex;  // guards mInput and mStop

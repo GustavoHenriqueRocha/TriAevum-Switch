@@ -48,7 +48,13 @@ constexpr uint32_t kSwitchDefaultAudioSampleRate = 48000U;
 // such buffers and queues at most one per 5 ms renderer frame, so a buffer must
 // last well over 5 ms: the former 160 frames (4.9 ms at 32728 Hz) delivered
 // 32000 frames/s for a 32728 Hz voice and starved it continuously.
-constexpr uint32_t kSwitchAudioDeviceFrames = 512U;
+// SWITCHAUDIO_PlayDevice queues buffer i behind the playing one and polls, one
+// renderer frame at a time, until i plays: the thread then has one buffer
+// minus up to two 5 ms frames (polling and the renderer's lead) to queue the
+// next. 512 frames (10.7 ms) left ~1 ms; the console's host queue grew as if
+// the device drained 5-10% below 48 kHz, i.e. the voice ran dry between
+// buffers (heard as grain). 1024 frames (21.3 ms) leave ~11 ms.
+constexpr uint32_t kSwitchAudioDeviceFrames = 1024U;
 
 // config/audio_sample_rate: a number in Hz (8000-192000); absent or invalid
 // selects 48000. "32728" restores the former output at the DSP's own rate.
@@ -62,6 +68,18 @@ uint32_t ReadSwitchAudioSampleRate() {
     std::fprintf(stderr, "audio: ignoring invalid %s\n",
                  kSwitchAudioSampleRatePath);
     return kSwitchDefaultAudioSampleRate;
+  }
+  return static_cast<uint32_t>(value);
+}
+
+// config/audio_device_frames: frames per SDL device buffer (256-4096). The
+// audren backend keeps only two such buffers, so this is the slack the SDL
+// audio thread has before the voice runs dry.
+uint32_t ReadSwitchAudioDeviceFrames() {
+  std::ifstream input("sdmc:/switch/oot3dre/config/audio_device_frames");
+  long long value = 0;
+  if (!input || !(input >> value) || value < 256 || value > 4096) {
+    return kSwitchAudioDeviceFrames;
   }
   return static_cast<uint32_t>(value);
 }
@@ -786,7 +804,7 @@ void NativeA32WindowSession::Setup() {
       Oot3dNativeGame::NativeA32DspHle::SamplesPerFrame;
 #if defined(__SWITCH__)
   hostArgs.AudioSampleRate = ReadSwitchAudioSampleRate();
-  hostArgs.AudioSampleLength = kSwitchAudioDeviceFrames;
+  hostArgs.AudioSampleLength = ReadSwitchAudioDeviceFrames();
 #endif
   hostArgs.AudioDesiredBuffered = std::max<int32_t>(
       hostArgs.AudioDesiredBuffered,

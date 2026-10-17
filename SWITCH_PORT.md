@@ -125,11 +125,25 @@ Desempenho e usabilidade:
   Só as cópias de 2 × 64 KiB zeradas a cada quadro foram eliminadas (buffers persistentes).
 - O lado host (stretch, reamostragem 32728→48000, fila do SDL) roda numa thread própria
   (núcleo 1/2, prioridade 0x2B), acordada a cada envio do jogo e a cada 4 ms.
-- Com a fila abaixo de 70% do alvo, períodos de pitch inteiros são inseridos (tempo até 1,5× mais
-  lento, sem mudar o tom); acima de 180%, removidos. Se o jogo atrasa e a fila chega a ~32 ms, o
-  último período é repetido (40 ms em nível cheio, depois fade de 80 ms até silêncio) e a volta é
-  contínua, em vez da pausa de re-prime. `logs/perf.txt` ganha `audio: ... inserted_ms concealed_ms
-  conceal_events starved min_queued pump_ms_*`.
+- Em jogo normal o stream não edita nada: só o ajuste fino de taxa (±0,5%, inaudível) segura a fila
+  no alvo (100 ms). Períodos de pitch inteiros são inseridos só com a fila quase vazia (abaixo de
+  ~37 ms) ou numa lentidão sustentada medida (jogo abaixo de 93% da velocidade: o tempo acompanha a
+  velocidade, até 1,5×, sem mudar o tom); removidos só perto do teto de descarte do SDL (2,6× o alvo).
+  Se o jogo atrasa e a fila chega ao nível crítico, o último período é repetido (40 ms cheio, depois
+  fade de 80 ms) e a volta é contínua, sem a pausa de re-prime. Um período (~12 ms) fica sempre
+  pendente para isso.
+- 1ª versão (6c0012f) soou granulada: o crédito do stretch tinha sinal e uma inserção que passava
+  do pedido virava remoção logo em seguida (e vice-versa), editando o tempo todo (26 min no console:
+  153 s inseridos e 346 s removidos). A fila alta (min_queued=10396, alvo 4800) indica que o
+  dispositivo drenava abaixo de 48 kHz: o backend audren do SDL só tem 2 wave buffers e espera, em
+  quadros de 5 ms, o buffer recém-enfileirado começar a tocar; com 512 quadros (10,7 ms) sobrava
+  ~1 ms para enfileirar o próximo e a voz secava entre buffers (grão). A simulação com dreno 5% mais
+  lento reproduz os números do console. Buffer do dispositivo agora 1024 quadros
+  (`config/audio_device_frames`, 256–4096; `512` volta ao anterior).
+- `logs/perf.txt`, linha `audio:` (por janela de 150 quadros): `min_queued avg_queued device_hz`
+  (dreno real do dispositivo; deve dar ~48000) `input_hz` (entrega do jogo; ~32728 a 100%)
+  `trim_pct game_speed`, e acumulados `inserted_ms removed_ms concealed_ms conceal_events starved
+  pump_ms_*` (em ms de áudio do DSP).
 - A/B: `config/audio_thread` = `0` (mixagem host volta para a thread do jogo, stretch continua) e
   `config/audio_stretch` = `0`; ambos `0` = caminho antigo idêntico. Desktop: `TRIAEVUM_AUDIO_THREAD=1`,
   `TRIAEVUM_AUDIO_STRETCH=1`.

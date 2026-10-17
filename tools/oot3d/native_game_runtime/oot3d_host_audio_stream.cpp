@@ -89,6 +89,7 @@ HostAudioStretcher::HostAudioStretcher() : HostAudioStretcher(Settings{}) {}
 HostAudioStretcher::HostAudioStretcher(Settings settings) : mSettings(settings) {
     mSettings.RecoverFrames = std::max<size_t>(mSettings.RecoverFrames, 1U);
     mSettings.ConcealFadeFrames = std::max<size_t>(mSettings.ConcealFadeFrames, 1U);
+    mSettings.HoldbackFrames = std::min(mSettings.HoldbackFrames, MaximumPeriod * 2U);
 }
 
 size_t HostAudioStretcher::FindPeriod(const int16_t* stereo, size_t frames, bool anchorEnd) {
@@ -99,6 +100,7 @@ void HostAudioStretcher::Reset() {
     mPending.clear();
     mHistory.clear();
     mCredit = 0.0;
+    mCreditDirection = 0;
     mGain = 1.0F;
     mGainStep = 0.0F;
     mGainTarget = 1.0F;
@@ -216,6 +218,10 @@ void HostAudioStretcher::FlushPending(size_t keepFrames, std::vector<int16_t>& o
     mPending.erase(mPending.begin(), mPending.begin() + static_cast<std::ptrdiff_t>(emit * 2U));
 }
 
+void HostAudioStretcher::Drain(std::vector<int16_t>& output) {
+    FlushPending(0, output);
+}
+
 void HostAudioStretcher::FadeOutTail(size_t frames, std::vector<int16_t>& output) {
     // Nothing to loop (no pending period): ramp the last emitted frame down
     // instead of stepping to silence, then hold silence.
@@ -254,21 +260,38 @@ void HostAudioStretcher::Process(std::span<const int16_t> input, double ratio,
         }
         concealFrames = 0;
     }
-    if (!(ratio > 0.0) || ratio == 1.0) {
+    const bool slower = ratio > 1.0;
+    const bool faster = ratio > 0.0 && ratio < 1.0;
+    if (!slower && !faster) {
         mCredit = 0.0;
+        mCreditDirection = 0;
     } else {
+        // A period that overshoots the credit is repaid by waiting, never by
+        // the opposite edit: removal only runs while a faster tempo is asked
+        // and insertion only while a slower one is (the former code removed
+        // right after inserting and vice versa, editing continuously), and a
+        // change of direction starts from zero.
         constexpr double kMaximumCredit = static_cast<double>(MaximumPeriod) * 4.0;
+        const int direction = slower ? 1 : -1;
+        if (direction != mCreditDirection) {
+            mCredit = 0.0;
+            mCreditDirection = direction;
+        }
         mCredit = std::clamp(mCredit + static_cast<double>(inputFrames) * (ratio - 1.0),
                              -kMaximumCredit, kMaximumCredit);
     }
-    size_t holdback = 0;
-    if (ratio > 1.0 || concealFrames != 0) {
-        holdback = MaximumPeriod;
-    } else if (ratio < 1.0 && ratio > 0.0) {
-        holdback = MaximumPeriod * 2U;
+    // One period always stays pending: a late input can then be concealed by
+    // looping it seamlessly (an empty pending buffer left only a fade to
+    // silence, since what was already played cannot be crossfaded).
+    size_t holdback = mSettings.HoldbackFrames;
+    if (slower || concealFrames != 0) {
+        holdback = std::max(holdback, MaximumPeriod);
+    } else if (faster) {
+        holdback = std::max(holdback, MaximumPeriod * 2U);
     }
 
-    for (int operations = 0; operations < 4 && mCredit >= static_cast<double>(MinimumPeriod);
+    for (int operations = 0;
+         slower && operations < 4 && mCredit >= static_cast<double>(MinimumPeriod);
          ++operations) {
         const size_t period = InsertAtEnd(output);
         if (period == 0) {
@@ -276,7 +299,8 @@ void HostAudioStretcher::Process(std::span<const int16_t> input, double ratio,
         }
         mCredit -= static_cast<double>(period);
     }
-    for (int operations = 0; operations < 4 && mCredit <= -static_cast<double>(MinimumPeriod) &&
+    for (int operations = 0; faster && operations < 4 &&
+                             mCredit <= -static_cast<double>(MinimumPeriod) &&
                              PendingFrames() >= MaximumPeriod * 2U;
          ++operations) {
         const size_t period = RemoveAtStart(output);
@@ -367,20 +391,74 @@ void HostAudioStream::Flush() {
     }
     mQueueEstimate = -1.0;
     mPrimed = false;
+    mSpeedEstimate = 1.0;
+    mSpeedWindowStart = -1.0;
+    mSpeedWindowFrames = 0;
+    mSlowGame = false;
+    {
+        std::lock_guard<std::mutex> stats(mStatsMutex);
+        mLastQueuedAfter = -1;
+    }
     if (mSink.Flush) {
         mSink.Flush();
     }
 }
 
-double HostAudioStream::StretchRatio(double level) const {
-    // Inside [0.7, 1.8] of the target only the +/-0.5% rate trim acts. Below,
-    // whole periods are inserted (up to 1.5x duration at an empty queue);
-    // above, removed (down to 0.75x), pitch unchanged in both cases.
-    if (level < 0.7) {
-        return 1.0 + 0.5 * std::min(1.0, (0.7 - level) / 0.5);
+double HostAudioStream::NowSeconds() const {
+    if (mOptions.Clock) {
+        return mOptions.Clock();
     }
-    if (level > 1.8) {
-        return 1.0 - 0.25 * std::min(1.0, (level - 1.8) / 1.0);
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+void HostAudioStream::UpdateSpeed(double now, size_t inputFrames) {
+    // Game speed = DSP frames delivered per wall-clock second over the
+    // nominal rate, sampled every 0.25 s and smoothed over ~1.5 s, so the
+    // refresh bursts of normal play average out.
+    if (mSpeedWindowStart < 0.0) {
+        mSpeedWindowStart = now;
+        mSpeedWindowFrames = 0;
+    }
+    mSpeedWindowFrames += inputFrames;
+    const double elapsed = now - mSpeedWindowStart;
+    if (elapsed < 0.25) {
+        return;
+    }
+    const double sample = static_cast<double>(mSpeedWindowFrames) /
+                          (elapsed * static_cast<double>(mOptions.InputRate));
+    mSpeedEstimate += std::min(1.0, elapsed / 1.5) * (sample - mSpeedEstimate);
+    mSpeedWindowStart = now;
+    mSpeedWindowFrames = 0;
+    if (!mSlowGame && mSpeedEstimate < kSlowGameEnterSpeed) {
+        mSlowGame = true;
+    } else if (mSlowGame && mSpeedEstimate > kSlowGameLeaveSpeed) {
+        mSlowGame = false;
+    }
+}
+
+int32_t HostAudioStream::CriticalFrames() const {
+    // Below this the device is about to run dry: one device buffer (what the
+    // SDL thread pulls at once) plus a pump period of margin, or a fifth of
+    // the target.
+    return std::max(mOptions.DeviceFrames + 256, mOptions.TargetFrames / 5);
+}
+
+double HostAudioStream::StretchRatio(double level) const {
+    // Normal play never edits the stream: the +/-0.5% rate trim alone holds
+    // the queue at its target. Whole periods are inserted only when the queue
+    // is close to running dry (below 30% of the target, or 10% above the
+    // concealment level, up to 1.5x duration near that level), and
+    // removed only near the device queue's drop limit (above 2.6x the target,
+    // down to 0.85x), pitch unchanged in both cases.
+    const double target = static_cast<double>(mOptions.TargetFrames);
+    const double critical = static_cast<double>(CriticalFrames()) / target;
+    const double insertBelow = std::max(kInsertBelowLevel, critical + 0.1);
+    if (level < insertBelow) {
+        return 1.0 + 0.5 * std::min(1.0, (insertBelow - level) / (insertBelow - critical));
+    }
+    if (level > kRemoveAboveLevel) {
+        return 1.0 - 0.15 * std::min(1.0, (level - kRemoveAboveLevel) / 0.6);
     }
     return 1.0;
 }
@@ -405,10 +483,20 @@ void HostAudioStream::Pump() {
         starved = true;
     }
     const double level = static_cast<double>(queued) / target;
-    const double ratio = mOptions.Stretch && mPrimed ? StretchRatio(level) : 1.0;
+    UpdateSpeed(NowSeconds(), mWork.size() / 2U);
+    double ratio = 1.0;
+    if (mOptions.Stretch && mPrimed) {
+        ratio = StretchRatio(level);
+        if (mSlowGame && level < kSlowGameHoldLevel) {
+            // A sustained slowdown (heavy scene): match the tempo to the
+            // game's measured speed so the queue holds where it is, instead
+            // of draining into repeated concealments.
+            ratio = std::max(ratio, std::min(1.5, 1.0 / std::max(mSpeedEstimate, 0.01)));
+        }
+    }
     size_t concealFrames = 0;
     if (mOptions.Stretch && mPrimed && mWork.empty()) {
-        const int32_t critical = std::max(mOptions.DeviceFrames * 3, mOptions.TargetFrames / 4);
+        const int32_t critical = CriticalFrames();
         if (queued < critical) {
             const double needOutput =
                 static_cast<double>(critical + mOptions.DeviceFrames - queued);
@@ -439,14 +527,36 @@ void HostAudioStream::Pump() {
             mSink.Play(output->data(), output->size());
         }
     }
+    // What the device really took since the previous pump: the queue left
+    // then minus the queue now (frames the player dropped at its cap never
+    // counted). Over a window this is the device's actual drain rate.
+    const int32_t queuedAfter =
+        mStretched.empty() || !mSink.Buffered ? queued : std::max<int32_t>(mSink.Buffered(), 0);
+    const auto now = std::chrono::steady_clock::now();
     const double milliseconds =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        std::chrono::duration<double, std::milli>(now - start).count();
+    {
+        std::lock_guard<std::mutex> stats(mStatsMutex);
+        if (mLastQueuedAfter >= 0 && queued <= mLastQueuedAfter) {
+            mWindowConsumedFrames += static_cast<uint64_t>(mLastQueuedAfter - queued);
+        }
+        mLastQueuedAfter = queuedAfter;
+        mWindowInputFrames += mWork.size() / 2U;
+        mWindowQueuedSum += static_cast<double>(queued);
+        ++mWindowQueuedCount;
+        if (!mWindowStarted) {
+            mWindowStarted = true;
+            mWindowStart = NowSeconds();
+        }
+        mRateAdjustment = mResampler.has_value() ? mResampler->RateAdjustment() : 0.0;
+    }
     std::lock_guard<std::mutex> stats(mStatsMutex);
     ++mStats.Pumps;
     mStats.InsertedFrames = mStretcher.InsertedFrames();
     mStats.RemovedFrames = mStretcher.RemovedFrames();
     mStats.ConcealedFrames = mStretcher.ConcealedFrames();
     mStats.ConcealEvents = mStretcher.ConcealEvents();
+    mStats.GameSpeed = mSpeedEstimate;
     mStats.DeviceStarvations += starved ? 1U : 0U;
     mStats.PumpMilliseconds += milliseconds;
     mStats.MaximumPumpMilliseconds = std::max(mStats.MaximumPumpMilliseconds, milliseconds);
@@ -472,9 +582,35 @@ std::string HostAudioStream::PerfSummary() {
         mWindowMinimumQueued = -1;
     }
     const double inputMs = 1000.0 / static_cast<double>(std::max<uint32_t>(mOptions.InputRate, 1U));
+    double deviceHz = 0.0;
+    double inputHz = 0.0;
+    double averageQueued = 0.0;
+    double rateAdjustment = 0.0;
+    {
+        std::lock_guard<std::mutex> stats(mStatsMutex);
+        const double now = NowSeconds();
+        const double seconds = mWindowStarted ? now - mWindowStart : 0.0;
+        if (seconds > 0.0) {
+            deviceHz = static_cast<double>(mWindowConsumedFrames) / seconds;
+            inputHz = static_cast<double>(mWindowInputFrames) / seconds;
+        }
+        averageQueued = mWindowQueuedCount != 0
+                            ? mWindowQueuedSum / static_cast<double>(mWindowQueuedCount)
+                            : 0.0;
+        rateAdjustment = mRateAdjustment;
+        mWindowStart = now;
+        mWindowStarted = true;
+        mWindowConsumedFrames = 0;
+        mWindowInputFrames = 0;
+        mWindowQueuedSum = 0.0;
+        mWindowQueuedCount = 0;
+    }
     std::ostringstream text;
     text << "audio: thread=" << (mOptions.Thread ? 1 : 0) << " stretch=" << (mOptions.Stretch ? 1 : 0)
-         << " min_queued=" << copy.MinimumQueued << " inserted_ms=" << copy.InsertedFrames * inputMs
+         << " min_queued=" << copy.MinimumQueued << " avg_queued=" << static_cast<int64_t>(averageQueued)
+         << " device_hz=" << static_cast<int64_t>(deviceHz) << " input_hz=" << static_cast<int64_t>(inputHz)
+         << " trim_pct=" << rateAdjustment * 100.0 << " game_speed=" << copy.GameSpeed
+         << " inserted_ms=" << copy.InsertedFrames * inputMs
          << " removed_ms=" << copy.RemovedFrames * inputMs
          << " concealed_ms=" << copy.ConcealedFrames * inputMs << " conceal_events=" << copy.ConcealEvents
          << " starved=" << copy.DeviceStarvations << " pumps=" << copy.Pumps

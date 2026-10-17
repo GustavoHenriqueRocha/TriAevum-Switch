@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <random>
 #include <thread>
 #include <utility>
 #include <span>
@@ -236,6 +237,9 @@ void TestHostAudioStretcher() {
             const size_t count = std::min<size_t>(1090, tone.size() - offset);
             stretcher.Process(std::span<const int16_t>(tone).subspan(offset, count), 1.0, 0, output);
         }
+        Expect(output.size() + Oot3dNativeGame::HostAudioStretcher::MaximumPeriod * 2U == tone.size(),
+               "stretcher keeps one period pending");
+        stretcher.Drain(output);
         Expect(output == tone, "stretcher at ratio 1 is a plain copy");
     }
     {
@@ -252,7 +256,9 @@ void TestHostAudioStretcher() {
             const size_t count = std::min<size_t>(1090, tone.size() - offset);
             stretcher.Process(std::span<const int16_t>(tone).subspan(offset, count), ratio, 0, output);
         }
-        stretcher.Process({}, 1.0, 0, output);  // release what was held back
+        stretcher.Drain(output);  // release what was held back
+        Expect(ratio > 1.0 ? stretcher.RemovedFrames() == 0U : stretcher.InsertedFrames() == 0U,
+               "stretcher never edits against the requested direction");
         const double frames = static_cast<double>(output.size() / 2U);
         Expect(std::abs(frames / 32728.0 - ratio) < 0.03, "stretcher tempo ratio");
         Expect(MaximumStep(output) <= toneStep * 5 / 4 + 64, "stretcher splices without clicks");
@@ -289,6 +295,7 @@ void TestHostAudioStretcher() {
         const size_t resumedAt = output.size() / 2U;
         const auto second = MakeStereoTone(6000, 4000, kTone);
         stretcher.Process(second, 1.0, 0, output);
+        stretcher.Drain(output);
         Expect(!stretcher.Concealing(), "stretcher resumes with the input");
         Expect(MaximumStep(std::span<const int16_t>(output).subspan((resumedAt - 1U) * 2U)) <=
                    toneStep * 5 / 4 + 64,
@@ -297,75 +304,194 @@ void TestHostAudioStretcher() {
     }
 }
 
-// The host stream against a simulated device: a game frame that arrives late
-// is concealed instead of draining the device queue, and a game that runs
-// slower than real time is stretched instead of stuttering.
-void TestHostAudioStream() {
+// Session of the host stream against a simulated device (no resampling, so
+// 30 minutes run in about a second): the game delivers its DSP frames per
+// guest refresh, 60 a second, at most two refreshes per ~33 ms presentation
+// with jitter and a bounded refresh debt (as the presentation scheduler does);
+// the worker pumps on every delivery and every 4 ms; the device takes
+// 512-frame buffers in real time once it holds the prebuffer, re-primes on an
+// empty queue and drops at 16384 frames, like SDLAudioPlayer on the Switch.
+struct HostAudioSessionResult {
+    uint64_t DeviceShortTicks = 0;  // device buffers that found the queue short
+    uint64_t Reprimes = 0;
+    uint64_t CapDrops = 0;
+    Oot3dNativeGame::HostAudioStream::Stats Stats;
+};
+
+HostAudioSessionResult RunHostAudioSession(bool stretch, double minutes, double dropEverySeconds,
+                                           double dropSeconds, double slowSpeed,
+                                           double deviceRateFactor = 1.0) {
+    constexpr double kRate = 32728.0;
     struct Device {
         int64_t Queued = 0;
-        uint64_t EmptyTicks = 0;
-        bool Playing = false;
+        bool Prebuffering = true;
+        uint64_t Reprimes = 0;
+        uint64_t CapDrops = 0;
     };
-    const auto run = [](bool stretch, const std::vector<int>& lateTicks, double speed) {
-        auto device = std::make_shared<Device>();
-        Oot3dNativeGame::HostAudioStream::Options options;
-        options.Thread = false;
-        options.Stretch = stretch;
-        options.TargetFrames = 4800;
-        options.DeviceFrames = 512;
-        Oot3dNativeGame::HostAudioStream::Sink sink;
-        sink.Buffered = [device]() { return static_cast<int32_t>(device->Queued); };
-        sink.Play = [device](const int16_t*, size_t samples) {
+    auto device = std::make_shared<Device>();
+    auto clock = std::make_shared<double>(0.0);
+    Oot3dNativeGame::HostAudioStream::Options options;
+    options.InputRate = 32728;
+    options.OutputRate = 32728;
+    options.TargetFrames = 3273;  // 100 ms
+    options.DeviceFrames = 512;
+    options.Thread = false;
+    options.Stretch = stretch;
+    options.Clock = [clock]() { return *clock; };
+    Oot3dNativeGame::HostAudioStream::Sink sink;
+    sink.Buffered = [device]() { return static_cast<int32_t>(device->Queued); };
+    sink.Play = [device](const int16_t*, size_t samples) {
+        if (!device->Prebuffering && device->Queued == 0) {
+            ++device->Reprimes;
+            device->Prebuffering = true;
+        }
+        if (device->Queued < 16384) {
             device->Queued += static_cast<int64_t>(samples / 2U);
-            if (device->Queued >= 4800) {
-                device->Playing = true;
+        } else {
+            ++device->CapDrops;
+        }
+        if (device->Prebuffering && device->Queued >= 3273) {
+            device->Prebuffering = false;
+        }
+    };
+    sink.Flush = [device]() { device->Queued = 0; device->Prebuffering = true; };
+    Oot3dNativeGame::HostAudioStream stream(options, sink);
+
+    std::vector<int16_t> cycle;  // one period of a pitched wave
+    for (size_t frame = 0; frame < 149; ++frame) {
+        const double phase = 2.0 * 3.14159265358979323846 * static_cast<double>(frame) / 149.0;
+        const auto value = static_cast<int16_t>(std::lrint(9000.0 * (0.8 * std::sin(phase) +
+                                                                     0.2 * std::sin(3.0 * phase))));
+        cycle.push_back(value);
+        cycle.push_back(value);
+    }
+    uint64_t cyclePosition = 0;
+    std::mt19937 random(20261017U);
+    std::normal_distribution<double> jitter(0.0, 0.002);
+    std::uniform_real_distribution<double> uniform(0.0, 1.0);
+    HostAudioSessionResult result;
+    const double end = minutes * 60.0;
+    double nextPresent = 0.0333;
+    double nextPump = 0.004;
+    double nextDevice = 512.0 / (kRate * deviceRateFactor);
+    double lastPresent = 0.0;
+    double refreshPhase = 0.0;
+    double dspPhase = 0.0;
+    double slowUntil = -1.0;
+    std::vector<int16_t> input;
+    for (double now = 0.0; now < end;) {
+        now = std::min({nextPresent, nextPump, nextDevice});
+        *clock = now;
+        if (now == nextPresent) {
+            double interval = 0.0333 + jitter(random);
+            if (dropEverySeconds > 0.0 && uniform(random) < 0.0333 / dropEverySeconds) {
+                interval = dropSeconds;
             }
-        };
-        sink.Flush = [device]() { device->Queued = 0; device->Playing = false; };
-        Oot3dNativeGame::HostAudioStream stream(options, sink);
-        // 4 ms ticks: the device plays 192 frames per tick once primed; the
-        // game delivers 160-frame DSP frames at `speed` of real time, except
-        // during the late ticks.
-        double owed = 0.0;
-        size_t frame = 0;
-        for (int tick = 0; tick < 2500; ++tick) {
-            const bool late = std::find(lateTicks.begin(), lateTicks.end(), tick) != lateTicks.end();
-            owed += 32728.0 * 0.004 * (tick < 250 ? 1.0 : speed);
-            std::vector<int16_t> input;
-            while (!late && owed >= 160.0) {
-                const auto chunk = MakeStereoTone(frame, 160, 330.0);
-                input.insert(input.end(), chunk.begin(), chunk.end());
-                frame += 160;
-                owed -= 160.0;
+            if (slowSpeed < 1.0) {
+                if (now > slowUntil && uniform(random) < 0.0333 / 30.0) {
+                    slowUntil = now + 8.0;  // an 8 s heavy scene every ~30 s
+                }
+                if (now < slowUntil) {
+                    interval = 0.0333 / slowSpeed + jitter(random);
+                }
+            }
+            refreshPhase += (now - lastPresent) * 60.0;
+            lastPresent = now;
+            const int due = static_cast<int>(std::floor(refreshPhase + 1e-9));
+            const int run = std::min(due, 2);
+            refreshPhase = std::min(refreshPhase - run, 8.0);
+            input.clear();
+            for (int refresh = 0; refresh < run; ++refresh) {
+                dspPhase += 32728.498 / 160.0 / 60.0;
+                const auto frames = static_cast<size_t>(std::floor(dspPhase));
+                dspPhase -= static_cast<double>(frames);
+                for (size_t frame = 0; frame < frames * 160U; ++frame) {
+                    input.push_back(cycle[(cyclePosition % 149U) * 2U]);
+                    input.push_back(cycle[(cyclePosition % 149U) * 2U + 1U]);
+                    ++cyclePosition;
+                }
             }
             if (!input.empty()) {
                 stream.Submit(input);
-            } else {
-                stream.Pump();
             }
-            if (device->Playing) {
-                if (device->Queued < 192) {
-                    ++device->EmptyTicks;  // the device ran out within the tick
+            nextPresent += interval;
+        } else if (now == nextPump) {
+            stream.Pump();
+            nextPump += 0.004;
+        } else {
+            nextDevice += 512.0 / (kRate * deviceRateFactor);
+            if (!device->Prebuffering) {
+                if (device->Queued < 512) {
+                    ++result.DeviceShortTicks;
                 }
-                device->Queued = std::max<int64_t>(0, device->Queued - 192);
+                device->Queued = std::max<int64_t>(0, device->Queued - 512);
             }
         }
-        return std::make_pair(device->EmptyTicks, stream.GetStats());
-    };
-    std::vector<int> stall;
-    for (int tick = 800; tick < 830; ++tick) {
-        stall.push_back(tick);  // 120 ms without a guest frame
     }
-    const auto [plainStall, plainStallStats] = run(false, stall, 1.0);
-    const auto [stretchStall, stretchStallStats] = run(true, stall, 1.0);
-    Expect(plainStall > 0, "a 120 ms stall drains the plain queue");
-    Expect(stretchStall == 0 && stretchStallStats.ConcealEvents >= 1U,
-           "a 120 ms stall is concealed");
-    const auto [plainSlow, plainSlowStats] = run(false, {}, 0.8);
-    const auto [stretchSlow, stretchSlowStats] = run(true, {}, 0.8);
-    Expect(plainSlow > 0, "80% game speed drains the plain queue");
-    Expect(stretchSlow == 0 && stretchSlowStats.InsertedFrames > 0U,
-           "80% game speed is stretched");
+    result.Reprimes = device->Reprimes;
+    result.CapDrops = device->CapDrops;
+    result.Stats = stream.GetStats();
+    return result;
+}
+
+// The host stream: no editing at all in normal play, concealment only for a
+// game that is really late, tempo matched in a sustained slowdown, and the
+// worker thread itself.
+void TestHostAudioStream() {
+    const double msPerFrame = 1000.0 / 32728.0;
+    {
+        // 30 minutes at full speed with presentation jitter: the rate trim
+        // alone holds the queue; the stretcher must stay (practically) idle.
+        const auto session = RunHostAudioSession(true, 30.0, 0.0, 0.0, 1.0);
+        const double editedMs =
+            static_cast<double>(session.Stats.InsertedFrames + session.Stats.RemovedFrames) * msPerFrame;
+        std::cout << "host audio 30 min at 100%: edited " << editedMs << " ms, concealed "
+                  << session.Stats.ConcealedFrames * msPerFrame << " ms, short device buffers "
+                  << session.DeviceShortTicks << "\n";
+        Expect(editedMs < 500.0, "no stretching in normal play (30 min)");
+        Expect(session.Stats.RemovedFrames == 0U, "no period removal in normal play");
+        Expect(session.Stats.ConcealEvents == 0U && session.DeviceShortTicks == 0U,
+               "no concealment or device starvation in normal play");
+    }
+    {
+        // Short real drops (200 ms late frames every ~10 s): concealed, the
+        // device never re-primes, and little else is edited.
+        const auto plain = RunHostAudioSession(false, 10.0, 10.0, 0.2, 1.0);
+        const auto session = RunHostAudioSession(true, 10.0, 10.0, 0.2, 1.0);
+        const double editedMs = static_cast<double>(session.Stats.InsertedFrames +
+                                                    session.Stats.RemovedFrames) * msPerFrame;
+        std::cout << "host audio 10 min with 200 ms drops: re-primes " << plain.Reprimes << " -> "
+                  << session.Reprimes << ", concealed " << session.Stats.ConcealedFrames * msPerFrame
+                  << " ms in " << session.Stats.ConcealEvents << " events, edited " << editedMs
+                  << " ms\n";
+        Expect(plain.Reprimes > 0U, "the plain stream re-primes on 200 ms drops");
+        Expect(session.Reprimes == 0U, "drops are concealed instead of re-priming");
+        Expect(session.Stats.ConcealEvents > 0U, "late frames are concealed");
+        Expect(editedMs < 0.01 * 600000.0, "short drops edit under 1% of the time");
+        Expect(session.Stats.RemovedFrames == 0U, "short drops never remove periods");
+    }
+    {
+        // Heavy scenes at 72% speed: the tempo follows the game instead of
+        // concealing over and over.
+        const auto plain = RunHostAudioSession(false, 10.0, 0.0, 0.0, 0.72);
+        const auto session = RunHostAudioSession(true, 10.0, 0.0, 0.0, 0.72);
+        std::cout << "host audio 10 min with 72% scenes: re-primes " << plain.Reprimes << " -> "
+                  << session.Reprimes << ", concealment events " << session.Stats.ConcealEvents
+                  << ", inserted " << session.Stats.InsertedFrames * msPerFrame << " ms\n";
+        Expect(plain.Reprimes > 0U, "72% scenes drain the plain stream");
+        Expect(session.Reprimes == 0U, "72% scenes never re-prime");
+        Expect(session.Stats.ConcealEvents < plain.Reprimes, "72% scenes are stretched rather than concealed");
+    }
+    {
+        // A device draining 5% slow (the console's symptom): the removal near
+        // the drop limit acts, insertion never, and the player never drops.
+        const auto session = RunHostAudioSession(true, 10.0, 0.0, 0.0, 1.0, 0.95);
+        std::cout << "host audio 10 min, device 5% slow: removed "
+                  << session.Stats.RemovedFrames * msPerFrame << " ms, cap drops " << session.CapDrops
+                  << "\n";
+        Expect(session.Stats.InsertedFrames == 0U, "a slow device is never answered by insertion");
+        Expect(session.CapDrops == 0U, "a slow device never reaches the player's drop limit");
+    }
     {
         // Worker thread: submissions reach the device, Flush clears it.
         auto queued = std::make_shared<std::atomic<int64_t>>(0);
@@ -389,10 +515,6 @@ void TestHostAudioStream() {
         stream.Flush();
         Expect(queued->load() == 0 && flushed->load() == 1, "audio worker flush");
     }
-    std::cout << "host audio stream: stall empty ticks " << plainStall << " -> " << stretchStall
-              << ", 80% speed " << plainSlow << " -> " << stretchSlow << " (inserted "
-              << stretchSlowStats.InsertedFrames << ", concealed " << stretchSlowStats.ConcealedFrames
-              << ")\n";
 }
 
 } // namespace
