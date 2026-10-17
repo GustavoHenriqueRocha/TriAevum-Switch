@@ -164,6 +164,43 @@ Desempenho e usabilidade:
   contra 13–45 dB do linear; aliasing −81/−84 dB contra −4/0 dB. Custo estimado no Switch
   (llvm-mca A57 do laço NEON): ~+0,3 ms por passo com 24 vozes sempre ativas, metade aceleradas.
 
+### Mixagem do DSP mais barata, bit a bit igual (2026-10-17)
+- A mixagem (`dsp_mix` no `perf.txt`) continua na thread do jogo; ficou mais barata sem mudar nenhum
+  byte do que o guest vê nem do PCM (modo de interpolação `original`). Onde ia o tempo (cena
+  OoT3D-like: 18 vozes, música sequenciada em loops ADPCM, stream PCM16, efeitos, reverb no aux 0):
+  ~1/3 decodificação ADPCM (o buffer inteiro a cada volta de loop, com alocação + zeragem), ~1/4
+  interpolação linear, ~1/4 `MixInto` (3 mixes por voz, mesmo com ganho zero), o resto cópias das
+  regiões compartilhadas (4 × 32 KiB por quadro), mixers e saída.
+- O que mudou:
+  1. `DecodedSampleQueue` reaproveita o armazenamento (sem `new`/zeragem/`free` por buffer) e
+     lembra qual decodificação ADPCM guarda: um loop que volta com o mesmo endereço, tamanho,
+     coeficientes, estado inicial do preditor e bytes codificados idênticos (`memcmp`) reusa as
+     amostras e o estado final, que são exatamente o que a decodificação daria. Só host, não vai
+     no savestate; buffers > 64 KiB codificados não são lembrados.
+  2. ADPCM: quadro de 14 amostras sem o clamp no caminho realimentado (multiply-add + shift, ~5
+     ciclos/amostra no A57 contra ~9); se algum valor sai de s16 o quadro é refeito pelo código
+     original. Uma escrita de 32 bits por amostra (os dois canais).
+  3. Interpolação None/Linear (`original`): o número de saídas cujo índice lê direto do buffer é
+     calculado antes; o laço não testa índice virtual por saída. No AArch64 o Linear usa NEON nos
+     dois canais (subtração saturada = o clamp, produto exato de 64 bits, shift 24): ~6,6 contra
+     ~14,6 ciclos por saída (llvm-mca A57). Passos absurdos (rate > 65536) usam o laço original.
+  4. Mix com os 4 ganhos zero é pulado em `MixInto` e nos mixers (somar zero não muda nada).
+  5. Saída copiada por `memcpy` (final_samples e PCM do host); só a cauda não gerada do quadro da
+     fonte é zerada.
+- Medido no host (i3-8130U, -O3 -ffast-math): 0,0506 → 0,0288 ms por quadro DSP (−43%).
+  Estimado no A57 a 1785 MHz (llvm-mca por laço × contagens da cena): ~0,6 → ~0,33 ms por passo.
+  As cópias de 4 × 32 KiB por quadro ficam (`Read`/`Write` precisam dos mesmos intervalos para a
+  contabilidade de gerações de escrita) e passam a ser ~1/4 do custo.
+- Prova: `oot3d_native_audio_dsp_mix_tests` roda 4 títulos aleatórios × 3000 quadros pelo
+  `ProcessFrame` inteiro (24 fontes, todos os formatos, loops, resets, filtros, ganhos extremos e
+  denormais, aux com efeito do guest, formatos de saída, sample data reescrita durante o loop,
+  rates absurdos, savestate a cada ~150 quadros com msgpack no digest) e compara o digest das duas
+  regiões após cada quadro + PCM + savestates com o do código antigo: idêntico no x86-64 e no
+  AArch64 com as flags do Switch sob qemu (`run_audio_dsp_mix_tests_qemu.sh`, devkitA64 16.1).
+  `oot3d_native_audio_interpolation_tests` (digest original) e os testes de armazenamento passam.
+  Observação: o padding de `DspStatus` é copiado de uma variável não inicializada desde o
+  original (lixo de pilha); o teste ignora esses 28 bytes e o código não foi mudado aí.
+
 ### Planejamento PICA fora da thread do jogo (2026-10-17)
 - O plano de cada draw (shaders, uniforms, bindings, hashes de textura; `pica_plan`, ~2,5 ms por
   passo) era montado na thread do jogo ao drenar a fila. Agora a thread do jogo põe no acumulador só
