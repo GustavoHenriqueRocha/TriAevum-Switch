@@ -458,7 +458,10 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
                     "-fprofile-use=${OOT3D_WHOLE_AOT_PROFILE_FILE}"
                     "-fprofile-prefix-path=${CMAKE_BINARY_DIR}"
                     -fprofile-partial-training
-                    -Wno-missing-profile)
+                    -Wno-missing-profile
+                    # A function whose CFG changed since the collection run
+                    # (edited runtime header) just loses its profile.
+                    -Wno-error=coverage-mismatch)
             endif()
         elseif (OOT3D_WHOLE_AOT_PROFILE_MODE STREQUAL "generate")
             target_compile_options(oot3d_native_whole_aot PRIVATE
