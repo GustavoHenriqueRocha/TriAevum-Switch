@@ -401,18 +401,21 @@ bool NativeA32WindowSession::RunFrame() {
   const bool cadenceThirty =
       cadencePlanning && cadenceLockedThirty.load(std::memory_order_relaxed);
   const Oot3dNativeGame::NativePresentationScheduler::RefreshPlanner
-      refreshPlanner = !cadencePlanning ? nullptr
-                       : cadenceThirty
-                           ? &Oot3dNativeGame::PlanThirtyRefreshes
-                           : &Oot3dNativeGame::PlanSixtyRefreshes;
+      refreshPlanner = nullptr;
+  // PlanSixtyRefreshes (debt instead of a two-refresh frame) slowed the game
+  // in the simulation of integ4 (52 of 60 refreshes/s): not used until it
+  // keeps the game speed. The scheduler plans as legacy in every mode.
+  (void)cadenceThirty;
   const auto presentationStateBeforeFrame = presentationScheduler.CaptureState();
   const auto presentationStep = presentationScheduler.AdvancePlanned(
       presentationElapsedSeconds, refreshPlanner);
   const uint32_t guestRefreshesDue = presentationStep.GuestRefreshesDue;
   previousHostFrameCost.Refreshes = guestRefreshesDue;
-  // A step of the locked 30 is presented two refreshes after the previous
-  // picture.
-  const bool cadenceThirtyPair = cadenceThirty && guestRefreshesDue == 2U;
+  // The locked 30 keeps the 60 Hz host loop (in-between frames dropped).
+  // Running both refreshes of a step in one host frame (PlanThirtyRefreshes)
+  // serialised the game thread and the GPU on the console (integ4: 8.7% of
+  // pictures held 3 refreshes while locked) and is no longer used.
+  const bool cadenceThirtyPair = false;
   const float visualInterpolationAlpha = static_cast<float>(
       std::clamp(presentationStep.InterpolationAlpha, 0.0, 1.0));
   ApplyTopScreenConfigSnapshot();

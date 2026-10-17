@@ -65,7 +65,9 @@ inline constexpr std::string_view Fps60ModeName(Fps60Mode mode) noexcept {
 }
 
 struct Fps60ModeConfig {
-  Fps60Mode Mode = Fps60Mode::Adaptive;
+  // Default legacy until a console session proves adaptive better
+  // (integ4, 2026-10-17: the first adaptive locked 30 83% of the time).
+  Fps60Mode Mode = Fps60Mode::Legacy;
   // Lock at 30 after LockMisses presents of 2+ refreshes (a refresh with no
   // new picture) among the last MissWindow new pictures at 60.
   uint32_t LockMisses = 3U;
@@ -76,8 +78,13 @@ struct Fps60ModeConfig {
   double MaxHoldSeconds = 16.0;
   double RelapseSeconds = 10.0;
   // Headroom to return to 60, fractions of the pair budget (2 refreshes).
-  double GameMargin = 0.90;
+  double GameMargin = 0.92;
   double GpuMargin = 0.90;
+  // Lock only when 60 cannot hold anyway: the mean game-thread pair or the
+  // GPU pair estimate above LockFraction of the pair budget. 1.15 (38 ms):
+  // with the 60 Hz host loop a locked 30 was no more regular than legacy in
+  // the simulation of integ4, so it is kept for real overload only.
+  double LockFraction = 1.15;
 };
 
 // "adaptive", "strict60", "legacy" (case-insensitive), then optional
@@ -143,6 +150,8 @@ ParseFps60Mode(std::string_view text) noexcept {
       first = false;
       if (equals(token, "strict60") || equals(token, "strict"))
         config.Mode = Fps60Mode::Strict60;
+      else if (equals(token, "adaptive"))
+        config.Mode = Fps60Mode::Adaptive;
       else if (equals(token, "legacy"))
         config.Mode = Fps60Mode::Legacy;
       continue;
@@ -168,6 +177,8 @@ ParseFps60Mode(std::string_view text) noexcept {
       config.GameMargin = value;
     else if (equals(key, "gpu") && value > 0.0 && value <= 2.0)
       config.GpuMargin = value;
+    else if (equals(key, "lock") && value > 0.0 && value <= 2.0)
+      config.LockFraction = value;
   }
   config.LockMisses = std::min(config.LockMisses, config.MissWindow);
   config.MaxHoldSeconds = std::max(config.MaxHoldSeconds, config.MinHoldSeconds);
@@ -355,6 +366,16 @@ public:
     ++mStats.GamePairs;
   }
 
+  // Mean of the recent game-thread step pairs (0: none yet).
+  [[nodiscard]] double GamePairMeanMs() const noexcept {
+    if (mGameCount == 0U)
+      return 0.0;
+    double sum = 0.0;
+    for (size_t index = 0U; index < mGameCount; ++index)
+      sum += mGameRing[index];
+    return sum / static_cast<double>(mGameCount);
+  }
+
   // 90th percentile of the recent game-thread step pairs (0: none yet).
   [[nodiscard]] double GamePairP90Ms() const noexcept {
     if (mGameCount == 0U)
@@ -431,7 +452,14 @@ public:
       mMissRing[mMissIndex] = late;
       mMissIndex = (mMissIndex + 1U) % mConfig.MissWindow;
       mMissCount = mMissCount - (old ? 1U : 0U) + (late ? 1U : 0U);
-      if (mMissCount >= mConfig.LockMisses)
+      // Misses alone are not enough (integ4: a game pair of ~30.6 ms of
+      // 33.3 missed often but kept ~54 FPS in legacy; locked it gave 38):
+      // 60 must be out of reach on average too.
+      const double budget = 2.0 * mRefreshMs;
+      const bool overloaded =
+          GamePairMeanMs() > mConfig.LockFraction * budget ||
+          gpuPairMs > mConfig.LockFraction * budget;
+      if (mMissCount >= mConfig.LockMisses && overloaded)
         EnterThirty(nowSeconds);
       return;
     }
@@ -440,7 +468,7 @@ public:
     const double pairBudget = 2.0 * mRefreshMs;
     const bool held = nowSeconds - mThirtySince >= mHoldSeconds;
     const bool calm = nowSeconds - mLastLate >= mConfig.MinHoldSeconds;
-    const double game = GamePairP90Ms();
+    const double game = GamePairMeanMs();
     const bool gameFits = game > 0.0 && game <= mConfig.GameMargin * pairBudget;
     const bool gpuFits = gpuPairMs <= mConfig.GpuMargin * pairBudget;
     if (held && calm && gameFits && gpuFits)

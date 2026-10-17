@@ -736,7 +736,7 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
   3. fica em 30 pelo menos 2 s (dobra até 16 s se 60 falhar de novo em menos de 10 s) e só volta com
      folga comprovada: par da thread do jogo p90 ≤ 90% de 33,3 ms, par de GPU/render estimado ≤ 90% e
      nenhum passo atrasado nos últimos 2 s.
-- **A/B** (`config/fps60_mode`, desktop `TRIAEVUM_FPS60_MODE`): `adaptive` (padrão), `strict60` (todo
+- **A/B** (`config/fps60_mode`, desktop `TRIAEVUM_FPS60_MODE`): `legacy` (padrão, ver abaixo), `adaptive`, `strict60` (todo
   intermediário desenhado, laço de antes; = `interp_pacing=0`, que sem o arquivo novo vira `strict60`),
   `legacy` (exatamente o comportamento anterior). Opções depois do modo: `adaptive misses=3 window=60
   hold=2 max_hold=16 relapse=10 game=0.9 gpu=0.9`.
@@ -765,6 +765,19 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
 - O que olhar no console: `cadence_switches` e `hold_3` por janela (devem cair a ~0 nos trechos
   pesados), `lock`/`lock30_ms`, `game_pair_p90_ms` (perto de 30 = o jogo é o limite; abaixo de 28 com
   `lock=30` = a GPU é o limite) e `guest_fps` ~60 (velocidade do jogo).
+
+- **Resultado no console (integ4, CPU 1785) e correção**: o 1º `adaptive` ficou travado em 30 83,7%
+  do tempo (18 trocas), FPS 53,7 → 38,5, e mesmo travado não era regular (hold 1/2/3 =
+  28/63/8,7%, 983 passos atrasados). A lógica não piorou (12,25 contra 11,9 ms/passo); o par do jogo
+  (30,6 ms) ficava acima do limiar de volta (30) e nunca destravava, e o laço de 30 (dois refreshes por
+  quadro de host) serializava a thread do jogo e a GPU. Simulando com os números da integ4, o 30 travado
+  com o laço de 60 também não fica mais regular que o legacy, e a dívida a 60 (`PlanSixtyRefreshes`)
+  atrasava o jogo (52 de 60 refreshes/s). Agora: **padrão `legacy`**; `adaptive` não usa mais o laço de
+  30 nem a dívida (o agendador planeja como legacy em todo modo), não descarta intermediários um a um e
+  só trava em 30 com sobrecarga real (par do jogo médio ou par de GPU > 1,15 × 33,3 ms, opção `lock=`);
+  volta com par médio ≤ 92%. Na prática, hoje `adaptive` ≈ `strict60`. Os contadores `cadence:` ficam.
+  Defeito "texturas pulam e voltam": não reproduzido; candidatos eram as 18 trocas de trava e os quadros
+  de host com dois refreshes ou com zero (repetição) do laço de 30, que deixaram de existir.
 
 ### Estado em 2026-10-17 (melhor versão até agora)
 - PGO (2ª coleta) + modo enxuto + planos PICA no núcleo 1 + render thread no núcleo 2 + áudio em thread própria.

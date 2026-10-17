@@ -61,11 +61,11 @@ struct Params {
   double SwapLatencyMs = 0.3;
   // Locked 30 (adaptive): the game thread runs both refreshes of a step in
   // one host frame and the pacer waits two periods (PlanThirtyRefreshes).
-  bool ThirtyHostLoop = true;
+  bool ThirtyHostLoop = false; // console integ4: worse, not used
   // At 60 (adaptive/strict60): a late host frame does not run two
   // refreshes (which starts the irregular 30 Hz loop); one refresh of debt
   // is carried instead.
-  bool SixtyNoBatch = true;
+  bool SixtyNoBatch = false; // slowed the game near the limit (integ4)
   // Locked 30: a late step rebases the 30 Hz deadline (no catch-up).
   bool ThirtyResyncWhenLate = true;
   // Swap: 0 = returns at the vblank that shows the picture; 1 = one picture
@@ -176,7 +176,7 @@ struct Result {
                                 cadence.DropsInBetween() &&
                                 params.ThirtyHostLoop;
     const bool noBatch = mode == Fps60Mode::Adaptive && params.SixtyNoBatch &&
-                         !adaptiveThirty;
+                         !cadence.DropsInBetween();
     if (started) {
       NativeCadenceRefreshPlan plan;
       plan.Elapsed = elapsed / P;

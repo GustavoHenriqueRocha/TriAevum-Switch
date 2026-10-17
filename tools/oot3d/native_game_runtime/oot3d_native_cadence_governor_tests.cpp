@@ -34,12 +34,18 @@ void Check(bool condition, const char *what, int line) {
 
 constexpr double kRefreshMs = 1000.0 / 60.0;
 
+Fps60ModeConfig AdaptiveConfig() {
+  Fps60ModeConfig config;
+  config.Mode = Fps60Mode::Adaptive;
+  return config;
+}
+
 void TestParseMode() {
-  CHECK(ParseFps60Mode("").Mode == Fps60Mode::Adaptive);
+  CHECK(ParseFps60Mode("").Mode == Fps60Mode::Legacy);
   CHECK(ParseFps60Mode("adaptive\n").Mode == Fps60Mode::Adaptive);
   CHECK(ParseFps60Mode("STRICT60").Mode == Fps60Mode::Strict60);
   CHECK(ParseFps60Mode("legacy\r\n").Mode == Fps60Mode::Legacy);
-  CHECK(ParseFps60Mode("bogus").Mode == Fps60Mode::Adaptive);
+  CHECK(ParseFps60Mode("bogus").Mode == Fps60Mode::Legacy);
   const auto options =
       ParseFps60Mode("adaptive misses=5 window=90 hold=3 max_hold=20 game=0,8 "
                      "gpu=0.95 relapse=12");
@@ -57,7 +63,7 @@ void TestParseMode() {
   CHECK(clamped.LockMisses <= clamped.MissWindow);
   // Options without a mode: adaptive.
   CHECK(ParseFps60Mode("misses=4").LockMisses == 4U);
-  CHECK(ParseFps60Mode("misses=4").Mode == Fps60Mode::Adaptive);
+  CHECK(ParseFps60Mode("misses=4").Mode == Fps60Mode::Legacy);
 }
 
 void TestRefreshPlans() {
@@ -166,7 +172,7 @@ void TestHoldCounters() {
 
 void TestLocksThirtyOnRepeatedMisses() {
   NativeCadenceGovernor governor;
-  governor.Configure(Fps60ModeConfig{}, kRefreshMs);
+  governor.Configure(AdaptiveConfig(), kRefreshMs);
   CHECK(!governor.PerFrameDropAllowed());
   Presenter presenter{governor};
   presenter.Present(PresentedPicture::Step, 1);
@@ -176,6 +182,7 @@ void TestLocksThirtyOnRepeatedMisses() {
     presenter.Present(PresentedPicture::Step, 1);
   }
   CHECK(governor.Cadence() == PresentCadence::Sixty);
+  FeedGamePairs(governor, 40.0, 64);
   // Two misses in a second: stays.
   presenter.Present(PresentedPicture::Step, 2);
   for (int pair = 0; pair < 10; ++pair) {
@@ -192,9 +199,22 @@ void TestLocksThirtyOnRepeatedMisses() {
   CHECK(governor.Stats().LockChanges == 1U);
 }
 
+void TestMissesWithoutOverloadDoNotLock() {
+  // integ4: a game pair of 30.6 ms of 33.3 misses often, but legacy kept
+  // ~54 FPS; locking gave 38.
+  NativeCadenceGovernor governor;
+  governor.Configure(AdaptiveConfig(), kRefreshMs);
+  Presenter presenter{governor};
+  presenter.Present(PresentedPicture::Step, 1);
+  FeedGamePairs(governor, 30.6, 64);
+  for (int miss = 0; miss < 20; ++miss)
+    presenter.Present(PresentedPicture::Step, 2);
+  CHECK(governor.Cadence() == PresentCadence::Sixty);
+}
+
 void TestMissesSpreadOutDoNotLock() {
   NativeCadenceGovernor governor;
-  governor.Configure(Fps60ModeConfig{}, kRefreshMs);
+  governor.Configure(AdaptiveConfig(), kRefreshMs);
   Presenter presenter{governor};
   presenter.Present(PresentedPicture::Step, 1);
   // One miss every 40 pictures: never three among 60.
@@ -208,20 +228,24 @@ void TestMissesSpreadOutDoNotLock() {
   CHECK(governor.Cadence() == PresentCadence::Sixty);
 }
 
-void LockNow(Presenter &presenter) {
+// Locks: misses while the game thread cannot hold 60 (pair of 35 ms), then
+// a light game thread (20 ms) for the way back.
+void LockNow(NativeCadenceGovernor &governor, Presenter &presenter) {
+  FeedGamePairs(governor, 40.0, 64);
   for (int miss = 0; miss < 3; ++miss)
     presenter.Present(PresentedPicture::Step, 2);
+  FeedGamePairs(governor, 20.0, 64);
 }
 
 void TestReturnsOnlyWithProvenHeadroom() {
   NativeCadenceGovernor governor;
-  governor.Configure(Fps60ModeConfig{}, kRefreshMs);
+  governor.Configure(AdaptiveConfig(), kRefreshMs);
   Presenter presenter{governor};
   presenter.Present(PresentedPicture::Step, 1);
-  LockNow(presenter);
+  LockNow(governor, presenter);
   CHECK(governor.Cadence() == PresentCadence::Thirty);
-  // Heavy game thread (31 ms per pair): stays at 30 however long.
-  FeedGamePairs(governor, 31.0, 64);
+  // Heavy game thread (32 ms per pair): stays at 30 however long.
+  FeedGamePairs(governor, 32.0, 64);
   for (int step = 0; step < 600; ++step)
     presenter.Present(PresentedPicture::Step, 2, 20.0);
   CHECK(governor.Cadence() == PresentCadence::Thirty);
@@ -238,11 +262,11 @@ void TestReturnsOnlyWithProvenHeadroom() {
 
 void TestHoldAndLateSteps() {
   NativeCadenceGovernor governor;
-  governor.Configure(Fps60ModeConfig{}, kRefreshMs);
+  governor.Configure(AdaptiveConfig(), kRefreshMs);
   Presenter presenter{governor};
   presenter.Present(PresentedPicture::Step, 1);
   FeedGamePairs(governor, 20.0, 64);
-  LockNow(presenter);
+  LockNow(governor, presenter);
   // Within the 2 s hold: stays although everything fits.
   for (int step = 0; step < 50; ++step) // 1.67 s
     presenter.Present(PresentedPicture::Step, 2, 20.0);
@@ -264,13 +288,13 @@ void TestHoldAndLateSteps() {
 
 void TestRelapseDoublesTheHold() {
   NativeCadenceGovernor governor;
-  governor.Configure(Fps60ModeConfig{}, kRefreshMs);
+  governor.Configure(AdaptiveConfig(), kRefreshMs);
   Presenter presenter{governor};
   presenter.Present(PresentedPicture::Step, 1);
   FeedGamePairs(governor, 20.0, 64);
   double expected = 2.0;
   for (int relapse = 0; relapse < 6; ++relapse) {
-    LockNow(presenter);
+    LockNow(governor, presenter);
     CHECK(governor.Cadence() == PresentCadence::Thirty);
     CHECK(std::abs(governor.HoldSeconds() - expected) < 1.0e-9);
     while (governor.Cadence() == PresentCadence::Thirty)
@@ -282,7 +306,7 @@ void TestRelapseDoublesTheHold() {
     presenter.Present(picture % 2 ? PresentedPicture::Step
                                   : PresentedPicture::InBetween,
                       1);
-  LockNow(presenter);
+  LockNow(governor, presenter);
   CHECK(std::abs(governor.HoldSeconds() - 2.0) < 1.0e-9);
 }
 
@@ -303,7 +327,7 @@ void TestStrictAndLegacyNeverLock() {
 
 void TestGamePairEstimate() {
   NativeCadenceGovernor governor;
-  governor.Configure(Fps60ModeConfig{}, kRefreshMs);
+  governor.Configure(AdaptiveConfig(), kRefreshMs);
   CHECK(governor.GamePairP90Ms() == 0.0);
   // At 60: in-between host frame 12 ms (2.5 overhead), step 14 ms: pair 26.
   for (int pair = 0; pair < 64; ++pair) {
@@ -435,23 +459,38 @@ void TestSimulationLightStaysAtSixty() {
   }
 }
 
-void TestSimulationHeavyLocksThirtyCleanly() {
-  // Swap returns at the vblank (the console: "swap includes the vsync
-  // wait"): legacy alternates holds of 1 and 2 (and 3).
-  const auto before = Simulate({Heavy(60)}, Fps60Mode::Legacy);
-  const auto after = Simulate({Heavy(60)}, Fps60Mode::Adaptive);
-  CHECK(before.JudderRmsMs > 5.0);
-  CHECK(after.JudderRmsMs < 1.5);
-  CHECK(after.JudderRmsMs < before.JudderRmsMs / 4.0);
-  CHECK(after.PictureIntervalStdMs < 1.5);
-  CHECK(static_cast<double>(after.Cadence.CadenceSwitches) / after.Seconds <
-        0.2);
-  CHECK(after.Cadence.Holds[1] > 20U * (after.Cadence.Holds[0] +
-                                        after.Cadence.Holds[2] +
-                                        after.Cadence.Holds[3]));
-  // Game speed kept (60 guest refreshes a second).
-  CHECK(after.GuestRefreshesPerSecond > 59.5);
-  CHECK(after.DroppedRefreshes < 10U);
+// integ4 (CPU 1785): game-thread pair ~30.6 ms of 33.3, GPU ~15 ms.
+Segment Integ4(double seconds) {
+  Segment segment = Heavy(seconds);
+  segment.GameStepMs = 24.0;
+  segment.GpuMs = 15.0;
+  return segment;
+}
+// Over the pair on average: 60 is out of reach.
+Segment Overloaded(double seconds) {
+  Segment segment = Heavy(seconds);
+  segment.GameStepMs = 33.0;
+  return segment;
+}
+
+void TestSimulationNearTheLimitKeepsTheAverage() {
+  for (uint32_t queue : {0U, 1U}) {
+    const auto before = Simulate({Integ4(60)}, Fps60Mode::Legacy, queue);
+    const auto after = Simulate({Integ4(60)}, Fps60Mode::Adaptive, queue);
+    // No lock at 30 below the pair budget, and no worse than legacy.
+    CHECK(after.Cadence.ThirtySeconds < 0.05 * after.Seconds);
+    CHECK(static_cast<double>(after.Pictures) / after.Seconds >=
+          static_cast<double>(before.Pictures) / before.Seconds - 1.0);
+    CHECK(after.Cadence.CadenceSwitches <=
+          before.Cadence.CadenceSwitches + before.Cadence.CadenceSwitches / 10U);
+    CHECK(after.GuestRefreshesPerSecond > 59.5);
+  }
+}
+
+void TestSimulationOverloadedLocksThirty() {
+  const auto after = Simulate({Overloaded(60)}, Fps60Mode::Adaptive);
+  CHECK(after.Cadence.ThirtySeconds > 0.8 * after.Seconds);
+  CHECK(after.GuestRefreshesPerSecond > 53.0); // as legacy: the game itself is late
 }
 
 void TestSimulationSessionIsMoreRegular() {
@@ -461,9 +500,7 @@ void TestSimulationSessionIsMoreRegular() {
     // Blocking swap: legacy judders (holds of 1, 2 and 3 mixed); with a
     // queued swap it mostly alternates long runs of 60 and of drops.
     if (queue == 0U)
-      CHECK(after.JudderRmsMs < before.JudderRmsMs / 2.0);
-    CHECK(after.JudderRmsMs < 1.0);
-    CHECK(after.Cadence.CadenceSwitches < before.Cadence.CadenceSwitches);
+      CHECK(after.JudderRmsMs <= before.JudderRmsMs + 0.2);
     CHECK(after.GuestRefreshesPerSecond > 59.5);
   }
   // Strict60 never drops a frame on purpose.
@@ -479,6 +516,7 @@ void Report() {
   const std::vector<Scenario> scenarios{
       {"leve", {Light(60)}},          {"normal", {Normal(60)}},
       {"pesado", {Heavy(60)}},        {"m.pesado", {VeryHeavy(60)}},
+      {"integ4", {Integ4(60)}},       {"sobrecarga", {Overloaded(60)}},
       {"sessao", Session()},
   };
   for (uint32_t queue : {0U, 1U}) {
@@ -501,6 +539,7 @@ int main(int argc, char **argv) {
   TestHoldCounters();
   TestLocksThirtyOnRepeatedMisses();
   TestMissesSpreadOutDoNotLock();
+  TestMissesWithoutOverloadDoNotLock();
   TestReturnsOnlyWithProvenHeadroom();
   TestHoldAndLateSteps();
   TestRelapseDoublesTheHold();
@@ -508,7 +547,8 @@ int main(int argc, char **argv) {
   TestGamePairEstimate();
   TestPerFrameGovernorWithoutDrop();
   TestSimulationLightStaysAtSixty();
-  TestSimulationHeavyLocksThirtyCleanly();
+  TestSimulationNearTheLimitKeepsTheAverage();
+  TestSimulationOverloadedLocksThirty();
   TestSimulationSessionIsMoreRegular();
   if (argc > 1 && std::strcmp(argv[1], "--report") == 0)
     Report();
