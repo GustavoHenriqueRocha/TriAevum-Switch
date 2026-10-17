@@ -224,6 +224,14 @@ Desempenho e usabilidade:
 
 ## Próximos passos
 
+- Ideias futuras (pedido do usuário, 2026-10-17):
+  - "Grama leve" para o Switch: versão OpenGL simplificada da grama procedural do renderizador NRI do PC
+    (menos folhas, só perto da câmera, sem interação cara), opcional via `config/grass`, pensada para o modo 30 FPS.
+  - Outros efeitos do PC (toon shading, contornos, FOV maior) adaptados ao GL, se couberem na GPU.
+  - Mods: testar pacotes de texturas HD da comunidade (formato Citra/Azahar) no sistema de substituição
+    de texturas (`.o3tu`/PICA), depois da correção de memória de vídeo; substituição de arquivos de dados
+    (modelos/textos) pelo runtime; mods de código exigem regenerar o AOT por mod.
+
 ### Estado em 2026-10-17 (melhor versão até agora)
 - PGO (2ª coleta) + modo enxuto + planos PICA no núcleo 1 + render thread no núcleo 2 + áudio em thread própria.
 - Medido a 30 FPS, escala 2×: 29,9 FPS médios, 93% do tempo em 30, lógica ~11 ms por passo.
