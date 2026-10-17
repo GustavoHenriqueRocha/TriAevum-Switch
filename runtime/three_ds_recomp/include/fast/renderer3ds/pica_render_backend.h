@@ -464,6 +464,23 @@ class PicaRenderBackend {
         const PicaFrameTemporalSample&) {
         return false;
     }
+
+    // False when no output of the backend depends on the images of the
+    // native dependency namespace (no read-back into guest memory, no
+    // savestate capture): its replay can then be skipped.
+    [[nodiscard]] virtual bool PicaNativeNamespaceObservable() const {
+        return true;
+    }
+    // Host pixels per native pixel of a namespace's images. A namespace can
+    // be given a lower scale than the backend's (a cheaper in-between frame);
+    // its images are recreated at the next use. False: not supported.
+    [[nodiscard]] virtual float PicaNamespaceResolutionScale(
+        uint64_t) const noexcept {
+        return 1.0F;
+    }
+    virtual bool SetPicaNamespaceResolutionScale(uint64_t, float) {
+        return false;
+    }
   protected:
     PhysicalMemoryRead mPhysicalMemoryRead;
     PhysicalMemoryCommit mPhysicalMemoryCommit;

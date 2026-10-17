@@ -45,6 +45,7 @@
 #include "oot3d_native_guest_profile.h"
 #include "oot3d_native_controls_settings_panel.h"
 #include "oot3d_native_frame_rate.h"
+#include "oot3d_native_interpolation_pacing.h"
 #include "oot3d_native_launch_frame_rate.h"
 #include "oot3d_native_game_bootstrap.h"
 #include "oot3d_native_mass_aot.h"
@@ -124,6 +125,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -302,6 +304,12 @@ private:
   std::vector<Fast::Renderer3ds::PicaTextureCopyReference> CollectGuestCopyReferences();
   void PinGpuCopyResources(const Oot3dNativeGame::Oot3dPicaVisualFrameViewSample& sample);
   bool FlushNativeDependencies();
+  // Render thread: configures the paced interpolation once the backend and
+  // the pacer rate are known (and again if the rate changes).
+  void EnsureInterpolationPacing();
+  // Render thread, before the pacing wait: closes the frame's cost (GPU
+  // timestamps, render-thread time) and feeds the governor and perf.txt.
+  void FinishRenderFrameCost();
   void ExecuteVisualSample(const Oot3dNativeGame::Oot3dPicaVisualFrameViewSample &sample, Oot3dNativeGame::Oot3dPicaPresentationExecutionKind kind, bool present, const Fast::Oot3d::NativeFrameTemporalSample& temporalSample, uint64_t renderTargetNamespace = kVisualInterpolationRenderTargetNamespace);
   // Deferred: a host continuation is pending, retry at a later frame boundary. Failed: reported once; the request is
   // dropped because every retry repeats the full GPU drain and readback.
@@ -552,6 +560,53 @@ private:
   std::vector<Fast::Renderer3ds::PicaTextureCopyReference> guestCopyReferences;
   Oot3dNativeGame::Oot3dPicaVisualFrameViewSample dependencySampleScratch;
   Oot3dNativeGame::Oot3dPicaVisualFrameViewSample visualFrameSampleScratch;
+  // Paced interpolation and frame costs (render thread; see
+  // oot3d_native_interpolation_pacing.h). Options read at setup.
+  struct InterpolationPacingOptions {
+    bool KeepGameSpeed = true;
+    std::string ReducedScaleText;
+    bool ReducedAlways = false;
+    // config/native_replay=1: replay the native namespace although the
+    // backend never observes it (A/B).
+    bool ForceNativeReplay = false;
+  } interpolationPacingOptions;
+  Oot3dNativeGame::InterpolationPacingGovernor interpolationPacing;
+  bool interpolationPacingConfigured = false;
+  uint32_t interpolationPacingRateHz = 0U;
+  bool skipNativeReplay = false;
+  // Kind of the frame the render thread is drawing (RenderFrameKind) and
+  // its render-thread milliseconds so far.
+  uint8_t renderFrameKind = 0U;
+  double renderFrameCpuMs = 0.0;
+  double lastSwapMs = 0.0;
+  // The transfer and namespace of the last presented visual sample: a
+  // dropped in-between frame presents it again.
+  std::optional<std::pair<Oot3dNativeGame::Oot3dPicaDisplayTransferSubmission,
+                          uint64_t>>
+      lastPresentedVisual;
+  // Cumulative counters for logs/perf.txt (written by the render thread,
+  // read by the guest thread under the mutex).
+  struct InterpolationPerfCounters {
+    std::array<uint64_t, 5> Frames{};
+    std::array<uint64_t, 5> GpuFrames{};
+    std::array<double, 5> GpuMs{};
+    std::array<double, 5> CpuMs{};
+    uint64_t NativeReplaysSkipped = 0;
+    uint64_t ReducedRefused = 0;
+    uint64_t RepeatFallbacks = 0;
+    uint64_t Probes = 0;
+    uint64_t LevelChanges = 0;
+    uint8_t Level = 0;
+    bool GpuTimer = false;
+    double GpuFactor = 1.0;
+    double StepCostMs = 0.0;
+    double FullEstimateMs = 0.0;
+    double ReducedEstimateMs = 0.0;
+    double BudgetMs = 0.0;
+    float ReducedScale = 0.0F;
+  };
+  std::mutex interpolationPerfMutex;
+  InterpolationPerfCounters interpolationPerf;
   std::optional<RenderStreamStop> renderStreamStop;
   bool renderingStopped = false;
   // The run closed itself (frame limit, structural scenario, dev lab quit):

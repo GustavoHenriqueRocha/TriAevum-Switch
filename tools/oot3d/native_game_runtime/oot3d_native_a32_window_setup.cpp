@@ -1402,6 +1402,48 @@ void NativeA32WindowSession::Setup() {
                               picaPlanWorker);
   }
 
+  // Paced interpolation (config/fps60; oot3d_native_interpolation_pacing.h)
+  // and the native replay. Switch: config/interp_pacing ("0": every
+  // in-between frame drawn, as before), config/interp_scale (e.g. "1.5":
+  // in-between frames that do not fit at full resolution are drawn at that
+  // scale), config/interp_scale_mode ("always": every in-between frame
+  // reduced), config/native_replay ("1": replay the native namespace even on
+  // a backend that never reads it). Desktop: TRIAEVUM_INTERP_PACING,
+  // TRIAEVUM_INTERP_SCALE, TRIAEVUM_INTERP_SCALE_MODE, TRIAEVUM_NATIVE_REPLAY.
+  {
+    const auto readText = [](const char* file, const char* environment)
+        -> std::optional<std::string> {
+#if defined(__SWITCH__)
+      (void)environment;
+      std::ifstream input(std::string("sdmc:/switch/oot3dre/config/") + file);
+      if (!input) return std::nullopt;
+      std::string text;
+      std::getline(input, text);
+      return text;
+#else
+      (void)file;
+      const char* value = std::getenv(environment);
+      return value != nullptr ? std::optional<std::string>(value) : std::nullopt;
+#endif
+    };
+    const auto trimmed = [](std::string text) {
+      while (!text.empty() && (text.back() == '\r' || text.back() == '\n' ||
+                               text.back() == ' ' || text.back() == '\t'))
+        text.pop_back();
+      return text;
+    };
+    auto& options = interpolationPacingOptions;
+    if (const auto text = readText("interp_pacing", "TRIAEVUM_INTERP_PACING"))
+      options.KeepGameSpeed = trimmed(*text) != "0";
+    if (const auto text = readText("interp_scale", "TRIAEVUM_INTERP_SCALE"))
+      options.ReducedScaleText = trimmed(*text);
+    if (const auto text =
+            readText("interp_scale_mode", "TRIAEVUM_INTERP_SCALE_MODE"))
+      options.ReducedAlways = trimmed(*text) == "always";
+    if (const auto text = readText("native_replay", "TRIAEVUM_NATIVE_REPLAY"))
+      options.ForceNativeReplay = trimmed(*text) == "1";
+  }
+
 #if defined(__SWITCH__)
   WriteSwitchBootStage("runtime_loop");
 #endif

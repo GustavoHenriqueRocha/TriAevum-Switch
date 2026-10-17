@@ -145,6 +145,9 @@ inline constexpr uint32_t kMinimumHostAudioPrebufferMilliseconds = 100U;
 inline constexpr uint64_t kA32RuntimeSampleDenominator = 64ULL;
 inline constexpr uint64_t kNativeDependencyRenderTargetNamespace = 1ULL;
 inline constexpr uint64_t kVisualInterpolationRenderTargetNamespace = 2ULL;
+// Reduced-resolution in-between frames (config/interp_scale): images of
+// their own, at the lower scale, so the full-scale ones stay intact.
+inline constexpr uint64_t kReducedVisualRenderTargetNamespace = 3ULL;
 inline constexpr size_t kMaximumPicaDrainPassesPerRefresh = 64U;
 inline constexpr uint32_t kMtx4x4BuildFrustum = 0x002FDE9CU;
 inline constexpr uint32_t kMtx4x4BuildOrthographicProjectionRotated = 0x00300AA8U;

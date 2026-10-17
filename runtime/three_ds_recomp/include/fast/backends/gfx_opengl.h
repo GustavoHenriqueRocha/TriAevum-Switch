@@ -152,6 +152,15 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
         uint64_t completionId, std::string* error = nullptr) override;
     std::vector<uint64_t> TakePicaCompletions() override;
     bool ResetPicaState(std::string* error = nullptr) override;
+    // Nothing reads a PICA image back into guest memory here (sampled
+    // textures are decoded from guest bytes and a Shadow2D consumer takes the
+    // image of its own namespace first): the native dependency namespace is
+    // never observed.
+    [[nodiscard]] bool PicaNativeNamespaceObservable() const override { return false; }
+    [[nodiscard]] float PicaNamespaceResolutionScale(
+        uint64_t renderTargetNamespace) const noexcept override;
+    bool SetPicaNamespaceResolutionScale(uint64_t renderTargetNamespace,
+                                         float scale) override;
     bool StartOot3dShadow2dDepthEncodePass(int fb_id, uint32_t clear_value) override;
     void EndOot3dShadow2dDepthEncodePass() override;
     bool DrawOot3dShadow2dDepthEncodedTriangles(float buf_vbo[], size_t buf_vbo_len,

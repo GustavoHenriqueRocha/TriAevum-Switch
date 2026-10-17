@@ -281,6 +281,10 @@ struct PicaGlTarget {
     // Host pixels per native pixel along storage Y (the presented horizontal
     // axis of the rotated top screen). ResolutionScale unless Wide.
     float ScaleY = 1.0F;
+    // Host pixels per native pixel along storage X: the resolution scale of
+    // the target's namespace (SetPicaNamespaceResolutionScale; the global
+    // ResolutionScale unless a namespace was given its own).
+    float Scale = 1.0F;
     // Widescreen top-screen target: the scene stretches over the whole
     // Height while placed UI keeps a centred native canvas of
     // FramebufferHeight * ResolutionScale pixels.
@@ -370,6 +374,12 @@ struct PicaGlPostState {
     // EASU output, portrait extent of the window viewport (only when RCAS
     // follows; otherwise EASU draws the window directly).
     PicaGlPostImage Upscaled;
+    // Lean: what Upscaled holds (display image, the copy that filled it,
+    // flip). A repeated scanout of an unchanged image (a dropped in-between
+    // frame, a presentation without a new guest frame) skips EASU.
+    GLuint UpscaledSource = 0U;
+    PicaGlScale::DisplayCopyIdentity UpscaledCopy;
+    bool UpscaledFlip = false;
 };
 
 struct PicaGlAttributeState {
@@ -1053,6 +1063,8 @@ struct GfxRenderingAPIOGL::NativePicaState {
     uint64_t LastFragmentUniformGeneration = 0U;
     uint64_t LastFragmentUniformOffset = 0U;
     float ResolutionScale = 1.0F;
+    // Namespaces drawn at their own scale (a reduced in-between frame).
+    std::map<uint64_t, float> NamespaceScales;
     // config/gl_lean (exact savings; see PicaGlScale::ParseLeanSetting).
     bool Lean = true;
     uint64_t NextTargetId = 1U;
@@ -1498,12 +1510,31 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
     }
     if (complete && easu && rcas) {
         GlPerf::Mark(GlPerf::Stage::PostEasu);
+        const GLuint upscaledBefore = post.Upscaled.Texture;
+        const uint64_t upscaledExtentBefore =
+            PicaGlPostExtentKey(post.Upscaled.Width, post.Upscaled.Height);
         complete = EnsurePicaGlPostImage(post.Upscaled, GL_RGBA8, outputWidth,
                                          outputHeight);
-        if (complete) {
+        // Lean: the same display image, filled by the same copy, already
+        // went through EASU into Upscaled (which was not reallocated).
+        const bool upscaledCurrent =
+            state.Lean && config.Aa == PicaGlPost::Antialiasing::Off &&
+            upscaledBefore == post.Upscaled.Texture &&
+            upscaledExtentBefore ==
+                PicaGlPostExtentKey(post.Upscaled.Width, post.Upscaled.Height) &&
+            post.UpscaledSource == display.Color &&
+            display.LastCopy.Valid() && post.UpscaledCopy == display.LastCopy &&
+            post.UpscaledFlip == flip;
+        if (complete && !upscaledCurrent) {
             BeginPicaGlPostImage(post.Upscaled);
             DrawPicaGlEasu(post.Easu, current, currentWidth, currentHeight,
                            false, flip, outputWidth, outputHeight);
+            post.UpscaledSource =
+                config.Aa == PicaGlPost::Antialiasing::Off ? display.Color : 0U;
+            post.UpscaledCopy = display.LastCopy;
+            post.UpscaledFlip = flip;
+        }
+        if (complete) {
             current = post.Upscaled.Texture;
             currentWidth = outputWidth;
             currentHeight = outputHeight;
@@ -1891,10 +1922,13 @@ PicaGlTarget& GetPicaGlTarget(
     }
     auto& target = found->second;
     target.Id = state.NextTargetId++;
-    target.Width = PicaGlScale::ScaledExtent(key.Width, state.ResolutionScale);
-    target.Height =
-        PicaGlScale::ScaledExtent(key.Height, state.ResolutionScale);
-    target.ScaleY = state.ResolutionScale;
+    const auto namespaceScale = state.NamespaceScales.find(key.Namespace);
+    target.Scale = namespaceScale != state.NamespaceScales.end()
+        ? namespaceScale->second
+        : state.ResolutionScale;
+    target.Width = PicaGlScale::ScaledExtent(key.Width, target.Scale);
+    target.Height = PicaGlScale::ScaledExtent(key.Height, target.Scale);
+    target.ScaleY = target.Scale;
     // Widescreen: only the top LCD target (480x400 stored rotated; its
     // 400-pixel axis is the presented width) grows, by the window's aspect
     // over 5:3, matching the frustum widening of the projection hook.
@@ -2015,20 +2049,33 @@ PicaGlProgram& GetPicaGlProgram(
 }
 
 // *rebind is set when a deferred clear changed the framebuffer binding.
+// The image of the consumer's own namespace wins: another namespace replays
+// a different guest frame (the native replay runs ahead of the delayed
+// visual sample) or is not replayed at all (SkipsPicaNativeNamespace).
 GLuint FindLivePicaShadow(
     GfxRenderingAPIOGL::NativePicaState& state,
-    const GfxNativePicaTextureView& texture, bool* rebind) {
+    const GfxNativePicaTextureView& texture, uint64_t renderTargetNamespace,
+    bool* rebind) {
+    PicaGlTarget* found = nullptr;
     for (auto& [key, target] : state.Targets) {
         if (key.ColorAddress == texture.PhysicalAddress &&
             key.Width == texture.Width && key.Height == texture.Height) {
-            // A consumer samples it: a deferred clear must land first.
-            if (ResolvePicaShadow(target)) {
-                *rebind = true;
+            if (found == nullptr || key.Namespace == renderTargetNamespace) {
+                found = &target;
             }
-            return target.Shadow;
+            if (key.Namespace == renderTargetNamespace) {
+                break;
+            }
         }
     }
-    return 0U;
+    if (found == nullptr) {
+        return 0U;
+    }
+    // A consumer samples it: a deferred clear must land first.
+    if (ResolvePicaShadow(*found)) {
+        *rebind = true;
+    }
+    return found->Shadow;
 }
 
 PicaGlTexture& GetPicaGlTexture(
@@ -2937,7 +2984,8 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 throw std::runtime_error("PICA texture type is unsupported");
             }
             GLuint handle = texture.NativeType == 2U
-                ? FindLivePicaShadow(*mNativePica, texture, &rebindTarget)
+                ? FindLivePicaShadow(*mNativePica, texture,
+                                     draw.RenderTargetNamespace, &rebindTarget)
                 : 0U;
             if (handle == 0U) {
                 handle = GetPicaGlTexture(*mNativePica, texture).Handle;
@@ -3127,7 +3175,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         // A fractional scale rounds both edges of every rectangle
         // (PicaGlScale::ScaledEdge); at an integer scale these are the
         // former products native * N.
-        const float resolutionScale = mNativePica->ResolutionScale;
+        const float resolutionScale = target.Scale;
         if (!target.Wide) {
             const auto edge = [&](int64_t native) {
                 return static_cast<GLint>(
@@ -3417,7 +3465,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
         // A fractional scale rounds each extent (PicaGlScale::ScaledEdge); a
         // 2:1 transfer then may read one host pixel more or less than twice
         // the output, a sub-pixel offset of the box filter.
-        const float resolutionScale = mNativePica->ResolutionScale;
+        const float resolutionScale = source->second.Scale;
         const float sourceScaleY = source->second.ScaleY;
         const auto scaledY = [&](uint32_t native) {
             return static_cast<uint32_t>(std::lround(
@@ -3666,6 +3714,67 @@ std::vector<uint64_t> GfxRenderingAPIOGL::TakePicaCompletions() {
     auto result = std::move(mNativePica->Completions);
     mNativePica->Completions.clear();
     return result;
+}
+
+float GfxRenderingAPIOGL::PicaNamespaceResolutionScale(
+    uint64_t renderTargetNamespace) const noexcept {
+#if !defined(USE_OPENGLES) && !defined(__APPLE__)
+    if (!mNativePica) {
+        return 1.0F;
+    }
+    const auto found = mNativePica->NamespaceScales.find(renderTargetNamespace);
+    return found != mNativePica->NamespaceScales.end()
+        ? found->second
+        : mNativePica->ResolutionScale;
+#else
+    (void)renderTargetNamespace;
+    return 1.0F;
+#endif
+}
+
+bool GfxRenderingAPIOGL::SetPicaNamespaceResolutionScale(
+    uint64_t renderTargetNamespace, float scale) {
+#if !defined(USE_OPENGLES) && !defined(__APPLE__)
+    // Anti-aliasing images have the source's extent: alternating extents
+    // would reallocate them every frame.
+    if (!mNativePica || !(scale >= 1.0F) ||
+        scale > mNativePica->ResolutionScale ||
+        mNativePica->Post.Config.Aa != PicaGlPost::Antialiasing::Off) {
+        return false;
+    }
+    if (PicaNamespaceResolutionScale(renderTargetNamespace) == scale) {
+        mNativePica->NamespaceScales[renderTargetNamespace] = scale;
+        return true;
+    }
+    // Images of the namespace made at the former scale go; the next frame
+    // recreates them.
+    for (auto it = mNativePica->Targets.begin();
+         it != mNativePica->Targets.end();) {
+        if (it->first.Namespace == renderTargetNamespace) {
+            DeletePicaTarget(it->second);
+            it = mNativePica->Targets.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = mNativePica->Displays.begin();
+         it != mNativePica->Displays.end();) {
+        if (it->first.first == renderTargetNamespace) {
+            DeletePicaDisplay(it->second);
+            it = mNativePica->Displays.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    mNativePica->NamespaceScales[renderTargetNamespace] = scale;
+    mNativePica->LastShadowImage = 0U;
+    InvalidateLegacyStateAfterPica();
+    return true;
+#else
+    (void)renderTargetNamespace;
+    (void)scale;
+    return false;
+#endif
 }
 
 bool GfxRenderingAPIOGL::ResetPicaState(std::string* error) {

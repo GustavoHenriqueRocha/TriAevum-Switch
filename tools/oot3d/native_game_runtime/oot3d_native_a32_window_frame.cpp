@@ -1,4 +1,6 @@
 // Native A32 window session: one frame of the loop and the renderer-side work it schedules.
+// First: on the Switch it brings in glad, which must precede any GL header.
+#include "oot3d_native_gpu_frame_timer.h"
 #include "oot3d_native_a32_window_session.h"
 #include "oot3d_whole_aot_gcov.h"
 #include <fstream>
@@ -100,7 +102,180 @@ Oot3dNativeGame::NativeGuestClockDeadlineResolution AdvanceGuestClockTo(
   return resolution;
 }
 
+// GPU time of the presented frames (render thread only; one session).
+Oot3dNativeGame::NativeGpuFrameTimer &GpuFrameTimer() {
+  static Oot3dNativeGame::NativeGpuFrameTimer timer;
+  return timer;
+}
+
+uint32_t PicaColorBytes(uint8_t format) {
+  return format == 0U ? 4U : (format == 1U ? 3U : 2U);
+}
+uint32_t PicaDepthBytes(uint8_t format) {
+  return format == 0U ? 2U : (format == 2U ? 3U : 4U);
+}
+
+// See Oot3dNativeGame::SampleClearsEveryTarget: a reduced in-between frame
+// replays into images that hold only what this sample draws.
+bool SampleSuitsReducedReplay(
+    const Oot3dNativeGame::Oot3dPicaVisualFrameViewSample &sample) {
+  static std::vector<Oot3dNativeGame::ReducedReplayDraw> draws;
+  static std::vector<Oot3dNativeGame::ReducedReplayFill> fills;
+  draws.clear();
+  fills.clear();
+  for (const auto &view : sample.Draws) {
+    if (view.BasePlan == nullptr) return false;
+    const auto &plan = *view.BasePlan;
+    const auto &framebuffer = plan.State.Framebuffer;
+    const auto &merger = plan.State.OutputMerger;
+    const uint64_t pixels =
+        static_cast<uint64_t>(framebuffer.Width) * framebuffer.Height;
+    draws.push_back({
+        .SubmissionId = plan.SubmissionId,
+        .ColorAddress = framebuffer.ColorPhysicalAddress,
+        .ColorEnd = static_cast<uint32_t>(std::min<uint64_t>(
+            UINT32_MAX, framebuffer.ColorPhysicalAddress +
+                            pixels * PicaColorBytes(framebuffer.ColorFormat))),
+        .DepthAddress = framebuffer.DepthPhysicalAddress,
+        .DepthEnd = static_cast<uint32_t>(std::min<uint64_t>(
+            UINT32_MAX, framebuffer.DepthPhysicalAddress +
+                            pixels * PicaDepthBytes(framebuffer.DepthFormat))),
+        .UsesDepthStencil = framebuffer.DepthPhysicalAddress != 0U &&
+                            (framebuffer.DepthStencilWriteEnabled ||
+                             merger.Depth.TestEnabled ||
+                             merger.Depth.WriteEnabled ||
+                             merger.Stencil.Enabled),
+    });
+  }
+  for (const auto &fill : sample.MemoryFills) {
+    fills.push_back({fill.BeforeDrawSubmissionId, fill.StartPhysicalAddress,
+                     fill.EndPhysicalAddress});
+  }
+  return Oot3dNativeGame::SampleClearsEveryTarget(draws, fills);
+}
+
 } // namespace
+
+void NativeA32WindowSession::EnsureInterpolationPacing() {
+  auto &api = *apiPointer;
+  auto &realtimePacer = *realtimePacerStorage;
+  const uint32_t rateHz = realtimePacer.TargetRateHz() != 0U
+                              ? realtimePacer.TargetRateHz()
+                              : 60U;
+  if (interpolationPacingConfigured && rateHz == interpolationPacingRateHz) {
+    // A backend reset (InitNativePica) forgets the namespace scale.
+    if (interpolationPacing.ReducedAvailable() &&
+        api.PicaNamespaceResolutionScale(kReducedVisualRenderTargetNamespace) !=
+            interpolationPacing.Config().ReducedScale) {
+      (void)api.SetPicaNamespaceResolutionScale(
+          kReducedVisualRenderTargetNamespace,
+          interpolationPacing.Config().ReducedScale);
+    }
+    return;
+  }
+  const bool firstConfiguration = !interpolationPacingConfigured;
+  interpolationPacingConfigured = true;
+  interpolationPacingRateHz = rateHz;
+  const auto &options = interpolationPacingOptions;
+  const float baseScale =
+      api.PicaNamespaceResolutionScale(kVisualInterpolationRenderTargetNamespace);
+  Oot3dNativeGame::InterpolationPacingConfig config;
+  config.KeepGameSpeed = options.KeepGameSpeed;
+  config.ReducedScale = Oot3dNativeGame::ParseInterpolationReducedScale(
+      options.ReducedScaleText, baseScale);
+  config.ReducedMode = options.ReducedAlways
+                           ? Oot3dNativeGame::InterpolationReducedScaleMode::Always
+                           : Oot3dNativeGame::InterpolationReducedScaleMode::Auto;
+  const bool reducedAvailable =
+      config.ReducedScale > 0.0F &&
+      api.SetPicaNamespaceResolutionScale(kReducedVisualRenderTargetNamespace,
+                                          config.ReducedScale);
+  // Two presentation periods: one step frame and one in-between frame.
+  interpolationPacing.Configure(config, 2000.0 / static_cast<double>(rateHz),
+                                baseScale, reducedAvailable);
+  if (firstConfiguration) {
+    skipNativeReplay =
+        !options.ForceNativeReplay && !api.PicaNativeNamespaceObservable();
+    std::fprintf(stderr,
+                 "TRIAEVUM_INTERP_PACING keep_speed=%d reduced_scale=%.2f "
+                 "reduced_available=%d mode=%s base_scale=%.2f "
+                 "native_replay=%d\n",
+                 config.KeepGameSpeed ? 1 : 0, config.ReducedScale,
+                 reducedAvailable ? 1 : 0,
+                 options.ReducedAlways ? "always" : "auto", baseScale,
+                 skipNativeReplay ? 0 : 1);
+  }
+  std::lock_guard lock(interpolationPerfMutex);
+  interpolationPerf.ReducedScale = reducedAvailable ? config.ReducedScale : 0.0F;
+}
+
+void NativeA32WindowSession::FinishRenderFrameCost() {
+  auto &timer = GpuFrameTimer();
+  const auto kind = renderFrameKind;
+  const double cpuMs = renderFrameCpuMs;
+  renderFrameKind = 0U;
+  renderFrameCpuMs = 0.0;
+  const auto observe = [&](uint8_t frameKind, double costMs) {
+    switch (static_cast<Oot3dNativeGame::RenderFrameKind>(frameKind)) {
+    case Oot3dNativeGame::RenderFrameKind::Step:
+      interpolationPacing.ObserveStep(costMs);
+      break;
+    case Oot3dNativeGame::RenderFrameKind::Full:
+      interpolationPacing.ObserveInterpolated(
+          Oot3dNativeGame::InterpolatedSampleLevel::Full, costMs);
+      break;
+    case Oot3dNativeGame::RenderFrameKind::Reduced:
+      interpolationPacing.ObserveInterpolated(
+          Oot3dNativeGame::InterpolatedSampleLevel::Reduced, costMs);
+      break;
+    case Oot3dNativeGame::RenderFrameKind::Dropped:
+      interpolationPacing.ObserveInterpolated(
+          Oot3dNativeGame::InterpolatedSampleLevel::Dropped, costMs);
+      break;
+    case Oot3dNativeGame::RenderFrameKind::Other:
+      break;
+    }
+  };
+  std::array<double, Oot3dNativeGame::kRenderFrameKindCount> gpuMs{};
+  std::array<uint64_t, Oot3dNativeGame::kRenderFrameKindCount> gpuFrames{};
+  const bool gpuAvailable = timer.Available();
+  timer.EndFrame(kind, cpuMs);
+  timer.Poll([&](const Oot3dNativeGame::NativeGpuFrameTime &result) {
+    if (result.Kind >= gpuMs.size()) return;
+    gpuMs[result.Kind] += result.Milliseconds;
+    ++gpuFrames[result.Kind];
+    // Both sides of a frame overlap the neighbouring frames: the pair fits
+    // only if each fits.
+    observe(result.Kind, std::max(result.Milliseconds, result.CpuMilliseconds));
+  });
+  if (!gpuAvailable) {
+    // No GPU clock (yet): render-thread time plus the last swap, which
+    // blocks while the GPU is behind.
+    observe(kind, cpuMs + lastSwapMs);
+  }
+  std::lock_guard lock(interpolationPerfMutex);
+  auto &perf = interpolationPerf;
+  if (kind < perf.Frames.size()) {
+    ++perf.Frames[kind];
+    perf.CpuMs[kind] += cpuMs;
+  }
+  for (size_t index = 0U; index < gpuMs.size(); ++index) {
+    perf.GpuMs[index] += gpuMs[index];
+    perf.GpuFrames[index] += gpuFrames[index];
+  }
+  const auto &stats = interpolationPacing.Stats();
+  perf.Probes = stats.Probes;
+  perf.LevelChanges = stats.LevelChanges;
+  perf.Level = static_cast<uint8_t>(interpolationPacing.Level());
+  perf.GpuTimer = timer.Available();
+  perf.GpuFactor = timer.NanosecondsPerTick();
+  perf.StepCostMs = interpolationPacing.StepCostMs();
+  perf.FullEstimateMs = interpolationPacing.Estimate(
+      Oot3dNativeGame::InterpolatedSampleLevel::Full);
+  perf.ReducedEstimateMs = interpolationPacing.Estimate(
+      Oot3dNativeGame::InterpolatedSampleLevel::Reduced);
+  perf.BudgetMs = interpolationPacing.PairBudgetMs();
+}
 
 bool NativeA32WindowSession::RunFrame() {
   auto &process = *processStorage;
@@ -486,6 +661,12 @@ bool NativeA32WindowSession::RunFrame() {
         n64UiRenderer.Stage(std::move(prepared));
         return;
       }
+      struct UiCost {
+        double &Total;
+        std::chrono::steady_clock::time_point Start =
+            std::chrono::steady_clock::now();
+        ~UiCost() { Total += SecondsSince(Start) * 1000.0; }
+      } uiCost{renderFrameCpuMs};
       if (!n64UiRenderer.Render(primitives, width, height, canvasMode,
                                 std::move(prepared), &renderError)) {
         throw std::runtime_error("integrated N64 UI presentation failed: " +
@@ -516,13 +697,16 @@ bool NativeA32WindowSession::RunFrame() {
         static_cast<uint32_t>(presentationSerial), screenshotState,
         capturedTemporalSample ? &*capturedTemporalSample : nullptr);
     capturedTemporalSample.reset();
+    FinishRenderFrameCost();
     const auto waitStart = std::chrono::steady_clock::now();
     CpuProbe::Scope cpuPacing(CpuProbe::Phase::Pacing);
     Fast::GlPerf::Mark(Fast::GlPerf::Stage::Pacing);
     realtimePacer.WaitForNextRefresh();
     cpuPacing.Stop();
     rendererTiming->PacingWaitSeconds += SecondsSince(waitStart);
+    const auto swapStart = std::chrono::steady_clock::now();
     window.EndFrame();
+    lastSwapMs = SecondsSince(swapStart) * 1000.0;
   }, true);
   presentSteps.Mark("render_end_frame");
   picaSemanticTrace.RecordFrameBoundary(
@@ -623,6 +807,53 @@ bool NativeA32WindowSession::RunFrame() {
              << " plan_batches_queued=" << planStats.QueuedBatches
              << " plan_batches_allocated=" << planStats.AllocatedBatches;
         windowPlanStats = planStats;
+      }
+      // Paced interpolation (config/fps60) and frame costs: frames of each
+      // kind in the window, their GPU ms (GL_TIMESTAMP; gpu_timer=0 until
+      // the clock is calibrated) and render-thread ms, the governor's level
+      // and estimates, and the native replays skipped.
+      {
+        static NativeA32WindowSession::InterpolationPerfCounters previous{};
+        NativeA32WindowSession::InterpolationPerfCounters current;
+        {
+          std::lock_guard lock(interpolationPerfMutex);
+          current = interpolationPerf;
+        }
+        const auto frames = [&](size_t kind) {
+          return current.Frames[kind] - previous.Frames[kind];
+        };
+        perf << " interp: pacing=" << (interpolationPacingOptions.KeepGameSpeed ? 1 : 0)
+             << " interp_scale=" << current.ReducedScale
+             << " level=" << Oot3dNativeGame::InterpolatedSampleLevelName(
+                    static_cast<Oot3dNativeGame::InterpolatedSampleLevel>(current.Level))
+             << " step_frames=" << frames(1)
+             << " interp_frames=" << frames(2)
+             << " interp_reduced=" << frames(3)
+             << " interp_dropped=" << frames(4)
+             << " other_frames=" << frames(0)
+             << " reduced_refused=" << (current.ReducedRefused - previous.ReducedRefused)
+             << " repeat_fallbacks=" << (current.RepeatFallbacks - previous.RepeatFallbacks)
+             << " native_replay_skipped=" << (current.NativeReplaysSkipped - previous.NativeReplaysSkipped)
+             << " probes=" << (current.Probes - previous.Probes)
+             << " level_changes=" << (current.LevelChanges - previous.LevelChanges)
+             << " gpu_timer=" << (current.GpuTimer ? 1 : 0)
+             << " gpu_ns_per_tick=" << current.GpuFactor;
+        for (size_t kind = 0U; kind < Oot3dNativeGame::kRenderFrameKindCount; ++kind) {
+          const uint64_t gpuFrames = current.GpuFrames[kind] - previous.GpuFrames[kind];
+          if (gpuFrames != 0U) {
+            perf << " gpu_ms_" << Oot3dNativeGame::kRenderFrameKindNames[kind] << '='
+                 << ((current.GpuMs[kind] - previous.GpuMs[kind]) / gpuFrames);
+          }
+          if (frames(kind) != 0U) {
+            perf << " rt_ms_" << Oot3dNativeGame::kRenderFrameKindNames[kind] << '='
+                 << ((current.CpuMs[kind] - previous.CpuMs[kind]) / frames(kind));
+          }
+        }
+        perf << " est_step_ms=" << current.StepCostMs
+             << " est_full_ms=" << current.FullEstimateMs
+             << " est_reduced_ms=" << current.ReducedEstimateMs
+             << " pair_budget_ms=" << current.BudgetMs;
+        previous = current;
       }
       // GPU residency and memory: every live count and byte total must stay
       // bounded over a long session (a texture cache that never released
@@ -2007,6 +2238,14 @@ void NativeA32WindowSession::PresentVisualFrame(
                              guestReferences =
                                  CollectGuestCopyReferences()] {
         if (rendererFrameSkipped) return;
+        struct RenderCost {
+          double &Total;
+          std::chrono::steady_clock::time_point Start =
+              std::chrono::steady_clock::now();
+          ~RenderCost() { Total += SecondsSince(Start) * 1000.0; }
+        } renderCost{renderFrameCpuMs};
+        GpuFrameTimer().BeginFrame();
+        EnsureInterpolationPacing();
         // Deferred plans of the closed frames are built (or taken from the
         // plan worker) here, on the render thread, before any use.
         if (completedFrame != nullptr) {
@@ -2022,6 +2261,9 @@ void NativeA32WindowSession::PresentVisualFrame(
             throw std::runtime_error(renderError);
         }
         guestCopyReferences = guestReferences;
+        uint64_t nativeReplaysSkippedThisFrame = 0U;
+        uint64_t reducedRefusedThisFrame = 0U;
+        uint64_t repeatFallbacksThisFrame = 0U;
         bool presentedVisualSample = false;
         bool selectedNewVisualFrame = false;
         {
@@ -2038,12 +2280,16 @@ void NativeA32WindowSession::PresentVisualFrame(
                       superseded.Sequence, superseded.Sequence,
                       visualContinuityEpoch, 1.0F,
                       static_cast<float>(presentationElapsedSeconds));
-              ExecuteVisualSample(
-                  sample,
-                  Oot3dNativeGame::Oot3dPicaPresentationExecutionKind::
-                      NativeFrame,
-                  false, nativeTemporalSample,
-                  kNativeDependencyRenderTargetNamespace);
+              if (skipNativeReplay) {
+                ++nativeReplaysSkippedThisFrame;
+              } else {
+                ExecuteVisualSample(
+                    sample,
+                    Oot3dNativeGame::Oot3dPicaPresentationExecutionKind::
+                        NativeFrame,
+                    false, nativeTemporalSample,
+                    kNativeDependencyRenderTargetNamespace);
+              }
               if (visualInterpolationEnabled) {
                 Oot3dNativeGame::ComposeTopScreenFrontendFrame(
                     superseded, suppressTopScreenBackdrop);
@@ -2060,6 +2306,8 @@ void NativeA32WindowSession::PresentVisualFrame(
             Fast::Oot3d::GrassInteractionBridge::Instance().PublishFrame(
                 currentVisualFrame->Sequence, frameActors);
             selectedNewVisualFrame = true;
+            renderFrameKind =
+                static_cast<uint8_t>(Oot3dNativeGame::RenderFrameKind::Step);
             auto &sample = visualFrameSampleScratch;
             // Keep the canonical target complete independently of the
             // delayed visual target. Raw-copy prefixes have already
@@ -2074,12 +2322,19 @@ void NativeA32WindowSession::PresentVisualFrame(
                     currentVisualFrame->Sequence,
                     currentVisualFrame->Sequence, visualContinuityEpoch,
                     1.0F, static_cast<float>(presentationElapsedSeconds));
-            ExecuteVisualSample(
-                sample,
-                Oot3dNativeGame::Oot3dPicaPresentationExecutionKind::
-                    NativeFrame,
-                false, nativeTemporalSample,
-                kNativeDependencyRenderTargetNamespace);
+            // The native namespace exists for read-backs into guest memory;
+            // a backend that never reads it (GL) skips the replay, a whole
+            // scene drawn for nothing (config/native_replay=1 keeps it).
+            if (skipNativeReplay) {
+              ++nativeReplaysSkippedThisFrame;
+            } else {
+              ExecuteVisualSample(
+                  sample,
+                  Oot3dNativeGame::Oot3dPicaPresentationExecutionKind::
+                      NativeFrame,
+                  false, nativeTemporalSample,
+                  kNativeDependencyRenderTargetNamespace);
+            }
             Oot3dNativeGame::ComposeTopScreenFrontendFrame(
                 *currentVisualFrame, suppressTopScreenBackdrop);
             if (!visualInterpolationEnabled) {
@@ -2278,9 +2533,43 @@ void NativeA32WindowSession::PresentVisualFrame(
           const float sampleAlpha =
               visualSampleCadence.Resolve(
                   false, visualInterpolationAlpha);
-          if (preparedVisualTransition.Sample(
+          // Paced: the in-between frame at full or reduced resolution, or
+          // dropped (the step image again) when the pair would not fit.
+          auto level = interpolationPacing.Decide();
+          if (level == Oot3dNativeGame::InterpolatedSampleLevel::Dropped) {
+            if (lastPresentedVisual.has_value() &&
+                picaPresentationScheduler.HasSnapshot(
+                    lastPresentedVisual->first,
+                    lastPresentedVisual->second)) {
+              const auto started = std::chrono::steady_clock::now();
+              if (!picaPresentationScheduler.PresentExisting(
+                      api, lastPresentedVisual->first,
+                      lastPresentedVisual->second, &renderError)) {
+                throw std::runtime_error(
+                    "native top-screen dropped in-between frame failed: " +
+                    renderError);
+              }
+              rendererTiming->VisualReplaySeconds += SecondsSince(started);
+              renderFrameKind = static_cast<uint8_t>(
+                  Oot3dNativeGame::RenderFrameKind::Dropped);
+              presentedVisualSample = true;
+            } else {
+              level = Oot3dNativeGame::InterpolatedSampleLevel::Full;
+            }
+          }
+          if (!presentedVisualSample &&
+              preparedVisualTransition.Sample(
                   *previousVisualFrame, *latestVisualFrame, sampleAlpha,
                   sample, &visualInterpolationTiming)) {
+            uint64_t sampleNamespace = kVisualInterpolationRenderTargetNamespace;
+            if (level == Oot3dNativeGame::InterpolatedSampleLevel::Reduced) {
+              if (SampleSuitsReducedReplay(sample)) {
+                sampleNamespace = kReducedVisualRenderTargetNamespace;
+              } else {
+                level = Oot3dNativeGame::InterpolatedSampleLevel::Full;
+                ++reducedRefusedThisFrame;
+              }
+            }
             const auto temporalSample =
                 Fast::Oot3d::BuildNativeFrameTemporalSample(
                     frameCompositionPolicy,
@@ -2294,7 +2583,9 @@ void NativeA32WindowSession::PresentVisualFrame(
                 sample,
                 Oot3dNativeGame::
                     Oot3dPicaPresentationExecutionKind::RepeatedFrame,
-                true, temporalSample);
+                true, temporalSample, sampleNamespace);
+            renderFrameKind = static_cast<uint8_t>(
+                Oot3dNativeGame::RenderFrameKindOf(level));
             ++visualStats.SamplesPresented;
             visualStats.SampleDrawCount += sample.Draws.size();
             visualStats.InterpolatedDrawCount += sample.InterpolatedDraws;
@@ -2319,6 +2610,31 @@ void NativeA32WindowSession::PresentVisualFrame(
           }
           rendererTiming->VisualReplaySeconds += SecondsSince(started);
           ++visualStats.ReusedSnapshotPresentations;
+        } else if (!presentedVisualSample && visualInterpolationEnabled &&
+                   lastPresentedVisual.has_value() &&
+                   picaPresentationScheduler.HasSnapshot(
+                       lastPresentedVisual->first,
+                       lastPresentedVisual->second)) {
+          // The delayed visual namespace holds the previous guest frame,
+          // not the one just selected: show the last presented sample
+          // again rather than nothing.
+          const auto started = std::chrono::steady_clock::now();
+          if (!picaPresentationScheduler.PresentExisting(
+                  api, lastPresentedVisual->first,
+                  lastPresentedVisual->second, &renderError)) {
+            throw std::runtime_error(
+                "native top-screen repeated scanout failed: " + renderError);
+          }
+          rendererTiming->VisualReplaySeconds += SecondsSince(started);
+          ++visualStats.ReusedSnapshotPresentations;
+          ++repeatFallbacksThisFrame;
+        }
+        if (nativeReplaysSkippedThisFrame != 0U ||
+            reducedRefusedThisFrame != 0U || repeatFallbacksThisFrame != 0U) {
+          std::lock_guard lock(interpolationPerfMutex);
+          interpolationPerf.NativeReplaysSkipped += nativeReplaysSkippedThisFrame;
+          interpolationPerf.ReducedRefused += reducedRefusedThisFrame;
+          interpolationPerf.RepeatFallbacks += repeatFallbacksThisFrame;
         }
         });
       }
@@ -2912,6 +3228,7 @@ void NativeA32WindowSession::ExecuteVisualSample(const Oot3dNativeGame::Oot3dPic
   const double elapsed = SecondsSince(started);
   if (present) {
     capturedTemporalSample = temporalSample;
+    lastPresentedVisual.emplace(sample.TopTransfer, renderTargetNamespace);
   }
   rendererTiming->PicaBackendSeconds += elapsed;
   rendererTiming->VisualReplaySeconds += elapsed;

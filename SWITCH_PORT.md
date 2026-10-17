@@ -309,6 +309,56 @@ Desempenho e usabilidade:
     de texturas (`.o3tu`/PICA), depois da correção de memória de vídeo; substituição de arquivos de dados
     (modelos/textos) pelo runtime; mods de código exigem regenerar o AOT por mod.
 
+### Interpolação a 60 FPS mais barata e com pacing (2026-10-17)
+- **Replay nativo pulado no GL** (`config/native_replay` = `1` volta ao antigo). Cada quadro de passo
+  era desenhado duas vezes: no namespace nativo (1), que existe para devolver pixels à memória do guest
+  (read-backs, savestate) e no visual (2), que é o apresentado. O backend GL nunca lê o namespace 1
+  (texturas sempre vêm dos bytes do guest; sem read-back nem captura de savestate), então a cena
+  inteira era desenhada à toa: metade da GPU a 30 FPS, um terço com `config/fps60`. O backend diz isso
+  por `PicaNativeNamespaceObservable()` (Vulkan continua `true`). Única coisa que cruzava namespaces: o
+  consumidor de sombra (Shadow2D) pegava a imagem do namespace 1 (o primeiro do mapa); agora prefere a
+  do próprio namespace. A 30 FPS a imagem é a mesma; com fps60 a sombra deixa de adiantar um passo em
+  relação à geometria (correção). `perf.txt`: `native_replay_skipped`.
+- **Pacing "manter a velocidade do jogo"** (`config/interp_pacing`, ligado; `0` desenha todo
+  intermediário como antes). Um governador na render thread
+  (`oot3d_native_interpolation_pacing.h`) aprende o custo recente de cada tipo de quadro (máximo entre
+  o tempo de GPU e o da render thread) e, para cada intermediário, escolhe o melhor nível cujo par
+  (passo + intermediário) cabe em dois refreshes (33,3 ms): cheio, reduzido ou **descartado**
+  (reapresenta a imagem do passo: só cópia já feita + RCAS, sem replay da cena). Histerese: subir de
+  nível exige caber em 90% do orçamento, manter em 95%. O custo de um nível não desenhado é estimado
+  pelo custo do passo × a razão medida por último (os dois são um replay da mesma cena), então ele
+  volta sozinho quando a cena fica leve; sondas (uma por vez, nível nunca medido ou a cada 150
+  intermediários abaixo do preferido) refrescam a razão. Picos contam no máximo 2× a média
+  (SwitchWakerHD `interp_pacing.h`). O quadro de passo nunca muda; a lógica nunca depende dos
+  intermediários (o agendador continua juntando refreshes).
+- **Resolução reduzida no intermediário** (`config/interp_scale`, ex.: `1.5` com escala 2; múltiplos
+  de 0,25 abaixo da escala; ausente = desligado). O intermediário que não cabe cheio é desenhado num
+  namespace próprio (3) com alvos na escala menor (`SetPicaNamespaceResolutionScale`; viewport,
+  scissor, cópias e apresentação usam a escala do alvo) e o FSR EASU amplia como sempre.
+  `config/interp_scale_mode` = `always` reduz todo intermediário. Só vale se a amostra limpa (memory
+  fill) cada alvo antes do primeiro draw (cor; profundidade/stencil se usados), porque o namespace 3
+  só vê alguns quadros; senão vai cheio (`reduced_refused`). Recusado com `antialiasing` ligado (as
+  imagens do AA teriam de ser realocadas a cada quadro).
+- **Tempo de GPU sem stall** (`oot3d_native_gpu_frame_timer.h`): `glQueryCounter(GL_TIMESTAMP)` no
+  início e no fim de cada quadro, lidos só quando disponíveis (anel de 8). O relógio da GPU do
+  switch-mesa não está em ns (SwitchWakerHD mediu 1,63 ns reais por "ns"): o fator é calibrado contra o
+  relógio da CPU numa base de ≥ 3 s e nada é usado antes disso (`gpu_timer=0`; o governador usa o tempo
+  da render thread + swap).
+- **EASU reaproveitado** (parte do `gl_lean`): reapresentar a mesma imagem (intermediário descartado,
+  apresentação sem quadro novo) pula o EASU e só roda o RCAS a partir da imagem ampliada guardada.
+- Tela de baixo/HUD: no perfil TopScreen a tela de baixo já é recomposta na de cima e o HUD (N64 UI) é
+  barato e pode mudar a cada refresh; nada a reaproveitar. Sombras: dependem das matrizes dos atores
+  (interpoladas), não dá para reaproveitar no intermediário.
+- `logs/perf.txt`, bloco `interp:` (por janela de 150 quadros): `pacing interp_scale level
+  step_frames interp_frames interp_reduced interp_dropped other_frames reduced_refused repeat_fallbacks
+  native_replay_skipped probes level_changes gpu_timer gpu_ns_per_tick`, `gpu_ms_<tipo>` e `rt_ms_<tipo>`
+  (ms médios de GPU e da render thread por tipo: step/full/reduced/dropped/other) e as estimativas
+  `est_step_ms est_full_ms est_reduced_ms pair_budget_ms`.
+- Teste: `oot3d_native_interpolation_pacing_tests` (governador, latência de medição, histerese, picos,
+  simulação de fila de GPU: com descarte os passos ficam no horário, sem descarte >100 atrasados).
+- A/B no console: `native_replay` = `1`; `interp_pacing` = `0`; `interp_scale` = `1.5` (e
+  `interp_scale_mode` = `always` para ver o custo/qualidade do reduzido em todo intermediário).
+
 ### Estado em 2026-10-17 (melhor versão até agora)
 - PGO (2ª coleta) + modo enxuto + planos PICA no núcleo 1 + render thread no núcleo 2 + áudio em thread própria.
 - Medido a 30 FPS, escala 2×: 29,9 FPS médios, 93% do tempo em 30, lógica ~11 ms por passo.

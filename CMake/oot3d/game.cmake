@@ -49,6 +49,13 @@ add_executable(triaevum_presentation_clock_tests EXCLUDE_FROM_ALL
 target_link_libraries(triaevum_presentation_clock_tests PRIVATE oot3d_native_game_runtime)
 oot3d_target_defaults(triaevum_presentation_clock_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Paced 60 Hz interpolation (header-only governor).
+add_executable(oot3d_native_interpolation_pacing_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing_tests.cpp
+)
+target_compile_features(oot3d_native_interpolation_pacing_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_native_interpolation_pacing_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 add_executable(oot3d_native_audio_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_audio_tests.cpp
 )
