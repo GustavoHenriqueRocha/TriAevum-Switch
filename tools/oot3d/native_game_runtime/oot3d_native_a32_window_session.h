@@ -46,6 +46,7 @@
 #include "oot3d_native_controls_settings_panel.h"
 #include "oot3d_native_frame_rate.h"
 #include "oot3d_native_interpolation_pacing.h"
+#include "oot3d_native_reduced_replay.h"
 #include "oot3d_native_launch_frame_rate.h"
 #include "oot3d_native_game_bootstrap.h"
 #include "oot3d_native_mass_aot.h"
@@ -571,6 +572,8 @@ private:
     bool ForceNativeReplay = false;
   } interpolationPacingOptions;
   Oot3dNativeGame::InterpolationPacingGovernor interpolationPacing;
+  // Scratch of SampleSuitsReducedReplay (render thread only).
+  Oot3dNativeGame::ReducedReplayScratch reducedReplayScratch;
   bool interpolationPacingConfigured = false;
   uint32_t interpolationPacingRateHz = 0U;
   bool skipNativeReplay = false;

@@ -393,6 +393,16 @@ Desempenho e usabilidade:
   fill) cada alvo antes do primeiro draw (cor; profundidade/stencil se usados), porque o namespace 3
   só vê alguns quadros; senão vai cheio (`reduced_refused`). Recusado com `antialiasing` ligado (as
   imagens do AA teriam de ser realocadas a cada quadro).
+- Crash no console com `interp_scale=1.5` (2026-10-17, mallinfo achou o heap corrompido na 21ª janela):
+  no perf.txt da sessão o nível reduzido nunca desenhou (`interp_reduced=0` em todas as janelas,
+  `gl_targets=2`: nenhum alvo do namespace 3); só na última janela houve 11 decisões "reduzido", todas
+  recusadas (`reduced_refused=11`) pela checagem de CPU. Essa checagem tinha vetores `static` de função;
+  agora usa scratch da sessão (`oot3d_native_reduced_replay.h`) e
+  `oot3d_native_reduced_replay_stress_tests` (worker gerando quadros reais, render thread com o
+  governador alternando cheio/reduzido/descartado ~200 vezes em 6000 quadros, thread do guest lendo os
+  contadores) passa limpo com ASan e TSan. `SetPicaNamespaceResolutionScale` não apaga mais imagens vivas
+  (recusa se o namespace já tem alvos). `config/heap_check_windows` (1–1000, padrão 20) controla a
+  frequência do mallinfo: `1` acha uma corrupção ~5 s depois de ela acontecer.
 - **Tempo de GPU sem stall** (`oot3d_native_gpu_frame_timer.h`): `glQueryCounter(GL_TIMESTAMP)` no
   início e no fim de cada quadro, lidos só quando disponíveis (anel de 8). O relógio da GPU do
   switch-mesa não está em ns (SwitchWakerHD mediu 1,63 ns reais por "ns"): o fator é calibrado contra o

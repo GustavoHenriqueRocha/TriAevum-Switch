@@ -291,6 +291,14 @@ target_link_libraries(oot3d_native_pica_deferred_plan_tests PRIVATE
     oot3d_native_pica_vulkan_plan)
 oot3d_target_defaults(oot3d_native_pica_deferred_plan_tests FOLDER Tests)
 
+# Reduced in-between path under the session's threads (run with ASan/TSan).
+add_executable(oot3d_native_reduced_replay_stress_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_reduced_replay_stress_tests.cpp
+)
+target_link_libraries(oot3d_native_reduced_replay_stress_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_reduced_replay_stress_tests FOLDER Tests)
+
 add_executable(oot3d_native_pica_deferred_plan_soak_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_deferred_plan_soak_tests.cpp
 )

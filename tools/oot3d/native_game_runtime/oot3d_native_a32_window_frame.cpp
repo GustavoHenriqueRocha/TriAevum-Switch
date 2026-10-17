@@ -108,52 +108,6 @@ Oot3dNativeGame::NativeGpuFrameTimer &GpuFrameTimer() {
   return timer;
 }
 
-uint32_t PicaColorBytes(uint8_t format) {
-  return format == 0U ? 4U : (format == 1U ? 3U : 2U);
-}
-uint32_t PicaDepthBytes(uint8_t format) {
-  return format == 0U ? 2U : (format == 2U ? 3U : 4U);
-}
-
-// See Oot3dNativeGame::SampleClearsEveryTarget: a reduced in-between frame
-// replays into images that hold only what this sample draws.
-bool SampleSuitsReducedReplay(
-    const Oot3dNativeGame::Oot3dPicaVisualFrameViewSample &sample) {
-  static std::vector<Oot3dNativeGame::ReducedReplayDraw> draws;
-  static std::vector<Oot3dNativeGame::ReducedReplayFill> fills;
-  draws.clear();
-  fills.clear();
-  for (const auto &view : sample.Draws) {
-    if (view.BasePlan == nullptr) return false;
-    const auto &plan = *view.BasePlan;
-    const auto &framebuffer = plan.State.Framebuffer;
-    const auto &merger = plan.State.OutputMerger;
-    const uint64_t pixels =
-        static_cast<uint64_t>(framebuffer.Width) * framebuffer.Height;
-    draws.push_back({
-        .SubmissionId = plan.SubmissionId,
-        .ColorAddress = framebuffer.ColorPhysicalAddress,
-        .ColorEnd = static_cast<uint32_t>(std::min<uint64_t>(
-            UINT32_MAX, framebuffer.ColorPhysicalAddress +
-                            pixels * PicaColorBytes(framebuffer.ColorFormat))),
-        .DepthAddress = framebuffer.DepthPhysicalAddress,
-        .DepthEnd = static_cast<uint32_t>(std::min<uint64_t>(
-            UINT32_MAX, framebuffer.DepthPhysicalAddress +
-                            pixels * PicaDepthBytes(framebuffer.DepthFormat))),
-        .UsesDepthStencil = framebuffer.DepthPhysicalAddress != 0U &&
-                            (framebuffer.DepthStencilWriteEnabled ||
-                             merger.Depth.TestEnabled ||
-                             merger.Depth.WriteEnabled ||
-                             merger.Stencil.Enabled),
-    });
-  }
-  for (const auto &fill : sample.MemoryFills) {
-    fills.push_back({fill.BeforeDrawSubmissionId, fill.StartPhysicalAddress,
-                     fill.EndPhysicalAddress});
-  }
-  return Oot3dNativeGame::SampleClearsEveryTarget(draws, fills);
-}
-
 } // namespace
 
 void NativeA32WindowSession::EnsureInterpolationPacing() {
@@ -894,7 +848,20 @@ bool NativeA32WindowSession::RunFrame() {
           const volatile size_t& peak = __malloc_max_sbrked_mem;
           perf << " heap_arena_peak_mb=" << (static_cast<double>(peak) / kMb);
         }
-        if (heapStats && heapWindows++ % 20U == 0U) {
+        // config/heap_check_windows (1-1000): walk the heap (mallinfo) every
+        // N windows; a corruption is then found within ~N*5 s of when it
+        // happened. Also enabled every 20 windows by config/heap_stats or
+        // config/gpu_timing. Absent: never (mallinfo holds the malloc lock and
+        // is what trips over a damaged heap).
+        static const uint32_t heapCheckWindows = [] {
+          std::ifstream input("sdmc:/switch/oot3dre/config/heap_check_windows");
+          long long value = 0;
+          return input && (input >> value) && value >= 1 && value <= 1000
+                     ? static_cast<uint32_t>(value)
+                     : 0U;
+        }();
+        const uint32_t heapEvery = heapCheckWindows != 0U ? heapCheckWindows : 20U;
+        if ((heapStats || heapCheckWindows != 0U) && heapWindows++ % heapEvery == 0U) {
           const struct mallinfo heap = mallinfo();
           perf << " heap_used_mb=" << (static_cast<double>(heap.uordblks) / kMb);
         }
@@ -2568,7 +2535,8 @@ void NativeA32WindowSession::PresentVisualFrame(
                   sample, &visualInterpolationTiming)) {
             uint64_t sampleNamespace = kVisualInterpolationRenderTargetNamespace;
             if (level == Oot3dNativeGame::InterpolatedSampleLevel::Reduced) {
-              if (SampleSuitsReducedReplay(sample)) {
+              if (Oot3dNativeGame::SampleSuitsReducedReplay(
+                      sample, reducedReplayScratch)) {
                 sampleNamespace = kReducedVisualRenderTargetNamespace;
               } else {
                 level = Oot3dNativeGame::InterpolatedSampleLevel::Full;

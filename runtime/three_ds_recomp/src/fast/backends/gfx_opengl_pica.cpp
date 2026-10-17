@@ -3807,29 +3807,20 @@ bool GfxRenderingAPIOGL::SetPicaNamespaceResolutionScale(
         mNativePica->NamespaceScales[renderTargetNamespace] = scale;
         return true;
     }
-    // Images of the namespace made at the former scale go; the next frame
-    // recreates them.
-    for (auto it = mNativePica->Targets.begin();
-         it != mNativePica->Targets.end();) {
-        if (it->first.Namespace == renderTargetNamespace) {
-            DeletePicaTarget(it->second);
-            it = mNativePica->Targets.erase(it);
-        } else {
-            ++it;
+    // Only before the namespace has images: changing the scale of live
+    // ones would mean deleting GL objects other caches may still name (the
+    // draw state cache, image unit 5) in the middle of a session.
+    for (const auto& entry : mNativePica->Targets) {
+        if (entry.first.Namespace == renderTargetNamespace) {
+            return false;
         }
     }
-    for (auto it = mNativePica->Displays.begin();
-         it != mNativePica->Displays.end();) {
-        if (it->first.first == renderTargetNamespace) {
-            DeletePicaDisplay(it->second);
-            it = mNativePica->Displays.erase(it);
-        } else {
-            ++it;
+    for (const auto& entry : mNativePica->Displays) {
+        if (entry.first.first == renderTargetNamespace) {
+            return false;
         }
     }
     mNativePica->NamespaceScales[renderTargetNamespace] = scale;
-    mNativePica->LastShadowImage = 0U;
-    InvalidateLegacyStateAfterPica();
     return true;
 #else
     (void)renderTargetNamespace;
