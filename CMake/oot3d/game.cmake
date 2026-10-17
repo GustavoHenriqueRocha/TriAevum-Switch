@@ -422,7 +422,8 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     # Core and priority placement for every pthread (see the source).
     target_sources(oot3d_native_game PRIVATE
         tools/oot3d/native_game_runtime/oot3d_switch_threads.cpp)
-    target_link_options(oot3d_native_game PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=threadCreate)
+    target_link_options(oot3d_native_game PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=threadCreate
+        -Wl,--wrap=SDL_SetThreadPriority)
     nx_generate_nacp(oot3d_native_game.nacp
         NAME "The Legend of Zelda: Ocarina of Time 3D Recompiled"
         AUTHOR "OoT3D Recompiled contributors"

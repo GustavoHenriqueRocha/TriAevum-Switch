@@ -30,6 +30,40 @@ BuildPicaMemoryRegions(
   return regions;
 }
 
+#if defined(__SWITCH__)
+constexpr const char *kSwitchAudioSampleRatePath =
+    "sdmc:/switch/oot3dre/config/audio_sample_rate";
+constexpr const char *kSwitchAudioDumpFlagPath =
+    "sdmc:/switch/oot3dre/config/audio_dump";
+constexpr const char *kSwitchAudioDumpPath =
+    "sdmc:/switch/oot3dre/logs/audio_dump.wav";
+constexpr uint32_t kSwitchAudioDumpSeconds = 60U;
+// Horizon's renderer runs at 48 kHz: handing it 48 kHz PCM leaves no rate
+// conversion outside the game's own resampler.
+constexpr uint32_t kSwitchDefaultAudioSampleRate = 48000U;
+// Frames per SDL device buffer. devkitPro's SDL (audren backend) keeps two
+// such buffers and queues at most one per 5 ms renderer frame, so a buffer must
+// last well over 5 ms: the former 160 frames (4.9 ms at 32728 Hz) delivered
+// 32000 frames/s for a 32728 Hz voice and starved it continuously.
+constexpr uint32_t kSwitchAudioDeviceFrames = 512U;
+
+// config/audio_sample_rate: a number in Hz (8000-192000); absent or invalid
+// selects 48000. "32728" restores the former output at the DSP's own rate.
+uint32_t ReadSwitchAudioSampleRate() {
+  std::ifstream input(kSwitchAudioSampleRatePath);
+  if (!input) {
+    return kSwitchDefaultAudioSampleRate;
+  }
+  long long value = 0;
+  if (!(input >> value) || value < 8000 || value > 192000) {
+    std::fprintf(stderr, "audio: ignoring invalid %s\n",
+                 kSwitchAudioSampleRatePath);
+    return kSwitchDefaultAudioSampleRate;
+  }
+  return static_cast<uint32_t>(value);
+}
+#endif
+
 } // namespace
 
 void NativeA32WindowSession::Setup() {
@@ -727,6 +761,10 @@ void NativeA32WindowSession::Setup() {
   hostArgs.AudioSampleRate = Oot3dNativeGame::NativeA32DspHle::NativeSampleRate;
   hostArgs.AudioSampleLength =
       Oot3dNativeGame::NativeA32DspHle::SamplesPerFrame;
+#if defined(__SWITCH__)
+  hostArgs.AudioSampleRate = ReadSwitchAudioSampleRate();
+  hostArgs.AudioSampleLength = kSwitchAudioDeviceFrames;
+#endif
   hostArgs.AudioDesiredBuffered = std::max<int32_t>(
       hostArgs.AudioDesiredBuffered,
       static_cast<int32_t>((static_cast<uint64_t>(hostArgs.AudioSampleRate) *
@@ -963,6 +1001,28 @@ void NativeA32WindowSession::Setup() {
   context = Ship::Context::GetRawInstance();
   audio = context != nullptr ? context->GetAudio() : nullptr;
   audioPlayer = audio != nullptr ? audio->GetAudioPlayer() : nullptr;
+  if (audioPlayer != nullptr && audioPlayer->IsInitialized() &&
+      static_cast<uint32_t>(audioPlayer->GetSampleRate()) !=
+          Oot3dNativeGame::NativeA32DspHle::NativeSampleRate) {
+    hostAudioResampler.emplace(
+        Oot3dNativeGame::NativeA32DspHle::NativeSampleRate,
+        static_cast<uint32_t>(audioPlayer->GetSampleRate()));
+  }
+#if defined(__SWITCH__)
+  std::fprintf(stderr, "audio: DSP %u Hz -> device %d Hz (%s), %d frames per device buffer\n",
+               Oot3dNativeGame::NativeA32DspHle::NativeSampleRate,
+               audioPlayer != nullptr ? audioPlayer->GetSampleRate() : 0,
+               hostAudioResampler.has_value() ? "game resampler" : "no conversion",
+               audioPlayer != nullptr ? audioPlayer->GetSampleLength() : 0);
+  {
+    std::error_code dumpError;
+    auto *sdlPlayer = dynamic_cast<Ship::SDLAudioPlayer *>(audioPlayer.get());
+    if (sdlPlayer != nullptr && audioPlayer->IsInitialized() &&
+        std::filesystem::exists(kSwitchAudioDumpFlagPath, dumpError)) {
+      sdlPlayer->StartPcmCapture(kSwitchAudioDumpPath, kSwitchAudioDumpSeconds);
+    }
+  }
+#endif
 #if defined(__SWITCH__)
   WriteSwitchBootStage("audio_runtime_initialized");
 #endif

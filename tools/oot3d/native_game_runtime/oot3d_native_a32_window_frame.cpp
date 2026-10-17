@@ -1151,12 +1151,33 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
     const auto audioOutputStart = std::chrono::steady_clock::now();
     CpuProbe::Scope cpuAudio(CpuProbe::Phase::AudioOutput);
     const int32_t bufferedBefore = audioPlayer->Buffered();
-    audioPlayer->Play(
-        reinterpret_cast<const uint8_t *>(audioSamples.data()),
-        audioSamples.size() * sizeof(int16_t));
+    const std::vector<int16_t> *outputSamples = &audioSamples;
+    if (hostAudioResampler.has_value()) {
+      // Keep the host queue at its target by nudging the conversion ratio
+      // (at most 0.5%, a few cents) instead of letting rate mismatch end in
+      // underruns or dropped chunks.
+      const double target =
+          std::max<double>(audioPlayer->GetDesiredBuffered(), 1.0);
+      hostAudioQueueEstimate =
+          hostAudioQueueEstimate < 0.0
+              ? static_cast<double>(bufferedBefore)
+              : hostAudioQueueEstimate +
+                    0.05 * (static_cast<double>(bufferedBefore) -
+                            hostAudioQueueEstimate);
+      hostAudioResampler->SetRateAdjustment(std::clamp(
+          (hostAudioQueueEstimate - target) / target * 0.01, -0.005, 0.005));
+      hostAudioResampled.clear();
+      hostAudioResampler->Process(audioSamples, hostAudioResampled);
+      outputSamples = &hostAudioResampled;
+    }
+    if (!outputSamples->empty()) {
+      audioPlayer->Play(
+          reinterpret_cast<const uint8_t *>(outputSamples->data()),
+          outputSamples->size() * sizeof(int16_t));
+    }
     audioOutputDiagnostics.Observe(
         frameCount, bufferedBefore, audioPlayer->Buffered(),
-        audioSamples.size() / 2U, audioPlayer->GetDesiredBuffered());
+        outputSamples->size() / 2U, audioPlayer->GetDesiredBuffered());
     phaseTiming.AudioOutputSeconds += SecondsSince(audioOutputStart);
   }
   if (!hostServices.SignalVBlank(process.Memory())) {

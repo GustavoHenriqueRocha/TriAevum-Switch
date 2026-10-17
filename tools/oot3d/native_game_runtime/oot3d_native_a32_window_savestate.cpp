@@ -464,6 +464,10 @@ bool NativeA32WindowSession::LoadState(const std::filesystem::path &path,
   if (audioPlayer != nullptr && audioPlayer->IsInitialized()) {
     audioPlayer->Flush();
   }
+  if (hostAudioResampler.has_value()) {
+    hostAudioResampler->Reset();
+    hostAudioQueueEstimate = -1.0;
+  }
   frameCount = runtime.FrameCount;
   refreshTickRemainder = runtime.RefreshTickRemainder;
   nextVblankTick = runtime.NextVblankTick;

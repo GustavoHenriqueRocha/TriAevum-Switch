@@ -122,6 +122,24 @@ extern "C" Result __wrap_threadCreate(Thread* t, ThreadFunc entry, void* arg, vo
     return result;
 }
 
+// SDL's audio thread asks for SDL_THREAD_PRIORITY_TIME_CRITICAL when it
+// starts (SDL_RunAudio). devkitPro's SDL 2.28 maps every priority except HIGH
+// to 0x3B (SDL_SYS_SetThreadPriority: HIGH -> 0x2B, anything else -> 0x3B),
+// which overrode the 0x2C set above: the thread that refills the audio
+// renderer every 5 ms ran below the render worker sharing its core and could
+// only run when that worker waited, starving the voice (constant crackle).
+// Time-critical now maps to 0x2B, ahead of the game's threads (it only copies
+// a buffer per audren frame).
+extern "C" int __real_SDL_SetThreadPriority(int priority);
+extern "C" int __wrap_SDL_SetThreadPriority(int priority) {
+    constexpr int kSdlThreadPriorityTimeCritical = 3;
+    constexpr int kAudioThreadPriority = 0x2B;
+    if (priority == kSdlThreadPriorityTimeCritical &&
+        R_SUCCEEDED(svcSetThreadPriority(CUR_THREAD_HANDLE, kAudioThreadPriority))) {
+        return 0;
+    }
+    return __real_SDL_SetThreadPriority(priority);
+}
 // Called once from main: the game thread runs alone on core 0.
 void PlaceSwitchMainThread() {
     MirrorTlsPointer();

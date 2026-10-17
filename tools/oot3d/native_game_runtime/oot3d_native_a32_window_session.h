@@ -31,6 +31,7 @@
 #include "oot3d_n64_ui_renderer.h"
 #include "oot3d_native_a32_ctr_host.h"
 #include "oot3d_native_a32_dsp_hle.h"
+#include "oot3d_host_audio_resampler.h"
 #include "oot3d_native_a32_dsp_memory_adapter.h"
 #include "oot3d_native_a32_process_image.h"
 #include "oot3d_native_a32_registry.h"
@@ -444,6 +445,11 @@ private:
   Ship::Context *context{};
   std::shared_ptr<Ship::Audio> audio{};
   std::shared_ptr<Ship::AudioPlayer> audioPlayer{};
+  // DSP HLE (32728 Hz) to the host device rate when they differ (Switch:
+  // 48000 Hz, so the console plays the game's own resampled PCM unchanged).
+  std::optional<Oot3dNativeGame::HostAudioResampler> hostAudioResampler;
+  std::vector<int16_t> hostAudioResampled;
+  double hostAudioQueueEstimate = -1.0;
   std::chrono::steady_clock::time_point phaseStart{};
   Oot3dNativeGame::NativeA32ProcessRunResult processResult;
   uint32_t frameCount = 0;

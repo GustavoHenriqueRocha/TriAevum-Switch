@@ -2,6 +2,9 @@
 #include "AudioPlayer.h"
 #include <SDL2/SDL.h>
 
+#include <string>
+#include <vector>
+
 namespace Ship {
 /**
  * @brief AudioPlayer implementation backed by SDL2's audio subsystem.
@@ -29,6 +32,16 @@ class SDLAudioPlayer final : public AudioPlayer {
      */
     int Buffered() override;
 
+    /** @brief Queue underruns recovered by re-priming (Switch only; 0 elsewhere). */
+    uint64_t OutputUnderruns() const override;
+
+    /**
+     * @brief Records the first @p maximumSeconds of PCM exactly as queued to SDL
+     *        and writes it as a PCM16 WAV file (off the game thread once full,
+     *        or at destruction if the session ends first).
+     */
+    bool StartPcmCapture(const std::string& path, uint32_t maximumSeconds);
+
   protected:
     /**
      * @brief Opens the SDL audio device with the configured settings.
@@ -50,7 +63,15 @@ class SDLAudioPlayer final : public AudioPlayer {
     void DoFlush() override;
 
   private:
+    void CapturePcm(const uint8_t* buf, size_t len);
+
     SDL_AudioDeviceID mDevice = 0; ///< Handle to the opened SDL audio device.
     int32_t mNumChannels = 2;      ///< Number of output channels (2 for stereo, 6 for 5.1).
+    bool mPrebuffering = false;    ///< Device paused until the queue holds the prebuffer (Switch).
+    uint64_t mOutputUnderruns = 0; ///< Queue underruns recovered by re-priming (Switch).
+    bool mCaptureActive = false;
+    std::string mCapturePath;
+    size_t mCaptureLimitSamples = 0;
+    std::vector<int16_t> mCapture;
 };
 } // namespace Ship

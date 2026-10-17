@@ -1,5 +1,6 @@
 #include "oot3d_native_audio.h"
 #include "oot3d_native_audio_service.h"
+#include "oot3d_host_audio_resampler.h"
 
 #include <algorithm>
 #include <array>
@@ -101,10 +102,91 @@ std::vector<uint8_t> MakeMonoBcwav(
     return bytes;
 }
 
+// The host-output resampler (DSP 32728 Hz -> device 48000 Hz): exact
+// streaming (chunking does not change the output), unit gain and high SNR
+// across the audible band, saturation instead of wrap-around, and the rate
+// adjustment used to hold the host queue.
+void TestHostAudioResampler() {
+    constexpr double kInputRate = 32728.0;
+    constexpr double kOutputRate = 48000.0;
+    constexpr double kPi = 3.14159265358979323846;
+    for (const double frequency : {100.0, 1000.0, 6000.0, 12000.0}) {
+        std::vector<int16_t> input;
+        const size_t frames = 32728;
+        for (size_t frame = 0; frame < frames; ++frame) {
+            const auto sample = static_cast<int16_t>(std::lrint(
+                16000.0 * std::sin(2.0 * kPi * frequency * frame / kInputRate)));
+            input.push_back(sample);
+            input.push_back(static_cast<int16_t>(-sample));
+        }
+        Oot3dNativeGame::HostAudioResampler whole(32728, 48000);
+        Oot3dNativeGame::HostAudioResampler chunked(32728, 48000);
+        std::vector<int16_t> wholeOutput;
+        std::vector<int16_t> chunkedOutput;
+        whole.Process(input, wholeOutput);
+        for (size_t offset = 0; offset < input.size(); offset += 320) {
+            const size_t count = std::min<size_t>(320, input.size() - offset);
+            chunked.Process(std::span<const int16_t>(input).subspan(offset, count),
+                            chunkedOutput);
+        }
+        Expect(wholeOutput == chunkedOutput, "host resampler streaming is chunk-invariant");
+        const size_t outputFrames = wholeOutput.size() / 2U;
+        Expect(outputFrames + Oot3dNativeGame::HostAudioResampler::HalfTaps * 2U >= 48000U &&
+                   outputFrames <= 48000U,
+               "host resampler output frame count");
+        double error = 0.0;
+        double signal = 0.0;
+        for (size_t frame = 256; frame + 64 < outputFrames; ++frame) {
+            const double ideal = 16000.0 * std::sin(2.0 * kPi * frequency * frame / kOutputRate);
+            const double difference = wholeOutput[frame * 2U] - ideal;
+            error += difference * difference;
+            signal += ideal * ideal;
+            Expect(wholeOutput[frame * 2U + 1U] == -wholeOutput[frame * 2U] ||
+                       std::abs(wholeOutput[frame * 2U + 1U] + wholeOutput[frame * 2U]) <= 1,
+                   "host resampler keeps channels independent");
+        }
+        Expect(10.0 * std::log10(signal / error) > 75.0, "host resampler SNR");
+    }
+    {
+        // Full-scale square wave: Gibbs overshoot must saturate, not wrap.
+        std::vector<int16_t> input;
+        for (size_t frame = 0; frame < 8192; ++frame) {
+            const int16_t sample = (frame / 37U) % 2U == 0U ? int16_t{32767} : int16_t{-32768};
+            input.push_back(sample);
+            input.push_back(sample);
+        }
+        Oot3dNativeGame::HostAudioResampler resampler(32728, 48000);
+        std::vector<int16_t> output;
+        resampler.Process(input, output);
+        for (size_t frame = 0; frame < output.size() / 2U; ++frame) {
+            const double time = static_cast<double>(frame) * 32728.0 / 48000.0;
+            const auto segment = static_cast<size_t>(time / 37.0);
+            const double inside = time - static_cast<double>(segment) * 37.0;
+            if (segment > 0 && inside >= 3.0 && inside <= 34.0) {
+                const int16_t sample = output[frame * 2U];
+                Expect(segment % 2U == 0U ? sample > 16000 : sample < -16000,
+                       "host resampler saturates instead of wrapping");
+            }
+        }
+    }
+    {
+        std::vector<int16_t> input(2U * 32728U, 1000);
+        Oot3dNativeGame::HostAudioResampler resampler(32728, 48000);
+        resampler.SetRateAdjustment(0.005);
+        std::vector<int16_t> output;
+        resampler.Process(input, output);
+        const double expected = 48000.0 / 1.005;
+        Expect(std::abs(static_cast<double>(output.size() / 2U) - expected) < 64.0,
+               "host resampler rate adjustment");
+        Expect(output[output.size() / 2U] == 1000, "host resampler unit DC gain");
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     try {
+        TestHostAudioResampler();
         // Without arguments the inputs come from the private extracted title
         // named by OOT3D_TEST_EXTRACT_ROOT (its romfs/ and exefs/; the sample
         // wave is the first effect of QueenSound's WARC_SE wave archive as
