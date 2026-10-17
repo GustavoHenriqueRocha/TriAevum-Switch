@@ -393,8 +393,26 @@ carregamentos).
   listas livres) agora só a cada 20 janelas (`heap_used_mb` aparece só nelas); `heap_arena_mb` e
   `heap_arena_peak_mb` vêm dos totais que o próprio malloc mantém (sem lock) em toda janela.
 - Resumo: `python3 tools/oot3d/perf_report.py perf.txt [--session -1] [--skip 2] [--windows]` —
-  fps por sessão, fases, memória e, com `glperf`, top etapas de GPU, CPU da render thread e
+  fps por sessão, clocks, fases, memória e, com `glperf`, top etapas de GPU, CPU da render thread e
   contadores por tipo de quadro.
+
+### Clocks em cada janela do `perf.txt` (2026-10-17)
+- Cada linha `host_frames=` ganha `clocks: cpu_mhz= gpu_mhz= mem_mhz= clk_src= op_mode=
+  perf_mode= sysclk_profile= sysclk_enabled= sysclk_api= clk_ipc_us=`
+  (`oot3d_switch_clocks.cpp`). Sempre comparar medições com o mesmo clock; agora o `perf.txt`
+  registra em que clock cada janela foi medida.
+- Fonte dos MHz: IPC público do sys-clk (`sys:clk`, comando `GetCurrentContext`, o mesmo que o
+  overlay usa), `realFreqs` (medido) quando a API ≥ 2, senão o alvo (`clk_src=sysclk`). A sessão é
+  aberta na primeira janela e mantida; antes, o sm do Atmosphère é consultado
+  (`AtmosphereHasService`, 65100) porque `smGetService` de serviço não registrado fica esperando.
+  Sem sys-clk: MHz -1, `clk_src=none`, nova tentativa a cada 60 janelas. Custo: uma IPC por janela
+  de 150 quadros (`clk_ipc_us`), feita depois de fechar o tempo da janela.
+- Somente leitura e sem clkrst/pcv no app (SwitchWakerHD issue #33: clkrst no app travou o console
+  ao acordar do sleep); clock continua sendo papel do sys-clk.
+- `op_mode` (portátil/dock) e `perf_mode` vêm de `appletGetOperationMode`/`appletGetPerformanceMode`
+  (valores guardados pela libnx, sem IPC) e funcionam mesmo sem sys-clk.
+- `perf_report.py` mostra o clock de cada sessão; se mudar no meio, avisa (janela, antes → depois) e
+  separa fps/`total_ms` por clock; `--windows` lista `cpu/gpu/mem modo` por janela.
 
 ### Heap estável e menos trabalho fantasma por quadro (2026-10-17)
 Medido (`switch-logs/interp1`, fps60, escala 2, 8,5 min): `heap_arena_mb` 631 → 1659 MB com

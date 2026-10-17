@@ -428,7 +428,9 @@ oot3d_target_defaults(oot3d_native_game NO_WARNING_OVERRIDE)
 if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     # Core and priority placement for every pthread (see the source).
     target_sources(oot3d_native_game PRIVATE
-        tools/oot3d/native_game_runtime/oot3d_switch_threads.cpp)
+        tools/oot3d/native_game_runtime/oot3d_switch_threads.cpp
+        # Clocks for logs/perf.txt (sys-clk IPC, read only).
+        tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp)
     target_link_options(oot3d_native_game PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=threadCreate
         -Wl,--wrap=SDL_SetThreadPriority)
     nx_generate_nacp(oot3d_native_game.nacp

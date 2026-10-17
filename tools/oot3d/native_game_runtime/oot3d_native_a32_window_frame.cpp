@@ -7,6 +7,7 @@
 #include "fast/renderer3ds/pica_surface_debug.h"
 #include "oot3d_native_room_shadow_shell.h"
 #include "oot3d_switch_threads.h"
+#include "oot3d_switch_clocks.h"
 #include "fast/backends/gl_frame_profiler.h"
 #if defined(__SWITCH__)
 #include <malloc.h>
@@ -733,6 +734,9 @@ bool NativeA32WindowSession::RunFrame() {
       }
       perf << " guest_in_pica=" << phaseTiming.GuestInsidePicaSubmitSeconds
            << " total_ms=" << (seconds * 1000.0 / hostFrames);
+      // Clocks of this window (sys-clk IPC, read only; -1 when unknown): one
+      // IPC per window, after `now`, so it is not billed to this window.
+      perf << ' ' << Oot3dNativeGame::SwitchClockPerfSummary();
       if (hostAudioStream != nullptr) {
         perf << ' ' << hostAudioStream->PerfSummary();
       }

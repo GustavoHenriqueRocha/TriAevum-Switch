@@ -650,7 +650,7 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 | Arquivo | Conteúdo |
 |---|---|
 | `boot-status.txt` | etapa da inicialização (`stage=runtime_running`), contagens do whole-AOT, erro legível |
-| `logs/perf.txt` | uma linha `host_frames=...` a cada 150 quadros + blocos `audio:`, `interp:`, `sync:`, `threads:`, `glperf` |
+| `logs/perf.txt` | uma linha `host_frames=...` a cada 150 quadros + blocos `clocks:`, `audio:`, `interp:`, `sync:`, `threads:`, `glperf` |
 | `logs/oot3d_native_game.log`, `logs/glthread.txt` | log geral e troca de contexto GL |
 | `logs/guest_profile.txt` | perfil por função (com `config/guest_profile`) |
 | `logs/failed_pica_*.glsl` | fonte de shader PICA que falhou |
@@ -662,6 +662,11 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   `pacing_wait`; memória `heap_arena_mb`, `heap_arena_peak_mb`, `proc_used_mb`/`proc_total_mb`
   (sempre estáveis numa sessão longa); GL `gl_textures_live`, `gl_tex_mb`, `gl_programs`,
   `gl_buffers_live`, `gl_oom`, `gl_draws_skipped`.
+- `clocks:` `cpu_mhz gpu_mhz mem_mhz` (clock real medido pelo sys-clk; `clk_src=sysclk_real`, ou
+  `sysclk` = alvo, `none` = sys-clk ausente → MHz -1), `op_mode=handheld|docked`,
+  `perf_mode=normal|boost`, `sysclk_profile`, `sysclk_enabled`, `sysclk_api`, `clk_ipc_us`. Só
+  leitura: uma chamada `GetCurrentContext` ao `sys:clk` por janela, sessão aberta uma vez; o app
+  nunca abre clkrst/pcv nem altera clock (SwitchWakerHD issue #33).
 - Planos: `plan_worker_ms`, `plan_late_ms`, `plan_late_draws`, `plan_batches_live/queued/allocated`
   (pequenos e constantes), `plan_lock_wait_*`.
 - `sync:` `guest_wait_frames_ms` (jogo esperando a render thread), `render_idle_ms`,
@@ -676,8 +681,9 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 ### 5.3 Ferramentas
 
 - `python3 tools/oot3d/perf_report.py perf.txt [--session -1] [--skip 2] [--windows] [--top 8]`:
-  resumo por sessão (uma sessão nova começa quando `host_frames` diminui): fps, fases, memória e, com
-  `glperf`, top etapas de GPU, CPU da render thread e contadores.
+  resumo por sessão (uma sessão nova começa quando `host_frames` diminui): fps, clocks, fases,
+  memória e, com `glperf`, top etapas de GPU, CPU da render thread e contadores. Se o clock muda no
+  meio da sessão, avisa (janela e clock antes/depois) e separa fps/`total_ms` por clock.
 - `config/gpu_timing` (N, padrão 30): GPU por etapa com `GL_TIMESTAMP` sem bloquear, CPU da render
   thread por etapa, contadores de chamadas GL (ganchos nos ponteiros do glad), separado por tipo de
   quadro (`step`/`interp`/`hold`). `gpu_*` inclui espera da CPU quando a render thread é o gargalo.
@@ -693,7 +699,9 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 1. **Mesmo clock.** Overclock (sys-clk: CPU 1785, memória 1600) e clock padrão dão resultados
    diferentes: com clock padrão a lógica do OoT3D chega a ~17 ms por passo (game_cpu 95–98%, jogo
    entre 71 e 100% da velocidade); com overclock fica 30 FPS cravado com game_cpu ~60%
-   *(notas de sessão)*. Perguntar o clock antes de comparar qualquer coisa.
+   *(notas de sessão)*. **Sempre comparar com o mesmo clock; o `perf.txt` agora registra**
+   (bloco `clocks:` em cada janela, `perf_report.py` mostra e separa por clock). Sem sys-clk os MHz
+   ficam -1: aí perguntar o clock antes de comparar.
 2. Mesma cena e mesmo save, 2–3 min por modo, descartar as primeiras janelas (`--skip`).
 3. Cache de shaders quente nas duas pontas (a primeira passada compila).
 4. Uma variável por vez, por arquivo em `config/` (quase tudo tem chave de A/B) — sem recompilar.

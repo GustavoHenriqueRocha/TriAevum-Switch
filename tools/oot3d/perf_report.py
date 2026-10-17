@@ -6,6 +6,12 @@ Cada linha "host_frames=..." é uma janela de 150 quadros de host; uma linha
 janela, tempos de GPU/CPU por etapa da render thread e contadores de chamadas
 GL. Uma sessão nova começa quando host_frames volta a diminuir.
 
+Desde o registro de clocks, cada janela traz também "clocks: cpu_mhz=
+gpu_mhz= mem_mhz= op_mode=handheld|docked ..." (lidos do sys-clk; -1 quando
+não deu para ler). O resumo mostra o clock de cada sessão, avisa quando ele
+muda no meio dela e separa as estatísticas por clock: só compare medições
+feitas no mesmo clock.
+
 Uso:
   python3 tools/oot3d/perf_report.py logs/perf.txt            # todas as sessões
   python3 tools/oot3d/perf_report.py perf.txt --session -1    # só a última
@@ -133,6 +139,32 @@ def percentile(data: list[float], fraction: float) -> float:
     return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
 
 
+MODE_NAMES = {"handheld": "portátil", "docked": "dock"}
+
+
+def clock_key(values: dict[str, object]) -> tuple | None:
+    """(cpu, gpu, mem, modo) da janela; None nos perf.txt sem clocks."""
+    if "cpu_mhz" not in values and "op_mode" not in values:
+        return None
+
+    def mhz(key: str) -> int:
+        value = values.get(key)
+        return int(value) if isinstance(value, float) and value > 0 else -1
+
+    mode = values.get("op_mode")
+    return (mhz("cpu_mhz"), mhz("gpu_mhz"), mhz("mem_mhz"),
+            mode if isinstance(mode, str) and mode != "-1" else "?")
+
+
+def clock_text(key: tuple | None) -> str:
+    if key is None:
+        return "sem registro"
+    cpu, gpu, mem, mode = key
+    parts = [f"{name} {value if value > 0 else '?'}" for name, value in
+             (("CPU", cpu), ("GPU", gpu), ("mem", mem))]
+    return " / ".join(parts) + f" MHz, {MODE_NAMES.get(mode, mode)}"
+
+
 def fmt(value: float, digits: int = 2) -> str:
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return "-"
@@ -171,6 +203,7 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
     slow = sum(1 for value in fps if value < 0.9 * max(fps))
     if slow:
         print(f"  janelas >10% abaixo do máximo: {slow}/{len(fps)}")
+    summarize_clocks(all_windows, windows, frames_in)
 
     # Fases do quadro de host (ms por quadro, média das janelas).
     phases = [(name, sum(num(w.main, name) for w in windows) / len(windows))
@@ -209,8 +242,10 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
         summarize_glperf(gl_windows, top, refresh)
 
     if show_windows:
+        has_clocks = any(clock_key(w.main) is not None for w in windows)
         print("  janelas: host_frames fps total_ms" +
-              (" step_gpu_ms interp_gpu_ms step_draws" if gl_windows else ""))
+              (" step_gpu_ms interp_gpu_ms step_draws" if gl_windows else "") +
+              (" cpu/gpu/mem modo" if has_clocks else ""))
         for window in windows:
             line = (f"    {int(num(window.main, 'host_frames')):>7} {fmt(num(window.main, 'fps'), 1):>6} "
                     f"{fmt(num(window.main, 'total_ms')):>7}")
@@ -218,7 +253,57 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
                 line += (f" {fmt(num(window.glperf, 'step_gpu_ms', math.nan)):>7}"
                          f" {fmt(num(window.glperf, 'interp_gpu_ms', math.nan)):>7}"
                          f" {fmt(num(window.glperf, 'step_n_draws', math.nan), 0):>6}")
+            key = clock_key(window.main)
+            if key is not None:
+                line += f"  {key[0]}/{key[1]}/{key[2]} {MODE_NAMES.get(key[3], key[3])}"
             print(line)
+
+
+def summarize_clocks(all_windows: list[Window], windows: list[Window],
+                     frames_in: list[float]) -> None:
+    keys = [clock_key(w.main) for w in all_windows]
+    if all(key is None for key in keys):
+        print("  clocks: não registrados (perf.txt anterior ao registro de clocks)")
+        return
+    last = next(w.main for w in reversed(all_windows) if clock_key(w.main) is not None)
+    source = last.get("clk_src", "?")
+    profile = last.get("sysclk_profile", "?")
+    profile = profile if isinstance(profile, str) else "?"
+    ipc = num(last, "clk_ipc_us", -1.0)
+    changes = [(position, keys[position - 1], keys[position])
+               for position in range(1, len(keys))
+               if keys[position] != keys[position - 1]]
+    distinct = list(dict.fromkeys(key for key in keys))
+    if not changes:
+        print(f"  clocks: {clock_text(keys[0])} (fonte {source}, perfil sys-clk {profile}"
+              + (f", IPC {fmt(ipc, 0)} µs" if ipc >= 0 else "") + ")")
+        if keys[0] is not None and -1 in keys[0][:3]:
+            print("    MHz desconhecidos (sys-clk ausente?): compare só com sessões "
+                  "medidas no mesmo clock")
+        return
+    print(f"  ATENÇÃO: o clock mudou {len(changes)}x no meio da sessão "
+          f"({len(distinct)} clocks distintos); estatísticas separadas abaixo")
+    for position, before, after in changes[:10]:
+        frames = int(num(all_windows[position].main, "host_frames"))
+        print(f"    janela {position + 1} (host_frames={frames}): "
+              f"{clock_text(before)} → {clock_text(after)}")
+    if len(changes) > 10:
+        print(f"    ... mais {len(changes) - 10} mudanças")
+    # Janelas analisadas (sem as puladas do início), agrupadas por clock.
+    groups: dict[tuple | None, list[tuple[float, Window]]] = {}
+    for count, window in zip(frames_in, windows):
+        groups.setdefault(clock_key(window.main), []).append((count, window))
+    print("  por clock (janelas analisadas):")
+    for key, members in groups.items():
+        fps = [num(w.main, "fps") for _, w in members]
+        frames = sum(count for count, _ in members)
+        seconds = sum(count / max(num(w.main, "fps"), 1e-9) for count, w in members)
+        total = [num(w.main, "total_ms") for _, w in members]
+        overall = frames / seconds if seconds > 0 else math.nan
+        print(f"    {clock_text(key)}: {len(members)} janelas (~{seconds / 60:.1f} min), "
+              f"fps global {fmt(overall, 1)} média {fmt(sum(fps) / len(fps), 1)} "
+              f"p10 {fmt(percentile(fps, 0.1), 1)} mín {fmt(min(fps), 1)}, "
+              f"total_ms média {fmt(sum(total) / len(total))}")
 
 
 def summarize_glperf(windows: list[Window], top: int, refresh: float) -> None:
