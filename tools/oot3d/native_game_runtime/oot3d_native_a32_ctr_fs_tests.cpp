@@ -1,4 +1,5 @@
 #include "oot3d_native_a32_ctr_host.h"
+#include "oot3d_native_master_quest_unlock.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -344,11 +345,110 @@ void TestFsRootedRoundTrip() {
     Require(rooted->Stats().opens == rooted->Stats().closes, "rooted handles leaked");
     std::filesystem::remove_all(directory);
 }
+
+// config/unlock_master_quest: system.dat (34 bytes; +0x00 0xBE = MQ liberado,
+// +0x1F 0xEF = modo MQ, +0x20 CRC-16/ARC) sai liberado na leitura e o disco
+// nunca recebe esse 0xBE.
+std::vector<uint8_t> MakeSystemData(uint8_t unlocked, uint8_t mode) {
+    std::vector<uint8_t> data(kSystemDataSize, 0U);
+    data[0] = unlocked;
+    for (size_t index = 1; index <= 30U; ++index)
+        data[index] = static_cast<uint8_t>('A' + index % 26U);
+    data[kSystemDataModeOffset] = mode;
+    StoreSystemDataChecksum(data);
+    return data;
+}
+void TestMasterQuestUnlockPolicy() {
+    const std::array<uint8_t, 9> check{'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+    Require(Crc16Arc(check) == 0xBB3DU, "CRC-16/ARC check value");
+    auto locked = MakeSystemData(0U, 0U);
+    Require(IsValidSystemData(locked), "fixture CRC");
+    auto read = locked;
+    Require(ApplyMasterQuestUnlockToSystemDataRead(0U, read) && read[0] == 0xBEU &&
+                IsValidSystemData(read) &&
+                std::equal(read.begin() + 1, read.begin() + 0x20, locked.begin() + 1),
+            "read did not unlock only byte 0");
+    auto again = read;
+    Require(!ApplyMasterQuestUnlockToSystemDataRead(0U, again) && again == read,
+            "already unlocked data changed");
+    auto corrupt = locked;
+    corrupt[5] ^= 1U;
+    const auto corruptCopy = corrupt;
+    Require(!ApplyMasterQuestUnlockToSystemDataRead(0U, corrupt) && corrupt == corruptCopy,
+            "corrupt system data patched");
+    auto partial = locked;
+    Require(!ApplyMasterQuestUnlockToSystemDataRead(4U, partial) &&
+                !ApplyMasterQuestUnlockToSystemDataRead(0U, std::span<uint8_t>(partial.data(), 33U)),
+            "partial read patched");
+    auto write = MakeSystemData(0xBEU, 0xEFU);
+    Require(GuardMasterQuestUnlockOnSystemDataWrite(0U, write, uint8_t{0U}) && write[0] == 0U &&
+                write[kSystemDataModeOffset] == 0xEFU && IsValidSystemData(write),
+            "write guard kept the injected unlock");
+    auto fresh = MakeSystemData(0xBEU, 0U);
+    Require(GuardMasterQuestUnlockOnSystemDataWrite(0U, fresh, std::nullopt) && fresh[0] == 0U &&
+                IsValidSystemData(fresh),
+            "write guard on a new file");
+    auto real = MakeSystemData(0xBEU, 0U);
+    const auto realCopy = real;
+    Require(!GuardMasterQuestUnlockOnSystemDataWrite(0U, real, uint8_t{0xBEU}) && real == realCopy,
+            "write guard dropped a real unlock");
+    auto plain = MakeSystemData(0U, 0U);
+    const auto plainCopy = plain;
+    Require(!GuardMasterQuestUnlockOnSystemDataWrite(0U, plain, uint8_t{0U}) && plain == plainCopy,
+            "write guard changed a locked write");
+    Require(ParseMasterQuestUnlockSetting("") && ParseMasterQuestUnlockSetting("1\n") &&
+                !ParseMasterQuestUnlockSetting("0") && !ParseMasterQuestUnlockSetting(" no"),
+            "option parsing");
+    Require(IsSystemDataPath("system.dat") && IsSystemDataPath("/sd/savedata/system.dat") &&
+                !IsSystemDataPath("save00.bin"),
+            "system.dat path");
+}
+void TestMasterQuestUnlockThroughFs() {
+    for (const bool enabled : {false, true}) {
+        SetMasterQuestUnlockOptionForTesting(enabled);
+        TestFs fs;
+        FsFixture f(fs);
+        const auto disk = MakeSystemData(0U, 0U);
+        fs.Storage.Bytes = disk;
+        const std::array<uint8_t, 12> path{'/', 's', 'y', 's', 't', 'e', 'm', '.', 'd', 'a', 't', 0};
+        Require(f.Memory.WriteBytes(FsFixture::Buffer, path), "system.dat path");
+        f.Call(f.Fs, {0x080201C2U, 0U, f.Archive, 0U, 3U, 12U, 3U, 0U, 0x30002U, FsFixture::Buffer});
+        const uint32_t system = f.Word(3);
+        Require(system && f.Word(1) == 0U, "system.dat open");
+        const uint32_t data = FsFixture::Buffer + 0x40U;
+        f.Call(system, {0x080200C2U, 0U, 0U, 34U, (34U << 4U) | 0xCU, data});
+        Require(f.Word(1) == 0U && f.Word(2) == 34U, "system.dat read");
+        std::vector<uint8_t> seen(kSystemDataSize);
+        Require(f.Memory.ReadBytes(data, seen), "system.dat read bytes");
+        Require(IsValidSystemData(seen) && seen[0] == (enabled ? 0xBEU : 0U) &&
+                    std::equal(seen.begin() + 1, seen.begin() + 0x20, disk.begin() + 1),
+                "system.dat read through fs:USER");
+        // O jogo marca o modo MQ (+0x1F) na RAM e regrava o arquivo.
+        seen[kSystemDataModeOffset] = 0xEFU;
+        StoreSystemDataChecksum(seen);
+        Require(f.Memory.WriteBytes(data, seen), "system.dat write bytes");
+        f.Call(system, {0x08030102U, 0U, 0U, 34U, 1U, (34U << 4U) | 0xAU, data});
+        Require(f.Word(1) == 0U && f.Word(2) == 34U, "system.dat write");
+        Require(fs.Storage.Bytes.size() == kSystemDataSize && fs.Storage.Bytes[0] == 0U &&
+                    fs.Storage.Bytes[kSystemDataModeOffset] == 0xEFU &&
+                    IsValidSystemData(fs.Storage.Bytes),
+                "system.dat on disk");
+        std::vector<uint8_t> after(kSystemDataSize);
+        Require(f.Memory.ReadBytes(data, after) && after == seen, "guest buffer changed by write");
+        // Outros arquivos do save passam intactos.
+        fs.Storage.Bytes = disk;
+        f.Call(f.Save, {0x080200C2U, 0U, 0U, 34U, (34U << 4U) | 0xCU, data});
+        Require(f.Memory.ReadBytes(data, seen) && seen == disk, "save file patched");
+    }
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
 } // namespace
 
 int main() {
     TestFullHistoryIntentionalWait();
     TestFsFailuresAndRestore();
     TestFsRootedRoundTrip();
+    TestMasterQuestUnlockPolicy();
+    TestMasterQuestUnlockThroughFs();
     std::cout << "oot3d_native_a32_ctr_fs_tests: ok\n";
 }

@@ -232,7 +232,11 @@ Desempenho e usabilidade:
   outras formas de aliviar a GPU para 720p/60 (escala 2,5×, upscaler linear em 3×, anisotrópico menor);
   `config/audio_interpolation` (`sinc`/`cubic`) ainda não testado no console; liberar Master Quest.
 
-- Opção para liberar o Master Quest sem zerar o jogo (flag de desbloqueio no save; `config/unlock_master_quest`, testar numa cópia do save).
+- Master Quest sem zerar o jogo: arquivo `config/unlock_master_quest` (conteúdo `0` desliga; desktop:
+  `TRIAEVUM_UNLOCK_MASTER_QUEST`). O desbloqueio é o byte 0 = `0xBE` do `savedata/system.dat`
+  (34 bytes, CRC-16/ARC em +0x20); o host devolve esse byte ao jogo na leitura e nunca o grava no
+  disco (`oot3d_native_master_quest_unlock.h`). Saves e system.dat ficam intactos; sem a opção tudo
+  volta como era (os saves MQ, slots 3–5, continuam no cartão). Ainda não testado no console.
 
 Medição de referência (2026-10-16, console, CPU 1785 MHz, render thread ligada): a lógica do jogo
 custa ~17,5 ms por refresh (~35 ms por passo de jogo); o jogo roda a ~72% da velocidade nas cenas

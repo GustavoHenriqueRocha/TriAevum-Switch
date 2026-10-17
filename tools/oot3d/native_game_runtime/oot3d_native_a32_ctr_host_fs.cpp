@@ -1,5 +1,6 @@
 // CTR host services: the fs:USER session and RomFS files.
 #include "oot3d_native_a32_ctr_host_internal.h"
+#include "oot3d_native_master_quest_unlock.h"
 
 #include <cstdio>
 
@@ -182,10 +183,31 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
             file.FileOffset > maximum - offset) {
             return fail(kFsOutOfRange, "offset-overflow", offset, length);
         }
+        // config/unlock_master_quest age só em /system.dat do arquivo de save
+        // (oot3d_native_master_quest_unlock.h).
+        const bool masterQuestUnlock = !romfs &&
+                                       *sessionType == "client_session:file:savedata" &&
+                                       IsSystemDataPath(file.FilePath) &&
+                                       MasterQuestUnlockOptionEnabled();
         if (writing) {
             std::vector<uint8_t> bytes(length);
             if (length && !memory.ReadBytes(address, bytes)) {
                 return fail(kInvalidBufferDescriptor, "source-read-failed", offset, length);
+            }
+            if (masterQuestUnlock) {
+                // config/unlock_master_quest: o 0xBE da RAM não vai para o disco.
+                std::optional<uint8_t> diskFirstByte;
+                std::array<uint8_t, 1> first{};
+                uint32_t firstCount = 0U;
+                if (file.FileBackend) {
+                    if (file.FileBackend->Read(0U, first, &firstCount) && firstCount == 1U)
+                        diskFirstByte = first[0];
+                } else {
+                    std::ifstream stream(file.FilePath, std::ios::binary);
+                    if (stream.read(reinterpret_cast<char*>(first.data()), 1)) diskFirstByte = first[0];
+                }
+                if (GuardMasterQuestUnlockOnSystemDataWrite(offset, bytes, diskFirstByte))
+                    event.Name += ":MasterQuestUnlockKeptOffDisk";
             }
             bool success = false;
             uint32_t written = 0U;
@@ -244,6 +266,11 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
             mRuntimeProfile.RomFsReadNanoseconds += RuntimeProfileElapsedNanoseconds(start);
         }
         if (!success) return fail(kFsBackendFailure, "backend-read-failed", offset, length);
+        if (masterQuestUnlock &&
+            ApplyMasterQuestUnlockToSystemDataRead(
+                file.FileOffset + offset, std::span<uint8_t>(bytes.data(), returned))) {
+            event.Name += ":MasterQuestUnlocked";
+        }
         if (returned && !memory.WriteBytes(address, std::span<const uint8_t>(bytes.data(), returned))) {
             return fail(kInvalidBufferDescriptor, "target-write-failed", offset, length);
         }
