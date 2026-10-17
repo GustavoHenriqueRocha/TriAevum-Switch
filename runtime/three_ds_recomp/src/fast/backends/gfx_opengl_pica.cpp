@@ -9,6 +9,7 @@
 
 
 #include "fast/backends/gfx_opengl_pica_post.h"
+#include "fast/backends/gfx_opengl_pica_residency.h"
 #include "fast/backends/gfx_opengl_pica_scale.h"
 #include "fast/oot3d/gl_widescreen_policy.h"
 #include "fast/oot3d/pica_geometry_registry.h"
@@ -23,6 +24,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -35,6 +37,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -114,6 +117,27 @@ bool ReadPicaGlLean() {
 #endif
     }();
     return lean;
+}
+
+// config/gl_texture_budget_mb (PicaGlResidency::ParseBudgetBytes).
+uint64_t ReadPicaGlTextureBudget() {
+    static const uint64_t budget = [] {
+        const uint64_t fallback = PicaGlResidency::Policy{}.BudgetBytes;
+#if defined(__SWITCH__)
+        std::ifstream file("sdmc:/switch/oot3dre/config/gl_texture_budget_mb");
+        std::string text;
+        if (!file || !std::getline(file, text)) {
+            return fallback;
+        }
+        return PicaGlResidency::ParseBudgetBytes(text, fallback);
+#else
+        const char* value = std::getenv("TRIAEVUM_GL_TEXTURE_BUDGET_MB");
+        return value == nullptr
+                   ? fallback
+                   : PicaGlResidency::ParseBudgetBytes(value, fallback);
+#endif
+    }();
+    return budget;
 }
 
 // Optional scanout post-processing and texture filtering (all off unless a
@@ -244,6 +268,9 @@ struct PicaGlTarget {
 struct PicaGlTexture {
     GLuint Handle = 0U;
     GLenum Format = GL_RGBA8;
+    // Residency (PicaGlResidency): decoded size and last frame a draw used it.
+    uint64_t Bytes = 0U;
+    uint64_t LastUsedFrame = 0U;
 };
 
 struct PicaGlDisplay {
@@ -320,7 +347,51 @@ struct PicaGlGeometryBuffer {
     GLuint Handle = 0U;
     uint64_t ContentVersion = 0U;
     uint64_t StructuralSignature = 0U;
+    uint64_t Bytes = 0U;
 };
+
+// One stream ring (PicaGlResidency::StreamRing) and its buffer object.
+struct PicaGlStreamBuffer {
+    GLenum Target = GL_ARRAY_BUFFER;
+    GLuint Handle = 0U;
+    PicaGlResidency::StreamRing Ring;
+};
+
+// Live GPU objects and bytes, published at each frame's first draw for the
+// stats reader (another thread).
+struct PicaGlResidencyCounters {
+    std::atomic<uint64_t> TexturesLive{0};
+    std::atomic<uint64_t> TextureBytes{0};
+    std::atomic<uint64_t> LutsLive{0};
+    std::atomic<uint64_t> LutBytes{0};
+    std::atomic<uint64_t> ProgramsLive{0};
+    std::atomic<uint64_t> TargetsLive{0};
+    std::atomic<uint64_t> DisplaysLive{0};
+    std::atomic<uint64_t> GeometryBuffersLive{0};
+    std::atomic<uint64_t> GeometryBufferBytes{0};
+    std::atomic<uint64_t> TexturesCreated{0};
+    std::atomic<uint64_t> TexturesEvicted{0};
+    std::atomic<uint64_t> RingOrphans{0};
+    std::atomic<uint64_t> OutOfMemoryEvents{0};
+    std::atomic<uint64_t> SkippedDraws{0};
+};
+
+// The driver could not allocate or map memory for a draw (GL_OUT_OF_MEMORY
+// or a failed buffer map): the draw is skipped after a trim, not fatal.
+struct PicaGlOutOfMemory : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+// Drains the GL error flags; true when one of them was GL_OUT_OF_MEMORY.
+bool TakePicaGlOutOfMemory() {
+    bool outOfMemory = false;
+    for (int guard = 0; guard < 8; ++guard) {
+        const GLenum error = glGetError();
+        if (error == GL_NO_ERROR) break;
+        outOfMemory = outOfMemory || error == GL_OUT_OF_MEMORY;
+    }
+    return outOfMemory;
+}
 
 GLuint CompilePicaGlShader(GLenum stage, std::string_view source) {
     const GLuint shader = glCreateShader(stage);
@@ -923,6 +994,26 @@ struct GfxRenderingAPIOGL::NativePicaState {
     uint64_t GeometryStreamingUploadBytes = 0U;
     uint64_t UniformUploads = 0U;
     uint64_t UniformUploadBytes = 0U;
+    // Residency: the frame of the current draws, decoded texture and LUT
+    // bytes, and the policy that bounds them.
+    uint64_t Frame = 0U;
+    uint64_t TextureBytes = 0U;
+    uint64_t LutBytes = 0U;
+    uint64_t GeometryBufferBytes = 0U;
+    PicaGlResidency::Policy TexturePolicy;
+    std::vector<PicaGlTextureKey> TextureEvictions;
+    std::vector<uint64_t> LutEvictions;
+    PicaGlResidencyCounters Counters;
+    // Stream rings: per-draw uniforms, streamed vertices and indices.
+    PicaGlStreamBuffer UniformRing;
+    PicaGlStreamBuffer VertexRing;
+    PicaGlStreamBuffer IndexRing;
+    uint64_t UniformAlignment = 256U;
+    // Lean: where the last uniform blocks went (ring generation, offset).
+    uint64_t LastVertexUniformGeneration = 0U;
+    uint64_t LastVertexUniformOffset = 0U;
+    uint64_t LastFragmentUniformGeneration = 0U;
+    uint64_t LastFragmentUniformOffset = 0U;
     float ResolutionScale = 1.0F;
     // config/gl_lean (exact savings; see PicaGlScale::ParseLeanSetting).
     bool Lean = true;
@@ -1433,6 +1524,23 @@ void GfxRenderingAPIOGL::InitNativePica() {
     glGenBuffers(1, &state.IndexBuffer);
     glGenBuffers(1, &state.VertexUniformBuffer);
     glGenBuffers(1, &state.FragmentUniformBuffer);
+    state.TexturePolicy.BudgetBytes = ReadPicaGlTextureBudget();
+    {
+        GLint alignment = 0;
+        glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &alignment);
+        if (alignment > 0) state.UniformAlignment = static_cast<uint64_t>(alignment);
+        // A draw's fragment block is 6 KiB: the uniform ring wraps about
+        // once a frame at most; the others less often.
+        state.UniformRing = {GL_UNIFORM_BUFFER, 0U,
+                             PicaGlResidency::StreamRing(8ULL << 20U)};
+        state.VertexRing = {GL_ARRAY_BUFFER, 0U,
+                            PicaGlResidency::StreamRing(4ULL << 20U)};
+        state.IndexRing = {GL_ELEMENT_ARRAY_BUFFER, 0U,
+                           PicaGlResidency::StreamRing(1ULL << 20U)};
+        glGenBuffers(1, &state.UniformRing.Handle);
+        glGenBuffers(1, &state.VertexRing.Handle);
+        glGenBuffers(1, &state.IndexRing.Handle);
+    }
 
     const std::array<uint8_t, 4> white{255U, 255U, 255U, 255U};
     glGenTextures(1, &state.FallbackColor);
@@ -1543,6 +1651,9 @@ void GfxRenderingAPIOGL::ShutdownNativePica() noexcept {
     glDeleteBuffers(1, &state.IndexBuffer);
     glDeleteBuffers(1, &state.VertexUniformBuffer);
     glDeleteBuffers(1, &state.FragmentUniformBuffer);
+    glDeleteBuffers(1, &state.UniformRing.Handle);
+    glDeleteBuffers(1, &state.VertexRing.Handle);
+    glDeleteBuffers(1, &state.IndexRing.Handle);
     glDeleteVertexArrays(1, &state.VertexArray);
 #endif
     mNativePica.reset();
@@ -1621,6 +1732,8 @@ void DeletePicaGlGeometry(
         }
     }
     glDeleteBuffers(1, &found->second.Handle);
+    state.GeometryBufferBytes -=
+        std::min(state.GeometryBufferBytes, found->second.Bytes);
     state.GeometryBuffers.erase(found);
 }
 
@@ -1822,10 +1935,13 @@ PicaGlTexture& GetPicaGlTexture(
     };
     auto [found, inserted] = state.Textures.try_emplace(key);
     if (!inserted) {
+        found->second.LastUsedFrame = state.Frame;
         return found->second;
     }
     auto& result = found->second;
+    result.LastUsedFrame = state.Frame;
     try {
+        (void)TakePicaGlOutOfMemory();
         glGenTextures(1, &result.Handle);
         glBindTexture(GL_TEXTURE_2D, result.Handle);
         if (texture.NativeType == 2U) {
@@ -1841,6 +1957,8 @@ PicaGlTexture& GetPicaGlTexture(
                          texture.Height, 0, GL_RED_INTEGER, GL_UNSIGNED_INT,
                          pixels.data());
             result.Format = GL_R32UI;
+            result.Bytes = static_cast<uint64_t>(texture.Width) *
+                           texture.Height * 4U;
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
@@ -1876,6 +1994,7 @@ PicaGlTexture& GetPicaGlTexture(
                              GL_RGBA8, static_cast<GLsizei>(width),
                              static_cast<GLsizei>(height), 0, GL_RGBA,
                              GL_UNSIGNED_BYTE, rgba8.data());
+                result.Bytes += static_cast<uint64_t>(width) * height * 4U;
                 nativeOffset += *encoded;
             }
             result.Format = GL_RGBA8;
@@ -1906,11 +2025,16 @@ PicaGlTexture& GetPicaGlTexture(
                         ToPicaGlWrap(texture.NativeWrapS));
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
                         ToPicaGlWrap(texture.NativeWrapT));
+        if (TakePicaGlOutOfMemory()) {
+            throw PicaGlOutOfMemory("PICA texture allocation ran out of memory");
+        }
     } catch (...) {
         glDeleteTextures(1, &result.Handle);
         state.Textures.erase(found);
         throw;
     }
+    state.TextureBytes += result.Bytes;
+    state.Counters.TexturesCreated.fetch_add(1U, std::memory_order_relaxed);
     return result;
 }
 
@@ -1922,9 +2046,12 @@ GLuint GetPicaLightingLut(
     }
     auto [found, inserted] = state.LightingLuts.try_emplace(lut.ContentHash);
     if (!inserted) {
+        found->second.LastUsedFrame = state.Frame;
         return found->second.Handle;
     }
     auto& texture = found->second;
+    texture.LastUsedFrame = state.Frame;
+    (void)TakePicaGlOutOfMemory();
     glGenTextures(1, &texture.Handle);
     glBindTexture(GL_TEXTURE_2D, texture.Handle);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_R32UI, 256, 24, 0,
@@ -1934,6 +2061,13 @@ GLuint GetPicaLightingLut(
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     texture.Format = GL_R32UI;
+    if (TakePicaGlOutOfMemory()) {
+        glDeleteTextures(1, &texture.Handle);
+        state.LightingLuts.erase(found);
+        throw PicaGlOutOfMemory("PICA lighting LUT allocation ran out of memory");
+    }
+    texture.Bytes = 256U * 24U * 4U;
+    state.LutBytes += texture.Bytes;
     return texture.Handle;
 }
 
@@ -2057,6 +2191,133 @@ PicaGlDisplay& GetPicaGlDisplay(
     return display;
 }
 
+// Releases textures and LUTs the policy no longer keeps. `all`: every one
+// idle for a frame or more, after an allocation failed.
+void TrimPicaGlResidency(GfxRenderingAPIOGL::NativePicaState& state,
+                         bool all) {
+    auto policy = state.TexturePolicy;
+    if (all) {
+        policy.BudgetBytes = 0U;
+        policy.MinIdleFrames = 1U;
+    }
+    PicaGlResidency::CollectEvictions(state.Textures, state.Frame,
+                                      state.TextureBytes, policy,
+                                      state.TextureEvictions);
+    for (const auto& key : state.TextureEvictions) {
+        const auto found = state.Textures.find(key);
+        if (found == state.Textures.end()) continue;
+        glDeleteTextures(1, &found->second.Handle);
+        state.TextureBytes -= std::min(state.TextureBytes, found->second.Bytes);
+        state.Textures.erase(found);
+    }
+    state.Counters.TexturesEvicted.fetch_add(state.TextureEvictions.size(),
+                                             std::memory_order_relaxed);
+    // LUTs are small; only the idle limit (or a failure) releases them.
+    auto lutPolicy = policy;
+    lutPolicy.BudgetBytes = all ? 0U : std::numeric_limits<uint64_t>::max();
+    PicaGlResidency::CollectEvictions(state.LightingLuts, state.Frame,
+                                      state.LutBytes, lutPolicy,
+                                      state.LutEvictions);
+    for (const uint64_t key : state.LutEvictions) {
+        const auto found = state.LightingLuts.find(key);
+        if (found == state.LightingLuts.end()) continue;
+        glDeleteTextures(1, &found->second.Handle);
+        state.LutBytes -= std::min(state.LutBytes, found->second.Bytes);
+        state.LightingLuts.erase(found);
+    }
+}
+
+void PublishPicaGlResidency(GfxRenderingAPIOGL::NativePicaState& state) {
+    auto& counters = state.Counters;
+    constexpr auto relaxed = std::memory_order_relaxed;
+    counters.TexturesLive.store(state.Textures.size(), relaxed);
+    counters.TextureBytes.store(state.TextureBytes, relaxed);
+    counters.LutsLive.store(state.LightingLuts.size(), relaxed);
+    counters.LutBytes.store(state.LutBytes, relaxed);
+    counters.ProgramsLive.store(state.Programs.size(), relaxed);
+    counters.TargetsLive.store(state.Targets.size(), relaxed);
+    counters.DisplaysLive.store(state.Displays.size(), relaxed);
+    counters.GeometryBuffersLive.store(state.GeometryBuffers.size(), relaxed);
+    counters.GeometryBufferBytes.store(state.GeometryBufferBytes, relaxed);
+}
+
+// The first draw of a frame: advance the residency clock, trim (every 30
+// frames, or whenever the textures exceed the budget) and publish.
+void BeginPicaGlFrame(GfxRenderingAPIOGL::NativePicaState& state,
+                      uint64_t frame) {
+    if (state.Frame == frame) return;
+    state.Frame = frame;
+    if (frame % 30U == 0U ||
+        state.TextureBytes > state.TexturePolicy.BudgetBytes) {
+        TrimPicaGlResidency(state, false);
+    }
+    PublishPicaGlResidency(state);
+}
+
+// Reserves `total` bytes (sum of StreamRing::Span) of a stream ring for one
+// draw, orphaning the storage when a new generation starts. False when the
+// ring cannot hold them: the caller uses its own buffers for this draw.
+bool ReservePicaGlStream(GfxRenderingAPIOGL::NativePicaState& state,
+                         PicaGlStreamBuffer& stream, uint64_t total) {
+    if (!stream.Ring.Fits(total)) return false;
+    if (stream.Ring.Reserve(total)) {
+        // Fresh storage; the GPU keeps reading the previous one until done.
+        glBindBuffer(stream.Target, stream.Handle);
+        glBufferData(stream.Target,
+                     static_cast<GLsizeiptr>(stream.Ring.Capacity()), nullptr,
+                     GL_STREAM_DRAW);
+        state.Counters.RingOrphans.fetch_add(1U, std::memory_order_relaxed);
+    }
+    return true;
+}
+
+// Copies `bytes` into the next reserved range of a stream ring and returns
+// its offset. Throws PicaGlOutOfMemory when the driver cannot map it.
+uint64_t WritePicaGlStream(PicaGlStreamBuffer& stream,
+                           std::span<const uint8_t> bytes, uint64_t alignment) {
+    const auto allocation = stream.Ring.Allocate(bytes.size(), alignment);
+    if (!allocation.Valid) {
+        throw std::runtime_error("PICA stream range was not reserved");
+    }
+    glBindBuffer(stream.Target, stream.Handle);
+    void* mapped = glMapBufferRange(
+        stream.Target, static_cast<GLintptr>(allocation.Offset),
+        static_cast<GLsizeiptr>(bytes.size()),
+        GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT |
+            GL_MAP_INVALIDATE_RANGE_BIT);
+    if (mapped == nullptr) {
+        stream.Ring.Reset();
+        (void)TakePicaGlOutOfMemory();
+        throw PicaGlOutOfMemory("PICA stream buffer could not be mapped");
+    }
+    std::memcpy(mapped, bytes.data(), bytes.size());
+    if (glUnmapBuffer(stream.Target) == GL_FALSE) {
+        stream.Ring.Reset();
+        throw PicaGlOutOfMemory("PICA stream buffer contents were lost");
+    }
+    return allocation.Offset;
+}
+
+// A whole buffer object replaced by `bytes` without letting the driver copy
+// from a failed allocation (glBufferData with data would memcpy into NULL).
+void UploadPicaGlBuffer(GLenum target, GLuint buffer,
+                        std::span<const uint8_t> bytes, GLenum usage) {
+    glBindBuffer(target, buffer);
+    glBufferData(target, static_cast<GLsizeiptr>(bytes.size()), nullptr, usage);
+    if (bytes.empty()) return;
+    void* mapped = glMapBufferRange(
+        target, 0, static_cast<GLsizeiptr>(bytes.size()),
+        GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+    if (mapped == nullptr) {
+        (void)TakePicaGlOutOfMemory();
+        throw PicaGlOutOfMemory("PICA buffer could not be mapped");
+    }
+    std::memcpy(mapped, bytes.data(), bytes.size());
+    if (glUnmapBuffer(target) == GL_FALSE) {
+        throw PicaGlOutOfMemory("PICA buffer contents were lost");
+    }
+}
+
 } // namespace
 #endif
 
@@ -2086,6 +2347,23 @@ GfxRenderingAPIOGL::GetNativePicaBackendStats() const noexcept {
             mNativePica->GeometryStreamingUploadBytes;
         result.UniformUploads = mNativePica->UniformUploads;
         result.UniformUploadBytes = mNativePica->UniformUploadBytes;
+        const auto& counters = mNativePica->Counters;
+        constexpr auto relaxed = std::memory_order_relaxed;
+        result.TexturesLive = counters.TexturesLive.load(relaxed);
+        result.TextureBytes = counters.TextureBytes.load(relaxed);
+        result.LutsLive = counters.LutsLive.load(relaxed);
+        result.LutBytes = counters.LutBytes.load(relaxed);
+        result.ProgramsLive = counters.ProgramsLive.load(relaxed);
+        result.TargetsLive = counters.TargetsLive.load(relaxed);
+        result.DisplaysLive = counters.DisplaysLive.load(relaxed);
+        result.GeometryBuffersLive = counters.GeometryBuffersLive.load(relaxed);
+        result.GeometryBufferBytes = counters.GeometryBufferBytes.load(relaxed);
+        result.TexturesCreated = counters.TexturesCreated.load(relaxed);
+        result.TexturesEvicted = counters.TexturesEvicted.load(relaxed);
+        result.StreamRingOrphans = counters.RingOrphans.load(relaxed);
+        result.OutOfMemoryEvents = counters.OutOfMemoryEvents.load(relaxed);
+        result.SkippedDraws = counters.SkippedDraws.load(relaxed);
+        result.TextureBudgetBytes = mNativePica->TexturePolicy.BudgetBytes;
     }
 #endif
     return result;
@@ -2133,6 +2411,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 Renderer3ds::BuildPicaCompositionDrawReference(draw), error)) {
             return false;
         }
+        BeginPicaGlFrame(*mNativePica, mFrameCount);
 
         auto& program = GetPicaGlProgram(*mNativePica, draw);
         auto& target = GetPicaGlTarget(*mNativePica, draw);
@@ -2164,32 +2443,69 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         // command FIFO word by word (and orphans the storage), so each
         // repeat (draws of one object share matrices, draws of one material
         // its constants) costs GPU front-end time as well as CPU.
+        // Each block goes to the next range of the uniform ring (no buffer
+        // reallocation per draw). Both blocks of a draw are reserved first,
+        // so they share one generation of the ring's storage.
+        auto& uniformRing = mNativePica->UniformRing;
+        const uint64_t uniformAlignment = mNativePica->UniformAlignment;
+        const bool uniformsInRing = ReservePicaGlStream(
+            *mNativePica, uniformRing,
+            PicaGlResidency::StreamRing::Span(draw.VertexUniformBytes.size(),
+                                              uniformAlignment) +
+                PicaGlResidency::StreamRing::Span(
+                    draw.FragmentUniformBytes.size(), uniformAlignment));
         const auto uploadUniforms = [&](GLuint buffer, GLuint binding,
                                         std::span<const uint8_t> bytes,
-                                        std::vector<uint8_t>& last) {
-            const bool same = mNativePica->Lean && last.size() == bytes.size() &&
-                              !bytes.empty() &&
+                                        std::vector<uint8_t>& last,
+                                        uint64_t& lastGeneration,
+                                        uint64_t& lastOffset) {
+            if (bytes.empty()) {
+                glBindBufferBase(GL_UNIFORM_BUFFER, binding, buffer);
+                return;
+            }
+            const bool same = uniformsInRing && mNativePica->Lean &&
+                              last.size() == bytes.size() &&
+                              lastGeneration != 0U &&
+                              lastGeneration == uniformRing.Ring.Generation() &&
                               std::memcmp(last.data(), bytes.data(),
                                           bytes.size()) == 0;
-            if (!same) {
-                glBindBuffer(GL_UNIFORM_BUFFER, buffer);
-                glBufferData(GL_UNIFORM_BUFFER,
-                             static_cast<GLsizeiptr>(bytes.size()),
-                             bytes.data(), GL_STREAM_DRAW);
-                ++mNativePica->UniformUploads;
-                mNativePica->UniformUploadBytes += bytes.size();
+            if (same) {
+                glBindBufferRange(GL_UNIFORM_BUFFER, binding, uniformRing.Handle,
+                                  static_cast<GLintptr>(lastOffset),
+                                  static_cast<GLsizeiptr>(bytes.size()));
+                return;
+            }
+            ++mNativePica->UniformUploads;
+            mNativePica->UniformUploadBytes += bytes.size();
+            last.clear();
+            lastGeneration = 0U;
+            if (uniformsInRing) {
+                const uint64_t offset =
+                    WritePicaGlStream(uniformRing, bytes, uniformAlignment);
+                glBindBufferRange(GL_UNIFORM_BUFFER, binding, uniformRing.Handle,
+                                  static_cast<GLintptr>(offset),
+                                  static_cast<GLsizeiptr>(bytes.size()));
                 if (mNativePica->Lean) {
                     last.assign(bytes.begin(), bytes.end());
+                    lastGeneration = uniformRing.Ring.Generation();
+                    lastOffset = offset;
                 }
+                return;
             }
+            UploadPicaGlBuffer(GL_UNIFORM_BUFFER, buffer, bytes,
+                               GL_STREAM_DRAW);
             glBindBufferBase(GL_UNIFORM_BUFFER, binding, buffer);
         };
         uploadUniforms(mNativePica->VertexUniformBuffer, 0U,
                        draw.VertexUniformBytes,
-                       mNativePica->LastVertexUniforms);
+                       mNativePica->LastVertexUniforms,
+                       mNativePica->LastVertexUniformGeneration,
+                       mNativePica->LastVertexUniformOffset);
         uploadUniforms(mNativePica->FragmentUniformBuffer, 4U,
                        draw.FragmentUniformBytes,
-                       mNativePica->LastFragmentUniforms);
+                       mNativePica->LastFragmentUniforms,
+                       mNativePica->LastFragmentUniformGeneration,
+                       mNativePica->LastFragmentUniformOffset);
 
         uint16_t nextAttributeMask = 0U;
         for (const auto& binding : draw.VertexBindings) {
@@ -2225,6 +2541,9 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             draw.GeometryContentVersion != 0U;
         const Oot3d::PicaPreparedGeometry* preparedGeometry = nullptr;
         GLuint persistentGeometryBuffer = 0U;
+        // Streamed bindings: the buffer and offset their bytes went to.
+        std::array<GLuint, 16> streamBuffers{};
+        std::array<uint64_t, 16> streamOffsets{};
         if (persistentGeometry) {
             auto& streams = mNativePica->GeometrySourceStreams;
             streams.clear();
@@ -2290,12 +2609,16 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                     throw std::runtime_error(
                         "PICA OpenGL geometry payload is too large");
                 }
-                glBindBuffer(GL_ARRAY_BUFFER, buffer.Handle);
-                glBufferData(
-                    GL_ARRAY_BUFFER,
-                    static_cast<GLsizeiptr>(
-                        preparedGeometry->Payload.size()),
-                    preparedGeometry->Payload.data(), GL_STATIC_DRAW);
+                // Invalid until the upload succeeded (a failed map leaves
+                // the buffer without these contents).
+                buffer.ContentVersion = 0U;
+                mNativePica->GeometryBufferBytes -=
+                    std::min(mNativePica->GeometryBufferBytes, buffer.Bytes);
+                buffer.Bytes = 0U;
+                UploadPicaGlBuffer(GL_ARRAY_BUFFER, buffer.Handle,
+                                   preparedGeometry->Payload, GL_STATIC_DRAW);
+                buffer.Bytes = preparedGeometry->Payload.size();
+                mNativePica->GeometryBufferBytes += buffer.Bytes;
                 buffer.ContentVersion = preparedGeometry->ContentVersion;
                 buffer.StructuralSignature =
                     preparedGeometry->StructuralSignature;
@@ -2306,13 +2629,30 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             persistentGeometryBuffer = buffer.Handle;
             ++mNativePica->GeometryPersistentDraws;
         } else {
+            // All bindings of the draw in one generation of the vertex ring;
+            // bindings larger than the ring keep their own buffers.
+            uint64_t vertexTotal = 0U;
             for (const auto& binding : draw.VertexBindings) {
-                const GLuint buffer =
-                    mNativePica->VertexBuffers[binding.Binding];
-                glBindBuffer(GL_ARRAY_BUFFER, buffer);
-                glBufferData(GL_ARRAY_BUFFER,
-                             static_cast<GLsizeiptr>(binding.Bytes.size()),
-                             binding.Bytes.data(), GL_STREAM_DRAW);
+                vertexTotal += PicaGlResidency::StreamRing::Span(
+                    binding.Bytes.size(), 16U);
+            }
+            const bool verticesInRing = ReservePicaGlStream(
+                *mNativePica, mNativePica->VertexRing, vertexTotal);
+            for (const auto& binding : draw.VertexBindings) {
+                if (verticesInRing) {
+                    streamBuffers[binding.Binding] =
+                        mNativePica->VertexRing.Handle;
+                    streamOffsets[binding.Binding] = WritePicaGlStream(
+                        mNativePica->VertexRing, binding.Bytes, 16U);
+                } else {
+                    UploadPicaGlBuffer(
+                        GL_ARRAY_BUFFER,
+                        mNativePica->VertexBuffers[binding.Binding],
+                        binding.Bytes, GL_STREAM_DRAW);
+                    streamBuffers[binding.Binding] =
+                        mNativePica->VertexBuffers[binding.Binding];
+                    streamOffsets[binding.Binding] = 0U;
+                }
                 ++mNativePica->GeometryStreamingUploads;
                 mNativePica->GeometryStreamingUploadBytes +=
                     binding.Bytes.size();
@@ -2330,10 +2670,12 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             }
             const GLuint buffer = persistentGeometry
                                       ? persistentGeometryBuffer
-                                      : mNativePica->VertexBuffers[
-                                            attribute.Binding];
+                                      : streamBuffers[attribute.Binding];
             const GLenum type = ToPicaGlVertexType(attribute.Format);
             uint64_t byteOffset = attribute.ByteOffset;
+            if (!persistentGeometry) {
+                byteOffset += streamOffsets[attribute.Binding];
+            }
             if (persistentGeometry) {
                 const auto preparedBinding = std::find_if(
                     preparedGeometry->SourceBindings.begin(),
@@ -2657,11 +2999,19 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                     throw std::runtime_error(
                         "PICA OpenGL streaming index data is too large");
                 }
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,
-                             mNativePica->IndexBuffer);
-                glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                             static_cast<GLsizeiptr>(draw.IndexBytes.size()),
-                             draw.IndexBytes.data(), GL_STREAM_DRAW);
+                std::optional<uint64_t> indexOffset;
+                if (ReservePicaGlStream(
+                        *mNativePica, mNativePica->IndexRing,
+                        PicaGlResidency::StreamRing::Span(
+                            draw.IndexBytes.size(), 4U))) {
+                    // Bound to the VAO's element binding by the write.
+                    indexOffset = WritePicaGlStream(mNativePica->IndexRing,
+                                                    draw.IndexBytes, 4U);
+                } else {
+                    UploadPicaGlBuffer(GL_ELEMENT_ARRAY_BUFFER,
+                                       mNativePica->IndexBuffer,
+                                       draw.IndexBytes, GL_STREAM_DRAW);
+                }
                 ++mNativePica->GeometryStreamingUploads;
                 mNativePica->GeometryStreamingUploadBytes +=
                     draw.IndexBytes.size();
@@ -2669,7 +3019,9 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                                         ? GL_UNSIGNED_SHORT
                                         : GL_UNSIGNED_BYTE;
                 glDrawElementsBaseVertex(
-                    topology, static_cast<GLsizei>(indexCount), type, nullptr,
+                    topology, static_cast<GLsizei>(indexCount), type,
+                    reinterpret_cast<const void*>(static_cast<uintptr_t>(
+                        indexOffset.value_or(0U))),
                     draw.BaseVertex);
             }
         } else {
@@ -2687,6 +3039,34 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         if (shadowProducer) {
             glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
                             GL_TEXTURE_FETCH_BARRIER_BIT);
+        }
+        InvalidateLegacyStateAfterPica();
+        return true;
+    } catch (const PicaGlOutOfMemory& exception) {
+        // Out of memory: release every idle texture and LUT, forget the
+        // stream storage and skip this draw instead of failing the frame.
+        auto& state = *mNativePica;
+        TrimPicaGlResidency(state, true);
+        state.UniformRing.Ring.Reset();
+        state.VertexRing.Ring.Reset();
+        state.IndexRing.Ring.Reset();
+        state.LastVertexUniforms.clear();
+        state.LastFragmentUniforms.clear();
+        state.LastVertexUniformGeneration = 0U;
+        state.LastFragmentUniformGeneration = 0U;
+        for (auto& attribute : state.AttributeStates) attribute = {};
+        PublishPicaGlResidency(state);
+        const uint64_t events = state.Counters.OutOfMemoryEvents.fetch_add(
+                                    1U, std::memory_order_relaxed) + 1U;
+        state.Counters.SkippedDraws.fetch_add(1U, std::memory_order_relaxed);
+        if ((events & (events - 1U)) == 0U) {
+            std::fprintf(stderr,
+                         "TRIAEVUM_GL_OUT_OF_MEMORY events=%llu textures=%zu "
+                         "texture_bytes=%llu: %s\n",
+                         static_cast<unsigned long long>(events),
+                         state.Textures.size(),
+                         static_cast<unsigned long long>(state.TextureBytes),
+                         exception.what());
         }
         InvalidateLegacyStateAfterPica();
         return true;

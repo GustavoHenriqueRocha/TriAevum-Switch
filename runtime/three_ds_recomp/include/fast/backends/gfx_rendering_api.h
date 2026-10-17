@@ -78,6 +78,24 @@ struct GfxNativePicaBackendStats {
     uint64_t GeometryStreamingUploadBytes = 0;
     uint64_t UniformUploads = 0;
     uint64_t UniformUploadBytes = 0;
+    // GPU residency (OpenGL PICA backend): live objects and bytes, published
+    // at each frame's first draw; created/evicted textures, stream ring
+    // orphans, allocation failures and the draws they skipped (totals).
+    uint64_t TexturesLive = 0;
+    uint64_t TextureBytes = 0;
+    uint64_t TextureBudgetBytes = 0;
+    uint64_t LutsLive = 0;
+    uint64_t LutBytes = 0;
+    uint64_t ProgramsLive = 0;
+    uint64_t TargetsLive = 0;
+    uint64_t DisplaysLive = 0;
+    uint64_t GeometryBuffersLive = 0;
+    uint64_t GeometryBufferBytes = 0;
+    uint64_t TexturesCreated = 0;
+    uint64_t TexturesEvicted = 0;
+    uint64_t StreamRingOrphans = 0;
+    uint64_t OutOfMemoryEvents = 0;
+    uint64_t SkippedDraws = 0;
 };
 
 // A hash function used to hash a: pair<float, float>

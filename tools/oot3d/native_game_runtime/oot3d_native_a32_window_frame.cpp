@@ -4,6 +4,10 @@
 #include <fstream>
 #include "fast/renderer3ds/pica_surface_debug.h"
 #include "oot3d_native_room_shadow_shell.h"
+#if defined(__SWITCH__)
+#include <malloc.h>
+#include <switch.h>
+#endif
 
 extern "C" {
 // Provided only by a Mesa built with the Horizon shader cache (mesa_switch.h).
@@ -610,6 +614,41 @@ bool NativeA32WindowSession::RunFrame() {
              << " plan_batches_queued=" << planStats.QueuedBatches
              << " plan_batches_allocated=" << planStats.AllocatedBatches;
         windowPlanStats = planStats;
+      }
+      // GPU residency and memory: every live count and byte total must stay
+      // bounded over a long session (a texture cache that never released
+      // ran the console out of memory after ~8 minutes).
+      {
+        constexpr double kMb = 1024.0 * 1024.0;
+        const auto gpu = api.GetNativePicaBackendStats();
+        perf << " gl_textures_live=" << gpu.TexturesLive
+             << " gl_tex_mb=" << (gpu.TextureBytes / kMb)
+             << " gl_tex_budget_mb=" << (gpu.TextureBudgetBytes / kMb)
+             << " gl_tex_created=" << gpu.TexturesCreated
+             << " gl_tex_evicted=" << gpu.TexturesEvicted
+             << " gl_luts_live=" << gpu.LutsLive
+             << " gl_lut_mb=" << (gpu.LutBytes / kMb)
+             << " gl_programs=" << gpu.ProgramsLive
+             << " gl_targets=" << gpu.TargetsLive
+             << " gl_displays=" << gpu.DisplaysLive
+             << " gl_buffers_live=" << gpu.GeometryBuffersLive
+             << " gl_buffer_mb=" << (gpu.GeometryBufferBytes / kMb)
+             << " gl_geometry_entries=" << gpu.GeometryRegistryEntries
+             << " gl_ring_orphans=" << gpu.StreamRingOrphans
+             << " gl_oom=" << gpu.OutOfMemoryEvents
+             << " gl_draws_skipped=" << gpu.SkippedDraws;
+        const struct mallinfo heap = mallinfo();
+        perf << " heap_used_mb=" << (static_cast<double>(heap.uordblks) / kMb)
+             << " heap_arena_mb=" << (static_cast<double>(heap.arena) / kMb);
+        uint64_t usedMemory = 0U;
+        uint64_t totalMemory = 0U;
+        if (R_SUCCEEDED(svcGetInfo(&usedMemory, InfoType_UsedMemorySize,
+                                   CUR_PROCESS_HANDLE, 0)) &&
+            R_SUCCEEDED(svcGetInfo(&totalMemory, InfoType_TotalMemorySize,
+                                   CUR_PROCESS_HANDLE, 0))) {
+          perf << " proc_used_mb=" << (usedMemory / kMb)
+               << " proc_total_mb=" << (totalMemory / kMb);
+        }
       }
       // Totals of a Mesa built with the Horizon shader cache (absent from
       // the stock devkitPro library, hence weak).

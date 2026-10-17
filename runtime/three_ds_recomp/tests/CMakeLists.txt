@@ -914,3 +914,14 @@ target_include_directories(gfx_opengl_pica_scale_tests
     PRIVATE ../src ../include)
 target_link_libraries(gfx_opengl_pica_scale_tests PRIVATE gtest_main)
 gtest_discover_tests(gfx_opengl_pica_scale_tests DISCOVERY_TIMEOUT 30)
+
+# GPU memory policy of the OpenGL PICA backend (texture residency, stream
+# rings) over long simulated sessions.
+add_executable(gfx_opengl_pica_residency_tests
+    gfx_opengl_pica_residency_tests.cpp
+)
+set_property(TARGET gfx_opengl_pica_residency_tests PROPERTY CXX_STANDARD 20)
+target_include_directories(gfx_opengl_pica_residency_tests
+    PRIVATE ../src ../include)
+target_link_libraries(gfx_opengl_pica_residency_tests PRIVATE gtest_main)
+gtest_discover_tests(gfx_opengl_pica_residency_tests DISCOVERY_TIMEOUT 30)

@@ -214,6 +214,24 @@ Desempenho e usabilidade:
      quadro em 720p mesmo sem sombra;
   4. blocos de uniform iguais ao anterior não são reenviados (o nvc0 empurra o upload de constant
      buffer pela FIFO, palavra a palavra) e a imagem da unidade 5 só é religada quando muda.
+- **Memória de GPU limitada** (crash após ~8 min com fps60: o nouveau não conseguiu mapear um
+  buffer e o Mesa copiou os uniforms de um draw para NULL dentro do `glBufferData`):
+  1. o cache de texturas PICA (por conteúdo) nunca descartava — cada textura animada criava uma
+     textura GL nova a cada quadro. Agora sai o que ficou 1800 quadros sem uso e, acima do
+     orçamento (`config/gl_texture_budget_mb`, padrão 96, 16–2048), o menos usado recentemente
+     (nunca o que o quadro atual/anterior usou). As LUTs de iluminação seguem a mesma regra de
+     ociosidade;
+  2. uniforms, vértices e índices por draw vão para anéis de 8/4/1 MB (map sem sincronização,
+     faixas que nunca se sobrepõem numa geração), com orphan só quando o anel dá a volta — antes
+     era um `glBufferData` (realocação) por draw;
+  3. falha de alocação/mapeamento (`GL_OUT_OF_MEMORY`, map nulo) não é mais fatal: descarta todas
+     as texturas ociosas e pula o draw (contado em `gl_oom`/`gl_draws_skipped` no perf.txt;
+     o stderr com `TRIAEVUM_GL_OUT_OF_MEMORY` não chega ao log do console);
+  4. `logs/perf.txt` mostra `gl_textures_live`, `gl_tex_mb`, `gl_tex_created/evicted`,
+     `gl_luts_live`, `gl_programs`, `gl_targets`, `gl_buffers_live`, `gl_buffer_mb`,
+     `gl_ring_orphans`, `gl_oom`, `gl_draws_skipped`, `heap_used_mb` e `proc_used_mb`/`proc_total_mb`:
+     todos devem ficar estáveis numa sessão longa. Teste:
+     `runtime/three_ds_recomp/tests/gfx_opengl_pica_residency_tests.cpp` (30 min simulados).
 - **Escala fracionária**: `config/resolution_scale` aceita `2.5` (ou `2,5`; múltiplos de 0,25). Os
   alvos ficam 1000×600 (1067×600 com widescreen) e o FSR EASU+RCAS sobe para 1280×720: ~69% dos
   pixels de 3×. Bordas de viewport/scissor/cópias = round(borda nativa × escala), então retângulos
