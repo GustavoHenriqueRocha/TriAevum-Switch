@@ -30,6 +30,21 @@ bool ConnectedPhysicalDeviceManager::Initialize(const std::string& mappingDataba
             SPDLOG_INFO("Loaded {} SDL controller mappings from '{}'", added, mappingDatabasePath);
         }
     }
+#if defined(__SWITCH__)
+    // devkitPro's SDL2 maps the console pad by position (Xbox layout: a:b1,
+    // b:b0, x:b3, y:b2), which swaps A/B and X/Y against their labels. The 3DS
+    // has the same labelled layout as the Switch, so map by label (libnx
+    // HidNpadButton order: A, B, X, Y = b0..b3). The shoulders are crossed on
+    // purpose: the game's L/R (Z-target, shield) sit on ZL/ZR (b8/b9), where
+    // the hands rest, and the physical L/R act as ZL/ZR.
+    if (SDL_GameControllerAddMapping(
+            "000038f853776974636820436f6e7400,Switch Controller,a:b0,b:b1,x:b2,y:b3,"
+            "back:b11,dpdown:b15,dpleft:b12,dpright:b14,dpup:b13,leftshoulder:b8,leftstick:b4,"
+            "lefttrigger:b6,leftx:a0,lefty:a1,rightshoulder:b9,rightstick:b5,righttrigger:b7,"
+            "rightx:a2,righty:a3,start:b10,") < 0) {
+        SPDLOG_WARN("Switch label-order controller mapping rejected: {}", SDL_GetError());
+    }
+#endif
     RefreshConnectedSDLGamepads();
     SPDLOG_INFO("SDL controllers initialized: {} joystick(s), {} mapped gamepad(s)",
                 SDL_NumJoysticks(), mConnectedSDLGamepads.size());
