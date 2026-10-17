@@ -376,6 +376,14 @@ struct TopScreenNativeItemOpacity {
   float Ocarina = 1.0F;
 };
 
+// SingleScreen 3.0 0x005CCF6C, the D-pad cross alpha: the first visible of
+// the ZR / ZL item lanes (0x0060D224 / 0x0060D228, stored by 0x005DC868 from
+// the native item colours), clamped to 1; with both hidden, 0.3 in gameplay
+// while the player has a nested owner (+0x12B8), otherwise 1.
+float ResolveTopScreenDpadGroupAlpha(const TopScreenNativeItemOpacity &lanes,
+                                     bool nestedOwner) noexcept;
+bool ReadTopScreenPlayerNestedOwner(NativeA32Memory &memory, bool *nestedOwner);
+
 bool AppendTopScreenNativeItemIconCopies(
     NativeA32Memory &memory, const std::array<float, 4> &nativeVerticalOffsets,
     float nativeAlpha, const oot3d::ui::UiTextureIdentity &itemIcons,

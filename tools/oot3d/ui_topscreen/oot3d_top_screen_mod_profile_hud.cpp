@@ -684,6 +684,32 @@ std::size_t AppendTopScreenExtendedItemButtonsPresentation(
   return output.size() - startSize;
 }
 
+float ResolveTopScreenDpadGroupAlpha(const TopScreenNativeItemOpacity &lanes,
+                                     bool nestedOwner) noexcept {
+  // 0x0060D22C, the third lane, has no writer in 3.0.
+  const float lane = lanes.ItemZr > 0.0F ? lanes.ItemZr : lanes.ItemZl;
+  if (lane > 0.0F) return std::min(lane, 1.0F);
+  return nestedOwner ? 0.3F : 1.0F;
+}
+
+bool ReadTopScreenPlayerNestedOwner(NativeA32Memory &memory, bool *nestedOwner) {
+  // 0x005CCFB0: PlayState 0x005043D4+0xC in state 3/2, Player +0x20AC.
+  if (nestedOwner == nullptr) return false;
+  *nestedOwner = false;
+  std::uint32_t play = 0U, player = 0U, nested = 0U;
+  std::uint8_t type = 0U, subtype = 0U;
+  if (!memory.Read32(0x005043D4U + 0x0CU, &play)) return false;
+  if (play == 0U) return true;
+  if (!memory.Read8(play + 0x100U, &type) || !memory.Read8(play + 0x101U, &subtype))
+    return false;
+  if (type != 3U || subtype != 2U) return true;
+  if (!memory.Read32(play + 0x20ACU, &player)) return false;
+  if (player == 0U) return true;
+  if (!memory.Read32(player + 0x12B8U, &nested)) return false;
+  *nestedOwner = nested != 0U;
+  return true;
+}
+
 bool AppendTopScreenNativeItemIconCopies(
     NativeA32Memory &memory, const std::array<float, 4> &nativeVerticalOffsets,
     float nativeAlpha, const oot3d::ui::UiTextureIdentity &itemIcons,
