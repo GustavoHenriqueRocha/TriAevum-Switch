@@ -97,7 +97,7 @@ uint32_t ReadPicaGlResolutionScale() {
         std::ifstream file("sdmc:/switch/oot3dre/config/resolution_scale");
         std::string text;
         if (!file || !std::getline(file, text)) {
-            return 3U; // console default: 720 lines, 1:1 with the handheld (Lite) panel
+            return 2U; // console default: 3x (720p) made the GPU the bottleneck (perf.txt: 23.4 vs 28.5 fps)
         }
         return ParsePicaGlResolutionScale(text);
 #else

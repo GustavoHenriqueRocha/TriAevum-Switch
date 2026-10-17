@@ -40,7 +40,7 @@ Desempenho e usabilidade:
   de 4 MiB (`oot3d_switch_threads.cpp`, `--wrap=pthread_create`).
 - **Render thread** (opcional): arquivo `config/parallel_presentation` no SD.
 - **Resolução interna** (opcional): arquivo `config/resolution_scale` no SD com `1`, `2` ou `3`
-  (ausente = 3 no Switch, 1 no PC). Alvos PICA, depth/stencil, sombras e imagens de display
+  (ausente = 2 no Switch, 1 no PC). Alvos PICA, depth/stencil, sombras e imagens de display
   transfer ficam N× maiores; viewport/scissor/blits escalados; custo só de GPU. 3 = 1200×720
   (encaixe 1:1 no portátil). No desktop: `TRIAEVUM_GL_RESOLUTION_SCALE=2`.
 - **Pós-processamento GL** (opcional, tudo desligado sem os arquivos; lidos uma vez, só GPU), em
@@ -111,7 +111,7 @@ Desempenho e usabilidade:
 - Controles no Switch: botões pelo rótulo, como no 3DS (A/B/X/Y nos lugares certos; o SDL2 do
   devkitPro mapeava por posição, estilo Xbox). ZL/ZR fazem o L/R do jogo (mirar/escudo) e o L/R
   físico faz o ZL/ZR. Mapeamento em `ConnectedPhysicalDeviceManager.cpp`.
-- Padrões no Switch (sem arquivos no SD): render thread ligada, resolução 3× (720 linhas, 1:1 com a tela do Lite), FSR 1 e anisotrópico 4×.
+- Padrões no Switch (sem arquivos no SD): render thread ligada, resolução 2× (3× = 720p deixou a GPU como gargalo: 23,4 contra 28,5 FPS medidos), FSR 1 e anisotrópico 4×.
   Desligar com `config/serial_presentation`, `config/resolution_scale`=1, `config/upscaler`=linear, `config/anisotropy`=1.
 - HUD corrigido: o VAO do PICA vazava para a UI desenhada pelo host (corações, rupias, ícones), que
   herdava divisores de instância e amostrava um único texel. Áudio: teto da fila de áudio maior,
