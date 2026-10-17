@@ -195,6 +195,14 @@ Desempenho e usabilidade:
 
 ## Próximos passos
 
+### Estado em 2026-10-17 (melhor versão até agora)
+- PGO (2ª coleta) + modo enxuto + planos PICA no núcleo 1 + render thread no núcleo 2 + áudio em thread própria.
+- Medido a 30 FPS, escala 2×: 29,9 FPS médios, 93% do tempo em 30, lógica ~11 ms por passo.
+- Áudio sem falhas audíveis (stretch só em queda real; buffer do audren 1024). 720p + 60 FPS (`config/fps60`) chega a ~96% de GPU.
+- Pendentes: aliasing no código gerado e funções quentes nativas (agentes em andamento, exigem nova coleta PGO);
+  outras formas de aliviar a GPU para 720p/60 (escala 2,5×, upscaler linear em 3×, anisotrópico menor);
+  `config/audio_interpolation` (`sinc`/`cubic`) ainda não testado no console; liberar Master Quest.
+
 - Opção para liberar o Master Quest sem zerar o jogo (flag de desbloqueio no save; `config/unlock_master_quest`, testar numa cópia do save).
 
 Medição de referência (2026-10-16, console, CPU 1785 MHz, render thread ligada): a lógica do jogo
