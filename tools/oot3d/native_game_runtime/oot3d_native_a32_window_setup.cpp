@@ -1641,11 +1641,11 @@ void NativeA32WindowSession::Setup() {
 #endif
   api.SetPicaPhysicalMemoryAccess(
       [&](uint32_t address, std::span<uint8_t> bytes) {
-        RequireStoppedGuest();
+        RequireStoppedGuest("memory read");
         return picaMemoryView.Read(address, bytes);
       },
       [&](std::span<const Fast::Renderer3ds::PicaPhysicalMemoryWrite> writes) {
-        RequireStoppedGuest();
+        RequireStoppedGuest("memory write");
         // The writeback is the renderer writing the copy itself, not a guest or
         // service access; keep it out of the guest-access counters. Scope, not
         // a pair of calls: an early return must not leave the watch suppressed.
@@ -1667,7 +1667,7 @@ void NativeA32WindowSession::Setup() {
       },
       [&](std::span<const Fast::Renderer3ds::PicaRawCopySpan> spans,
           Fast::Renderer3ds::PicaRenderBackend::PhysicalMemoryRead reader) {
-        RequireStoppedGuest();
+        RequireStoppedGuest("raw copy");
         std::vector<std::pair<uint32_t, size_t>> ranges;
         for (const auto& span : spans) {
           if (!picaMemoryView.ForEachGuestAlias(span.DestinationAddress, span.ByteCount,
@@ -1691,14 +1691,14 @@ void NativeA32WindowSession::Setup() {
             });
       },
       [&](uint64_t) {
-        RequireStoppedGuest();
+        RequireStoppedGuest("PPF interrupt");
         if (!hostServices.SignalPicaInterrupt(process.Memory(), Oot3dNativeGame::Oot3dPicaInterruptId::Ppf)) return false;
         ++picaStats.CompletedPpfCount;
         ++picaStats.RecordedCompletionCount;
         return true;
       },
       [&]() {
-        RequireStoppedGuest();
+        RequireStoppedGuest("deferred writes");
         return process.Memory().MaterializeDeferredWrites();
       });
   physicalMemoryAccessLifetime.emplace(api);
