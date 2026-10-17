@@ -133,6 +133,25 @@ Desempenho e usabilidade:
   herdava divisores de instância e amostrava um único texel. Áudio: teto da fila de áudio maior,
   reamostragem de alta qualidade e render thread abaixo da prioridade do áudio (chiado residual em estudo).
 
+### Substituições nativas e o perfil guest (2026-10-17)
+- As "recusas" do rodapé do perfil eram artefato: nos quadros medidos o perfil instala o callback
+  em todos os blocos e `Hooked()` recusava toda substituição (as de bloco no topo de laço, a cada
+  volta). O tempo medido dessas funções era o do código traduzido. Agora o perfil se registra
+  (`Oot3dGuestOverrideProfileHook`), as substituições só recusam se o perfil repassaria um PC do
+  intervalo, e o tempo nativo fica no bloco de entrada.
+- Para ler o perfil: ~180 ns por entrada de bloco são do próprio perfil; o custo real de um bloco
+  é `ns/entrada - 180`. Blocos curtos muito executados (laços de áudio, mutex) quase não custam.
+- Maior custo real na floresta Kokiri: `Mtx3x4_Multiply` (0x36C174, ~440 chamadas/quadro, chamada
+  externa manual). Núcleo exato novo (`oot3d_native_mtx3x4_kernel.h`, VFP nativo com o FPCR do
+  guest): ~4,7x menos instruções; o caminho antigo em double errava IXC/UFC e o sinal de zeros
+  descartados (~10% das matrizes do teste divergiam do software).
+- Prólogos novos usam `"inline": true` em `guest_overrides.json`: não deslocam linhas do shard, e
+  o PGO das outras funções do shard continua valendo (só a função com o prólogo perde o perfil).
+- Gargalo sistêmico do VFP gerado: `Oot3dVfpNative*` volta ao software em todo resultado zero,
+  inclusive zeros exatos (x*0, a-a), comuns em matrizes de rotação/escala. A guarda refinada
+  (`Oot3dVfpZeroAware*`, validada no teste do núcleo) resolveria no cabeçalho, mas mudar o
+  cabeçalho recompila todos os shards e exige nova coleta de PGO.
+
 ### Áudio fora da thread do jogo (2026-10-17)
 - O DSP HLE (mixagem) continua na thread do jogo: cada quadro de áudio lê as regiões compartilhadas
   do DSP, escreve status/aux/final_samples na memória do guest e sinaliza o guest, que roda logo em
