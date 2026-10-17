@@ -1,7 +1,87 @@
 // Host input polling of the A32 window and the TopScreen pause transitions it drives.
 #include "oot3d_native_a32_window_shared.h"
 
+#if defined(__SWITCH__)
+#include <mutex>
+#endif
+
 namespace Oot3dA32Window {
+
+#if defined(__SWITCH__)
+namespace {
+
+// The console's touch screen. SDL reports it as finger events normalised to
+// the window (the panel is 1280x720; docked there is no touch device). The
+// PC path reads the mouse as the pointer; here the first finger is the
+// pointer instead, and SDL's synthetic touch->mouse events are disabled so a
+// touch never reaches mouse-bound gameplay actions or mouse aim.
+//
+// Polling alone would miss a tap that goes down and up between two polls
+// (the guest samples at most 30-60 times a second), so an event watch
+// latches every press until a guest refresh has consumed it, like the
+// pending button presses of PollNativeA32Input.
+struct SwitchTouchLatch {
+  std::mutex Mutex;
+  SDL_FingerID Finger = 0;
+  bool Down = false;
+  bool PendingPress = false;
+  float X = 0.0F;
+  float Y = 0.0F;
+};
+
+SwitchTouchLatch &SwitchTouch() {
+  static SwitchTouchLatch latch;
+  return latch;
+}
+
+int ObserveSwitchTouchEvent(void *, SDL_Event *event) {
+  if (event->type != SDL_FINGERDOWN && event->type != SDL_FINGERMOTION &&
+      event->type != SDL_FINGERUP) {
+    return 0;
+  }
+  auto &touch = SwitchTouch();
+  std::lock_guard lock(touch.Mutex);
+  const auto &finger = event->tfinger;
+  if (event->type == SDL_FINGERDOWN) {
+    if (touch.Down && finger.fingerId != touch.Finger) {
+      return 0; // a second finger does not move the pointer
+    }
+    touch.Finger = finger.fingerId;
+    touch.Down = true;
+    touch.PendingPress = true;
+  } else if (!touch.Down || finger.fingerId != touch.Finger) {
+    return 0;
+  } else if (event->type == SDL_FINGERUP) {
+    touch.Down = false;
+  }
+  touch.X = std::clamp(finger.x, 0.0F, 1.0F);
+  touch.Y = std::clamp(finger.y, 0.0F, 1.0F);
+  return 0;
+}
+
+struct SwitchTouchSample {
+  bool Pressed = false;
+  float X = 0.0F;
+  float Y = 0.0F;
+};
+
+SwitchTouchSample SampleSwitchTouch(bool guestRefreshWillConsume) {
+  static std::once_flag installed;
+  std::call_once(installed, [] {
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+    SDL_AddEventWatch(&ObserveSwitchTouchEvent, nullptr);
+  });
+  auto &touch = SwitchTouch();
+  std::lock_guard lock(touch.Mutex);
+  SwitchTouchSample sample{touch.Down || touch.PendingPress, touch.X, touch.Y};
+  if (guestRefreshWillConsume) {
+    touch.PendingPress = false;
+  }
+  return sample;
+}
+
+} // namespace
+#endif
 
 Oot3dNativeGame::NativeA32InputFrame
 PollNativeA32Input(Fast::Fast3dWindow &window,
@@ -209,15 +289,30 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                                      &pollingState.RightStickProfile,
                                      guestRefreshWillConsume,
                                      &pollingState.VirtualMotion);
+#if defined(__SWITCH__)
+  // Sampled every poll so a press latched outside a touch-enabled page is
+  // consumed (and so never replayed when one opens).
+  const auto switchTouch = SampleSwitchTouch(guestRefreshWillConsume);
+#endif
   if (nativeFrontendTouchEnabled && !hostGuiVisible) {
     if (window.IsMouseCaptured()) {
       window.SetMouseCapture(false);
     }
     window.SetCursorVisibility(true);
-    const auto pointer = window.GetMousePos();
+    auto pointer = window.GetMousePos();
+    bool pointerPressed = window.GetMouseState(Ship::LUS_MOUSE_BTN_LEFT);
+#if defined(__SWITCH__)
+    if (switchTouch.Pressed) {
+      pointer.x = static_cast<int32_t>(
+          switchTouch.X * static_cast<float>(window.GetWidth()));
+      pointer.y = static_cast<int32_t>(
+          switchTouch.Y * static_cast<float>(window.GetHeight()));
+      pointerPressed = true;
+    }
+#endif
     const auto touch = Oot3dNativeGame::MapHostPointerToNativeA32Touch(
         pointer.x, pointer.y, window.GetWidth(), window.GetHeight(),
-        window.GetMouseState(Ship::LUS_MOUSE_BTN_LEFT),
+        pointerPressed,
         topScreenUiProfile
             ? Oot3dNativeGame::NativeA32TouchPresentation::TopScreen400x240
             : Oot3dNativeGame::NativeA32TouchPresentation::
