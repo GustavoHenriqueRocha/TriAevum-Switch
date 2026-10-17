@@ -71,6 +71,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="experimental: keep promoted GPRs/flags in locals in every function",
     )
     parser.add_argument(
+        "--promote-registers", action="store_true",
+        help="GPRs, NZCV e orçamento de blocos em variáveis locais em todas as "
+             "funções comuns, gravados no estado só nas chamadas (conjunto "
+             "sujo), saídas e ganchos (exato; muda o C++ e invalida o PGO)",
+    )
+    parser.add_argument(
         "--no-literal-folding", action="store_true",
         help="keep PC-relative literal loads from the read-only text segment "
              "as memory reads instead of folding them to constants",
@@ -119,6 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         native_vfp_aarch64=args.native_vfp_aarch64,
         giant_function_instructions=args.giant_function_instructions,
         hot_entries=_read_hot_entries(args.hot_functions),
+        promote_registers=args.promote_registers,
     )
     if args.guest_overrides is not None:
         from apply_guest_overrides import apply as apply_overrides, load_manifest

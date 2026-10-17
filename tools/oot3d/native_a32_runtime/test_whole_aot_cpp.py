@@ -37,6 +37,79 @@ class WholeAotCppTests(unittest.TestCase):
             generate(*inputs, output)
             self.assertEqual(original, (output / SOURCE_NAME).read_bytes())
 
+    def test_register_promotion_is_opt_in_exact_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            code = words(
+                0xE3A04005,  # MOV R4, #5
+                0xEB000001,  # BL 0x1010
+                0xE2800001,  # ADD R0, R0, #1
+                0xE12FFF1E,  # BX LR
+                0xE3A01007,  # MOV R1, #7 (callee)
+                0xE12FFF1E,  # BX LR
+            )
+            code_path = root / "code.bin"
+            program_path = root / "program.json"
+            selection_path = root / "selection.json"
+            code_path.write_bytes(code)
+            program_path.write_text(json.dumps({
+                "format": PROGRAM_FORMAT,
+                "base": 0x1000,
+                "code_sha256": hashlib.sha256(code).hexdigest(),
+                "blocks": [
+                    {"id": 0, "pc": 0x1000, "end_pc": 0x1008, "successors": [
+                        {"site": 0x1004, "kind": "call", "target": 0x1010},
+                        {"site": 0x1004, "kind": "fallthrough", "target": 0x1008}]},
+                    {"id": 1, "pc": 0x1008, "end_pc": 0x1010, "successors": [
+                        {"site": 0x100C, "kind": "return"}]},
+                    {"id": 2, "pc": 0x1010, "end_pc": 0x1018, "successors": [
+                        {"site": 0x1014, "kind": "return"}]},
+                ],
+                "functions": [
+                    {"entry": 0x1000, "name": "Caller", "blocks": [0, 1],
+                     "closed_static_cfg": True,
+                     "direct_calls": [{"site": 0x1004, "target": 0x1010}],
+                     "tail_calls": [], "indirect_sites": []},
+                    {"entry": 0x1010, "name": "Callee", "blocks": [2],
+                     "closed_static_cfg": True, "direct_calls": [],
+                     "tail_calls": [], "indirect_sites": []},
+                ],
+            }), encoding="utf-8")
+            selection_path.write_text(json.dumps({
+                "format": SELECTION_FORMAT,
+                "functions": [{"entry": 0x1000}, {"entry": 0x1010}],
+            }), encoding="utf-8")
+            inputs = (program_path, selection_path, code_path)
+            output = root / "output"
+            generate(*inputs, output)
+            reference = (output / SOURCE_NAME).read_text(encoding="utf-8")
+            self.assertIn("uint32_t& r4 = state.R[4];", reference)
+            manifest = generate(*inputs, output, promote_registers=True)
+            self.assertTrue(manifest["register_promotion"])
+            source = (output / SOURCE_NAME).read_text(encoding="utf-8")
+            caller = source[source.index("Execute_Caller_00001000(\n    Oot3dWholeAotFrame& frame"):]
+            caller = caller[:caller.index("\n}\n")]
+            self.assertIn("uint32_t r4 = state.R[4];", caller)
+            self.assertIn("uint32_t blocksRemaining = context.BlocksRemaining;", caller)
+            # Nenhuma lambda passada adiante: os locais não escapam.
+            self.assertNotIn("commitState, reloadState", caller)
+            self.assertIn("Oot3dAotRunBlockEntryHook(context, frame, state, 0x00001000U);", caller)
+            # Antes da chamada, só o conjunto sujo (r4 e lr) e o orçamento.
+            call = caller.index("Execute_Callee_00001010(frame, context, state")
+            before = caller[caller.rindex("OOT3D_AOT_STAT(context.Stats.DirectCalls);", 0, call):call]
+            self.assertIn("state.R[4] = r4;", before)
+            self.assertIn("state.R[14] = r14;", before)
+            self.assertNotIn("state.R[0] = r0;", before)
+            self.assertIn("context.BlocksRemaining = blocksRemaining;", before)
+            self.assertIn("reloadState();", caller[call:])
+            # Retornos e saídas por rótulos compartilhados que gravam o estado.
+            self.assertIn("{ exitFlow = Oot3dAotReturned(r14); goto exit_", caller)
+            self.assertRegex(caller, r"exit_\d+:\n    state\.R\[0\] = r0;")
+            self.assertNotIn("\n        return ", caller)
+            # Desligado de novo: o C++ volta a ser exatamente o de antes.
+            generate(*inputs, output)
+            self.assertEqual(reference, (output / SOURCE_NAME).read_text(encoding="utf-8"))
+
     def test_giant_cold_attribute_keeps_shard_lines(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -1045,7 +1045,15 @@ Desempenho (prioridade):
    teste de equivalência (overrides) — em andamento.
 5. "Modo enxuto": contar gerações de escrita só nas páginas relevantes à GPU/savestate, tirar
    trace/estatísticas do caminho quente.
-6. `--local-state` (registradores do guest em locais) depois do inline.
+6. Registradores do guest em locais: **avaliado e descartado** (2026-10-17). O `--local-state`
+   antigo regrediu porque grava/recarrega os 15 GPRs em toda chamada e em cada uma das milhares
+   de saídas (código 2× maior, módulo de 318 MB) e passa lambdas que capturam os locais para
+   funções não inline (os locais escapam e moram na pilha). O novo `--promote-registers`
+   (conjunto sujo exato por bloco, rótulos de saída compartilhados, orçamento local, nada escapa;
+   exato pelo diferencial `run_register_promotion_equivalence.py`) também piora no A57:
+   shard 243 com +36% de instruções, loads +77% e stores +89% (derrames na pilha 2,4×), porque
+   com referências o próprio `state` é a casa de cada registrador e as chamadas frias dos
+   caminhos lentos de memória obrigam os locais a callee-saved/pilha. Fica desligado.
 7. glthread do Mesa (compilado; ligar atrás de config e medir).
 8. Fastmem (reserva do espaço de endereços do 3DS, acesso sem checagem) — grande.
 9. Longo prazo: deko3d no lugar de OpenGL/Mesa.

@@ -659,4 +659,26 @@ inline void Oot3dAotCommitVfp(
     fpscr |= result.exception_flags;
 }
 
+// Cold half of the block entry of a function with promoted registers
+// (generator --promote-registers). The caller has already consumed the block
+// and made state and context exact (it stores its possibly dirty registers,
+// flags and BlocksRemaining; clean locals already equal state), and reloads
+// every local afterwards; nothing local is passed here, so no local escapes. "First block" is decided after consumption, exactly as
+// in Oot3dAotEnterBlock. Kept at the end of the header so that the lines
+// above (and the PGO data of code built from them) do not move.
+OOT3D_AOT_COLD inline void Oot3dAotRunBlockEntryHook(
+    Oot3dWholeAotContext& context, Oot3dWholeAotFrame& frame,
+    Oot3dAotArchitecturalState& state, uint32_t pc) {
+    if (!Oot3dAotShouldNotifyBlock(context, pc, context.BlocksConsumed() == 1U)) {
+        return;
+    }
+    state.Flush(0x7FFFU, true);
+    {
+        Oot3dGuestFpHostCallScope hostFp(frame.Guest.fpscr);
+        context.BlockEntry(pc, frame.Guest, context.CallbackMemory,
+                           context.BlockEntryUser);
+    }
+    state.Reload(0x7FFFU, true);
+}
+
 } // namespace Oot3dNativeGame

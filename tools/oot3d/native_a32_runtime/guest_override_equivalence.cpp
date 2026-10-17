@@ -75,6 +75,19 @@ bool BuildMemory(NativeA32Memory& memory) {
            memory.MapRegion({"rom", kRomBase, rom.size(), false, false, rom});
 }
 
+uint64_t CycleCounter() noexcept {
+#if defined(__x86_64__) || defined(__i386__)
+    return __builtin_ia32_rdtsc();
+#elif defined(__aarch64__)
+    uint64_t value;
+    asm volatile("mrs %0, cntvct_el0" : "=r"(value));
+    return value;
+#else
+    return static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+#endif
+}
+
 struct Rng {
     std::mt19937_64 engine;
     explicit Rng(uint64_t seed) : engine(seed) {}
@@ -863,9 +876,13 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "uso: %s code.bin [tentativas] [semente] [entrada]\n", argv[0]);
         return 2;
     }
-    {
+    // Sem arquivos (qemu, run_register_promotion_equivalence.py --qemu): o
+    // code.bin já vem embutido em gCode.
+    if (gCode.empty()) {
         std::ifstream file(argv[1], std::ios::binary);
         gCode.assign(std::istreambuf_iterator<char>(file), {});
+    }
+    {
         if (gCode.size() < kDataBase - kTextBase) {
             std::fprintf(stderr, "code.bin curto demais\n");
             return 2;
@@ -894,6 +911,7 @@ int main(int argc, char** argv) {
         const uint64_t callsBefore = info ? info->Calls : 0U;
         const uint64_t declinedBefore = info ? info->Declined : 0U;
         uint64_t flows[6] = {};
+        uint64_t guestCalls = 0; // chamadas diretas e indiretas executadas (cobertura)
         // Para o microbenchmark: cenários aceitos pela versão nativa, com a RAM
         // exatamente como estava antes da chamada e sem orçamento curto.
         std::vector<std::pair<Scenario, std::vector<uint8_t>>> accepted;
@@ -974,6 +992,7 @@ int main(int argc, char** argv) {
                 accepted.emplace_back(s, std::move(snapshot));
             }
             ++flows[std::min<size_t>(static_cast<size_t>(a.Flow.Kind), 5U)];
+            guestCalls += a.Stats.DirectCalls + a.Stats.IndirectCalls;
             std::string why = Mismatch(a, b);
             std::string where;
             if (why.empty() && !SameMemory(memoryA, memoryB, (trial & 255U) == 0U, &where)) {
@@ -1006,9 +1025,10 @@ int main(int argc, char** argv) {
         const uint64_t declined = info ? info->Declined - declinedBefore : 0U;
         std::printf("%s %08X %-36s tentativas=%" PRIu64 " nativa=%" PRIu64 " recusou=%" PRIu64
                     " fluxos[ret=%" PRIu64 " br=%" PRIu64 " lim=%" PRIu64 " falta=%" PRIu64
-                    " nsup=%" PRIu64 "]\n",
+                    " nsup=%" PRIu64 "] chamadas=%" PRIu64 "\n",
                     failed ? "FALHOU" : "OK    ", testCase.Entry, testCase.Name, trials,
-                    calls, declined, flows[0], flows[1], flows[3], flows[4], flows[5]);
+                    calls, declined, flows[0], flows[1], flows[3], flows[4], flows[5],
+                    guestCalls);
 #if defined(__x86_64__) && !defined(OOT3D_GUEST_OVERRIDE_QEMU)
         if (benchEnabled && !accepted.empty() && !failed) {
             // Microbenchmark no host (x86): mesmo conjunto de entradas aceitas,
@@ -1032,7 +1052,7 @@ int main(int argc, char** argv) {
                         Oot3dWholeAotFrame frame(guest);
                         Oot3dAotArchitecturalState state(guest);
                         Oot3dWholeAotFlow flow{};
-                        const uint64_t start = __builtin_ia32_rdtsc();
+                        const uint64_t start = CycleCounter();
                         if (testCase.Patched != nullptr) {
                             flow = (native ? testCase.Patched : testCase.Translated)(
                                 frame, context, state, testCase.Entry);
@@ -1040,7 +1060,7 @@ int main(int argc, char** argv) {
                             flow = testCase.Translated(frame, context, state, testCase.Entry);
                         }
                         asm volatile("" : : "r"(&flow), "r"(&guest) : "memory");
-                        cycles += __builtin_ia32_rdtsc() - start;
+                        cycles += CycleCounter() - start;
                         ++calls;
                     }
                 }

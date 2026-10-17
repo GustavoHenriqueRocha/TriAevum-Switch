@@ -80,6 +80,23 @@ _FOLDED_LITERALS: set[int] = set()
 # default; the emitted code still compiles to the software operations on
 # other hosts.
 _NATIVE_VFP_AARCH64 = False
+# Promoção de registradores (generate(promote_registers=True)): GPRs, NZCV e
+# o orçamento de blocos ficam em variáveis locais em todas as funções comuns,
+# sincronizados com o estado arquitetural só onde ele é observável (ver
+# _promote_function_body). Desligado por padrão: o C++ gerado é o mesmo de antes.
+#
+# Medido (2026-10-17, GCC 16.1 devkitA64 -O3, flags dos shards do Switch):
+# piora. Shard 243: 114,2 mil -> 154,8 mil instruções, loads +77%, stores
+# +89% (pilha 13,5/15,8 mil -> 33,3/32,7 mil); FUN_0046c204: 81 mil -> 119 mil.
+# Com referências o próprio state é a "casa" de cada registrador: o GCC
+# guarda na escrita e recarrega só o que usa depois de uma chamada (inclusive
+# os caminhos lentos frios de memória). Com locais, (1) cada valor vivo através
+# de uma chamada fria (ReadFastSlow/WriteFastSlow) precisa de registrador
+# callee-saved ou derrame na pilha; (2) a entrada carrega todos os registros
+# promovidos de uma vez, porque as saídas gravam o conjunto "talvez sujo"
+# (estático); (3) o prólogo salva x19-x28. Sem os caminhos lentos
+# (experimento, não exato) ainda fica 19% pior. Por isso continua desligado.
+_PROMOTE_REGISTERS = False
 # Funções gigantes e frias marcadas com GIANT_COLD_ATTRIBUTE (ver generate).
 _GIANT_COLD_ENTRIES: frozenset[int] = frozenset()
 # O escalonador pré-alocação (sched1, que no AArch64 o GCC só liga em -O3) e
@@ -1830,6 +1847,7 @@ def _emit_terminal(
     function_symbols: dict[int, str],
     external_entries: frozenset[int],
     live_flags: Flag = Flag.NZCV,
+    promote: bool = False,
 ) -> list[str]:
     item = block.instructions[-1]
     raw = item.raw
@@ -1862,6 +1880,13 @@ def _emit_terminal(
                 call = (
                     f"Execute_{function_symbols[target]}(frame, context, state, "
                     f"0x{target:08X}U)"
+                )
+                call_prefix = ["commitState();"]
+                call_suffix = ["reloadState();"]
+            elif target in external_entries and promote:
+                # Sem lambdas como argumento: os locais não podem escapar.
+                call = (
+                    f"Oot3dAotCallExternal(context, 0x{target:08X}U, frame, state)"
                 )
                 call_prefix = ["commitState();"]
                 call_suffix = ["reloadState();"]
@@ -2079,6 +2104,9 @@ def _render_function(
     # Broad residency regressed the matched full-title workload. Keep local
     # state only at the existing explicitly selected callback-free boundaries.
     local_state = local_state or callback_free or memory_view
+    # Promoção ampla (ver _promote_function_body); as regiões e cópias acima
+    # mantêm o mecanismo próprio delas.
+    promote = (_PROMOTE_REGISTERS and not local_state and not memory_copy)
     lines = [
         f"Oot3dWholeAotFlow Execute_{symbol}(",
         "    Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,",
@@ -2088,8 +2116,9 @@ def _render_function(
     lines.extend(
         f"    uint32_t{' ' if local_state else '& '}r{index} = state.R[{index}];"
         for index in promoted_registers
+        if not promote
     )
-    if optimization.promoted_flags != Flag.NONE:
+    if optimization.promoted_flags != Flag.NONE and not promote:
         lines.append("    Oot3dAotLazyFlags flags = state.Flags;" if local_state
                      else "    auto& flags = state.Flags;")
     if memory_view:
@@ -2099,7 +2128,8 @@ def _render_function(
         ])
     # Calls and observers commit before they can unwind. Ordinary exits commit
     # explicitly below: no caller cleanup may overwrite newer callee state.
-    lines.append("    const auto commitState = [&]() noexcept {")
+    if not promote:
+        lines.append("    const auto commitState = [&]() noexcept {")
     if local_state:
         lines.extend(f"        state.R[{index}] = r{index};" for index in promoted_registers)
         if optimization.promoted_flags != Flag.NONE:
@@ -2110,20 +2140,18 @@ def _render_function(
             # Consumed blocks are derived (BlockBudget - BlocksRemaining).
             "        context.BlocksRemaining = regionBlocksRemaining;",
         ])
-    lines.extend([
-        "    };",
-        "    const auto reloadState = [&]() noexcept {",
-    ])
+    if not promote:
+        lines.extend([
+            "    };",
+            "    const auto reloadState = [&]() noexcept {",
+        ])
     if local_state:
         lines.extend(f"        r{index} = state.R[{index}];" for index in promoted_registers)
         if optimization.promoted_flags != Flag.NONE:
             lines.append("        flags = state.Flags;")
-    lines.extend(
-        [
-            "    };",
-            "    switch (entryPc) {",
-        ]
-    )
+    if not promote:
+        lines.append("    };")
+    lines.append("    switch (entryPc) {")
     lines.extend([
         f"    case 0x{function.entry:08X}U:",
         f"        goto block_{function.entry:08X};",
@@ -2165,13 +2193,29 @@ def _render_function(
             "Oot3dAotConsumeBlock(context)" if callback_free else
             f"Oot3dAotEnterBlock(context, frame, state, 0x{block.pc:08X}U, commitState, reloadState)"
         )
-        lines.extend(
-            [
-                f"        if (!{enter}) {{",
+        if promote:
+            # Orçamento local; o gancho (raro) sincroniza tudo em volta da
+            # metade fria, que não recebe nenhum local.
+            lines.extend([
+                "        if (blocksRemaining == 0U) [[unlikely]] {",
                 f"            return Oot3dAotBlockLimit(context, 0x{block.pc:08X}U);",
                 "        }",
-            ]
-        )
+                "        --blocksRemaining;",
+                f"        if (context.BlockEntryGate->MayContain(0x{block.pc:08X}U)) [[unlikely]] {{",
+                # Vira as gravações do conjunto sujo (_promote_function_body).
+                "            commitState();",
+                f"            Oot3dAotRunBlockEntryHook(context, frame, state, 0x{block.pc:08X}U);",
+                "            reloadState();",
+                "        }",
+            ])
+        else:
+            lines.extend(
+                [
+                    f"        if (!{enter}) {{",
+                    f"            return Oot3dAotBlockLimit(context, 0x{block.pc:08X}U);",
+                    "        }",
+                ]
+            )
         if memory_view:
             lines.append("        --regionBlocksRemaining;")
         for item in block.instructions[:-1]:
@@ -2188,6 +2232,7 @@ def _render_function(
             function_symbols,
             external_entries,
             terminal_flags,
+            promote=promote,
         ):
             lines.append("        " + emitted)
         lines.append("    }")
@@ -2221,13 +2266,16 @@ def _render_function(
             "Oot3dAotSetSaturationFlag(frame,",
             "Oot3dAotSetSaturationFlag(state,",
         )
-        for register in promoted_registers:
-            line = line.replace(f"state.R[{register}]", f"r{register}")
-        if optimization.promoted_flags != Flag.NONE:
+        if not promote:
+            for register in promoted_registers:
+                line = line.replace(f"state.R[{register}]", f"r{register}")
+        if optimization.promoted_flags != Flag.NONE and not promote:
             line = line.replace("state.Flags", "flags")
             for helper in promoted_helpers:
                 line = line.replace(f"{helper}(state,", f"{helper}(flags,")
         lines[index] = line
+    if promote:
+        return _promote_function_body(function, lines, body_start, promoted_helpers)
     committed = lines[:body_start]
     for line in lines[body_start:]:
         if line.lstrip().startswith("return "):
@@ -2238,6 +2286,281 @@ def _render_function(
             )
         committed.append(line)
     return committed
+
+
+def _promoted_prologue(registers: tuple[int, ...], has_flags: bool) -> list[str]:
+    """Locais e sincronizações completas de uma função promovida.
+
+    As lambdas são always_inline e só são chamadas diretamente: um local cujo
+    endereço escapasse para uma função não inline teria de morar na pilha.
+    """
+    attribute = "__attribute__((always_inline))"
+    lines = [f"    uint32_t r{index} = state.R[{index}];" for index in registers]
+    if has_flags:
+        lines.append("    Oot3dAotLazyFlags flags = state.Flags;")
+    lines += [
+        "    uint32_t blocksRemaining = context.BlocksRemaining;",
+        "    Oot3dWholeAotFlow exitFlow{};",
+        f"    const auto commitAllState = [&]() noexcept {attribute} {{",
+        *(f"        state.R[{index}] = r{index};" for index in registers),
+        *(["        state.Flags = flags;"] if has_flags else []),
+        "        context.BlocksRemaining = blocksRemaining;",
+        "    };",
+        # Nome usado pelos prólogos das substituições nativas.
+        f"    const auto commitState = [&]() noexcept {attribute} {{",
+        "        commitAllState();",
+        "    };",
+        f"    const auto reloadState = [&]() noexcept {attribute} {{",
+        *(f"        r{index} = state.R[{index}];" for index in registers),
+        *(["        flags = state.Flags;"] if has_flags else []),
+        "        blocksRemaining = context.BlocksRemaining;",
+        "    };",
+    ]
+    return lines
+
+
+_BLOCK_LABEL = re.compile(r"^block_([0-9A-F]{8}):$")
+_GOTO_BLOCK = re.compile(r"\bgoto block_([0-9A-F]{8});")
+_REGISTER_WRITE = re.compile(
+    r"(?<![\w.>])r(\d+)\s*(?:<<|>>|[-+*/%&|^])?=(?!=)"
+    r"|(?:\+\+|--)\s*r(\d+)\b|(?<![\w.>])r(\d+)\s*(?:\+\+|--)")
+
+# Helpers que recebem registradores só por valor (oot3d_native_whole_aot_runtime.h,
+# oot3d_aot_architectural_state.h); qualquer outro recebendo um local promovido
+# é recusado por _promote_function_body.
+_BY_VALUE_REGISTER_CALLEES = frozenset({
+    "static_cast", "Oot3dAotLsl", "Oot3dAotLsr", "Oot3dAotAsr", "Oot3dAotRor",
+    "Oot3dAotShiftRegister", "Oot3dAotShiftImmediate", "Oot3dAotReturned",
+    "Oot3dAotBranch", "Oot3dAotSetNz", "Oot3dAotSetNz64", "Oot3dAotSetLogicalFlags",
+    "Oot3dAotSetSubtractFlags", "Oot3dAotSetAddFlags", "Oot3dAotAddWithCarry",
+    "Oot3dAotSaturateSigned32", "ExecuteOot3dWholeAotIndirect", "Oot3dAotMemoryFault",
+    "Oot3dAotRegisterArgument",
+})
+_CALL_NAME = re.compile(r"([A-Za-z_][\w:]*)(?:<[^<>()]*>)?\s*\(")
+_REGISTER_TOKEN = re.compile(r"(?<![\w.\[])r\d+\b")
+
+
+def _calls_with_register_argument(line: str) -> set[str]:
+    """Funções (e métodos) cujo parêntese de argumentos contém um rN na linha."""
+    found: set[str] = set()
+    stack: list[str | None] = []
+    position = 0
+    while position < len(line):
+        match = _CALL_NAME.match(line, position)
+        if match and (position == 0 or not (line[position - 1].isalnum() or line[position - 1] in "_.>:")):
+            name = match.group(1)
+            stack.append(None if name in {"if", "while", "for", "switch", "return", "sizeof"} else name)
+            position = match.end()
+            continue
+        char = line[position]
+        if char == "(":
+            stack.append(None)
+        elif char == ")":
+            if stack:
+                stack.pop()
+        else:
+            token = _REGISTER_TOKEN.match(line, position)
+            if token and (position == 0 or not (line[position - 1].isalnum() or line[position - 1] in "_.[")):
+                found.update(name for name in stack if name is not None)
+                position = token.end()
+                continue
+        position += 1
+    return found
+
+
+_FLAGS_READ = re.compile(r"\bflags\.(?:N|Z|C|V)\(\)|\bflags\.Materialize\(")
+
+
+def _flags_written(line: str) -> bool:
+    """Conservador: qualquer uso de flags que não seja uma leitura conhecida."""
+    stripped = _FLAGS_READ.sub("", line)
+    return re.search(r"(?<![\w.])flags\b", stripped) is not None
+
+
+def _is_unconditional_call(raw: int, block) -> bool:
+    if ((raw >> 28) & 0xF) != 0xE:
+        return False
+    if (raw & 0x0F000000) == 0x0B000000:  # BL
+        return True
+    if (raw & 0x0FFFFFF0) == 0x012FFF30:  # BLX register
+        return True
+    return any(edge.get("kind") == "indirect_call" for edge in block.successors)
+
+
+def _promote_function_body(
+    function: Function,
+    lines: list[str],
+    body_start: int,
+    flag_helpers: tuple[str, ...],
+) -> list[str]:
+    """Sincroniza os locais promovidos só onde o estado é observável.
+
+    Invariante: fora do conjunto "sujo" estático, cada local é igual ao
+    campo de state (carregado na entrada e recarregado depois de cada
+    chamada, gancho ou substituição). Chamadas e o gancho de bloco gravam só
+    o conjunto sujo do bloco; retornos e saídas (falta de memória, orçamento,
+    SVC, fluxo não retornado) vão para um rótulo compartilhado por conjunto,
+    que grava esse conjunto e o orçamento e retorna. Os conjuntos são
+    superconjuntos seguros: gravar um local limpo regrava o mesmo valor.
+
+    Escritas e usos vêm do próprio C++ emitido (exatos), não da análise do
+    IR, que é conservadora em várias codificações. Para que a varredura seja
+    completa, um local só pode ser escrito por atribuição, atribuição
+    composta ou ++/--: endereço tomado ou passagem para uma função fora da
+    lista de helpers por valor é recusada (LoweringError).
+    """
+    body = lines[body_start:]
+    text = "\n".join(body)
+    registers = tuple(sorted({int(index) for index in re.findall(r"\bstate\.R\[(\d+)\]", text)}))
+    has_flags = "state.Flags" in text or any(f"{helper}(state," in text for helper in flag_helpers)
+    for index, line in enumerate(body):
+        for register in registers:
+            line = line.replace(f"state.R[{register}]", f"r{register}")
+        if has_flags:
+            line = line.replace("state.Flags", "flags")
+            for helper in flag_helpers:
+                line = line.replace(f"{helper}(state,", f"{helper}(flags,")
+        body[index] = line
+    register_mask = sum(1 << index for index in registers)
+    for line in body:
+        # & unário (endereço): depois de início, '(', ',', '=', '{', '?' ou ':'.
+        if re.search(r"(?:^|[(,={?:])\s*&\s*r\d+\b", line.strip()):
+            raise LoweringError(
+                f"function 0x{function.entry:08X}: address of a promoted register: {line.strip()}")
+        for callee in _calls_with_register_argument(line):
+            if callee not in _BY_VALUE_REGISTER_CALLEES:
+                raise LoweringError(
+                    f"function 0x{function.entry:08X}: promoted register passed to {callee}")
+    lines = [*lines[:body_start], *body]
+    blocks_by_pc = {block.pc: block for block in function.blocks}
+    # Linhas de cada bloco (o trecho antes do primeiro rótulo é o despacho).
+    owner: list[int | None] = []
+    current: int | None = None
+    for line in body:
+        match = _BLOCK_LABEL.match(line)
+        if match:
+            current = int(match.group(1), 16)
+        owner.append(current)
+    writes: dict[int, int] = {pc: 0 for pc in blocks_by_pc}
+    flag_writes: dict[int, bool] = {pc: False for pc in blocks_by_pc}
+    successors: dict[int, set[int]] = {pc: set() for pc in blocks_by_pc}
+    calls: set[int] = set()
+    for line, pc in zip(body, owner):
+        if pc is None:
+            continue
+        if "Oot3dWholeAotFlow callFlow" in line:
+            calls.add(pc)
+        for match in _REGISTER_WRITE.finditer(line):
+            index = int(next(group for group in match.groups() if group is not None))
+            if register_mask & (1 << index):
+                writes[pc] |= 1 << index
+        if has_flags and _flags_written(line):
+            flag_writes[pc] = True
+        for target in _GOTO_BLOCK.findall(line):
+            successors[pc].add(int(target, 16))
+    resets = {
+        pc: pc in calls and _is_unconditional_call(block.instructions[-1].raw, block)
+        for pc, block in blocks_by_pc.items()
+    }
+    dirty_in = {pc: (0, False) for pc in blocks_by_pc}
+    dirty_out = {pc: (0, False) for pc in blocks_by_pc}
+    changed = True
+    while changed:
+        changed = False
+        for block in function.blocks:
+            pc = block.pc
+            incoming = dirty_in[pc]
+            outgoing = (0, False) if resets[pc] else (
+                incoming[0] | writes[pc], incoming[1] or flag_writes[pc])
+            if outgoing != dirty_out[pc]:
+                dirty_out[pc] = outgoing
+                changed = True
+                for target in successors[pc]:
+                    if target in dirty_in:
+                        merged = (dirty_in[target][0] | outgoing[0],
+                                  dirty_in[target][1] or outgoing[1])
+                        dirty_in[target] = merged
+    # Conjunto usado em todo o bloco: entrada mais tudo que o bloco escreve.
+    block_sets = {
+        pc: (dirty_in[pc][0] | writes[pc], dirty_in[pc][1] or flag_writes[pc])
+        for pc in blocks_by_pc
+    }
+    labels: dict[tuple[int, bool], str] = {}
+
+    def label(dirty: tuple[int, bool]) -> str:
+        if dirty not in labels:
+            labels[dirty] = f"exit_{len(labels)}"
+        return labels[dirty]
+
+    def stores(dirty: tuple[int, bool], indent: str) -> list[str]:
+        result = [f"{indent}state.R[{index}] = r{index};"
+                  for index in registers if dirty[0] & (1 << index)]
+        if has_flags and dirty[1]:
+            result.append(f"{indent}state.Flags = flags;")
+        result.append(f"{indent}context.BlocksRemaining = blocksRemaining;")
+        return result
+
+    output = [*lines[:body_start], *_promoted_prologue(registers, has_flags)]
+    pending_exit: str | None = None
+    depth = 0
+    # Depois de chamada + recarga, state é a verdade: a saída por fluxo não
+    # retornado não precisa gravar nada (a não ser o orçamento).
+    after_call: int | None = None
+    for line, pc in zip(lines[body_start:], owner):
+        if pc != after_call:
+            after_call = None
+        if "Oot3dWholeAotFlow callFlow" in line:
+            after_call = pc
+        elif after_call is not None and (
+                _REGISTER_WRITE.search(line) or (has_flags and _flags_written(line))):
+            raise LoweringError(
+                f"function 0x{function.entry:08X}: state written after a call: {line.strip()}")
+        dirty = (block_sets[pc] if pc is not None and after_call is None
+                 else (0, False))
+        indent = line[:len(line) - len(line.lstrip())]
+        stripped = line.strip()
+        if pending_exit is not None:
+            depth += line.count("(") - line.count(")")
+            if depth == 0 and stripped.endswith(";"):
+                output.append(f"{line} goto {pending_exit}; }}")
+                pending_exit = None
+            else:
+                output.append(line)
+            continue
+        if stripped.startswith("return "):
+            target = label(dirty if pc is not None else (0, False))
+            text = indent + "{ exitFlow = " + stripped[len("return "):]
+            depth = text.count("(") - text.count(")")
+            if depth == 0 and stripped.endswith(";"):
+                output.append(f"{text} goto {target}; }}")
+            else:
+                output.append(text)
+                pending_exit = target
+            continue
+        if re.search(r"\breturn\b", line):
+            raise LoweringError(
+                f"function 0x{function.entry:08X}: return must be standalone: {stripped}"
+            )
+        if stripped == "commitState();":
+            # Antes de uma chamada ou do gancho de bloco: só o que pode estar
+            # sujo neste bloco (os locais limpos já são iguais a state).
+            output.extend(stores(dirty, indent))
+            continue
+        output.append(line)
+    if pending_exit is not None:
+        raise LoweringError(f"function 0x{function.entry:08X}: unterminated return")
+    if output[-1] == "" and output[-2] == "}":
+        output = output[:-2]
+    elif output[-1] == "}":
+        output = output[:-1]
+    else:
+        raise LoweringError(f"function 0x{function.entry:08X}: unexpected function end")
+    for dirty, name in labels.items():
+        output.append(f"{name}:")
+        output.extend(stores(dirty, "    "))
+        output.append("    return exitFlow;")
+    output.extend(["}", ""])
+    return output
 
 
 def _render_region_function(
@@ -3222,11 +3545,12 @@ def generate(
     native_vfp_aarch64: bool = False,
     giant_function_instructions: int = 0,
     hot_entries: frozenset[int] = frozenset(),
+    promote_registers: bool = False,
 ) -> dict[str, object]:
     """``giant_function_instructions`` > 0 marca as funções com pelo menos
     tantas instruções guest, exceto as de ``hot_entries`` (perfil), com
     GIANT_COLD_ATTRIBUTE. 0 (padrão) gera exatamente o mesmo C++ de antes."""
-    global _LITERAL_IMAGE, _NATIVE_VFP_AARCH64, _GIANT_COLD_ENTRIES
+    global _LITERAL_IMAGE, _NATIVE_VFP_AARCH64, _GIANT_COLD_ENTRIES, _PROMOTE_REGISTERS
     if giant_function_instructions < 0:
         raise ValueError("giant function threshold must not be negative")
     giant_contract: dict[str, object] = (
@@ -3279,6 +3603,7 @@ def generate(
             **({"local_state": True} if local_state else {}),
             "literal_folding": fold_literals,
             **({"native_vfp_aarch64": True} if native_vfp_aarch64 else {}),
+            **({"register_promotion": True} if promote_registers else {}),
             **giant_contract,
         }
         files = cached.get("files", {})
@@ -3289,6 +3614,8 @@ def generate(
         if all(cached.get(key) == value for key, value in expected.items()) and (
             # Absent in manifests of the default (software) lowering.
             cached.get("native_vfp_aarch64", False) == native_vfp_aarch64
+        ) and (
+            cached.get("register_promotion", False) == promote_registers
         ) and (
             # Absent in manifests generated without the giant-function marks.
             cached.get("giant_cold_instructions", 0)
@@ -3315,6 +3642,7 @@ def generate(
             raise ValueError("program executable size does not fit code.bin")
         _LITERAL_IMAGE = LiteralImage(int(program["base"]), code[:text_size])
     _NATIVE_VFP_AARCH64 = native_vfp_aarch64
+    _PROMOTE_REGISTERS = promote_registers
     _GIANT_COLD_ENTRIES = frozenset(
         function.entry
         for function in functions
@@ -3332,6 +3660,7 @@ def generate(
     finally:
         _LITERAL_IMAGE = None
         _NATIVE_VFP_AARCH64 = False
+        _PROMOTE_REGISTERS = False
         _GIANT_COLD_ENTRIES = frozenset()
 
 
@@ -3445,6 +3774,7 @@ def _generate_files(
         **({"local_state": True} if local_state else {}),
         "literal_folding": fold_literals,
         **({"native_vfp_aarch64": True} if _NATIVE_VFP_AARCH64 else {}),
+        **({"register_promotion": True} if _PROMOTE_REGISTERS else {}),
         **(giant_contract or {}),
         **(
             {"giant_cold_functions": sorted(_GIANT_COLD_ENTRIES)}

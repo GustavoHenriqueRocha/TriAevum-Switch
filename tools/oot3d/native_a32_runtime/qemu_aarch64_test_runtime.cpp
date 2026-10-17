@@ -40,8 +40,12 @@ extern char* fake_heap_start;
 extern char* fake_heap_end;
 
 alignas(16) static unsigned char gHeap[256U << 20U];
+// qemu-user starts with TPIDR_EL0 = 0; thread_local variables (local-exec,
+// zero-initialized .tbss only) then live in this block.
+alignas(64) static unsigned char gThreadBlock[4096];
 
 void Oot3dQemuTestStart() {
+    asm volatile("msr tpidr_el0, %0" : : "r"(gThreadBlock));
     fake_heap_start = reinterpret_cast<char*>(gHeap);
     fake_heap_end = reinterpret_cast<char*>(gHeap) + sizeof(gHeap);
     for (auto entry = __init_array_start; entry < __init_array_end; ++entry) {
