@@ -195,11 +195,18 @@ Outcome Run(const GeneratedWholeAot::OverrideCase& testCase, bool patched,
     Oot3dWholeAotFrame frame(out.Guest);
     Oot3dAotArchitecturalState state(out.Guest);
     Oot3dWholeAotFlow flow{};
-    bool done = false;
-    if (patched && Oot3dGuestOverridesEnabled()) {
-        done = testCase.Native(frame, context, state, flow);
+    if (testCase.Patched != nullptr) {
+        // Substituição de bloco: a função traduzida começa no próprio bloco;
+        // a versão com prólogo chama a nativa e retoma no código traduzido.
+        flow = (patched ? testCase.Patched : testCase.Translated)(frame, context, state,
+                                                                  testCase.Entry);
+    } else {
+        bool done = false;
+        if (patched && Oot3dGuestOverridesEnabled()) {
+            done = testCase.Native(frame, context, state, flow);
+        }
+        if (!done) flow = testCase.Translated(frame, context, state, testCase.Entry);
     }
-    if (!done) flow = testCase.Translated(frame, context, state, testCase.Entry);
     state.Flush(0x7FFFU, true);
     out.Flow = flow;
     out.Remaining = context.BlocksRemaining;
@@ -504,6 +511,246 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
         if (kind < 75U) std::memcpy(&g.vfp[0], &angle, 4);
         break;
     }
+    case 0x00466E68U: { // MeshCommandPacket_Submit: cópia de n pares de palavras
+        if (!rng.Chance(92)) break;
+        const uint32_t count = rng.Chance(6) ? (rng.Chance(50) ? 0U : rng.U32() >> 3U)
+                                             : 1U + rng.Below(rng.Chance(80) ? 24U : 400U);
+        g.r[2] = (count << 3U) | (rng.Chance(30) ? rng.Below(8U) : 0U);
+        if (rng.Chance(3)) g.r[2] |= 0x80000000U; // n negativo: recusa
+        const uint32_t bytes = 8U * (count & 0x7FFU) + 4U;
+        const auto place = [&](uint32_t other) -> uint32_t {
+            const uint32_t room = bytes < 0x3800U ? 0x3800U - bytes : 4U;
+            switch (rng.Below(16U)) {
+            case 0: return kDataBase + (rng.Below(kDataEnd - kDataBase - 0x4000U) & ~3U);
+            case 1: return kRamBase + 0x1000U * (1U + rng.Below(3U)) - 4U * rng.Below(40U);
+            case 2: return other + 4U * rng.Below(64U) - 128U;          // sobreposição
+            case 3: return (kRamBase + rng.Below(room)) | (1U + rng.Below(3U)); // desalinhado
+            case 4: return g.r[13] - 4U * rng.Below(48U);                // sobre a pilha
+            case 5: return kRomBase + (rng.Below(kRomSize) & ~3U);
+            case 6: return kUnmapped + (rng.Below(0x1000U) & ~3U);
+            default: return (kRamBase + rng.Below(room)) & ~3U;
+            }
+        };
+        const uint32_t src = place(g.r[0]);
+        const uint32_t dst = place(src);
+        g.r[1] = src;
+        poke(g.r[13], dst);
+        if (rng.Chance(30)) s.Budget = rng.Below(count + 8U);
+        break;
+    }
+    case 0x003247B0U: { // BgCheck_LineTestImpl: zera n bytes
+        if (!rng.Chance(92)) break;
+        const uint32_t count = rng.Chance(85) ? 1U + rng.Below(rng.Chance(70) ? 64U : 3000U)
+                                              : rng.U32();
+        const uint32_t start = rng.Chance(85) ? kRamBase + rng.Below(0x3000U) : rng.Pointer();
+        const uint32_t object = rng.Chance(8) ? start + count - rng.Below(8U) - 0x4CU // limite sobre o laço
+                                              : kRamBase + 0x3000U + (rng.Below(0x800U) & ~3U);
+        g.r[0] = start;
+        g.r[8] = rng.Chance(95) ? object : rng.Pointer();
+        const uint32_t base = rng.Chance(80) ? kRamBase + rng.Below(0x4000U) : rng.U32();
+        poke(g.r[8] + 0x4CU, base);
+        g.r[1] = start + count - base;
+        if (rng.Chance(10)) g.r[1] = rng.U32();
+        if (rng.Chance(30)) s.Budget = rng.Below(count + 8U);
+        break;
+    }
+    case 0x0047AF24U: { // busca em 50 entradas: objeto grande, bandeiras e ponteiros
+        if (!rng.Chance(92)) break;
+        const uint32_t object = rng.Chance(90) ? kRamBase + (rng.Below(0x1000U) & ~3U) : rng.Pointer();
+        const uint32_t flags1 = rng.Chance(90) ? kRamBase + (rng.Below(0x2000U) & ~3U) : rng.Pointer();
+        const uint32_t key = rng.Chance(80) ? kRamBase + (rng.Below(0x8000U) & ~3U) : rng.U32();
+        g.r[0] = object;
+        g.r[1] = flags1;
+        g.r[2] = key;
+        const uint32_t density = rng.Below(100U);
+        const uint32_t base = object + 0xA98U;
+        for (uint32_t j = 0; j < 25U; ++j) {
+            uint32_t a = 0U, b = 0U;
+            for (uint32_t k = 0; k < 2U; ++k) {
+                if (rng.Below(100U) < density) a |= (rng.U32() | 1U) << (16U * k) & (0xFFFFU << (16U * k));
+                if (rng.Chance(60)) b |= (rng.U32() & 0xFFFFU) << (16U * k);
+            }
+            poke(flags1 + 0x151CU + 4U * j, a);
+            poke(base + 0x156CU + 4U * j, b);
+        }
+        for (uint32_t i = 0; i < 50U; ++i) {
+            const uint32_t kind = rng.Below(100U);
+            poke(base + 0x54U + 36U * i, kind < 40U ? 0U : kind < 45U ? key : rng.U32());
+        }
+        if (rng.Chance(30)) s.Budget = rng.Below(160U);
+        break;
+    }
+    case 0x002FA674U: { // anel de 256 amostras, índice, limites e contador
+        if (!rng.Chance(92)) break;
+        const uint32_t ring = rng.Chance(92) ? kRamBase + (rng.Below(0x2C00U) & ~3U) : rng.Pointer();
+        g.r[6] = ring;
+        g.r[12] = rng.Chance(90) ? rng.Below(256U) : rng.U32();
+        g.r[9] = rng.Chance(90) ? rng.Below(256U) : rng.U32();
+        const int32_t center = static_cast<int32_t>(rng.Below(2000U)) - 1000;
+        const int32_t width = static_cast<int32_t>(rng.Below(rng.Chance(50) ? 8U : 400U));
+        g.r[7] = static_cast<uint32_t>(center - width);
+        g.r[8] = static_cast<uint32_t>(center + width);
+        const uint32_t inside = rng.Below(101U);
+        for (uint32_t i = 0; i < 256U; ++i) {
+            const int32_t value = rng.Below(100U) < inside
+                ? center - width + static_cast<int32_t>(rng.Below(2U * static_cast<uint32_t>(width) + 1U))
+                : static_cast<int32_t>(rng.U32());
+            poke(ring + 4U * i, static_cast<uint32_t>(value));
+        }
+        const uint32_t kind = rng.Below(100U);
+        g.r[2] = kind < 85U ? kRamBase + 0x3000U + (rng.Below(0x800U) & ~3U)
+               : kind < 92U ? ring + 4U * rng.Below(256U)          // contador dentro do anel
+               : rng.Pointer();
+        poke(g.r[2], rng.Below(1000U));
+        if (rng.Chance(30)) s.Budget = rng.Below(800U);
+        break;
+    }
+    case 0x00307B50U:   // PicaTev_ConvertSource
+    case 0x00307DC8U: { // PicaCompare_ConvertFunction
+        const bool tev = entry == 0x00307B50U;
+        const uint32_t table = tev ? 0x004EA254U : 0x004EA36CU;
+        const uint32_t count = tev ? 16U : 8U;
+        const auto value = [&](uint32_t i) {
+            const uint32_t offset = table - kTextBase + (tev ? 4U : 2U) * i;
+            return tev ? (gCode[offset] | gCode[offset + 1] << 8U | gCode[offset + 2] << 16U |
+                          static_cast<uint32_t>(gCode[offset + 3]) << 24U)
+                       : static_cast<uint32_t>(gCode[offset] | gCode[offset + 1] << 8U);
+        };
+        const uint32_t kind = rng.Below(100U);
+        if (kind < 75U) g.r[0] = value(rng.Below(count));
+        else if (kind < 85U) g.r[0] = rng.Chance(50) ? g.r[4] : g.r[5]; // na pilha empilhada
+        else if (kind < 92U) g.r[0] = rng.Below(16U);
+        if (kind >= 75U && kind < 85U && !tev) g.r[0] &= 0xFFFFU;
+        if (rng.Chance(10)) { // acima de sp: o quadro do chamador
+            const uint32_t key = rng.U32() & (tev ? 0xFFFFFFFFU : 0xFFFFU);
+            g.r[0] = key;
+            poke(g.r[13] + 4U * rng.Below(tev ? 46U : 2U), tev ? key : key | (key << 16U));
+        }
+        if (rng.Chance(20)) s.Budget = rng.Below(80U);
+        break;
+    }
+    case 0x00308920U:   // NativeCurve_SampleFloat: quadros-chave de 16 bytes
+    case 0x00308604U: { // CsabCurve_SampleRotation: quadros-chave s16 de 8 bytes
+        if (!rng.Chance(92)) break;
+        const bool wide = entry == 0x00308920U;
+        const uint32_t stride = wide ? 16U : 8U;
+        const uint32_t count = rng.Chance(90) ? 1U + rng.Below(rng.Chance(70) ? 12U : 300U) : rng.U32();
+        const uint32_t index = rng.Chance(80) ? 0U : (rng.Chance(70) ? rng.Below(16U) : rng.U32());
+        const uint32_t keys = rng.Chance(92) ? kRamBase + (rng.Below(0x2000U) & ~3U) : rng.Pointer();
+        int32_t time = static_cast<int32_t>(rng.Below(20U)) - 5;
+        for (uint32_t i = 0; i < std::min<uint32_t>(count, 400U); ++i) {
+            time += static_cast<int32_t>(rng.Below(rng.Chance(10) ? 3000U : 20U));
+            if (wide) {
+                poke(keys + stride * i, static_cast<uint32_t>(time));
+            } else {
+                const uint32_t half = static_cast<uint32_t>(time) & 0xFFFFU;
+                poke(keys + stride * i, half | (rng.U32() & 0xFFFF0000U));
+            }
+        }
+        const float sample = static_cast<float>(time) * rng.Below(1000U) / 900.0f;
+        uint32_t bits;
+        std::memcpy(&bits, &sample, 4);
+        if (rng.Chance(85)) g.vfp[wide ? 0 : 1] = bits;
+        g.r[0] = index;
+        if (wide) {
+            g.r[1] = count;
+            g.r[2] = keys + stride * (index & 0xFFU);
+        } else {
+            g.r[2] = count;
+            g.r[1] = keys + stride * (index & 0xFFU);
+        }
+        if (rng.Chance(30)) s.Budget = rng.Below(2U * (count & 0x3FFU) + 4U);
+        break;
+    }
+    case 0x002BBB14U: { // Math3D_CirSquareVsTriSquare: coordenadas de jogo
+        if (!rng.Chance(80)) break;
+        const float center = static_cast<float>(static_cast<int>(rng.Below(2001U)) - 1000);
+        for (int i = 0; i < 9; ++i) {
+            float value = center + (static_cast<float>(rng.Below(4001U)) - 2000.0f) * 0.05f;
+            if (i == 8) value = static_cast<float>(rng.Below(200U)) * 0.5f; // raio
+            uint32_t bits;
+            std::memcpy(&bits, &value, 4);
+            if (rng.Chance(92)) g.vfp[i] = bits;
+        }
+        if (rng.Chance(10)) g.vfp[rng.Below(9U)] = g.vfp[rng.Below(9U)]; // empates
+        if (rng.Chance(20)) s.Budget = rng.Below(16U);
+        break;
+    }
+    case 0x00303C78U: { // cópia de 64 bytes
+        if (!rng.Chance(92)) break;
+        g.r[7] = rng.Below(64U) * 4U;
+        const auto place = [&]() -> uint32_t {
+            switch (rng.Below(12U)) {
+            case 0: return kRamBase + 0x1000U * (1U + rng.Below(3U)) - 4U * rng.Below(24U) - g.r[7];
+            case 1: return rng.Pointer() - g.r[7];
+            case 2: return g.r[4] + 4U * rng.Below(32U) - 64U;  // sobreposição
+            case 3: return (kRamBase + rng.Below(0x3000U)) | 1U;
+            default: return (kRamBase + rng.Below(0x3000U)) & ~3U;
+            }
+        };
+        g.r[4] = place();
+        g.r[5] = place();
+        if (rng.Chance(20)) s.Budget = rng.Below(14U);
+        break;
+    }
+    case 0x0046700CU: { // grupos de 4 palavras invertidos
+        if (!rng.Chance(92)) break;
+        g.r[6] = rng.Chance(90) ? 5U + rng.Below(60U) : (rng.Chance(50) ? rng.Below(5U) : rng.U32());
+        const uint32_t bytes = 16U * ((g.r[6] - 1U) / 4U);
+        const auto place = [&](uint32_t other) -> uint32_t {
+            switch (rng.Below(12U)) {
+            case 0: return kRamBase + 0x1000U * (1U + rng.Below(3U)) - 4U * rng.Below(24U);
+            case 1: return rng.Pointer();
+            case 2: return other + 4U * rng.Below(32U) - 64U;  // sobreposição
+            case 3: return (kRamBase + rng.Below(0x3000U)) | 2U;
+            default: return (kRamBase + rng.Below(bytes < 0x3000U ? 0x3000U - bytes : 4U)) & ~3U;
+            }
+        };
+        g.r[4] = place(g.r[0]);
+        g.r[0] = place(g.r[4]);
+        if (rng.Chance(20)) s.Budget = rng.Below(24U);
+        break;
+    }
+    case 0x003563E0U: { // lista de polígonos: nós (s16 polígono, u16 próximo), polígonos e vértices
+        if (!rng.Chance(92)) break;
+        const uint32_t nodes = kRamBase + 0x0400U + (rng.Below(0x100U) & ~3U);  // 256 nós
+        const uint32_t polys = kRamBase + 0x0C00U + (rng.Below(0x100U) & ~3U);  // 64 x 20 bytes
+        const uint32_t verts = kRamBase + 0x1200U + (rng.Below(0x100U) & ~3U);  // 128 x 6 bytes
+        const uint32_t length = rng.Below(rng.Chance(80) ? 12U : 200U);
+        const int32_t threshold = static_cast<int32_t>(rng.Below(2000U)) - 1000;
+        // Vértices: y espalhado em torno do limiar.
+        for (uint32_t v = 0; v < 128U; v += 2U) {
+            const auto y = [&]() {
+                return static_cast<uint32_t>(threshold + static_cast<int32_t>(rng.Below(400U)) - 200) & 0xFFFFU;
+            };
+            const uint32_t base = verts + 6U * v;
+            // [x, y, z] s16 de dois vértices = 12 bytes
+            poke(base, rng.U32() & 0xFFFFU | y() << 16U);
+            poke(base + 4U, rng.U32());
+            poke(base + 8U, y() | (rng.U32() & 0xFFFF0000U));
+        }
+        for (uint32_t p = 0; p < 64U; ++p) {
+            const auto vertex = [&]() { return rng.Below(128U) | (rng.Chance(20) ? rng.Below(8U) << 13U : 0U); };
+            poke(polys + 20U * p, (rng.U32() & 0xFFFFU) | vertex() << 16U);
+            poke(polys + 20U * p + 4U, vertex() | rng.Below(128U) << 16U);
+        }
+        // Cadeia de nós a partir do nó 0; o último aponta para 0xFFFF (ou ciclo).
+        uint32_t current = 0U;
+        for (uint32_t i = 0; i < length; ++i) {
+            const uint32_t next = 1U + rng.Below(255U);
+            poke(nodes + 4U * current, rng.Below(64U) | next << 16U);
+            current = next;
+        }
+        poke(nodes + 4U * current, rng.Below(64U) | (rng.Chance(97) ? 0xFFFFU : rng.Below(256U)) << 16U);
+        g.r[2] = polys;
+        g.r[3] = verts;
+        g.r[7] = nodes;
+        g.r[6] = rng.Chance(95) ? nodes : rng.Pointer();
+        g.r[8] = rng.Chance(95) ? 0xFFFFU : rng.U32();
+        g.r[12] = static_cast<uint32_t>(threshold);
+        if (rng.Chance(30)) s.Budget = rng.Below(4U * length + 8U);
+        break;
+    }
     default:
         break;
     }
@@ -669,7 +916,10 @@ int main(int argc, char** argv) {
                         Oot3dAotArchitecturalState state(guest);
                         Oot3dWholeAotFlow flow{};
                         const uint64_t start = __builtin_ia32_rdtsc();
-                        if (!native || !testCase.Native(frame, context, state, flow)) {
+                        if (testCase.Patched != nullptr) {
+                            flow = (native ? testCase.Patched : testCase.Translated)(
+                                frame, context, state, testCase.Entry);
+                        } else if (!native || !testCase.Native(frame, context, state, flow)) {
                             flow = testCase.Translated(frame, context, state, testCase.Entry);
                         }
                         asm volatile("" : : "r"(&flow), "r"(&guest) : "memory");

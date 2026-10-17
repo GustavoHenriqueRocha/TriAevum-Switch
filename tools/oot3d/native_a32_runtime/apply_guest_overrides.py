@@ -6,6 +6,13 @@ GuestOverrides::Override_<ENTRADA> quando a função é chamada pela própria
 entrada; se a versão nativa recusar, a tradução segue intacta. Acrescenta o
 #include de oot3d_native_guest_overrides.h nos shards afetados.
 
+Substituições de bloco (itens com "function"): em vez da entrada da função,
+o prólogo vai logo depois do rótulo block_<ENTRADA> dentro da função
+traduzida <function>. A versão nativa executa o laço/trecho quente e devolve
+o PC de retomada (um dos listados em "resume"), para onde o código traduzido
+segue com goto, ou um fluxo de saída (limite de blocos etc.). Se recusar, o
+bloco traduzido roda normalmente.
+
 É idempotente (marcadores "guest-override") e --remove desfaz. Rodar depois
 de generate_whole_aot_cpp.py (ou usar a opção --guest-overrides dele); só os
 shards que contêm funções listadas mudam, então a recompilação é pequena.
@@ -27,6 +34,13 @@ DEFAULT_MANIFEST = Path(__file__).resolve().with_name("guest_overrides.json")
 MANIFEST_NAME = "whole_aot_cpp_manifest.json"
 
 
+# Substituições de bloco lidas por load_manifest: entrada do bloco ->
+# (entrada da função que contém o bloco, PCs de retomada). apply() recebe só
+# as entradas (assim generate_whole_aot_cpp.py não precisa saber de blocos) e
+# consulta esta tabela.
+BLOCK_OVERRIDES: dict[int, tuple[int, tuple[int, ...]]] = {}
+
+
 def load_manifest(path: Path) -> list[dict[str, object]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("format") != "oot3d_guest_overrides_v1":
@@ -34,7 +48,15 @@ def load_manifest(path: Path) -> list[dict[str, object]]:
     entries = []
     for item in data["overrides"]:
         entry = int(str(item["entry"]), 0)
-        entries.append({**item, "entry": entry})
+        parsed = {**item, "entry": entry}
+        if "function" in item:
+            function = int(str(item["function"]), 0)
+            resume = tuple(int(str(pc), 0) for pc in item.get("resume", []))
+            if not resume:
+                raise ValueError(f"{path}: bloco 0x{entry:08X} sem PCs de retomada")
+            parsed.update(function=function, resume=list(resume))
+            BLOCK_OVERRIDES[entry] = (function, resume)
+        entries.append(parsed)
     return entries
 
 
@@ -65,6 +87,50 @@ def prologue(entry: int) -> list[str]:
     ]
 
 
+def block_prologue(entry: int, resume: Iterable[int]) -> list[str]:
+    lines = [
+        PROLOGUE_BEGIN,
+        "    if (Oot3dGuestOverridesEnabled()) {",
+        "        commitState();",
+        "        Oot3dWholeAotFlow nativeFlow;",
+        "        uint32_t resumePc = 0U;",
+        f"        if (GuestOverrides::Override_{entry:08X}(frame, context, state, nativeFlow, resumePc)) {{",
+        "            reloadState();",
+    ]
+    for pc in resume:
+        lines.append(f"            if (resumePc == 0x{pc:08X}U) goto block_{pc:08X};")
+    lines += [
+        "            return nativeFlow;",
+        "        }",
+        "    }",
+        PROLOGUE_END,
+    ]
+    return lines
+
+
+def function_end(lines: list[str], index: int) -> int:
+    return lines.index("}", index)
+
+
+def patch_block(lines: list[str], entry: int, function: int,
+                resume: Iterable[int]) -> bool:
+    """Insere o prólogo de bloco depois do rótulo block_<entry> da função."""
+    found = find_definition(lines, function)
+    if found is None:
+        return False
+    index, _ = found
+    end = function_end(lines, index)
+    label = f"block_{entry:08X}:"
+    labels = {f"block_{pc:08X}:" for pc in resume}
+    body = lines[index:end]
+    if label not in body or not labels <= set(body):
+        raise SystemExit(
+            f"bloco 0x{entry:08X} ou retomada ausente na função 0x{function:08X}")
+    at = index + body.index(label) + 1
+    lines[at:at] = block_prologue(entry, resume)
+    return True
+
+
 def strip(lines: list[str]) -> list[str]:
     out: list[str] = []
     skipping = False
@@ -86,6 +152,11 @@ def patch_text(text: str, entries: Iterable[int]) -> tuple[str, list[int]]:
     lines = strip(text.split("\n"))
     patched: list[int] = []
     for entry in sorted(set(entries)):
+        if entry in BLOCK_OVERRIDES:
+            function, resume = BLOCK_OVERRIDES[entry]
+            if patch_block(lines, entry, function, resume):
+                patched.append(entry)
+            continue
         found = find_definition(lines, entry)
         if found is None:
             continue

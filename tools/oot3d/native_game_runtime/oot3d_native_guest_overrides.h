@@ -15,6 +15,14 @@
 //     liveness do código gerado), VFP, FPSCR, memória, gerações de escrita,
 //     BlocksRemaining/BlocksConsumed e o Oot3dWholeAotFlow exatamente como a
 //     versão traduzida deixaria.
+//
+// Substituições de bloco (Override_<BLOCO> com resumePc): chamadas pelo
+// prólogo inserido logo depois do rótulo block_<BLOCO> da função traduzida
+// que contém o bloco, antes de o bloco entrar (orçamento, gancho). Devolvem
+// false (recusa sem efeito: o bloco traduzido roda) ou true com resumePc = o
+// PC de um bloco da mesma função onde a tradução continua (goto), deixando o
+// estado exatamente como a tradução deixaria ao entrar nesse bloco; com
+// resumePc = 0 a função traduzida devolve `flow` (saída por limite etc.).
 // A equivalência é verificada por run_guest_override_equivalence.py contra o
 // C++ gerado; uma substituição só entra em guest_overrides.json depois de
 // passar sem nenhuma diferença.
@@ -67,7 +75,28 @@ OOT3D_GUEST_OVERRIDE_DECLARE(003727F0) // Math_SinF
 OOT3D_GUEST_OVERRIDE_DECLARE(004A022C) // efeito de áudio: atraso de 4 canais
 OOT3D_GUEST_OVERRIDE_DECLARE(004A0338) // efeito de áudio: reverberação estéreo
 OOT3D_GUEST_OVERRIDE_DECLARE(00371738) // Runtime_Memcpy
+OOT3D_GUEST_OVERRIDE_DECLARE(0047AF24) // busca em 50 entradas
+OOT3D_GUEST_OVERRIDE_DECLARE(00307B50) // PicaTev_ConvertSource
+OOT3D_GUEST_OVERRIDE_DECLARE(00307DC8) // PicaCompare_ConvertFunction
+OOT3D_GUEST_OVERRIDE_DECLARE(002BBB14) // Math3D_CirSquareVsTriSquare
 
+#define OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(entry)                             \
+    bool Override_##entry(Oot3dWholeAotFrame& frame,                          \
+                          Oot3dWholeAotContext& context,                      \
+                          Oot3dAotArchitecturalState& state,                  \
+                          Oot3dWholeAotFlow& flow,                            \
+                          uint32_t& resumePc) noexcept;
+
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(00466E68) // MeshCommandPacket_Submit: cópia
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(003247B0) // BgCheck_LineTestImpl: zera marcas
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(002FA674) // CalculateGyroscopeAxisStatus: média
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(00308920) // NativeCurve_SampleFloat: busca
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(00308604) // CsabCurve_SampleRotation: busca
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(00303C78) // FUN_00303b24: cópia de 64 bytes
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(0046700C) // MeshCommandPacket_PatchBoneUniforms: cópia
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(003563E0) // FUN_003562c0: percurso da lista
+
+#undef OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE
 #undef OOT3D_GUEST_OVERRIDE_DECLARE
 
 } // namespace GuestOverrides

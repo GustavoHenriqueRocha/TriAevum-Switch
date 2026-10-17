@@ -52,6 +52,18 @@ enum OverrideIndex : size_t {
     kIdx004A022C,
     kIdx004A0338,
     kIdx00371738,
+    kIdx00466E68,
+    kIdx003247B0,
+    kIdx0047AF24,
+    kIdx002FA674,
+    kIdx00307B50,
+    kIdx00307DC8,
+    kIdx00308920,
+    kIdx00308604,
+    kIdx002BBB14,
+    kIdx00303C78,
+    kIdx0046700C,
+    kIdx003563E0,
     kOverrideCount,
 };
 
@@ -67,6 +79,18 @@ Oot3dGuestOverrideInfo gOverrides[kOverrideCount] = {
     {0x004A022CU, "AudioEffect_ProcessFourChannelDelay"},
     {0x004A0338U, "AudioEffect_ProcessStereoReverb"},
     {0x00371738U, "Runtime_Memcpy"},
+    {0x00466E68U, "MeshCommandPacket_Submit:copia"},
+    {0x003247B0U, "BgCheck_LineTestImpl:zera_marcas"},
+    {0x0047AF24U, "FUN_0047af24"},
+    {0x002FA674U, "CalculateGyroscopeAxisStatus:media"},
+    {0x00307B50U, "PicaTev_ConvertSource"},
+    {0x00307DC8U, "PicaCompare_ConvertFunction"},
+    {0x00308920U, "NativeCurve_SampleFloat:busca"},
+    {0x00308604U, "CsabCurve_SampleRotation:busca"},
+    {0x002BBB14U, "Math3D_CirSquareVsTriSquare"},
+    {0x00303C78U, "FUN_00303b24:copia"},
+    {0x0046700CU, "MeshCommandPacket_PatchBoneUniforms:copia"},
+    {0x003563E0U, "FUN_003562c0:percurso"},
 };
 
 constexpr uint32_t kFpscrTrapMask = 0x00379F00U; // LEN/STRIDE e habilitação de exceções
@@ -279,6 +303,81 @@ inline void SpanStore(NativeA32Memory& memory, const Span& span, uint32_t addres
 
 inline Oot3dAotFlagMask Mask(uint8_t bits) noexcept {
     return static_cast<Oot3dAotFlagMask>(bits);
+}
+
+// A geração de escrita aguenta `writes` incrementos sem dar a volta (na volta
+// a tradução invalidaria as versões de intervalo; aí a substituição recusa).
+inline bool GenerationRoom(NativeA32Memory& memory, uint64_t writes) noexcept {
+    return memory.*MemberOf(RangeGenerationTag{}) <= UINT64_MAX - writes;
+}
+
+// Cópia de `bytes` de `from` para `to` como a sequência crescente de
+// WriteFast de `unit` bytes da tradução (cada leitura antes da escrita do
+// mesmo endereço; sem sobreposição, a ordem entre leituras e escritas não
+// importa): os mesmos bytes, a geração +1 por unidade e cada página carimbada
+// com a geração da última unidade escrita nela. Pré-condições:
+// Readable(from, bytes, unit), Writable(to, bytes, unit), intervalos
+// disjuntos e GenerationRoom(bytes / unit).
+void CopyRun(NativeA32Memory& memory, uint32_t to, uint32_t from, uint32_t bytes,
+             uint32_t unit) noexcept {
+    auto& generation = memory.*MemberOf(RangeGenerationTag{});
+    uint32_t done = 0U;
+    while (done < bytes) {
+        const uint32_t source = from + done, target = to + done;
+        const uint32_t chunk = std::min({bytes - done, kMemPageSize - (source & kMemPageMask),
+                                         kMemPageSize - (target & kMemPageMask)});
+        auto* readPage = FastPageOf(memory, source, chunk);
+        auto* writePage = FastPageOf(memory, target, chunk);
+        std::memcpy(writePage->Write + (target & kMemPageMask),
+                    readPage->Bytes + (source & kMemPageMask), chunk);
+        generation += chunk / unit;
+        writePage->WriteGeneration = generation;
+        done += chunk;
+    }
+}
+
+// Palavras de um STM/PUSH como o código gerado: WriteWordsFast quando todas
+// cabem numa página rápida, senão palavra a palavra (mesmo efeito final).
+// Pré-condição: Writable(address, 4 * count).
+inline void StoreWords(NativeA32Memory& memory, uint32_t address, const uint32_t* words,
+                       uint32_t count) noexcept {
+    if (!memory.WriteWordsFast(address, words, count)) {
+        for (uint32_t i = 0; i < count; ++i) memory.WriteFast<uint32_t>(address + 4U * i, words[i]);
+    }
+}
+
+// Escrita de `size` bytes que acerta o caminho rápido de WriteFast<T>.
+inline bool SinglePageWritable(const NativeA32Memory& memory, uint32_t address,
+                               uint32_t size) noexcept {
+    return memory.SpanOnFastWritePage(address, size);
+}
+
+// `writes` escritas seguidas da mesma palavra (contador em memória num laço):
+// fica o último valor, a geração anda `writes` e a página é carimbada com ela.
+// Pré-condições: SinglePageWritable(address, 4) e GenerationRoom(writes).
+inline void RepeatStore32(NativeA32Memory& memory, uint32_t address, uint32_t value,
+                          uint32_t writes) noexcept {
+    if (writes == 0U) return;
+    auto& generation = memory.*MemberOf(RangeGenerationTag{});
+    auto* page = FastPageOf(memory, address, 4U);
+    std::memcpy(page->Write + (address & kMemPageMask), &value, 4U);
+    generation += writes;
+    page->WriteGeneration = generation;
+}
+
+// O mesmo para `bytes` escritas de um byte com o mesmo valor (STRB em laço).
+void FillBytes(NativeA32Memory& memory, uint32_t to, uint8_t value, uint32_t bytes) noexcept {
+    auto& generation = memory.*MemberOf(RangeGenerationTag{});
+    uint32_t done = 0U;
+    while (done < bytes) {
+        const uint32_t target = to + done;
+        const uint32_t chunk = std::min(bytes - done, kMemPageSize - (target & kMemPageMask));
+        auto* writePage = FastPageOf(memory, target, chunk);
+        std::memset(writePage->Write + (target & kMemPageMask), value, chunk);
+        generation += chunk;
+        writePage->WriteGeneration = generation;
+        done += chunk;
+    }
 }
 
 } // namespace
@@ -1795,6 +1894,804 @@ bool Override_00371738(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         R[0] += 1U;
     }
     flow = Oot3dAotReturned(R[14]);
+    return Accept(kIdx);
+}
+
+// ===========================================================================
+// Substituições de bloco (ver oot3d_native_guest_overrides.h).
+
+// ---------------------------------------------------------------------------
+// 0x00466E68 MeshCommandPacket_Submit, cópia do pacote para a lista de
+// comandos: bloco 0x00466E68 + n voltas de 0x00466E7C, retoma em 0x00466E94.
+//   r0 = r1 - 4; r1 = [sp] - 4; r3 = [r0 + 4]; r2 = asr(r2, 3) (= n)
+//   volta: ip = [r0 += 8]; [r1 + 4] = r3; r3 = [r0 + 4]; subs r2, #1;
+//          [r1 += 8] = ip; bne
+// Lê [src, src + 8n + 4) (a última palavra é a leitura antecipada) e escreve
+// [dst, dst + 8n) em palavras crescentes.
+bool Override_00466E68(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx00466E68;
+    static_cast<void>(frame);
+    static_cast<void>(flow);
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    const uint32_t src = R[1], sp = R[13];
+    const uint32_t count = static_cast<uint32_t>(static_cast<int32_t>(R[2]) >> 3);
+    // n <= 0 daria (quase) 2^32 voltas: fica com a tradução.
+    if (Hooked(context, 0x00466E68U, 0x00466E90U) || static_cast<int32_t>(count) <= 0 ||
+        count > 0x00020000U || !Budget(context, 1U + count) ||
+        !SinglePageReadable(memory, sp, 4U)) {
+        return Decline(kIdx);
+    }
+    const uint32_t dst = Read32(memory, sp);
+    const uint32_t bytes = 8U * count;
+    if (!Readable(memory, src, bytes + 4U) || !Writable(memory, dst, bytes) ||
+        Overlaps(src, bytes + 4U, dst, bytes) || !GenerationRoom(memory, 2U * count)) {
+        return Decline(kIdx);
+    }
+    Consume(context, 1U + count);
+    CopyRun(memory, dst, src, bytes, 4U);
+    R[0] = src - 4U + bytes;
+    R[1] = dst - 4U + bytes;
+    R[2] = 0U;
+    R[3] = Read32(memory, src + bytes);
+    R[12] = Read32(memory, src + bytes - 4U);
+    Oot3dAotSetSubtractFlags(state.Flags, 1U, 1U, Mask(0xFU));
+    resumePc = 0x00466E94U;
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// 0x003247B0 BgCheck_LineTestImpl, laço que zera o mapa de polígonos já
+// testados (um bloco por byte), retoma em 0x003247C4:
+//   strb r5, [r0], #1; r2 = [r8 + 0x4C] + r1; cmp r2, r0; bhi (volta)
+// O limite é relido a cada volta; se o próprio laço escrevesse sobre
+// [r8 + 0x4C] o limite mudaria, e aí a substituição recusa.
+bool Override_003247B0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx003247B0;
+    static_cast<void>(frame);
+    static_cast<void>(flow);
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    const uint32_t start = R[0];
+    const uint32_t baseAddress = R[8] + 0x4CU;
+    if (Hooked(context, 0x003247B0U, 0x003247C0U) || start == 0xFFFFFFFFU ||
+        !SinglePageReadable(memory, baseAddress, 4U)) {
+        return Decline(kIdx);
+    }
+    const uint32_t limit = Read32(memory, baseAddress) + R[1];
+    // Depois de k voltas r0 = start + k; para na primeira em que limit <= r0.
+    const uint32_t count = limit > start + 1U ? limit - start : 1U;
+    // Se o orçamento acabar antes, faz as voltas que cabem e sai pelo limite
+    // no topo do laço, como a tradução (o prólogo fica no topo do laço; uma
+    // recusa aqui se repetiria a cada volta traduzida).
+    const uint32_t done = std::min(count, context.BlocksRemaining);
+    if (count > 0x00100000U || done == 0U ||
+        !Writable(memory, start, done, 1U) || Overlaps(start, done, baseAddress, 4U) ||
+        !GenerationRoom(memory, done)) {
+        return Decline(kIdx);
+    }
+    Consume(context, done);
+    FillBytes(memory, start, static_cast<uint8_t>(R[5]), done);
+    R[0] = start + done;
+    R[2] = limit;
+    Oot3dAotSetSubtractFlags(state.Flags, limit, start + done, Mask(0xFU));
+    if (done < count) {
+        flow = Oot3dAotBlockLimit(context, 0x003247B0U);
+        resumePc = 0U;
+    } else {
+        resumePc = 0x003247C4U;
+    }
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// 0x0047AF24 (folha; busca em 50 entradas): r1 = tabela de bandeiras u16
+// (+0x151C), r0 = objeto (r14 = r0 + 0xA98: bandeiras u16 em +0x156C e
+// ponteiros de 36 bytes em +0x54), r2 = valor procurado. Para cada i < 50 com
+// o bit 0 de flags1[i]: ptr = (flags2[i] tem o bit 0 e não o bit 1)
+// ? entrada[i].ptr : 0; se ptr != 0 e ptr == r2, desempilha e cai na cauda
+// 0x00483C9C ([r2 + 0x1B8] = 0, r1 = 0). Sem achar: pop {r4, pc} (lr não é
+// restaurado: r14 sai = r0 + 0xA98).
+// As leituras não podem cair sobre a pilha empilhada (senão leriam r4/lr):
+// aí recusa. Tudo é simulado em locais e só depois gravado.
+bool Override_0047AF24(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state,
+                       Oot3dWholeAotFlow& flow) noexcept {
+    constexpr size_t kIdx = kIdx0047AF24;
+    static_cast<void>(frame);
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    const uint32_t sp = R[13];
+    if (Hooked(context, 0x0047AF24U, 0x0047AFACU) || Hooked(context, 0x00483C9CU, 0x00483C9CU) ||
+        !Writable(memory, sp - 8U, 8U)) {
+        return Decline(kIdx);
+    }
+    const auto readable = [&](uint32_t address, uint32_t size) {
+        return SinglePageReadable(memory, address, size) && !Overlaps(address, size, sp - 8U, 8U);
+    };
+    Oot3dAotLazyFlags flags = state.Flags;
+    uint32_t r0 = R[2], r1 = R[1], r2 = R[2], r3 = 0U, r12 = R[0];
+    uint32_t r14 = r12 + 0x00000800U;
+    r14 += 0x00000298U;
+    uint32_t blocks = 1U; // 0x0047AF24
+    bool tail = false;
+    while (true) {
+        ++blocks; // 0x0047AF3C
+        {
+            const uint32_t address = r1 + (r3 << 1U) + 0x00001500U + 0x1CU;
+            if (!readable(address, 2U)) return Decline(kIdx);
+            uint16_t value = 0U;
+            memory.ReadFast<uint16_t>(address, &value);
+            r2 = value;
+            Oot3dAotSetLogicalFlags(flags, r2 & 0x00000001U, flags.C(), Mask(0x4U));
+        }
+        if (!flags.Z()) {
+            ++blocks; // 0x0047AF50
+            Oot3dAotSetSubtractFlags(flags, r3, 0x00000032U, Mask(0x2U));
+            bool clear = true; // -> 0x0047AF74
+            if (!flags.C()) {
+                ++blocks; // 0x0047AF58
+                r2 = r14 + (r3 << 1U) + 0x00001500U;
+                const uint32_t address = r2 + 0x6CU;
+                if (!readable(address, 2U)) return Decline(kIdx);
+                uint16_t value = 0U;
+                memory.ReadFast<uint16_t>(address, &value);
+                r12 = value;
+                Oot3dAotSetLogicalFlags(flags, r12 & 0x00000001U, flags.C(), Mask(0x6U));
+                if (!flags.Z()) {
+                    ++blocks; // 0x0047AF6C
+                    Oot3dAotSetLogicalFlags(flags, r12 & 0x00000002U, flags.C(), Mask(0x4U));
+                    if (flags.Z()) {
+                        ++blocks; // 0x0047AF7C
+                        clear = false;
+                        r12 = r3 + (r3 << 3U);
+                        r12 = r12 + (r12 << 1U);
+                        r2 = r14 + (r12 << 2U);
+                        const uint32_t pointer = r2 + 0x54U;
+                        if (!readable(pointer, 4U)) return Decline(kIdx);
+                        r12 = Read32(memory, pointer);
+                    }
+                }
+            }
+            if (clear) {
+                ++blocks; // 0x0047AF74
+                r12 = 0x00000000U;
+            }
+            ++blocks; // 0x0047AF8C
+            Oot3dAotSetSubtractFlags(flags, r12, 0x00000000U, Mask(0x4U));
+            if (!flags.Z()) {
+                ++blocks; // 0x0047AF94
+                Oot3dAotSetSubtractFlags(flags, r12, r0, Mask(0xFU));
+                if (flags.Z()) {
+                    tail = true;
+                    break;
+                }
+            }
+        }
+        ++blocks; // 0x0047AFA0
+        r3 += 0x00000001U;
+        Oot3dAotSetSubtractFlags(flags, r3, 0x00000032U, Mask(0xFU));
+        if (flags.N() == flags.V()) break;
+    }
+    ++blocks; // 0x00483C9C ou 0x0047AFAC
+    if (!Budget(context, blocks) ||
+        (tail && !Writable(memory, r0 + 0x1B8U, 1U, 1U))) {
+        return Decline(kIdx);
+    }
+    // Daqui em diante não há mais recusa.
+    const uint32_t pushed[2] = {R[4], R[14]};
+    StoreWords(memory, sp - 8U, pushed, 2U);
+    Consume(context, blocks);
+    R[0] = r0;
+    R[2] = r2;
+    R[3] = r3;
+    R[12] = r12;
+    R[13] = sp; // R[4] volta ao valor empilhado (o mesmo)
+    state.Flags = flags;
+    if (tail) {
+        R[1] = 0x00000000U;
+        R[14] = pushed[1];
+        memory.WriteFast<uint8_t>(r0 + 0x1B8U, 0U);
+    } else {
+        R[1] = r1;
+        R[14] = r14;
+    }
+    flow = Oot3dAotReturned(pushed[1]);
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// 0x00307B50 PicaTev_ConvertSource (folha): copia a tabela de 16 palavras de
+// 0x004EA254 para a pilha e procura r0 aos pares (índices 0..63, lendo além
+// da cópia: r4/r5 empilhados e o quadro do chamador, como o original);
+// devolve o índice ou -1.
+bool Override_00307B50(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state,
+                       Oot3dWholeAotFlow& flow) noexcept {
+    constexpr size_t kIdx = kIdx00307B50;
+    constexpr uint32_t kTable = 0x004EA254U; // literal em 0x00307BD4
+    static_cast<void>(frame);
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    const uint32_t sp = R[13], key = R[0];
+    const uint32_t copy = sp - 0x48U;
+    if (Hooked(context, 0x00307B50U, 0x00307BC4U) || !Writable(memory, copy, 0x48U) ||
+        !Readable(memory, kTable, 0x40U) || Overlaps(kTable, 0x40U, copy, 0x48U)) {
+        return Decline(kIdx);
+    }
+    uint32_t table[16];
+    for (uint32_t i = 0; i < 16U; ++i) table[i] = Read32(memory, kTable + 4U * i);
+    // Palavra i da pilha depois da cópia (nada acima de sp é escrito).
+    const auto word = [&](uint32_t i, uint32_t& value) {
+        if (i < 16U) { value = table[i]; return true; }
+        if (i < 18U) { value = i == 16U ? R[4] : R[5]; return true; }
+        const uint32_t address = sp + 4U * (i - 18U);
+        if (!SinglePageReadable(memory, address, 4U)) return false;
+        value = Read32(memory, address);
+        return true;
+    };
+    Oot3dAotLazyFlags flags = state.Flags;
+    uint32_t r0 = 0U, r1 = 0U;
+    uint32_t blocks = 1U; // 0x00307B50
+    bool found = false;
+    while (true) {
+        ++blocks; // 0x00307B8C
+        if (!word(r0, r1)) return Decline(kIdx);
+        Oot3dAotSetSubtractFlags(flags, r1, key, Mask(0xFU));
+        if (flags.Z()) { found = true; break; }
+        ++blocks; // 0x00307B98
+        if (!word(r0 + 1U, r1)) return Decline(kIdx);
+        Oot3dAotSetSubtractFlags(flags, r1, key, Mask(0xFU));
+        if (flags.Z()) {
+            ++blocks; // 0x00307BA8
+            r0 += 1U;
+            found = true;
+            break;
+        }
+        ++blocks; // 0x00307BB8
+        r0 += 2U;
+        Oot3dAotSetSubtractFlags(flags, r0, 0x00000040U, Mask(0xFU));
+        if (flags.N() == flags.V()) break;
+    }
+    ++blocks; // 0x00307BAC ou 0x00307BC4
+    if (!Budget(context, blocks)) return Decline(kIdx);
+    const uint32_t pushed[2] = {R[4], R[5]};
+    StoreWords(memory, sp - 8U, pushed, 2U);
+    for (uint32_t i = 0; i < 16U; i += 4U) StoreWords(memory, copy + 4U * i, table + i, 4U);
+    Consume(context, blocks);
+    R[0] = found ? r0 : 0xFFFFFFFFU;
+    R[1] = r1;
+    R[2] = table[13];
+    R[3] = table[14];
+    R[12] = table[15];
+    R[13] = sp;
+    state.Flags = flags;
+    flow = Oot3dAotReturned(R[14]);
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// 0x00307DC8 PicaCompare_ConvertFunction (folha): o mesmo com a tabela de 8
+// meias-palavras de 0x004EA36C (índices 0..15) e resultado 0 se não achar.
+bool Override_00307DC8(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state,
+                       Oot3dWholeAotFlow& flow) noexcept {
+    constexpr size_t kIdx = kIdx00307DC8;
+    constexpr uint32_t kTable = 0x004EA36CU; // literal em 0x00307E30
+    static_cast<void>(frame);
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    const uint32_t sp = R[13], key = R[0];
+    const uint32_t copy = sp - 0x18U;
+    if (Hooked(context, 0x00307DC8U, 0x00307E20U) || !Writable(memory, copy, 0x18U) ||
+        !Readable(memory, kTable, 0x10U) || Overlaps(kTable, 0x10U, copy, 0x18U)) {
+        return Decline(kIdx);
+    }
+    uint32_t table[4];
+    for (uint32_t i = 0; i < 4U; ++i) table[i] = Read32(memory, kTable + 4U * i);
+    const uint32_t stacked[6] = {table[0], table[1], table[2], table[3], R[4], R[5]};
+    const auto half = [&](uint32_t i, uint32_t& value) {
+        if (i < 12U) {
+            value = (stacked[i >> 1U] >> (16U * (i & 1U))) & 0xFFFFU;
+            return true;
+        }
+        const uint32_t address = sp + 2U * (i - 12U);
+        if (!SinglePageReadable(memory, address, 2U)) return false;
+        uint16_t read = 0U;
+        memory.ReadFast<uint16_t>(address, &read);
+        value = read;
+        return true;
+    };
+    Oot3dAotLazyFlags flags = state.Flags;
+    uint32_t r0 = 0U, r1 = table[0], r2 = table[1];
+    uint32_t blocks = 1U; // 0x00307DC8
+    bool found = false;
+    while (true) {
+        ++blocks; // 0x00307DE8
+        r1 = copy + (r0 << 1U);
+        if (!half(r0, r2)) return Decline(kIdx);
+        Oot3dAotSetSubtractFlags(flags, r2, key, Mask(0xFU));
+        if (flags.Z()) { found = true; break; }
+        ++blocks; // 0x00307DF8
+        if (!half(r0 + 1U, r1)) return Decline(kIdx);
+        Oot3dAotSetSubtractFlags(flags, r1, key, Mask(0xFU));
+        if (flags.Z()) {
+            ++blocks; // 0x00307E04
+            r0 += 1U;
+            found = true;
+            break;
+        }
+        ++blocks; // 0x00307E14
+        r0 += 2U;
+        Oot3dAotSetSubtractFlags(flags, r0, 0x00000010U, Mask(0xFU));
+        if (flags.N() == flags.V()) break;
+    }
+    ++blocks; // 0x00307E08 ou 0x00307E20
+    if (!Budget(context, blocks)) return Decline(kIdx);
+    const uint32_t pushed[2] = {R[4], R[5]};
+    StoreWords(memory, sp - 8U, pushed, 2U);
+    StoreWords(memory, copy, table, 4U);
+    Consume(context, blocks);
+    R[0] = found ? r0 : 0x00000000U;
+    R[1] = r1;
+    R[2] = r2;
+    R[3] = table[2];
+    R[12] = table[3];
+    R[13] = sp;
+    state.Flags = flags;
+    flow = Oot3dAotReturned(R[14]);
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// 0x002FA674 CalculateGyroscopeAxisStatus, média sobre o anel de amostras
+// (blocos 0x002FA674/680/688 por volta), retoma em 0x002FA6A8:
+//   r4 = anel[r12]; sai se r4 < r7 ou r4 > r8; r5 += r4; ++[r2];
+//   r12 = (r12 - 1) & 0xFF; continua enquanto r12 != r9.
+// O contador [r2] é relido e regravado a cada volta: se uma leitura do anel
+// caísse sobre ele, recusa; senão a simulação usa o valor inicial + voltas.
+bool Override_002FA674(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx002FA674;
+    static_cast<void>(frame);
+    static_cast<void>(flow);
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    const uint32_t counter = R[2], ring = R[6];
+    // Cota de blocos pelo pior caso (todas as voltas até r12 == r9), testada
+    // antes de simular: este prólogo está no topo do laço e, se recusar, roda
+    // de novo a cada volta traduzida, então a recusa precisa ser barata.
+    // r12/r9 vêm de "and #0xFF"; fora disso o laço só para pelos limites.
+    uint32_t turns = (R[12] - R[9]) & 0xFFU;
+    if (turns == 0U) turns = 256U;
+    if (R[12] > 0xFFU || R[9] > 0xFFU || !Budget(context, 3U * turns) ||
+        Hooked(context, 0x002FA674U, 0x002FA6A4U) || !SinglePageReadable(memory, counter, 4U) ||
+        !SinglePageWritable(memory, counter, 4U)) {
+        return Decline(kIdx);
+    }
+    Oot3dAotLazyFlags flags = state.Flags;
+    uint32_t r4 = R[4], r5 = R[5], r12 = R[12];
+    const uint32_t initial = Read32(memory, counter);
+    uint32_t writes = 0U, blocks = 0U;
+    while (true) {
+        ++blocks; // 0x002FA674
+        const uint32_t address = ring + (r12 << 2U);
+        if (!SinglePageReadable(memory, address, 4U) || Overlaps(address, 4U, counter, 4U)) {
+            return Decline(kIdx);
+        }
+        r4 = Read32(memory, address);
+        Oot3dAotSetSubtractFlags(flags, r4, R[7], Mask(0x9U));
+        if (flags.N() != flags.V()) break;
+        ++blocks; // 0x002FA680
+        Oot3dAotSetSubtractFlags(flags, r4, R[8], Mask(0xDU));
+        if (!flags.Z() && flags.N() == flags.V()) break;
+        ++blocks; // 0x002FA688
+        r5 += r4;
+        r4 = initial + writes;
+        r12 = (r12 - 0x00000001U) & 0x000000FFU;
+        r4 += 0x00000001U;
+        Oot3dAotSetSubtractFlags(flags, r12, R[9], Mask(0x4U));
+        ++writes;
+        if (flags.Z()) break;
+    }
+    if (!GenerationRoom(memory, writes)) return Decline(kIdx);
+    Consume(context, blocks);
+    RepeatStore32(memory, counter, initial + writes, writes);
+    R[4] = r4;
+    R[5] = r5;
+    R[12] = r12;
+    state.Flags = flags;
+    resumePc = 0x002FA6A8U;
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// Laços de busca das curvas de animação: acham o primeiro quadro-chave com
+// tempo (inteiro convertido para float) maior que s0/s1. Só registradores,
+// VFP e flags mudam; tudo é simulado em locais com as mesmas operações VFP
+// do código gerado (Oot3dVfpNative*) e gravado no fim. Recusar depois de
+// simular é seguro: nada foi gravado no estado guest, e as flags acumuladas
+// que a VFP nativa do console já tiver levantado no FPSR são as mesmas que a
+// tradução vai levantar ao refazer as mesmas operações sobre os mesmos dados.
+// O prólogo fica no topo do laço; a cota de blocos (pior caso) é testada
+// antes de simular para a recusa ser barata.
+
+// Voltas no pior caso de um laço "faz; ++i; continua enquanto limite > i"
+// (com sinal), a partir de i: pelo menos uma; 0 se não for limitado.
+inline uint32_t SignedTurns(uint32_t limit, uint32_t index) noexcept {
+    const int64_t span = int64_t{static_cast<int32_t>(limit)} - static_cast<int32_t>(index);
+    if (span > 0x00010000) return 0U;
+    return span > 1 ? static_cast<uint32_t>(span) : 1U;
+}
+
+// 0x00308920 NativeCurve_SampleFloat (r2 = quadro-chave, 16 bytes; r1 =
+// quantidade; r0 = índice): r6 = [r2]; s1 = s0; s2 = (float)r6;
+// sai se s2 > s1; senão ++r0, r2 += 16, continua enquanto r1 > r0.
+// Retoma em 0x0030894C.
+bool Override_00308920(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx00308920;
+    static_cast<void>(flow);
+    auto& guest = frame.Guest;
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    const uint32_t turns = SignedTurns(R[1], R[0]);
+    if (turns == 0U || !Budget(context, 2U * turns) || !VfpDefault(guest.fpscr) ||
+        Hooked(context, 0x00308920U, 0x00308948U)) {
+        return Decline(kIdx);
+    }
+    Oot3dAotLazyFlags flags = state.Flags;
+    uint32_t fpscr = guest.fpscr;
+    uint32_t s1 = guest.vfp[1], s2 = guest.vfp[2];
+    const uint32_t s0 = guest.vfp[0], r1 = R[1];
+    uint32_t r0 = R[0], r2 = R[2], r6 = R[6];
+    uint32_t blocks = 0U;
+    while (true) {
+        ++blocks; // 0x00308920
+        if (!SinglePageReadable(memory, r2, 4U)) return Decline(kIdx);
+        r6 = Read32(memory, r2);
+        s1 = s0;
+        s2 = r6;
+        Oot3dVfpNativeFromSigned(s2, s2, fpscr);
+        Oot3dVfpNativeCompare(s2, s1, true, fpscr);
+        flags.AssignPackedNzcv(fpscr);
+        if (!flags.Z() && flags.N() == flags.V()) break;
+        ++blocks; // 0x0030893C
+        r0 += 0x00000001U;
+        Oot3dAotSetSubtractFlags(flags, r1, r0, Mask(0xDU));
+        r2 += 0x00000010U;
+        if (!(!flags.Z() && flags.N() == flags.V())) break;
+        if (blocks >= 2U * turns) return Decline(kIdx); // não acontece (cota acima)
+    }
+    Consume(context, blocks);
+    R[0] = r0;
+    R[2] = r2;
+    R[6] = r6;
+    state.Flags = flags;
+    guest.vfp[1] = s1;
+    guest.vfp[2] = s2;
+    guest.fpscr = fpscr;
+    resumePc = 0x0030894CU;
+    return Accept(kIdx);
+}
+
+// 0x00308604 CsabCurve_SampleRotation: o mesmo com tempos s16 (ldrsh),
+// passo de 8 bytes em r1, quantidade em r2 e s1 fixo. Retoma em 0x0030862C.
+bool Override_00308604(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx00308604;
+    static_cast<void>(flow);
+    auto& guest = frame.Guest;
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    const uint32_t turns = SignedTurns(R[2], R[0]);
+    if (turns == 0U || !Budget(context, 2U * turns) || !VfpDefault(guest.fpscr) ||
+        Hooked(context, 0x00308604U, 0x00308628U)) {
+        return Decline(kIdx);
+    }
+    Oot3dAotLazyFlags flags = state.Flags;
+    uint32_t fpscr = guest.fpscr;
+    uint32_t s2 = guest.vfp[2];
+    const uint32_t s1 = guest.vfp[1], r2 = R[2];
+    uint32_t r0 = R[0], r1 = R[1], r6 = R[6];
+    uint32_t blocks = 0U;
+    while (true) {
+        ++blocks; // 0x00308604
+        if (!SinglePageReadable(memory, r1, 2U)) return Decline(kIdx);
+        uint16_t value = 0U;
+        memory.ReadFast<uint16_t>(r1, &value);
+        r6 = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(value)));
+        s2 = r6;
+        Oot3dVfpNativeFromSigned(s2, s2, fpscr);
+        Oot3dVfpNativeCompare(s2, s1, true, fpscr);
+        flags.AssignPackedNzcv(fpscr);
+        if (!flags.Z() && flags.N() == flags.V()) break;
+        ++blocks; // 0x0030861C
+        r0 += 0x00000001U;
+        Oot3dAotSetSubtractFlags(flags, r2, r0, Mask(0xDU));
+        r1 += 0x00000008U;
+        if (!(!flags.Z() && flags.N() == flags.V())) break;
+        if (blocks >= 2U * turns) return Decline(kIdx); // não acontece (cota acima)
+    }
+    Consume(context, blocks);
+    R[0] = r0;
+    R[1] = r1;
+    R[6] = r6;
+    state.Flags = flags;
+    guest.vfp[2] = s2;
+    guest.fpscr = fpscr;
+    resumePc = 0x0030862CU;
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// 0x002BBB14 Math3D_CirSquareVsTriSquare (folha, só VFP): caixa dos três
+// pontos (s0..s5: x0,y0,x1,y1,x2,y2) contra o quadrado do círculo (s6, s7
+// centro, s8 raio). Espelho bloco a bloco da tradução, direto no estado
+// guest: depois do teste de entrada não há recusa nem acesso à memória.
+bool Override_002BBB14(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state,
+                       Oot3dWholeAotFlow& flow) noexcept {
+    constexpr size_t kIdx = kIdx002BBB14;
+    auto& guest = frame.Guest;
+    auto& s = guest.vfp;
+    auto& fpscr = guest.fpscr;
+    auto& flags = state.Flags;
+    if (!Budget(context, 13U) || !VfpDefault(fpscr) ||
+        Hooked(context, 0x002BBB14U, 0x002BBBC4U)) {
+        return Decline(kIdx);
+    }
+    const auto compare = [&](uint32_t left, uint32_t right) {
+        Oot3dVfpNativeCompare(left, right, true, fpscr);
+        flags.AssignPackedNzcv(fpscr);
+    };
+    const auto greater = [&]() { return !flags.Z() && flags.N() == flags.V(); };
+    uint32_t blocks = 1U; // 0x002BBB14
+    s[9] = s[0];
+    s[10] = s[1];
+    compare(s[0], s[2]);
+    if (greater()) {
+        s[0] = s[2];
+    } else {
+        ++blocks; // 0x002BBB2C
+        if (!flags.C()) s[9] = s[2];
+    }
+    ++blocks; // 0x002BBB30
+    compare(s[1], s[3]);
+    if (greater()) {
+        s[1] = s[3];
+    } else {
+        ++blocks; // 0x002BBB40
+        if (!flags.C()) s[10] = s[3];
+    }
+    ++blocks; // 0x002BBB44
+    compare(s[0], s[4]);
+    if (greater()) {
+        s[0] = s[4];
+    } else {
+        ++blocks; // 0x002BBB54
+        compare(s[9], s[4]);
+        if (!flags.C()) s[9] = s[4];
+    }
+    ++blocks; // 0x002BBB60
+    compare(s[1], s[5]);
+    if (greater()) {
+        s[1] = s[5];
+    } else {
+        ++blocks; // 0x002BBB70
+        compare(s[10], s[5]);
+        if (!flags.C()) s[10] = s[5];
+    }
+    bool inside = false;
+    ++blocks; // 0x002BBB7C
+    Oot3dVfpNativeSubtract(s[0], s[0], s[8], fpscr);
+    compare(s[0], s[6]);
+    if (!(flags.C() && !flags.Z())) {
+        ++blocks; // 0x002BBB8C
+        Oot3dVfpNativeAdd(s[0], s[9], s[8], fpscr);
+        compare(s[0], s[6]);
+        if (flags.N() == flags.V()) {
+            ++blocks; // 0x002BBB9C
+            Oot3dVfpNativeSubtract(s[0], s[1], s[8], fpscr);
+            compare(s[0], s[7]);
+            if (!(flags.C() && !flags.Z())) {
+                ++blocks; // 0x002BBBAC
+                Oot3dVfpNativeAdd(s[0], s[10], s[8], fpscr);
+                compare(s[0], s[7]);
+                inside = flags.N() == flags.V();
+            }
+        }
+    }
+    ++blocks; // 0x002BBBBC ou 0x002BBBC4
+    state.R[0] = inside ? 1U : 0U;
+    Consume(context, blocks);
+    flow = Oot3dAotReturned(state.R[14]);
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// Cópias curtas de palavras em laço (pré-cabeçalho + voltas), com as mesmas
+// chamadas ReadFast/WriteFast da tradução na mesma ordem (todas no caminho
+// rápido, validado antes). Origem e destino não podem se sobrepor (senão uma
+// leitura veria uma escrita anterior do laço): aí recusa.
+
+// 0x00303C78 (FUN_00303b24): copia 8 pares de palavras de r5 + 4*r7 para
+// r4 + 4*r7 (bloco 0x00303C78 + 8 voltas de 0x00303C8C), retoma em 0x00303CA4.
+bool Override_00303C78(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx00303C78;
+    static_cast<void>(frame);
+    static_cast<void>(flow);
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    const uint32_t src = R[5] + (R[7] << 2U), dst = R[4] + (R[7] << 2U);
+    if (!Budget(context, 9U) || Hooked(context, 0x00303C78U, 0x00303CA0U) ||
+        !Readable(memory, src, 64U) || !Writable(memory, dst, 64U) ||
+        Overlaps(src, 64U, dst, 64U)) {
+        return Decline(kIdx);
+    }
+    Consume(context, 9U);
+    uint32_t r3 = 0U, r12 = 0U;
+    for (uint32_t i = 0; i < 64U; i += 8U) {
+        r12 = Read32(memory, src + i);
+        memory.WriteFast<uint32_t>(dst + i, r12);
+        r3 = Read32(memory, src + i + 4U);
+        memory.WriteFast<uint32_t>(dst + i + 4U, r3);
+    }
+    R[0] = src - 4U + 64U;
+    R[1] = dst - 4U + 64U;
+    R[2] = 0U;
+    R[3] = r3;
+    R[12] = r12;
+    Oot3dAotSetSubtractFlags(state.Flags, 1U, 1U, Mask(0x4U));
+    resumePc = 0x00303CA4U;
+    return Accept(kIdx);
+}
+
+// 0x0046700C MeshCommandPacket_PatchBoneUniforms: n = (r6 - 1) / 4 grupos de
+// 4 palavras de r4 copiados para r0 com a ordem invertida em cada grupo
+// (bloco 0x0046700C + n voltas de 0x00467024), retoma em 0x0046705C.
+bool Override_0046700C(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx0046700C;
+    static_cast<void>(flow);
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    const uint32_t r3 = R[6] - 1U;
+    const uint32_t r12 = Oot3dAotAsr(r3, 31U);
+    const uint32_t r9 = r3 + Oot3dAotLsr(r12, 30U);
+    const uint32_t count = Oot3dAotAsr(r9, 2U);
+    const uint32_t src = R[4], dst = R[0];
+    // n <= 0 daria (quase) 2^32 voltas: fica com a tradução.
+    if (static_cast<int32_t>(count) <= 0 || count > 0x1000U || !Budget(context, 1U + count) ||
+        Hooked(context, 0x0046700CU, 0x00467058U) || !Readable(memory, src, 16U * count) ||
+        !Writable(memory, dst, 16U * count) || Overlaps(src, 16U * count, dst, 16U * count)) {
+        return Decline(kIdx);
+    }
+    Consume(context, 1U + count);
+    uint32_t s0 = 0U;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t from = src + 16U * i + 12U, to = dst + 16U * i;
+        for (uint32_t k = 0; k < 4U; ++k) {
+            s0 = Read32(memory, from - 4U * k);
+            memory.WriteFast<uint32_t>(to + 4U * k, s0);
+        }
+    }
+    frame.Guest.vfp[0] = s0;
+    R[1] = dst + 16U * count;
+    R[2] = src + 12U + 16U * count;
+    R[3] = 0U;
+    R[5] = dst + 16U * (count - 1U);
+    R[9] = r9;
+    R[12] = src + 12U + 16U * (count - 1U);
+    Oot3dAotSetSubtractFlags(state.Flags, 1U, 1U, Mask(0x6U));
+    resumePc = 0x0046705CU;
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// 0x003563E0 FUN_003562c0 (inserção ordenada na lista de polígonos da
+// colisão), percurso da lista até achar onde inserir: só leituras.
+//   3563E0: r1 = next(r6) ([r6 + 2]); fim da lista (0xFFFF) -> 0x003563EC
+//   35640C/438/454: polígono r4 = r7 + 4*r1, vértices de [r2 + 20*idx + 2..6]
+//     (índices & 0x1FFF, y em [r3 + 6*v + 2]); se algum y <= r12 -> 0x00356498
+//     (avança: r6 = r4), senão -> 0x0035646C (insere antes dele)
+// Retoma em 0x003563EC ou 0x0035646C. Como nada é escrito, o fim do
+// orçamento de blocos no meio do percurso é reproduzido exatamente (fluxo de
+// limite no bloco que não pôde entrar) em vez de recusar.
+bool Override_003563E0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx003563E0;
+    static_cast<void>(frame);
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    if (Hooked(context, 0x003563E0U, 0x00356498U)) return Decline(kIdx);
+    Oot3dAotLazyFlags flags = state.Flags;
+    uint32_t r1 = R[1], r4 = R[4], r5 = R[5], r6 = R[6];
+    const uint32_t r2 = R[2], r3 = R[3], r7 = R[7], r8 = R[8], r12 = R[12];
+    const uint32_t remaining = context.BlocksRemaining;
+    uint32_t blocks = 0U, limitPc = 0U, exitPc = 0U;
+    const auto enter = [&](uint32_t pc) {
+        if (blocks == remaining) {
+            limitPc = pc;
+            return false;
+        }
+        ++blocks;
+        return true;
+    };
+    const auto read16 = [&](uint32_t address, uint32_t& value, bool sign) {
+        if (!SinglePageReadable(memory, address, 2U)) return false;
+        uint16_t raw = 0U;
+        memory.ReadFast<uint16_t>(address, &raw);
+        value = sign ? static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(raw))) : raw;
+        return true;
+    };
+    const auto vertexY = [&](uint32_t index, uint32_t& value) {
+        index = index + (index << 1U);
+        return read16(r3 + (index << 1U) + 2U, value, true);
+    };
+    const auto lowerOrEqual = [&]() { return flags.Z() || flags.N() != flags.V(); };
+    while (true) {
+        if (!enter(0x003563E0U)) break;
+        if (!read16(r6 + 2U, r1, false)) return Decline(kIdx);
+        Oot3dAotSetSubtractFlags(flags, r1, r8, Mask(0xFU));
+        if (flags.Z()) {
+            exitPc = 0x003563ECU;
+            break;
+        }
+        bool advance = true;
+        if (!enter(0x0035640CU)) break;
+        r4 = r7 + (r1 << 2U);
+        if (!read16(r4, r1, true)) return Decline(kIdx);
+        r1 = r1 + (r1 << 2U);
+        r1 = r2 + (r1 << 2U);
+        if (!read16(r1 + 2U, r5, false)) return Decline(kIdx);
+        r5 &= ~0x0000E000U;
+        if (!vertexY(r5, r5)) return Decline(kIdx);
+        Oot3dAotSetSubtractFlags(flags, r5, r12, Mask(0xDU));
+        if (!lowerOrEqual()) {
+            if (!enter(0x00356438U)) break;
+            if (!read16(r1 + 4U, r5, false)) return Decline(kIdx);
+            r5 &= ~0x0000E000U;
+            if (!vertexY(r5, r5)) return Decline(kIdx);
+            Oot3dAotSetSubtractFlags(flags, r5, r12, Mask(0xDU));
+            if (!lowerOrEqual()) {
+                if (!enter(0x00356454U)) break;
+                if (!read16(r1 + 6U, r1, false)) return Decline(kIdx);
+                if (!vertexY(r1, r1)) return Decline(kIdx);
+                Oot3dAotSetSubtractFlags(flags, r1, r12, Mask(0xFU));
+                advance = lowerOrEqual();
+            }
+        }
+        if (!advance) {
+            exitPc = 0x0035646CU;
+            break;
+        }
+        if (!enter(0x00356498U)) break;
+        r6 = r4; // uma lista em ciclo termina pelo orçamento, como na tradução
+    }
+    Consume(context, blocks);
+    R[1] = r1;
+    R[4] = r4;
+    R[5] = r5;
+    R[6] = r6;
+    state.Flags = flags;
+    if (limitPc != 0U) {
+        flow = Oot3dAotBlockLimit(context, limitPc);
+        resumePc = 0U;
+    } else {
+        resumePc = exitPc;
+    }
     return Accept(kIdx);
 }
 

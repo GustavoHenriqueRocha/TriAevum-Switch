@@ -1,6 +1,6 @@
 {
   "format": "oot3d_guest_overrides_v1",
-  "description": "Funcoes guest com substituicao nativa escrita a mao (tools/oot3d/native_game_runtime/oot3d_native_guest_overrides.cpp), ligadas no C++ gerado por apply_guest_overrides.py. So entram aqui depois de passar em run_guest_override_equivalence.py sem nenhuma diferenca. Amostras: perfil de blocos Kokiri (profiles/navi_kokiri_main_forest_source_coverage.json).",
+  "description": "Funcoes guest com substituicao nativa escrita a mao (tools/oot3d/native_game_runtime/oot3d_native_guest_overrides.cpp), ligadas no C++ gerado por apply_guest_overrides.py. So entram aqui depois de passar em run_guest_override_equivalence.py sem nenhuma diferenca. Amostras: perfil de blocos Kokiri (profiles/navi_kokiri_main_forest_source_coverage.json); switch_share = fracao do tempo guest no perfil do console (comparacao/2026-10-16-pgo1, logs-final-pgo/guest_profile.txt). Itens com 'function' sao substituicoes de bloco: o prologo vai no rotulo block_<entry> da funcao 'function' e a versao nativa retoma em um dos PCs de 'resume'.",
   "overrides": [
     {"entry": "0x004A0338", "name": "AudioEffect_ProcessStereoReverb", "switch_share": "5.35%"},
     {"entry": "0x004A022C", "name": "AudioEffect_ProcessFourChannelDelay", "switch_share": "2.02%"},
@@ -12,6 +12,18 @@
     {"entry": "0x002F9430", "name": "PauseRenderBuffer_SetVec2Range", "kokiri_share": "0.54%"},
     {"entry": "0x00372070", "name": "oot3d_translate_mtx3x4_local", "kokiri_share": "0.44%"},
     {"entry": "0x003094CC", "name": "FUN_003094cc", "kokiri_share": "0.41%"},
-    {"entry": "0x002CDE90", "name": "FUN_002cde90", "kokiri_share": "0.36%"}
+    {"entry": "0x002CDE90", "name": "FUN_002cde90", "kokiri_share": "0.36%"},
+    {"entry": "0x00466E68", "function": "0x00466E2C", "resume": ["0x00466E94"], "name": "MeshCommandPacket_Submit:copia", "switch_share": "3.02%"},
+    {"entry": "0x003247B0", "function": "0x00324758", "resume": ["0x003247C4"], "name": "BgCheck_LineTestImpl:zera_marcas", "switch_share": "2.53%"},
+    {"entry": "0x0047AF24", "name": "FUN_0047af24", "switch_share": "1.31%"},
+    {"entry": "0x002FA674", "function": "0x002FA5EC", "resume": ["0x002FA6A8"], "name": "CalculateGyroscopeAxisStatus:media", "switch_share": "1.04%"},
+    {"entry": "0x00307B50", "name": "PicaTev_ConvertSource", "switch_share": "0.84%"},
+    {"entry": "0x00307DC8", "name": "PicaCompare_ConvertFunction", "switch_share": "0.53%"},
+    {"entry": "0x00308920", "function": "0x003087A4", "resume": ["0x0030894C"], "name": "NativeCurve_SampleFloat:busca", "switch_share": "0.53%"},
+    {"entry": "0x00308604", "function": "0x003084E8", "resume": ["0x0030862C"], "name": "CsabCurve_SampleRotation:busca", "switch_share": "0.34%"},
+    {"entry": "0x002BBB14", "name": "Math3D_CirSquareVsTriSquare", "switch_share": "0.70%"},
+    {"entry": "0x00303C78", "function": "0x00303B24", "resume": ["0x00303CA4"], "name": "FUN_00303b24:copia", "switch_share": "0.23%"},
+    {"entry": "0x0046700C", "function": "0x00466F78", "resume": ["0x0046705C"], "name": "MeshCommandPacket_PatchBoneUniforms:copia", "switch_share": "0.21%"},
+    {"entry": "0x003563E0", "function": "0x003562C0", "resume": ["0x003563EC", "0x0035646C"], "name": "FUN_003562c0:percurso", "switch_share": "0.55%"}
   ]
 }

@@ -3,6 +3,9 @@
 Extrai do C++ gerado (sem prólogos de substituição) cada função listada em
 guest_overrides.json e o fecho das funções que ela chama, renomeia as
 listadas para Translated_<ENTRADA>, gera guest_override_fixture.inc e compila
+(substituições de bloco: a função que contém o bloco entra inteira e uma
+cópia dela com o prólogo do bloco vira Patched_<BLOCO>; as duas rodam a
+partir do bloco)
 guest_override_equivalence.cpp com os mesmos cabeçalhos do runtime e as
 mesmas opções de ponto flutuante do build (-fno-fast-math -ffp-contract=off).
 
@@ -59,28 +62,58 @@ def extract(generated: Path, entries: list[int]) -> tuple[list[str], dict[int, s
 
 
 def render_fixture(generated: Path, manifest: list[dict[str, object]]) -> str:
-    entries = [int(item["entry"]) for item in manifest]
-    body, symbols = extract(generated, entries)
+    functions = [int(item["entry"]) for item in manifest if "function" not in item]
+    blocks = [item for item in manifest if "function" in item]
+    roots = functions + [int(item["function"]) for item in blocks]
+    body, symbols = extract(generated, roots)
     text = "\n".join(body)
-    for entry in entries:
+    for entry in functions:
         text = re.sub(r"\b%s\(" % re.escape(symbols[entry]), f"Translated_{entry:08X}(", text)
     declarations = []
     for entry, symbol in sorted(symbols.items()):
-        name = f"Translated_{entry:08X}" if entry in entries else symbol
+        name = f"Translated_{entry:08X}" if entry in functions else symbol
         declarations.append(
             f"Oot3dWholeAotFlow {name}(Oot3dWholeAotFrame& frame, "
             "Oot3dWholeAotContext& context, Oot3dAotArchitecturalState& state, "
             "uint32_t entryPc);")
-    cases = [
-        "    {0x%08XU, \"%s\", &Translated_%08X, &::Oot3dNativeGame::GuestOverrides::Override_%08X},"
-        % (int(item["entry"]), item.get("name", ""), int(item["entry"]), int(item["entry"]))
-        for item in manifest
-    ]
+    # Substituição de bloco: uma cópia da função traduzida com o prólogo do
+    # bloco (Patched_<BLOCO>) contra a original, as duas começando no bloco.
+    patched_text = []
+    for item in blocks:
+        entry, function = int(item["entry"]), int(item["function"])
+        lines = None
+        for path in sorted(generated.glob("oot3d_whole_aot_shard_*.cpp")):
+            candidate = overrides.strip(path.read_text(encoding="utf-8").split("\n"))
+            if overrides.find_definition(candidate, function) is not None:
+                lines = candidate
+                break
+        index, symbol = overrides.find_definition(lines, function)
+        copy = lines[index:overrides.function_end(lines, index) + 1]
+        overrides.patch_block(copy, entry, function, [int(pc) for pc in item["resume"]])
+        copy[0] = copy[0].replace(symbol + "(", f"Patched_{entry:08X}(")
+        patched_text += copy + [""]
+        declarations.append(
+            f"Oot3dWholeAotFlow Patched_{entry:08X}(Oot3dWholeAotFrame& frame, "
+            "Oot3dWholeAotContext& context, Oot3dAotArchitecturalState& state, "
+            "uint32_t entryPc);")
+    cases = []
+    for item in manifest:
+        entry = int(item["entry"])
+        if "function" in item:
+            cases.append(
+                "    {0x%08XU, \"%s\", &%s, nullptr, &Patched_%08X},"
+                % (entry, item.get("name", ""), symbols[int(item["function"])], entry))
+        else:
+            cases.append(
+                "    {0x%08XU, \"%s\", &Translated_%08X, "
+                "&::Oot3dNativeGame::GuestOverrides::Override_%08X, nullptr},"
+                % (entry, item.get("name", ""), entry, entry))
     return "\n".join([
         "// Gerado por run_guest_override_equivalence.py; não editar.",
         *declarations,
         "",
         text,
+        *patched_text,
         "struct OverrideCase {",
         "    uint32_t Entry;",
         "    const char* Name;",
@@ -88,6 +121,9 @@ def render_fixture(generated: Path, manifest: list[dict[str, object]]) -> str:
         "                                    Oot3dAotArchitecturalState&, uint32_t);",
         "    bool (*Native)(Oot3dWholeAotFrame&, Oot3dWholeAotContext&,",
         "                   Oot3dAotArchitecturalState&, Oot3dWholeAotFlow&) noexcept;",
+        "    // Substituição de bloco: a função com o prólogo do bloco (Native nulo).",
+        "    Oot3dWholeAotFlow (*Patched)(Oot3dWholeAotFrame&, Oot3dWholeAotContext&,",
+        "                                 Oot3dAotArchitecturalState&, uint32_t);",
         "};",
         "inline constexpr OverrideCase kOverrideCases[] = {",
         *cases,
