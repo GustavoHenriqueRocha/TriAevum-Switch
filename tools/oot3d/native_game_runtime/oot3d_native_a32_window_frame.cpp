@@ -878,10 +878,14 @@ bool NativeA32WindowSession::RunFrame() {
              << " gl_ring_orphans=" << gpu.StreamRingOrphans
              << " gl_oom=" << gpu.OutOfMemoryEvents
              << " gl_draws_skipped=" << gpu.SkippedDraws;
-        // Lock-free arena every window; the bytes in use need mallinfo()
-        // (global malloc lock + walk of the free lists): only every 20th
-        // window (~100 s at 30 fps).
+        // Lock-free arena every window. The bytes in use need mallinfo(),
+        // which holds the malloc lock shared with Mesa and walks the heap
+        // (a corrupted heap crashes there): opt-in only, with
+        // config/heap_stats or config/gpu_timing, every 20th window.
         static uint32_t heapWindows = 0U;
+        static const bool heapStats =
+            std::ifstream("sdmc:/switch/oot3dre/config/heap_stats").good() ||
+            std::ifstream("sdmc:/switch/oot3dre/config/gpu_timing").good();
         if (&__malloc_current_mallinfo != nullptr) {
           const volatile size_t& arena = __malloc_current_mallinfo.arena;
           perf << " heap_arena_mb=" << (static_cast<double>(arena) / kMb);
@@ -890,7 +894,7 @@ bool NativeA32WindowSession::RunFrame() {
           const volatile size_t& peak = __malloc_max_sbrked_mem;
           perf << " heap_arena_peak_mb=" << (static_cast<double>(peak) / kMb);
         }
-        if (heapWindows++ % 20U == 0U) {
+        if (heapStats && heapWindows++ % 20U == 0U) {
           const struct mallinfo heap = mallinfo();
           perf << " heap_used_mb=" << (static_cast<double>(heap.uordblks) / kMb);
         }
