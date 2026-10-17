@@ -10,6 +10,7 @@
 #include "oot3d_native_direct_aot.h"
 #include "oot3d_title_grass_rules.h"
 #include "fast/oot3d/graphics_settings_persistence.h"
+#include "fast/oot3d/gl_widescreen_policy.h"
 
 namespace Oot3dA32Window {
 
@@ -1306,10 +1307,23 @@ void NativeA32WindowSession::ApplySelectedUiProfile() {
 
 void NativeA32WindowSession::UpdateScenePresentation() {
   auto &window = *windowPointer;
+  uint32_t sceneWidth = std::max<uint32_t>(1, window.GetWidth());
+  const uint32_t sceneHeight = std::max<uint32_t>(1, window.GetHeight());
+  // The Vulkan scene target takes the window's shape. The OpenGL one keeps
+  // the native 5:3 (letterboxed) unless its widescreen option widens it by
+  // GlWidescreenFactor, so the frustum must widen by exactly that much.
+  if (apiPointer != nullptr &&
+      std::string_view(apiPointer->GetName()) == "OpenGL") {
+    const float factor = Fast::Oot3d::GlWidescreenEnabled()
+                             ? Fast::Oot3d::GlWidescreenFactor(sceneWidth, sceneHeight)
+                             : 1.0F;
+    sceneWidth = std::max<uint32_t>(
+        1U, static_cast<uint32_t>(std::lround(
+                static_cast<float>(sceneHeight) *
+                Fast::Oot3d::kNativeTopScreenAspect * factor)));
+  }
   widescreenProjection.Projection.Presentation =
-      Fast::Oot3d::ResolveScenePresentationPolicy(
-          std::max<uint32_t>(1, window.GetWidth()),
-          std::max<uint32_t>(1, window.GetHeight()));
+      Fast::Oot3d::ResolveScenePresentationPolicy(sceneWidth, sceneHeight);
   const auto graphics = Fast::Oot3d::GraphicsSettingsRuntime::Instance().Snapshot();
   widescreenProjection.Projection.FovMultiplier = graphics.FovMultiplier;
   auto &visibility = widescreenProjection.ActorVisibility;

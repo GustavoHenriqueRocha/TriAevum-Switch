@@ -9,7 +9,11 @@
 
 
 #include "fast/backends/gfx_opengl_pica_post.h"
+#include "fast/oot3d/gl_widescreen_policy.h"
 #include "fast/oot3d/pica_geometry_registry.h"
+#include "fast/oot3d/pica_uniform_layout.h"
+#include "fast/renderer3ds/pica_composition.h"
+#include "fast/renderer3ds/pica_draw_coverage.h"
 #include "fast/oot3d/pica_shadow2d.h"
 #include "fast/oot3d/smaa_lookup_data.h"
 #include "fast/renderer3ds/pica_composition_schedule.h"
@@ -199,9 +203,18 @@ struct PicaGlProgram {
 };
 
 struct PicaGlTarget {
-    // Allocated extent: the key's native extent times the resolution scale.
+    // Allocated extent: the key's native extent times the resolution scale
+    // (and, for a widescreen top-screen target, its height times the
+    // widescreen factor as well).
     uint32_t Width = 0U;
     uint32_t Height = 0U;
+    // Host pixels per native pixel along storage Y (the presented horizontal
+    // axis of the rotated top screen). ResolutionScale unless Wide.
+    float ScaleY = 1.0F;
+    // Widescreen top-screen target: the scene stretches over the whole
+    // Height while placed UI keeps a centred native canvas of
+    // FramebufferHeight * ResolutionScale pixels.
+    bool Wide = false;
     GLuint Framebuffer = 0U;
     GLuint Color = 0U;
     GLuint DepthStencil = 0U;
@@ -220,6 +233,10 @@ struct PicaGlDisplay {
     // Native (guest) extent; the texture is Width/Height times the scale.
     uint32_t Width = 0U;
     uint32_t Height = 0U;
+    // Allocated texture extent: Width/Height times the scale, except that a
+    // widescreen top-screen transfer has a wider Height.
+    uint32_t AllocWidth = 0U;
+    uint32_t AllocHeight = 0U;
     bool Initialized = false;
 };
 
@@ -1200,8 +1217,8 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
                        GLsizei viewportWidth, GLsizei viewportHeight) {
     auto& post = state.Post;
     auto& config = post.Config;
-    const uint32_t sourceWidth = display.Width * state.ResolutionScale;
-    const uint32_t sourceHeight = display.Height * state.ResolutionScale;
+    const uint32_t sourceWidth = display.AllocWidth;
+    const uint32_t sourceHeight = display.AllocHeight;
     // The window viewport, in the portrait layout of the source image.
     const uint32_t outputWidth = static_cast<uint32_t>(viewportHeight);
     const uint32_t outputHeight = static_cast<uint32_t>(viewportWidth);
@@ -1552,6 +1569,31 @@ void DeletePicaGlGeometry(
     state.GeometryBuffers.erase(found);
 }
 
+// Widescreen factor of the top-screen target for the current window (1 when
+// the option is off or the window is not wider than 5:3). Queried only when
+// a target is created.
+float ResolvePicaGlWidescreenFactor() {
+    if (!Oot3d::GlWidescreenEnabled()) {
+        return 1.0F;
+    }
+    SDL_Window* window = SDL_GL_GetCurrentWindow();
+    if (window == nullptr) {
+        return 1.0F;
+    }
+    int width = 0;
+    int height = 0;
+#ifdef __SWITCH__
+    SDL_GetWindowSize(window, &width, &height);
+#else
+    SDL_GL_GetDrawableSize(window, &width, &height);
+#endif
+    if (width <= 0 || height <= 0) {
+        return 1.0F;
+    }
+    return Oot3d::GlWidescreenFactor(static_cast<uint32_t>(width),
+                                     static_cast<uint32_t>(height));
+}
+
 PicaGlTarget& GetPicaGlTarget(
     GfxRenderingAPIOGL::NativePicaState& state,
     const GfxNativePicaDrawView& draw) {
@@ -1571,6 +1613,21 @@ PicaGlTarget& GetPicaGlTarget(
     auto& target = found->second;
     target.Width = static_cast<uint32_t>(key.Width) * state.ResolutionScale;
     target.Height = static_cast<uint32_t>(key.Height) * state.ResolutionScale;
+    target.ScaleY = static_cast<float>(state.ResolutionScale);
+    // Widescreen: only the top LCD target (480x400 stored rotated; its
+    // 400-pixel axis is the presented width) grows, by the window's aspect
+    // over 5:3, matching the frustum widening of the projection hook.
+    if (key.Width == Oot3d::kNativeTopScreenPhysicalWidth &&
+        key.Height == Oot3d::kNativeTopScreenPhysicalHeight) {
+        const float factor = ResolvePicaGlWidescreenFactor();
+        if (factor > 1.0F) {
+            target.Height = static_cast<uint32_t>(std::lround(
+                static_cast<float>(target.Height) * factor));
+            target.ScaleY = static_cast<float>(target.Height) /
+                            static_cast<float>(key.Height);
+            target.Wide = true;
+        }
+    }
     try {
         glGenTextures(1, &target.Color);
         glBindTexture(GL_TEXTURE_2D, target.Color);
@@ -1897,11 +1954,14 @@ void ApplyPendingPicaFills(GfxRenderingAPIOGL::NativePicaState& state,
 PicaGlDisplay& GetPicaGlDisplay(
     GfxRenderingAPIOGL::NativePicaState& state,
     uint64_t targetNamespace, uint32_t outputAddress,
-    uint32_t width, uint32_t height) {
+    uint32_t width, uint32_t height,
+    uint32_t allocWidth, uint32_t allocHeight) {
     const auto key = std::make_pair(targetNamespace, outputAddress);
     auto [found, inserted] = state.Displays.try_emplace(key);
     auto& display = found->second;
-    if (!inserted && display.Width == width && display.Height == height) {
+    if (!inserted && display.Width == width && display.Height == height &&
+        display.AllocWidth == allocWidth &&
+        display.AllocHeight == allocHeight) {
         return display;
     }
     if (!inserted) {
@@ -1910,8 +1970,8 @@ PicaGlDisplay& GetPicaGlDisplay(
     glGenTextures(1, &display.Color);
     glBindTexture(GL_TEXTURE_2D, display.Color);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-                 static_cast<GLsizei>(width * state.ResolutionScale),
-                 static_cast<GLsizei>(height * state.ResolutionScale), 0,
+                 static_cast<GLsizei>(allocWidth),
+                 static_cast<GLsizei>(allocHeight), 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -1928,6 +1988,8 @@ PicaGlDisplay& GetPicaGlDisplay(
     }
     display.Width = width;
     display.Height = height;
+    display.AllocWidth = allocWidth;
+    display.AllocHeight = allocHeight;
     return display;
 }
 
@@ -2349,25 +2411,99 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         // N>1 covers exactly the same native pixels.
         const GLint resolutionScale =
             static_cast<GLint>(mNativePica->ResolutionScale);
-        glViewport(static_cast<GLint>(draw.ViewportX) * resolutionScale,
-                   static_cast<GLint>(draw.ViewportY) * resolutionScale,
-                   static_cast<GLsizei>(draw.ViewportWidth) * resolutionScale,
-                   static_cast<GLsizei>(draw.ViewportHeight) * resolutionScale);
-        glEnable(GL_SCISSOR_TEST);
-        if (draw.ScissorMode == 3U) {
-            const GLsizei scissorWidth = draw.ScissorX2 >= draw.ScissorX1
-                ? static_cast<GLsizei>(draw.ScissorX2 - draw.ScissorX1 + 1U)
-                : 0;
-            const GLsizei scissorHeight = draw.ScissorY2 >= draw.ScissorY1
-                ? static_cast<GLsizei>(draw.ScissorY2 - draw.ScissorY1 + 1U)
-                : 0;
-            glScissor(static_cast<GLint>(draw.ScissorX1) * resolutionScale,
-                      static_cast<GLint>(draw.ScissorY1) * resolutionScale,
-                      scissorWidth * resolutionScale,
-                      scissorHeight * resolutionScale);
+        if (!target.Wide) {
+            glViewport(static_cast<GLint>(draw.ViewportX) * resolutionScale,
+                       static_cast<GLint>(draw.ViewportY) * resolutionScale,
+                       static_cast<GLsizei>(draw.ViewportWidth) * resolutionScale,
+                       static_cast<GLsizei>(draw.ViewportHeight) * resolutionScale);
+            glEnable(GL_SCISSOR_TEST);
+            if (draw.ScissorMode == 3U) {
+                const GLsizei scissorWidth = draw.ScissorX2 >= draw.ScissorX1
+                    ? static_cast<GLsizei>(draw.ScissorX2 - draw.ScissorX1 + 1U)
+                    : 0;
+                const GLsizei scissorHeight = draw.ScissorY2 >= draw.ScissorY1
+                    ? static_cast<GLsizei>(draw.ScissorY2 - draw.ScissorY1 + 1U)
+                    : 0;
+                glScissor(static_cast<GLint>(draw.ScissorX1) * resolutionScale,
+                          static_cast<GLint>(draw.ScissorY1) * resolutionScale,
+                          scissorWidth * resolutionScale,
+                          scissorHeight * resolutionScale);
+            } else {
+                glScissor(0, 0, static_cast<GLsizei>(target.Width),
+                          static_cast<GLsizei>(target.Height));
+            }
         } else {
-            glScissor(0, 0, static_cast<GLsizei>(target.Width),
-                      static_cast<GLsizei>(target.Height));
+            // Widescreen top-screen target (see PicaGlTarget::Wide), as the
+            // Vulkan raster canvas (ResolvePicaRasterCanvas): the scene and
+            // screen-wide frame content (a wash, a full-frame redraw) stretch
+            // over the whole widened axis, where the projection hook already
+            // widened the frustum by the same factor; placed UI (HUD, menus,
+            // dialogue, file select) keeps the native proportions on a
+            // centred canvas, which the touch/pointer mapping also assumes.
+            bool placedUi =
+                draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Ui;
+            if (placedUi &&
+                draw.ViewportX <= 0.0F && draw.ViewportY <= 0.0F &&
+                draw.ViewportX + draw.ViewportWidth >=
+                    static_cast<float>(draw.FramebufferWidth) &&
+                draw.ViewportY + draw.ViewportHeight >=
+                    static_cast<float>(draw.FramebufferHeight) &&
+                draw.VertexUniformBytes.size() >=
+                    Oot3d::kPicaPackedVertexFloatOffset) {
+                uint32_t booleanUniforms = 0U;
+                std::memcpy(&booleanUniforms,
+                            draw.VertexUniformBytes.data() +
+                                Oot3d::kPicaPackedVertexBooleanMaskOffset,
+                            sizeof(booleanUniforms));
+                placedUi = !Renderer3ds::PicaDrawGeometryCoversViewport(
+                    draw, booleanUniforms,
+                    draw.VertexUniformBytes.subspan(
+                        Oot3d::kPicaPackedVertexFloatOffset));
+            }
+            const float scaleX = static_cast<float>(resolutionScale);
+            const float scaleY = placedUi ? scaleX : target.ScaleY;
+            const float offsetY = placedUi
+                ? std::floor((static_cast<float>(target.Height) -
+                              static_cast<float>(draw.FramebufferHeight) *
+                                  scaleX) * 0.5F)
+                : 0.0F;
+            const auto edgeX = [&](float native) {
+                return static_cast<GLint>(std::lround(native * scaleX));
+            };
+            const auto edgeY = [&](float native) {
+                return static_cast<GLint>(std::lround(offsetY + native * scaleY));
+            };
+            const GLint viewportX0 = edgeX(draw.ViewportX);
+            const GLint viewportY0 = edgeY(draw.ViewportY);
+            glViewport(viewportX0, viewportY0,
+                       std::max<GLint>(0, edgeX(draw.ViewportX + draw.ViewportWidth) - viewportX0),
+                       std::max<GLint>(0, edgeY(draw.ViewportY + draw.ViewportHeight) - viewportY0));
+            glEnable(GL_SCISSOR_TEST);
+            GLint scissorX0 = 0;
+            GLint scissorY0 = 0;
+            GLint scissorX1 = static_cast<GLint>(target.Width);
+            GLint scissorY1 = static_cast<GLint>(target.Height);
+            if (draw.ScissorMode == 3U) {
+                scissorX0 = edgeX(static_cast<float>(draw.ScissorX1));
+                scissorY0 = edgeY(static_cast<float>(draw.ScissorY1));
+                scissorX1 = draw.ScissorX2 >= draw.ScissorX1
+                    ? edgeX(static_cast<float>(draw.ScissorX2) + 1.0F)
+                    : scissorX0;
+                scissorY1 = draw.ScissorY2 >= draw.ScissorY1
+                    ? edgeY(static_cast<float>(draw.ScissorY2) + 1.0F)
+                    : scissorY0;
+            }
+            if (placedUi) {
+                // Placed UI never reaches past its native canvas.
+                const GLint canvasY0 = static_cast<GLint>(offsetY);
+                const GLint canvasY1 = canvasY0 +
+                    static_cast<GLint>(draw.FramebufferHeight) * resolutionScale;
+                scissorY0 = std::max(scissorY0, canvasY0);
+                scissorY1 = std::min(scissorY1, canvasY1);
+            }
+            glScissor(scissorX0, scissorY0,
+                      std::max<GLint>(0, scissorX1 - scissorX0),
+                      std::max<GLint>(0, scissorY1 - scissorY0));
         }
 
         const GLenum topology = ToPicaGlTopology(draw.Topology);
@@ -2503,22 +2639,34 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
                 source->first.Height) {
             throw std::runtime_error("PICA display transfer samples out of bounds");
         }
+        // Both images hold ResolutionScale host pixels per native pixel (a
+        // widescreen top-screen target holds ScaleY along its height). A 2:1
+        // linear blit samples each destination centre on the boundary of two
+        // source texels, so the PICA box filter stays exact at any scale.
+        const uint32_t resolutionScale = mNativePica->ResolutionScale;
+        const float sourceScaleY = source->second.ScaleY;
+        const auto scaledY = [&](uint32_t native) {
+            return static_cast<uint32_t>(std::lround(
+                static_cast<float>(native) * sourceScaleY));
+        };
+        const uint32_t displayAllocWidth = outputWidth * resolutionScale;
+        const uint32_t displayAllocHeight =
+            std::max<uint32_t>(1U, scaledY(outputHeight));
         auto& display = GetPicaGlDisplay(
             *mNativePica, transfer.RenderTargetNamespace,
-            transfer.OutputPhysicalAddress, outputWidth, outputHeight);
+            transfer.OutputPhysicalAddress, outputWidth, outputHeight,
+            displayAllocWidth, displayAllocHeight);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, source->second.Framebuffer);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, display.Framebuffer);
         glDisable(GL_SCISSOR_TEST);
-        // Both images hold ResolutionScale host pixels per native pixel. A
-        // 2:1 linear blit samples each destination centre on the boundary of
-        // two source texels, so the PICA box filter stays exact at any scale.
-        const uint32_t resolutionScale = mNativePica->ResolutionScale;
         glBlitFramebuffer(
             0, 0,
             static_cast<GLint>(outputWidth * horizontalSamples * resolutionScale),
-            static_cast<GLint>(outputHeight * verticalSamples * resolutionScale),
-            0, 0, static_cast<GLint>(outputWidth * resolutionScale),
-            static_cast<GLint>(outputHeight * resolutionScale),
+            static_cast<GLint>(std::min<uint32_t>(
+                scaledY(outputHeight * verticalSamples),
+                source->second.Height)),
+            0, 0, static_cast<GLint>(displayAllocWidth),
+            static_cast<GLint>(displayAllocHeight),
             GL_COLOR_BUFFER_BIT,
             scaling == 0U ? GL_NEAREST : GL_LINEAR);
         display.Initialized = true;
@@ -2543,13 +2691,27 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
             // The placement uses the native extent; the sampled image holds
             // ResolutionScale times as many pixels (e.g. 3x: 1200x720, an
             // exact 1:1 fit of the 1280x720 handheld screen).
+            // A widescreen top-screen image is presented wider by the same
+            // factor its target was widened (16:9 on the Switch: no bars).
+            const float presentedWidth = static_cast<float>(outputHeight) *
+                static_cast<float>(display.AllocHeight) /
+                (static_cast<float>(outputHeight) *
+                 static_cast<float>(resolutionScale));
+            const float presentedHeight = static_cast<float>(outputWidth);
             const float scale = std::min(
-                static_cast<float>(windowWidth) / outputHeight,
-                static_cast<float>(windowHeight) / outputWidth);
-            const int viewportWidth = std::max(
-                1, static_cast<int>(std::lround(outputHeight * scale)));
-            const int viewportHeight = std::max(
-                1, static_cast<int>(std::lround(outputWidth * scale)));
+                static_cast<float>(windowWidth) / presentedWidth,
+                static_cast<float>(windowHeight) / presentedHeight);
+            int viewportWidth = std::max(
+                1, static_cast<int>(std::lround(presentedWidth * scale)));
+            int viewportHeight = std::max(
+                1, static_cast<int>(std::lround(presentedHeight * scale)));
+            // Rounding of the widened extent must not leave a 1-pixel bar.
+            if (std::abs(viewportWidth - windowWidth) <= 2) {
+                viewportWidth = windowWidth;
+            }
+            if (std::abs(viewportHeight - windowHeight) <= 2) {
+                viewportHeight = windowHeight;
+            }
             const int viewportX = (windowWidth - viewportWidth) / 2;
             const int viewportY = (windowHeight - viewportHeight) / 2;
 
