@@ -178,6 +178,8 @@ private:
   std::array<bool, oot3d::ui::kUiSubsystemCount> mObservedSubsystems{};
   std::optional<oot3d::ui::UiSubsystem> mLastObservedSubsystem;
   TopScreenPauseProjectionState mTopScreenPauseProjection;
+  // Captured at the Quest draw, cleared at the next submit.
+  std::vector<TopScreenQuestCopiedQuad> mTopScreenQuestBCopies;
   std::optional<TopScreenPauseEdgeGeometry> mTopScreenPauseEdgeGeometry;
   std::optional<TopScreenPauseEdgeGeometry>
       mTopScreenPausePageRedrawEdgeGeometry;

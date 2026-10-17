@@ -580,6 +580,30 @@ bool ApplyTopScreenQuestDrawModelTransform(
     TopScreenQuestModelTransformStats *stats = nullptr,
     std::string *error = nullptr);
 
+// SingleScreen 3.0 draws its button circles (hub 0x005DCAD0, from the
+// Gameplay_Draw hook 0x002E27C0) before the native Quest page, so the native
+// B item icon (Quest main renderer, ItemIcons) and its ammo digits (first
+// child, NumberGlyphs) cover the B circle. The host HUD is composed after the
+// native UI: at the Quest draw (0x0042B9F4) the quads around the B button are
+// copied for the host, drawn above its circle, and moved off screen for the
+// native draw (the submit rebuilds them every frame).
+struct TopScreenQuestCopiedQuad {
+  std::array<TopScreenVec2, 4> Positions{};
+  std::array<float, 8> Uvs{};
+  oot3d::ui::UiColor Color;
+  bool NumberGlyphs = false;
+};
+bool CaptureTopScreenQuestBButtonCopies(NativeA32Memory &memory,
+                                        const TopScreenUiConfig &config,
+                                        std::vector<TopScreenQuestCopiedQuad> *copies,
+                                        std::string *error = nullptr);
+// Final native coordinates: append after the HUD scale.
+std::size_t AppendTopScreenQuestBButtonCopiesPresentation(
+    std::span<const TopScreenQuestCopiedQuad> copies,
+    const oot3d::ui::UiTextureIdentity &itemIcons,
+    const oot3d::ui::UiTextureIdentity &numberGlyphs,
+    std::vector<oot3d::ui::UiPrimitive> &output);
+
 bool ReadTopScreenQuestGeometryContext(
     NativeA32Memory &memory, TopScreenQuestGeometryContext *context,
     const TopScreenPauseProjectionState *projection = nullptr,
