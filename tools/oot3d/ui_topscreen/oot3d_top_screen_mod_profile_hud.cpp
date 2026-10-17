@@ -834,6 +834,36 @@ bool AppendTopScreenNativeItemIconCopies(
   return true;
 }
 
+std::size_t AppendTopScreenQuestBButtonCopiesPresentation(
+    std::span<const TopScreenQuestCopiedQuad> copies,
+    const oot3d::ui::UiTextureIdentity &itemIcons,
+    const oot3d::ui::UiTextureIdentity &numberGlyphs,
+    std::vector<oot3d::ui::UiPrimitive> &output) {
+  const std::size_t startSize = output.size();
+  for (std::size_t index = 0U; index < copies.size(); ++index) {
+    const auto &copy = copies[index];
+    const auto &texture = copy.NumberGlyphs ? numberGlyphs : itemIcons;
+    if (texture.semantic_name.empty()) continue;
+    oot3d::ui::UiPrimitive primitive;
+    primitive.subsystem = oot3d::ui::UiSubsystem::GameplayHud;
+    primitive.role = copy.NumberGlyphs ? oot3d::ui::UiPrimitiveRole::AmmoCounter
+                                       : oot3d::ui::UiPrimitiveRole::ActionButton;
+    primitive.owner_address = 0x0042B9F4U;
+    primitive.source_quad = static_cast<std::uint32_t>(index);
+    primitive.texture = texture;
+    primitive.destination = {copy.Positions[0].X, copy.Positions[0].Y,
+                             copy.Positions[1].X - copy.Positions[0].X,
+                             copy.Positions[2].Y - copy.Positions[0].Y};
+    primitive.uv = NativePicaQuadUvToHost(copy.Uvs);
+    primitive.color = copy.Color;
+    // Above the circles (layer 12, appended earlier), under the B label (13).
+    primitive.layer = 12U;
+    primitive.visible = primitive.color.alpha != 0.0F;
+    output.push_back(std::move(primitive));
+  }
+  return output.size() - startSize;
+}
+
 bool AppendTopScreenNativeCounters(
     NativeA32Memory &memory, const std::array<float, 4> &nativeVerticalOffsets,
     const oot3d::ui::UiTextureIdentity &numberGlyphs,

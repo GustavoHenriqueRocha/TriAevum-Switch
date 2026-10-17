@@ -190,6 +190,7 @@ bool Oot3dNativeUiLifecycleBridge::ApplyTopScreenGuestHook(uint32_t guestPc,
     // Native submit refreshes counter geometry before the next draw.
     // TopScreen 2.1.1 resets its guard (005E3D1C) in update 005D4A8C.
     mTopScreenPauseProjection.QuestDrawModelAdjusted = false;
+    mTopScreenQuestBCopies.clear();
     ++mStats.topscreen_quest_hook_calls;
     TopScreenQuestModelTransformStats stats;
     std::string error;
@@ -213,6 +214,13 @@ bool Oot3dNativeUiLifecycleBridge::ApplyTopScreenGuestHook(uint32_t guestPc,
       return true;
     }
     mStats.topscreen_quest_transforms += stats.DrawModelsTransformed;
+    // The host HUD draws the B icon and digits above its B circle, as 3.0's
+    // native order does; only while that HUD is composed.
+    TopScreenHudCompositorGate gate;
+    if (mTopScreenConfig.RenderHud && ReadTopScreenHudCompositorGate(mMemory, &gate, &error) &&
+        gate.Draw && !CaptureTopScreenQuestBButtonCopies(mMemory, mTopScreenConfig,
+                                                         &mTopScreenQuestBCopies, &error))
+      ++mStats.topscreen_quest_hook_failures;
     return true;
   }
   if (guestPc != kTopScreenQuestMaterializedHook)
@@ -432,6 +440,14 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
       (void)AppendTopScreenMagicMeterPresentation(magic, *texture, output);
     }
     ApplyTopScreenHudScale(output, mTopScreenConfig);
+    if (const auto itemIcons = NativePauseSharedTextureIdentity(
+            oot3d::ui::UiPauseSharedTextureSlot::ItemIcons)) {
+      const auto numberGlyphs = NativePauseSharedTextureIdentity(
+          oot3d::ui::UiPauseSharedTextureSlot::NumberGlyphs);
+      (void)AppendTopScreenQuestBButtonCopiesPresentation(
+          mTopScreenQuestBCopies, *itemIcons,
+          numberGlyphs.value_or(oot3d::ui::UiTextureIdentity{}), output);
+    }
     ApplyTopScreenGameplayCanvas(output);
     std::uint64_t visibleNativeTouchCopies = 0U;
     std::uint64_t visibleHorseStamina = 0U;

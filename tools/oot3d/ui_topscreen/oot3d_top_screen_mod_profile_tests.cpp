@@ -2063,6 +2063,61 @@ int main() {
               nearAction(actionQuads[1][0].Y, 291.0F),
           "3.0 0x005DA3D4 did not hide only the A label");
 
+  // B icon (Quest main renderer, ItemIcons 512x512) and digits (first child,
+  // NumberGlyphs 256x128) are copied above the host B circle and hidden.
+  NativeA32Memory bMemory;
+  Require(bMemory.MapRegion({"b-roots", 0x004F0000U, 0x10000U, true, false, {}}, &error) &&
+              bMemory.MapRegion({"b-heap", 0x08000000U, 0x10000U, true, false, {}}, &error),
+          "cannot map Quest B fixture");
+  constexpr std::uint32_t bOwner = 0x08000000U, bMain = 0x08001000U, bChild = 0x08002000U,
+                          bChildRenderer = 0x08003000U;
+  const auto seedRenderer = [&](std::uint32_t renderer, float width, float height,
+                                std::vector<std::array<float, 4>> boxes) {
+    const std::uint32_t streams = renderer + 0x100U;
+    bool ok = bMemory.Write32(renderer, static_cast<std::uint32_t>(boxes.size())) &&
+              bMemory.Write32(renderer + 4U, std::bit_cast<std::uint32_t>(width)) &&
+              bMemory.Write32(renderer + 8U, std::bit_cast<std::uint32_t>(height)) &&
+              bMemory.Write32(renderer + 0x0CU, streams) && bMemory.Write32(renderer + 0x14U, streams + 0x200U) &&
+              bMemory.Write32(renderer + 0x18U, streams + 0x400U) && bMemory.Write32(renderer + 0x1CU, streams + 0x600U);
+    for (std::uint32_t q = 0U; q < boxes.size(); ++q) {
+      const auto quad = nativeQuad(boxes[q][0], boxes[q][1], boxes[q][2], boxes[q][3]);
+      ok = ok && bMemory.WriteBytes(streams + q * 0x30U, std::span<const std::uint8_t>(
+                                                            reinterpret_cast<const std::uint8_t *>(quad.data()), 48U));
+      for (std::uint32_t c = 0U; c < 4U; ++c)
+        ok = ok && bMemory.Write32(streams + 0x400U + q * 0x40U + c * 16U + 12U, std::bit_cast<std::uint32_t>(0.5F));
+    }
+    return ok;
+  };
+  TopScreenUiConfig bConfig;
+  bConfig.HudScale = 0.9F;
+  bConfig.HudMarginX = 4;
+  bConfig.HudMarginY = 1;
+  Require(bMemory.Write32(0x004FC688U, bOwner) && bMemory.Write32(bOwner + 0x10CU, bMain) &&
+              bMemory.Write32(bOwner + 0x224U, 1U) && bMemory.Write32(bOwner + 0x0CU, bChild) &&
+              bMemory.Write32(bChild + 8U, bChildRenderer) &&
+              seedRenderer(bMain, 512.0F, 512.0F, {{247.0F, 10.0F, 272.0F, 35.0F}, {150.0F, 8.0F, 250.0F, 40.0F}}) &&
+              seedRenderer(bChildRenderer, 256.0F, 128.0F, {{266.0F, 28.0F, 273.0F, 35.0F}}),
+          "cannot seed Quest B fixture");
+  std::vector<TopScreenQuestCopiedQuad> bCopies;
+  std::array<TopScreenVec3, 4> hiddenB{}, keptTitle{};
+  Require(CaptureTopScreenQuestBButtonCopies(bMemory, bConfig, &bCopies, &error) && bCopies.size() == 2U &&
+              !bCopies[0].NumberGlyphs && bCopies[1].NumberGlyphs && bCopies[0].Positions[0].X == 247.0F &&
+              bCopies[0].Color.alpha == 0.5F &&
+              bMemory.ReadBytes(bMain + 0x100U, std::span<std::uint8_t>(
+                                                    reinterpret_cast<std::uint8_t *>(hiddenB.data()), 48U)) &&
+              bMemory.ReadBytes(bMain + 0x130U, std::span<std::uint8_t>(
+                                                    reinterpret_cast<std::uint8_t *>(keptTitle.data()), 48U)) &&
+              hiddenB[0].X == 487.5F && hiddenB[0].Y == 287.5F && keptTitle[0].X == 150.0F,
+          "Quest B icon/digits were not copied and hidden, or the title was taken");
+  oot3d::ui::UiTextureIdentity bIcons, bDigits;
+  bIcons.semantic_name = "icons";
+  bDigits.semantic_name = "digits";
+  std::vector<oot3d::ui::UiPrimitive> bPrimitives;
+  Require(AppendTopScreenQuestBButtonCopiesPresentation(bCopies, bIcons, bDigits, bPrimitives) == 2U &&
+              bPrimitives[0].texture.semantic_name == "icons" && bPrimitives[1].texture.semantic_name == "digits" &&
+              bPrimitives[0].layer == 12U && bPrimitives[0].destination.width == 25.0F,
+          "Quest B copies were not presented above the circle");
+
   std::array<std::array<TopScreenVec3, 4>, 1> offsetQuest{
       {{{{80.0F, 140.0F, 0.0F},
          {100.0F, 140.0F, 0.0F},
