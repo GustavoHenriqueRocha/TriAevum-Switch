@@ -240,6 +240,32 @@ Desempenho e usabilidade:
 - Em 3× o EASU já era pulado (saída 1:1); só o RCAS roda (`config/sharpen` `0` troca por cópia
   simples). `config/anisotropy` `2` reduz o custo de textura em superfícies oblíquas.
 
+### Cache de estado GL no caminho de draw PICA (2026-10-17)
+- Cada draw reenviava todo o estado fixo (~27 chamadas: framebuffer + draw buffer, VAO, programa,
+  4 unidades de textura com `glActiveTexture`, color mask, blend/logic op, depth, stencil, cull,
+  viewport, scissor) e depois religava o VAO do caminho legado. O Mesa filtra quase todas as
+  repetições, mas cada uma ainda paga despacho + contexto + validação de enum na render thread; e o
+  vai-e-volta de VAO não era repetição: fazia o state tracker reconstruir os vertex arrays de todo
+  draw (no quadro interpolado, o dobro).
+- `PicaGlStateCache` (`gfx_opengl_pica_state_cache.h`, sem GL, testado em
+  `gfx_opengl_pica_state_cache_tests`) guarda o último valor de cada estado e só emite a chamada que
+  muda algo. O VAO legado passa a ser religado sob demanda (`RestoreLegacyVertexArray`, nas funções
+  legadas que usam vertex arrays). Ordem dos draws, valores e chamadas de draw não mudam.
+- O cache só vale entre draws PICA consecutivos: é esquecido no início de cada lista de execução
+  (`PublishPicaCompositionSequence`), em qualquer entrada PICA que não seja draw (transfer, fill,
+  clear, apresentação/pós), em qualquer chamada do caminho legado (`MarkPicaGlStateForeign`) e
+  quando os caches do legado mostram que ele desenhou. Dentro do draw, criar programa/alvo/textura,
+  fills e limpezas de Shadow2D esquecem só o estado que tocam.
+- Efeito colateral corrigido: o LUT de iluminação novo era criado (ligado) na unidade 3 depois de
+  ligar as texturas, trocando a textura do slot 2 por ele naquele draw; agora é buscado antes.
+- A/B: `config/gl_state_cache` com `0` volta ao comportamento antigo (todas as chamadas + religar o
+  VAO legado). `config/gl_stats` (arquivo existe, mesmo vazio) liga em `perf.txt`, por quadro de
+  host: `gl_draws`, `gl_presents`, `gl_state_calls` (emitidas), `gl_state_skipped`,
+  `gl_state_calls_per_draw`, `gl_program_binds`, `gl_texture_binds`, `gl_vao_binds`, `gl_fb_binds`,
+  `gl_ubo_uploads`, `gl_draw_ms` (tempo da render thread dentro de `SubmitPicaDraw`) e
+  `gl_us_per_draw`. Os contadores rodam nos dois modos, então o mesmo build mede antes e depois.
+- Quadro sintético de 400 draws (teste): 27,5 → 2,7 chamadas de estado por draw.
+
 ## Próximos passos
 
 - Ideias futuras (pedido do usuário, 2026-10-17):

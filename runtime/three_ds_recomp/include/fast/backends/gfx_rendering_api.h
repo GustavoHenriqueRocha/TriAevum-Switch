@@ -96,6 +96,20 @@ struct GfxNativePicaBackendStats {
     uint64_t StreamRingOrphans = 0;
     uint64_t OutOfMemoryEvents = 0;
     uint64_t SkippedDraws = 0;
+    // OpenGL PICA draw path (config/gl_state_cache, config/gl_stats):
+    // totals published by the render thread at each presented frame.
+    bool GlStateCacheEnabled = false;
+    bool GlStatsEnabled = false;
+    uint64_t PicaDraws = 0;
+    uint64_t PicaDrawNanoseconds = 0; // only counted with gl_stats
+    uint64_t PicaPresents = 0;
+    uint64_t GlStateCallsIssued = 0;
+    uint64_t GlStateCallsSkipped = 0;
+    uint64_t GlProgramBinds = 0;
+    uint64_t GlTextureBinds = 0;
+    uint64_t GlVertexArrayBinds = 0;
+    uint64_t GlFramebufferBinds = 0;
+    uint64_t PublishedUniformUploads = 0;
 };
 
 // A hash function used to hash a: pair<float, float>

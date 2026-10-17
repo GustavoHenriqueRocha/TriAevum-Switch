@@ -177,6 +177,13 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     void InitNativePica();
     void ShutdownNativePica() noexcept;
     void InvalidateLegacyStateAfterPica() noexcept;
+    // The PICA path leaves its VAO bound (config/gl_state_cache); legacy
+    // calls that use vertex arrays restore the legacy one first.
+    void RestoreLegacyVertexArray() noexcept;
+    bool PicaGlStateMayBeStale() const noexcept;
+    void MarkPicaGlStateForeign() noexcept {
+        mPicaGlStateForeign = true;
+    }
 
     void SetUniforms(ShaderProgram* prg) const;
     std::string BuildFsShader(const CCFeatures& cc_features);
@@ -226,6 +233,10 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     GLuint mPixelDepthFb = 0;
     size_t mPixelDepthRbSize = 0;
     bool mNativePicaGeometryCacheEnabled = true;
+    // The PICA VAO may be bound (the legacy one is restored on demand).
+    bool mPicaVertexArrayBound = false;
+    // GL state may have changed outside consecutive PICA draws.
+    bool mPicaGlStateForeign = true;
     std::unique_ptr<NativePicaState> mNativePica;
 };
 

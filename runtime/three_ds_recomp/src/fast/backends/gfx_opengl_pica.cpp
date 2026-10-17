@@ -11,6 +11,7 @@
 #include "fast/backends/gfx_opengl_pica_post.h"
 #include "fast/backends/gfx_opengl_pica_residency.h"
 #include "fast/backends/gfx_opengl_pica_scale.h"
+#include "fast/backends/gfx_opengl_pica_state_cache.h"
 #include "fast/oot3d/gl_widescreen_policy.h"
 #include "fast/oot3d/pica_geometry_registry.h"
 #include "fast/oot3d/pica_uniform_layout.h"
@@ -159,6 +160,42 @@ std::optional<std::string> ReadPicaGlConfigText(const char* file,
     (void)file;
     const char* value = std::getenv(environment);
     return value != nullptr ? std::optional<std::string>(value) : std::nullopt;
+#endif
+}
+
+// On/off switches read once: on the Switch from sdmc:/switch/oot3dre/config/
+// <file> (missing: `absent`; present: PicaGlStateCache::ParseSwitch with an
+// empty file meaning `empty`), elsewhere from the environment variable.
+//   gl_state_cache  TRIAEVUM_GL_STATE_CACHE  on unless "0"
+//   gl_stats        TRIAEVUM_GL_STATS        off unless the file exists
+bool ReadPicaGlSwitch(const char* file, const char* environment, bool absent,
+                      bool empty) {
+#if defined(__SWITCH__)
+    (void)environment;
+    std::ifstream stream(std::string("sdmc:/switch/oot3dre/config/") + file);
+    if (!stream) {
+        return absent;
+    }
+    std::string text;
+    std::getline(stream, text);
+    return PicaGlStateCache::ParseSwitch(text.c_str(), empty);
+#else
+    (void)file;
+    const char* value = std::getenv(environment);
+    return value == nullptr ? absent
+                            : PicaGlStateCache::ParseSwitch(value, empty);
+#endif
+}
+
+uint64_t PicaGlNowNanoseconds() {
+#if defined(__SWITCH__)
+    // CNTPCT (19.2 MHz): a register read, no syscall.
+    return armTicksToNs(armGetSystemTick());
+#else
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
 #endif
 }
 
@@ -1023,6 +1060,27 @@ struct GfxRenderingAPIOGL::NativePicaState {
     std::vector<uint8_t> LastFragmentUniforms;
     GLuint LastShadowImage = 0U;
     PicaGlPostState Post;
+    // config/gl_state_cache: shadow of the draw path's GL state (see
+    // gfx_opengl_pica_state_cache.h); counters run in both modes.
+    PicaGlStateCache::State Gl;
+    // config/gl_stats: draw counters and render-thread time inside
+    // SubmitPicaDraw, published at each presentation for perf.txt.
+    bool Stats = false;
+    uint64_t Draws = 0U;
+    uint64_t DrawNanoseconds = 0U;
+    uint64_t Presents = 0U;
+    struct Published {
+        std::atomic<uint64_t> Draws{0U};
+        std::atomic<uint64_t> DrawNanoseconds{0U};
+        std::atomic<uint64_t> Presents{0U};
+        std::atomic<uint64_t> Issued{0U};
+        std::atomic<uint64_t> Skipped{0U};
+        std::atomic<uint64_t> ProgramBinds{0U};
+        std::atomic<uint64_t> TextureBinds{0U};
+        std::atomic<uint64_t> VertexArrayBinds{0U};
+        std::atomic<uint64_t> FramebufferBinds{0U};
+        std::atomic<uint64_t> UniformUploads{0U};
+    } Publish;
 #endif
 };
 
@@ -1507,6 +1565,12 @@ void GfxRenderingAPIOGL::InitNativePica() {
     state.GeometryCacheEnabled = mNativePicaGeometryCacheEnabled;
     state.ResolutionScale = ReadPicaGlResolutionScale();
     state.Lean = ReadPicaGlLean();
+    static const bool stateCache = ReadPicaGlSwitch(
+        "gl_state_cache", "TRIAEVUM_GL_STATE_CACHE", true, true);
+    static const bool stats =
+        ReadPicaGlSwitch("gl_stats", "TRIAEVUM_GL_STATS", false, true);
+    state.Gl.Enabled = stateCache;
+    state.Stats = stats;
     if (state.ResolutionScale > 1.0F) {
         // Keep the largest PICA target (1024 per axis) within the driver's
         // limits; otherwise fall back to a smaller scale.
@@ -1667,10 +1731,18 @@ void GfxRenderingAPIOGL::InvalidateLegacyStateAfterPica() noexcept {
     // fixed attributes (one value for the whole quad: transparent or flat
     // sprites) and silently invalidating the PICA attribute cache. Restore the
     // VAO the legacy path was initialised with.
-#if defined(__APPLE__) || defined(__SWITCH__) || defined(USE_OPENGLES)
-    glBindVertexArray(mOpenglVao);
+    // With the state cache the restore is deferred to the first legacy call
+    // that needs it (RestoreLegacyVertexArray): binding it after every PICA
+    // draw and the PICA VAO again before the next one made Mesa rebuild the
+    // vertex arrays of every draw.
+    mPicaGlStateForeign = true;
+    mPicaVertexArrayBound = true;
+#if !defined(USE_OPENGLES) && !defined(__APPLE__)
+    if (mNativePica == nullptr || !mNativePica->Gl.Enabled) {
+        RestoreLegacyVertexArray();
+    }
 #else
-    glBindVertexArray(0U);
+    RestoreLegacyVertexArray();
 #endif
     mLastLoadedShader = nullptr;
     mCurrentArrayBuffer = 0U;
@@ -1684,9 +1756,43 @@ void GfxRenderingAPIOGL::InvalidateLegacyStateAfterPica() noexcept {
               std::end(mLastBoundTextures), 0U);
 }
 
+void GfxRenderingAPIOGL::RestoreLegacyVertexArray() noexcept {
+    if (!mPicaVertexArrayBound) {
+        return;
+    }
+    mPicaVertexArrayBound = false;
+    mPicaGlStateForeign = true;
+#if !defined(USE_OPENGLES) && !defined(__APPLE__)
+    if (mNativePica != nullptr) {
+        // Counted with the draw path's calls: without the cache this
+        // rebind follows every PICA draw.
+        ++mNativePica->Gl.Count.Issued;
+        ++mNativePica->Gl.Count.VertexArrayBinds;
+    }
+#endif
+#if defined(__APPLE__) || defined(__SWITCH__) || defined(USE_OPENGLES)
+    glBindVertexArray(mOpenglVao);
+#else
+    glBindVertexArray(0U);
+#endif
+}
+
+// The PICA state cache is only trusted across consecutive PICA draws. The
+// legacy path's own caches are reset after each PICA draw
+// (InvalidateLegacyStateAfterPica); any legacy draw sets them again.
+bool GfxRenderingAPIOGL::PicaGlStateMayBeStale() const noexcept {
+    return mPicaGlStateForeign || !mPicaVertexArrayBound ||
+           mLastLoadedShader != nullptr || mCurrentArrayBuffer != 0U ||
+           mLastActiveTexture != -1 || mLastBlendEnabled != -1 ||
+           mLastScissorEnabled != -1 || mLastDepthTest != -1 ||
+           mLastDepthMask != -1 || mLastZmodeDecal != -1;
+}
+
 bool GfxRenderingAPIOGL::PublishPicaCompositionSequence(
     const Renderer3ds::PicaCompositionSequenceView& sequence,
     std::string* error) {
+    // A new execution list: whatever ran since the last draw is unknown.
+    mPicaGlStateForeign = true;
 #if defined(USE_OPENGLES) || defined(__APPLE__)
     SetPicaGlError(error, "native PICA requires OpenGL 4.3");
     return false;
@@ -2321,12 +2427,58 @@ void UploadPicaGlBuffer(GLenum target, GLuint buffer,
 } // namespace
 #endif
 
+#if !defined(USE_OPENGLES) && !defined(__APPLE__)
+namespace {
+// Render-thread totals made readable by the thread that writes perf.txt
+// (relaxed stores, once per presented frame).
+void PublishPicaGlStats(GfxRenderingAPIOGL::NativePicaState& state) {
+    ++state.Presents;
+    auto& out = state.Publish;
+    const auto& count = state.Gl.Count;
+    out.Draws.store(state.Draws, std::memory_order_relaxed);
+    out.DrawNanoseconds.store(state.DrawNanoseconds, std::memory_order_relaxed);
+    out.Presents.store(state.Presents, std::memory_order_relaxed);
+    out.Issued.store(count.Issued, std::memory_order_relaxed);
+    out.Skipped.store(count.Skipped, std::memory_order_relaxed);
+    out.ProgramBinds.store(count.ProgramBinds, std::memory_order_relaxed);
+    out.TextureBinds.store(count.TextureBinds, std::memory_order_relaxed);
+    out.VertexArrayBinds.store(count.VertexArrayBinds,
+                               std::memory_order_relaxed);
+    out.FramebufferBinds.store(count.FramebufferBinds,
+                               std::memory_order_relaxed);
+    out.UniformUploads.store(state.UniformUploads, std::memory_order_relaxed);
+}
+} // namespace
+#endif
+
 GfxNativePicaBackendStats
 GfxRenderingAPIOGL::GetNativePicaBackendStats() const noexcept {
     GfxNativePicaBackendStats result;
 #if !defined(USE_OPENGLES) && !defined(__APPLE__)
     if (mNativePica != nullptr) {
         result.Available = true;
+        const auto& published = mNativePica->Publish;
+        result.GlStateCacheEnabled = mNativePica->Gl.Enabled;
+        result.GlStatsEnabled = mNativePica->Stats;
+        result.PicaDraws = published.Draws.load(std::memory_order_relaxed);
+        result.PicaDrawNanoseconds =
+            published.DrawNanoseconds.load(std::memory_order_relaxed);
+        result.PicaPresents =
+            published.Presents.load(std::memory_order_relaxed);
+        result.GlStateCallsIssued =
+            published.Issued.load(std::memory_order_relaxed);
+        result.GlStateCallsSkipped =
+            published.Skipped.load(std::memory_order_relaxed);
+        result.GlProgramBinds =
+            published.ProgramBinds.load(std::memory_order_relaxed);
+        result.GlTextureBinds =
+            published.TextureBinds.load(std::memory_order_relaxed);
+        result.GlVertexArrayBinds =
+            published.VertexArrayBinds.load(std::memory_order_relaxed);
+        result.GlFramebufferBinds =
+            published.FramebufferBinds.load(std::memory_order_relaxed);
+        result.PublishedUniformUploads =
+            published.UniformUploads.load(std::memory_order_relaxed);
         const auto registry = mNativePica->GeometryRegistry.Stats();
         result.GeometryCacheEnabled = mNativePica->GeometryCacheEnabled;
         result.GeometryRegistryHits = registry.Hits;
@@ -2413,7 +2565,24 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         }
         BeginPicaGlFrame(*mNativePica, mFrameCount);
 
+        // State cache (gfx_opengl_pica_state_cache.h): trusted only across
+        // consecutive PICA draws; helpers below that create programs,
+        // targets or textures, or run fills and Shadow2D clears, forget the
+        // state they touch.
+        auto& gl = mNativePica->Gl;
+        if (PicaGlStateMayBeStale()) {
+            gl.Invalidate();
+        }
+        const uint64_t drawStart =
+            mNativePica->Stats ? PicaGlNowNanoseconds() : 0U;
+        const size_t programsBefore = mNativePica->Programs.size();
+        const size_t targetsBefore = mNativePica->Targets.size();
+        const size_t fillsBefore = mNativePica->PendingFills.size();
+
         auto& program = GetPicaGlProgram(*mNativePica, draw);
+        if (mNativePica->Programs.size() != programsBefore) {
+            gl.Program.Reset(); // the sampler setup used the new program
+        }
         auto& target = GetPicaGlTarget(*mNativePica, draw);
         const PicaGlTargetKey targetKey{
             draw.RenderTargetNamespace,
@@ -2425,18 +2594,30 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             draw.FramebufferDepthFormat,
         };
         ApplyPendingPicaFills(*mNativePica, targetKey, target);
+        if (mNativePica->Targets.size() != targetsBefore ||
+            mNativePica->PendingFills.size() != fillsBefore) {
+            gl.ForgetClearState();
+        }
         if (draw.FragmentOperationMode == 3U) {
             // A shadow producer reads and writes its Shadow2D image.
-            ResolvePicaShadow(target);
+            if (ResolvePicaShadow(target)) {
+                gl.ForgetClearState();
+            }
         }
         // Every draw may write colour (a producer masks it, but counting it
         // keeps the version a strict upper bound on content changes).
         ++target.Version;
 
-        glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
-        glDrawBuffer(GL_COLOR_ATTACHMENT0);
-        glBindVertexArray(mNativePica->VertexArray);
-        glUseProgram(program.Handle);
+        if (gl.BindFramebuffer(target.Framebuffer)) {
+            glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
+            glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        }
+        if (gl.BindVertexArray(mNativePica->VertexArray)) {
+            glBindVertexArray(mNativePica->VertexArray);
+        }
+        if (gl.UseProgram(program.Handle)) {
+            glUseProgram(program.Handle);
+        }
 
         // Lean: a block equal to the one the buffer already holds is not
         // sent again. nvc0 pushes a constant-buffer upload through the
@@ -2757,18 +2938,34 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             textures[texture.Slot] = handle;
         }
         if (rebindTarget) {
-            glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
+            // The deferred Shadow2D clear bound its own framebuffer.
+            gl.ForgetClearState();
+            if (gl.BindFramebuffer(target.Framebuffer)) {
+                glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
+                glDrawBuffer(GL_COLOR_ATTACHMENT0);
+            }
         }
-        for (size_t slot = 0U; slot < textures.size(); ++slot) {
-            glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(slot + 1U));
-            glBindTexture(GL_TEXTURE_2D, textures[slot]);
-        }
+        // Looked up before binding: a new LUT is created (bound) on the
+        // active unit like any new texture.
         GLuint lighting = mNativePica->FallbackInteger;
         if (!draw.LightingLut.PackedEntries.empty()) {
             lighting = GetPicaLightingLut(*mNativePica, draw.LightingLut);
         }
-        glActiveTexture(GL_TEXTURE13);
-        glBindTexture(GL_TEXTURE_2D, lighting);
+        // Texture creation/upload above binds on the active unit.
+        gl.ForgetActiveTextureBinding();
+        const auto bindTexture = [&](uint32_t unit, GLuint handle) {
+            bool activate = false;
+            if (gl.BindTexture(unit, handle, &activate)) {
+                if (activate) {
+                    glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(unit));
+                }
+                glBindTexture(GL_TEXTURE_2D, handle);
+            }
+        };
+        for (size_t slot = 0U; slot < textures.size(); ++slot) {
+            bindTexture(static_cast<uint32_t>(slot + 1U), textures[slot]);
+        }
+        bindTexture(13U, lighting);
 
         const bool shadowProducer = draw.FragmentOperationMode == 3U;
         // Only this backend binds image unit 5; Mesa revalidates every
@@ -2778,70 +2975,143 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                                GL_READ_WRITE, GL_R32UI);
             mNativePica->LastShadowImage = target.Shadow;
         }
+        // Each call below is issued only when it changes the value the
+        // context holds (always, with config/gl_state_cache 0).
+        const auto toggle = [&](PicaGlStateCache::Slot<bool>& slot,
+                                GLenum capability, bool enabled) {
+            if (gl.Change(slot, enabled)) {
+                if (enabled) {
+                    glEnable(capability);
+                } else {
+                    glDisable(capability);
+                }
+            }
+        };
+        const auto setColorMask = [&](uint8_t mask) {
+            if (gl.Change(gl.ColorMask, mask)) {
+                glColorMask((mask & 1U) != 0U, (mask & 2U) != 0U,
+                            (mask & 4U) != 0U, (mask & 8U) != 0U);
+            }
+        };
         if (shadowProducer) {
-            glDisable(GL_BLEND);
-            glDisable(GL_COLOR_LOGIC_OP);
-            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+            toggle(gl.Blend, GL_BLEND, false);
+            toggle(gl.ColorLogicOp, GL_COLOR_LOGIC_OP, false);
+            setColorMask(0U);
         } else {
-            glColorMask((draw.ColorWriteMask & 1U) != 0U,
-                        (draw.ColorWriteMask & 2U) != 0U,
-                        (draw.ColorWriteMask & 4U) != 0U,
-                        (draw.ColorWriteMask & 8U) != 0U);
+            setColorMask(static_cast<uint8_t>(draw.ColorWriteMask & 0xFU));
             if (draw.Blend.Enabled) {
-                glEnable(GL_BLEND);
-                glDisable(GL_COLOR_LOGIC_OP);
-                glBlendEquationSeparate(
+                toggle(gl.Blend, GL_BLEND, true);
+                toggle(gl.ColorLogicOp, GL_COLOR_LOGIC_OP, false);
+                const std::array<uint32_t, 2> equation{
                     ToPicaGlBlendEquation(draw.Blend.EquationRgb),
-                    ToPicaGlBlendEquation(draw.Blend.EquationAlpha));
-                glBlendFuncSeparate(
+                    ToPicaGlBlendEquation(draw.Blend.EquationAlpha)};
+                if (gl.Change(gl.BlendEquation, equation)) {
+                    glBlendEquationSeparate(equation[0], equation[1]);
+                }
+                const std::array<uint32_t, 4> factors{
                     ToPicaGlBlendFactor(draw.Blend.SourceRgb),
                     ToPicaGlBlendFactor(draw.Blend.DestRgb),
                     ToPicaGlBlendFactor(draw.Blend.SourceAlpha),
-                    ToPicaGlBlendFactor(draw.Blend.DestAlpha));
-                glBlendColor(draw.Blend.ConstantColor[0],
-                             draw.Blend.ConstantColor[1],
-                             draw.Blend.ConstantColor[2],
-                             draw.Blend.ConstantColor[3]);
+                    ToPicaGlBlendFactor(draw.Blend.DestAlpha)};
+                if (gl.Change(gl.BlendFunc, factors)) {
+                    glBlendFuncSeparate(factors[0], factors[1], factors[2],
+                                        factors[3]);
+                }
+                const std::array<uint32_t, 4> constant{
+                    PicaGlStateCache::FloatBits(draw.Blend.ConstantColor[0]),
+                    PicaGlStateCache::FloatBits(draw.Blend.ConstantColor[1]),
+                    PicaGlStateCache::FloatBits(draw.Blend.ConstantColor[2]),
+                    PicaGlStateCache::FloatBits(draw.Blend.ConstantColor[3])};
+                if (gl.Change(gl.BlendColor, constant)) {
+                    glBlendColor(draw.Blend.ConstantColor[0],
+                                 draw.Blend.ConstantColor[1],
+                                 draw.Blend.ConstantColor[2],
+                                 draw.Blend.ConstantColor[3]);
+                }
             } else {
-                glDisable(GL_BLEND);
-                glEnable(GL_COLOR_LOGIC_OP);
-                glLogicOp(ToPicaGlLogic(draw.LogicOperation));
+                toggle(gl.Blend, GL_BLEND, false);
+                toggle(gl.ColorLogicOp, GL_COLOR_LOGIC_OP, true);
+                const uint32_t logic = ToPicaGlLogic(draw.LogicOperation);
+                if (gl.Change(gl.LogicOp, logic)) {
+                    glLogicOp(logic);
+                }
             }
         }
 
         if (draw.DepthTestEnabled || draw.DepthWriteEnabled) {
-            glEnable(GL_DEPTH_TEST);
-            glDepthFunc(draw.DepthTestEnabled
+            toggle(gl.DepthTest, GL_DEPTH_TEST, true);
+            const uint32_t depthFunc = draw.DepthTestEnabled
                 ? ToPicaGlCompare(draw.DepthCompare)
-                : GL_ALWAYS);
+                : GL_ALWAYS;
+            if (gl.Change(gl.DepthFunc, depthFunc)) {
+                glDepthFunc(depthFunc);
+            }
         } else {
-            glDisable(GL_DEPTH_TEST);
+            toggle(gl.DepthTest, GL_DEPTH_TEST, false);
         }
-        glDepthMask(draw.DepthWriteEnabled ? GL_TRUE : GL_FALSE);
+        if (gl.Change(gl.DepthMask, draw.DepthWriteEnabled)) {
+            glDepthMask(draw.DepthWriteEnabled ? GL_TRUE : GL_FALSE);
+        }
         if (draw.Stencil.Enabled) {
-            glEnable(GL_STENCIL_TEST);
-            glStencilFunc(ToPicaGlCompare(draw.Stencil.Compare),
-                          draw.Stencil.Reference, draw.Stencil.CompareMask);
-            glStencilMask(draw.Stencil.WriteMask);
-            glStencilOp(ToPicaGlStencil(draw.Stencil.Fail),
-                        ToPicaGlStencil(draw.Stencil.DepthFail),
-                        ToPicaGlStencil(draw.Stencil.Pass));
+            toggle(gl.StencilTest, GL_STENCIL_TEST, true);
+            const std::array<uint32_t, 3> stencilFunc{
+                ToPicaGlCompare(draw.Stencil.Compare),
+                static_cast<uint32_t>(draw.Stencil.Reference),
+                static_cast<uint32_t>(draw.Stencil.CompareMask)};
+            if (gl.Change(gl.StencilFunc, stencilFunc)) {
+                glStencilFunc(stencilFunc[0],
+                              static_cast<GLint>(stencilFunc[1]),
+                              stencilFunc[2]);
+            }
+            const uint32_t stencilMask = draw.Stencil.WriteMask;
+            if (gl.Change(gl.StencilMask, stencilMask)) {
+                glStencilMask(stencilMask);
+            }
+            const std::array<uint32_t, 3> stencilOp{
+                ToPicaGlStencil(draw.Stencil.Fail),
+                ToPicaGlStencil(draw.Stencil.DepthFail),
+                ToPicaGlStencil(draw.Stencil.Pass)};
+            if (gl.Change(gl.StencilOp, stencilOp)) {
+                glStencilOp(stencilOp[0], stencilOp[1], stencilOp[2]);
+            }
         } else {
-            glDisable(GL_STENCIL_TEST);
+            toggle(gl.StencilTest, GL_STENCIL_TEST, false);
         }
         if (draw.CullMode == GfxNativeCullMode::KeepAll) {
-            glDisable(GL_CULL_FACE);
+            toggle(gl.CullFace, GL_CULL_FACE, false);
         } else {
-            glEnable(GL_CULL_FACE);
+            toggle(gl.CullFace, GL_CULL_FACE, true);
             // Vulkan's positive-height viewport reverses window-space winding
             // relative to OpenGL. Keep the PICA semantic winding here instead
             // of copying the Vulkan pipeline's compensating front-face value.
-            glFrontFace(draw.CullMode ==
-                            GfxNativeCullMode::KeepCounterClockwise
-                        ? GL_CCW
-                        : GL_CW);
-            glCullFace(draw.FramebufferFlipped ? GL_FRONT : GL_BACK);
+            const uint32_t frontFace =
+                draw.CullMode == GfxNativeCullMode::KeepCounterClockwise
+                    ? GL_CCW
+                    : GL_CW;
+            if (gl.Change(gl.FrontFace, frontFace)) {
+                glFrontFace(frontFace);
+            }
+            const uint32_t cullFace =
+                draw.FramebufferFlipped ? GL_FRONT : GL_BACK;
+            if (gl.Change(gl.CullFaceMode, cullFace)) {
+                glCullFace(cullFace);
+            }
         }
+        const auto setViewport = [&](GLint x, GLint y, GLsizei width,
+                                     GLsizei height) {
+            if (gl.Change(gl.Viewport,
+                          std::array<int32_t, 4>{x, y, width, height})) {
+                glViewport(x, y, width, height);
+            }
+        };
+        const auto setScissor = [&](GLint x, GLint y, GLsizei width,
+                                    GLsizei height) {
+            toggle(gl.ScissorTest, GL_SCISSOR_TEST, true);
+            if (gl.Change(gl.Scissor,
+                          std::array<int32_t, 4>{x, y, width, height})) {
+                glScissor(x, y, width, height);
+            }
+        };
 
         // Guest viewport and scissor are in native pixels; the target holds
         // ResolutionScale host pixels per native pixel on each axis. The
@@ -2862,10 +3132,9 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 static_cast<GLsizei>(draw.ViewportWidth);
             const int64_t viewportHeight =
                 static_cast<GLsizei>(draw.ViewportHeight);
-            glViewport(edge(viewportX), edge(viewportY),
-                       edge(viewportX + viewportWidth) - edge(viewportX),
-                       edge(viewportY + viewportHeight) - edge(viewportY));
-            glEnable(GL_SCISSOR_TEST);
+            setViewport(edge(viewportX), edge(viewportY),
+                        edge(viewportX + viewportWidth) - edge(viewportX),
+                        edge(viewportY + viewportHeight) - edge(viewportY));
             if (draw.ScissorMode == 3U) {
                 const int64_t scissorWidth = draw.ScissorX2 >= draw.ScissorX1
                     ? static_cast<int64_t>(draw.ScissorX2) - draw.ScissorX1 + 1
@@ -2875,12 +3144,12 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                     : 0;
                 const int64_t scissorX = draw.ScissorX1;
                 const int64_t scissorY = draw.ScissorY1;
-                glScissor(edge(scissorX), edge(scissorY),
-                          edge(scissorX + scissorWidth) - edge(scissorX),
-                          edge(scissorY + scissorHeight) - edge(scissorY));
+                setScissor(edge(scissorX), edge(scissorY),
+                           edge(scissorX + scissorWidth) - edge(scissorX),
+                           edge(scissorY + scissorHeight) - edge(scissorY));
             } else {
-                glScissor(0, 0, static_cast<GLsizei>(target.Width),
-                          static_cast<GLsizei>(target.Height));
+                setScissor(0, 0, static_cast<GLsizei>(target.Width),
+                           static_cast<GLsizei>(target.Height));
             }
         } else {
             // Widescreen top-screen target (see PicaGlTarget::Wide), as the
@@ -2925,10 +3194,9 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             };
             const GLint viewportX0 = edgeX(draw.ViewportX);
             const GLint viewportY0 = edgeY(draw.ViewportY);
-            glViewport(viewportX0, viewportY0,
-                       std::max<GLint>(0, edgeX(draw.ViewportX + draw.ViewportWidth) - viewportX0),
-                       std::max<GLint>(0, edgeY(draw.ViewportY + draw.ViewportHeight) - viewportY0));
-            glEnable(GL_SCISSOR_TEST);
+            setViewport(viewportX0, viewportY0,
+                        std::max<GLint>(0, edgeX(draw.ViewportX + draw.ViewportWidth) - viewportX0),
+                        std::max<GLint>(0, edgeY(draw.ViewportY + draw.ViewportHeight) - viewportY0));
             GLint scissorX0 = 0;
             GLint scissorY0 = 0;
             GLint scissorX1 = static_cast<GLint>(target.Width);
@@ -2952,9 +3220,9 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 scissorY0 = std::max(scissorY0, canvasY0);
                 scissorY1 = std::min(scissorY1, canvasY1);
             }
-            glScissor(scissorX0, scissorY0,
-                      std::max<GLint>(0, scissorX1 - scissorX0),
-                      std::max<GLint>(0, scissorY1 - scissorY0));
+            setScissor(scissorX0, scissorY0,
+                       std::max<GLint>(0, scissorX1 - scissorX0),
+                       std::max<GLint>(0, scissorY1 - scissorY0));
         }
 
         const GLenum topology = ToPicaGlTopology(draw.Topology);
@@ -3040,7 +3308,13 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
                             GL_TEXTURE_FETCH_BARRIER_BIT);
         }
+        ++mNativePica->Draws;
+        if (mNativePica->Stats) {
+            mNativePica->DrawNanoseconds += PicaGlNowNanoseconds() - drawStart;
+        }
         InvalidateLegacyStateAfterPica();
+        // Nothing but this draw touched GL since the cache was checked.
+        mPicaGlStateForeign = false;
         return true;
     } catch (const PicaGlOutOfMemory& exception) {
         // Out of memory: release every idle texture and LUT, forget the
@@ -3280,6 +3554,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
                 glDrawArrays(GL_TRIANGLES, 0, 3);
             }
             mNativePica->LastPresented = transfer;
+            PublishPicaGlStats(*mNativePica);
         }
         InvalidateLegacyStateAfterPica();
         return true;

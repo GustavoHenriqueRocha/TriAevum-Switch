@@ -650,6 +650,56 @@ bool NativeA32WindowSession::RunFrame() {
                << " proc_total_mb=" << (totalMemory / kMb);
         }
       }
+      // OpenGL PICA draw path (config/gl_stats), per host frame: draws,
+      // fixed-function GL calls issued and dropped by the state cache
+      // (config/gl_state_cache), binds, uniform uploads and render-thread
+      // time inside SubmitPicaDraw.
+      {
+        const auto gl = api.GetNativePicaBackendStats();
+        if (gl.GlStatsEnabled) {
+          static decltype(api.GetNativePicaBackendStats()) windowGl{};
+          if (gl.PicaDraws < windowGl.PicaDraws ||
+              gl.PicaPresents < windowGl.PicaPresents) {
+            windowGl = {}; // backend state was recreated
+          }
+          const auto perFrame = [&](uint64_t now, uint64_t before) {
+            return static_cast<double>(now - before) / hostFrames;
+          };
+          const uint64_t draws = gl.PicaDraws - windowGl.PicaDraws;
+          const uint64_t issued =
+              gl.GlStateCallsIssued - windowGl.GlStateCallsIssued;
+          const uint64_t skipped =
+              gl.GlStateCallsSkipped - windowGl.GlStateCallsSkipped;
+          const uint64_t nanoseconds =
+              gl.PicaDrawNanoseconds - windowGl.PicaDrawNanoseconds;
+          perf << " gl_cache=" << (gl.GlStateCacheEnabled ? 1 : 0)
+               << " gl_draws=" << perFrame(gl.PicaDraws, windowGl.PicaDraws)
+               << " gl_presents="
+               << perFrame(gl.PicaPresents, windowGl.PicaPresents)
+               << " gl_state_calls=" << static_cast<double>(issued) / hostFrames
+               << " gl_state_skipped="
+               << static_cast<double>(skipped) / hostFrames
+               << " gl_state_calls_per_draw="
+               << (draws != 0U ? static_cast<double>(issued) / draws : 0.0)
+               << " gl_program_binds="
+               << perFrame(gl.GlProgramBinds, windowGl.GlProgramBinds)
+               << " gl_texture_binds="
+               << perFrame(gl.GlTextureBinds, windowGl.GlTextureBinds)
+               << " gl_vao_binds="
+               << perFrame(gl.GlVertexArrayBinds, windowGl.GlVertexArrayBinds)
+               << " gl_fb_binds="
+               << perFrame(gl.GlFramebufferBinds, windowGl.GlFramebufferBinds)
+               << " gl_ubo_uploads="
+               << perFrame(gl.PublishedUniformUploads,
+                           windowGl.PublishedUniformUploads)
+               << " gl_draw_ms="
+               << static_cast<double>(nanoseconds) / 1.0e6 / hostFrames
+               << " gl_us_per_draw="
+               << (draws != 0U ? static_cast<double>(nanoseconds) / 1.0e3 / draws
+                               : 0.0);
+          windowGl = gl;
+        }
+      }
       // Totals of a Mesa built with the Horizon shader cache (absent from
       // the stock devkitPro library, hence weak).
       if (mesa_switch_get_stats != nullptr) {

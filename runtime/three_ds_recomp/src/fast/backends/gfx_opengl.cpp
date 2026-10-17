@@ -173,6 +173,8 @@ void GfxRenderingAPIOGL::SetPerDrawUniforms() {
 }
 
 void GfxRenderingAPIOGL::UnloadShader(ShaderProgram* old_prg) {
+    RestoreLegacyVertexArray();
+    MarkPicaGlStateForeign();
     if (old_prg != nullptr && old_prg == mLastLoadedShader) {
         for (unsigned int i = 0; i < old_prg->numAttribs; i++) {
             if (old_prg->attribLocations[i] >= 0) {
@@ -184,6 +186,8 @@ void GfxRenderingAPIOGL::UnloadShader(ShaderProgram* old_prg) {
 }
 
 void GfxRenderingAPIOGL::LoadShader(ShaderProgram* new_prg) {
+    RestoreLegacyVertexArray();
+    MarkPicaGlStateForeign();
     // if (!new_prg) return;
     mCurrentShaderProgram = new_prg;
     if (new_prg != mLastLoadedShader) {
@@ -522,6 +526,7 @@ void GfxRenderingAPIOGL::ClearShaderCache() {
 }
 
 ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
+    MarkPicaGlStateForeign();
     CCFeatures cc_features;
     gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
     const auto fs_buf = BuildFsShader(cc_features);
@@ -709,6 +714,7 @@ void GfxRenderingAPIOGL::ShaderGetInfo(struct ShaderProgram* prg, uint8_t* numIn
 }
 
 GLuint GfxRenderingAPIOGL::NewTexture() {
+    MarkPicaGlStateForeign();
     GLuint ret;
     glGenTextures(1, &ret);
     textures.resize(std::max(textures.size(), (size_t)ret + 1));
@@ -716,10 +722,12 @@ GLuint GfxRenderingAPIOGL::NewTexture() {
 }
 
 void GfxRenderingAPIOGL::DeleteTexture(uint32_t texID) {
+    MarkPicaGlStateForeign();
     glDeleteTextures(1, &texID);
 }
 
 void GfxRenderingAPIOGL::SelectTexture(int tile, GLuint texture_id) {
+    MarkPicaGlStateForeign();
     if (mLastActiveTexture != tile) {
         mLastActiveTexture = tile;
         glActiveTexture(GL_TEXTURE0 + tile);
@@ -733,6 +741,7 @@ void GfxRenderingAPIOGL::SelectTexture(int tile, GLuint texture_id) {
 }
 
 void GfxRenderingAPIOGL::UploadTexture(const uint8_t* rgba32_buf, uint32_t width, uint32_t height) {
+    MarkPicaGlStateForeign();
     if (width == 0 || height == 0) {
         return;
     }
@@ -743,6 +752,7 @@ void GfxRenderingAPIOGL::UploadTexture(const uint8_t* rgba32_buf, uint32_t width
 
 bool GfxRenderingAPIOGL::UploadTextureMipLevel(uint32_t level, const uint8_t* rgba32_buf,
                                                uint32_t width, uint32_t height) {
+    MarkPicaGlStateForeign();
     if (level == 0 || width == 0 || height == 0 || rgba32_buf == nullptr) {
         return false;
     }
@@ -800,6 +810,7 @@ static GLint gfx_native_wrap_to_opengl(GfxNativeTextureWrap wrap) {
 }
 
 void GfxRenderingAPIOGL::SetSamplerParameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt) {
+    MarkPicaGlStateForeign();
     if (mLastActiveTexture != tile) {
         mLastActiveTexture = tile;
         glActiveTexture(GL_TEXTURE0 + tile);
@@ -813,6 +824,7 @@ void GfxRenderingAPIOGL::SetSamplerParameters(int tile, bool linear_filter, uint
 }
 
 bool GfxRenderingAPIOGL::SetNativeSamplerParameters(int tile, const GfxNativeSamplerState& state) {
+    MarkPicaGlStateForeign();
     if (mLastActiveTexture != tile) {
         mLastActiveTexture = tile;
         glActiveTexture(GL_TEXTURE0 + tile);
@@ -864,14 +876,17 @@ void GfxRenderingAPIOGL::SetZmodeDecal(bool zmode_decal) {
 }
 
 void GfxRenderingAPIOGL::SetViewport(int x, int y, int width, int height) {
+    MarkPicaGlStateForeign();
     glViewport(x, y, width, height);
 }
 
 void GfxRenderingAPIOGL::SetScissor(int x, int y, int width, int height) {
+    MarkPicaGlStateForeign();
     glScissor(x, y, width, height);
 }
 
 void GfxRenderingAPIOGL::SetUseAlpha(bool use_alpha) {
+    MarkPicaGlStateForeign();
     int8_t val = use_alpha ? 1 : 0;
     if (mLastBlendEnabled != val) {
         mLastBlendEnabled = val;
@@ -888,6 +903,7 @@ void GfxRenderingAPIOGL::SetUseAlpha(bool use_alpha) {
 }
 
 bool GfxRenderingAPIOGL::SetNativeBlendState(const GfxNativeBlendState& state) {
+    MarkPicaGlStateForeign();
     if (!state.Enabled) {
         SetUseAlpha(false);
         return true;
@@ -909,6 +925,7 @@ bool GfxRenderingAPIOGL::SetNativeBlendState(const GfxNativeBlendState& state) {
 }
 
 bool GfxRenderingAPIOGL::SetNativeCullMode(GfxNativeCullMode mode) {
+    MarkPicaGlStateForeign();
     if (mode == GfxNativeCullMode::KeepAll) {
         glDisable(GL_CULL_FACE);
         return true;
@@ -941,6 +958,8 @@ bool GfxRenderingAPIOGL::SetOot3dNativeTransform(const float* row_major_matrix) 
 }
 
 void GfxRenderingAPIOGL::PrepareTriangleDraw() {
+    RestoreLegacyVertexArray();
+    MarkPicaGlStateForeign();
     if (mCurrentDepthTest != mLastDepthTest || mCurrentDepthMask != mLastDepthMask) {
         mLastDepthTest = mCurrentDepthTest;
         mLastDepthMask = mCurrentDepthMask;
@@ -994,6 +1013,8 @@ void GfxRenderingAPIOGL::PrepareTriangleDraw() {
 }
 
 void GfxRenderingAPIOGL::BindArrayBufferForCurrentShader(GLuint buffer) {
+    RestoreLegacyVertexArray();
+    MarkPicaGlStateForeign();
     if (buffer == mCurrentArrayBuffer) {
         return;
     }
@@ -1106,10 +1127,12 @@ void GfxRenderingAPIOGL::OnResize() {
 }
 
 void GfxRenderingAPIOGL::StartFrame() {
+    MarkPicaGlStateForeign();
     mFrameCount++;
 }
 
 void GfxRenderingAPIOGL::EndFrame() {
+    MarkPicaGlStateForeign();
     glFlush();
 }
 
@@ -1117,6 +1140,7 @@ void GfxRenderingAPIOGL::FinishRender() {
 }
 
 int GfxRenderingAPIOGL::CreateFramebuffer() {
+    MarkPicaGlStateForeign();
     GLuint clrbuf;
     glGenTextures(1, &clrbuf);
     glBindTexture(GL_TEXTURE_2D, clrbuf);
@@ -1151,6 +1175,7 @@ int GfxRenderingAPIOGL::CreateFramebuffer() {
 void GfxRenderingAPIOGL::UpdateFramebufferParameters(int fb_id, uint32_t width, uint32_t height, uint32_t msaa_level,
                                                      bool opengl_invertY, bool render_target, bool has_depth_buffer,
                                                      bool can_extract_depth) {
+    MarkPicaGlStateForeign();
     FramebufferOGL& fb = mFrameBuffers[fb_id];
 
     width = std::max(width, 1U);
@@ -1205,6 +1230,7 @@ bool GfxRenderingAPIOGL::UpdateFramebufferParametersWithColorFormat(
     int fb_id, uint32_t width, uint32_t height, uint32_t msaa_level, bool opengl_invertY,
     bool render_target, bool has_depth_buffer, bool can_extract_depth,
     GfxFramebufferColorFormat color_format) {
+    MarkPicaGlStateForeign();
     if (color_format == GfxFramebufferColorFormat::Rgba8) {
         UpdateFramebufferParameters(fb_id, width, height, msaa_level, opengl_invertY, render_target,
                                     has_depth_buffer, can_extract_depth);
@@ -1263,6 +1289,7 @@ bool GfxRenderingAPIOGL::SupportsOot3dShadow2dR32uiPipeline() const {
 }
 
 bool GfxRenderingAPIOGL::BindOot3dShadow2dTexture(int fb_id, uint32_t texture_unit) {
+    MarkPicaGlStateForeign();
     if (fb_id <= 0 || fb_id >= static_cast<int>(mFrameBuffers.size()) ||
         texture_unit != kOot3dShadow2dTextureUnit) {
         return false;
@@ -1285,6 +1312,7 @@ bool GfxRenderingAPIOGL::BindOot3dShadow2dTexture(int fb_id, uint32_t texture_un
 }
 
 bool GfxRenderingAPIOGL::SetOot3dShadow2dShaderParameters(uint32_t texture_bias, bool orthographic, bool invert) {
+    MarkPicaGlStateForeign();
     if (mCurrentShaderProgram == nullptr ||
         mCurrentShaderProgram->oot3d_shadow2d_texture_bias_location < 0) {
         return false;
@@ -1305,6 +1333,7 @@ bool GfxRenderingAPIOGL::SupportsOot3dPicaFogLut() const {
 bool GfxRenderingAPIOGL::SetOot3dPicaFogShaderParameters(const uint32_t* lut_words,
                                                          size_t lut_word_count, bool flip,
                                                          uint64_t state_key) {
+    MarkPicaGlStateForeign();
     if (mCurrentShaderProgram == nullptr || lut_words == nullptr ||
         lut_word_count != kOot3dPicaFogLutEntryCount ||
         mCurrentShaderProgram->oot3d_pica_fog_lut_location < 0 ||
@@ -1326,6 +1355,7 @@ bool GfxRenderingAPIOGL::SetOot3dPicaFogShaderParameters(const uint32_t* lut_wor
 bool GfxRenderingAPIOGL::SetOot3dPicaAlphaTestShaderParameters(bool enabled,
                                                                uint32_t compare_func,
                                                                uint8_t reference) {
+    MarkPicaGlStateForeign();
     if (mCurrentShaderProgram == nullptr ||
         mCurrentShaderProgram->oot3d_pica_alpha_test_enabled_location < 0 ||
         mCurrentShaderProgram->oot3d_pica_alpha_test_func_location < 0 ||
@@ -1347,6 +1377,7 @@ bool GfxRenderingAPIOGL::SupportsOot3dPicaTexture2() const {
 }
 
 bool GfxRenderingAPIOGL::EnsureOot3dShadow2dDepthEncodeProgram() {
+    MarkPicaGlStateForeign();
 #if defined(USE_OPENGLES)
     return false;
 #else
@@ -1426,6 +1457,7 @@ void main() {
 }
 
 bool GfxRenderingAPIOGL::StartOot3dShadow2dDepthEncodePass(int fb_id, uint32_t clear_value) {
+    MarkPicaGlStateForeign();
     if (!SupportsOot3dShadow2dR32uiPipeline() || fb_id <= 0 ||
         fb_id >= static_cast<int>(mFrameBuffers.size()) ||
         !EnsureOot3dShadow2dDepthEncodeProgram()) {
@@ -1464,11 +1496,14 @@ bool GfxRenderingAPIOGL::StartOot3dShadow2dDepthEncodePass(int fb_id, uint32_t c
 }
 
 void GfxRenderingAPIOGL::EndOot3dShadow2dDepthEncodePass() {
+    MarkPicaGlStateForeign();
     glBindFramebuffer(GL_FRAMEBUFFER, mFrameBuffers[mCurrentFrameBuffer].fbo);
 }
 
 bool GfxRenderingAPIOGL::DrawOot3dShadow2dDepthEncodedTriangles(float buf_vbo[], size_t buf_vbo_len,
                                                                 size_t buf_vbo_num_tris) {
+    RestoreLegacyVertexArray();
+    MarkPicaGlStateForeign();
     if (mOot3dShadow2dDepthEncodeProgram == 0 ||
         mOot3dShadow2dDepthEncodePositionLocation < 0 ||
         buf_vbo_len != buf_vbo_num_tris * 3 * 4) {
@@ -1488,6 +1523,7 @@ bool GfxRenderingAPIOGL::DrawOot3dShadow2dDepthEncodedTriangles(float buf_vbo[],
 }
 
 void GfxRenderingAPIOGL::StartDrawToFramebuffer(int fb_id, float noise_scale) {
+    MarkPicaGlStateForeign();
     FramebufferOGL& fb = mFrameBuffers[fb_id];
 
     if (noise_scale != 0.0f) {
@@ -1498,6 +1534,7 @@ void GfxRenderingAPIOGL::StartDrawToFramebuffer(int fb_id, float noise_scale) {
 }
 
 void GfxRenderingAPIOGL::ClearFramebuffer(bool color, bool depth) {
+    MarkPicaGlStateForeign();
     if (mLastScissorEnabled != 0) {
         mLastScissorEnabled = 0;
         glDisable(GL_SCISSOR_TEST);
@@ -1513,6 +1550,7 @@ void GfxRenderingAPIOGL::ClearFramebuffer(bool color, bool depth) {
 }
 
 void GfxRenderingAPIOGL::ClearDepthRegion(int x, int y, int w, int h) {
+    MarkPicaGlStateForeign();
     // Save current scissor state so callers don't need to manually invalidate.
     GLint prevScissor[4];
     GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
@@ -1532,6 +1570,7 @@ void GfxRenderingAPIOGL::ClearDepthRegion(int x, int y, int w, int h) {
 }
 
 void GfxRenderingAPIOGL::ResolveMSAAColorBuffer(int fb_id_target, int fb_id_source) {
+    MarkPicaGlStateForeign();
     FramebufferOGL& fb_dst = mFrameBuffers[fb_id_target];
     FramebufferOGL& fb_src = mFrameBuffers[fb_id_source];
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fb_dst.fbo);
@@ -1558,6 +1597,7 @@ void* GfxRenderingAPIOGL::GetFramebufferTextureId(int fb_id) {
 }
 
 void GfxRenderingAPIOGL::SelectTextureFb(int fb_id) {
+    MarkPicaGlStateForeign();
     // glDisable(GL_DEPTH_TEST);
     int tile = 0;
     GLuint texId = mFrameBuffers[fb_id].clrbuf;
@@ -1572,6 +1612,7 @@ void GfxRenderingAPIOGL::SelectTextureFb(int fb_id) {
 
 void GfxRenderingAPIOGL::CopyFramebuffer(int fb_dst_id, int fb_src_id, int srcX0, int srcY0, int srcX1, int srcY1,
                                          int dstX0, int dstY0, int dstX1, int dstY1) {
+    MarkPicaGlStateForeign();
     if (fb_dst_id >= (int)mFrameBuffers.size() || fb_src_id >= (int)mFrameBuffers.size()) {
         return;
     }
@@ -1643,6 +1684,7 @@ void GfxRenderingAPIOGL::CopyFramebuffer(int fb_dst_id, int fb_src_id, int srcX0
 }
 
 void GfxRenderingAPIOGL::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32_t height, uint16_t* rgba16_buf) {
+    MarkPicaGlStateForeign();
     if (fb_id >= (int)mFrameBuffers.size()) {
         return;
     }
@@ -1676,6 +1718,7 @@ void GfxRenderingAPIOGL::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32_
 
 std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff>
 GfxRenderingAPIOGL::GetPixelDepth(int fb_id, const std::set<std::pair<float, float>>& coordinates) {
+    MarkPicaGlStateForeign();
     std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff> res;
 
     FramebufferOGL& fb = mFrameBuffers[fb_id];
@@ -1744,6 +1787,7 @@ GfxRenderingAPIOGL::GetPixelDepth(int fb_id, const std::set<std::pair<float, flo
 }
 
 void GfxRenderingAPIOGL::SetTextureFilter(FilteringMode mode) {
+    MarkPicaGlStateForeign();
     gfx_texture_cache_clear();
     mCurrentFilterMode = mode;
 }
