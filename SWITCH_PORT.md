@@ -7,6 +7,10 @@ que ele credita (veja [README.md](README.md) e [THIRD_PARTY_NOTICES.md](THIRD_PA
 Aqui estão as mudanças feitas para o **homebrew de Switch** (`.nro`) rodar e ficar jogável num
 console real, no branch `switch-port`.
 
+> **Guia reutilizável:** a receita para portar outros jogos de 3DS com as mesmas técnicas (pipeline,
+> substituições nativas, otimizações do gerador, runtime, medição e checklist) está em
+> [docs/GUIA_PORT_3DS_SWITCH.md](docs/GUIA_PORT_3DS_SWITCH.md).
+
 > **Nenhuma ROM, código do jogo, C++ gerado a partir do jogo ou asset é distribuído aqui.**
 > Você precisa do seu próprio dump decriptado do cartucho. Licença: GPL-3.0, como o original.
 

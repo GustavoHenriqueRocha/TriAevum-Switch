@@ -1,5 +1,6 @@
 > **Fork com port para Nintendo Switch.** Este fork de [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum)
 > adiciona correções e otimizações para o homebrew de Switch — veja [SWITCH_PORT.md](SWITCH_PORT.md).
+> Para portar outros jogos de 3DS reaproveitando essas técnicas, veja o [guia de port 3DS → Switch](docs/GUIA_PORT_3DS_SWITCH.md).
 > Todo o crédito do projeto é do autor original e dos projetos que ele credita abaixo. Nenhuma ROM é distribuída.
 
 # TriAevum — Echoes of Time
