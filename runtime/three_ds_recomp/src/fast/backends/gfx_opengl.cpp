@@ -20,6 +20,7 @@
 #endif
 
 #include "fast/backends/gfx_opengl.h"
+#include "fast/backends/gl_frame_profiler.h"
 #include "ship/window/gui/Gui.h"
 #include <prism/processor.h>
 #include <fstream>
@@ -1117,6 +1118,7 @@ void GfxRenderingAPIOGL::Init() {
 
     glGetIntegerv(GL_MAX_SAMPLES, &mMaxMsaaLevel);
     InitNativePica();
+    GlPerf::Init(); // config/gpu_timing; absent: no cost
 }
 
 void GfxRenderingAPIOGL::Shutdown() {
@@ -1129,14 +1131,18 @@ void GfxRenderingAPIOGL::OnResize() {
 void GfxRenderingAPIOGL::StartFrame() {
     MarkPicaGlStateForeign();
     mFrameCount++;
+    GlPerf::FrameBegin();
 }
 
 void GfxRenderingAPIOGL::EndFrame() {
     MarkPicaGlStateForeign();
+    GlPerf::Mark(GlPerf::Stage::Present);
     glFlush();
 }
 
 void GfxRenderingAPIOGL::FinishRender() {
+    // After the swap (SwapBuffersBegin).
+    GlPerf::FrameEnd();
 }
 
 int GfxRenderingAPIOGL::CreateFramebuffer() {
@@ -1535,6 +1541,7 @@ void GfxRenderingAPIOGL::StartDrawToFramebuffer(int fb_id, float noise_scale) {
 
 void GfxRenderingAPIOGL::ClearFramebuffer(bool color, bool depth) {
     MarkPicaGlStateForeign();
+    GlPerf::Scope perfStage(GlPerf::Stage::Clear);
     if (mLastScissorEnabled != 0) {
         mLastScissorEnabled = 0;
         glDisable(GL_SCISSOR_TEST);

@@ -4,6 +4,7 @@
 #include <fstream>
 #include "fast/renderer3ds/pica_surface_debug.h"
 #include "oot3d_native_room_shadow_shell.h"
+#include "fast/backends/gl_frame_profiler.h"
 #if defined(__SWITCH__)
 #include <malloc.h>
 #include <switch.h>
@@ -13,6 +14,13 @@ extern "C" {
 // Provided only by a Mesa built with the Horizon shader cache (mesa_switch.h).
 unsigned mesa_switch_get_stats(uint64_t* out, unsigned count) __attribute__((weak));
 const char* mesa_switch_shader_cache_status(void) __attribute__((weak));
+#if defined(__SWITCH__)
+// newlib's running totals (mallocr.c: arena = memory taken with sbrk), kept
+// up to date by malloc itself: reading them takes no lock, unlike mallinfo(),
+// which holds the malloc lock shared with Mesa while it walks every free list.
+extern struct mallinfo __malloc_current_mallinfo __attribute__((weak));
+extern size_t __malloc_max_sbrked_mem __attribute__((weak));
+#endif
 }
 
 namespace Oot3dA32Window {
@@ -510,6 +518,7 @@ bool NativeA32WindowSession::RunFrame() {
     capturedTemporalSample.reset();
     const auto waitStart = std::chrono::steady_clock::now();
     CpuProbe::Scope cpuPacing(CpuProbe::Phase::Pacing);
+    Fast::GlPerf::Mark(Fast::GlPerf::Stage::Pacing);
     realtimePacer.WaitForNextRefresh();
     cpuPacing.Stop();
     rendererTiming->PacingWaitSeconds += SecondsSince(waitStart);
@@ -637,9 +646,22 @@ bool NativeA32WindowSession::RunFrame() {
              << " gl_ring_orphans=" << gpu.StreamRingOrphans
              << " gl_oom=" << gpu.OutOfMemoryEvents
              << " gl_draws_skipped=" << gpu.SkippedDraws;
-        const struct mallinfo heap = mallinfo();
-        perf << " heap_used_mb=" << (static_cast<double>(heap.uordblks) / kMb)
-             << " heap_arena_mb=" << (static_cast<double>(heap.arena) / kMb);
+        // Lock-free arena every window; the bytes in use need mallinfo()
+        // (global malloc lock + walk of the free lists): only every 20th
+        // window (~100 s at 30 fps).
+        static uint32_t heapWindows = 0U;
+        if (&__malloc_current_mallinfo != nullptr) {
+          const volatile size_t& arena = __malloc_current_mallinfo.arena;
+          perf << " heap_arena_mb=" << (static_cast<double>(arena) / kMb);
+        }
+        if (&__malloc_max_sbrked_mem != nullptr) {
+          const volatile size_t& peak = __malloc_max_sbrked_mem;
+          perf << " heap_arena_peak_mb=" << (static_cast<double>(peak) / kMb);
+        }
+        if (heapWindows++ % 20U == 0U) {
+          const struct mallinfo heap = mallinfo();
+          perf << " heap_used_mb=" << (static_cast<double>(heap.uordblks) / kMb);
+        }
         uint64_t usedMemory = 0U;
         uint64_t totalMemory = 0U;
         if (R_SUCCEEDED(svcGetInfo(&usedMemory, InfoType_UsedMemorySize,
@@ -723,6 +745,11 @@ bool NativeA32WindowSession::RunFrame() {
         }
       }
       perf << '\n';
+      // config/gpu_timing: GPU/CPU per render-thread stage and GL call
+      // counts over the same window (empty when off).
+      if (Fast::GlPerf::Enabled()) {
+        perf << Fast::GlPerf::TakeReport(runFrameCount) << '\n';
+      }
       windowStart = now;
       windowValues = values;
       windowHostFrames = runFrameCount;
@@ -2871,6 +2898,11 @@ void NativeA32WindowSession::ExecuteVisualSample(const Oot3dNativeGame::Oot3dPic
   // gave the next displayed sample a backward sweep.
   if (present) Fast::Oot3d::GrassInteractionBridge::Instance().SelectSample(temporalSample);
   PinGpuCopyResources(sample);
+  // config/gpu_timing: step/interp frame and canonical (hidden) draws.
+  Fast::GlPerf::SampleScope perfSample(
+      kind == Oot3dNativeGame::Oot3dPicaPresentationExecutionKind::NativeFrame ||
+          kind == Oot3dNativeGame::Oot3dPicaPresentationExecutionKind::CurrentFrame,
+      present);
   if (!picaPresentationScheduler.Execute(
           api, sample, renderTargetNamespace, kind,
           present, &renderError)) {

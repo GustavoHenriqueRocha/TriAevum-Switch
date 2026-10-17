@@ -1,5 +1,6 @@
 #include "oot3d_native_render_command_stream.h"
 #include "oot3d_switch_threads.h"
+#include "fast/backends/gl_frame_profiler.h"
 
 #if defined(__SWITCH__)
 #include <switch.h>
@@ -67,6 +68,7 @@ void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
     if (mMode == Mode::Inline) {
         {
             CommandScope scope(true);
+            Fast::GlPerf::CommandScope perfCommand;
             command();
         }
         std::lock_guard lock(mMutex);
@@ -97,6 +99,7 @@ bool NativeRenderCommandStream::Run(Command command) {
     if (ShutdownRequested()) return false;
     {
         CommandScope scope(true);
+        Fast::GlPerf::CommandScope perfCommand;
         command();
     }
     std::lock_guard lock(mMutex);
@@ -234,6 +237,7 @@ void NativeRenderCommandStream::WorkerLoop() {
         std::exception_ptr failure;
         try {
             CommandScope scope(entry.Synchronous);
+            Fast::GlPerf::CommandScope perfCommand;
             entry.Work();
         } catch (...) {
             failure = std::current_exception();

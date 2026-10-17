@@ -1,6 +1,7 @@
 #include "oot3d_n64_ui_renderer.h"
 
 #include "oot3d/renderer/ui_presentation_layout.h"
+#include "fast/backends/gl_frame_profiler.h"
 
 #include <algorithm>
 #include <array>
@@ -331,6 +332,7 @@ bool N64UiFast3dRenderer::Render(std::span<const UiPrimitive> primitives,
                                 N64UiCanvasMode canvasMode,
                                 PreparedUiTextures prepared,
                                 std::string* error) {
+    Fast::GlPerf::Scope perfStage(Fast::GlPerf::Stage::Ui);
     Stage(std::move(prepared));
     ++stats_.frames;
     stats_.primitives_received += primitives.size();

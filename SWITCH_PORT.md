@@ -266,6 +266,39 @@ Desempenho e usabilidade:
   `gl_us_per_draw`. Os contadores rodam nos dois modos, então o mesmo build mede antes e depois.
 - Quadro sintético de 400 draws (teste): 27,5 → 2,7 chamadas de estado por draw.
 
+### Perfil de GPU/CPU por etapa: `config/gpu_timing` (2026-10-17)
+- Arquivo `sdmc:/switch/oot3dre/config/gpu_timing` (conteúdo opcional: N, amostrar a GPU 1 quadro a
+  cada N; padrão 30). Desktop: `TRIAEVUM_GL_GPU_TIMING=30`. Sem o arquivo nada é instalado: cada
+  ponto de marcação custa uma carga atômica e um desvio.
+- Cada janela de 150 quadros do `perf.txt` ganha uma linha `glperf host_frames=... ` com médias por
+  tipo de quadro de host: `step` (executa um quadro novo do jogo), `interp` (só a amostra repetida /
+  interpolada do fps60) e `hold` (reapresentação). Chaves `<tipo>_gpu_<etapa>` (ms por quadro
+  amostrado), `<tipo>_gpu_ms` (início do quadro → depois do swap), `<tipo>_cpu_<etapa>` (ms da
+  render thread por quadro) e `<tipo>_n_<contador>` (por quadro; `*_kb` em KiB).
+- Etapas: `begin`, `clear` (janela, alvos PICA, fills), `pica_top`/`pica_bottom`/`pica_off` (draws
+  PICA da amostra exibida por alvo: tela de cima, de baixo, outros como sombras/RTT), `pica_canon`
+  (execução canônica, não exibida, de um quadro novo), `transfer` (display transfers), `post_aa`,
+  `post_easu`, `scanout` (último passe na janela: RCAS, EASU/FXAA direto ou cópia), `ui` (HUD/menus
+  TopScreen), `present` (EndFrame + swap); só CPU: `other`, `pacing`, `idle`.
+- GPU: `glQueryCounter(GL_TIMESTAMP)` a cada troca de etapa no quadro amostrado (pool de 4×128
+  queries); lidos 2+ quadros depois com `GL_QUERY_RESULT_AVAILABLE`, nunca bloqueia (sem resultado,
+  a amostra é descartada: `gpu_dropped`). Diferença entre timestamps = execução da GPU **mais** a
+  espera por comandos da CPU dentro do quadro: se a render thread é o gargalo, `gpu_*` inclui
+  ociosidade.
+- Contadores (ganchos nos ponteiros do glad, instalados só com o arquivo): draws, clears,
+  `fbo_binds/fbo_changes`, `tex_binds`, `prog_binds/prog_changes`, VAO/UBO binds, uniforms soltos,
+  bytes enviados (`buf_upload_kb`, `map_kb`, `tex_upload_kb`), `buf_reallocs` (glBufferData),
+  blits, `barriers` (glMemoryBarrier), `syncs`, `finish`, `flush`, `get_error`, `gets`
+  (glGet*/glIsEnabled/glCheckFramebufferStatus), `readbacks`, `gen_delete`, `enables`.
+- Custo ligado: uma chamada indireta + incremento por chamada GL contada, uma leitura de relógio por
+  troca de etapa e ~20–60 timestamps no quadro amostrado.
+- Memória: `mallinfo()` (trava o malloc do newlib, compartilhado com o Mesa, enquanto percorre as
+  listas livres) agora só a cada 20 janelas (`heap_used_mb` aparece só nelas); `heap_arena_mb` e
+  `heap_arena_peak_mb` vêm dos totais que o próprio malloc mantém (sem lock) em toda janela.
+- Resumo: `python3 tools/oot3d/perf_report.py perf.txt [--session -1] [--skip 2] [--windows]` —
+  fps por sessão, fases, memória e, com `glperf`, top etapas de GPU, CPU da render thread e
+  contadores por tipo de quadro.
+
 ## Próximos passos
 
 - Ideias futuras (pedido do usuário, 2026-10-17):

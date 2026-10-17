@@ -9,6 +9,7 @@
 
 
 #include "fast/backends/gfx_opengl_pica_post.h"
+#include "fast/backends/gl_frame_profiler.h"
 #include "fast/backends/gfx_opengl_pica_residency.h"
 #include "fast/backends/gfx_opengl_pica_scale.h"
 #include "fast/backends/gfx_opengl_pica_state_cache.h"
@@ -1451,6 +1452,7 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
     bool complete = true;
 
     if (config.Aa == PicaGlPost::Antialiasing::Smaa) {
+        GlPerf::Mark(GlPerf::Stage::PostAa);
         complete = EnsurePicaGlPostImage(post.Edges, GL_RG8, sourceWidth,
                                          sourceHeight) &&
                    EnsurePicaGlPostImage(post.Weights, GL_RGBA8, sourceWidth,
@@ -1484,6 +1486,7 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
             current = post.Color.Texture;
         }
     } else if (config.Aa == PicaGlPost::Antialiasing::Fxaa && !fxaaInWindow) {
+        GlPerf::Mark(GlPerf::Stage::PostAa);
         complete = EnsurePicaGlPostImage(post.Color, GL_RGBA8, sourceWidth,
                                          sourceHeight);
         if (complete) {
@@ -1494,6 +1497,7 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
         }
     }
     if (complete && easu && rcas) {
+        GlPerf::Mark(GlPerf::Stage::PostEasu);
         complete = EnsurePicaGlPostImage(post.Upscaled, GL_RGBA8, outputWidth,
                                          outputHeight);
         if (complete) {
@@ -1506,6 +1510,7 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
         }
     }
 
+    GlPerf::Mark(GlPerf::Stage::Scanout);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
     if (!complete) {
@@ -2193,6 +2198,7 @@ void ApplyPicaFill(const GfxNativePicaMemoryFillView& fill,
     if (!color && !depth) {
         return;
     }
+    GlPerf::Scope perfStage(GlPerf::Stage::Clear);
     if (color) {
         const uint32_t shadow =
             static_cast<uint32_t>(PicaFillByte(fill, 0U)) |
@@ -2564,6 +2570,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             return false;
         }
         BeginPicaGlFrame(*mNativePica, mFrameCount);
+        GlPerf::MarkPicaDraw(draw.FramebufferWidth, draw.FramebufferHeight);
 
         // State cache (gfx_opengl_pica_state_cache.h): trusted only across
         // consecutive PICA draws; helpers below that create programs,
@@ -3371,6 +3378,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
             (transfer.Flags & 0x10000U) != 0U || scaling > 2U) {
             throw std::runtime_error("PICA display transfer mode is unsupported");
         }
+        GlPerf::Mark(GlPerf::Stage::Transfer);
         const auto source = std::find_if(
             mNativePica->Targets.begin(), mNativePica->Targets.end(),
             [&](const auto& entry) {
@@ -3497,6 +3505,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
             const int viewportX = (windowWidth - viewportWidth) / 2;
             const int viewportY = (windowHeight - viewportHeight) / 2;
 
+            GlPerf::Mark(GlPerf::Stage::Scanout);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
             glDisable(GL_DEPTH_TEST);
@@ -3582,6 +3591,7 @@ bool GfxRenderingAPIOGL::ClearPicaRenderTarget(
             key.ColorAddress != colorPhysicalAddress) {
             continue;
         }
+        GlPerf::Mark(GlPerf::Stage::Clear);
         ClearPicaShadow(target, 0xFFFFFFFFU, mNativePica->Lean);
         ++target.Version;
         glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
