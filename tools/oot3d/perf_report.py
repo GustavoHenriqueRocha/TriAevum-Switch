@@ -142,6 +142,26 @@ def percentile(data: list[float], fraction: float) -> float:
 MODE_NAMES = {"handheld": "portátil", "docked": "dock"}
 
 
+# Degraus de clock do Switch (os perfis do sys-clk). O clock medido (realFreqs)
+# oscila alguns MHz em volta do degrau: 1780..1789 é o mesmo 1785.
+CLOCK_STEPS = {
+    "cpu_mhz": (612, 714, 816, 918, 1020, 1122, 1224, 1326, 1428, 1581, 1683,
+                1785, 1887, 1963, 2091, 2193, 2295, 2397),
+    "gpu_mhz": (77, 154, 230, 307, 384, 461, 538, 614, 691, 768, 845, 922, 998,
+                1075, 1152, 1229, 1267),
+    "mem_mhz": (665, 800, 1065, 1331, 1600, 1862, 2131),
+}
+
+
+def snap_clock(key: str, mhz: int) -> int:
+    """Encaixa o MHz medido no degrau mais próximo (se estiver a até 3%)."""
+    steps = CLOCK_STEPS.get(key)
+    if mhz <= 0 or not steps:
+        return mhz
+    nearest = min(steps, key=lambda step: abs(step - mhz))
+    return nearest if abs(nearest - mhz) <= nearest * 0.03 else mhz
+
+
 def clock_key(values: dict[str, object]) -> tuple | None:
     """(cpu, gpu, mem, modo) da janela; None nos perf.txt sem clocks."""
     if "cpu_mhz" not in values and "op_mode" not in values:
@@ -149,7 +169,7 @@ def clock_key(values: dict[str, object]) -> tuple | None:
 
     def mhz(key: str) -> int:
         value = values.get(key)
-        return int(value) if isinstance(value, float) and value > 0 else -1
+        return snap_clock(key, int(value)) if isinstance(value, float) and value > 0 else -1
 
     mode = values.get("op_mode")
     return (mhz("cpu_mhz"), mhz("gpu_mhz"), mhz("mem_mhz"),
