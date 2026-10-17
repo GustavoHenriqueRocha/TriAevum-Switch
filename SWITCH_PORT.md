@@ -55,6 +55,17 @@ Desempenho e usabilidade:
   1280 na escala 3) e o FOV horizontal cresce na mesma razão pelo hook de projeção que o PC já usa;
   HUD, menus e textos continuam num quadro 5:3 centralizado, como no Vulkan do PC. Desktop GL:
   `TRIAEVUM_GL_WIDESCREEN=1`.
+  - **Menus no widescreen** (`config/widescreen_menus`, padrão ligado; `0` volta ao comportamento
+    anterior; desktop `TRIAEVUM_GL_WIDESCREEN_MENUS`): antes só o domínio `Ui` (HUD, texto, pausa)
+    ia para o quadro 5:3; tela de título, seleção de arquivo, criação de nome e escolha normal/Master
+    Quest (domínio `Unknown`/`Scene`) esticavam ~6,7%. Agora também vão para o quadro, pelo estado
+    PICA: viewport que não cobre a largura apresentada (o menu de baixo que o TopScreen realoca, Y
+    40..360) e projeção ortográfica de c0-c3 com pixels quadrados cuja geometria não cobre o viewport
+    (painéis, textos, logotipo). Fades/lavagens de tela inteira, redesenhos de cópia do quadro e a
+    camada de atmosfera continuam esticados com a cena. Modelos 3D em perspectiva postos no quadro
+    cujo frustum o hook alargou (anisotropia medida = 1/fator) têm o viewport alargado pelo mesmo
+    fator em torno do centro, recortado ao quadro (não ficam espremidos). Política e testes:
+    `gl_widescreen_menu_policy.h`, `tests/gl_widescreen_menu_policy_tests.cpp`.
 - **Tela de toque**: tocar funciona onde o mouse funciona no PC (tela de título/seleção de arquivo e
   as páginas de pausa Itens/Mapa/Equipamento do TopScreen); no jogo em movimento o toque é ignorado,
   como o mouse no PC. Toques curtos ficam retidos até o jogo ler.

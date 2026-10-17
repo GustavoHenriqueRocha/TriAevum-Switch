@@ -915,6 +915,15 @@ target_include_directories(gfx_opengl_pica_scale_tests
 target_link_libraries(gfx_opengl_pica_scale_tests PRIVATE gtest_main)
 gtest_discover_tests(gfx_opengl_pica_scale_tests DISCOVERY_TIMEOUT 30)
 
+# Menus/2D no widescreen do backend OpenGL (quadro 5:3 centralizado).
+add_executable(gl_widescreen_menu_policy_tests
+    gl_widescreen_menu_policy_tests.cpp
+)
+set_property(TARGET gl_widescreen_menu_policy_tests PROPERTY CXX_STANDARD 20)
+target_include_directories(gl_widescreen_menu_policy_tests PRIVATE ../include)
+target_link_libraries(gl_widescreen_menu_policy_tests PRIVATE gtest_main)
+gtest_discover_tests(gl_widescreen_menu_policy_tests DISCOVERY_TIMEOUT 30)
+
 # GPU memory policy of the OpenGL PICA backend (texture residency, stream
 # rings) over long simulated sessions.
 add_executable(gfx_opengl_pica_residency_tests

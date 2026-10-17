@@ -13,6 +13,7 @@
 #include "fast/backends/gfx_opengl_pica_residency.h"
 #include "fast/backends/gfx_opengl_pica_scale.h"
 #include "fast/backends/gfx_opengl_pica_state_cache.h"
+#include "fast/oot3d/gl_widescreen_menu_policy.h"
 #include "fast/oot3d/gl_widescreen_policy.h"
 #include "fast/oot3d/pica_geometry_registry.h"
 #include "fast/oot3d/pica_uniform_layout.h"
@@ -1904,6 +1905,68 @@ float ResolvePicaGlWidescreenFactor() {
                                      static_cast<uint32_t>(height));
 }
 
+// Placement of one draw on the widened top-screen target: the scene's
+// stretched mapping or the centred native canvas
+// (gl_widescreen_menu_policy.h). Reads 64 bytes of uniforms; the vertex
+// coverage proof runs only for the few draws that need it.
+Oot3d::GlWidescreenDrawPlacement ResolvePicaGlWidescreenPlacement(
+    const GfxNativePicaDrawView& draw, float widescreenFactor) {
+    const bool menus = Oot3d::GlWidescreenMenusEnabled();
+    Oot3d::GlWidescreenDrawEvidence evidence;
+    evidence.UiDomain =
+        draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Ui;
+    evidence.Atmosphere = draw.Composition.Layer ==
+                          Renderer3ds::PicaCompositionLayer::Atmosphere;
+    evidence.ViewportSpansPresentedWidth =
+        draw.ViewportY <= 0.5F &&
+        draw.ViewportY + draw.ViewportHeight >=
+            static_cast<float>(draw.FramebufferHeight) - 0.5F;
+    evidence.ViewportCoversTarget =
+        draw.ViewportX <= 0.0F && draw.ViewportY <= 0.0F &&
+        draw.ViewportX + draw.ViewportWidth >=
+            static_cast<float>(draw.FramebufferWidth) &&
+        draw.ViewportY + draw.ViewportHeight >=
+            static_cast<float>(draw.FramebufferHeight);
+    const bool uniformsAvailable =
+        draw.VertexUniformBytes.size() >=
+        Oot3d::kPicaPackedVertexFloatOffset + 4U * Oot3d::kPicaPackedVec4Bytes;
+    if (menus && uniformsAvailable) {
+        std::array<float, 16> rows{};
+        std::memcpy(rows.data(),
+                    draw.VertexUniformBytes.data() +
+                        Oot3d::kPicaPackedVertexFloatOffset,
+                    sizeof(rows));
+        const auto projection = Oot3d::DecodeGlProjection(rows);
+        evidence.Projection = projection.Shape;
+        evidence.PixelAnisotropy = Oot3d::GlNativePixelAnisotropy(
+            projection, draw.ViewportWidth, draw.ViewportHeight,
+            draw.FramebufferWidth);
+    }
+    if (menus && !evidence.UiDomain) {
+        evidence.SamplesRenderedCopy = std::any_of(
+            draw.Textures.begin(), draw.Textures.end(),
+            [](const auto& texture) { return !texture.CopyReferences.empty(); });
+    }
+    const bool needsCoverage =
+        uniformsAvailable &&
+        ((evidence.UiDomain && evidence.ViewportCoversTarget) ||
+         (menus && Oot3d::GlWidescreenOrthographicPanelCandidate(evidence)));
+    if (needsCoverage) {
+        uint32_t booleanUniforms = 0U;
+        std::memcpy(&booleanUniforms,
+                    draw.VertexUniformBytes.data() +
+                        Oot3d::kPicaPackedVertexBooleanMaskOffset,
+                    sizeof(booleanUniforms));
+        evidence.GeometryCoversViewport =
+            Renderer3ds::PicaDrawGeometryCoversViewport(
+                draw, booleanUniforms,
+                draw.VertexUniformBytes.subspan(
+                    Oot3d::kPicaPackedVertexFloatOffset));
+    }
+    return Oot3d::ResolveGlWidescreenDrawPlacement(evidence, widescreenFactor,
+                                                   menus);
+}
+
 PicaGlTarget& GetPicaGlTarget(
     GfxRenderingAPIOGL::NativePicaState& state,
     const GfxNativePicaDrawView& draw) {
@@ -3214,26 +3277,12 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             // widened the frustum by the same factor; placed UI (HUD, menus,
             // dialogue, file select) keeps the native proportions on a
             // centred canvas, which the touch/pointer mapping also assumes.
-            bool placedUi =
-                draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Ui;
-            if (placedUi &&
-                draw.ViewportX <= 0.0F && draw.ViewportY <= 0.0F &&
-                draw.ViewportX + draw.ViewportWidth >=
-                    static_cast<float>(draw.FramebufferWidth) &&
-                draw.ViewportY + draw.ViewportHeight >=
-                    static_cast<float>(draw.FramebufferHeight) &&
-                draw.VertexUniformBytes.size() >=
-                    Oot3d::kPicaPackedVertexFloatOffset) {
-                uint32_t booleanUniforms = 0U;
-                std::memcpy(&booleanUniforms,
-                            draw.VertexUniformBytes.data() +
-                                Oot3d::kPicaPackedVertexBooleanMaskOffset,
-                            sizeof(booleanUniforms));
-                placedUi = !Renderer3ds::PicaDrawGeometryCoversViewport(
-                    draw, booleanUniforms,
-                    draw.VertexUniformBytes.subspan(
-                        Oot3d::kPicaPackedVertexFloatOffset));
-            }
+            // Menus outside the Ui domain (title, file select, the relocated
+            // lower menu) are recognised by their PICA state
+            // (gl_widescreen_menu_policy.h, config/widescreen_menus).
+            const auto placement = ResolvePicaGlWidescreenPlacement(
+                draw, target.ScaleY / resolutionScale);
+            const bool placedUi = placement.Canvas;
             const float scaleX = resolutionScale;
             const float scaleY = placedUi ? scaleX : target.ScaleY;
             const float offsetY = placedUi
@@ -3248,10 +3297,22 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 return static_cast<GLint>(std::lround(offsetY + native * scaleY));
             };
             const GLint viewportX0 = edgeX(draw.ViewportX);
-            const GLint viewportY0 = edgeY(draw.ViewportY);
+            GLint viewportY0 = edgeY(draw.ViewportY);
+            GLint viewportY1 = edgeY(draw.ViewportY + draw.ViewportHeight);
+            if (placement.CompensateWidening) {
+                // The projection hook widened this frustum by the target's
+                // factor: widen its viewport by the same amount about its
+                // centre so it keeps its proportions; the canvas scissor
+                // below still clips it.
+                const float centre = offsetY +
+                    (draw.ViewportY + draw.ViewportHeight * 0.5F) * scaleX;
+                const float half = draw.ViewportHeight * 0.5F * target.ScaleY;
+                viewportY0 = static_cast<GLint>(std::lround(centre - half));
+                viewportY1 = static_cast<GLint>(std::lround(centre + half));
+            }
             setViewport(viewportX0, viewportY0,
                         std::max<GLint>(0, edgeX(draw.ViewportX + draw.ViewportWidth) - viewportX0),
-                        std::max<GLint>(0, edgeY(draw.ViewportY + draw.ViewportHeight) - viewportY0));
+                        std::max<GLint>(0, viewportY1 - viewportY0));
             GLint scissorX0 = 0;
             GLint scissorY0 = 0;
             GLint scissorX1 = static_cast<GLint>(target.Width);
