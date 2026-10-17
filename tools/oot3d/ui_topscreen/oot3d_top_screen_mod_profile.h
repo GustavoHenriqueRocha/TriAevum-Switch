@@ -228,6 +228,11 @@ bool ReadTopScreenHudCompositorGate(NativeA32Memory &memory,
                                     TopScreenHudCompositorGate *gate,
                                     std::string *error = nullptr);
 
+// Native Gameplay_InCsMode (0x0037577C) for a live play state and player.
+bool ReadTopScreenGameplayInCutsceneMode(NativeA32Memory &memory, std::uint32_t playState,
+                                         std::uint32_t player, bool *cutscene,
+                                         std::string *error = nullptr);
+
 struct TopScreenNativeTouchQuad28LayoutStats {
   bool Eligible = false;
   bool Transformed = false;

@@ -1407,6 +1407,19 @@ int main() {
                                              &compositorGate, &error) &&
               compositorGate.Draw,
           "TopScreen compositor did not restore HUD after player suppression");
+  // 3.0 0x005CC87C: Gameplay_InCsMode hides the HUD (play cutscene state, or
+  // a Player_InCsMode blocking flag).
+  Require(compositorGateMemory.Write8(kGatePlayState + 0x22A0U, 1U) &&
+              ReadTopScreenHudCompositorGate(compositorGateMemory, &compositorGate, &error) &&
+              !compositorGate.Draw &&
+              compositorGateMemory.Write8(kGatePlayState + 0x22A0U, 0U) &&
+              compositorGateMemory.Write32(kGateSceneOwner + 0x1710U, 0x20000000U) &&
+              ReadTopScreenHudCompositorGate(compositorGateMemory, &compositorGate, &error) &&
+              !compositorGate.Draw &&
+              compositorGateMemory.Write32(kGateSceneOwner + 0x1710U, 0U) &&
+              ReadTopScreenHudCompositorGate(compositorGateMemory, &compositorGate, &error) &&
+              compositorGate.Draw,
+          "TopScreen compositor ignored the native cutscene mode");
   Require(compositorGateMemory.Write32(0x005066F8U + 0x34U, 1U) &&
               ReadTopScreenHudCompositorGate(compositorGateMemory,
                                              &compositorGate, &error) &&

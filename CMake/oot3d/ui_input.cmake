@@ -30,7 +30,8 @@ target_include_directories(oot3d_ui_topscreen PUBLIC
 target_link_libraries(oot3d_ui_topscreen PUBLIC
     three_ds_recomp_input
     oot3d_native_a32_process
-    oot3d_native_ui_contract)
+    oot3d_native_ui_contract
+    oot3d_typed_gameplay)
 oot3d_target_defaults(oot3d_ui_topscreen FOLDER Tools)
 
 add_executable(oot3d_native_font_coverage_tests EXCLUDE_FROM_ALL
