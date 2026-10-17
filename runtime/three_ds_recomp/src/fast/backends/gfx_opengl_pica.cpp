@@ -9,6 +9,7 @@
 
 
 #include "fast/backends/gfx_opengl_pica_post.h"
+#include "fast/backends/gfx_opengl_pica_gpu_lean.h"
 #include "fast/backends/gl_frame_profiler.h"
 #include "fast/backends/gfx_opengl_pica_residency.h"
 #include "fast/backends/gfx_opengl_pica_scale.h"
@@ -116,6 +117,31 @@ bool ReadPicaGlLean() {
         return PicaGlScale::ParseLeanSetting(text, true);
 #else
         const char* value = std::getenv("TRIAEVUM_GL_LEAN");
+        return value == nullptr || PicaGlScale::ParseLeanSetting(value, true);
+#endif
+    }();
+    return lean;
+}
+
+static_assert(PicaGlGpuLean::kGlZero == GL_ZERO);
+static_assert(PicaGlGpuLean::kGlOne == GL_ONE);
+static_assert(PicaGlGpuLean::kGlFuncAdd == GL_FUNC_ADD);
+static_assert(PicaGlGpuLean::kGlCopy == GL_COPY);
+static_assert(PicaGlGpuLean::kGlNoop == GL_NOOP);
+static_assert(PicaGlGpuLean::kGlKeep == GL_KEEP);
+
+// config/gl_gpu_lean (see gfx_opengl_pica_gpu_lean.h): on by default.
+bool ReadPicaGlGpuLean() {
+    static const bool lean = [] {
+#if defined(__SWITCH__)
+        std::ifstream file("sdmc:/switch/oot3dre/config/gl_gpu_lean");
+        std::string text;
+        if (!file || !std::getline(file, text)) {
+            return true;
+        }
+        return PicaGlScale::ParseLeanSetting(text, true);
+#else
+        const char* value = std::getenv("TRIAEVUM_GL_GPU_LEAN");
         return value == nullptr || PicaGlScale::ParseLeanSetting(value, true);
 #endif
     }();
@@ -271,6 +297,8 @@ struct PicaGlTextureKey {
 
 struct PicaGlProgram {
     GLuint Handle = 0U;
+    // PicaGlGpuLean::FragmentFeature bits of the fragment source.
+    uint8_t FragmentFeatures = 0U;
 };
 
 struct PicaGlTarget {
@@ -703,7 +731,7 @@ PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {
             state.Ready.erase(found);
             lock.unlock();
             BindPicaGlProgramSamplers(program);
-            return {program};
+            return {program, PicaGlGpuLean::ClassifyFragmentSource(fragmentSource)};
         }
     }
 #endif
@@ -712,7 +740,7 @@ PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {
 #if defined(__SWITCH__)
     RecordPicaGlProgramSource(cacheKey, vertexSource, fragmentSource);
 #endif
-    return {program};
+    return {program, PicaGlGpuLean::ClassifyFragmentSource(fragmentSource)};
 }
 
 GLenum ToPicaGlCompare(GfxNativePicaCompareFunction compare) {
@@ -1068,6 +1096,8 @@ struct GfxRenderingAPIOGL::NativePicaState {
     std::map<uint64_t, float> NamespaceScales;
     // config/gl_lean (exact savings; see PicaGlScale::ParseLeanSetting).
     bool Lean = true;
+    // config/gl_gpu_lean (exact GPU savings; gfx_opengl_pica_gpu_lean.h).
+    bool GpuLean = true;
     uint64_t NextTargetId = 1U;
     // Lean: what the uniform buffers and image unit 5 hold.
     std::vector<uint8_t> LastVertexUniforms;
@@ -1602,6 +1632,7 @@ void GfxRenderingAPIOGL::InitNativePica() {
     state.GeometryCacheEnabled = mNativePicaGeometryCacheEnabled;
     state.ResolutionScale = ReadPicaGlResolutionScale();
     state.Lean = ReadPicaGlLean();
+    state.GpuLean = ReadPicaGlGpuLean();
     static const bool stateCache = ReadPicaGlSwitch(
         "gl_state_cache", "TRIAEVUM_GL_STATE_CACHE", true, true);
     static const bool stats =
@@ -2300,7 +2331,7 @@ GLuint GetPicaLightingLut(
 
 void ApplyPicaFill(const GfxNativePicaMemoryFillView& fill,
                    const PicaGlTargetKey& key,
-                   PicaGlTarget& target, bool lean) {
+                   PicaGlTarget& target, bool lean, bool gpuLean) {
     const uint64_t pixels = static_cast<uint64_t>(key.Width) * key.Height;
     const uint64_t colorEnd = static_cast<uint64_t>(key.ColorAddress) +
                               pixels * PicaColorBytesPerPixel(key.ColorFormat);
@@ -2341,8 +2372,14 @@ void ApplyPicaFill(const GfxNativePicaMemoryFillView& fill,
         glClearDepth(depthValue);
         glClearStencil(stencil);
         mask |= GL_DEPTH_BUFFER_BIT;
-        if (key.DepthFormat == 3U) {
+        // GPU lean: without a PICA stencil plane (D16/D24) nothing reads or
+        // writes the renderbuffer's stencil, so clearing it too (with the
+        // value the fill decodes: 0) makes this a full depth/stencil clear.
+        if (PicaGlGpuLean::DepthFillClearsStencil(key.DepthFormat, gpuLean)) {
             mask |= GL_STENCIL_BUFFER_BIT;
+            if (key.DepthFormat != 3U) {
+                GlPerf::CountPica(PicaGlGpuLean::kCountFullDepthClear);
+            }
         }
     }
     glClear(mask);
@@ -2372,7 +2409,7 @@ void ApplyPendingPicaFills(GfxRenderingAPIOGL::NativePicaState& state,
             ++fill;
             continue;
         }
-        ApplyPicaFill(*fill, key, target, state.Lean);
+        ApplyPicaFill(*fill, key, target, state.Lean, state.GpuLean);
         fill = state.PendingFills.erase(fill);
     }
 }
@@ -3117,13 +3154,39 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                             (mask & 4U) != 0U, (mask & 8U) != 0U);
             }
         };
+        // GPU lean (gfx_opengl_pica_gpu_lean.h): an identity blend or the
+        // logic op COPY becomes "both off"; same pixels, no raster op.
+        PicaGlGpuLean::BlendState blendState;
+        blendState.Enabled = draw.Blend.Enabled;
+        if (draw.Blend.Enabled) {
+            blendState.EquationRgb = ToPicaGlBlendEquation(draw.Blend.EquationRgb);
+            blendState.EquationAlpha =
+                ToPicaGlBlendEquation(draw.Blend.EquationAlpha);
+            blendState.SourceRgb = ToPicaGlBlendFactor(draw.Blend.SourceRgb);
+            blendState.DestRgb = ToPicaGlBlendFactor(draw.Blend.DestRgb);
+            blendState.SourceAlpha = ToPicaGlBlendFactor(draw.Blend.SourceAlpha);
+            blendState.DestAlpha = ToPicaGlBlendFactor(draw.Blend.DestAlpha);
+        } else {
+            blendState.LogicOp = ToPicaGlLogic(draw.LogicOperation);
+        }
+        const auto outputMerger = PicaGlGpuLean::ResolveOutputMerger(
+            blendState, mNativePica->GpuLean);
+        uint32_t perfBits = 0U;
         if (shadowProducer) {
             toggle(gl.Blend, GL_BLEND, false);
             toggle(gl.ColorLogicOp, GL_COLOR_LOGIC_OP, false);
             setColorMask(0U);
+        } else if (outputMerger == PicaGlGpuLean::OutputMerger::Plain) {
+            setColorMask(static_cast<uint8_t>(draw.ColorWriteMask & 0xFU));
+            toggle(gl.Blend, GL_BLEND, false);
+            toggle(gl.ColorLogicOp, GL_COLOR_LOGIC_OP, false);
+            perfBits |= draw.Blend.Enabled
+                ? PicaGlGpuLean::kCountBlendIdentityOff
+                : PicaGlGpuLean::kCountLogicCopyOff;
         } else {
             setColorMask(static_cast<uint8_t>(draw.ColorWriteMask & 0xFU));
             if (draw.Blend.Enabled) {
+                perfBits |= PicaGlGpuLean::kCountBlended;
                 toggle(gl.Blend, GL_BLEND, true);
                 toggle(gl.ColorLogicOp, GL_COLOR_LOGIC_OP, false);
                 const std::array<uint32_t, 2> equation{
@@ -3347,8 +3410,44 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                        std::max<GLint>(0, scissorY1 - scissorY0));
         }
 
+        // GPU lean: a draw that cannot change any buffer is not issued (its
+        // uploads and state above are kept, so later draws see the same).
+        PicaGlGpuLean::DrawEffects effects;
+        effects.ShadowProducer = shadowProducer;
+        effects.ColorWriteMask = static_cast<uint8_t>(draw.ColorWriteMask & 0xFU);
+        effects.Blend = blendState;
+        effects.DepthWrite = draw.DepthWriteEnabled;
+        effects.StencilTest = draw.Stencil.Enabled;
+        if (draw.Stencil.Enabled) {
+            effects.StencilWriteMask = draw.Stencil.WriteMask;
+            effects.StencilFail = ToPicaGlStencil(draw.Stencil.Fail);
+            effects.StencilDepthFail = ToPicaGlStencil(draw.Stencil.DepthFail);
+            effects.StencilPass = ToPicaGlStencil(draw.Stencil.Pass);
+        }
+        effects.FragmentFeatures = program.FragmentFeatures;
+        const bool skipDraw =
+            mNativePica->GpuLean && PicaGlGpuLean::DrawHasNoEffect(effects);
+        if (GlPerf::Enabled()) {
+            if ((program.FragmentFeatures & PicaGlGpuLean::kFragmentDiscard) != 0U) {
+                perfBits |= PicaGlGpuLean::kCountFragmentDiscard;
+            }
+            if ((program.FragmentFeatures & PicaGlGpuLean::kFragmentWritesDepth) != 0U) {
+                perfBits |= PicaGlGpuLean::kCountFragmentDepth;
+            }
+            if ((program.FragmentFeatures & PicaGlGpuLean::kFragmentStoresImage) != 0U) {
+                perfBits |= PicaGlGpuLean::kCountFragmentImage;
+            }
+            if (skipDraw) {
+                perfBits |= PicaGlGpuLean::kCountNoEffectSkipped;
+            }
+            GlPerf::CountPica(perfBits);
+        }
+
         const GLenum topology = ToPicaGlTopology(draw.Topology);
-        if (draw.Indexed) {
+        if (skipDraw) {
+            // Nothing to draw: the uploads below are skipped as well (each
+            // draw writes its own ring range; nothing later reads this one).
+        } else if (draw.Indexed) {
             if (draw.IndexBytes.empty()) {
                 throw std::runtime_error("PICA indexed draw has no indices");
             }

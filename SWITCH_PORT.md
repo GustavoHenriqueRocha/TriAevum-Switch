@@ -378,6 +378,77 @@ Medido (`switch-logs/interp1`, fps60, escala 2, 8,5 min): `heap_arena_mb` 631 �
   o renderer da UI não aloca mais por quadro (ordenação por inserção em vez de `stable_sort`, quad
   em `std::array`, chave de textura e vetores de rascunho mantidos).
 
+### GPU: ZCULL/early-Z no nvc0 e economias exatas `config/gl_gpu_lean` (2026-10-17)
+**O que o Mesa 20.1 (nvc0) faz** (fonte em `mesa-cache/work/mesa-20.1.0-rc3`):
+- **ZCULL nunca liga.** `nvc0_screen.c` grava `ZCULL_REGION = 0x3f` ("deactivate ZCULL") na criação
+  da tela e `nvc0_validate_zcull` está sob `#if 0`; nenhum caminho reativa. O `libdrm_nouveau` do
+  devkitPro até faz `nvGpuChannelZcullBind`, mas sem região configurada o hardware não usa. Formato
+  de depth, clears ou estado não mudam isso: ZCULL (os ~2 ms do nfsmw-nx) só com patch no Mesa
+  (portar a configuração de região/armazenamento/invalidação do deko3d, que liga ZCULL por padrão)
+  ou com deko3d/NVK.
+- **Early-Z por pixel é automático** no Maxwell, salvo se o cabeçalho do fragment program disser
+  que ele mata pixels (`discard` em qualquer lugar do GLSL → `usesDiscard` → `hdr[0] |= 0x8000`),
+  escreve depth (`gl_FragDepth` → `hdr[19] |= 0x2`, e o Mesa ainda põe `ZCULL_TEST_MASK = 0x11`) ou
+  grava memória (imagem/atomics → `hdr[0]` bit 26). Função de depth, blend ou logic op não desligam
+  early-Z.
+- Compressão de depth: o libdrm do devkitPro informa versão `0x01000202` (≥ `0x01000101`), então o
+  nvc0 escolhe tipos de memória comprimidos para Z24S8; limpar depth **e** stencil do buffer
+  inteiro é o caso que o hardware pode resolver só marcando os tiles.
+- Os programas PICA já estavam certos para early-Z: no modo especializado (o único usado no GL; o
+  paramétrico/uber é só do Vulkan) `discard` só existe com o alpha test do PICA ligado (função ≠
+  ALWAYS) e `gl_FragDepth` só fora da forma "raster depth" (`Oot3dPicaFragmentDepthIsRasterDepth`:
+  escala -1, offset 0, z-buffering). Por isso os shaders **não** foram mexidos (mudar a fonte
+  invalida o cache de shaders do Mesa sem ganho provado). Os casos que restam são contados (abaixo).
+
+**`config/gl_gpu_lean`** (padrão ligado; `0` desliga para A/B; desktop `TRIAEVUM_GL_GPU_LEAN=0`),
+`gfx_opengl_pica_gpu_lean.h` (sem GL, testado em `gfx_opengl_pica_gpu_lean_tests`):
+1. **Logic op COPY com blend desligado → logic op desligado.** Todo draw opaco do PICA chegava ao
+   hardware com `LOGIC_OP_ENABLE = 1` (o Mesa não filtra COPY), uma operação de ROP que pode ler o
+   destino. COPY = s pela especificação.
+2. **Blend ADD com fonte ONE e destino ZERO (cor e alfa) → blend desligado** (s·1 + d·0 = s).
+3. **Draw sem efeito não é emitido**: máscara de cor vazia, ou blend que mantém o destino
+   (ZERO/ONE/ADD), ou logic op NOOP; e sem escrita de depth, sem stencil que mude, sem imagem
+   (produtor Shadow2D nunca é pulado). Estado e uploads anteriores continuam iguais.
+4. **Fill de depth em alvo sem stencil no PICA (D16/D24)** limpa também o stencil do renderbuffer
+   D24S8: o frontend só liga o teste de stencil com formato 3 (D24S8), então esse plano nunca é lido
+   nem escrito; a limpeza vira depth+stencil inteira em vez de mascarada.
+- Prova de imagem igual: o teste de unidade compara o modelo de operações por fragmento do GL
+  (todas as 256 cores de destino × varredura densa de fonte, inclusive fora de [0,1]); e uma checagem
+  de pixels em GL real (EGL sem janela, Intel UHD 620 e llvmpipe, 20 cenas aleatórias de 300
+  triângulos por caso, 257×193): 0 bytes de cor e 0 valores de depth diferentes nos quatro casos (a
+  mesma checagem acusa milhões de diferenças com XOR no lugar de COPY ou sem a limpeza de depth).
+- **No console**: mesma cena parada (mercado, câmera fixa, quadro pausado pelo menu), uma captura
+  de tela do álbum com `gl_gpu_lean` ausente e outra com `0`; comparar pixel a pixel no PC (a
+  captura do álbum é JPEG: comparar com tolerância ou usar as capturas PNG do homebrew, se houver).
+  Para medir: `config/gpu_timing` com e sem `gl_gpu_lean`, mesma cena, `step_gpu_pica_top`.
+- Ganho esperado: incerto sem medir. (1) atinge quase todos os draws opacos da cena — se o ROP do
+  Maxwell lê o destino com logic op ligado, são ~4 B por pixel opaco desenhado (≈ 3,3 MB por camada
+  de overdraw a 960×853), algo como 0,2–0,6 ms no quadro cheio; se não lê, ~0. (2)/(3) dependem de
+  quantos draws o jogo manda assim (contados). (4) ≤ 0,1–0,2 ms por limpeza.
+
+**Contadores novos no glperf** (`config/gpu_timing`, por quadro de host e tipo): `n_fs_discard`,
+`n_fs_depth`, `n_fs_image` (draws cujo programa desliga early-Z), `n_blended`, `n_logic_copy_off`,
+`n_blend_identity_off`, `n_noeffect_skipped`, `n_full_depth_clears`. Com eles dá para decidir se vale
+especializar mais (ex.: trocar `gl_FragDepth` por `glDepthRange` — não feito: arredondamento de depth
+em hardware × shader pode diferir no último bit e mudar testes LEQUAL/EQUAL).
+
+**Amostragem do glperf corrigida**: com fps60 os quadros de passo e intermediário se alternam, e
+`FrameSerial % 30 == 0` sempre caía no mesmo tipo — nenhum `perf.txt` tinha `step_gpu_*`. Agora a
+amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
+
+**Avaliados e não feitos (sem prova de imagem igual ou sem ganho):**
+- Reordenar draws / "céu por último": sem ZCULL, ordenar só ajuda o early-Z por pixel quando o
+  opaco vem de frente para trás; o PICA exige a ordem do jogo para blend, depth EQUAL e stencil, e o
+  backend não tem marcador seguro no estado PICA que diga "este draw é o céu" (só heurística por
+  textura/estado, que pode errar e mudar a imagem). Risco alto, ganho incerto.
+- "Resolve sem cópia" do display transfer: a cópia (0,2–0,8 ms medidos) teria de ser adiada até o
+  alvo ser reescrito, e ele é reescrito todo quadro (a imagem de display é reapresentada em quadros
+  hold/EASU reaproveitado): a cópia só mudaria de lugar.
+- Passes de tela cheia: a limpeza da janela e a cópia repetida já são puladas (`gl_lean`); o RCAS
+  (~1,9 ms) e a UI (~1,5 ms) mudam a imagem se tirados.
+- Shaders: o especializado já tem os ramos resolvidos na geração; sem medição por programa não
+  compensa invalidar o cache de shaders.
+
 ## Próximos passos
 
 - Ideias futuras (pedido do usuário, 2026-10-17):

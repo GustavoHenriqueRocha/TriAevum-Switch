@@ -34,14 +34,21 @@ enum Counter : size_t {
     kProgramChanges, kVaoBinds, kUboBinds, kUniforms, kBufferUploadBytes,
     kBufferReallocs, kMapBytes, kTextureUploadBytes, kBlits, kBarriers,
     kSyncs, kFinish, kFlush, kGetError, kGets, kReadbacks, kGenDelete,
-    kEnables, kCounterCount
+    kEnables,
+    // Caminho PICA (GlPerf::CountPica, bits PicaGlGpuLean::CountBit).
+    kPicaFsDiscard, kPicaFsDepth, kPicaFsImage, kPicaBlended,
+    kPicaLogicCopyOff, kPicaBlendIdentityOff, kPicaNoEffectSkipped,
+    kPicaFullDepthClears, kCounterCount
 };
+constexpr size_t kPicaCountFirst = kPicaFsDiscard;
 constexpr std::array<const char*, kCounterCount> kCounterNames{
     "draws", "clears", "fbo_binds", "fbo_changes", "tex_binds", "prog_binds",
     "prog_changes", "vao_binds", "ubo_binds", "uniforms", "buf_upload_kb",
     "buf_reallocs", "map_kb", "tex_upload_kb", "blits", "barriers", "syncs",
     "finish", "flush", "get_error", "gets", "readbacks", "gen_delete",
-    "enables"};
+    "enables", "fs_discard", "fs_depth", "fs_image", "blended",
+    "logic_copy_off", "blend_identity_off", "noeffect_skipped",
+    "full_depth_clears"};
 constexpr bool CounterIsBytes(size_t counter) {
     return counter == kBufferUploadBytes || counter == kMapBytes ||
            counter == kTextureUploadBytes;
@@ -187,7 +194,12 @@ void PollGpu(State& state) {
 void BeginGpuSample(State& state) {
     if (!state.GpuTimer) return;
     PollGpu(state);
-    if (state.FrameSerial % state.SampleEvery != 0U) return;
+    // One sample per block of N frames, one frame later in each block: with
+    // fps60 step and interp frames alternate, and a fixed phase with an even
+    // N (the default 30) sampled only one of the two kinds (no step_gpu_* in
+    // any perf.txt).
+    const uint64_t serial = state.FrameSerial;
+    if ((serial + serial / state.SampleEvery) % state.SampleEvery != 0U) return;
     int free = -1;
     for (size_t index = 0; index < kSlots; ++index) {
         if (!gSlots[index].Pending) {
@@ -597,6 +609,12 @@ void MarkPicaDrawSlow(uint32_t framebufferWidth, uint32_t framebufferHeight) {
     MarkSlow(stage);
 }
 
+void CountPicaSlow(uint32_t bits) {
+    for (size_t bit = 0; bit < kCounterCount - kPicaCountFirst; ++bit) {
+        if ((bits & (1U << bit)) != 0U) ++gFrameCounters[kPicaCountFirst + bit];
+    }
+}
+
 void FrameBeginSlow() {
     auto& state = S();
     const uint64_t now = NowNs();
@@ -674,6 +692,7 @@ void Init() {
     auto& hooks = detail::gHooks;
     hooks.Mark = &MarkSlow;
     hooks.MarkPicaDraw = &MarkPicaDrawSlow;
+    hooks.CountPica = &CountPicaSlow;
     hooks.FrameBegin = &FrameBeginSlow;
     hooks.FrameEnd = &FrameEndSlow;
     hooks.SampleBegin = &SampleBeginSlow;

@@ -944,3 +944,13 @@ target_include_directories(gfx_opengl_pica_state_cache_tests
     PRIVATE ../src ../include)
 target_link_libraries(gfx_opengl_pica_state_cache_tests PRIVATE gtest_main)
 gtest_discover_tests(gfx_opengl_pica_state_cache_tests DISCOVERY_TIMEOUT 30)
+
+# Exact GPU savings of the OpenGL PICA draw path (config/gl_gpu_lean).
+add_executable(gfx_opengl_pica_gpu_lean_tests
+    gfx_opengl_pica_gpu_lean_tests.cpp
+)
+set_property(TARGET gfx_opengl_pica_gpu_lean_tests PROPERTY CXX_STANDARD 20)
+target_include_directories(gfx_opengl_pica_gpu_lean_tests
+    PRIVATE ../src ../include)
+target_link_libraries(gfx_opengl_pica_gpu_lean_tests PRIVATE gtest_main)
+gtest_discover_tests(gfx_opengl_pica_gpu_lean_tests DISCOVERY_TIMEOUT 30)

@@ -52,6 +52,7 @@ namespace detail {
 struct Hooks {
     void (*Mark)(Stage) = nullptr;
     void (*MarkPicaDraw)(uint32_t, uint32_t) = nullptr;
+    void (*CountPica)(uint32_t) = nullptr;
     void (*FrameBegin)() = nullptr;
     void (*FrameEnd)() = nullptr;
     void (*SampleBegin)(bool, bool) = nullptr;
@@ -74,6 +75,12 @@ inline void Mark(Stage stage) {
 }
 inline void MarkPicaDraw(uint32_t framebufferWidth, uint32_t framebufferHeight) {
     if (Enabled()) detail::gHooks.MarkPicaDraw(framebufferWidth, framebufferHeight);
+}
+// Contadores do caminho PICA (bits PicaGlGpuLean::CountBit): draws com
+// discard / gl_FragDepth / imagem, com blend, logic op COPY e blend
+// identidade desligados, draws sem efeito pulados, limpezas de depth+stencil.
+inline void CountPica(uint32_t bits) {
+    if (bits != 0U && Enabled()) detail::gHooks.CountPica(bits);
 }
 inline void FrameBegin() {
     if (Enabled()) detail::gHooks.FrameBegin();
