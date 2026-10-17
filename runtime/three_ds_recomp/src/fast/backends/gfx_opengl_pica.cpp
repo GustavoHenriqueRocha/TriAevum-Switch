@@ -9,6 +9,7 @@
 
 
 #include "fast/backends/gfx_opengl_pica_post.h"
+#include "fast/backends/gfx_opengl_pica_scale.h"
 #include "fast/oot3d/gl_widescreen_policy.h"
 #include "fast/oot3d/pica_geometry_registry.h"
 #include "fast/oot3d/pica_uniform_layout.h"
@@ -60,52 +61,59 @@ uint64_t HashBytes(std::span<const uint8_t> bytes) {
     return hash == 0U ? 1U : hash;
 }
 
-// Internal resolution scale (integer, like Citra/Azahar's "resolution
-// scale"). Every PICA render target -- color, depth/stencil and the Shadow2D
-// image -- and every display-transfer image is allocated N times larger per
-// axis; viewport, scissor and transfer blits are multiplied by N and the
-// scanout samples the large image. Keys, guest addresses and logical extents
-// stay native, so N=1 issues exactly the same GL calls as before. The GL
-// backend never reads PICA pixels back into guest memory (sampled textures
-// are always decoded from guest bytes; only the live Shadow2D image is
-// shared, and its consumer filters it through textureSize()), so no
-// downsample path is needed.
+// Internal resolution scale (like Citra/Azahar's "resolution scale"). Every
+// PICA render target -- color, depth/stencil and the Shadow2D image -- and
+// every display-transfer image is allocated N times larger per axis;
+// viewport, scissor and transfer blits are multiplied by N and the scanout
+// samples the large image. Keys, guest addresses and logical extents stay
+// native, so N=1 issues exactly the same GL calls as before. The GL backend
+// never reads PICA pixels back into guest memory (sampled textures are always
+// decoded from guest bytes; only the live Shadow2D image is shared, and its
+// consumer filters it through textureSize()), so no downsample path is
+// needed.
+//
+// N may be fractional (2.5: 1000x600, or 1067x600 widened, upscaled to the
+// 720p screen by FSR EASU with ~69% of the pixel work of 3x). Every host edge
+// is then round(native edge * N) (PicaGlScale::ScaledEdge), so rectangles
+// that tile natively still tile; at an integer N that is exactly native * N.
 //
 // Read once: on the Switch from sdmc:/switch/oot3dre/config/resolution_scale
-// (text "1", "2" or "3"); elsewhere from TRIAEVUM_GL_RESOLUTION_SCALE.
-// Missing or invalid means 1.
-constexpr uint32_t kPicaGlMaxResolutionScale = 3U;
-
-uint32_t ParsePicaGlResolutionScale(std::string_view text) {
-    while (!text.empty() && (text.front() == ' ' || text.front() == '\t' ||
-                             text.front() == '\n' || text.front() == '\r')) {
-        text.remove_prefix(1U);
-    }
-    if (text.empty() || text.front() < '1' || text.front() > '9') {
-        return 1U;
-    }
-    if (text.size() > 1U && text[1] >= '0' && text[1] <= '9') {
-        return 1U;
-    }
-    const uint32_t value = static_cast<uint32_t>(text.front() - '0');
-    return std::min(value, kPicaGlMaxResolutionScale);
-}
-
-uint32_t ReadPicaGlResolutionScale() {
-    static const uint32_t scale = [] {
+// (text "1", "2", "3" or a decimal such as "2.5"); elsewhere from
+// TRIAEVUM_GL_RESOLUTION_SCALE. Missing or invalid means 1.
+float ReadPicaGlResolutionScale() {
+    static const float scale = [] {
 #if defined(__SWITCH__)
         std::ifstream file("sdmc:/switch/oot3dre/config/resolution_scale");
         std::string text;
         if (!file || !std::getline(file, text)) {
-            return 2U; // console default: 3x (720p) made the GPU the bottleneck (perf.txt: 23.4 vs 28.5 fps)
+            return 2.0F; // console default: 3x (720p) made the GPU the bottleneck (perf.txt: 23.4 vs 28.5 fps)
         }
-        return ParsePicaGlResolutionScale(text);
+        return PicaGlScale::ParseResolutionScale(text);
 #else
         const char* value = std::getenv("TRIAEVUM_GL_RESOLUTION_SCALE");
-        return value != nullptr ? ParsePicaGlResolutionScale(value) : 1U;
+        return value != nullptr ? PicaGlScale::ParseResolutionScale(value)
+                                : 1.0F;
 #endif
     }();
     return scale;
+}
+
+// config/gl_lean (see PicaGlScale::ParseLeanSetting): on by default.
+bool ReadPicaGlLean() {
+    static const bool lean = [] {
+#if defined(__SWITCH__)
+        std::ifstream file("sdmc:/switch/oot3dre/config/gl_lean");
+        std::string text;
+        if (!file || !std::getline(file, text)) {
+            return true;
+        }
+        return PicaGlScale::ParseLeanSetting(text, true);
+#else
+        const char* value = std::getenv("TRIAEVUM_GL_LEAN");
+        return value == nullptr || PicaGlScale::ParseLeanSetting(value, true);
+#endif
+    }();
+    return lean;
 }
 
 // Optional scanout post-processing and texture filtering (all off unless a
@@ -220,6 +228,17 @@ struct PicaGlTarget {
     GLuint DepthStencil = 0U;
     GLuint ShadowFramebuffer = 0U;
     GLuint Shadow = 0U;
+    // Unique per created target (never reused) and bumped by every GL write
+    // to Color: together they identify the colour content a display copy
+    // read (PicaGlScale::DisplayCopyIdentity).
+    uint64_t Id = 0U;
+    uint64_t Version = 0U;
+    // Lean mode: the Shadow2D image is cleared only when a shadow producer
+    // draws into it or a consumer samples it. Its contents are visible to no
+    // one else (only producer programs declare the image), so a deferred
+    // clear writes the same values the eager one would.
+    bool ShadowClearPending = false;
+    uint32_t ShadowClearValue = 0U;
 };
 
 struct PicaGlTexture {
@@ -238,6 +257,9 @@ struct PicaGlDisplay {
     uint32_t AllocWidth = 0U;
     uint32_t AllocHeight = 0U;
     bool Initialized = false;
+    // The copy that produced Color (lean mode skips an identical repeat:
+    // a presentation re-submits the transfer the sample already executed).
+    PicaGlScale::DisplayCopyIdentity LastCopy;
 };
 
 // Intermediate image of the scanout post-processing chain. Reallocated only
@@ -813,10 +835,37 @@ std::pair<float, uint8_t> DecodePicaClearDepthStencil(
             format == 3U ? PicaFillByte(fill, 3U) : 0U};
 }
 
-void ClearPicaShadow(const PicaGlTarget& target, uint32_t value) {
+void ClearPicaShadowNow(const PicaGlTarget& target, uint32_t value) {
     glBindFramebuffer(GL_FRAMEBUFFER, target.ShadowFramebuffer);
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
     glClearBufferuiv(GL_COLOR, 0, &value);
+}
+
+// Eager unless lean: then it only records the value (see
+// PicaGlTarget::ShadowClearPending) and ResolvePicaShadow clears on use.
+void ClearPicaShadow(PicaGlTarget& target, uint32_t value, bool lean) {
+    if (lean) {
+        target.ShadowClearPending = true;
+        target.ShadowClearValue = value;
+        return;
+    }
+    ClearPicaShadowNow(target, value);
+}
+
+// Performs a deferred Shadow2D clear (true when it did; the shadow
+// framebuffer is then bound). The eager clear ran wherever the fill was,
+// under whatever scissor and colour mask the previous draw left (a shadow
+// producer leaves the mask off, which made it a no-op); the deferred one
+// clears the whole image, as a PICA fill of the buffer does.
+bool ResolvePicaShadow(PicaGlTarget& target) {
+    if (!target.ShadowClearPending) {
+        return false;
+    }
+    target.ShadowClearPending = false;
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    ClearPicaShadowNow(target, target.ShadowClearValue);
+    return true;
 }
 
 void DeletePicaTarget(PicaGlTarget& target) {
@@ -874,7 +923,14 @@ struct GfxRenderingAPIOGL::NativePicaState {
     uint64_t GeometryStreamingUploadBytes = 0U;
     uint64_t UniformUploads = 0U;
     uint64_t UniformUploadBytes = 0U;
-    uint32_t ResolutionScale = 1U;
+    float ResolutionScale = 1.0F;
+    // config/gl_lean (exact savings; see PicaGlScale::ParseLeanSetting).
+    bool Lean = true;
+    uint64_t NextTargetId = 1U;
+    // Lean: what the uniform buffers and image unit 5 hold.
+    std::vector<uint8_t> LastVertexUniforms;
+    std::vector<uint8_t> LastFragmentUniforms;
+    GLuint LastShadowImage = 0U;
     PicaGlPostState Post;
 #endif
 };
@@ -1359,7 +1415,8 @@ void GfxRenderingAPIOGL::InitNativePica() {
     auto& state = *mNativePica;
     state.GeometryCacheEnabled = mNativePicaGeometryCacheEnabled;
     state.ResolutionScale = ReadPicaGlResolutionScale();
-    if (state.ResolutionScale > 1U) {
+    state.Lean = ReadPicaGlLean();
+    if (state.ResolutionScale > 1.0F) {
         // Keep the largest PICA target (1024 per axis) within the driver's
         // limits; otherwise fall back to a smaller scale.
         GLint maxTexture = 0;
@@ -1367,10 +1424,8 @@ void GfxRenderingAPIOGL::InitNativePica() {
         glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTexture);
         glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &maxRenderbuffer);
         const GLint limit = std::min(maxTexture, maxRenderbuffer);
-        while (state.ResolutionScale > 1U &&
-               static_cast<GLint>(1024U * state.ResolutionScale) > limit) {
-            --state.ResolutionScale;
-        }
+        state.ResolutionScale =
+            PicaGlScale::FitResolutionScale(state.ResolutionScale, limit);
     }
     glGenVertexArrays(1, &state.VertexArray);
     glGenBuffers(static_cast<GLsizei>(state.VertexBuffers.size()),
@@ -1611,9 +1666,11 @@ PicaGlTarget& GetPicaGlTarget(
         return found->second;
     }
     auto& target = found->second;
-    target.Width = static_cast<uint32_t>(key.Width) * state.ResolutionScale;
-    target.Height = static_cast<uint32_t>(key.Height) * state.ResolutionScale;
-    target.ScaleY = static_cast<float>(state.ResolutionScale);
+    target.Id = state.NextTargetId++;
+    target.Width = PicaGlScale::ScaledExtent(key.Width, state.ResolutionScale);
+    target.Height =
+        PicaGlScale::ScaledExtent(key.Height, state.ResolutionScale);
+    target.ScaleY = state.ResolutionScale;
     // Widescreen: only the top LCD target (480x400 stored rotated; its
     // 400-pixel axis is the presented width) grows, by the window's aspect
     // over 5:3, matching the frustum widening of the projection hook.
@@ -1675,7 +1732,7 @@ PicaGlTarget& GetPicaGlTarget(
             GL_FRAMEBUFFER_COMPLETE) {
             throw std::runtime_error("PICA OpenGL shadow target is incomplete");
         }
-        ClearPicaShadow(target, 0xFFFFFFFFU);
+        ClearPicaShadow(target, 0xFFFFFFFFU, state.Lean);
 
         glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
         glDrawBuffer(GL_COLOR_ATTACHMENT0);
@@ -1687,6 +1744,7 @@ PicaGlTarget& GetPicaGlTarget(
         glClearStencil(0);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
                 GL_STENCIL_BUFFER_BIT);
+        ++target.Version;
     } catch (...) {
         DeletePicaTarget(target);
         state.Targets.erase(found);
@@ -1732,12 +1790,17 @@ PicaGlProgram& GetPicaGlProgram(
     return state.Programs.emplace(key, BuildPicaGlProgram(draw)).first->second;
 }
 
+// *rebind is set when a deferred clear changed the framebuffer binding.
 GLuint FindLivePicaShadow(
-    const GfxRenderingAPIOGL::NativePicaState& state,
-    const GfxNativePicaTextureView& texture) {
-    for (const auto& [key, target] : state.Targets) {
+    GfxRenderingAPIOGL::NativePicaState& state,
+    const GfxNativePicaTextureView& texture, bool* rebind) {
+    for (auto& [key, target] : state.Targets) {
         if (key.ColorAddress == texture.PhysicalAddress &&
             key.Width == texture.Width && key.Height == texture.Height) {
+            // A consumer samples it: a deferred clear must land first.
+            if (ResolvePicaShadow(target)) {
+                *rebind = true;
+            }
             return target.Shadow;
         }
     }
@@ -1876,7 +1939,7 @@ GLuint GetPicaLightingLut(
 
 void ApplyPicaFill(const GfxNativePicaMemoryFillView& fill,
                    const PicaGlTargetKey& key,
-                   const PicaGlTarget& target) {
+                   PicaGlTarget& target, bool lean) {
     const uint64_t pixels = static_cast<uint64_t>(key.Width) * key.Height;
     const uint64_t colorEnd = static_cast<uint64_t>(key.ColorAddress) +
                               pixels * PicaColorBytesPerPixel(key.ColorFormat);
@@ -1896,7 +1959,7 @@ void ApplyPicaFill(const GfxNativePicaMemoryFillView& fill,
             (static_cast<uint32_t>(PicaFillByte(fill, 1U)) << 8U) |
             (static_cast<uint32_t>(PicaFillByte(fill, 2U)) << 16U) |
             (static_cast<uint32_t>(PicaFillByte(fill, 3U)) << 24U);
-        ClearPicaShadow(target, shadow);
+        ClearPicaShadow(target, shadow, lean);
     }
     glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
     glDisable(GL_SCISSOR_TEST);
@@ -1906,6 +1969,7 @@ void ApplyPicaFill(const GfxNativePicaMemoryFillView& fill,
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         glClearColor(decoded[0], decoded[1], decoded[2], decoded[3]);
         mask |= GL_COLOR_BUFFER_BIT;
+        ++target.Version;
     }
     if (depth) {
         const auto [depthValue, stencil] =
@@ -1924,7 +1988,7 @@ void ApplyPicaFill(const GfxNativePicaMemoryFillView& fill,
 
 void ApplyPendingPicaFills(GfxRenderingAPIOGL::NativePicaState& state,
                            const PicaGlTargetKey& key,
-                           const PicaGlTarget& target) {
+                           PicaGlTarget& target) {
     auto fill = state.PendingFills.begin();
     while (fill != state.PendingFills.end()) {
         if (fill->RenderTargetNamespace != key.Namespace) {
@@ -1946,7 +2010,7 @@ void ApplyPendingPicaFills(GfxRenderingAPIOGL::NativePicaState& state,
             ++fill;
             continue;
         }
-        ApplyPicaFill(*fill, key, target);
+        ApplyPicaFill(*fill, key, target, state.Lean);
         fill = state.PendingFills.erase(fill);
     }
 }
@@ -2082,27 +2146,50 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             draw.FramebufferDepthFormat,
         };
         ApplyPendingPicaFills(*mNativePica, targetKey, target);
+        if (draw.FragmentOperationMode == 3U) {
+            // A shadow producer reads and writes its Shadow2D image.
+            ResolvePicaShadow(target);
+        }
+        // Every draw may write colour (a producer masks it, but counting it
+        // keeps the version a strict upper bound on content changes).
+        ++target.Version;
 
         glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
         glDrawBuffer(GL_COLOR_ATTACHMENT0);
         glBindVertexArray(mNativePica->VertexArray);
         glUseProgram(program.Handle);
 
-        glBindBuffer(GL_UNIFORM_BUFFER, mNativePica->VertexUniformBuffer);
-        glBufferData(GL_UNIFORM_BUFFER,
-                     static_cast<GLsizeiptr>(draw.VertexUniformBytes.size()),
-                     draw.VertexUniformBytes.data(), GL_STREAM_DRAW);
-        glBindBufferBase(GL_UNIFORM_BUFFER, 0,
-                         mNativePica->VertexUniformBuffer);
-        glBindBuffer(GL_UNIFORM_BUFFER, mNativePica->FragmentUniformBuffer);
-        glBufferData(GL_UNIFORM_BUFFER,
-                     static_cast<GLsizeiptr>(draw.FragmentUniformBytes.size()),
-                     draw.FragmentUniformBytes.data(), GL_STREAM_DRAW);
-        glBindBufferBase(GL_UNIFORM_BUFFER, 4,
-                         mNativePica->FragmentUniformBuffer);
-        mNativePica->UniformUploads += 2U;
-        mNativePica->UniformUploadBytes += draw.VertexUniformBytes.size() +
-                                           draw.FragmentUniformBytes.size();
+        // Lean: a block equal to the one the buffer already holds is not
+        // sent again. nvc0 pushes a constant-buffer upload through the
+        // command FIFO word by word (and orphans the storage), so each
+        // repeat (draws of one object share matrices, draws of one material
+        // its constants) costs GPU front-end time as well as CPU.
+        const auto uploadUniforms = [&](GLuint buffer, GLuint binding,
+                                        std::span<const uint8_t> bytes,
+                                        std::vector<uint8_t>& last) {
+            const bool same = mNativePica->Lean && last.size() == bytes.size() &&
+                              !bytes.empty() &&
+                              std::memcmp(last.data(), bytes.data(),
+                                          bytes.size()) == 0;
+            if (!same) {
+                glBindBuffer(GL_UNIFORM_BUFFER, buffer);
+                glBufferData(GL_UNIFORM_BUFFER,
+                             static_cast<GLsizeiptr>(bytes.size()),
+                             bytes.data(), GL_STREAM_DRAW);
+                ++mNativePica->UniformUploads;
+                mNativePica->UniformUploadBytes += bytes.size();
+                if (mNativePica->Lean) {
+                    last.assign(bytes.begin(), bytes.end());
+                }
+            }
+            glBindBufferBase(GL_UNIFORM_BUFFER, binding, buffer);
+        };
+        uploadUniforms(mNativePica->VertexUniformBuffer, 0U,
+                       draw.VertexUniformBytes,
+                       mNativePica->LastVertexUniforms);
+        uploadUniforms(mNativePica->FragmentUniformBuffer, 4U,
+                       draw.FragmentUniformBytes,
+                       mNativePica->LastFragmentUniforms);
 
         uint16_t nextAttributeMask = 0U;
         for (const auto& binding : draw.VertexBindings) {
@@ -2309,6 +2396,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             mNativePica->FallbackColor,
             mNativePica->FallbackColor,
         };
+        bool rebindTarget = false;
         for (const auto& texture : draw.Textures) {
             if (texture.Slot >= textures.size()) {
                 throw std::runtime_error("PICA texture slot is invalid");
@@ -2319,12 +2407,15 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 throw std::runtime_error("PICA texture type is unsupported");
             }
             GLuint handle = texture.NativeType == 2U
-                ? FindLivePicaShadow(*mNativePica, texture)
+                ? FindLivePicaShadow(*mNativePica, texture, &rebindTarget)
                 : 0U;
             if (handle == 0U) {
                 handle = GetPicaGlTexture(*mNativePica, texture).Handle;
             }
             textures[texture.Slot] = handle;
+        }
+        if (rebindTarget) {
+            glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
         }
         for (size_t slot = 0U; slot < textures.size(); ++slot) {
             glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(slot + 1U));
@@ -2338,8 +2429,13 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         glBindTexture(GL_TEXTURE_2D, lighting);
 
         const bool shadowProducer = draw.FragmentOperationMode == 3U;
-        glBindImageTexture(5, target.Shadow, 0, GL_FALSE, 0,
-                           GL_READ_WRITE, GL_R32UI);
+        // Only this backend binds image unit 5; Mesa revalidates every
+        // image binding on each call, even an unchanged one.
+        if (!mNativePica->Lean || mNativePica->LastShadowImage != target.Shadow) {
+            glBindImageTexture(5, target.Shadow, 0, GL_FALSE, 0,
+                               GL_READ_WRITE, GL_R32UI);
+            mNativePica->LastShadowImage = target.Shadow;
+        }
         if (shadowProducer) {
             glDisable(GL_BLEND);
             glDisable(GL_COLOR_LOGIC_OP);
@@ -2409,25 +2505,37 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         // ResolutionScale host pixels per native pixel on each axis. The
         // guest values are truncated first, so N=1 is the original call and
         // N>1 covers exactly the same native pixels.
-        const GLint resolutionScale =
-            static_cast<GLint>(mNativePica->ResolutionScale);
+        // A fractional scale rounds both edges of every rectangle
+        // (PicaGlScale::ScaledEdge); at an integer scale these are the
+        // former products native * N.
+        const float resolutionScale = mNativePica->ResolutionScale;
         if (!target.Wide) {
-            glViewport(static_cast<GLint>(draw.ViewportX) * resolutionScale,
-                       static_cast<GLint>(draw.ViewportY) * resolutionScale,
-                       static_cast<GLsizei>(draw.ViewportWidth) * resolutionScale,
-                       static_cast<GLsizei>(draw.ViewportHeight) * resolutionScale);
+            const auto edge = [&](int64_t native) {
+                return static_cast<GLint>(
+                    PicaGlScale::ScaledEdge(native, resolutionScale));
+            };
+            const int64_t viewportX = static_cast<GLint>(draw.ViewportX);
+            const int64_t viewportY = static_cast<GLint>(draw.ViewportY);
+            const int64_t viewportWidth =
+                static_cast<GLsizei>(draw.ViewportWidth);
+            const int64_t viewportHeight =
+                static_cast<GLsizei>(draw.ViewportHeight);
+            glViewport(edge(viewportX), edge(viewportY),
+                       edge(viewportX + viewportWidth) - edge(viewportX),
+                       edge(viewportY + viewportHeight) - edge(viewportY));
             glEnable(GL_SCISSOR_TEST);
             if (draw.ScissorMode == 3U) {
-                const GLsizei scissorWidth = draw.ScissorX2 >= draw.ScissorX1
-                    ? static_cast<GLsizei>(draw.ScissorX2 - draw.ScissorX1 + 1U)
+                const int64_t scissorWidth = draw.ScissorX2 >= draw.ScissorX1
+                    ? static_cast<int64_t>(draw.ScissorX2) - draw.ScissorX1 + 1
                     : 0;
-                const GLsizei scissorHeight = draw.ScissorY2 >= draw.ScissorY1
-                    ? static_cast<GLsizei>(draw.ScissorY2 - draw.ScissorY1 + 1U)
+                const int64_t scissorHeight = draw.ScissorY2 >= draw.ScissorY1
+                    ? static_cast<int64_t>(draw.ScissorY2) - draw.ScissorY1 + 1
                     : 0;
-                glScissor(static_cast<GLint>(draw.ScissorX1) * resolutionScale,
-                          static_cast<GLint>(draw.ScissorY1) * resolutionScale,
-                          scissorWidth * resolutionScale,
-                          scissorHeight * resolutionScale);
+                const int64_t scissorX = draw.ScissorX1;
+                const int64_t scissorY = draw.ScissorY1;
+                glScissor(edge(scissorX), edge(scissorY),
+                          edge(scissorX + scissorWidth) - edge(scissorX),
+                          edge(scissorY + scissorHeight) - edge(scissorY));
             } else {
                 glScissor(0, 0, static_cast<GLsizei>(target.Width),
                           static_cast<GLsizei>(target.Height));
@@ -2460,7 +2568,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                     draw.VertexUniformBytes.subspan(
                         Oot3d::kPicaPackedVertexFloatOffset));
             }
-            const float scaleX = static_cast<float>(resolutionScale);
+            const float scaleX = resolutionScale;
             const float scaleY = placedUi ? scaleX : target.ScaleY;
             const float offsetY = placedUi
                 ? std::floor((static_cast<float>(target.Height) -
@@ -2497,7 +2605,8 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 // Placed UI never reaches past its native canvas.
                 const GLint canvasY0 = static_cast<GLint>(offsetY);
                 const GLint canvasY1 = canvasY0 +
-                    static_cast<GLint>(draw.FramebufferHeight) * resolutionScale;
+                    static_cast<GLint>(PicaGlScale::ScaledEdge(
+                        draw.FramebufferHeight, resolutionScale));
                 scissorY0 = std::max(scissorY0, canvasY0);
                 scissorY1 = std::min(scissorY1, canvasY1);
             }
@@ -2643,32 +2752,51 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
         // widescreen top-screen target holds ScaleY along its height). A 2:1
         // linear blit samples each destination centre on the boundary of two
         // source texels, so the PICA box filter stays exact at any scale.
-        const uint32_t resolutionScale = mNativePica->ResolutionScale;
+        // A fractional scale rounds each extent (PicaGlScale::ScaledEdge); a
+        // 2:1 transfer then may read one host pixel more or less than twice
+        // the output, a sub-pixel offset of the box filter.
+        const float resolutionScale = mNativePica->ResolutionScale;
         const float sourceScaleY = source->second.ScaleY;
         const auto scaledY = [&](uint32_t native) {
             return static_cast<uint32_t>(std::lround(
                 static_cast<float>(native) * sourceScaleY));
         };
-        const uint32_t displayAllocWidth = outputWidth * resolutionScale;
+        const uint32_t displayAllocWidth =
+            PicaGlScale::ScaledExtent(outputWidth, resolutionScale);
         const uint32_t displayAllocHeight =
             std::max<uint32_t>(1U, scaledY(outputHeight));
         auto& display = GetPicaGlDisplay(
             *mNativePica, transfer.RenderTargetNamespace,
             transfer.OutputPhysicalAddress, outputWidth, outputHeight,
             displayAllocWidth, displayAllocHeight);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, source->second.Framebuffer);
-        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, display.Framebuffer);
-        glDisable(GL_SCISSOR_TEST);
-        glBlitFramebuffer(
-            0, 0,
-            static_cast<GLint>(outputWidth * horizontalSamples * resolutionScale),
-            static_cast<GLint>(std::min<uint32_t>(
+        const PicaGlScale::DisplayCopyIdentity copy{
+            source->second.Id,
+            source->second.Version,
+            static_cast<int32_t>(std::min<uint32_t>(
+                PicaGlScale::ScaledExtent(outputWidth * horizontalSamples,
+                                          resolutionScale),
+                source->second.Width)),
+            static_cast<int32_t>(std::min<uint32_t>(
                 scaledY(outputHeight * verticalSamples),
                 source->second.Height)),
-            0, 0, static_cast<GLint>(displayAllocWidth),
-            static_cast<GLint>(displayAllocHeight),
-            GL_COLOR_BUFFER_BIT,
-            scaling == 0U ? GL_NEAREST : GL_LINEAR);
+            scaling == 0U ? static_cast<uint32_t>(GL_NEAREST)
+                          : static_cast<uint32_t>(GL_LINEAR),
+        };
+        // Lean: a presentation re-submits the transfer its sample already
+        // executed (and a reused snapshot one whose source may be unchanged);
+        // an identical copy from an unchanged source writes the same pixels.
+        if (!(mNativePica->Lean && display.Initialized &&
+              display.LastCopy.Valid() && display.LastCopy == copy)) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, source->second.Framebuffer);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, display.Framebuffer);
+            glDisable(GL_SCISSOR_TEST);
+            glBlitFramebuffer(
+                0, 0, copy.SourceWidth, copy.SourceHeight,
+                0, 0, static_cast<GLint>(displayAllocWidth),
+                static_cast<GLint>(displayAllocHeight),
+                GL_COLOR_BUFFER_BIT, static_cast<GLenum>(copy.Filter));
+            display.LastCopy = copy;
+        }
         display.Initialized = true;
 
         if (transfer.Present) {
@@ -2730,12 +2858,20 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             } else {
                 glDisable(GL_BLEND);
-                glViewport(0, 0, windowWidth, windowHeight);
-                glClearColor(mClearColor[0], mClearColor[1],
-                             mClearColor[2], mClearColor[3]);
-                glClear(GL_COLOR_BUFFER_BIT);
-                glViewport(viewportX, viewportY,
-                           viewportWidth, viewportHeight);
+                // Lean: the scanout below overwrites every pixel of a
+                // viewport that is the whole window (widescreen 16:9), so
+                // clearing it first is dead work.
+                if (!(mNativePica->Lean &&
+                      PicaGlScale::ScanoutCoversWindow(
+                          viewportX, viewportY, viewportWidth,
+                          viewportHeight, windowWidth, windowHeight))) {
+                    glViewport(0, 0, windowWidth, windowHeight);
+                    glClearColor(mClearColor[0], mClearColor[1],
+                                 mClearColor[2], mClearColor[3]);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glViewport(viewportX, viewportY,
+                               viewportWidth, viewportHeight);
+                }
             }
             glBindVertexArray(mNativePica->VertexArray);
             const bool transferInputLinear =
@@ -2791,7 +2927,8 @@ bool GfxRenderingAPIOGL::ClearPicaRenderTarget(
             key.ColorAddress != colorPhysicalAddress) {
             continue;
         }
-        ClearPicaShadow(target, 0xFFFFFFFFU);
+        ClearPicaShadow(target, 0xFFFFFFFFU, mNativePica->Lean);
+        ++target.Version;
         glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
         glDisable(GL_SCISSOR_TEST);
         glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -2833,7 +2970,7 @@ bool GfxRenderingAPIOGL::SubmitPicaMemoryFill(
     } else {
         mNativePica->PendingFills.push_back(fill);
     }
-    for (const auto& [key, target] : mNativePica->Targets) {
+    for (auto& [key, target] : mNativePica->Targets) {
         ApplyPendingPicaFills(*mNativePica, key, target);
     }
     InvalidateLegacyStateAfterPica();

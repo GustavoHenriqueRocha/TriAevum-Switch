@@ -193,6 +193,35 @@ Desempenho e usabilidade:
   permitir): render thread no núcleo 2; worker de planos PICA e thread de áudio no núcleo 1. Antes a
   ordem de criação punha a render thread e o worker no mesmo núcleo, com o outro quase ocioso.
 
+### fps60 de verdade e economia de GPU no backend GL (2026-10-17)
+- **fps60 não apresentava a 60 Hz**: o pacer e a cadência de amostras vêm do modo `FrameRate` das
+  configurações gráficas (padrão `Original30`, escolhido no menu F1 do PC); `--presentation-rate 60`
+  só entrava no contrato e nunca chegava ao pacer. Com `config/fps60` o console seguia apresentando
+  30 quadros/s com dois refreshes de 60 Hz cada e nunca desenhava a amostra interpolada. Agora, no
+  Switch, `ResolveLaunchFrameRateMode` (`oot3d_native_launch_frame_rate.h`) converte timing+taxa do
+  lançamento no modo de pacing (`native30_interpolated`+60 → `Interpolated2x`;
+  `native30_no_interpolation` → `Original30`, igual ao padrão de antes). Teste:
+  `oot3d_native_frame_rate_tests.cpp` (`triaevum_presentation_clock_tests`).
+  Atenção: a amostra interpolada redesenha o quadro inteiro (o dobro de GPU); em 720p não cabe.
+- **`config/gl_lean`** (ligado por padrão; `0` desliga para A/B), economias exatas do backend GL:
+  1. a cópia do display transfer que a apresentação reenvia (a amostra já executou a mesma cópia)
+     é pulada quando o alvo de origem não mudou (versão por alvo); em 720p evita ler+escrever
+     ~3,7 MB por quadro apresentado;
+  2. a limpeza da janela antes do scanout é pulada quando o scanout cobre a janela inteira
+     (widescreen 16:9);
+  3. a imagem Shadow2D (R32UI do tamanho do alvo) só é limpa quando um produtor/consumidor de
+     sombra a usa — antes cada fill de cor limpava ~3,7 MB (topo) + ~2,8 MB (tela de baixo) por
+     quadro em 720p mesmo sem sombra;
+  4. blocos de uniform iguais ao anterior não são reenviados (o nvc0 empurra o upload de constant
+     buffer pela FIFO, palavra a palavra) e a imagem da unidade 5 só é religada quando muda.
+- **Escala fracionária**: `config/resolution_scale` aceita `2.5` (ou `2,5`; múltiplos de 0,25). Os
+  alvos ficam 1000×600 (1067×600 com widescreen) e o FSR EASU+RCAS sobe para 1280×720: ~69% dos
+  pixels de 3×. Bordas de viewport/scissor/cópias = round(borda nativa × escala), então retângulos
+  vizinhos continuam encaixando; com escala inteira as contas são as mesmas de antes. Testes:
+  `runtime/three_ds_recomp/tests/gfx_opengl_pica_scale_tests.cpp`.
+- Em 3× o EASU já era pulado (saída 1:1); só o RCAS roda (`config/sharpen` `0` troca por cópia
+  simples). `config/anisotropy` `2` reduz o custo de textura em superfícies oblíquas.
+
 ## Próximos passos
 
 ### Estado em 2026-10-17 (melhor versão até agora)

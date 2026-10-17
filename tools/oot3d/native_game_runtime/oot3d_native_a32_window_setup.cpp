@@ -242,6 +242,10 @@ void NativeA32WindowSession::Setup() {
   savestateCompatibility.GameplayTiming = frameRateContract.Mode;
 #if defined(__SWITCH__)
   gSwitchVisualInterpolation = frameRateContract.VisualInterpolationAllowed;
+  // The homebrew arguments always name the timing and presentation rate
+  // (config/fps60); they, not the graphics settings, set the pacing here.
+  launchFrameRateMode = Oot3dNativeGame::ResolveLaunchFrameRateMode(
+      launch.GameplayTiming, launch.PresentationRateHz);
 #endif
   auto &frameRatePolicy = frameRatePolicyStorage.emplace(frameRateContract);
   widescreenProjection.HdFonts = hdFontsLoaded ? &hdFonts : nullptr;
@@ -1188,10 +1192,7 @@ void NativeA32WindowSession::Setup() {
   }
   timing = WindowDemoTimingState{};  // its default members read the clock here
   presentationPacingPolicy =
-      Fast::Oot3d::ResolvePresentationPacingPolicy(
-          Fast::Oot3d::GraphicsSettingsRuntime::Instance()
-              .Snapshot()
-              .FrameRate);
+      Fast::Oot3d::ResolvePresentationPacingPolicy(EffectiveFrameRateMode());
   frameCompositionPolicy =
       ResolveFrameCompositionPolicy(presentationPacingPolicy);
   visualSampleCadence.Configure(
@@ -1484,6 +1485,14 @@ void NativeA32WindowSession::UpdateScenePresentation() {
   visibility.ExtendedDrawDistance = graphics.ExtendedDrawDistance;
   visibility.Presentation = widescreenProjection.Projection.Presentation;
   visibility.FovMultiplier = graphics.FovMultiplier;
+}
+
+Fast::Oot3d::FrameRateMode NativeA32WindowSession::EffectiveFrameRateMode() const {
+  return launchFrameRateMode.has_value()
+             ? *launchFrameRateMode
+             : Fast::Oot3d::GraphicsSettingsRuntime::Instance()
+                   .Snapshot()
+                   .FrameRate;
 }
 
 Fast::Renderer3ds::PicaFrameCompositionPolicy NativeA32WindowSession::ResolveFrameCompositionPolicy(const Fast::Oot3d::PresentationPacingPolicy& pacing) {

@@ -1,5 +1,7 @@
 #include "oot3d_native_frame_rate.h"
+#include "oot3d_native_launch_frame_rate.h"
 #include "oot3d_native_presentation_pacer.h"
+#include "fast/oot3d/presentation_pacing_policy.h"
 
 #include "a32_runtime.h"
 
@@ -116,6 +118,72 @@ void RunNativeFrameRateTests() {
         Oot3dNativeGame::ParseGameplayTimingMode("arbitrary120",
                                                  &parsedMode)) {
         throw std::runtime_error("gameplay timing mode parsing mismatch");
+    }
+
+    {
+        // The Switch launch (config/fps60) must pace at its presentation
+        // rate and interpolate; the plain launch keeps 30 Hz.
+        using Fast::Oot3d::FrameRateMode;
+        using Oot3dNativeGame::GameplayTimingMode;
+        using Oot3dNativeGame::ResolveLaunchFrameRateMode;
+        const auto fps60 = ResolveLaunchFrameRateMode(
+            GameplayTimingMode::Native30Interpolated, 60U);
+        const auto fps30 = ResolveLaunchFrameRateMode(
+            GameplayTimingMode::Native30NoInterpolation, 30U);
+        if (fps60 != FrameRateMode::Interpolated2x ||
+            fps30 != FrameRateMode::Original30 ||
+            ResolveLaunchFrameRateMode(
+                GameplayTimingMode::Native30Interpolated, 90U) !=
+                FrameRateMode::Interpolated3x ||
+            ResolveLaunchFrameRateMode(
+                GameplayTimingMode::Native30Interpolated, 30U) !=
+                FrameRateMode::Original30 ||
+            ResolveLaunchFrameRateMode(
+                GameplayTimingMode::Native30Interpolated, 0U) !=
+                FrameRateMode::Uncapped ||
+            ResolveLaunchFrameRateMode(
+                GameplayTimingMode::Native30Interpolated, 75U)
+                .has_value() ||
+            ResolveLaunchFrameRateMode(GameplayTimingMode::Enhanced60, 60U) !=
+                FrameRateMode::Interpolated2x) {
+            throw std::runtime_error("launch frame-rate mapping mismatch");
+        }
+        const auto pacing60 = Fast::Oot3d::ResolvePresentationPacingPolicy(*fps60);
+        const auto pacing30 = Fast::Oot3d::ResolvePresentationPacingPolicy(*fps30);
+        if (!pacing60.Enabled || pacing60.TargetRateHz != 60U ||
+            pacing60.Composition.Interpolation !=
+                Fast::Oot3d::NativeVisualInterpolationMode::Fixed2x ||
+            pacing30.TargetRateHz != 30U ||
+            pacing30.Composition.Interpolation !=
+                Fast::Oot3d::NativeVisualInterpolationMode::Disabled) {
+            throw std::runtime_error("launch pacing policy mismatch");
+        }
+        // 60 Hz presentation runs one 60 Hz guest refresh per frame (the
+        // game steps every second one) and alternates new and interpolated
+        // samples.
+        Oot3dNativeGame::NativePresentationScheduler scheduler(
+            Oot3dNativeGame::kOot3dOriginalSimulationRateHz);
+        (void)scheduler.Advance(0.0);
+        uint32_t refreshes = 0U;
+        for (int frame = 0; frame < 60; ++frame) {
+            const auto step = scheduler.Advance(1.0 / 60.0);
+            if (step.GuestRefreshesDue > 1U) {
+                throw std::runtime_error(
+                    "60 Hz presentation batched guest refreshes");
+            }
+            refreshes += step.GuestRefreshesDue;
+        }
+        if (refreshes < 59U || refreshes > 60U) {
+            throw std::runtime_error(
+                "60 Hz presentation must keep 60 guest refreshes a second");
+        }
+        Oot3dNativeGame::NativeVisualSampleCadence cadence(
+            pacing60.Composition.FixedSampleMultiplier);
+        if (cadence.Resolve(true, 0.0F) != 0.0F ||
+            cadence.Resolve(false, 0.0F) != 0.5F) {
+            throw std::runtime_error(
+                "fixed 2x cadence must present the interpolated half step");
+        }
     }
 
     const auto native30 =

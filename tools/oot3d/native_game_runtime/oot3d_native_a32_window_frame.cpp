@@ -111,10 +111,7 @@ bool NativeA32WindowSession::RunFrame() {
     return true;
   }
   const auto requestedPresentationPolicy =
-      Fast::Oot3d::ResolvePresentationPacingPolicy(
-          Fast::Oot3d::GraphicsSettingsRuntime::Instance()
-              .Snapshot()
-              .FrameRate);
+      Fast::Oot3d::ResolvePresentationPacingPolicy(EffectiveFrameRateMode());
   if (Fast::Oot3d::PresentationPacingPolicyChanged(
           presentationPacingPolicy, requestedPresentationPolicy)) {
     const auto requestedCompositionPolicy =

@@ -45,6 +45,7 @@
 #include "oot3d_native_guest_profile.h"
 #include "oot3d_native_controls_settings_panel.h"
 #include "oot3d_native_frame_rate.h"
+#include "oot3d_native_launch_frame_rate.h"
 #include "oot3d_native_game_bootstrap.h"
 #include "oot3d_native_mass_aot.h"
 #include "oot3d_native_pcm_diagnostics.h"
@@ -507,6 +508,10 @@ private:
   nlohmann::json visualTransitionEvents = nlohmann::json::array();
   WindowDemoTimingState timing;
   Fast::Oot3d::PresentationPacingPolicy presentationPacingPolicy{};
+  // Set on the Switch from the launch (ResolveLaunchFrameRateMode): it
+  // replaces the graphics settings' FrameRate when pacing is resolved.
+  std::optional<Fast::Oot3d::FrameRateMode> launchFrameRateMode;
+  Fast::Oot3d::FrameRateMode EffectiveFrameRateMode() const;
   Fast::Renderer3ds::PicaFrameCompositionPolicy frameCompositionPolicy{};
   std::optional<Oot3dNativeGame::NativeRealtimeRefreshPacer> realtimePacerStorage;
   bool visualInterpolationEnabled{};

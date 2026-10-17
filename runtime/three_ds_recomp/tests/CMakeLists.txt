@@ -904,3 +904,13 @@ if(TARGET three_ds_recomp_shaderc AND TARGET Vulkan::Vulkan)
     gtest_discover_tests(oot3d_toon_outline_gpu_tests
         DISCOVERY_TIMEOUT 30 PROPERTIES LABELS "gpu;outline")
 endif()
+
+# Pure helpers of the OpenGL PICA backend (resolution scale, lean switches).
+add_executable(gfx_opengl_pica_scale_tests
+    gfx_opengl_pica_scale_tests.cpp
+)
+set_property(TARGET gfx_opengl_pica_scale_tests PROPERTY CXX_STANDARD 20)
+target_include_directories(gfx_opengl_pica_scale_tests
+    PRIVATE ../src ../include)
+target_link_libraries(gfx_opengl_pica_scale_tests PRIVATE gtest_main)
+gtest_discover_tests(gfx_opengl_pica_scale_tests DISCOVERY_TIMEOUT 30)
