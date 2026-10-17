@@ -70,7 +70,7 @@ static Result Run(const TestFunction& function, bool candidate, unsigned budget,
     memory.EnableWriteTraceFingerprint(trace);
     Oot3dWholeAotStats stats;
     Oot3dWholeAotContext context{memory, memory, stats};
-    context.BlocksRemaining = budget;
+    context.ResetBlockBudget(budget);
     const std::array<uint32_t, 1> hook{mode == 2 ? function.Entry : 0x7000};
     if (mode) {
         context.BlockEntry = Callback;
@@ -82,14 +82,13 @@ static Result Run(const TestFunction& function, bool candidate, unsigned budget,
     Oot3dAotArchitecturalState state(result.Guest);
     uint32_t entry = function.Entry;
     for (unsigned chunk = 0; chunk < (resume ? 8U : 1U); ++chunk) {
-        context.BlocksRemaining = budget;
-        context.BlocksConsumed = 0;
+        context.ResetBlockBudget(budget);
         result.Flow = (candidate ? function.Candidate : function.Baseline)(frame, context, state, entry);
         if (result.Flow.Kind != Oot3dWholeAotFlowKind::BlockLimit || budget == 0) break;
         entry = result.Flow.Pc;
     }
     state.Flush(0x7FFFU, true);
-    result.Remaining = context.BlocksRemaining; result.Consumed = context.BlocksConsumed;
+    result.Remaining = context.BlocksRemaining; result.Consumed = context.BlocksConsumed();
     result.Memory = memory.ContentFingerprint(); result.Trace = memory.WriteTraceFingerprint();
     result.Generation = memory.WriteGeneration();
     return result;
@@ -135,7 +134,7 @@ int main() {
         NativeA32UnobservedMemory region(memory, &counters);
         Oot3dWholeAotStats stats;
         Oot3dWholeAotContext context{memory, memory, stats};
-        context.BlocksRemaining = 20;
+        context.ResetBlockBudget(20);
         uint32_t source = 0x1000, destination = 0x1800, count = 4, carry = 9, scratch = 0;
         Oot3dAotLazyFlags flags(0);
         if (!region.CopyPairs(source, destination, count, carry, scratch, flags, context, 0x8000) ||
@@ -145,7 +144,7 @@ int main() {
         destination = source;
         if (region.CopyPairs(source, destination, count, carry, scratch, flags, context, 0x8000) ||
             counters.Overlap != 1) return 5;
-        context.BlocksRemaining = 1;
+        context.ResetBlockBudget(1);
         if (region.CopyPairs(source, destination, count, carry, scratch, flags, context, 0x8000) ||
             counters.Budget != 1) return 6;
     }
@@ -162,7 +161,7 @@ int main() {
         NativeA32UnobservedMemory region(memory);
         Oot3dWholeAotStats stats;
         Oot3dWholeAotContext context{memory, memory, stats};
-        context.BlocksRemaining = 8;
+        context.ResetBlockBudget(8);
         uint32_t source = 0x0FF8, destination = 0x1800, copies = 4, carry = 9, scratch = 0;
         Oot3dAotLazyFlags flags(0);
         if (region.CopyPairs(source, destination, copies, carry, scratch, flags, context, 0x8000) ||

@@ -36,7 +36,7 @@ static Result Run(bool candidate, unsigned budget, unsigned mode, bool fault,
     Oot3dWholeAotContext context{memory, memory, stats};
     const std::array<uint32_t, 2> outside{0x900, 0x2000};
     const std::array<uint32_t, 1> inside{0x1000};
-    context.BlocksRemaining = budget;
+    context.ResetBlockBudget(budget);
     context.SkipFirstBlockEntry = skip;
     if (mode != 0) {
         context.BlockEntry = Callback;
@@ -56,7 +56,7 @@ static Result Run(bool candidate, unsigned budget, unsigned mode, bool fault,
                             : Execute_Loop_00001000_Observed(frame, context, state, entry);
     state.Flush(0x7FFFU, true);
     result.Remaining = context.BlocksRemaining;
-    result.Consumed = context.BlocksConsumed;
+    result.Consumed = context.BlocksConsumed();
     result.Memory = memory.ContentFingerprint();
     result.Trace = memory.WriteTraceFingerprint();
     result.Faults = stats.MemoryFaults;

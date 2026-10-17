@@ -100,7 +100,6 @@ inline bool Budget(const Oot3dWholeAotContext& context,
 
 inline void Consume(Oot3dWholeAotContext& context, uint32_t blocks) noexcept {
     context.BlocksRemaining -= blocks;
-    context.BlocksConsumed += blocks;
 }
 
 inline bool VfpDefault(uint32_t fpscr) noexcept {
@@ -189,7 +188,6 @@ struct LocalGuest {
     bool Enter() noexcept {
         if (Context.BlocksRemaining == 0U) return false;
         --Context.BlocksRemaining;
-        ++Context.BlocksConsumed;
         return true;
     }
     void Flush() noexcept {
@@ -963,7 +961,7 @@ bool Override_003727F0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
             // 0x003728AC: bl 0x002C0B34; 0x003728B4: cmp r0, #4; bleq 0x002C0B24
             blocks += 3U;
             r0 = s16;
-            ++context.Stats.DirectCalls;
+            OOT3D_AOT_STAT(context.Stats.DirectCalls);
             r14 = 0x003728B4U;
             state.R[0] = r0;
             state.R[1] = r1;
@@ -975,7 +973,7 @@ bool Override_003727F0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
             flags.SetSubtract(r0, 0x00000004U, Mask(0xFU));
             if (flags.Z()) {
                 blocks += 1U; // 0x002C0B24
-                ++context.Stats.DirectCalls;
+                OOT3D_AOT_STAT(context.Stats.DirectCalls);
                 r14 = 0x003728BCU;
                 s0 = 0x10000000U; // literal em 0x002C0B30
                 s0 = Commit(fpscr, Oot3dVfpMultiply(s0, s0, fpscr));

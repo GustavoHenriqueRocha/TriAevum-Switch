@@ -21,6 +21,7 @@ class WholeAotLinkExecutionTests(unittest.TestCase):
         source = r"""
 #include <cassert>
 #include <cstdint>
+#define OOT3D_AOT_STAT(counter) static_cast<void>(++(counter))
 enum class Oot3dWholeAotFlowKind { Returned, Faulted };
 struct Oot3dWholeAotFlow { Oot3dWholeAotFlowKind Kind; uint32_t Pc; };
 struct State { uint32_t R[16]{}; struct { bool Zero; bool Z() const { return Zero; } } Flags{}; };

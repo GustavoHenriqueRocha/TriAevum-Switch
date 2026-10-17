@@ -23,6 +23,22 @@
 #endif
 #endif
 
+// Per-call statistics in generated code (direct, indirect and resolved
+// indirect calls). They feed only the host summary JSON, never guest state,
+// scheduling or the block budget, so a lean product build may compile them
+// out (OOT3D_WHOLE_AOT_LEAN_STATS on the targets that compile generated
+// shards and the native overrides). Only non-inline generated/override
+// function bodies use this macro, so the definition may differ per target.
+// Exits (SVC, block limit, fault, unsupported) and external calls are rare
+// and keep their counters: whole_aot_block_limit_exits feeds boot-status.
+#ifndef OOT3D_AOT_STAT
+#if defined(OOT3D_WHOLE_AOT_LEAN_STATS)
+#define OOT3D_AOT_STAT(counter) static_cast<void>(0)
+#else
+#define OOT3D_AOT_STAT(counter) static_cast<void>(++(counter))
+#endif
+#endif
+
 namespace Oot3dNativeGame {
 
 class NativeA32Memory;
@@ -181,6 +197,28 @@ using Oot3dWholeAotExternalCall = Oot3dWholeAotFlow (*)(
     NativeA32Memory& memory);
 
 struct Oot3dWholeAotContext {
+    // The block budget is the last argument; there is no "consumed" argument
+    // any more (it is derived, see BlocksConsumed()). Code generated for the
+    // previous layout, which passed (budget, 0U), therefore no longer
+    // compiles instead of silently starting from a wrong budget.
+    Oot3dWholeAotContext(
+        NativeA32Memory& memory, oot3d::recomp::a32::MemoryBus& callbackMemory,
+        Oot3dWholeAotStats& stats, Oot3dWholeAotExternalCall externalCall = nullptr,
+        oot3d::recomp::a32::BlockEntryCallback blockEntry = nullptr,
+        void* blockEntryUser = nullptr, const uint32_t* blockEntryPcs = nullptr,
+        size_t blockEntryPcCount = 0,
+        const Oot3dAotBlockEntryFilter* blockEntryFilter = nullptr,
+        bool skipFirstBlockEntry = false, uint32_t blockBudget = 0) noexcept
+        : Memory(memory), CallbackMemory(callbackMemory), Stats(stats),
+          ExternalCall(externalCall), BlockEntry(blockEntry),
+          BlockEntryUser(blockEntryUser), BlockEntryPcs(blockEntryPcs),
+          BlockEntryPcCount(blockEntryPcCount),
+          BlockEntryFilter(blockEntryFilter),
+          SkipFirstBlockEntry(skipFirstBlockEntry),
+          BlocksRemaining(blockBudget), BlockBudget(blockBudget),
+          BlockEntryGate(Oot3dAotBlockEntryGateFor(
+              blockEntry, blockEntryPcCount, blockEntryFilter)) {}
+
     NativeA32Memory& Memory;
     oot3d::recomp::a32::MemoryBus& CallbackMemory;
     Oot3dWholeAotStats& Stats;
@@ -192,15 +230,25 @@ struct Oot3dWholeAotContext {
     size_t BlockEntryPcCount = 0;
     const Oot3dAotBlockEntryFilter* BlockEntryFilter = nullptr;
     bool SkipFirstBlockEntry = false;
+    // Every consumer of the budget only decrements BlocksRemaining (no refunds),
+    // so the consumed count is BlockBudget - BlocksRemaining and the generated
+    // block entry maintains a single counter. Set both with ResetBlockBudget().
     uint32_t BlocksRemaining = 0;
-    uint32_t BlocksConsumed = 0;
+    uint32_t BlockBudget = 0;
     // Derived from BlockEntry/BlockEntryPcCount/BlockEntryFilter when the
-    // context is initialized. Code that changes any of those three afterwards
+    // context is constructed. Code that changes any of those three afterwards
     // must call RefreshBlockEntryGate(), or blocks it newly hooks can be
     // skipped by the generated block entry.
-    const Oot3dAotBlockEntryFilter* BlockEntryGate =
-        Oot3dAotBlockEntryGateFor(BlockEntry, BlockEntryPcCount,
-                                  BlockEntryFilter);
+    const Oot3dAotBlockEntryFilter* BlockEntryGate = nullptr;
+
+    uint32_t BlocksConsumed() const noexcept {
+        return BlockBudget - BlocksRemaining;
+    }
+
+    void ResetBlockBudget(uint32_t budget) noexcept {
+        BlocksRemaining = budget;
+        BlockBudget = budget;
+    }
 
     void RefreshBlockEntryGate() noexcept {
         BlockEntryGate = Oot3dAotBlockEntryGateFor(
@@ -248,7 +296,6 @@ OOT3D_AOT_HOT bool Oot3dAotConsumeBlock(Oot3dWholeAotContext& context) noexcept 
         return false;
     }
     --context.BlocksRemaining;
-    ++context.BlocksConsumed;
     return true;
 }
 
@@ -274,7 +321,7 @@ inline bool Oot3dAotShouldNotifyBlock(
 inline bool Oot3dAotEnterBlock(
     Oot3dWholeAotContext& context, Oot3dWholeAotFrame& frame,
     uint32_t pc) {
-    const bool firstBlock = context.BlocksConsumed == 0U;
+    const bool firstBlock = context.BlocksConsumed() == 0U;
     if (!Oot3dAotConsumeBlock(context)) {
         return false;
     }
@@ -290,7 +337,7 @@ inline bool Oot3dAotEnterBlock(
 inline bool Oot3dAotEnterBlock(
     Oot3dWholeAotContext& context, Oot3dWholeAotFrame& frame,
     Oot3dAotArchitecturalState& state, uint32_t pc) {
-    const bool firstBlock = context.BlocksConsumed == 0U;
+    const bool firstBlock = context.BlocksConsumed() == 0U;
     if (!Oot3dAotConsumeBlock(context)) {
         return false;
     }
@@ -335,8 +382,8 @@ OOT3D_AOT_COLD bool Oot3dAotEnterBlockSlow(
 // Oot3dAotShouldNotifyBlock can be true, so a rejection is exactly one of its
 // early "false" results; the cold half still evaluates it in full. The PC is a
 // literal, so the gate test is one load of a fixed word and one bit test.
-// "First block" is decided after consumption: BlocksConsumed was 0 before the
-// increment exactly when it is 1 after it.
+// "First block" is decided after consumption: nothing was consumed before
+// this block exactly when one block is consumed after it.
 template <typename CommitState, typename ReloadState>
 OOT3D_AOT_HOT bool Oot3dAotEnterBlock(
     Oot3dWholeAotContext& context, Oot3dWholeAotFrame& frame,
@@ -349,7 +396,7 @@ OOT3D_AOT_HOT bool Oot3dAotEnterBlock(
         return true;
     }
     return Oot3dAotEnterBlockSlow(context, frame, state, pc,
-                                  context.BlocksConsumed == 1U,
+                                  context.BlocksConsumed() == 1U,
                                   commitState, reloadState);
 }
 

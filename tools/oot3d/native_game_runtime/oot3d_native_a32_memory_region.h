@@ -135,7 +135,6 @@ class NativeA32UnobservedMemory final {
         carried = lastCarry;
         scratch = lastScratch;
         context.BlocksRemaining -= iterations;
-        context.BlocksConsumed += iterations;
         mWrites += uint64_t{iterations} * 2U;
         mMemory.MarkRangeWritten(static_cast<uint32_t>(writeBegin), size_t(length),
             mMemory.CurrentRangeGeneration() + mWrites);

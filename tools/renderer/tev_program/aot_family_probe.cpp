@@ -13,7 +13,7 @@ Oot3dWholeAotFlow FamilyTriangle(Oot3dWholeAotFrame& frame,Oot3dWholeAotContext&
     bool ok=Triangle(pc,frame.Guest,context.Memory,&result,&stats,context.ExternalCall,
         context.BlocksRemaining,&used,nullptr,nullptr,nullptr,0,nullptr,true,returnPc);
     state.Reload(0x7FFFU,true);
-    context.BlocksConsumed+=used;context.BlocksRemaining-=used;
+    context.BlocksRemaining-=used;
     context.Stats.MemoryFaults+=stats.MemoryFaults;
     context.Stats.BlockLimitExits+=stats.BlockLimitExits;
     if (!ok) return Oot3dAotBlockLimit(context,pc);
@@ -38,7 +38,7 @@ bool FamilyExecute(uint32_t pc,a32::GuestState& guest,NativeA32Memory& memory,
             callback,user,pcs,count,filter,skipFirst,stop);
     Oot3dWholeAotFrame frame(guest);Oot3dAotArchitecturalState state(guest);
     Oot3dWholeAotContext context{memory,memory,*stats,external,
-        kFamilyOptimized?nullptr:callback,user,pcs,count,filter,skipFirst,budget,0};
+        kFamilyOptimized?nullptr:callback,user,pcs,count,filter,skipFirst,budget};
     Oot3dWholeAotFlow flow;
     try {
         Oot3dWholeAotExecutionScope scope;
@@ -51,7 +51,7 @@ bool FamilyExecute(uint32_t pc,a32::GuestState& guest,NativeA32Memory& memory,
     }
     state.Flush(0x7FFFU,true);guest.r[15]=flow.Pc;
     ++familyHits;++stats->Calls;
-    if(consumed) *consumed=context.BlocksConsumed?context.BlocksConsumed:1;
+    if(consumed) *consumed=context.BlocksConsumed()?context.BlocksConsumed():1;
     switch(flow.Kind) {
     case Oot3dWholeAotFlowKind::Returned:
     case Oot3dWholeAotFlowKind::Branch:
@@ -59,7 +59,7 @@ bool FamilyExecute(uint32_t pc,a32::GuestState& guest,NativeA32Memory& memory,
     case Oot3dWholeAotFlowKind::MemoryFault:
         *result={a32::ExitKind::MemoryFault,flow.Pc,a32::FallbackReason::None,flow.Detail};break;
     case Oot3dWholeAotFlowKind::BlockLimit:
-        *result={a32::ExitKind::BlockLimit,flow.Pc,a32::FallbackReason::None,context.BlocksConsumed};break;
+        *result={a32::ExitKind::BlockLimit,flow.Pc,a32::FallbackReason::None,context.BlocksConsumed()};break;
     case Oot3dWholeAotFlowKind::Svc:
         *result={a32::ExitKind::Svc,flow.Pc,a32::FallbackReason::None,flow.Detail};break;
     default:

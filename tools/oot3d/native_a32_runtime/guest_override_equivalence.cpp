@@ -191,7 +191,7 @@ Outcome Run(const GeneratedWholeAot::OverrideCase& testCase, bool patched,
         context.RefreshBlockEntryGate();
     }
     context.SkipFirstBlockEntry = scenario.SkipFirst;
-    context.BlocksRemaining = scenario.Budget;
+    context.ResetBlockBudget(scenario.Budget);
     Oot3dWholeAotFrame frame(out.Guest);
     Oot3dAotArchitecturalState state(out.Guest);
     Oot3dWholeAotFlow flow{};
@@ -203,7 +203,7 @@ Outcome Run(const GeneratedWholeAot::OverrideCase& testCase, bool patched,
     state.Flush(0x7FFFU, true);
     out.Flow = flow;
     out.Remaining = context.BlocksRemaining;
-    out.Consumed = context.BlocksConsumed;
+    out.Consumed = context.BlocksConsumed();
     out.Stats = stats;
     out.Hooks = std::move(log.Pcs);
     out.Generation = memory.WriteGeneration();
@@ -664,7 +664,7 @@ int main(int argc, char** argv) {
                         a32::GuestState guest = scenario.Guest;
                         Oot3dWholeAotStats stats{};
                         Oot3dWholeAotContext context{memory, memory, stats};
-                        context.BlocksRemaining = 1U << 20U;
+                        context.ResetBlockBudget(1U << 20U);
                         Oot3dWholeAotFrame frame(guest);
                         Oot3dAotArchitecturalState state(guest);
                         Oot3dWholeAotFlow flow{};
