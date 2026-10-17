@@ -132,7 +132,10 @@ Experience" 3.0 is. The pack builder also accepts that archive, verified exactly
 ### What changed relative to 2.1.1
 
 - No localized `menu_top_parts00`/`menu_cursor00` CTXBs: 3.0 leaves the native
-  menu textures untouched, so the pack has **zero** hash-matched CTXB entries.
+  menu textures untouched (its own HUD draws from `custom_ui01`). 2.1.1 had
+  painted HUD sprites into texels the original leaves transparent, and the
+  native consumers still sample them, so the builder recreates those
+  replacements (see below).
 - `custom_menu00` + `custom_font00` became one 512x256 ETC1A4 atlas,
   `custom_ui01.ctxb`, which also holds the payload's own glyph font, buttons,
   the "Mod Options" panel, SELECT/START labels and the cycle arrows.
@@ -144,7 +147,27 @@ Experience" 3.0 is. The pack builder also accepts that archive, verified exactly
 
 ### Pack produced from 3.0
 
-No C++ changes. The builder emits O3TU v2 with three profile textures:
+No C++ changes. The builder emits O3TU v2 with hash-matched entries for every
+distinct original `menu_top_parts00` / `menu_cursor00` payload (USA RomFS: 6 +
+2 = 8 entries, the same count 2.1.1 produced). Each entry is the original
+RGBA4 payload, bit-exact outside the 2.1.1 rectangles, with the 3.0 sprite
+painted in; the builder refuses an original that is not fully transparent in a
+rectangle, so native draws never see a changed texel. Nothing is scaled; only
+transparent borders are cropped:
+
+| 2.1.1 rect (consumer) | Element | 3.0 `custom_ui01` source |
+|---|---|---|
+| `menu_top_parts00 (432,218,30,30)` TouchCluster quad 5 | D-pad cross | `(385,108,30,30)`, the 3.0 remap of 2.1.1 `(434,219)` (literal pool 0x005E52D4) |
+| `menu_top_parts00 (386,201,48,48)` TouchCluster quads 0..4 | X/Y/I/II action circles | `(98,3,46,48)` of `(97,3,48,48)`, one texel left of centre so the D-pad columns 432..433 stay clear |
+| `menu_top_parts00 (440,190,17,11)` TouchLabels quad 0 | `ZR` label (Item I) | `(47,234,16,11)` of the `(47,231,16,16)` cell, at +1,0 |
+| `menu_top_parts00 (440,201,17,11)` TouchLabels quad 1 | `ZL` label (Item II) | `(245,230,16,11)` of the `(245,227,16,16)` cell, at +1,0 |
+| `menu_top_parts00 (486,230,26,26)` Ocarina navigation (left mirrored) | arrow | `(47,124,26,26)` of `(46,124,28,26)` |
+| `menu_cursor00 (72,89,28,36)` tab hint, quarter turn | `R` glyph | `(240,117,36,28)` of `(240,117,37,28)`, rotated |
+| `menu_cursor00 (100,89,28,36)` tab hint, quarter turn | `L` glyph | `(462,108,36,28)` of `(462,108,37,28)`, rotated |
+
+Everything else the TopScreen C++ samples from `menu_top_parts00` (view eye,
+Navi, camera, hearts, magic meter, X/Y/I/B/II labels, native touch copies) is
+present in the original texture. Profile textures:
 
 | Semantic | Content |
 |---|---|
@@ -169,5 +192,7 @@ Emulator `ltn16.qbf` (64x64 HD, same contract as 2.1.1). Its `sys8.qbf`
 (1,575,184 bytes vs 26,896 native) uses an encoding the QBF pairing does not
 support and is not imported. Forge recipes still pin 2.1.1 only.
 
-Not yet verified on hardware: the Items hint and the D-pad cycle marks with 3.0
-art, and the pause screens with native (not 2.1.1-modified) menu textures.
+Not yet verified on hardware: the Items hint, the D-pad cross/cycle marks,
+action circles, labels, Ocarina arrows and L/R tab hints with 3.0 art. The
+pack replaces the old one in place (`sdmc:/switch/oot3dre/config/
+atlas_overrides.o3tu`); no rebuild is needed.

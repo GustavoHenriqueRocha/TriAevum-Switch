@@ -84,7 +84,51 @@ TOPSCREEN_30_MENU_ATLAS_REGIONS = (
 # region edges sees what the 3.0 payload itself samples there.
 TOPSCREEN_30_REGION_MARGIN = 1
 PICA_FORMAT_RGBA8 = 0
+PICA_FORMAT_RGBA4 = 4
 PICA_FORMAT_ETC1A4 = 13
+
+# 2.1.1 also replaced the localized menu_top_parts00/menu_cursor00 CTXBs and
+# painted HUD sprites into texels the original game leaves fully transparent.
+# The native TopScreen consumers still sample those 2.1.1 rectangles from the
+# native textures, so a 3.0 pack rebuilds the replacements: original payload
+# plus the 3.0 sprite at each 2.1.1 rectangle, hash-matched per language.
+#
+# (label, 3.0 source rect, 2.1.1 sampled rect, placement inside it,
+#  quarter_turn). Sources come from the 3.0 custom_ui01 rect tables (Emulator
+# code.ips): the D-pad cross is the 3.0 remap 2.1.1 (434,219) -> (385,108)
+# (literal pool 0x005E52D4..0x005E5310; rect 0x0060A598); circle 0x0060A568;
+# ZR/ZL cells 0x0060A658/0x0060A648; arrow 0x0060A5D8; R/L 0x0060A6B8/A6A8.
+# Each source is cropped to whole transparent borders around the opaque
+# sprite so nothing is scaled:
+# - circle: 3.0 48x48 (opaque 45x45) shifted 1 texel left so columns
+#   432..433, shared with the D-pad rectangle, stay transparent;
+# - ZR/ZL: opaque 15x9 inside the 3.0 16x16 cell, centred in the 17x11 label;
+# - arrow: 3.0 28x26 (opaque 25x24) cropped to 26x26;
+# - L/R: 3.0 37x28 (opaque 35x26) cropped to 36x28 and stored a quarter turn
+#   as the 28x36 2.1.1 crop (UiPrimitive::uv_quarter_turn).
+TOPSCREEN_211_PAUSE_TOP_PAGE = "menu_top_parts00.ctxb"
+TOPSCREEN_211_CURSOR = "menu_cursor00.ctxb"
+TOPSCREEN_30_PAUSE_TOP_PAGE_REGIONS = (
+    # TouchCluster quad 5 (oot3d_top_screen_mod_profile_hud.cpp).
+    ("dpad_cross", (385, 108, 30, 30), (432, 218, 30, 30), (0, 0), False),
+    # TouchCluster quads 0..4: X/Y/I/II action circles.
+    ("action_circle", (98, 3, 46, 48), (386, 201, 48, 48), (0, 0), False),
+    # TouchLabels quad 0 (Item I circle) and quad 1 (Item II circle).
+    ("item_i_label_zr", (47, 234, 16, 11), (440, 190, 17, 11), (1, 0), False),
+    ("item_ii_label_zl", (245, 230, 16, 11), (440, 201, 17, 11), (1, 0),
+     False),
+    # OcarinaNavigation (right quad; the left quad mirrors it).
+    ("ocarina_arrow", (47, 124, 26, 26), (486, 230, 26, 26), (0, 0), False),
+)
+TOPSCREEN_30_CURSOR_REGIONS = (
+    # TabHint glyphs: R at crop X 72, L at crop X 100.
+    ("tab_hint_r", (240, 117, 36, 28), (72, 89, 28, 36), (0, 0), True),
+    ("tab_hint_l", (462, 108, 36, 28), (100, 89, 28, 36), (0, 0), True),
+)
+TOPSCREEN_30_NATIVE_TEXTURES = (
+    (TOPSCREEN_211_PAUSE_TOP_PAGE, TOPSCREEN_30_PAUSE_TOP_PAGE_REGIONS),
+    (TOPSCREEN_211_CURSOR, TOPSCREEN_30_CURSOR_REGIONS),
+)
 ETC1_MODIFIERS = (
     (2, 8), (5, 17), (9, 29), (13, 42),
     (18, 60), (24, 80), (33, 106), (47, 183),
@@ -176,6 +220,81 @@ def encode_rgba8_tiled(rgba: bytes, width: int, height: int) -> bytes:
             output[pixel * 4:pixel * 4 + 4] = bytes(
                 (alpha, blue, green, red))
     return bytes(output)
+
+
+def _tiled_pixel(x: int, y: int, width: int) -> int:
+    return ((y // 8) * (width // 8) + x // 8) * 64 + morton8(x % 8, y % 8)
+
+
+def decode_rgba4_tiled(payload: bytes, width: int, height: int) -> bytearray:
+    """Decode PICA tiled RGBA4 (native format 4) to linear RGBA8."""
+    if width % 8 or height % 8 or len(payload) != width * height * 2:
+        raise ValueError("invalid RGBA4 image")
+    rgba = bytearray(width * height * 4)
+    for y in range(height):
+        for x in range(width):
+            value = struct.unpack_from(
+                "<H", payload, _tiled_pixel(x, y, width) * 2)[0]
+            target = (y * width + x) * 4
+            rgba[target:target + 4] = bytes(
+                ((value >> shift) & 15) * 17 for shift in (12, 8, 4, 0))
+    return rgba
+
+
+def encode_rgba4_tiled(rgba: bytes, width: int, height: int) -> bytes:
+    """Encode linear RGBA8 as PICA tiled RGBA4 (rounded to 4 bits)."""
+    if width % 8 or height % 8 or len(rgba) != width * height * 4:
+        raise ValueError("invalid RGBA8 image")
+    output = bytearray(width * height * 2)
+    for y in range(height):
+        for x in range(width):
+            source = (y * width + x) * 4
+            red, green, blue, alpha = (
+                (channel * 15 + 127) // 255
+                for channel in rgba[source:source + 4])
+            struct.pack_into("<H", output, _tiled_pixel(x, y, width) * 2,
+                             (red << 12) | (green << 8) | (blue << 4) | alpha)
+    return bytes(output)
+
+
+def compose_topscreen_30_native_texture(
+        original_payload: bytes, width: int, height: int,
+        ui_atlas_rgba: bytes, ui_width: int, ui_height: int,
+        regions: tuple, label: str) -> bytes:
+    """Paint 3.0 sprites into an original RGBA4 menu texture.
+
+    Every 2.1.1 rectangle must be fully transparent in the original, so native
+    draws never sample a changed texel; all other texels are kept bit-exact.
+    """
+    rgba = decode_rgba4_tiled(original_payload, width, height)
+    # 2.1.1 rectangles may overlap (action circle and D-pad share columns
+    # 432..433), so every check runs on the original before any paint.
+    for name, (sx, sy, sw, sh), (dx, dy, dw, dh), (ox, oy), turn in regions:
+        if (dx + dw > width or dy + dh > height or
+                sx + sw > ui_width or sy + sh > ui_height):
+            raise ValueError(f"TopScreen 3.0 region out of bounds: {name}")
+        placed_w, placed_h = (sh, sw) if turn else (sw, sh)
+        if ox + placed_w > dw or oy + placed_h > dh:
+            raise ValueError(f"TopScreen 3.0 sprite exceeds its rect: {name}")
+        if any(rgba[((dy + row) * width + dx + column) * 4 + 3]
+               for row in range(dh) for column in range(dw)):
+            raise ValueError(
+                f"original {label} is not transparent at the 2.1.1 {name} "
+                "rectangle")
+    for name, (sx, sy, sw, sh), (dx, dy, dw, dh), (ox, oy), turn in regions:
+        placed_w, placed_h = (sh, sw) if turn else (sw, sh)
+        for row in range(placed_h):
+            for column in range(placed_w):
+                if turn:
+                    # uv_quarter_turn shows stored texel (c, r) at display
+                    # (placed_h - 1 - r, c) of the sw x sh sprite.
+                    source_x, source_y = sx + placed_h - 1 - row, sy + column
+                else:
+                    source_x, source_y = sx + column, sy + row
+                source = (source_y * ui_width + source_x) * 4
+                target = ((dy + oy + row) * width + dx + ox + column) * 4
+                rgba[target:target + 4] = ui_atlas_rgba[source:source + 4]
+    return encode_rgba4_tiled(rgba, width, height)
 
 
 def compose_topscreen_30_menu_atlas(ui_atlas_rgba: bytes, width: int,
@@ -325,7 +444,9 @@ def build_texture_pack(*, archive: Path | None = None,
             region = detect_romfs_region(
                 original_romfs=original_romfs,
                 original_romfs_image=original_romfs_image)
-        return build_topscreen_30_pack(archive=archive, region=region)
+        return build_topscreen_30_pack(
+            archive=archive, region=region, original_romfs=original_romfs,
+            original_romfs_image=original_romfs_image)
     entries_by_original: dict[int, tuple[int, bytes, str]] = {}
     profile_textures: list[tuple[str, int, int, int, bytes]] = []
 
@@ -481,11 +602,68 @@ def detect_romfs_region(*, original_romfs: Path | None = None,
     return found[0]
 
 
-def build_topscreen_30_pack(*, archive: Path, region: str) -> bytes:
+def read_original_menu_ctxb(language: str, texture: str, *,
+                            original_romfs: Path | None,
+                            original_romfs_image: Path | None) -> bytes:
+    relative = f"menu/{language}/{texture}"
+    if original_romfs is not None:
+        path = original_romfs / relative
+        if not path.is_file():
+            raise FileNotFoundError(relative)
+        return path.read_bytes()
+    if original_romfs_image is None:
+        raise ValueError("TopScreen 3.0 needs the original RomFS")
+    return read_level3_romfs_file(original_romfs_image, relative)
+
+
+def build_topscreen_30_native_entries(
+        ui_rgba: bytes, ui_width: int, ui_height: int, *,
+        original_romfs: Path | None,
+        original_romfs_image: Path | None) -> list[tuple[int, int, bytes]]:
+    """Hash-matched menu_top_parts00/menu_cursor00 replacements for 3.0."""
+    entries: dict[int, tuple[int, bytes]] = {}
+    for texture, regions in TOPSCREEN_30_NATIVE_TEXTURES:
+        found = 0
+        for language in LANGUAGES:
+            try:
+                original = read_original_menu_ctxb(
+                    language, texture, original_romfs=original_romfs,
+                    original_romfs_image=original_romfs_image)
+            except FileNotFoundError:
+                continue
+            found += 1
+            label = f"{language}/{texture}"
+            if len(original) < CTXB_HEADER_SIZE or original[:4] != b"ctxb":
+                raise ValueError(f"invalid original CTXB: {label}")
+            width, height, raw_format, raw_type = struct.unpack_from(
+                "<HHHH", original, 0x2C)
+            payload = original[CTXB_HEADER_SIZE:]
+            if (PICA_FORMATS.get((raw_format, raw_type)) != PICA_FORMAT_RGBA4
+                    or len(payload) != width * height * 2):
+                raise ValueError(f"original CTXB is not RGBA4: {label}")
+            original_hash = fnv1a64(payload)
+            if original_hash in entries:
+                continue
+            replacement = compose_topscreen_30_native_texture(
+                payload, width, height, ui_rgba, ui_width, ui_height,
+                regions, label)
+            entries[original_hash] = (fnv1a64(replacement), replacement)
+        if not found:
+            raise ValueError(f"original RomFS has no menu/*/{texture}")
+    return [(original, replacement_hash, payload)
+            for original, (replacement_hash, payload) in entries.items()]
+
+
+def build_topscreen_30_pack(*, archive: Path, region: str,
+                            original_romfs: Path | None = None,
+                            original_romfs_image: Path | None = None) -> bytes:
     """Build an O3TU v2 pack from the TopScreen 3.0 archive.
 
-    3.0 ships no localized CTXB replacements, so the pack has no hash-matched
-    entries. Profile textures:
+    3.0 ships no localized CTXB replacements; the hash-matched entries are
+    rebuilt from the original RomFS: each distinct localized
+    menu_top_parts00/menu_cursor00 payload with the 3.0 sprites painted at the
+    2.1.1 rectangles the native consumers sample (D-pad cross, action circles,
+    ZR/ZL labels, Ocarina arrows, L/R tab hints). Profile textures:
     - 2.1.1 ``menu_atlas``: 512x512 RGBA8 in the 2.1.1 layout, holding the
       exact 3.0 Items-hint and D-pad cycle sprites at the 2.1.1 coordinates the
       native consumers sample (unchanged C++).
@@ -523,7 +701,10 @@ def build_topscreen_30_pack(*, archive: Path, region: str) -> bytes:
     menu_payload = encode_rgba8_tiled(
         compose_topscreen_30_menu_atlas(ui_rgba, width, height),
         menu_width, menu_height)
-    return serialize_pack([], [
+    entries = build_topscreen_30_native_entries(
+        ui_rgba, width, height, original_romfs=original_romfs,
+        original_romfs_image=original_romfs_image)
+    return serialize_pack(entries, [
         (TOPSCREEN_211_MENU_ATLAS_SEMANTIC, menu_width, menu_height,
          PICA_FORMAT_RGBA8, menu_payload),
         (TOPSCREEN_211_FONT_ATLAS_SEMANTIC, width, height,
