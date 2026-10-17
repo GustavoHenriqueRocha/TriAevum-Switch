@@ -593,7 +593,11 @@ bool NativeA32WindowSession::RunFrame() {
              << (planStats.ConsumerBuilds - windowPlanStats.ConsumerBuilds)
              << " plan_serial_ms="
              << perFrameMs(planStats.SerialBuildNanoseconds,
-                           windowPlanStats.SerialBuildNanoseconds);
+                           windowPlanStats.SerialBuildNanoseconds)
+             // Must stay small and constant (recycled batches).
+             << " plan_batches_live=" << planStats.LiveBatches
+             << " plan_batches_queued=" << planStats.QueuedBatches
+             << " plan_batches_allocated=" << planStats.AllocatedBatches;
         windowPlanStats = planStats;
       }
       // Totals of a Mesa built with the Horizon shader cache (absent from
@@ -1448,10 +1452,10 @@ void NativeA32WindowSession::RunGuestRefresh() {
     std::shared_ptr<Oot3dNativeGame::Oot3dPicaDeferredPlanBatch> deferredPlans;
     if (picaPlanBuilder.Deferred() && !draws.empty() &&
         !launch.ExtendedDiagnostics && !picaSemanticTrace.Enabled()) {
-      const size_t drainedCapacity = draws.capacity();
-      deferredPlans = picaPlanBuilder.BeginBatch(std::move(draws));
-      // The submission queue swaps this vector in next: keep its capacity.
-      draws.reserve(drainedCapacity);
+      // Swaps vectors with a recycled batch: `draws` comes back empty with
+      // capacity for the submission queue to fill next; nothing is copied
+      // or allocated per pass.
+      deferredPlans = picaPlanBuilder.BeginBatch(draws);
     }
     auto &drawList =
         deferredPlans != nullptr ? deferredPlans->Submissions : draws;

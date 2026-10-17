@@ -291,6 +291,13 @@ target_link_libraries(oot3d_native_pica_deferred_plan_tests PRIVATE
     oot3d_native_pica_vulkan_plan)
 oot3d_target_defaults(oot3d_native_pica_deferred_plan_tests FOLDER Tests)
 
+add_executable(oot3d_native_pica_deferred_plan_soak_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_pica_deferred_plan_soak_tests.cpp
+)
+target_link_libraries(oot3d_native_pica_deferred_plan_soak_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_pica_deferred_plan_soak_tests FOLDER Tests)
+
 add_executable(oot3d_native_pica_vulkan_plan_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_vulkan_plan_tests.cpp
 )

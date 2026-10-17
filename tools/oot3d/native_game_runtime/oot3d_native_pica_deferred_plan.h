@@ -27,6 +27,10 @@ class Oot3dPicaDeferredPlanBuilder;
 // Ownership: until Publish, only the guest thread touches the batch. After
 // Publish, Submissions, Plans and Status belong to the builder and are only
 // touched under its mutex; Slots are immutable and may be read by anyone.
+//
+// Batches are recycled (Oot3dPicaDeferredPlanBuilder's pool): every vector
+// keeps its capacity, so a steady game allocates no batch storage per drain
+// pass. Plans and Errors may hold more elements than the current Status.
 struct Oot3dPicaDeferredPlanBatch {
     enum class SlotStatus : uint8_t { Unused, Pending, Built, Failed, Taken };
 
@@ -40,6 +44,12 @@ struct Oot3dPicaDeferredPlanBatch {
 };
 
 struct Oot3dPicaDeferredPlanStats {
+    // Batches alive (placeholders, frames in flight, worker queue) and kept
+    // for reuse; both must stay small and constant.
+    uint64_t LiveBatches = 0;
+    uint64_t PooledBatches = 0;
+    uint64_t QueuedBatches = 0;
+    uint64_t AllocatedBatches = 0;
     uint64_t DeferredDraws = 0;
     uint64_t WorkerBuilds = 0;
     uint64_t ConsumerBuilds = 0;
@@ -78,9 +88,11 @@ class Oot3dPicaDeferredPlanBuilder final {
     bool Build(Oot3dPicaDrawSubmission& submission,
                Oot3dPicaVulkanDrawPlan& plan, std::string* error = nullptr);
 
-    // Takes the drained submissions; `submissions` is left empty.
+    // Takes the drained submissions by swapping vectors: `drained` comes back
+    // empty with the capacity of a recycled batch, ready for the submission
+    // queue to fill again. No submission is copied.
     std::shared_ptr<Oot3dPicaDeferredPlanBatch> BeginBatch(
-        std::vector<Oot3dPicaDrawSubmission>&& submissions);
+        std::vector<Oot3dPicaDrawSubmission>& drained);
     // The placeholder plan of one submission, before Publish: identity, the
     // decoded state (framebuffer, viewport) the guest-side frame accounting
     // reads, and the copy producers its textures reference. Everything else
@@ -98,16 +110,30 @@ class Oot3dPicaDeferredPlanBuilder final {
     friend bool ResolveOot3dPicaDeferredDrawPlan(Oot3dPicaVulkanDrawPlan&,
                                                  std::string*);
 
+    // Outlives the builder: a batch may be released by the last frame that
+    // holds one of its placeholders, on any thread.
+    struct BatchPool {
+        std::mutex Mutex;
+        std::vector<std::unique_ptr<Oot3dPicaDeferredPlanBatch>> Free;
+        std::atomic<uint64_t> Live{0};
+        std::atomic<uint64_t> Allocated{0};
+    };
+    struct BatchRecycler {
+        std::shared_ptr<BatchPool> Pool;
+        void operator()(Oot3dPicaDeferredPlanBatch* batch) const noexcept;
+    };
+
     void BuildSlotLocked(Oot3dPicaDeferredPlanBatch& batch, size_t index,
                          std::atomic<uint64_t>& builds,
                          std::atomic<uint64_t>& nanoseconds);
     void WorkerLoop();
 
     Oot3dPicaVulkanShaderSourceCache& mShaderCache;
+    std::shared_ptr<BatchPool> mPool = std::make_shared<BatchPool>();
     bool mDeferred = false;
     bool mWorker = false;
     std::mutex mBuildMutex;
-    std::mutex mQueueMutex;
+    mutable std::mutex mQueueMutex;
     std::condition_variable mQueueReady;
     std::deque<std::shared_ptr<Oot3dPicaDeferredPlanBatch>> mQueue;
     bool mStop = false;

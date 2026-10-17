@@ -1,4 +1,5 @@
 #include "oot3d_native_pica_deferred_plan.h"
+#include "oot3d_switch_threads.h"
 
 #if defined(__SWITCH__)
 #include <switch.h>
@@ -77,13 +78,56 @@ bool Oot3dPicaDeferredPlanBuilder::Build(Oot3dPicaDrawSubmission& submission,
     return built;
 }
 
+// Pooled batches: more than the few alive at once (accumulator, frames in
+// flight, worker queue) would only pin memory.
+constexpr size_t kPooledBatches = 4U;
+
+void Oot3dPicaDeferredPlanBuilder::BatchRecycler::operator()(
+    Oot3dPicaDeferredPlanBatch* batch) const noexcept {
+    using Status = Oot3dPicaDeferredPlanBatch::SlotStatus;
+    // Release what the batch still references (submission snapshots, plans
+    // nobody took) but keep every vector's capacity.
+    batch->Submissions.clear();
+    for (size_t index = 0; index < batch->Status.size(); ++index) {
+        if (batch->Status[index] == Status::Built) {
+            batch->Plans[index] = {};
+        }
+    }
+    batch->Status.clear();
+    batch->Published = false;
+    batch->Builder = nullptr;
+    Pool->Live.fetch_sub(1U, std::memory_order_relaxed);
+    std::unique_ptr<Oot3dPicaDeferredPlanBatch> owned(batch);
+    std::lock_guard lock(Pool->Mutex);
+    if (Pool->Free.size() < kPooledBatches) {
+        Pool->Free.push_back(std::move(owned));
+    }
+}
+
 std::shared_ptr<Oot3dPicaDeferredPlanBatch>
 Oot3dPicaDeferredPlanBuilder::BeginBatch(
-    std::vector<Oot3dPicaDrawSubmission>&& submissions) {
-    auto batch = std::make_shared<Oot3dPicaDeferredPlanBatch>();
+    std::vector<Oot3dPicaDrawSubmission>& drained) {
+    std::unique_ptr<Oot3dPicaDeferredPlanBatch> storage;
+    {
+        std::lock_guard lock(mPool->Mutex);
+        if (!mPool->Free.empty()) {
+            storage = std::move(mPool->Free.back());
+            mPool->Free.pop_back();
+        }
+    }
+    if (storage == nullptr) {
+        storage = std::make_unique<Oot3dPicaDeferredPlanBatch>();
+        mPool->Allocated.fetch_add(1U, std::memory_order_relaxed);
+    }
+    mPool->Live.fetch_add(1U, std::memory_order_relaxed);
+    std::shared_ptr<Oot3dPicaDeferredPlanBatch> batch(storage.release(),
+                                                      BatchRecycler{mPool});
     batch->Builder = this;
-    batch->Submissions = std::move(submissions);
-    submissions.clear();
+    batch->Published = false;
+    // The recycled vector is empty and keeps its capacity: the submission
+    // queue fills it next, without regrowing.
+    batch->Submissions.clear();
+    batch->Submissions.swap(drained);
     const size_t count = batch->Submissions.size();
     batch->Slots.resize(count);
     batch->Status.assign(count, Oot3dPicaDeferredPlanBatch::SlotStatus::Unused);
@@ -162,12 +206,13 @@ void Oot3dPicaDeferredPlanBuilder::BuildSlotLocked(
         return;
     }
     const auto started = std::chrono::steady_clock::now();
-    if (batch.Plans.size() != batch.Status.size()) {
-        // Plans are several kilobytes each: allocated by the first builder,
-        // never on the guest thread.
+    if (batch.Plans.size() < batch.Status.size()) {
+        // Plans are several kilobytes each: grown by a builder (never on the
+        // guest thread) and kept by the recycled batch.
         batch.Plans.resize(batch.Status.size());
         batch.Errors.resize(batch.Status.size());
     }
+    batch.Errors[index].clear();
     bool built = false;
     try {
         built = BuildOot3dPicaVulkanDrawPlanAndConsumeResources(
@@ -178,9 +223,12 @@ void Oot3dPicaDeferredPlanBuilder::BuildSlotLocked(
     } catch (...) {
         batch.Errors[index] = "native PICA deferred plan build threw";
     }
-    // The submission (register packet and remaining snapshot references) is
-    // no longer needed: release it here rather than on the guest thread.
-    batch.Submissions[index] = {};
+    // Release the snapshot payloads the plan did not take. Never assign a
+    // default submission here: a default packet allocates four fresh 16 KiB
+    // shader stores (64 KiB per draw), the heap churn that made the console's
+    // cost grow with play time. The packet's shared shader and LUT stores go
+    // when the batch is recycled.
+    batch.Submissions[index].Resources.clear();
     batch.Status[index] = built ? Status::Built : Status::Failed;
     builds.fetch_add(1U, std::memory_order_relaxed);
     nanoseconds.fetch_add(NanosecondsSince(started), std::memory_order_relaxed);
@@ -193,6 +241,9 @@ void Oot3dPicaDeferredPlanBuilder::WorkerLoop() {
     // priorities, so on a shared core the renderer always preempts this
     // prebuilding, and a plan it needs first it builds itself.
     svcSetThreadPriority(threadGetCurHandle(), 0x2E);
+    // Core 1, away from the render worker on core 2: sharing its core, this
+    // thread only ran while the renderer waited.
+    (void)SetSwitchThreadCore(kSwitchPicaPlanThreadCore);
 #endif
     for (;;) {
         std::shared_ptr<Oot3dPicaDeferredPlanBatch> batch;
@@ -228,6 +279,16 @@ void Oot3dPicaDeferredPlanBuilder::WorkerLoop() {
 
 Oot3dPicaDeferredPlanStats Oot3dPicaDeferredPlanBuilder::Stats() const noexcept {
     Oot3dPicaDeferredPlanStats stats;
+    stats.LiveBatches = mPool->Live.load(std::memory_order_relaxed);
+    stats.AllocatedBatches = mPool->Allocated.load(std::memory_order_relaxed);
+    {
+        std::lock_guard lock(mPool->Mutex);
+        stats.PooledBatches = mPool->Free.size();
+    }
+    {
+        std::lock_guard lock(mQueueMutex);
+        stats.QueuedBatches = mQueue.size();
+    }
     stats.DeferredDraws = mDeferredDraws.load(std::memory_order_relaxed);
     stats.WorkerBuilds = mWorkerBuilds.load(std::memory_order_relaxed);
     stats.ConsumerBuilds = mConsumerBuilds.load(std::memory_order_relaxed);
@@ -252,7 +313,6 @@ bool ResolveOot3dPicaDeferredDrawPlan(Oot3dPicaVulkanDrawPlan& plan,
     auto& batch = *slot->Batch;
     auto& builder = *batch.Builder;
     const size_t index = slot->Index;
-    Oot3dPicaVulkanDrawPlan built;
     {
         std::lock_guard lock(builder.mBuildMutex);
         if (index >= batch.Status.size() || !batch.Published) {
@@ -263,8 +323,9 @@ bool ResolveOot3dPicaDeferredDrawPlan(Oot3dPicaVulkanDrawPlan& plan,
                                 builder.mConsumerNanoseconds);
         switch (batch.Status[index]) {
         case Status::Built:
-            built = std::move(batch.Plans[index]);
-            batch.Plans[index] = {};
+            // Moved straight into the caller's plan (its slot reference is
+            // held above); the moved-from element is reset by its next build.
+            plan = std::move(batch.Plans[index]);
             batch.Status[index] = Status::Taken;
             break;
         case Status::Failed:
@@ -276,7 +337,6 @@ bool ResolveOot3dPicaDeferredDrawPlan(Oot3dPicaVulkanDrawPlan& plan,
             return false;
         }
     }
-    plan = std::move(built);
     return true;
 }
 

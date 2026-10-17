@@ -149,6 +149,19 @@ Desempenho e usabilidade:
   (montados pelo consumidor porque o worker ainda não tinha chegado), `plan_late_draws` e
   `plan_serial_ms` (ms por quadro de host).
 - Desktop: `TRIAEVUM_DEFERRED_PICA_PLAN=1` (worker) ou `=render`. Teste: `oot3d_native_pica_deferred_plan_tests`.
+- Correção (primeira versão degradava com o tempo de jogo no console: worker 3,9 → 89 ms por quadro
+  em 3 min, 30 → 9 FPS): depois de montar cada plano o worker fazia `submissão = {}`, e um pacote
+  PICA padrão aloca e zera quatro áreas de shader de 16 KiB (64 KiB por draw); além disso cada
+  passada alocava vetores de submissões e de planos de vários MB. Eram ~118 KiB de heap a mais por
+  draw (152 KiB contra 34 KiB do caminho serial), em blocos grandes liberados por outras threads:
+  banda de memória e fragmentação do heap do newlib, que pesavam em todas as threads. Agora os
+  lotes são reciclados (vetores mantêm a capacidade, o vetor drenado volta por troca) e só os
+  recursos da submissão são liberados: o tráfego de heap é igual ao serial. `perf.txt` mostra
+  `plan_batches_live/queued/allocated` (devem ficar pequenos e constantes). Teste de longa duração:
+  `oot3d_native_pica_deferred_plan_soak_tests` (2400 quadros × 160 draws, nos três modos).
+- Núcleos fixos (`SetSwitchThreadCore`, `oot3d_switch_threads.h`; vale só se a máscara do processo
+  permitir): render thread no núcleo 2; worker de planos PICA e thread de áudio no núcleo 1. Antes a
+  ordem de criação punha a render thread e o worker no mesmo núcleo, com o outro quase ocioso.
 
 ## Próximos passos
 

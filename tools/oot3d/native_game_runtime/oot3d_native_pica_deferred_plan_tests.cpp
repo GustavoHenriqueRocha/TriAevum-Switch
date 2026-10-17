@@ -174,6 +174,12 @@ void RequireSamePlan(const Oot3dPicaVulkanDrawPlan& expected,
         fail("visual identity");
 }
 
+std::shared_ptr<Oot3dPicaDeferredPlanBatch> BeginOwned(
+    Oot3dPicaDeferredPlanBuilder& builder,
+    std::vector<Oot3dPicaDrawSubmission> submissions) {
+    return builder.BeginBatch(submissions);
+}
+
 std::vector<Oot3dPicaVulkanDrawPlan> SerialPlans(
     std::vector<Oot3dPicaDrawSubmission> submissions) {
     Oot3dPicaVulkanShaderSourceCache cache;
@@ -198,7 +204,7 @@ void TestDeferredMatchesSerial(bool worker) {
     builder.Configure(true, worker);
     Require(builder.Deferred() && builder.WorkerEnabled() == worker,
             "builder configuration");
-    auto batch = builder.BeginBatch(MakeSubmissions(1U, kDraws));
+    auto batch = BeginOwned(builder, MakeSubmissions(1U, kDraws));
     Oot3dPicaVisualFrameAccumulator accumulator;
     std::vector<Fast::Renderer3ds::PicaTextureCopyReference> copies;
     for (size_t index = 0; index < kDraws; ++index) {
@@ -280,7 +286,7 @@ void TestSkippedAndFailedSlots() {
     auto submissions = MakeSubmissions(40U, 3U);
     // No vertex snapshot: the serial build fails, so must the deferred one.
     submissions[2].Resources.erase(submissions[2].Resources.begin() + 1);
-    auto batch = builder.BeginBatch(std::move(submissions));
+    auto batch = builder.BeginBatch(submissions);
     auto first = builder.MakeDeferredPlan(batch, 0U);
     // Slot 1 is never planned (a suppressed draw): the worker skips it.
     auto broken = builder.MakeDeferredPlan(batch, 2U);
@@ -300,12 +306,12 @@ void TestUnpublishedAndStoppedWorker() {
     Oot3dPicaVulkanShaderSourceCache cache;
     Oot3dPicaDeferredPlanBuilder builder(cache);
     builder.Configure(true, true);
-    auto batch = builder.BeginBatch(MakeSubmissions(60U, 2U));
+    auto batch = BeginOwned(builder, MakeSubmissions(60U, 2U));
     auto early = builder.MakeDeferredPlan(batch, 0U);
     std::string error;
     Require(!ResolveOot3dPicaDeferredDrawPlan(early, &error),
             "an unpublished placeholder must not resolve");
-    auto batch2 = builder.BeginBatch(MakeSubmissions(70U, 64U));
+    auto batch2 = BeginOwned(builder, MakeSubmissions(70U, 64U));
     std::vector<Oot3dPicaVulkanDrawPlan> plans;
     for (size_t index = 0; index < 64U; ++index)
         plans.push_back(builder.MakeDeferredPlan(batch2, index));
@@ -329,7 +335,7 @@ void TestConcurrentBatches() {
     const auto expected = SerialPlans(MakeSubmissions(1000U, 16U));
     std::vector<std::vector<Oot3dPicaVulkanDrawPlan>> passes;
     for (size_t pass = 0; pass < 40U; ++pass) {
-        auto batch = builder.BeginBatch(MakeSubmissions(1000U, 16U));
+        auto batch = BeginOwned(builder, MakeSubmissions(1000U, 16U));
         std::vector<Oot3dPicaVulkanDrawPlan> plans;
         for (size_t index = 0; index < 16U; ++index)
             plans.push_back(builder.MakeDeferredPlan(batch, index));

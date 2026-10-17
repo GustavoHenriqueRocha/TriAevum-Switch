@@ -1,4 +1,5 @@
 #include "oot3d_host_audio_stream.h"
+#include "oot3d_switch_threads.h"
 
 #include <algorithm>
 #include <chrono>
@@ -490,6 +491,8 @@ void HostAudioStream::WorkerMain() {
     if (mOptions.SwitchPriority != 0) {
         svcSetThreadPriority(CUR_THREAD_HANDLE, mOptions.SwitchPriority);
     }
+    // Core 1 with the PICA plan worker, off the render worker's core 2.
+    (void)SetSwitchThreadCore(kSwitchAudioThreadCore);
 #endif
     const auto poll = std::chrono::microseconds(std::max<uint32_t>(mOptions.PollMicroseconds, 500U));
     for (;;) {

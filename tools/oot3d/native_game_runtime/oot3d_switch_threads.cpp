@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <pthread.h>
 
+#include "oot3d_switch_threads.h"
+
 extern "C" int __real_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
                                      void* (*start)(void*), void* arg);
 extern "C" Result __real_threadCreate(Thread* t, ThreadFunc entry, void* arg, void* stack_mem,
@@ -140,6 +142,16 @@ extern "C" int __wrap_SDL_SetThreadPriority(int priority) {
     }
     return __real_SDL_SetThreadPriority(priority);
 }
+// See oot3d_switch_threads.h. The wrapper's alternating placement put the
+// heavy render worker and the PICA plan worker on the same core while the
+// other stayed almost idle; the threads that matter now ask for their core.
+bool SetSwitchThreadCore(int core) {
+    if (core < 0 || core > 2 || (ApplicationCoreMask() & (1U << core)) == 0U) {
+        return false;
+    }
+    return R_SUCCEEDED(svcSetThreadCoreMask(threadGetCurHandle(), core, 1U << core));
+}
+
 // Called once from main: the game thread runs alone on core 0.
 void PlaceSwitchMainThread() {
     MirrorTlsPointer();

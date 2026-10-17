@@ -1,4 +1,5 @@
 #include "oot3d_native_render_command_stream.h"
+#include "oot3d_switch_threads.h"
 
 #if defined(__SWITCH__)
 #include <switch.h>
@@ -140,6 +141,9 @@ void NativeRenderCommandStream::WorkerLoop() {
     // time-slice equal priorities, so a busy render worker sharing a core
     // with the audio thread starved it and the sound crackled.
     svcSetThreadPriority(threadGetCurHandle(), 0x2D);
+    // The heaviest thread after the game: core 2 to itself (the plan worker
+    // and audio take core 1) instead of wherever creation order put it.
+    (void)SetSwitchThreadCore(kSwitchRenderThreadCore);
 #endif
     std::unique_lock lock(mMutex);
     for (;;) {
