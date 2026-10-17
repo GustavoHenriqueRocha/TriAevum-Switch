@@ -268,6 +268,7 @@ set_property(TARGET oot3d_native_pica_composition_tests PROPERTY FOLDER Tests)
 add_library(oot3d_native_pica_vulkan_plan STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_vulkan_plan.cpp
     tools/oot3d/native_game_runtime/oot3d_native_pica_visual_frame.cpp
+    tools/oot3d/native_game_runtime/oot3d_native_pica_deferred_plan.cpp
 )
 target_include_directories(oot3d_native_pica_vulkan_plan PUBLIC
     tools/oot3d/native_game_runtime
@@ -282,6 +283,13 @@ add_executable(oot3d_native_pica_temporal_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_native_pica_temporal_tests PRIVATE
     oot3d_native_pica_composition oot3d_native_pica_vulkan_plan)
 oot3d_target_defaults(oot3d_native_pica_temporal_tests FOLDER Tests)
+
+add_executable(oot3d_native_pica_deferred_plan_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_pica_deferred_plan_tests.cpp
+)
+target_link_libraries(oot3d_native_pica_deferred_plan_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_pica_deferred_plan_tests FOLDER Tests)
 
 add_executable(oot3d_native_pica_vulkan_plan_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_vulkan_plan_tests.cpp

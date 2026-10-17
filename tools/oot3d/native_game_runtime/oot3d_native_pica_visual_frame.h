@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -225,6 +226,12 @@ class Oot3dPicaVisualFrameAccumulator final {
     // for the complete visual frame and its subsequent interpolated samples.
     bool ViewDependencyWork(Oot3dPicaVisualFrameViewSample& output);
     void CompleteDependencyWork();
+    // Replaces deferred placeholders among the pending draws up to a
+    // submission (oot3d_native_pica_deferred_plan.h) before they execute.
+    bool ResolveDeferredDraws(
+        uint64_t throughSubmissionId,
+        const std::function<bool(Oot3dPicaVulkanDrawPlan&)>& resolve);
+    // Plans are copied: deferred placeholders must be resolved first.
     Oot3dPicaVisualFrameAccumulatorState CaptureState() const;
     bool RestoreState(Oot3dPicaVisualFrameAccumulatorState state);
 

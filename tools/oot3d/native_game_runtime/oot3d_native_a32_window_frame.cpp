@@ -572,6 +572,30 @@ bool NativeA32WindowSession::RunFrame() {
       if (hostAudioStream != nullptr) {
         perf << ' ' << hostAudioStream->PerfSummary();
       }
+      // Plan builds off the guest thread (deferred planning): ms per host
+      // frame on the plan worker and on the render thread / dependency
+      // flushes ("late": the worker had not reached them yet).
+      {
+        static Oot3dNativeGame::Oot3dPicaDeferredPlanStats windowPlanStats{};
+        const auto planStats = picaPlanBuilder.Stats();
+        const auto perFrameMs = [&](uint64_t now, uint64_t before) {
+          return static_cast<double>(now - before) / 1.0e6 / hostFrames;
+        };
+        perf << " pica_plan_deferred=" << (picaPlanBuilder.Deferred() ? 1 : 0)
+             << " plan_worker=" << (picaPlanBuilder.WorkerEnabled() ? 1 : 0)
+             << " plan_worker_ms="
+             << perFrameMs(planStats.WorkerBuildNanoseconds,
+                           windowPlanStats.WorkerBuildNanoseconds)
+             << " plan_late_ms="
+             << perFrameMs(planStats.ConsumerBuildNanoseconds,
+                           windowPlanStats.ConsumerBuildNanoseconds)
+             << " plan_late_draws="
+             << (planStats.ConsumerBuilds - windowPlanStats.ConsumerBuilds)
+             << " plan_serial_ms="
+             << perFrameMs(planStats.SerialBuildNanoseconds,
+                           windowPlanStats.SerialBuildNanoseconds);
+        windowPlanStats = planStats;
+      }
       // Totals of a Mesa built with the Horizon shader cache (absent from
       // the stock devkitPro library, hence weak).
       if (mesa_switch_get_stats != nullptr) {
@@ -1416,7 +1440,23 @@ void NativeA32WindowSession::RunGuestRefresh() {
                lastSubmittedDrawId) {
       submitDisplayTransfer(displayTransfers[displayTransferIndex++]);
     }
-    for (auto &draw : draws) {
+    // Deferred planning: each draw enters the accumulator as a placeholder
+    // (identity and decoded state only) and its plan is built off this
+    // thread from the same immutable submission snapshot. Diagnostics that
+    // read the plan here (semantic trace, extended diagnostics) keep the
+    // serial build.
+    std::shared_ptr<Oot3dNativeGame::Oot3dPicaDeferredPlanBatch> deferredPlans;
+    if (picaPlanBuilder.Deferred() && !draws.empty() &&
+        !launch.ExtendedDiagnostics && !picaSemanticTrace.Enabled()) {
+      const size_t drainedCapacity = draws.capacity();
+      deferredPlans = picaPlanBuilder.BeginBatch(std::move(draws));
+      // The submission queue swaps this vector in next: keep its capacity.
+      draws.reserve(drainedCapacity);
+    }
+    auto &drawList =
+        deferredPlans != nullptr ? deferredPlans->Submissions : draws;
+    for (size_t drawIndex = 0; drawIndex < drawList.size(); ++drawIndex) {
+      auto &draw = drawList[drawIndex];
       while (memoryFillIndex < memoryFills.size() &&
              memoryFills[memoryFillIndex].BeforeDrawSubmissionId <=
                  draw.Id) {
@@ -1438,17 +1478,21 @@ void NativeA32WindowSession::RunGuestRefresh() {
           (usesCommonBackground || isOpaqueTargetInitialization);
       Oot3dNativeGame::Oot3dPicaVulkanDrawPlan plan;
       auto drawPhaseStart = std::chrono::steady_clock::now();
-      if (!Oot3dNativeGame::
-              BuildOot3dPicaVulkanDrawPlanAndConsumeResources(
-                  draw, plan, &error, &shaderSourceCache)) {
+      if (deferredPlans != nullptr) {
+        if (!suppressNativeFrontendBackdropDraw) {
+          plan = picaPlanBuilder.MakeDeferredPlan(deferredPlans, drawIndex);
+        }
+      } else if (!picaPlanBuilder.Build(draw, plan, &error)) {
         throw std::runtime_error("native PICA Vulkan plan failed: " +
                                  error);
       }
       phaseTiming.PicaPlanSeconds += SecondsSince(drawPhaseStart);
-      picaSemanticTrace.RecordDraw(
-          presentationFrameCount, frameCount, draw, plan,
-          suppressNativeFrontendBackdropDraw, usesCommonBackground,
-          isOpaqueTargetInitialization);
+      if (deferredPlans == nullptr) {
+        picaSemanticTrace.RecordDraw(
+            presentationFrameCount, frameCount, draw, plan,
+            suppressNativeFrontendBackdropDraw, usesCommonBackground,
+            isOpaqueTargetInitialization);
+      }
       if (suppressNativeFrontendBackdropDraw) {
         picaStats.NativeMenuBackdropDrawOmissionCount +=
             usesCommonBackground ? 1U : 0U;
@@ -1675,6 +1719,8 @@ void NativeA32WindowSession::RunGuestRefresh() {
       }
       ++picaStats.DrawCount;
     }
+    // From here on the submissions belong to the plan builder.
+    picaPlanBuilder.Publish(std::move(deferredPlans));
     if (completionIndex != completions.size()) {
       throw std::runtime_error(
           "native PICA completion did not match a submitted draw");
@@ -1826,6 +1872,20 @@ void NativeA32WindowSession::PresentVisualFrame(
                              guestReferences =
                                  CollectGuestCopyReferences()] {
         if (rendererFrameSkipped) return;
+        // Deferred plans of the closed frames are built (or taken from the
+        // plan worker) here, on the render thread, before any use.
+        if (completedFrame != nullptr) {
+          if (supersededFrames != nullptr) {
+            for (auto &superseded : *supersededFrames) {
+              if (!Oot3dNativeGame::ResolveOot3dPicaDeferredVisualFrame(
+                      superseded, &renderError))
+                throw std::runtime_error(renderError);
+            }
+          }
+          if (!Oot3dNativeGame::ResolveOot3dPicaDeferredVisualFrame(
+                  *completedFrame, &renderError))
+            throw std::runtime_error(renderError);
+        }
         guestCopyReferences = guestReferences;
         bool presentedVisualSample = false;
         bool selectedNewVisualFrame = false;
@@ -2663,6 +2723,20 @@ bool NativeA32WindowSession::FlushNativeDependencies() {
     // Without an acquired image the flush waits; PPF arrives later, as it
     // may on hardware.
     if (rendererFrameSkipped) return;
+    // Deferred placeholders this flush executes are built now (the guest
+    // waits here anyway); the render worker is idle inside Run.
+    uint64_t lastDependencyDraw = 0U;
+    for (const auto& draw : dependencySampleScratch.Draws) {
+      if (draw.BasePlan != nullptr)
+        lastDependencyDraw = std::max(lastDependencyDraw, draw.BasePlan->SubmissionId);
+    }
+    if (!picaPresentationScheduler.ResolveDeferredDraws(
+            lastDependencyDraw,
+            [&](Oot3dNativeGame::Oot3dPicaVulkanDrawPlan& plan) {
+              return Oot3dNativeGame::ResolveOot3dPicaDeferredDrawPlan(plan, &renderError);
+            })) {
+      throw std::runtime_error(renderError);
+    }
     guestCopyReferences = CollectGuestCopyReferences();
     PinGpuCopyResources(dependencySampleScratch);
     if (!picaPresentationScheduler.Execute(

@@ -178,6 +178,8 @@ void NativeA32WindowSession::Finish() {
   auto &realtimePacer = *realtimePacerStorage;
   // Every renderer-owned value below is read after the last command ran.
   renderStream.SetMode(Oot3dNativeGame::NativeRenderCommandStream::Mode::Inline);
+  // The shader-source cache is read below; no build may still be running.
+  picaPlanBuilder.StopWorker();
   if (rendererTiming != &phaseTiming) {
     phaseTiming.PicaBackendSeconds += workerPhaseTiming.PicaBackendSeconds;
     phaseTiming.VisualReplaySeconds += workerPhaseTiming.VisualReplaySeconds;

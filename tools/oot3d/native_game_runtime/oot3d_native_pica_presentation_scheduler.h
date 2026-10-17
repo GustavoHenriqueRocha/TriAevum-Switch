@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -123,6 +124,13 @@ public:
   [[nodiscard]] std::span<const Oot3dPicaVulkanDrawPlan> PendingDraws()
       const noexcept {
     return mAccumulator.PendingDraws();
+  }
+  // Deferred plan placeholders among the pending draws, up to a submission,
+  // are replaced by their built plans in place (views stay valid).
+  bool ResolveDeferredDraws(
+      uint64_t throughSubmissionId,
+      const std::function<bool(Oot3dPicaVulkanDrawPlan &)> &resolve) {
+    return mAccumulator.ResolveDeferredDraws(throughSubmissionId, resolve);
   }
   // True while an ordered raw TextureCopy still owes the guest a PPF
   // completion and therefore needs a dependency flush.

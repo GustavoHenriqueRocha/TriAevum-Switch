@@ -59,6 +59,7 @@
 #include "oot3d_native_pica_visual_savestate.h"
 #include "oot3d_native_pica_vulkan_bridge.h"
 #include "oot3d_native_pica_vulkan_plan.h"
+#include "oot3d_native_pica_deferred_plan.h"
 #include "oot3d_native_player_temporal_bridge.h"
 #include "oot3d_native_scenario_bootstrap.h"
 #include "oot3d_native_temporal_event_ledger.h"
@@ -441,6 +442,11 @@ private:
   NativeInputConsumerDiagnostics inputConsumerDiagnostics;
   NativeControlPollingState nativeControlPollingState;
   Oot3dNativeGame::Oot3dPicaVulkanShaderSourceCache shaderSourceCache;
+  // Builds the PICA draw plans; with deferred planning (Switch default,
+  // config/serial_pica turns it off) on a worker and the render thread
+  // instead of the guest thread. Declared after the cache it uses and before
+  // the render stream, whose commands resolve deferred plans.
+  Oot3dNativeGame::Oot3dPicaDeferredPlanBuilder picaPlanBuilder{shaderSourceCache};
   std::optional<Oot3dNativeGame::Oot3dPicaSemanticTraceWriter> picaSemanticTraceStorage;
   std::optional<Oot3dNativeGame::NativeA32DspHle> dspHleStorage;
   Ship::Context *context{};

@@ -1999,6 +1999,11 @@ bool ViewOot3dPicaVisualFrame(
 void CollectOot3dPicaPlanCopyReferences(
     const Oot3dPicaVulkanDrawPlan& plan,
     std::vector<Fast::Renderer3ds::PicaTextureCopyReference>& out) {
+    if (plan.Deferred != nullptr) {
+        out.insert(out.end(), plan.Deferred->CopyReferences.begin(),
+                   plan.Deferred->CopyReferences.end());
+        return;
+    }
     for (const auto& texture : plan.Textures) {
         out.insert(out.end(), texture.CopyReferences.begin(),
                    texture.CopyReferences.end());
@@ -2152,9 +2157,15 @@ std::vector<Oot3dPicaVisualFrame> Oot3dPicaVisualFrameAccumulator::FinishFrames(
         while (draw < mPendingDraws.size() && mPendingDraws[draw].SubmissionId <= end) ++draw;
         frame.Draws.assign(std::make_move_iterator(mPendingDraws.begin() + firstDraw),
                            std::make_move_iterator(mPendingDraws.begin() + draw));
-        frame.StrictDrawIdentities.reserve(frame.Draws.size());
-        for (const auto& plan : frame.Draws) {
-            frame.StrictDrawIdentities.push_back(ComputeOot3dPicaVisualDrawIdentity(plan));
+        // A frame holding deferred placeholders gets its identities when they
+        // are resolved (ResolveOot3dPicaDeferredVisualFrame), not here.
+        const bool deferredDraws = std::any_of(frame.Draws.begin(), frame.Draws.end(),
+                                               [](const auto& plan) { return plan.Deferred != nullptr; });
+        if (!deferredDraws) {
+            frame.StrictDrawIdentities.reserve(frame.Draws.size());
+            for (const auto& plan : frame.Draws) {
+                frame.StrictDrawIdentities.push_back(ComputeOot3dPicaVisualDrawIdentity(plan));
+            }
         }
         // A fill precedes its draw; a transfer follows its draw.
         const size_t firstFill = fill;
@@ -2237,6 +2248,17 @@ bool Oot3dPicaVisualFrameAccumulator::ViewDependencyWork(
         std::span<const Oot3dPicaDisplayTransferSubmission>(
             mPendingDisplayTransfers).subspan(
                 firstTransfer, endTransfer - firstTransfer);
+    return true;
+}
+
+bool Oot3dPicaVisualFrameAccumulator::ResolveDeferredDraws(
+    uint64_t throughSubmissionId,
+    const std::function<bool(Oot3dPicaVulkanDrawPlan&)>& resolve) {
+    // In place: views of the pending draws keep pointing at them.
+    for (auto& draw : mPendingDraws) {
+        if (draw.SubmissionId > throughSubmissionId) break;
+        if (draw.Deferred != nullptr && !resolve(draw)) return false;
+    }
     return true;
 }
 

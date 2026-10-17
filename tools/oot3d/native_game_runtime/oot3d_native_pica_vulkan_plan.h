@@ -79,6 +79,17 @@ struct Oot3dPicaVulkanTextureBinding {
 bool ResolveOot3dPicaTextureContentIdentity(
     Oot3dPicaVulkanTextureBinding& texture, std::string* error = nullptr);
 
+struct Oot3dPicaDeferredPlanBatch;
+
+// Where a placeholder plan is built later (oot3d_native_pica_deferred_plan.h).
+// Immutable once the plan exists; CopyReferences are the producers the built
+// plan's textures will reference, readable while the build is pending.
+struct Oot3dPicaDeferredPlanSlot {
+    Oot3dPicaDeferredPlanBatch* Batch = nullptr;
+    uint32_t Index = 0;
+    std::vector<Fast::Renderer3ds::PicaTextureCopyReference> CopyReferences;
+};
+
 struct Oot3dPicaVulkanDrawPlan {
     uint64_t SubmissionId = 0;
     uint32_t CommandListAddress = 0;
@@ -114,6 +125,10 @@ struct Oot3dPicaVulkanDrawPlan {
     uint64_t GeometryIdentity = 0;
     uint64_t GeometryContentVersion = 0;
     bool GeometryIdentityAvailable = false;
+    // Set on a placeholder whose build is deferred: only SubmissionId, the
+    // command-list fields, the composition fields and State are valid until
+    // ResolveOot3dPicaDeferredDrawPlan replaces it with the built plan.
+    std::shared_ptr<const Oot3dPicaDeferredPlanSlot> Deferred;
 
     [[nodiscard]]
 

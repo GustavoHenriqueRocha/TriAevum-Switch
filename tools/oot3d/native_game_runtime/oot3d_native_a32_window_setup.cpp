@@ -1354,6 +1354,34 @@ void NativeA32WindowSession::Setup() {
   }
   // The routing refers to this loop's stream: removed on every exit.
   guiRendererRoutingReset.emplace(parallelPresentation ? fast3dGui : nullptr);
+  // Deferred PICA planning: the guest thread queues each drained draw as a
+  // placeholder and its plan is built by a background worker or, at the
+  // latest, by the render command that executes it. Only with the render
+  // worker (the serial loop keeps the original order of work).
+  // Switch: on by default; config/serial_pica turns it off for A/B, and
+  // config/pica_plan_render_thread builds on the render thread without the
+  // extra worker. Desktop: TRIAEVUM_DEFERRED_PICA_PLAN=1 (worker) or =render.
+  {
+    bool deferredPicaPlans = false;
+    bool picaPlanWorker = true;
+#if defined(__SWITCH__)
+    std::error_code picaPlanError;
+    deferredPicaPlans = !std::filesystem::exists(
+        "sdmc:/switch/oot3dre/config/serial_pica", picaPlanError);
+    picaPlanWorker = !std::filesystem::exists(
+        "sdmc:/switch/oot3dre/config/pica_plan_render_thread", picaPlanError);
+#else
+    const char* deferredPicaPlanEnvironment =
+        std::getenv("TRIAEVUM_DEFERRED_PICA_PLAN");
+    if (deferredPicaPlanEnvironment != nullptr) {
+      const std::string_view value(deferredPicaPlanEnvironment);
+      deferredPicaPlans = value == "1" || value == "render";
+      picaPlanWorker = value == "1";
+    }
+#endif
+    picaPlanBuilder.Configure(deferredPicaPlans && parallelPresentation,
+                              picaPlanWorker);
+  }
 
 #if defined(__SWITCH__)
   WriteSwitchBootStage("runtime_loop");

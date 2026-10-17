@@ -134,6 +134,22 @@ Desempenho e usabilidade:
   `config/audio_stretch` = `0`; ambos `0` = caminho antigo idêntico. Desktop: `TRIAEVUM_AUDIO_THREAD=1`,
   `TRIAEVUM_AUDIO_STRETCH=1`.
 
+### Planejamento PICA fora da thread do jogo (2026-10-17)
+- O plano de cada draw (shaders, uniforms, bindings, hashes de textura; `pica_plan`, ~2,5 ms por
+  passo) era montado na thread do jogo ao drenar a fila. Agora a thread do jogo põe no acumulador só
+  um *placeholder* (id, estado decodificado, produtores de cópia) e o plano é montado a partir do
+  mesmo snapshot imutável da submissão (bytes de vértice/índice/textura já copiados no momento da
+  submissão) por um worker de planos (prioridade 0x2E, núcleos 1/2) ou, no mais tardar, pelo comando
+  de render que executa o quadro / pelo flush de dependência (`Run`, guest parado). Fills e display
+  transfers continuam capturados na hora; a ordem de execução não muda.
+- A/B no SD: `config/serial_pica` volta ao caminho antigo; `config/pica_plan_render_thread` monta os
+  planos na render thread sem o worker. Só vale com a render thread ligada (sem
+  `config/serial_presentation`). Trace semântico e diagnóstico estendido usam o caminho serial.
+- `perf.txt` ganhou `pica_plan_deferred`, `plan_worker`, `plan_worker_ms`, `plan_late_ms`
+  (montados pelo consumidor porque o worker ainda não tinha chegado), `plan_late_draws` e
+  `plan_serial_ms` (ms por quadro de host).
+- Desktop: `TRIAEVUM_DEFERRED_PICA_PLAN=1` (worker) ou `=render`. Teste: `oot3d_native_pica_deferred_plan_tests`.
+
 ## Próximos passos
 
 - Opção para liberar o Master Quest sem zerar o jogo (flag de desbloqueio no save; `config/unlock_master_quest`, testar numa cópia do save).
