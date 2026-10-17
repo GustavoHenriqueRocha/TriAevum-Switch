@@ -518,6 +518,8 @@ struct TopScreenQuestGeometryContext {
   float HudScale = 1.0F;
   float HudMarginX = 0.0F;
   float HudMarginY = 0.0F;
+  // 0x005DA3D4: alternate HUD mode 1 or 4 (0x004FC648+0x48) hides the A label.
+  bool ActionLabelHidden = false;
 };
 
 struct TopScreenSystemMenuLayerStats {
