@@ -254,6 +254,8 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
     if memory:
         print("  memória (início→fim): " + "; ".join(memory))
 
+    summarize_cadence(windows, seconds)
+
     gl_windows = [w for w in windows if w.glperf is not None]
     if not gl_windows:
         print("  glperf: ausente (crie config/gpu_timing no SD para medir GPU/CPU por etapa)")
@@ -263,12 +265,21 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
 
     if show_windows:
         has_clocks = any(clock_key(w.main) is not None for w in windows)
+        has_cadence = any("present_1" in w.main for w in windows)
         print("  janelas: host_frames fps total_ms" +
+              (" passo/interp/desc hold1/2/3+ trocas trava" if has_cadence else "") +
               (" step_gpu_ms interp_gpu_ms step_draws" if gl_windows else "") +
               (" cpu/gpu/mem modo" if has_clocks else ""))
         for window in windows:
             line = (f"    {int(num(window.main, 'host_frames')):>7} {fmt(num(window.main, 'fps'), 1):>6} "
                     f"{fmt(num(window.main, 'total_ms')):>7}")
+            if has_cadence:
+                m = window.main
+                line += (f" {int(num(m, 'step_frames')):>3}/{int(num(m, 'interp_frames')):>3}"
+                         f"/{int(num(m, 'interp_dropped')):>3}"
+                         f" {int(num(m, 'hold_1')):>3}/{int(num(m, 'hold_2')):>3}"
+                         f"/{int(num(m, 'hold_3') + num(m, 'hold_4p')):>3}"
+                         f" {int(num(m, 'cadence_switches')):>4} {int(num(m, 'lock', 60)):>3}")
             if window.glperf is not None:
                 line += (f" {fmt(num(window.glperf, 'step_gpu_ms', math.nan)):>7}"
                          f" {fmt(num(window.glperf, 'interp_gpu_ms', math.nan)):>7}"
@@ -324,6 +335,35 @@ def summarize_clocks(all_windows: list[Window], windows: list[Window],
               f"fps global {fmt(overall, 1)} média {fmt(sum(fps) / len(fps), 1)} "
               f"p10 {fmt(percentile(fps, 0.1), 1)} mín {fmt(min(fps), 1)}, "
               f"total_ms média {fmt(sum(total) / len(total))}")
+
+
+CADENCE_BUCKETS = ["1", "2", "3", "4p"]
+
+
+def summarize_cadence(windows: list[Window], seconds: float) -> None:
+    # Bloco "cadence:" (config/fps60_mode): regularidade da apresentação.
+    cadence = [w for w in windows if "present_1" in w.main]
+    if not cadence:
+        return
+    def total(key: str) -> float:
+        return sum(num(w.main, key) for w in cadence)
+    presents = [total(f"present_{b}") for b in CADENCE_BUCKETS]
+    holds = [total(f"hold_{b}") for b in CADENCE_BUCKETS]
+    pictures = sum(holds)
+    modes = sorted({str(w.main.get("fps60_mode")) for w in cadence})
+    print(f"  cadência ({'/'.join(modes)}, {len(cadence)} janelas):")
+    print("    intervalos entre apresentações (refreshes 1/2/3/4+): " +
+          "/".join(str(int(v)) for v in presents))
+    if pictures:
+        print("    cada quadro novo ficou na tela (1/2/3/4+ refreshes): " +
+              "/".join(f"{100 * v / pictures:.1f}%" for v in holds))
+    print(f"    trocas de cadência {fmt(total('cadence_switches') / max(seconds, 1e-9))}/s, "
+          f"passos atrasados {int(total('late_steps'))}, repetições {int(total('repeats'))}, "
+          f"quadros do jogo nunca mostrados {int(total('superseded_frames'))}")
+    print(f"    travado em 30: {fmt(100 * total('lock30_ms') / 1000 / max(seconds, 1e-9), 1)}% do tempo, "
+          f"{int(total('lock_changes'))} trocas de trava; par do jogo (thread do jogo) "
+          f"média {fmt(sum(num(w.main, 'game_pair_ms') for w in cadence) / len(cadence), 1)} ms, "
+          f"p90 máx {fmt(max(num(w.main, 'game_pair_p90_ms') for w in cadence), 1)} ms")
 
 
 def summarize_glperf(windows: list[Window], top: int, refresh: float) -> None:

@@ -124,6 +124,11 @@ void NativeRealtimeRefreshPacer::SleepUntil(
 }
 
 void NativeRealtimeRefreshPacer::WaitForNextRefresh() {
+    WaitForNextRefresh(1U, false);
+}
+
+void NativeRealtimeRefreshPacer::WaitForNextRefresh(uint32_t periods,
+                                                    bool resyncWhenLate) {
     if (!mEnabled) {
         return;
     }
@@ -133,7 +138,10 @@ void NativeRealtimeRefreshPacer::WaitForNextRefresh() {
         return;
     }
 
-    const auto period = NextPeriod();
+    auto period = NextPeriod();
+    for (uint32_t extra = 1U; extra < periods; ++extra) {
+        period += NextPeriod();
+    }
     mNextDeadline += period;
     auto now = std::chrono::steady_clock::now();
     if (now >= mNextDeadline) {
@@ -148,7 +156,8 @@ void NativeRealtimeRefreshPacer::WaitForNextRefresh() {
         // Presentation debt is bounded in refresh periods, not wall seconds:
         // a 250 ms window allowed 23 catch-up presentations at 90 Hz. Guest
         // simulation has its own elapsed-time clock and must not be rebased here.
-        if (ResolveNativePacerDeadlineAction(
+        if (resyncWhenLate ||
+            ResolveNativePacerDeadlineAction(
                 latenessDuration, period) ==
             NativePacerDeadlineAction::Resync) {
             ++mStats.DeadlineResyncs;

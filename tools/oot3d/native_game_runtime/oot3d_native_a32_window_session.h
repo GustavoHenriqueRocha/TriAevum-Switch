@@ -45,6 +45,7 @@
 #include "oot3d_native_guest_profile.h"
 #include "oot3d_native_controls_settings_panel.h"
 #include "oot3d_native_frame_rate.h"
+#include "oot3d_native_cadence_governor.h"
 #include "oot3d_native_interpolation_pacing.h"
 #include "oot3d_native_reduced_replay.h"
 #include "oot3d_native_launch_frame_rate.h"
@@ -314,6 +315,9 @@ private:
   // Render thread, before the pacing wait: closes the frame's cost (GPU
   // timestamps, render-thread time) and feeds the governor and perf.txt.
   void FinishRenderFrameCost();
+  // Render thread, right after the swap: the presentation cadence
+  // (oot3d_native_cadence_governor.h) of the frame just presented.
+  void ObservePresentCadence(uint8_t renderFrameKind);
   void ExecuteVisualSample(const Oot3dNativeGame::Oot3dPicaVisualFrameViewSample &sample, Oot3dNativeGame::Oot3dPicaPresentationExecutionKind kind, bool present, const Fast::Oot3d::NativeFrameTemporalSample& temporalSample, uint64_t renderTargetNamespace = kVisualInterpolationRenderTargetNamespace);
   // Deferred: a host continuation is pending, retry at a later frame boundary. Failed: reported once; the request is
   // dropped because every retry repeats the full GPU drain and readback.
@@ -573,8 +577,28 @@ private:
     // config/native_replay=1: replay the native namespace although the
     // backend never observes it (A/B).
     bool ForceNativeReplay = false;
+    // config/fps60_mode (oot3d_native_cadence_governor.h): adaptive
+    // (default), strict60 or legacy, then options.
+    Oot3dNativeGame::Fps60ModeConfig Fps60Mode{};
   } interpolationPacingOptions;
   Oot3dNativeGame::InterpolationPacingGovernor interpolationPacing;
+  // Presentation cadence (render thread): counters and the locked 30.
+  Oot3dNativeGame::NativeCadenceGovernor cadenceGovernor;
+  bool cadenceGovernorConfigured = false;
+  // Render thread -> game thread: the cadence is locked at 30 (the game
+  // thread then runs both refreshes of a step in one host frame).
+  std::atomic<bool> cadenceLockedThirty{false};
+  // Game thread: the previous host frame, for the governor's game-thread
+  // cost (busy = duration minus the waits for the renderer).
+  struct HostFrameCost {
+    bool Valid = false;
+    std::chrono::steady_clock::time_point Start{};
+    double GuestSeconds = 0.0;
+    uint64_t WaitNanoseconds = 0U;
+    uint32_t Refreshes = 0U;
+  } previousHostFrameCost;
+  // Game thread: the host frame being built completed a guest frame.
+  bool hostFrameCompletedStep = false;
   // Scratch of SampleSuitsReducedReplay (render thread only).
   Oot3dNativeGame::ReducedReplayScratch reducedReplayScratch;
   bool interpolationPacingConfigured = false;
@@ -613,6 +637,13 @@ private:
     // Render-thread visual-frame preparation (matching + analysis) and
     // sampling, cumulative (copy of visualInterpolationTiming).
     Oot3dNativeGame::Oot3dPicaVisualInterpolationTiming VisualTiming{};
+    // Presentation cadence (cadenceGovernor): counters, the lock, the hold
+    // and the game-thread step pair p90; guest frames never shown.
+    Oot3dNativeGame::CadenceStats Cadence{};
+    bool CadenceThirty = false;
+    double CadenceHoldSeconds = 0.0;
+    double GamePairP90Ms = 0.0;
+    uint64_t SupersededFrames = 0;
   };
   std::mutex interpolationPerfMutex;
   InterpolationPerfCounters interpolationPerf;

@@ -711,6 +711,61 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
 - A/B no console: `native_replay` = `1`; `interp_pacing` = `0`; `interp_scale` = `1.5` (e
   `interp_scale_mode` = `always` para ver o custo/qualidade do reduzido em todo intermediário).
 
+### Cadência do fps60: regularidade antes da média, `config/fps60_mode` (2026-10-17)
+- **Diagnóstico** (`switch-logs/integ2b`, CPU 1785, 4,5 min a 60, 52 FPS de média): nos trechos
+  pesados (host_frames 9450–14250) a thread do jogo gasta 27–31 ms de cada par de passo de 33,3 ms
+  (`game_cpu` 80–95%) e a GPU ~16,5 ms por replay (`est_step`≈`est_full`≈16,5: par 33,0–33,2 de 33,3).
+  Quadro a quadro, a janela 12150 (fps 54,6, 2,75 s) teve 165 refreshes em 150 quadros de host:
+  ~15 quadros de host com **dois refreshes** (o jogo atrasou: o passo sai sem quadro intermediário) e,
+  nos outros, passo + intermediário descartado (81 passos, 67 descartes, 1 intermediário). Isto é, ~30
+  imagens novas/s com o "fps" contando as repetições, e ~5 passos por segundo segurando a imagem 3
+  refreshes em vez de 2. Na janela 10650 (fps 45, 3,33 s): 200 refreshes em 150 quadros → 50 quadros
+  de 2 refreshes (passo sozinho) + 50 pares (26 com intermediário, 24 descartados): imagens de 1 e de 2
+  refreshes misturadas várias vezes por segundo. Mecanismo (reproduzido no simulador): um atraso põe
+  dois refreshes num quadro de host — um passo inteiro (~23 ms) de uma vez — o que atrasa o seguinte;
+  o laço cai num ritmo irregular de quadros de 1 e 2 refreshes e fica lá; ao mesmo tempo o governador
+  por quadro alterna desenhar/descartar com o par de GPU no limite (33,2 > 97% de 33,3).
+- **Política nova** (`oot3d_native_cadence_governor.h`, padrão `adaptive`):
+  1. a 60, um refresh por quadro de host: um quadro atrasado carrega **um refresh de dívida** em vez de
+     rodar dois (a imagem fica um refresh atrás; uma segunda dívida é descartada; travamentos de 2,5+
+     refreshes — carregamento — recuperam como antes); o intermediário é desenhado (cheio/reduzido),
+     nunca descartado um aqui outro ali;
+  2. 3 apresentações de 2+ refreshes entre as últimas 60 imagens → **trava em 30**: o jogo roda os dois
+     refreshes do passo num quadro de host (some o quadro intermediário e o custo dele na thread do
+     jogo), o pacer espera 2 períodos e um passo atrasado reancora o relógio (hold 3,2,2… e não 3,1);
+  3. fica em 30 pelo menos 2 s (dobra até 16 s se 60 falhar de novo em menos de 10 s) e só volta com
+     folga comprovada: par da thread do jogo p90 ≤ 90% de 33,3 ms, par de GPU/render estimado ≤ 90% e
+     nenhum passo atrasado nos últimos 2 s.
+- **A/B** (`config/fps60_mode`, desktop `TRIAEVUM_FPS60_MODE`): `adaptive` (padrão), `strict60` (todo
+  intermediário desenhado, laço de antes; = `interp_pacing=0`, que sem o arquivo novo vira `strict60`),
+  `legacy` (exatamente o comportamento anterior). Opções depois do modo: `adaptive misses=3 window=60
+  hold=2 max_hold=16 relapse=10 game=0.9 gpu=0.9`.
+- **perf.txt**, bloco novo `cadence:` (no fim da linha antes de `gl_textures_live`, sem mexer nos
+  campos existentes): `fps60_mode lock present_1/2/3/4p` (apresentações N refreshes depois da anterior)
+  `hold_1/2/3/4p` (refreshes que cada imagem nova ficou na tela) `repeats cadence_switches` (trocas de
+  hold entre imagens seguidas) `late_steps superseded_frames` (passos nunca mostrados) `lock_changes
+  lock30_ms hold_s game_pair_ms game_pair_p90_ms`. `perf_report.py` resume a cadência e mostra
+  passo/interp/desc, hold e trava por janela em `--windows`.
+- **Simulação no host** (`oot3d_native_cadence_sim.h`; `oot3d_native_cadence_governor_tests --report`):
+  pipeline do console (jogo → render thread → GPU → pacer → swap no vblank) com os governadores de
+  produção e custos do perf.txt. Swap bloqueante (como o console mede) / com fila de 1 quadro:
+  | cenário | legacy: hold 1/2/3, trocas/s, judder | adaptive: hold 1/2/3, trocas/s, judder |
+  |---|---|---|
+  | pesado (jogo 21±3 ms, GPU 16,5) | 332/1624/6, 11,2/s, 8,6 ms | 1/1799/0, 0,03/s, 0,7 ms (30 cravado) |
+  | m. pesado (24 ms, GPU 17) | 75/1661/66, 4,6/s, 4,9 ms | 0/1799/0, 0/s, 0,6 ms |
+  | normal (18 ms, GPU 14) | 3408/95/0, 3,2/s, 2,9 ms | 3584/7/0, 0,23/s, 0,7 ms (60) |
+  | sessão 220 s (como integ2b) | 5,2 trocas/s, judder 4,1 ms, 95 holds de 3 | 0,22/s, 0,9 ms, 0 holds de 3 |
+  | sessão, swap com fila | 0,36/s, desvio 5,7 ms | 0,07/s, desvio 3,4 ms |
+  (judder = RMS de intervalo mostrado − intervalo de conteúdo entre imagens seguidas; jogo a 60
+  refreshes/s em todos). A média cai pouco ou nada; o que some são as trocas de cadência.
+- Testes: `oot3d_native_cadence_governor_tests` (parser, planos de refresh, histograma de hold,
+  trava/volta/recaída, estimativa do par do jogo, governador por quadro sem descarte, simulação; limpo
+  com ASan/UBSan) e `triaevum_presentation_clock_tests` (`AdvancePlanned`, empréstimo fora do estado
+  salvo, pacer de 2 períodos com reancoragem).
+- O que olhar no console: `cadence_switches` e `hold_3` por janela (devem cair a ~0 nos trechos
+  pesados), `lock`/`lock30_ms`, `game_pair_p90_ms` (perto de 30 = o jogo é o limite; abaixo de 28 com
+  `lock=30` = a GPU é o limite) e `guest_fps` ~60 (velocidade do jogo).
+
 ### Estado em 2026-10-17 (melhor versão até agora)
 - PGO (2ª coleta) + modo enxuto + planos PICA no núcleo 1 + render thread no núcleo 2 + áudio em thread própria.
 - Medido a 30 FPS, escala 2×: 29,9 FPS médios, 93% do tempo em 30, lógica ~11 ms por passo.

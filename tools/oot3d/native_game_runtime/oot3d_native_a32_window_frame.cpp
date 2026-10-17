@@ -149,17 +149,30 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
   // Two presentation periods: one step frame and one in-between frame.
   interpolationPacing.Configure(config, 2000.0 / static_cast<double>(rateHz),
                                 baseScale, reducedAvailable);
+  // Presentation cadence (config/fps60_mode): its lock only means something
+  // at 60 (at 30 every picture holds two refreshes by design).
+  auto cadenceConfig = options.Fps60Mode;
+  if (rateHz != 60U)
+    cadenceConfig.Mode = Oot3dNativeGame::Fps60Mode::Legacy;
+  cadenceGovernor.Configure(cadenceConfig,
+                            1000.0 / static_cast<double>(rateHz));
+  cadenceGovernorConfigured = true;
+  cadenceLockedThirty.store(false, std::memory_order_relaxed);
+  // Single in-between frames are dropped only in legacy; adaptive drops
+  // them as a whole (the locked 30) and strict60 never.
+  interpolationPacing.SetDropAllowed(cadenceGovernor.PerFrameDropAllowed());
   if (firstConfiguration) {
     skipNativeReplay =
         !options.ForceNativeReplay && !api.PicaNativeNamespaceObservable();
     std::fprintf(stderr,
                  "TRIAEVUM_INTERP_PACING keep_speed=%d reduced_scale=%.2f "
                  "reduced_available=%d mode=%s base_scale=%.2f "
-                 "native_replay=%d\n",
+                 "native_replay=%d fps60_mode=%s\n",
                  config.KeepGameSpeed ? 1 : 0, config.ReducedScale,
                  reducedAvailable ? 1 : 0,
                  options.ReducedAlways ? "always" : "auto", baseScale,
-                 skipNativeReplay ? 0 : 1);
+                 skipNativeReplay ? 0 : 1,
+                 Oot3dNativeGame::Fps60ModeName(options.Fps60Mode.Mode).data());
   }
   std::lock_guard lock(interpolationPerfMutex);
   interpolationPerf.ReducedScale = reducedAvailable ? config.ReducedScale : 0.0F;
@@ -232,6 +245,36 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   perf.ReducedEstimateMs = interpolationPacing.Estimate(
       Oot3dNativeGame::InterpolatedSampleLevel::Reduced);
   perf.BudgetMs = interpolationPacing.PairBudgetMs();
+}
+
+void NativeA32WindowSession::ObservePresentCadence(uint8_t frameKind) {
+  if (!cadenceGovernorConfigured)
+    return;
+  using Kind = Oot3dNativeGame::RenderFrameKind;
+  using Picture = Oot3dNativeGame::PresentedPicture;
+  const auto kind = static_cast<Kind>(frameKind);
+  const Picture picture = kind == Kind::Step ? Picture::Step
+                          : kind == Kind::Full || kind == Kind::Reduced
+                              ? Picture::InBetween
+                              : Picture::Repeat;
+  const double now = std::chrono::duration<double>(
+                         std::chrono::steady_clock::now().time_since_epoch())
+                         .count();
+  const double stepMs = interpolationPacing.StepCostMs();
+  const double gpuPairMs =
+      stepMs > 0.0
+          ? stepMs + interpolationPacing.Estimate(
+                         Oot3dNativeGame::InterpolatedSampleLevel::Full)
+          : 0.0;
+  cadenceGovernor.ObservePresent(picture, now, gpuPairMs);
+  cadenceLockedThirty.store(cadenceGovernor.DropsInBetween(),
+                            std::memory_order_relaxed);
+  std::lock_guard lock(interpolationPerfMutex);
+  auto &perf = interpolationPerf;
+  perf.Cadence = cadenceGovernor.Stats();
+  perf.CadenceThirty = cadenceGovernor.DropsInBetween();
+  perf.CadenceHoldSeconds = cadenceGovernor.HoldSeconds();
+  perf.GamePairP90Ms = cadenceGovernor.GamePairP90Ms();
 }
 
 bool NativeA32WindowSession::RunFrame() {
@@ -316,10 +359,60 @@ bool NativeA32WindowSession::RunFrame() {
                                           lastPresentationTime)
                 .count();
   lastPresentationTime = presentationTime;
+  // Presentation cadence (config/fps60_mode): the previous host frame's
+  // game-thread cost (its duration minus the waits for the renderer) goes
+  // to the render thread's governor.
+  {
+    const auto waits = renderStream.GetWaitStats();
+    const uint64_t waitNanoseconds =
+        waits.SubmitWaitNanoseconds + waits.DrainWaitNanoseconds;
+    auto &previous = previousHostFrameCost;
+    if (previous.Valid) {
+      const double frameMs = std::chrono::duration<double, std::milli>(
+                                 presentationTime - previous.Start)
+                                 .count();
+      const double waitMs =
+          static_cast<double>(waitNanoseconds - previous.WaitNanoseconds) /
+          1.0e6;
+      const double busyMs = std::max(0.0, frameMs - waitMs);
+      const double guestMs =
+          (phaseTiming.GuestSeconds - previous.GuestSeconds) * 1000.0;
+      renderStream.Submit([&, busyMs, guestMs,
+                           refreshes = previous.Refreshes,
+                           step = hostFrameCompletedStep] {
+        cadenceGovernor.ObserveGameFrame(busyMs, guestMs, refreshes, step);
+      });
+    }
+    previous.Valid = true;
+    previous.Start = presentationTime;
+    previous.GuestSeconds = phaseTiming.GuestSeconds;
+    previous.WaitNanoseconds = waitNanoseconds;
+    hostFrameCompletedStep = false;
+  }
+  // adaptive at 60: one refresh per host frame (a refresh of debt instead
+  // of a two-refresh catch-up frame), or both refreshes of a step at the
+  // locked 30 (oot3d_native_cadence_governor.h). Otherwise as before.
+  const bool cadencePlanning =
+      guestInterpolationEnabled && presentationPacingPolicy.Enabled &&
+      presentationPacingPolicy.TargetRateHz == 60U &&
+      hostArgs.FixedDeltaSeconds <= 0.0 && !hostArgs.ThroughputBenchmark &&
+      interpolationPacingOptions.Fps60Mode.Mode ==
+          Oot3dNativeGame::Fps60Mode::Adaptive;
+  const bool cadenceThirty =
+      cadencePlanning && cadenceLockedThirty.load(std::memory_order_relaxed);
+  const Oot3dNativeGame::NativePresentationScheduler::RefreshPlanner
+      refreshPlanner = !cadencePlanning ? nullptr
+                       : cadenceThirty
+                           ? &Oot3dNativeGame::PlanThirtyRefreshes
+                           : &Oot3dNativeGame::PlanSixtyRefreshes;
   const auto presentationStateBeforeFrame = presentationScheduler.CaptureState();
-  const auto presentationStep =
-      presentationScheduler.Advance(presentationElapsedSeconds);
+  const auto presentationStep = presentationScheduler.AdvancePlanned(
+      presentationElapsedSeconds, refreshPlanner);
   const uint32_t guestRefreshesDue = presentationStep.GuestRefreshesDue;
+  previousHostFrameCost.Refreshes = guestRefreshesDue;
+  // A step of the locked 30 is presented two refreshes after the previous
+  // picture.
+  const bool cadenceThirtyPair = cadenceThirty && guestRefreshesDue == 2U;
   const float visualInterpolationAlpha = static_cast<float>(
       std::clamp(presentationStep.InterpolationAlpha, 0.0, 1.0));
   ApplyTopScreenConfigSnapshot();
@@ -642,6 +735,7 @@ bool NativeA32WindowSession::RunFrame() {
   presentSteps.Mark("gui_end_draw");
   renderStream.Submit([&, width, height,
                        presentationSerial = presentationFrameCount,
+                       cadenceThirtyPair,
                        forcedScreenshot = std::exchange(pendingForcedScreenshot, {})] {
     if (!forcedScreenshot.empty()) screenshotState.ForcedPath = forcedScreenshot;
     if (rendererFrameSkipped) {
@@ -655,16 +749,24 @@ bool NativeA32WindowSession::RunFrame() {
         static_cast<uint32_t>(presentationSerial), screenshotState,
         capturedTemporalSample ? &*capturedTemporalSample : nullptr);
     capturedTemporalSample.reset();
+    const uint8_t presentedKind = renderFrameKind;
     FinishRenderFrameCost();
     const auto waitStart = std::chrono::steady_clock::now();
     CpuProbe::Scope cpuPacing(CpuProbe::Phase::Pacing);
     Fast::GlPerf::Mark(Fast::GlPerf::Stage::Pacing);
-    realtimePacer.WaitForNextRefresh();
+    // Locked 30: a step two periods after the previous picture, and a late
+    // one rebases the clock (hold 3 then 2, 2... instead of 3 then 1).
+    const bool thirtyStep =
+        cadenceThirtyPair &&
+        presentedKind ==
+            static_cast<uint8_t>(Oot3dNativeGame::RenderFrameKind::Step);
+    realtimePacer.WaitForNextRefresh(thirtyStep ? 2U : 1U, thirtyStep);
     cpuPacing.Stop();
     rendererTiming->PacingWaitSeconds += SecondsSince(waitStart);
     const auto swapStart = std::chrono::steady_clock::now();
     window.EndFrame();
     lastSwapMs = SecondsSince(swapStart) * 1000.0;
+    ObservePresentCadence(presentedKind);
   }, true);
   presentSteps.Mark("render_end_frame");
   picaSemanticTrace.RecordFrameBoundary(
@@ -878,6 +980,64 @@ bool NativeA32WindowSession::RunFrame() {
              << " est_reduced_ms=" << current.ReducedEstimateMs
              << " pair_budget_ms=" << current.BudgetMs;
         previous = current;
+      }
+      // Presentation cadence (config/fps60_mode, oot3d_native_cadence_governor.h),
+      // per window: presents 1/2/3/4+ refreshes after the previous one, how
+      // many refreshes each new picture stayed (hold_), repeats of the same
+      // picture, changes of hold between consecutive pictures, late steps,
+      // guest frames never shown, the lock (60/30) and its changes, ms at
+      // 30, and the game thread's step pair (mean and p90 of the last 64).
+      {
+        static Oot3dNativeGame::CadenceStats previousCadence{};
+        static uint64_t previousSuperseded = 0U;
+        Oot3dNativeGame::CadenceStats cadence;
+        bool thirty = false;
+        double holdSeconds = 0.0;
+        double gameP90 = 0.0;
+        uint64_t superseded = 0U;
+        {
+          std::lock_guard lock(interpolationPerfMutex);
+          cadence = interpolationPerf.Cadence;
+          thirty = interpolationPerf.CadenceThirty;
+          holdSeconds = interpolationPerf.CadenceHoldSeconds;
+          gameP90 = interpolationPerf.GamePairP90Ms;
+          superseded = interpolationPerf.SupersededFrames;
+        }
+        const auto delta = [](uint64_t now, uint64_t before) {
+          return now - before;
+        };
+        static constexpr std::array<const char *, 4> kBuckets{"1", "2", "3",
+                                                              "4p"};
+        perf << " cadence: fps60_mode="
+             << Oot3dNativeGame::Fps60ModeName(
+                    interpolationPacingOptions.Fps60Mode.Mode)
+             << " lock=" << (thirty ? 30 : 60);
+        for (size_t bucket = 0U; bucket < kBuckets.size(); ++bucket)
+          perf << " present_" << kBuckets[bucket] << '='
+               << delta(cadence.Intervals[bucket],
+                        previousCadence.Intervals[bucket]);
+        for (size_t bucket = 0U; bucket < kBuckets.size(); ++bucket)
+          perf << " hold_" << kBuckets[bucket] << '='
+               << delta(cadence.Holds[bucket], previousCadence.Holds[bucket]);
+        const uint64_t pairs = cadence.GamePairs - previousCadence.GamePairs;
+        perf << " repeats=" << delta(cadence.Repeats, previousCadence.Repeats)
+             << " cadence_switches="
+             << delta(cadence.CadenceSwitches, previousCadence.CadenceSwitches)
+             << " late_steps="
+             << delta(cadence.LateSteps, previousCadence.LateSteps)
+             << " superseded_frames=" << (superseded - previousSuperseded)
+             << " lock_changes="
+             << delta(cadence.LockChanges, previousCadence.LockChanges)
+             << " lock30_ms="
+             << (cadence.ThirtySeconds - previousCadence.ThirtySeconds) * 1000.0
+             << " hold_s=" << holdSeconds << " game_pair_ms="
+             << (pairs != 0U ? (cadence.GamePairMsSum -
+                                previousCadence.GamePairMsSum) /
+                                   static_cast<double>(pairs)
+                             : 0.0)
+             << " game_pair_p90_ms=" << gameP90;
+        previousCadence = cadence;
+        previousSuperseded = superseded;
       }
       // GPU residency and memory: every live count and byte total must stay
       // bounded over a long session (a texture cache that never released
@@ -2270,6 +2430,7 @@ void NativeA32WindowSession::PresentVisualFrame(
             completedFrame =
                 std::make_shared<Oot3dNativeGame::Oot3dPicaVisualFrame>(
                     std::move(*finished));
+            hostFrameCompletedStep = true;
           }
         }
         renderStream.Submit([&, topSelection, completedFrame, supersededFrames,
@@ -2576,7 +2737,13 @@ void NativeA32WindowSession::PresentVisualFrame(
                   false, visualInterpolationAlpha);
           // Paced: the in-between frame at full or reduced resolution, or
           // dropped (the step image again) when the pair would not fit.
-          auto level = interpolationPacing.Decide();
+          // config/fps60_mode: at the locked 30 every in-between frame is
+          // dropped (the step image again); otherwise the per-frame
+          // governor (which drops single frames only in legacy).
+          auto level =
+              cadenceGovernor.DropsInBetween()
+                  ? Oot3dNativeGame::InterpolatedSampleLevel::Dropped
+                  : interpolationPacing.Decide();
           if (level == Oot3dNativeGame::InterpolatedSampleLevel::Dropped) {
             if (lastPresentedVisual.has_value() &&
                 picaPresentationScheduler.HasSnapshot(
@@ -2671,9 +2838,13 @@ void NativeA32WindowSession::PresentVisualFrame(
           ++visualStats.ReusedSnapshotPresentations;
           ++repeatFallbacksThisFrame;
         }
+        const uint64_t supersededThisFrame =
+            supersededFrames != nullptr ? supersededFrames->size() : 0U;
         if (nativeReplaysSkippedThisFrame != 0U ||
-            reducedRefusedThisFrame != 0U || repeatFallbacksThisFrame != 0U) {
+            reducedRefusedThisFrame != 0U || repeatFallbacksThisFrame != 0U ||
+            supersededThisFrame != 0U) {
           std::lock_guard lock(interpolationPerfMutex);
+          interpolationPerf.SupersededFrames += supersededThisFrame;
           interpolationPerf.NativeReplaysSkipped += nativeReplaysSkippedThisFrame;
           interpolationPerf.ReducedRefused += reducedRefusedThisFrame;
           interpolationPerf.RepeatFallbacks += repeatFallbacksThisFrame;

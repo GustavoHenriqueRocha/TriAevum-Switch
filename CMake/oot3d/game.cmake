@@ -56,6 +56,14 @@ add_executable(oot3d_native_interpolation_pacing_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_native_interpolation_pacing_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_native_interpolation_pacing_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Presentation cadence of fps60 (header-only governor and pipeline simulation;
+# --report prints the before/after table).
+add_executable(oot3d_native_cadence_governor_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_cadence_governor_tests.cpp
+)
+target_compile_features(oot3d_native_cadence_governor_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_native_cadence_governor_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 add_executable(oot3d_native_audio_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_audio_tests.cpp
 )

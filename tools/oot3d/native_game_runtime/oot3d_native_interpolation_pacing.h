@@ -223,8 +223,10 @@ public:
       }
     }
     if (!best.has_value()) {
-      // Never dropped without KeepGameSpeed: the cheapest drawn level.
-      best = mConfig.KeepGameSpeed ? InterpolatedSampleLevel::Dropped
+      // Never dropped without KeepGameSpeed (or while the cadence governor
+      // holds 60, SetDropAllowed): the cheapest drawn level.
+      best = mConfig.KeepGameSpeed && mDropAllowed
+                 ? InterpolatedSampleLevel::Dropped
              : mReducedAvailable   ? InterpolatedSampleLevel::Reduced
                                    : InterpolatedSampleLevel::Full;
     }
@@ -264,6 +266,20 @@ public:
     }
     return Commit(chosen, false);
   }
+
+  // config/fps60_mode (oot3d_native_cadence_governor.h): with "adaptive" the
+  // cadence governor drops in-between frames as a whole (a locked 30) and
+  // this governor only chooses full or reduced; "strict60" never drops.
+  // Leaving the dropped level when dropping is withdrawn.
+  void SetDropAllowed(bool allowed) noexcept {
+    if (mDropAllowed == allowed)
+      return;
+    mDropAllowed = allowed;
+    mOverBudget = 0U;
+    if (!allowed && mLevel == InterpolatedSampleLevel::Dropped)
+      Commit(PreferredLevel(), false);
+  }
+  [[nodiscard]] bool DropAllowed() const noexcept { return mDropAllowed; }
 
   void ObserveStep(double costMs) noexcept {
     if (!(costMs > 0.0) || !std::isfinite(costMs))
@@ -344,6 +360,7 @@ private:
   InterpolationPacingConfig mConfig{};
   double mPairBudgetMs = 1000.0 / 30.0;
   bool mReducedAvailable = false;
+  bool mDropAllowed = true;
   double mStepCostMs = 0.0;
   std::array<double, 3> mRatio{1.0, 1.0, 0.1};
   std::array<bool, 3> mMeasured{};

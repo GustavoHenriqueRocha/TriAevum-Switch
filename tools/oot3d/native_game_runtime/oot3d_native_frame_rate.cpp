@@ -285,6 +285,8 @@ NativePresentationScheduler::Advance(double elapsedSeconds) {
         return step;
     }
 
+    // The locked 30 of fps60 may leave up to one refresh borrowed ahead.
+    mGuestRefreshPhase = std::max(0.0, mGuestRefreshPhase);
     mGuestRefreshPhase +=
         elapsedSeconds * static_cast<double>(kOot3dNativeTimeUnitsPerSecond);
     mVisualSamplePhase +=
@@ -350,6 +352,54 @@ NativePresentationScheduler::Advance(double elapsedSeconds) {
     return step;
 }
 
+NativePresentationStep NativePresentationScheduler::AdvancePlanned(
+    double elapsedSeconds, RefreshPlanner plan) {
+    if (plan == nullptr) {
+        return Advance(elapsedSeconds);
+    }
+    if (!std::isfinite(elapsedSeconds) || elapsedSeconds < 0.0) {
+        throw std::invalid_argument(
+            "presentation elapsed time must be finite and non-negative");
+    }
+    if (!mStarted) {
+        return Advance(elapsedSeconds);
+    }
+    NativePresentationStep step;
+    ++mStats.PresentationFrames;
+    NativeCadenceRefreshPlan request;
+    request.Elapsed =
+        elapsedSeconds * static_cast<double>(kOot3dNativeTimeUnitsPerSecond);
+    request.Phase = mGuestRefreshPhase + request.Elapsed;
+    const auto decision = plan(request);
+    step.GuestRefreshesDue =
+        std::min(decision.Due, kMaximumGuestRefreshesPerPresentation);
+    step.DroppedGuestRefreshes = decision.Dropped;
+    mGuestRefreshPhase = decision.Phase;
+    step.DeferredGuestRefreshes = static_cast<uint32_t>(
+        std::floor(std::max(0.0, mGuestRefreshPhase) + 1.0e-9));
+    mVisualSamplePhase +=
+        elapsedSeconds * static_cast<double>(mVisualSampleRateHz);
+    const uint32_t elapsedVisualSamples =
+        static_cast<uint32_t>(std::floor(mVisualSamplePhase + 1.0e-9));
+    if (elapsedVisualSamples != 0U) {
+        mVisualSamplePhase -= static_cast<double>(elapsedVisualSamples);
+        mVisualSamplePhase = std::clamp(mVisualSamplePhase, 0.0, 1.0);
+    }
+    step.InterpolationAlpha =
+        elapsedVisualSamples != 0U ? 1.0 : mVisualSamplePhase;
+    step.GuestRefreshPhase = mGuestRefreshPhase;
+    step.VisualSamplePhase = mVisualSamplePhase;
+    mStats.GuestRefreshes += step.GuestRefreshesDue;
+    mStats.DeferredGuestRefreshObservations += step.DeferredGuestRefreshes;
+    mStats.DroppedGuestRefreshes += step.DroppedGuestRefreshes;
+    mStats.BatchedPresentationFrames += step.GuestRefreshesDue > 1U ? 1U : 0U;
+    mStats.MaximumGuestRefreshBatch =
+        std::max(mStats.MaximumGuestRefreshBatch, step.GuestRefreshesDue);
+    mStats.MaximumDeferredGuestRefreshes = std::max(
+        mStats.MaximumDeferredGuestRefreshes, step.DeferredGuestRefreshes);
+    return step;
+}
+
 void NativePresentationScheduler::Reset() {
     mGuestRefreshPhase = 0.0;
     mVisualSamplePhase = 0.0;
@@ -384,7 +434,9 @@ bool NativePresentationScheduler::Restore(
 
 NativePresentationSchedulerState
 NativePresentationScheduler::CaptureState() const noexcept {
-    return {mGuestRefreshPhase, mVisualSamplePhase, mStarted};
+    // A refresh borrowed by the locked 30 (negative phase) is not part of
+    // the saved state: a restore owes nothing instead.
+    return {std::max(0.0, mGuestRefreshPhase), mVisualSamplePhase, mStarted};
 }
 
 const NativePresentationSchedulerStats&

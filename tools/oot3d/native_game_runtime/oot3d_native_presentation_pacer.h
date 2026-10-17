@@ -60,6 +60,11 @@ class NativeRealtimeRefreshPacer final {
 
     void Configure(bool enabled, uint32_t targetRateHz) noexcept;
     void WaitForNextRefresh();
+    // `periods` presentation periods after the previous deadline (2: a step
+    // of the locked 30 of config/fps60_mode). resyncWhenLate: a late frame
+    // rebases the clock instead of carrying the debt, so the next picture
+    // keeps the full interval (no short hold after a long one).
+    void WaitForNextRefresh(uint32_t periods, bool resyncWhenLate);
     void ObservePresentation(
         std::chrono::steady_clock::time_point presentationTime) noexcept;
     void ResetDeadline() noexcept;

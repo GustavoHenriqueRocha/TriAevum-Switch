@@ -1433,8 +1433,9 @@ void NativeA32WindowSession::Setup() {
   // in-between frames that do not fit at full resolution are drawn at that
   // scale), config/interp_scale_mode ("always": every in-between frame
   // reduced), config/native_replay ("1": replay the native namespace even on
-  // a backend that never reads it). Desktop: TRIAEVUM_INTERP_PACING,
-  // TRIAEVUM_INTERP_SCALE, TRIAEVUM_INTERP_SCALE_MODE, TRIAEVUM_NATIVE_REPLAY.
+  // a backend that never reads it), config/fps60_mode (presentation
+  // cadence). Desktop: TRIAEVUM_INTERP_PACING, TRIAEVUM_INTERP_SCALE,
+  // TRIAEVUM_INTERP_SCALE_MODE, TRIAEVUM_NATIVE_REPLAY, TRIAEVUM_FPS60_MODE.
   {
     const auto readText = [](const char* file, const char* environment)
         -> std::optional<std::string> {
@@ -1467,6 +1468,15 @@ void NativeA32WindowSession::Setup() {
       options.ReducedAlways = trimmed(*text) == "always";
     if (const auto text = readText("native_replay", "TRIAEVUM_NATIVE_REPLAY"))
       options.ForceNativeReplay = trimmed(*text) == "1";
+    // config/fps60_mode: adaptive (default), strict60, legacy (A/B of the
+    // presentation cadence, oot3d_native_cadence_governor.h). Without it,
+    // config/interp_pacing=0 keeps its meaning (every in-between frame
+    // drawn): strict60.
+    if (const auto text = readText("fps60_mode", "TRIAEVUM_FPS60_MODE")) {
+      options.Fps60Mode = Oot3dNativeGame::ParseFps60Mode(trimmed(*text));
+    } else if (!options.KeepGameSpeed) {
+      options.Fps60Mode.Mode = Oot3dNativeGame::Fps60Mode::Strict60;
+    }
   }
 
 #if defined(__SWITCH__)

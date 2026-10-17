@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 
@@ -676,5 +677,70 @@ void RunNativeFrameRateTests() {
         policy.Stats().FramePacingDeadlineWrites != 1U) {
         throw std::runtime_error(
             "A32 repeated frame-pacing decision was not stable");
+    }
+
+    // config/fps60_mode (oot3d_native_cadence_governor.h): refreshes chosen
+    // by a plan. At 60 a late host frame carries one refresh of debt instead
+    // of running two; the locked 30 runs both refreshes of a step together
+    // and may borrow one ahead, which a captured state never shows.
+    {
+        constexpr double kRefresh = 1.0 / 60.0;
+        Oot3dNativeGame::NativePresentationScheduler planned;
+        (void)planned.AdvancePlanned(0.0, &Oot3dNativeGame::PlanSixtyRefreshes);
+        auto step = planned.AdvancePlanned(
+            2.2 * kRefresh, &Oot3dNativeGame::PlanSixtyRefreshes);
+        if (step.GuestRefreshesDue != 1U || step.DroppedGuestRefreshes != 0U) {
+            throw std::runtime_error("planned 60 batched a late host frame");
+        }
+        ExpectNear(step.GuestRefreshPhase, 1.2, "planned 60 debt");
+        step = planned.AdvancePlanned(kRefresh,
+                                      &Oot3dNativeGame::PlanSixtyRefreshes);
+        if (step.GuestRefreshesDue != 1U) {
+            throw std::runtime_error("planned 60 skipped a refresh");
+        }
+        step = planned.AdvancePlanned(kRefresh,
+                                      &Oot3dNativeGame::PlanThirtyRefreshes);
+        if (step.GuestRefreshesDue != 2U) {
+            throw std::runtime_error("planned 30 did not run a pair");
+        }
+        step = planned.AdvancePlanned(1.5 * kRefresh,
+                                      &Oot3dNativeGame::PlanThirtyRefreshes);
+        if (step.GuestRefreshesDue != 2U || !(step.GuestRefreshPhase < 0.0)) {
+            throw std::runtime_error("planned 30 did not borrow");
+        }
+        if (planned.CaptureState().GuestRefreshPhase != 0.0) {
+            throw std::runtime_error("a borrowed refresh reached the state");
+        }
+        // Back to the plain scheduler: the borrow is forgiven, not owed.
+        step = planned.AdvancePlanned(kRefresh, nullptr);
+        if (step.GuestRefreshesDue != 1U) {
+            throw std::runtime_error("legacy after a borrow lost a refresh");
+        }
+        // A stall at 60 catches up as before (loading).
+        step = planned.AdvancePlanned(6.0 * kRefresh,
+                                      &Oot3dNativeGame::PlanSixtyRefreshes);
+        if (step.GuestRefreshesDue != 2U || step.DroppedGuestRefreshes != 4U) {
+            throw std::runtime_error("planned 60 did not catch up a stall");
+        }
+    }
+    {
+        Oot3dNativeGame::NativeRealtimeRefreshPacer pacer(true, 60U);
+        pacer.SetMaximumSpin(0ns);
+        pacer.WaitForNextRefresh();
+        const auto start = std::chrono::steady_clock::now();
+        pacer.WaitForNextRefresh(2U, false);
+        const auto waited = std::chrono::steady_clock::now() - start;
+        if (waited < 30ms) {
+            throw std::runtime_error("two-period pacer wait was short");
+        }
+        // Late by more than a period with resync: the next deadline is a
+        // whole period after now, not a carried catch-up.
+        std::this_thread::sleep_for(45ms);
+        pacer.WaitForNextRefresh(2U, true);
+        const auto rebased = std::chrono::steady_clock::now();
+        pacer.WaitForNextRefresh(1U, false);
+        if (std::chrono::steady_clock::now() - rebased < 14ms) {
+            throw std::runtime_error("late resync carried the debt");
+        }
     }
 }

@@ -5,6 +5,7 @@
 #include <string_view>
 
 #include "oot3d_gameplay_time.h"
+#include "oot3d_native_cadence_governor.h"
 
 namespace oot3d::recomp::a32 {
 class MemoryBus;
@@ -196,6 +197,14 @@ class NativePresentationScheduler {
             NativeSimulationCatchUpPolicy::DropExcess);
 
     NativePresentationStep Advance(double elapsedSeconds);
+    // config/fps60_mode (oot3d_native_cadence_governor.h): the refreshes of
+    // this host frame are chosen by `plan` from the owed phase (one per host
+    // frame at 60 with a refresh of debt, or two at the locked 30) instead
+    // of every owed refresh up to two.
+    using RefreshPlanner =
+        NativeCadenceRefreshDecision (*)(const NativeCadenceRefreshPlan&) noexcept;
+    NativePresentationStep AdvancePlanned(double elapsedSeconds,
+                                          RefreshPlanner plan);
     void Reset();
     bool Restore(const NativePresentationSchedulerState& state,
                  std::string* error = nullptr);
