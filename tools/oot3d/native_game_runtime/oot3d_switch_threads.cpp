@@ -17,6 +17,9 @@
 
 extern "C" int __real_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
                                      void* (*start)(void*), void* arg);
+extern "C" Result __real_threadCreate(Thread* t, ThreadFunc entry, void* arg, void* stack_mem,
+                                      size_t stack_sz, int prio, int cpuid);
+extern "C" void* __aarch64_read_tp();
 
 namespace {
 
@@ -24,6 +27,33 @@ constexpr int kThreadPriority = 0x2C;
 constexpr size_t kMinimumStackSize = 4U * 1024U * 1024U;
 
 std::atomic<int> gNextCore{1};
+
+// libnx code is built with -mtp=soft and finds TLS through __aarch64_read_tp,
+// but devkitA64's libgcc (libgcov's indirect-call profiler, __thread data)
+// reads tpidr_el0 directly, which Horizon leaves at 0: PGO-instrumented code
+// faulted on its first indirect call. Mirror the libnx TLS pointer there on
+// every thread.
+void MirrorTlsPointer() {
+    void* const tp = __aarch64_read_tp();
+    asm volatile("msr tpidr_el0, %0" : : "r"(tp));
+}
+
+struct ThreadEntry {
+    ThreadFunc Entry;
+    void* Argument;
+};
+
+// Before any static constructor of instrumented code runs on the main thread.
+__attribute__((constructor(101))) void MirrorMainThreadTlsPointer() {
+    MirrorTlsPointer();
+}
+
+void RunThreadEntry(void* raw) {
+    const ThreadEntry entry = *static_cast<ThreadEntry*>(raw);
+    delete static_cast<ThreadEntry*>(raw);
+    MirrorTlsPointer();
+    entry.Entry(entry.Argument);
+}
 
 uint32_t ApplicationCoreMask() {
     uint64_t mask = 0;
@@ -82,8 +112,19 @@ extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* at
     return result;
 }
 
+extern "C" Result __wrap_threadCreate(Thread* t, ThreadFunc entry, void* arg, void* stack_mem,
+                                      size_t stack_sz, int prio, int cpuid) {
+    auto* wrapped = new ThreadEntry{entry, arg};
+    const Result result = __real_threadCreate(t, RunThreadEntry, wrapped, stack_mem, stack_sz, prio, cpuid);
+    if (R_FAILED(result)) {
+        delete wrapped;
+    }
+    return result;
+}
+
 // Called once from main: the game thread runs alone on core 0.
 void PlaceSwitchMainThread() {
+    MirrorTlsPointer();
     const Handle self = threadGetCurHandle();
     svcSetThreadPriority(self, kThreadPriority);
     if ((ApplicationCoreMask() & 1U) != 0U) {
