@@ -14,6 +14,9 @@ struct TopScreenDpadPresentationState {
   bool Boomerang = false;
   bool Slingshot = false;
   TopScreenNativeItemOpacity ItemOpacity;
+  // 3.0 0x005CCF6C, as for the cross: the icons without a lane alpha of
+  // their own (not ZR, ZL or the Ocarina) take it (loop at 0x005DD78C).
+  float GroupAlpha = 1.0F;
 };
 
 bool ReadTopScreenDpadPresentationState(NativeA32Memory &memory,

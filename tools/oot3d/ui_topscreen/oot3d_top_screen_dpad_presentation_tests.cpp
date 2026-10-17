@@ -86,6 +86,14 @@ void RunTopScreenDpadPresentationTests() {
               dimmed[2].color.alpha == 0.0F &&
               std::abs(dimmed[3].color.alpha - 0.6F) < 0.0001F,
           "native item opacity must multiply HUD alpha once, not affect boots");
+  // 3.0 0x005DD78C: icons without a lane of their own take the group alpha.
+  state.GroupAlpha = 0.5F;
+  dimmed.clear();
+  AppendTopScreenDpadPresentation(config, state, {}, 0.6F, items, page, dimmed);
+  require(dimmed.size() == 4 && std::abs(dimmed[0].color.alpha - 0.3F) < 0.0001F &&
+              std::abs(dimmed[3].color.alpha - 0.3F) < 0.0001F,
+          "the D-pad group alpha must dim the boots, not the ZR lane");
+  state.GroupAlpha = 1.0F;
   state.ItemOpacity = {};
   config.AdultDpad.fill(TopScreenDpadAction::None);
   config.AdultDpad[0] = TopScreenDpadAction::TunicToggle;
