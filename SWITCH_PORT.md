@@ -120,6 +120,7 @@ Desempenho e usabilidade:
 ## Próximos passos
 
 - Opção para liberar o Master Quest sem zerar o jogo (flag de desbloqueio no save; `config/unlock_master_quest`, testar numa cópia do save).
+
 Medição de referência (2026-10-16, console, CPU 1785 MHz, render thread ligada): a lógica do jogo
 custa ~17,5 ms por refresh (~35 ms por passo de jogo); o jogo roda a ~72% da velocidade nas cenas
 pesadas. Meta: ≤ 33 ms por passo (velocidade real a 30 FPS), depois 60 FPS por interpolação.
