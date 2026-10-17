@@ -72,6 +72,25 @@ set(OOT3D_WHOLE_AOT_MAX_PARALLEL_COMPILES "2" CACHE STRING
     "Maximum concurrent whole-AOT shard compilations")
 set(OOT3D_WHOLE_AOT_SHARD_COUNT "256" CACHE STRING
     "Generated whole-AOT C++ shard count")
+# affinity: distribuição por afinidade de chamadas, recalculada do zero a cada
+# geração (uma função a mais ou a menos na seleção remaneja ~30% dos shards).
+# affinity-incremental: mesma distribuição na primeira geração; depois
+# preserva o shard de cada função existente (ver _affinity_incremental_buckets),
+# para o ccache acertar os shards não tocados. Os .gcda do PGO casam com o
+# C++ gerado, então só troque a estratégia antes de um treino de perfil.
+set(OOT3D_WHOLE_AOT_SHARD_STRATEGY "affinity" CACHE STRING
+    "Whole-AOT C++ shard strategy (affinity or affinity-incremental)")
+set_property(CACHE OOT3D_WHOLE_AOT_SHARD_STRATEGY PROPERTY STRINGS
+    affinity affinity-incremental)
+# Tempo de compilação dos shards (medições no commit que criou estas opções): as funções
+# guest gigantes gastam 50-65% do tempo no sched1 e 15-45% no PRE/gcse do RTL.
+# 0 / vazio = comportamento anterior (C++ e flags idênticos).
+set(OOT3D_WHOLE_AOT_GIANT_FUNCTION_INSTRUCTIONS "0" CACHE STRING
+    "Marca funções com >= N instruções guest (exceto as quentes) sem sched1/gcse-after-reload; 0 desliga")
+set(OOT3D_WHOLE_AOT_HOT_FUNCTIONS "" CACHE FILEPATH
+    "Lista de funções quentes (whole_aot_hot_functions.py) que nunca perdem otimizações")
+set(OOT3D_WHOLE_AOT_GCSE_MEMORY_KB "" CACHE STRING
+    "--param=max-gcse-memory para os shards (GCC); só funções gigantes pulam o PRE do RTL; vazio = padrão do GCC")
 option(OOT3D_WHOLE_AOT_THINLTO
     "Compile and link the whole-AOT archive with LLVM ThinLTO" OFF)
 set(OOT3D_WHOLE_AOT_PROFILE_MODE "none" CACHE STRING
@@ -384,6 +403,14 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
             target_compile_options(oot3d_native_whole_aot PRIVATE
                 -finline-functions)
         endif()
+        if (OOT3D_WHOLE_AOT_GCSE_MEMORY_KB AND
+            CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            # Funções cujo PRE/cprop/gcse-after-reload do RTL excederia esse
+            # orçamento (blocos x pseudos) pulam essas passagens; as quentes são
+            # pequenas e saem byte a byte iguais (medido com 32768).
+            target_compile_options(oot3d_native_whole_aot PRIVATE
+                "--param=max-gcse-memory=${OOT3D_WHOLE_AOT_GCSE_MEMORY_KB}")
+        endif()
         if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
             # The Switch release flags carry -ffast-math, which breaks the
             # exact VFP emulation of the generated code (cumulative IXC flags
@@ -524,6 +551,13 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
                 list(APPEND _oot3d_whole_aot_code_dependencies
                     "${OOT3D_WHOLE_AOT_CODE_BIN}")
             endif()
+            set(_oot3d_whole_aot_hot_arguments)
+            if (OOT3D_WHOLE_AOT_HOT_FUNCTIONS)
+                set(_oot3d_whole_aot_hot_arguments
+                    --hot-functions "${OOT3D_WHOLE_AOT_HOT_FUNCTIONS}")
+                list(APPEND _oot3d_whole_aot_code_dependencies
+                    "${OOT3D_WHOLE_AOT_HOT_FUNCTIONS}")
+            endif()
             set(_oot3d_whole_aot_generation_stamp
                 "${OOT3D_WHOLE_AOT_GENERATED_DIR}/generation.stamp")
             add_custom_command(
@@ -535,7 +569,9 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
                     ${_oot3d_whole_aot_code_arguments}
                     --output "${OOT3D_WHOLE_AOT_GENERATED_DIR}"
                     --shards "${OOT3D_WHOLE_AOT_SHARD_COUNT}"
-                    --shard-strategy affinity
+                    --shard-strategy "${OOT3D_WHOLE_AOT_SHARD_STRATEGY}"
+                    --giant-function-instructions "${OOT3D_WHOLE_AOT_GIANT_FUNCTION_INSTRUCTIONS}"
+                    ${_oot3d_whole_aot_hot_arguments}
                     $<$<BOOL:${OOT3D_WHOLE_AOT_NATIVE_VFP_AARCH64}>:--native-vfp-aarch64>
                 COMMAND ${CMAKE_COMMAND} -E touch
                     "${_oot3d_whole_aot_generation_stamp}"
@@ -547,7 +583,7 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
                     "${OOT3D_WHOLE_AOT_SELECTION}"
                     "${OOT3D_WHOLE_AOT_PROGRAM}"
                     ${_oot3d_whole_aot_code_dependencies}
-                COMMENT "Regenerating affinity whole-AOT C++ shards"
+                COMMENT "Regenerating ${OOT3D_WHOLE_AOT_SHARD_STRATEGY} whole-AOT C++ shards"
                 VERBATIM)
             add_custom_target(oot3d_generate_whole_aot_cpp
                 DEPENDS "${_oot3d_whole_aot_generation_stamp}")

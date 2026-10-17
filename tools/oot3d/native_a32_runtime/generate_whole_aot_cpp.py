@@ -46,11 +46,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--shard-strategy",
-        choices=("stable", "balanced", "incremental", "affinity"),
+        choices=(
+            "stable", "balanced", "incremental", "affinity",
+            "affinity-incremental",
+        ),
         default="stable",
         help=(
             "stable hash placement, weight-balanced placement, preservation "
-            "of existing assignments, or direct-call affinity placement"
+            "of existing assignments, direct-call affinity placement, or "
+            "affinity placement that preserves the previous manifest's "
+            "assignments (ccache-friendly)"
         ),
     )
     parser.add_argument(
@@ -82,6 +87,17 @@ def main(argv: Sequence[str] | None = None) -> int:
              "the guest FPSCR mode loaded in FPCR and flags accumulated in "
              "FPSR (exact; software operations on other hosts)",
     )
+    parser.add_argument(
+        "--giant-function-instructions", type=int, default=0,
+        help="marca funções com pelo menos N instruções guest com "
+             "[[gnu::optimize]] sem sched1 nem gcse-after-reload (GCC); "
+             "0 desliga (padrão)",
+    )
+    parser.add_argument(
+        "--hot-functions", type=Path, default=None,
+        help="funções quentes que nunca recebem esse atributo: uma "
+             "entrada hex por linha (o resto da linha e '#...' é ignorado)",
+    )
     args = parser.parse_args(argv)
     if args.shards <= 0:
         parser.error("--shards must be positive")
@@ -101,6 +117,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         local_state=args.local_state,
         fold_literals=not args.no_literal_folding,
         native_vfp_aarch64=args.native_vfp_aarch64,
+        giant_function_instructions=args.giant_function_instructions,
+        hot_entries=_read_hot_entries(args.hot_functions),
     )
     if args.guest_overrides is not None:
         from apply_guest_overrides import apply as apply_overrides, load_manifest
@@ -115,6 +133,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{manifest['shard_count']} shard(s)"
     )
     return 0
+
+
+def _read_hot_entries(path: Path | None) -> frozenset[int]:
+    if path is None:
+        return frozenset()
+    entries = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        token = line.split("#", 1)[0].strip()
+        if token:
+            entries.add(int(token.split()[0], 16))
+    return frozenset(entries)
 
 
 if __name__ == "__main__":

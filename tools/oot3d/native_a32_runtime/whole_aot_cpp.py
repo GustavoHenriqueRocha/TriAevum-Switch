@@ -80,6 +80,19 @@ _FOLDED_LITERALS: set[int] = set()
 # default; the emitted code still compiles to the software operations on
 # other hosts.
 _NATIVE_VFP_AARCH64 = False
+# Funções gigantes e frias marcadas com GIANT_COLD_ATTRIBUTE (ver generate).
+_GIANT_COLD_ENTRIES: frozenset[int] = frozenset()
+# O escalonador pré-alocação (sched1, que no AArch64 o GCC só liga em -O3) e
+# o load CSE após a alocação (-fgcse-after-reload, só em -O3) custam 50-65% do
+# tempo de compilação das funções gigantes (milhares de instruções guest). O
+# atributo os desliga só nelas e mantém o inline forçado dos helpers quentes
+# (medido: mesmos símbolos externos, .text +0,02%). Vai na mesma linha da
+# assinatura, sem macro nem linhas novas: os números de linha do shard (e com
+# eles os checksums dos .gcda do PGO) não mudam. Outros compiladores ignoram
+# um atributo gnu:: desconhecido (só um aviso, e os shards usam -w).
+GIANT_COLD_ATTRIBUTE = (
+    '[[gnu::optimize("no-schedule-insns", "no-gcse-after-reload")]] '
+)
 
 
 def _cpp_flag_mask(mask: Flag) -> str:
@@ -2571,7 +2584,10 @@ def _render_shard_source(
     lines.extend(_render_function_declarations(declarations))
     lines.append("")
     for function in functions:
-        lines.extend(_render_region_function(function, all_symbols, external_entries, region_entries, memory_entries, local_state))
+        rendered = _render_region_function(function, all_symbols, external_entries, region_entries, memory_entries, local_state)
+        if function.entry in _GIANT_COLD_ENTRIES:
+            rendered = [GIANT_COLD_ATTRIBUTE + rendered[0], *rendered[1:]]
+        lines.extend(rendered)
     lines.extend(["} // namespace Oot3dNativeGame::GeneratedWholeAot", ""])
     return "\n".join(lines)
 
@@ -2818,6 +2834,10 @@ def _shard_buckets(
                 len(block.instructions) for block in function.blocks
             )
         return buckets
+    if strategy == "affinity-incremental":
+        return _affinity_incremental_buckets(
+            functions, shard_count, existing_assignments or {}
+        )
     if strategy == "affinity":
         function_by_entry = {function.entry: function for function in functions}
         weights_by_entry = {
@@ -2924,6 +2944,113 @@ def _shard_buckets(
             len(block.instructions) for block in function.blocks
         )
     return buckets
+
+
+# Teto de peso (instruções) de um shard ao receber uma função nova no modo
+# affinity-incremental, relativo à média: evita que um shard cresça sem
+# limite por acumular vizinhos novos (a cauda do build paralelo).
+AFFINITY_INCREMENTAL_WEIGHT_CAP = 1.25
+
+
+def _affinity_incremental_buckets(
+    functions: tuple[Function, ...], shard_count: int,
+    existing_assignments: dict[int, int],
+) -> list[list[Function]]:
+    """Afinidade estável: preserva a distribuição anterior.
+
+    Sem distribuição anterior (primeira geração, outra contagem de shards),
+    o resultado é idêntico ao de ``affinity``. Com ela, cada função que já
+    existia fica no mesmo shard, de modo que uma mudança pequena na seleção
+    (uma função nova, removida ou que mudou de tamanho) só altera os shards
+    que de fato a contêm ou a chamam, e o ccache acerta os demais. Funções
+    novas vão para o shard com o qual têm mais chamadas diretas (para manter
+    o inline entre chamador e chamado), desde que caibam no teto de peso;
+    sem vizinhos colocados, vão para o shard mais leve.
+    """
+    if not existing_assignments:
+        return _shard_buckets(functions, shard_count, "affinity")
+    buckets: list[list[Function]] = [[] for _ in range(shard_count)]
+    weights = [0] * shard_count
+    weight_of = {
+        function.entry: sum(len(block.instructions) for block in function.blocks)
+        for function in functions
+    }
+    placed: dict[int, int] = {}
+    unassigned: list[Function] = []
+    for function in functions:
+        index = existing_assignments.get(function.entry)
+        if index is None or not 0 <= index < shard_count:
+            unassigned.append(function)
+            continue
+        buckets[index].append(function)
+        weights[index] += weight_of[function.entry]
+        placed[function.entry] = index
+    if not unassigned:
+        return buckets
+    known = set(weight_of)
+    adjacency: dict[int, dict[int, int]] = {entry: {} for entry in known}
+    for function in functions:
+        for _, target in function.direct_calls:
+            if target not in known or target == function.entry:
+                continue
+            adjacency[function.entry][target] = (
+                adjacency[function.entry].get(target, 0) + 1
+            )
+            adjacency[target][function.entry] = (
+                adjacency[target].get(function.entry, 0) + 1
+            )
+    cap = AFFINITY_INCREMENTAL_WEIGHT_CAP * sum(weight_of.values()) / shard_count
+    for function in sorted(
+        unassigned, key=lambda item: (-weight_of[item.entry], item.entry)
+    ):
+        weight = weight_of[function.entry]
+        score: dict[int, int] = {}
+        for neighbor, edge_weight in adjacency[function.entry].items():
+            if neighbor in placed:
+                score[placed[neighbor]] = (
+                    score.get(placed[neighbor], 0) + edge_weight
+                )
+        index = next(
+            (
+                candidate
+                for candidate in sorted(
+                    score, key=lambda item: (-score[item], weights[item], item)
+                )
+                if weights[candidate] + weight <= cap
+            ),
+            None,
+        )
+        if index is None:
+            index = min(range(shard_count), key=lambda item: (weights[item], item))
+        buckets[index].append(function)
+        weights[index] += weight
+        placed[function.entry] = index
+    return buckets
+
+
+def _manifest_shard_assignments(
+    output: Path, shard_count: int
+) -> dict[int, int]:
+    """Distribuição anterior lida só do manifesto e só com a mesma contagem."""
+    manifest_path = output / MANIFEST_NAME
+    if not manifest_path.is_file():
+        return {}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if manifest.get("shard_count") != shard_count:
+        return {}
+    assignments: dict[int, int] = {}
+    shards = manifest.get("shards", [])
+    if isinstance(shards, list):
+        for index, shard in enumerate(shards):
+            entries = shard.get("entries") if isinstance(shard, dict) else None
+            if isinstance(entries, list):
+                for entry in entries:
+                    if isinstance(entry, int):
+                        assignments[entry] = index
+    return assignments
 
 
 def _existing_shard_assignments(
@@ -3094,14 +3221,31 @@ def generate(
     local_state: bool = False,
     fold_literals: bool = True,
     native_vfp_aarch64: bool = False,
+    giant_function_instructions: int = 0,
+    hot_entries: frozenset[int] = frozenset(),
 ) -> dict[str, object]:
-    global _LITERAL_IMAGE, _NATIVE_VFP_AARCH64
+    """``giant_function_instructions`` > 0 marca as funções com pelo menos
+    tantas instruções guest, exceto as de ``hot_entries`` (perfil), com
+    GIANT_COLD_ATTRIBUTE. 0 (padrão) gera exatamente o mesmo C++ de antes."""
+    global _LITERAL_IMAGE, _NATIVE_VFP_AARCH64, _GIANT_COLD_ENTRIES
+    if giant_function_instructions < 0:
+        raise ValueError("giant function threshold must not be negative")
+    giant_contract: dict[str, object] = (
+        {
+            "giant_cold_instructions": giant_function_instructions,
+            "giant_cold_hot_entries": sorted(hot_entries),
+        }
+        if giant_function_instructions
+        else {}
+    )
     if shard_count <= 0:
         raise ValueError("whole-AOT shard count must be positive")
-    if shard_strategy not in {"stable", "balanced", "incremental", "affinity"}:
+    if shard_strategy not in {
+        "stable", "balanced", "incremental", "affinity", "affinity-incremental"
+    }:
         raise ValueError(
             "whole-AOT shard strategy must be stable, balanced, incremental, "
-            "or affinity"
+            "affinity or affinity-incremental"
         )
     program_bytes = program_path.read_bytes()
     selection_bytes = selection_path.read_bytes()
@@ -3136,6 +3280,7 @@ def generate(
             **({"local_state": True} if local_state else {}),
             "literal_folding": fold_literals,
             **({"native_vfp_aarch64": True} if native_vfp_aarch64 else {}),
+            **giant_contract,
         }
         files = cached.get("files", {})
         cached_shards = {
@@ -3145,6 +3290,10 @@ def generate(
         if all(cached.get(key) == value for key, value in expected.items()) and (
             # Absent in manifests of the default (software) lowering.
             cached.get("native_vfp_aarch64", False) == native_vfp_aarch64
+        ) and (
+            # Absent in manifests generated without the giant-function marks.
+            cached.get("giant_cold_instructions", 0)
+            == giant_function_instructions
         ) and all(
             (output / name).is_file() and
             _sha256((output / name).read_bytes()) == digest
@@ -3167,15 +3316,24 @@ def generate(
             raise ValueError("program executable size does not fit code.bin")
         _LITERAL_IMAGE = LiteralImage(int(program["base"]), code[:text_size])
     _NATIVE_VFP_AARCH64 = native_vfp_aarch64
+    _GIANT_COLD_ENTRIES = frozenset(
+        function.entry
+        for function in functions
+        if giant_function_instructions
+        and function.entry not in hot_entries
+        and sum(len(block.instructions) for block in function.blocks)
+        >= giant_function_instructions
+    )
     try:
         return _generate_files(
             output, functions, external_entries, shard_count, shard_strategy,
             region_entries, memory_entries, local_state, fold_literals,
             memory_contract, program_sha256, selection_sha256, code_sha256,
-            generator_sha256)
+            generator_sha256, giant_contract)
     finally:
         _LITERAL_IMAGE = None
         _NATIVE_VFP_AARCH64 = False
+        _GIANT_COLD_ENTRIES = frozenset()
 
 
 def _generate_files(
@@ -3193,6 +3351,7 @@ def _generate_files(
     selection_sha256: str,
     code_sha256: str,
     generator_sha256: str,
+    giant_contract: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if region_entries - {function.entry for function in functions}:
         raise ValueError("callback-free regions must be selected function entries")
@@ -3214,6 +3373,8 @@ def _generate_files(
         existing_assignments = (
             _existing_shard_assignments(output, shard_count)
             if shard_strategy == "incremental"
+            else _manifest_shard_assignments(output, shard_count)
+            if shard_strategy == "affinity-incremental"
             else None
         )
         buckets = _shard_buckets(
@@ -3285,6 +3446,12 @@ def _generate_files(
         **({"local_state": True} if local_state else {}),
         "literal_folding": fold_literals,
         **({"native_vfp_aarch64": True} if _NATIVE_VFP_AARCH64 else {}),
+        **(giant_contract or {}),
+        **(
+            {"giant_cold_functions": sorted(_GIANT_COLD_ENTRIES)}
+            if giant_contract
+            else {}
+        ),
         "folded_literal_addresses": len(_FOLDED_LITERALS),
         "folding_excluded_ranges": [
             [start, length] for start, length in HOST_WRITTEN_TEXT_RANGES

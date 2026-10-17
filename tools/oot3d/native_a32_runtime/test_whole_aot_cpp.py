@@ -37,6 +37,36 @@ class WholeAotCppTests(unittest.TestCase):
             generate(*inputs, output)
             self.assertEqual(original, (output / SOURCE_NAME).read_bytes())
 
+    def test_giant_cold_attribute_keeps_shard_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs = self.write_inputs(root, words(0xE2800002, 0xE12FFF1E))
+            plain, marked, hot = root / "plain", root / "marked", root / "hot"
+            generate(*inputs, plain, shard_count=2, shard_strategy="affinity")
+            manifest = generate(
+                *inputs, marked, shard_count=2, shard_strategy="affinity",
+                giant_function_instructions=1,
+            )
+            self.assertEqual(manifest["giant_cold_functions"], [0x1000])
+            generate(
+                *inputs, hot, shard_count=2, shard_strategy="affinity",
+                giant_function_instructions=1, hot_entries=frozenset({0x1000}),
+            )
+            for path in plain.glob("oot3d_whole_aot_shard_*.cpp"):
+                before = path.read_text(encoding="utf-8").splitlines()
+                after = (marked / path.name).read_text(
+                    encoding="utf-8").splitlines()
+                self.assertEqual(len(before), len(after))
+                self.assertEqual(
+                    path.read_bytes(), (hot / path.name).read_bytes()
+                )
+                for old, new in zip(before, after):
+                    if old != new:
+                        self.assertEqual(
+                            new, '[[gnu::optimize("no-schedule-insns", '
+                            '"no-gcse-after-reload")]] ' + old,
+                        )
+
     def test_callback_free_region_rejects_unknown_entry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1152,6 +1182,94 @@ class WholeAotCppTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "unselected function"):
                 generate(*inputs, root / "output")
+
+
+class AffinityIncrementalShardingTests(unittest.TestCase):
+    """Distribuição estável: só os shards tocados mudam (acertos de ccache)."""
+
+    @staticmethod
+    def chain(count: int, size: int = 4) -> tuple:
+        from whole_aot_cpp import Block, Function
+
+        functions = []
+        for index in range(count):
+            entry = 0x1000 + index * 0x100
+            instructions = tuple(
+                Instruction(entry + offset * 4, 0xE1A00000)
+                for offset in range(size + index % 3)
+            )
+            calls = (
+                ((entry, entry + 0x100),) if index + 1 < count else ()
+            )
+            functions.append(
+                Function(
+                    entry,
+                    f"F{index}",
+                    (Block(0, entry, entry + len(instructions) * 4,
+                           instructions, ()),),
+                    calls,
+                    (),
+                )
+            )
+        return tuple(functions)
+
+    @staticmethod
+    def entry_sets(buckets) -> list:
+        return [frozenset(f.entry for f in bucket) for bucket in buckets]
+
+    def test_without_previous_assignment_matches_affinity(self) -> None:
+        from whole_aot_cpp import _shard_buckets
+
+        functions = self.chain(40)
+        self.assertEqual(
+            self.entry_sets(_shard_buckets(functions, 8, "affinity")),
+            self.entry_sets(
+                _shard_buckets(functions, 8, "affinity-incremental", {})
+            ),
+        )
+
+    def test_removal_and_addition_touch_only_their_shards(self) -> None:
+        from whole_aot_cpp import _shard_buckets
+
+        functions = self.chain(40)
+        base = _shard_buckets(functions, 8, "affinity")
+        assignment = {
+            f.entry: index for index, bucket in enumerate(base) for f in bucket
+        }
+        before = self.entry_sets(base)
+        victim = functions[17]
+        reduced = tuple(f for f in functions if f.entry != victim.entry)
+        after = self.entry_sets(
+            _shard_buckets(reduced, 8, "affinity-incremental", assignment)
+        )
+        changed = [
+            index for index, (old, new) in enumerate(zip(before, after))
+            if old - {victim.entry} != new
+        ]
+        self.assertEqual(changed, [])
+        # Recolocar a função removida: volta para junto de um vizinho.
+        reduced_assignment = {
+            entry: index for entry, index in assignment.items()
+            if entry != victim.entry
+        }
+        readded = _shard_buckets(
+            functions, 8, "affinity-incremental", reduced_assignment
+        )
+        home = next(
+            index for index, bucket in enumerate(readded)
+            if victim.entry in {f.entry for f in bucket}
+        )
+        neighbors = {victim.entry - 0x100, victim.entry + 0x100}
+        self.assertTrue(
+            neighbors & {f.entry for f in readded[home]}
+        )
+        self.assertEqual(
+            sum(
+                1 for old, new in zip(before, self.entry_sets(readded))
+                if old != new
+            ),
+            0 if home == assignment[victim.entry] else 2,
+        )
 
 
 if __name__ == "__main__":
