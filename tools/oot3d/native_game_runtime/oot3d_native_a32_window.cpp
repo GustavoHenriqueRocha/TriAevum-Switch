@@ -160,6 +160,33 @@ void NativeA32WindowSession::Run() {
   Finish();
 }
 
+NativeA32WindowSession::~NativeA32WindowSession() { StopRendering(); }
+
+void NativeA32WindowSession::StopRendering() noexcept {
+  if (renderingStopped) return;
+  renderingStopped = true;
+  // No queued command starts any more; the one running finishes (and draws
+  // no further sample: ExecuteVisualSample checks the stream); the worker is
+  // joined. The GL context stays where it was, as before: teardown after
+  // this point issues no rendering.
+  const size_t discarded = renderStream.Shutdown();
+  if (discarded != 0U) {
+    std::fprintf(stderr, "TRIAEVUM_RENDER_SHUTDOWN discarded_commands=%zu\n",
+                 discarded);
+  }
+  // The overlay no longer routes into the closed stream.
+  guiRendererRoutingReset.reset();
+  // After the render worker: resolving a placeholder takes the builder's
+  // lock, so the plan worker stops once nobody can resolve any more.
+  picaPlanBuilder.StopWorker();
+  if (rendererTiming != &phaseTiming && rendererTiming != nullptr) {
+    phaseTiming.PicaBackendSeconds += workerPhaseTiming.PicaBackendSeconds;
+    phaseTiming.VisualReplaySeconds += workerPhaseTiming.VisualReplaySeconds;
+    phaseTiming.PacingWaitSeconds += workerPhaseTiming.PacingWaitSeconds;
+    rendererTiming = &phaseTiming;
+  }
+}
+
 void NativeA32WindowSession::Finish() {
   auto &hostServices = *hostServicesStorage;
   auto &frameRatePolicy = *frameRatePolicyStorage;
@@ -176,16 +203,14 @@ void NativeA32WindowSession::Finish() {
   auto &picaSemanticTrace = *picaSemanticTraceStorage;
   auto &presentationScheduler = *presentationSchedulerStorage;
   auto &realtimePacer = *realtimePacerStorage;
-  // Every renderer-owned value below is read after the last command ran.
-  renderStream.SetMode(Oot3dNativeGame::NativeRenderCommandStream::Mode::Inline);
-  // The shader-source cache is read below; no build may still be running.
-  picaPlanBuilder.StopWorker();
-  if (rendererTiming != &phaseTiming) {
-    phaseTiming.PicaBackendSeconds += workerPhaseTiming.PicaBackendSeconds;
-    phaseTiming.VisualReplaySeconds += workerPhaseTiming.VisualReplaySeconds;
-    phaseTiming.PacingWaitSeconds += workerPhaseTiming.PacingWaitSeconds;
-    rendererTiming = &phaseTiming;
-  }
+  // Before anything is released: frames still queued behind the exit are
+  // discarded, not drained (they would run against state the exit tears
+  // down), the render worker is joined and the plan worker stopped. Every
+  // renderer-owned value below is read after the last command ran, and the
+  // shader-source cache with no build still running. A run that closed
+  // itself first completes what it submitted (nothing is released yet).
+  if (scriptedExit.load() && !renderStream.ShutdownRequested()) renderStream.Drain();
+  StopRendering();
   CpuProbe::Thread.Active = false;
   // The audio worker stops before anything below can tear the device down.
   hostAudioStream.reset();

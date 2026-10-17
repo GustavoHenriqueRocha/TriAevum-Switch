@@ -62,6 +62,8 @@ void NativeRenderCommandStream::Submit(Command command, bool endsFrame) {
 
 void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
                                         bool synchronous) {
+    // Leaving the game: nothing submitted from now on is executed.
+    if (ShutdownRequested()) return;
     if (mMode == Mode::Inline) {
         {
             CommandScope scope(true);
@@ -77,18 +79,22 @@ void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
     RethrowPendingFailureLocked(lock);
     if (endsFrame) {
         mProgress.wait(lock, [&] {
-            return mFailure != nullptr || mFramesQueued < mMaxFramesInFlight;
+            return mFailure != nullptr || ShutdownRequested() ||
+                   mFramesQueued < mMaxFramesInFlight;
         });
+        if (ShutdownRequested()) return;
         RethrowPendingFailureLocked(lock);
         ++mFramesQueued;
     }
+    if (ShutdownRequested()) return;
     mQueue.push_back({std::move(command), endsFrame, synchronous});
     ++mSubmitted;
     mWork.notify_one();
 }
 
-void NativeRenderCommandStream::Run(Command command) {
+bool NativeRenderCommandStream::Run(Command command) {
     Drain();
+    if (ShutdownRequested()) return false;
     {
         CommandScope scope(true);
         command();
@@ -96,6 +102,7 @@ void NativeRenderCommandStream::Run(Command command) {
     std::lock_guard lock(mMutex);
     ++mSubmitted;
     ++mExecuted;
+    return true;
 }
 
 void NativeRenderCommandStream::Drain() {
@@ -104,7 +111,68 @@ void NativeRenderCommandStream::Drain() {
     mProgress.wait(lock, [&] {
         return mFailure != nullptr || (mQueue.empty() && !mBusy);
     });
+    // A failure behind an exit request is not reported: Shutdown drops it.
+    if (ShutdownRequested()) return;
     RethrowPendingFailureLocked(lock);
+}
+
+void NativeRenderCommandStream::BeginShutdown() noexcept {
+    std::deque<Entry> discarded;
+    {
+        std::lock_guard lock(mMutex);
+        mShutdown.store(true, std::memory_order_release);
+        // Final entries (only Shutdown queues one) stay.
+        for (auto it = mQueue.begin(); it != mQueue.end();) {
+            if (it->Final) {
+                ++it;
+                continue;
+            }
+            discarded.push_back(std::move(*it));
+            it = mQueue.erase(it);
+        }
+        mDiscarded += discarded.size();
+        mFramesQueued = 0U;
+    }
+    mProgress.notify_all();
+    mWork.notify_all();
+    // The discarded commands (and what they captured) die here, outside the
+    // lock: nothing of theirs ran.
+}
+
+size_t NativeRenderCommandStream::Shutdown(Command last) noexcept {
+    BeginShutdown();
+    if (mWorker.joinable() && mWorker.get_id() == std::this_thread::get_id()) {
+        // From inside a command: the submitter finishes the shutdown.
+        return 0U;
+    }
+    if (mWorker.joinable()) {
+        {
+            std::unique_lock lock(mMutex);
+            // The command already running finishes; nothing after it starts.
+            mProgress.wait(lock, [&] { return !mBusy; });
+            if (last) {
+                Entry entry;
+                entry.Work = std::move(last);
+                entry.Final = true;
+                mQueue.push_back(std::move(entry));
+            }
+            mStop = true;
+        }
+        mWork.notify_all();
+        mWorker.join();
+    } else if (last) {
+        try {
+            CommandScope scope(false);
+            last();
+        } catch (...) {
+        }
+    }
+    std::lock_guard lock(mMutex);
+    mFailure = nullptr;
+    mQueue.clear();
+    mFramesQueued = 0U;
+    mMode = Mode::Inline;
+    return static_cast<size_t>(mDiscarded);
 }
 
 void NativeRenderCommandStream::RethrowPendingFailureLocked(
@@ -151,6 +219,16 @@ void NativeRenderCommandStream::WorkerLoop() {
         if (mQueue.empty()) return;  // stopping with nothing left to run
         Entry entry = std::move(mQueue.front());
         mQueue.pop_front();
+        if (ShutdownRequested() && !entry.Final) {
+            // Queued behind an exit request: never run.
+            ++mDiscarded;
+            if (entry.EndsFrame && mFramesQueued != 0U) --mFramesQueued;
+            lock.unlock();
+            entry = {};
+            lock.lock();
+            mProgress.notify_all();
+            continue;
+        }
         mBusy = true;
         lock.unlock();
         std::exception_ptr failure;

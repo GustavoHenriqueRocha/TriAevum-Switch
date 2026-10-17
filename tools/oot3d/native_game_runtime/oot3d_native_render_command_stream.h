@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +36,15 @@ namespace Oot3dNativeGame {
 //   only while the submitter is known to be stopped: inline, or inside Run.
 //   InSynchronousCommand tells the two cases apart; commands that may reach
 //   guest state check it and fail instead of racing the guest.
+//
+// Shutdown (leaving the game): once BeginShutdown is called (from any
+// thread, also from inside a command) no command that has not started yet
+// ever runs: queued commands are discarded, and Submit and Run drop theirs.
+// Shutdown waits for the one command that may be running, discards the
+// queue (and a pending failure), runs a last command on the worker (to hand
+// thread-affine resources such as the GL context back) and joins it. Frames
+// queued behind an exit request are therefore never executed against state
+// the exit is about to release.
 class NativeRenderCommandStream final {
   public:
     enum class Mode : uint8_t { Inline, Worker };
@@ -53,8 +63,20 @@ class NativeRenderCommandStream final {
     void SetMode(Mode mode);
 
     void Submit(Command command, bool endsFrame = false);
-    void Run(Command command);
+    // False when the command was dropped because shutdown has begun.
+    bool Run(Command command);
     void Drain();
+
+    // From now on no command that has not started runs (see above).
+    void BeginShutdown() noexcept;
+    [[nodiscard]] bool ShutdownRequested() const noexcept {
+        return mShutdown.load(std::memory_order_acquire);
+    }
+    // BeginShutdown, wait for the running command, discard the rest, run
+    // `last` on the worker thread (on the caller without one), join the
+    // worker and stay inline and closed. Never throws; idempotent. Returns
+    // the number of discarded commands.
+    size_t Shutdown(Command last = {}) noexcept;
 
     // True on the worker thread while it executes a command, and on the
     // submitting thread while an inline command runs.
@@ -69,6 +91,8 @@ class NativeRenderCommandStream final {
         Command Work;
         bool EndsFrame = false;
         bool Synchronous = false;
+        // The last command of Shutdown: runs although shutdown has begun.
+        bool Final = false;
     };
 
     void Enqueue(Command command, bool endsFrame, bool synchronous);
@@ -90,6 +114,8 @@ class NativeRenderCommandStream final {
     std::exception_ptr mFailure;
     uint64_t mExecuted = 0U;
     uint64_t mSubmitted = 0U;
+    std::atomic<bool> mShutdown{false};
+    uint64_t mDiscarded = 0U;
 };
 
 } // namespace Oot3dNativeGame

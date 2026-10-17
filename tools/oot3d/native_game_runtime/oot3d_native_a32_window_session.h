@@ -228,6 +228,8 @@ class ScopedA32BlockTraceWriter final {
 class NativeA32WindowSession {
 public:
   explicit NativeA32WindowSession(const Oot3dNativeGameLaunch &launch) : launch(launch) {}
+  // Stops the renderer before any member dies (also when Run throws).
+  ~NativeA32WindowSession();
   NativeA32WindowSession(const NativeA32WindowSession &) = delete;
   NativeA32WindowSession &operator=(const NativeA32WindowSession &) = delete;
 
@@ -278,6 +280,11 @@ private:
   void RunGuestRefresh();
   void PresentVisualFrame(const double &presentationElapsedSeconds, const float &visualInterpolationAlpha);
   void Finish();
+  // Leaving the game: no render command that has not started runs any more
+  // (queued frames, interpolated or repeated samples are discarded), the
+  // render worker is joined, then the plan worker stops. Idempotent; the
+  // first thing Finish and the destructor do.
+  void StopRendering() noexcept;
   // The setup's former lambdas.
   void ApplyTopScreenConfigSnapshot();
   void SetTopScreenSessionMinimapVisible(bool visible);
@@ -546,6 +553,12 @@ private:
   Oot3dNativeGame::Oot3dPicaVisualFrameViewSample dependencySampleScratch;
   Oot3dNativeGame::Oot3dPicaVisualFrameViewSample visualFrameSampleScratch;
   std::optional<RenderStreamStop> renderStreamStop;
+  bool renderingStopped = false;
+  // The run closed itself (frame limit, structural scenario, dev lab quit):
+  // the frames it already submitted still complete (screenshots, captures)
+  // before rendering stops. Any other exit (Quit, HOME > Close, the window)
+  // discards them.
+  std::atomic<bool> scriptedExit{false};
   std::vector<Oot3dNativeGame::Oot3dPicaDrawSubmission> drainedDraws;
   bool quickSaveKeyWasDown = false;
   bool quickLoadKeyWasDown = false;

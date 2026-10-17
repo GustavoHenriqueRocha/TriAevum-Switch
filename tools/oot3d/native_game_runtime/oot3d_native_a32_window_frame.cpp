@@ -106,6 +106,11 @@ bool NativeA32WindowSession::RunFrame() {
   const double guestClockBeforeFrame = phaseTiming.GuestClockSeconds;
   widescreenProjection.CurrentHostFrame =
       static_cast<uint32_t>(presentationFrameCount);
+  // The render thread saw the exit request: leave before simulating more.
+  if (renderStream.ShutdownRequested()) {
+    window.Close();
+    return false;
+  }
   WindowDemoFrameTiming frameTiming;
   if (!PrepareNextWindowDemoFrame(hostArgs, window, timing, frameTiming)) {
     return true;
@@ -190,7 +195,15 @@ bool NativeA32WindowSession::RunFrame() {
   hostStartSteps.Mark("mouse");
   gui->StartDraw();
   hostStartSteps.Mark("gui_start_draw");
-  renderStream.Submit([&] { window.StartFrame(); });
+  renderStream.Submit([&] {
+    window.StartFrame();
+    // The window's events are pumped here, on the render thread: an exit
+    // request (Quit, HOME > Close) seen now ends rendering before the rest of
+    // this frame and any frame queued behind it runs.
+    // (A run that closes itself completes its frames: see Finish.)
+    if (!window.IsRunning() && !scriptedExit.load())
+      renderStream.BeginShutdown();
+  });
   hostStartSteps.Mark("render_start_frame");
   phaseTiming.HostFrameStartSeconds += SecondsSince(phaseStart);
   const auto inputPhaseStart = std::chrono::steady_clock::now();
@@ -248,6 +261,7 @@ bool NativeA32WindowSession::RunFrame() {
                          guestRefreshesDue != 0U,
                          nativeControlPollingState);
   if (physicalInputFrame.Exit || devLabQuit) {
+    if (devLabQuit) scriptedExit = true;
     window.Close();
     return false;
   }
@@ -733,6 +747,8 @@ bool NativeA32WindowSession::RunFrame() {
       }
     }
   }
+  if (hostArgs.FrameLimit > 0 && runFrameCount >= hostArgs.FrameLimit)
+    scriptedExit = true;  // before the close the render thread may observe
   ApplyWindowDemoFrameLimit(hostArgs, window, runFrameCount);
   return true;
 }
@@ -1080,11 +1096,13 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
       std::cerr << "oot3d_native_game: structural scenario failed: "
                 << scenarioError << '\n';
       if (launch.ScenarioStrict) {
+        scriptedExit = true;
         window.Close();
         return false;
       }
     }
     if (launch.ScenarioAutoExit && scenarioBootstrap->Complete()) {
+      scriptedExit = true;
       window.Close();
       return false;
     }
@@ -2753,6 +2771,10 @@ bool NativeA32WindowSession::FlushNativeDependencies() {
 
 void NativeA32WindowSession::ExecuteVisualSample(const Oot3dNativeGame::Oot3dPicaVisualFrameViewSample &sample, Oot3dNativeGame::Oot3dPicaPresentationExecutionKind kind, bool present, const Fast::Oot3d::NativeFrameTemporalSample& temporalSample, uint64_t renderTargetNamespace) {
   auto &api = *apiPointer;
+  // Leaving the game: a command already running (a new frame followed by its
+  // interpolated sample, a repeated sample of the previous frame) draws
+  // nothing more once the exit has begun.
+  if (renderStream.ShutdownRequested()) return;
   const auto started = std::chrono::steady_clock::now();
   (void)api.PublishPicaFrameTemporalSample(temporalSample);
   // Only displayed samples advance the grass colliders: the authoritative
