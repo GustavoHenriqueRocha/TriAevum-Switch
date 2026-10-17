@@ -1,5 +1,6 @@
 // Host input polling of the A32 window and the TopScreen pause transitions it drives.
 #include "oot3d_native_a32_window_shared.h"
+#include "fast/oot3d/gl_widescreen_menu_policy.h"
 
 #if defined(__SWITCH__)
 #include <mutex>
@@ -94,7 +95,8 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                        &aimTransform,
                    double samplePeriodSeconds,
                    bool guestRefreshWillConsume,
-                   NativeControlPollingState &pollingState) {
+                   NativeControlPollingState &pollingState,
+                   bool widescreenMenuCorners) {
   using namespace Oot3dNativeGame;
   auto config = controls.Snapshot().Config;
   NativeControlHostInputState host;
@@ -310,6 +312,18 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
       pointerPressed = true;
     }
 #endif
+    if (widescreenMenuCorners) {
+      // The OpenGL widescreen draws the relocated lower menu's bottom
+      // corners (the BACK tab) at the window's corners
+      // (gl_widescreen_menu_policy.h); a touch there goes back to the corner
+      // of the menu the game expects.
+      const auto remapped = Fast::Oot3d::RemapGlWidescreenCornerPointer(
+          static_cast<float>(pointer.x), static_cast<float>(pointer.y),
+          static_cast<float>(window.GetWidth()),
+          static_cast<float>(window.GetHeight()));
+      pointer.x = static_cast<int32_t>(remapped.X);
+      pointer.y = static_cast<int32_t>(remapped.Y);
+    }
     const auto touch = Oot3dNativeGame::MapHostPointerToNativeA32Touch(
         pointer.x, pointer.y, window.GetWidth(), window.GetHeight(),
         pointerPressed,

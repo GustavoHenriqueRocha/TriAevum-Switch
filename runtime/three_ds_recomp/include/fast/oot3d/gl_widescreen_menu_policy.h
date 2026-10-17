@@ -147,6 +147,11 @@ struct GlWidescreenDrawEvidence {
     bool Untextured = false;
     // Recorte (scissor) do próprio jogo ligado.
     bool GuestScissor = false;
+    // Limites em NDC da geometria projetada (eixo 0 = vertical apresentado,
+    // eixo 1 = horizontal apresentado; -1 = começo do viewport no alvo).
+    bool BoundsKnown = false;
+    std::array<float, 2> NdcMin{};
+    std::array<float, 2> NdcMax{};
 };
 
 struct GlWidescreenDrawPlacement {
@@ -164,6 +169,9 @@ struct GlWidescreenDrawPlacement {
     // Com FillTarget: até onde a geometria chega no eixo horizontal
     // apresentado (NDC; 1/fator quando o hook alargou o frustum).
     float FillHorizontalExtent = 1.0F;
+    // Draw do menu de baixo realocado: os cantos de baixo (a aba BACK) vão
+    // para os cantos da tela alargada (ResolveGlWidescreenCornerPasses).
+    bool SplitCorners = false;
 
     bool operator==(const GlWidescreenDrawPlacement&) const = default;
 };
@@ -219,6 +227,37 @@ inline constexpr float kGlWidescreenAnisotropyTolerance = 0.03F;
            evidence.Untextured && !evidence.GuestScissor;
 }
 
+// Cantos de baixo do menu de baixo realocado (a aba BACK encostada no canto
+// da tela de baixo). Num jogo widescreen eles ficam nos cantos da tela, não
+// nos cantos do 4:3 do menu. A aba vem no mesmo draw que os cartões, o
+// cabeçalho e os textos (trace do host: 1104 vértices, um só draw), então o
+// draw é repetido por recortes: o meio no lugar, cada canto deslocado pela
+// margem até a borda do alvo alargado.
+// Lido uma vez: Switch, config/widescreen_menu_corners ("0" desliga; sem o
+// arquivo, ligado); fora dele, TRIAEVUM_GL_WIDESCREEN_MENU_CORNERS.
+[[nodiscard]] inline bool GlWidescreenMenuCornersEnabled() {
+    static const bool enabled = [] {
+        constexpr bool kDefault = true;
+#if defined(__SWITCH__)
+        std::ifstream file("sdmc:/switch/oot3dre/config/widescreen_menu_corners");
+        std::string text;
+        if (!file || !std::getline(file, text))
+            return kDefault;
+        return ParseGlWidescreenSetting(text, kDefault);
+#else
+        const char* value = std::getenv("TRIAEVUM_GL_WIDESCREEN_MENU_CORNERS");
+        return value == nullptr ? kDefault : ParseGlWidescreenSetting(value, kDefault);
+#endif
+    }();
+    return enabled;
+}
+
+// Tamanho de cada canto, no menu nativo de 320x240: a aba BACK ocupa 57x37.
+// Os cartões e botões de baixo terminam acima de 43 linhas da borda e a mais
+// de 70 px da lateral.
+inline constexpr std::int32_t kGlWidescreenCornerWidth = 64;  // px apresentados
+inline constexpr std::int32_t kGlWidescreenCornerHeight = 40; // linhas
+
 [[nodiscard]] inline GlWidescreenDrawPlacement ResolveGlWidescreenDrawPlacement(
     const GlWidescreenDrawEvidence& evidence, float widescreenFactor,
     bool menusEnabled) noexcept {
@@ -255,6 +294,10 @@ inline constexpr float kGlWidescreenAnisotropyTolerance = 0.03F;
     placement.CompensateWidening =
         placement.Canvas && menusEnabled &&
         GlWidescreenPerspectiveWidened(evidence, widescreenFactor);
+    placement.SplitCorners = placement.Canvas && menusEnabled &&
+                             widescreenFactor > 1.0F && !evidence.UiDomain &&
+                             !evidence.ViewportSpansPresentedWidth &&
+                             !placement.CompensateWidening;
     return placement;
 }
 
@@ -345,6 +388,92 @@ struct GlWidescreenPresentedAxis {
     return axis;
 }
 
+// Um passe de um draw no alvo alargado: o viewport do eixo apresentado
+// deslocado e o recorte (X = eixo vertical apresentado, Y = horizontal).
+struct GlWidescreenPass {
+    std::int32_t ViewportShift = 0;
+    std::int32_t ScissorX0 = 0;
+    std::int32_t ScissorX1 = 0;
+    std::int32_t ScissorY0 = 0;
+    std::int32_t ScissorY1 = 0;
+
+    bool operator==(const GlWidescreenPass&) const = default;
+};
+
+struct GlWidescreenCornerInput {
+    // Recorte já resolvido no eixo vertical apresentado (X do alvo).
+    std::int32_t ScissorX0 = 0;
+    std::int32_t ScissorX1 = 0;
+    // Começo do viewport em X (a linha de baixo da tela) e quantos pixels do
+    // alvo têm as kGlWidescreenCornerHeight linhas de baixo.
+    std::int32_t BottomX = 0;
+    std::int32_t CornerHeight = 0;
+    // Pixels do alvo das kGlWidescreenCornerWidth colunas do menu.
+    std::int32_t CornerWidth = 0;
+    std::int32_t TargetHeight = 0;
+};
+
+// Até 4 passes: o meio do menu (em cima de tudo e a faixa de baixo entre os
+// cantos) no lugar, e os dois cantos de baixo encostados nas bordas do alvo.
+// Cada pixel do menu sai em um único passe.
+[[nodiscard]] inline std::size_t ResolveGlWidescreenCornerPasses(
+    const GlWidescreenPresentedAxis& axis, const GlWidescreenCornerInput& input,
+    std::array<GlWidescreenPass, 4>& passes) noexcept {
+    std::size_t count = 0;
+    const auto add = [&](std::int32_t shift, std::int32_t x0, std::int32_t x1,
+                         std::int32_t y0, std::int32_t y1) {
+        if (x1 <= x0 || y1 <= y0)
+            return;
+        passes[count++] = {shift, x0, x1, y0 + shift, y1 + shift};
+    };
+    const std::int32_t band = input.BottomX + input.CornerHeight;
+    const std::int32_t begin = axis.ViewportBegin;
+    const std::int32_t end = axis.ViewportEnd;
+    const std::int32_t sy0 = axis.ScissorBegin;
+    const std::int32_t sy1 = axis.ScissorEnd;
+    const std::int32_t bandX0 = input.ScissorX0;
+    const std::int32_t bandX1 = std::min(input.ScissorX1, band);
+    add(0, std::max(input.ScissorX0, band), input.ScissorX1, sy0, sy1);
+    add(0, bandX0, bandX1, std::max(sy0, begin + input.CornerWidth),
+        std::min(sy1, end - input.CornerWidth));
+    add(-begin, bandX0, bandX1, std::max(sy0, begin),
+        std::min(sy1, begin + input.CornerWidth));
+    add(input.TargetHeight - end, bandX0, bandX1,
+        std::max(sy0, end - input.CornerWidth), std::min(sy1, end));
+    return count;
+}
+
+// Toque/ponteiro com os cantos deslocados (mesma regra do desenho): um ponto
+// num canto de baixo da janela, fora do menu, vai para o canto equivalente
+// do menu realocado, onde o jogo o espera. `width`x`height` = janela.
+struct GlWidescreenPointer {
+    float X = 0.0F;
+    float Y = 0.0F;
+};
+
+[[nodiscard]] inline GlWidescreenPointer RemapGlWidescreenCornerPointer(
+    float x, float y, float width, float height) noexcept {
+    GlWidescreenPointer pointer{x, y};
+    if (!(width > 0.0F) || !(height > 0.0F))
+        return pointer;
+    const float canvasWidth = std::min(width, height * kNativeTopScreenAspect);
+    const float canvasX = (width - canvasWidth) * 0.5F;
+    const float unit = canvasWidth / 400.0F; // pixel apresentado nativo
+    const float menuBegin = canvasX + 40.0F * unit;
+    const float menuEnd = canvasX + 360.0F * unit;
+    const float cornerWidth = static_cast<float>(kGlWidescreenCornerWidth) * unit;
+    const float cornerTop =
+        height - static_cast<float>(kGlWidescreenCornerHeight) * height / 240.0F;
+    // Sem margem além do quadro 5:3 (janela 5:3) não há o que deslocar.
+    if (canvasX <= 0.5F || y < cornerTop)
+        return pointer;
+    if (x < cornerWidth)
+        pointer.X = x + menuBegin;
+    else if (x >= width - cornerWidth)
+        pointer.X = x - (width - menuEnd);
+    return pointer;
+}
+
 // Diagnóstico da classificação (desligado sem o arquivo): com
 // sdmc:/switch/oot3dre/config/widescreen_menus_log presente (desktop: variável
 // TRIAEVUM_GL_WIDESCREEN_MENUS_LOG com o caminho do arquivo de saída), o
@@ -400,7 +529,14 @@ struct GlWidescreenDrawLogFacts {
         (placement.Canvas ? 64U : 0U) | (placement.CompensateWidening ? 128U : 0U) |
         (static_cast<std::uint64_t>(evidence.Projection) << 8U) |
         (evidence.Untextured ? 0x10000U : 0U) | (evidence.GuestScissor ? 0x20000U : 0U) |
-        (placement.FillTarget ? 0x40000U : 0U));
+        (placement.FillTarget ? 0x40000U : 0U) |
+        (placement.SplitCorners ? 0x100000U : 0U));
+    if (evidence.BoundsKnown) {
+        for (std::size_t axis = 0; axis < 2U; ++axis) {
+            mix(static_cast<std::uint64_t>(std::lround(evidence.NdcMin[axis] * 20.0F) + 1000));
+            mix(static_cast<std::uint64_t>(std::lround(evidence.NdcMax[axis] * 20.0F) + 1000));
+        }
+    }
     mix(static_cast<std::uint64_t>(std::lround(evidence.PixelAnisotropy * 1000.0F)));
     return hash;
 }
@@ -440,6 +576,17 @@ struct GlWidescreenDrawLogFacts {
     std::string line(text, length > 0 ? std::min<std::size_t>(static_cast<std::size_t>(length),
                                                                sizeof(text) - 1U)
                                        : 0U);
+    if (placement.SplitCorners)
+        line.insert(0, "CANTOS ");
+    if (evidence.BoundsKnown) {
+        length = std::snprintf(text, sizeof(text), " ndc=v%.3f..%.3f,h%.3f..%.3f",
+                               static_cast<double>(evidence.NdcMin[0]),
+                               static_cast<double>(evidence.NdcMax[0]),
+                               static_cast<double>(evidence.NdcMin[1]),
+                               static_cast<double>(evidence.NdcMax[1]));
+        if (length > 0)
+            line.append(text, static_cast<std::size_t>(length));
+    }
     if (facts.RowsAvailable) {
         line += " c0-c3=";
         for (std::size_t index = 0; index < facts.Rows.size(); ++index) {

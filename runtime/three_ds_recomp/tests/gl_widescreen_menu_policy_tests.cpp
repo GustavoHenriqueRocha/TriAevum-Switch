@@ -78,6 +78,9 @@ GlWidescreenDrawEvidence FullViewport() {
 
 GlWidescreenDrawEvidence RelocatedMenuDraw();
 
+// Menu de baixo realocado no quadro, com os cantos de baixo nas bordas.
+const GlWidescreenDrawPlacement kRelocatedCanvas{true, false, false, 1.0F, true};
+
 TEST(GlWidescreenMenuPolicy, KeepsFormerRulesWhenDisabled) {
     auto ui = FullViewport();
     ui.UiDomain = true;
@@ -144,7 +147,7 @@ TEST(GlWidescreenMenuPolicy, RelocatedLowerMenuGoesToTheCanvas) {
     GlWidescreenDrawEvidence menu;
     menu.ViewportSpansPresentedWidth = false; // Y 40..360
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(menu, kFactor169, true),
-              (GlWidescreenDrawPlacement{true, false}));
+              (kRelocatedCanvas));
     // Mesmo um fundo que cobre o próprio viewport do menu.
     menu.GeometryCoversViewport = true;
     EXPECT_TRUE(ResolveGlWidescreenDrawPlacement(menu, kFactor169, true).Canvas);
@@ -156,7 +159,7 @@ TEST(GlWidescreenMenuPolicy, RelocatedLowerMenuGoesToTheCanvas) {
     // Perspectiva não alargada: só o quadro.
     menu.PixelAnisotropy = 1.0F;
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(menu, kFactor169, true),
-              (GlWidescreenDrawPlacement{true, false}));
+              (kRelocatedCanvas));
     // Cópia do quadro: fica com a cena.
     menu.SamplesRenderedCopy = true;
     EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(menu, kFactor169, true).Canvas);
@@ -204,7 +207,7 @@ TEST(GlWidescreenMenuPolicy, RelocatedMenuIgnoresTheAtmosphereLayer) {
         480.0F, 320.0F, 480U);
     EXPECT_NEAR(back.PixelAnisotropy, 1.0F, 1.0e-4F);
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(back, kFactor169, true),
-              (GlWidescreenDrawPlacement{true, false}));
+              (kRelocatedCanvas));
     // O fade dele também cobre a tela.
     back.Untextured = true;
     back.GeometryCoversViewport = true;
@@ -279,7 +282,7 @@ TEST(GlWidescreenMenuPolicy, OtherRelocatedDrawsStayOnTheCanvas) {
     picture.GeometryCoversViewport = true;
     EXPECT_FALSE(GlWidescreenRelocatedFillCandidate(picture));
     EXPECT_EQ(ResolveGlWidescreenDrawPlacement(picture, kFactor169, true),
-              (GlWidescreenDrawPlacement{true, false}));
+              (kRelocatedCanvas));
     // Recorte do próprio jogo: respeitado no quadro.
     auto clipped = RelocatedMenuDraw();
     clipped.Untextured = true;
@@ -494,6 +497,92 @@ TEST(GlWidescreenMenuPolicy, DiagnosticLineNamesTheDecision) {
     EXPECT_EQ(FormatGlWidescreenDrawLogLine(facts, card, placed).rfind("QUADRO+COMP", 0), 0U);
     EXPECT_NE(GlWidescreenDrawLogSignature(facts, fade, fill),
               GlWidescreenDrawLogSignature(facts, card, placed));
+}
+
+TEST(GlWidescreenMenuPolicy, OnlyRelocatedMenuDrawsSplitTheirCorners) {
+    // Menu de baixo realocado (fora do domínio Ui): sim.
+    auto menu = RelocatedMenuDraw();
+    menu.Atmosphere = true;
+    menu.Projection = GlProjectionShape::Orthographic;
+    menu.PixelAnisotropy = 1.0F;
+    auto placement = ResolveGlWidescreenDrawPlacement(menu, kFactor169, true);
+    EXPECT_TRUE(placement.Canvas);
+    EXPECT_TRUE(placement.SplitCorners);
+    // Sem alargar (fator 1), com menus desligados, no domínio Ui (Game Over),
+    // compensado, fade de tela inteira ou na tela inteira: não.
+    EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(menu, 1.0F, true).SplitCorners);
+    EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(menu, kFactor169, false).SplitCorners);
+    auto gameOver = menu;
+    gameOver.UiDomain = true;
+    EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(gameOver, kFactor169, true).SplitCorners);
+    auto model = RelocatedMenuDraw();
+    model.Projection = GlProjectionShape::Perspective;
+    model.PixelAnisotropy = 1.0F / kFactor169;
+    EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(model, kFactor169, true).SplitCorners);
+    auto fade = RelocatedMenuDraw();
+    fade.Untextured = true;
+    fade.GeometryCoversViewport = true;
+    EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(fade, kFactor169, true).SplitCorners);
+    auto panel = FullViewport();
+    panel.Projection = GlProjectionShape::Orthographic;
+    panel.PixelAnisotropy = 1.0F;
+    EXPECT_FALSE(ResolveGlWidescreenDrawPlacement(panel, kFactor169, true).SplitCorners);
+}
+
+TEST(GlWidescreenMenuPolicy, BottomCornersGoToTheWidenedTargetEdges) {
+    // Console: alvo 853 de altura, menu 106..746 (quadro em 26); X do alvo
+    // 0..960 (240 linhas x 2 amostras x escala 2), linha de baixo em X = 0.
+    // Canto: 64 px do menu (128 no alvo) por 40 linhas (160 no alvo).
+    const auto axis = ResolveGlWidescreenPresentedAxis({true, false},
+                                                       ConsoleAxis(40.0F, 320.0F));
+    GlWidescreenCornerInput input;
+    input.ScissorX0 = 0;
+    input.ScissorX1 = 960;
+    input.BottomX = 0;
+    input.CornerHeight = 160;
+    input.CornerWidth = 128;
+    input.TargetHeight = 853;
+    std::array<GlWidescreenPass, 4> passes{};
+    ASSERT_EQ(ResolveGlWidescreenCornerPasses(axis, input, passes), 4U);
+    // Tudo acima da faixa de baixo, no lugar (o recorte do quadro).
+    EXPECT_EQ(passes[0], (GlWidescreenPass{0, 160, 960, 26, 826}));
+    // A faixa de baixo entre os cantos, no lugar.
+    EXPECT_EQ(passes[1], (GlWidescreenPass{0, 0, 160, 106 + 128, 746 - 128}));
+    // Canto do começo encostado em 0 (na saída 1280: x 0..192), canto do fim
+    // em 853.
+    EXPECT_EQ(passes[2], (GlWidescreenPass{-106, 0, 160, 0, 128}));
+    EXPECT_EQ(passes[3], (GlWidescreenPass{853 - 746, 0, 160, 853 - 128, 853}));
+    // Os pixels do menu saem uma vez só: as áreas somam a do menu no quadro.
+    std::int64_t area = 0;
+    for (const auto& pass : passes)
+        area += std::int64_t{pass.ScissorX1 - pass.ScissorX0} * (pass.ScissorY1 - pass.ScissorY0);
+    EXPECT_EQ(area, std::int64_t{960} * 800 - std::int64_t{160} * (106 - 26) -
+                        std::int64_t{160} * (826 - 746));
+    // Recorte do jogo que não toca a faixa de baixo: só o passe de cima.
+    GlWidescreenCornerInput high = input;
+    high.ScissorX0 = 400;
+    EXPECT_EQ(ResolveGlWidescreenCornerPasses(axis, high, passes), 1U);
+    EXPECT_EQ(passes[0], (GlWidescreenPass{0, 400, 960, 26, 826}));
+}
+
+TEST(GlWidescreenMenuPolicy, TouchInTheWindowCornerReachesTheMenuCorner) {
+    // Janela 1280x720: quadro 5:3 em x 40..1240, menu em 160..1120; canto de
+    // 64 px nativos = 192 px por 40 linhas = 120 px.
+    // A aba BACK desenhada em x 0..170 (y 610..720) toca o BACK do jogo.
+    auto pointer = RemapGlWidescreenCornerPointer(20.0F, 680.0F, 1280.0F, 720.0F);
+    EXPECT_FLOAT_EQ(pointer.X, 180.0F);
+    EXPECT_FLOAT_EQ(pointer.Y, 680.0F);
+    pointer = RemapGlWidescreenCornerPointer(170.0F, 700.0F, 1280.0F, 720.0F);
+    EXPECT_FLOAT_EQ(pointer.X, 330.0F);
+    // Canto da direita, espelhado.
+    pointer = RemapGlWidescreenCornerPointer(1270.0F, 650.0F, 1280.0F, 720.0F);
+    EXPECT_FLOAT_EQ(pointer.X, 1110.0F);
+    // Fora da faixa de baixo ou no meio: inalterado (cartões, botões).
+    EXPECT_FLOAT_EQ(RemapGlWidescreenCornerPointer(20.0F, 590.0F, 1280.0F, 720.0F).X, 20.0F);
+    EXPECT_FLOAT_EQ(RemapGlWidescreenCornerPointer(640.0F, 700.0F, 1280.0F, 720.0F).X, 640.0F);
+    EXPECT_FLOAT_EQ(RemapGlWidescreenCornerPointer(400.0F, 700.0F, 1280.0F, 720.0F).X, 400.0F);
+    // Janela 5:3 (sem margem): nada a remapear.
+    EXPECT_FLOAT_EQ(RemapGlWidescreenCornerPointer(20.0F, 700.0F, 1200.0F, 720.0F).X, 20.0F);
 }
 
 TEST(GlWidescreenMenuPolicy, ParsesTheSwitch) {

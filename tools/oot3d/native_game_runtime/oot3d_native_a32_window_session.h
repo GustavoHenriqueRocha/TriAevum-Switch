@@ -293,6 +293,9 @@ private:
   void SetTopScreenSessionMinimapVisible(bool visible);
   void ApplySelectedUiProfile();
   void UpdateScenePresentation();
+  // The OpenGL widescreen moves the relocated lower menu's bottom corners to
+  // the window's corners (TopScreen frontend menus); touch follows.
+  bool WidescreenMenuCornersActive();
   void RestoreSavestateTiming(const Oot3dNativeGame::NativeA32SavestateRuntimeState &runtime);
   void RestoreSavestateTopScreenTemporalState(const Oot3dNativeGame::NativeA32SavestateRuntimeState &runtime);
   void RestoreSavestatePicaTextureCache(const Oot3dNativeGame::NativeA32SavestateRuntimeState &runtime);

@@ -1,4 +1,5 @@
 // Native A32 window session: setup (process image, host services, renderer, UI, initial state).
+#include "fast/oot3d/gl_widescreen_menu_policy.h"
 #include "oot3d_native_a32_window_session.h"
 #include "oot3d_native_guest_overrides.h"
 #include "oot3d_switch_threads.h"
@@ -1551,6 +1552,21 @@ void NativeA32WindowSession::UpdateScenePresentation() {
   visibility.ExtendedDrawDistance = graphics.ExtendedDrawDistance;
   visibility.Presentation = widescreenProjection.Projection.Presentation;
   visibility.FovMultiplier = graphics.FovMultiplier;
+}
+
+bool NativeA32WindowSession::WidescreenMenuCornersActive() {
+  if (apiPointer == nullptr || windowPointer == nullptr ||
+      std::string_view(apiPointer->GetName()) != "OpenGL" ||
+      !nativeCandidateDispatch.TopScreenUiProfile ||
+      !uiLifecycleBridgeStorage.has_value() ||
+      !uiLifecycleBridgeStorage->NativeFrontendPresentationActive() ||
+      !Fast::Oot3d::GlWidescreenEnabled() ||
+      !Fast::Oot3d::GlWidescreenMenusEnabled() ||
+      !Fast::Oot3d::GlWidescreenMenuCornersEnabled()) {
+    return false;
+  }
+  auto &window = *windowPointer;
+  return Fast::Oot3d::GlWidescreenFactor(window.GetWidth(), window.GetHeight()) > 1.0F;
 }
 
 Fast::Oot3d::FrameRateMode NativeA32WindowSession::EffectiveFrameRateMode() const {

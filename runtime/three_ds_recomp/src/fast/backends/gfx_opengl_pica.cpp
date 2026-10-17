@@ -2072,12 +2072,32 @@ Oot3d::GlWidescreenDrawPlacement ResolvePicaGlWidescreenPlacement(
         ((evidence.UiDomain && evidence.ViewportCoversTarget) ||
          (menus && Oot3d::GlWidescreenOrthographicPanelCandidate(evidence)) ||
          relocatedFill);
-    if (needsCoverage) {
-        uint32_t booleanUniforms = 0U;
+    // Diagnostic only: projected bounds of the relocated lower menu's draws.
+    const bool relocatedBounds = menus && uniformsAvailable &&
+                                 !Oot3d::GlWidescreenMenusLogPath().empty() &&
+                                 widescreenFactor > 1.0F &&
+                                 !evidence.ViewportSpansPresentedWidth &&
+                                 !evidence.SamplesRenderedCopy;
+    uint32_t booleanUniforms = 0U;
+    if (needsCoverage || relocatedBounds) {
         std::memcpy(&booleanUniforms,
                     draw.VertexUniformBytes.data() +
                         Oot3d::kPicaPackedVertexBooleanMaskOffset,
                     sizeof(booleanUniforms));
+    }
+    if (relocatedBounds) {
+        constexpr uint32_t kMaximumElementVertices = 4096U;
+        const auto element = Renderer3ds::PicaDrawGeometryNdcBounds(
+            draw, booleanUniforms,
+            draw.VertexUniformBytes.subspan(Oot3d::kPicaPackedVertexFloatOffset),
+            kMaximumElementVertices);
+        if (element.has_value()) {
+            evidence.BoundsKnown = true;
+            evidence.NdcMin = element->Minimum;
+            evidence.NdcMax = element->Maximum;
+        }
+    }
+    if (needsCoverage) {
         const auto bounds = Renderer3ds::PicaDrawGeometryNdcBounds(
             draw, booleanUniforms,
             draw.VertexUniformBytes.subspan(Oot3d::kPicaPackedVertexFloatOffset));
@@ -2089,8 +2109,10 @@ Oot3d::GlWidescreenDrawPlacement ResolvePicaGlWidescreenPlacement(
         evidence.GeometryCoversViewport =
             bounds.has_value() && bounds->Reaches({1.0F, horizontal});
     }
-    const auto placement = Oot3d::ResolveGlWidescreenDrawPlacement(
+    auto placement = Oot3d::ResolveGlWidescreenDrawPlacement(
         evidence, widescreenFactor, menus);
+    placement.SplitCorners =
+        placement.SplitCorners && Oot3d::GlWidescreenMenuCornersEnabled();
     if (const auto& logPath = Oot3d::GlWidescreenMenusLogPath(); !logPath.empty()) {
         LogPicaGlWidescreenPlacement(logPath, draw, evidence, placement,
                                      uniformsAvailable);
@@ -3402,6 +3424,15 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         // (PicaGlScale::ScaledEdge); at an integer scale these are the
         // former products native * N.
         const float resolutionScale = target.Scale;
+        // Widescreen: a relocated lower-menu draw is issued once per pass
+        // (its middle in place, its bottom corners at the widened target's
+        // edges); none = the single draw with the state set below.
+        std::array<Oot3d::GlWidescreenPass, 4> cornerPasses{};
+        size_t cornerPassCount = 0U;
+        GLint cornerViewportX = 0;
+        GLint cornerViewportY = 0;
+        GLsizei cornerViewportWidth = 0;
+        GLsizei cornerViewportHeight = 0;
         if (!target.Wide) {
             const auto edge = [&](int64_t native) {
                 return static_cast<GLint>(
@@ -3479,7 +3510,51 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             setScissor(scissorX0, axis.ScissorBegin,
                        std::max<GLint>(0, scissorX1 - scissorX0),
                        axis.ScissorEnd - axis.ScissorBegin);
+            if (placement.SplitCorners) {
+                Oot3d::GlWidescreenCornerInput corners;
+                corners.ScissorX0 = scissorX0;
+                corners.ScissorX1 = scissorX1;
+                corners.BottomX = viewportX0;
+                // Presented lines hold FramebufferWidth / 240 native columns.
+                corners.CornerHeight = edgeX(
+                    static_cast<float>(Oot3d::kGlWidescreenCornerHeight) *
+                    static_cast<float>(draw.FramebufferWidth) / 240.0F);
+                corners.CornerWidth = static_cast<int32_t>(std::lround(
+                    static_cast<float>(Oot3d::kGlWidescreenCornerWidth) *
+                    resolutionScale));
+                corners.TargetHeight = static_cast<int32_t>(target.Height);
+                cornerPassCount = Oot3d::ResolveGlWidescreenCornerPasses(
+                    axis, corners, cornerPasses);
+                if (cornerPassCount == 0U) {
+                    cornerPassCount = 1U; // fully clipped: an empty scissor
+                    cornerPasses[0] = {0, 0, 0, 0, 0};
+                }
+            }
+            if (cornerPassCount != 0U) {
+                // Re-issued below per pass with these viewport/scissor bases.
+                cornerViewportX = viewportX0;
+                cornerViewportWidth = std::max<GLint>(
+                    0, edgeX(draw.ViewportX + draw.ViewportWidth) - viewportX0);
+                cornerViewportY = axis.ViewportBegin;
+                cornerViewportHeight = axis.ViewportEnd - axis.ViewportBegin;
+            }
         }
+        // Issues the draw call once, or once per corner pass.
+        const auto issuePasses = [&](const auto& issue) {
+            if (cornerPassCount == 0U) {
+                issue();
+                return;
+            }
+            for (size_t index = 0; index < cornerPassCount; ++index) {
+                const auto& pass = cornerPasses[index];
+                setViewport(cornerViewportX, cornerViewportY + pass.ViewportShift,
+                            cornerViewportWidth, cornerViewportHeight);
+                setScissor(pass.ScissorX0, pass.ScissorY0,
+                           std::max<GLint>(0, pass.ScissorX1 - pass.ScissorX0),
+                           std::max<GLint>(0, pass.ScissorY1 - pass.ScissorY0));
+                issue();
+            }
+        };
 
         // GPU lean: a draw that cannot change any buffer is not issued (its
         // uploads and state above are kept, so later draws see the same).
@@ -3541,14 +3616,16 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 }
                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,
                              persistentGeometryBuffer);
-                glDrawElementsBaseVertex(
-                    topology,
-                    static_cast<GLsizei>(
-                        preparedGeometry->VertexOrIndexCount),
-                    GL_UNSIGNED_SHORT,
-                    reinterpret_cast<const void*>(static_cast<uintptr_t>(
-                        preparedGeometry->IndexOffset)),
-                    draw.BaseVertex);
+                issuePasses([&] {
+                    glDrawElementsBaseVertex(
+                        topology,
+                        static_cast<GLsizei>(
+                            preparedGeometry->VertexOrIndexCount),
+                        GL_UNSIGNED_SHORT,
+                        reinterpret_cast<const void*>(static_cast<uintptr_t>(
+                            preparedGeometry->IndexOffset)),
+                        draw.BaseVertex);
+                });
             } else {
                 const size_t indexCount = draw.IndexBytes.size() / indexSize;
                 if (draw.IndexBytes.size() >
@@ -3578,11 +3655,13 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 const GLenum type = draw.IndicesAre16Bit
                                         ? GL_UNSIGNED_SHORT
                                         : GL_UNSIGNED_BYTE;
-                glDrawElementsBaseVertex(
-                    topology, static_cast<GLsizei>(indexCount), type,
-                    reinterpret_cast<const void*>(static_cast<uintptr_t>(
-                        indexOffset.value_or(0U))),
-                    draw.BaseVertex);
+                issuePasses([&] {
+                    glDrawElementsBaseVertex(
+                        topology, static_cast<GLsizei>(indexCount), type,
+                        reinterpret_cast<const void*>(static_cast<uintptr_t>(
+                            indexOffset.value_or(0U))),
+                        draw.BaseVertex);
+                });
             }
         } else {
             if (draw.VertexCount > static_cast<uint32_t>(
@@ -3590,8 +3669,10 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 throw std::runtime_error(
                     "PICA non-indexed draw has too many vertices");
             }
-            glDrawArrays(topology, 0,
-                         static_cast<GLsizei>(draw.VertexCount));
+            issuePasses([&] {
+                glDrawArrays(topology, 0,
+                             static_cast<GLsizei>(draw.VertexCount));
+            });
         }
         // Ordinary raster and framebuffer commands are ordered by GL. Only
         // the PICA shadow producer writes through an image binding and needs

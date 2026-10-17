@@ -690,7 +690,8 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                        &aimTransform,
                    double samplePeriodSeconds,
                    bool guestRefreshWillConsume,
-                   NativeControlPollingState &pollingState);
+                   NativeControlPollingState &pollingState,
+                   bool widescreenMenuCorners = false);
 
 Oot3dNativeGame::NativeA32InputFrame ResolveNativeA32GuestInput(
     const Oot3dNativeGame::NativeA32InputFrame &physical,

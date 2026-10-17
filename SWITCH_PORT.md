@@ -593,9 +593,18 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
 - Draws em perspectiva compensados (viewport alargado em torno do centro) agora são recortados no
   seu viewport nativo: o viewport alargado só devolve as proporções, não mostra o que no 3DS fica
   fora da tela.
+- **Cantos de baixo do menu nos cantos da tela** (pedido do usuário: o BACK no canto da tela 16:9,
+  não no canto do 4:3 do menu): a aba BACK vem no MESMO draw que cartões, cabeçalho e textos (1104
+  vértices), então o draw do menu realocado é emitido por recortes: o meio no lugar e cada canto de
+  baixo (64 px x 40 linhas do menu nativo) deslocado pela margem até a borda do alvo alargado
+  (`ResolveGlWidescreenCornerPasses`). O toque acompanha: um toque num canto de baixo da janela fora do
+  menu vai para o canto equivalente do menu (`RemapGlWidescreenCornerPointer`, só com o frontend do
+  TopScreen ativo no GL widescreen; o lugar antigo da aba continua tocando o BACK). Desliga com
+  `config/widescreen_menu_corners` = `0` (desktop `TRIAEVUM_GL_WIDESCREEN_MENU_CORNERS=0`). Domínio Ui
+  (Game Over), fades de tela inteira e modelos compensados não são divididos.
 - O eixo apresentado (viewport/recorte: quadro, esticado, fade, compensação) saiu do backend para
   `ResolveGlWidescreenPresentedAxis` (`gl_widescreen_menu_policy.h`), testado no host
-  (`gl_widescreen_menu_policy_tests`, 18/18, também com ASan/UBSan).
+  (`gl_widescreen_menu_policy_tests`, 21/21, também com ASan/UBSan).
 - **Diagnóstico no console** (`config/widescreen_menus_log`, desligado sem o arquivo; desktop
   `TRIAEVUM_GL_WIDESCREEN_MENUS_LOG=<arquivo>`): `logs/widescreen_menus.txt` com uma linha por draw
   distinto no alvo alargado: decisão (`QUADRO`, `QUADRO+COMP`, `ESTICA`, `TELA`), viewport, recorte,

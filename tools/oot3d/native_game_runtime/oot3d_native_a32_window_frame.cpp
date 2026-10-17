@@ -403,7 +403,8 @@ bool NativeA32WindowSession::RunFrame() {
                          *controlConfigRuntime, aimProfileTransform,
                          presentationElapsedSeconds,
                          guestRefreshesDue != 0U,
-                         nativeControlPollingState);
+                         nativeControlPollingState,
+                         WidescreenMenuCornersActive());
   if (physicalInputFrame.Exit || devLabQuit) {
     if (devLabQuit) scriptedExit = true;
     window.Close();
