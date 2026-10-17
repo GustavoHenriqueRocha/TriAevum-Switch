@@ -852,6 +852,22 @@ bool NativeA32WindowSession::RunFrame() {
                  << ((current.CpuMs[kind] - previous.CpuMs[kind]) / frames(kind));
           }
         }
+        // Visual-frame preparation before the first draw (matching and
+        // analysis of the new guest frame) and its samples, ms per host frame.
+        const auto visualMs = [&](uint64_t now, uint64_t before) {
+          return static_cast<double>(now - before) / 1.0e6 / hostFrames;
+        };
+        perf << " rt_prepare_ms="
+             << visualMs(current.VisualTiming.MatchingNanoseconds +
+                             current.VisualTiming.AnalysisNanoseconds,
+                         previous.VisualTiming.MatchingNanoseconds +
+                             previous.VisualTiming.AnalysisNanoseconds)
+             << " rt_match_ms="
+             << visualMs(current.VisualTiming.MatchingNanoseconds,
+                         previous.VisualTiming.MatchingNanoseconds)
+             << " rt_sample_ms="
+             << visualMs(current.VisualTiming.SamplingNanoseconds,
+                         previous.VisualTiming.SamplingNanoseconds);
         perf << " est_step_ms=" << current.StepCostMs
              << " est_full_ms=" << current.FullEstimateMs
              << " est_reduced_ms=" << current.ReducedEstimateMs
@@ -2656,6 +2672,10 @@ void NativeA32WindowSession::PresentVisualFrame(
           interpolationPerf.NativeReplaysSkipped += nativeReplaysSkippedThisFrame;
           interpolationPerf.ReducedRefused += reducedRefusedThisFrame;
           interpolationPerf.RepeatFallbacks += repeatFallbacksThisFrame;
+        }
+        {
+          std::lock_guard lock(interpolationPerfMutex);
+          interpolationPerf.VisualTiming = visualInterpolationTiming;
         }
         });
       }

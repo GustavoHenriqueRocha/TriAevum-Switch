@@ -413,6 +413,21 @@ Medido (`switch-logs/interp1`, fps60, escala 2, 8,5 min): `heap_arena_mb` 631 �
 - Teste de longa duração no host: `oot3d_native_pica_visual_frame_soak_tests` (1800 quadros,
   180–220 draws, matching + 2 amostras por quadro, `operator new` contado): antes 12 MB e 4,8
   alocações ≥ 256 KiB por quadro; agora ~0,24 MB e 0 grandes, constante no tempo.
+- **Preparação do quadro visual (fps60) sem mapas nem hash por draw**: o matching entre o quadro
+  anterior e o novo usa listas ordenadas (identidade, índice) com junção por intercalação no
+  lugar dos `unordered_map`/`std::map` (chave nativa compacta de 13 × u64, sem padding), e todo o
+  rascunho (marcas, chaves, tabela da DP monotônica, identidades) fica na transição preparada.
+  `ShareVisualPaletteMotions` usa grupos e ossos em vetores planos reaproveitados e roda uma vez
+  por transição (não depende de alpha). `CmbPaletteSlots` valida o atributo de ossos uma vez e
+  lembra o resultado da varredura de vértices por draw, chaveado pelos bytes compartilhados
+  (imutáveis, segurados na memo) e pelo layout: no regime estável a varredura não roda.
+  `NormalizedVertexUniformDelta` e a interpolação de uniforms pulam linhas iguais (exato,
+  inclusive -0,0). `perf.txt` ganhou `rt_prepare_ms` (matching + análise), `rt_match_ms` e
+  `rt_sample_ms` por quadro de host. Prova de equivalência:
+  `oot3d_native_pica_visual_frame_equivalence_tests` compara com uma cópia congelada do código
+  anterior (`..._reference.inc`) pares casados, estatísticas e amostras bit a bit em milhares de
+  quadros aleatórios (também com `-O3 -ffast-math`, ASan/UBSan e TSan `--threads`); `--bench`
+  mede o custo por quadro de jogo (Prepare + amostras em 0 e 1/2).
 - **Anéis de upload PICA ≤ 2 MiB** (eram 8/4 MiB): o nouveau subaloca buffers até 2 MiB de slabs
   que ele mantém (`nouveau_mm`); acima disso cada orphan do anel era um `memalign` novo de 8/4 MiB
   (1610 orphans na sessão).

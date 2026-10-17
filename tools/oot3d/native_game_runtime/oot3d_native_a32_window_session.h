@@ -607,6 +607,9 @@ private:
     double ReducedEstimateMs = 0.0;
     double BudgetMs = 0.0;
     float ReducedScale = 0.0F;
+    // Render-thread visual-frame preparation (matching + analysis) and
+    // sampling, cumulative (copy of visualInterpolationTiming).
+    Oot3dNativeGame::Oot3dPicaVisualInterpolationTiming VisualTiming{};
   };
   std::mutex interpolationPerfMutex;
   InterpolationPerfCounters interpolationPerf;
