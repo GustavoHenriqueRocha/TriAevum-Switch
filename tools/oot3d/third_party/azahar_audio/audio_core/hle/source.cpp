@@ -97,7 +97,7 @@ nlohmann::json Source::CaptureState() const {
             queue.push_back(captureBuffer(remaining.top()));
             remaining.pop();
         }
-        return nlohmann::json{
+        nlohmann::json captured{
             {"enabled", sourceState.enabled},
             {"sync_count", sourceState.sync_count},
             {"gain", sourceState.gain},
@@ -125,6 +125,14 @@ nlohmann::json Source::CaptureState() const {
               {"fractional_position", sourceState.interp_state.fposition}}},
             {"filters", sourceState.filters.CaptureState()},
         };
+        // TriAevum: extra history of the optional cubic/sinc interpolators. Always zero in the
+        // original mode, where it is omitted so the snapshot schema stays unchanged.
+        const auto& history = sourceState.interp_state.history;
+        if (std::any_of(history.begin(), history.end(),
+                        [](const auto& sample) { return sample[0] != 0 || sample[1] != 0; })) {
+            captured["interpolation_state"]["history"] = history;
+        }
+        return captured;
     };
 
     return {
@@ -262,6 +270,11 @@ bool Source::RestoreState(const nlohmann::json& snapshot,
                 interpolation.at("xn2").get<std::array<s16, 2>>();
             restored.interp_state.fposition =
                 interpolation.at("fractional_position").get<u64>();
+            if (const auto history = interpolation.find("history");
+                history != interpolation.end()) {
+                restored.interp_state.history =
+                    history->get<decltype(restored.interp_state.history)>();
+            }
             if (!restored.filters.RestoreState(encoded.at("filters"), error)) {
                 return false;
             }
@@ -603,9 +616,19 @@ void Source::GenerateFrame() {
     }
 
     std::size_t frame_position = 0;
+    const AudioInterp::Quality quality = AudioInterp::ActiveQuality();
     while (frame_position < current_frame.size()) {
         if (state.current_buffer.empty() && !DequeueBuffer()) {
             break;
+        }
+
+        if (quality != AudioInterp::Quality::Original) {
+            // TriAevum option: same stepping, higher-quality sample values. None stays a
+            // zero-order hold (the title asked for it) but keeps the history current.
+            AudioInterp::HighQuality(quality, state.interpolation_mode == InterpolationMode::None,
+                                     state.interp_state, state.current_buffer,
+                                     state.rate_multiplier, current_frame, frame_position);
+            continue;
         }
 
         switch (state.interpolation_mode) {

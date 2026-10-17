@@ -148,6 +148,22 @@ Desempenho e usabilidade:
   `config/audio_stretch` = `0`; ambos `0` = caminho antigo idêntico. Desktop: `TRIAEVUM_AUDIO_THREAD=1`,
   `TRIAEVUM_AUDIO_STRETCH=1`.
 
+### Interpolação por fonte no DSP (2026-10-17)
+- Onde fica: `third_party/azahar_audio/audio_core/interpolate.cpp`, chamada por
+  `hle/source.cpp` (`Source::GenerateFrame`), que reamostra cada voz (rate do jogo) para 32728 Hz.
+  O original segue o Citra/Azahar: None = retenção, Linear e "Polyphase" = linear.
+- `config/audio_interpolation` (desktop: `TRIAEVUM_AUDIO_INTERPOLATION`): ausente/`original` =
+  código antigo, bit a bit; `cubic` = Catmull-Rom de 4 pontos (sem atraso); `sinc` = sinc-Kaiser
+  (β 8) polifásico Q15, 256 fases com mistura linear entre fases, 16 taps até rate 1 e alargado
+  até 32 taps com corte em 1/rate para vozes aceleradas (anti-aliasing). Atraso fixo de 14
+  amostras de entrada da voz (0,43 ms a 32728 Hz). None continua retenção nos dois modos.
+- O passo (posições, amostras consumidas, xn1/xn2, fposition, status, loops) é o mesmo código do
+  original; só o valor da amostra muda. O fluxo é contínuo entre buffers encadeados e loops
+  (`State::history`, 32 amostras, serializado no savestate só quando não é zero).
+- Testes: `oot3d_native_audio_interpolation_tests` (`--bench` mede 24 vozes). SNR sinc 79–94 dB
+  contra 13–45 dB do linear; aliasing −81/−84 dB contra −4/0 dB. Custo estimado no Switch
+  (llvm-mca A57 do laço NEON): ~+0,3 ms por passo com 24 vozes sempre ativas, metade aceleradas.
+
 ### Planejamento PICA fora da thread do jogo (2026-10-17)
 - O plano de cada draw (shaders, uniforms, bindings, hashes de textura; `pica_plan`, ~2,5 ms por
   passo) era montado na thread do jogo ao drenar a fila. Agora a thread do jogo põe no acumulador só

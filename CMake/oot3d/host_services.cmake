@@ -43,6 +43,16 @@ target_link_libraries(oot3d_native_audio_storage_tests PRIVATE
     oot3d_native_a32_ctr_host)
 oot3d_target_defaults(oot3d_native_audio_storage_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# config/audio_interpolation: original-mode bit identity, cubic/sinc stepping identity, signal
+# quality and (with --bench) the cost of 24 voices.
+add_executable(oot3d_native_audio_interpolation_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_audio_interpolation_tests.cpp)
+target_include_directories(oot3d_native_audio_interpolation_tests PRIVATE
+    tools/oot3d/third_party/azahar_audio)
+target_link_libraries(oot3d_native_audio_interpolation_tests PRIVATE
+    oot3d_native_a32_ctr_host)
+oot3d_target_defaults(oot3d_native_audio_interpolation_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Private title modules retain the exact CTR/SVC implementation but may only
 # reach graphics through the stable host-service ABI. This variant therefore
 # has no direct renderer dependency or callable PICA frontend path.
