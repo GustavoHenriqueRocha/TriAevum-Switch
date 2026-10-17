@@ -533,6 +533,47 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
   depois "Salvar?" Sim/Não centralizado, depois "Continuar?"; Não/Sim devem voltar ao jogo com 3
   corações ou ir para o título. Apague o arquivo depois (dispara uma vez por sessão).
 
+### Seleção de arquivo no widescreen: aba BACK, fade da transição (2026-10-17)
+- Sintomas (prints do console, widescreen e `widescreen_menus` ligados): a aba "B BACK" sai do
+  canto do menu (x=128 em vez de 160, de 1280); o cartão que entra deslizando aparece até x=1152; o
+  fade preto ao escolher o save (e o escurecimento da escolha Normal/Master Quest) cobre só o
+  retângulo 4:3 do menu e o céu fica nas laterais.
+- Evidência: build Linux do produto com OpenGL no host (Xvfb/llvmpipe, 1280x720, TopScreen, escala
+  2, `TRIAEVUM_GL_WIDESCREEN=1`) reproduz o print do console; o log de diagnóstico abaixo mostrou a
+  classificação de cada draw.
+- Causa 1 (BACK/cartões): os draws do menu de baixo realocado (viewport 0,40,480,320, ortográfica
+  320x240, pixels quadrados) vêm atribuídos à camada de atmosfera (domínio Scene, camada 3: o menu
+  roda dentro da fila de ambiente do `Gameplay_Draw` da tela de título), e a política de 111c86e
+  deixava atmosfera esticada com a cena. O menu inteiro esticava 6,7% (viewport 40..360 -> x
+  128..1152): os cartões só pareciam estar no quadro; a aba BACK (encostada no canto da tela de
+  baixo) e o cartão deslizando, perto das bordas, denunciavam. Correção: no viewport realocado a
+  camada de atmosfera não conta (nenhum efeito de ambiente usa Y 40..360); na tela inteira continua
+  presa à cena.
+- Causa 2 (fade): o preto é um quad do domínio Ui, sem textura, com a ortográfica 400x240 da tela
+  de cima desenhada no viewport do menu; ia para o quadro e cobria só o 4:3 (x 160..1120), com a cena
+  (o céu, que a composição do frontend mantém atrás do menu, `TRIAEVUM_TOPSCREEN_FRONTEND_SKY.md`)
+  nos 16:9. Correção: draw no viewport realocado, sem textura, sem recorte do jogo e cuja geometria
+  comprovadamente cobre o viewport nativo (prova de cobertura agora calculada também para ele; com
+  frustum alargado a borda nativa fica em 1/fator, `PicaDrawGeometryNdcBounds`) cobre o alvo
+  alargado inteiro. Texturas, botões, barras e os painéis do Game Over (domínio Ui, mesmo viewport)
+  seguem no quadro.
+- Draws em perspectiva compensados (viewport alargado em torno do centro) agora são recortados no
+  seu viewport nativo: o viewport alargado só devolve as proporções, não mostra o que no 3DS fica
+  fora da tela.
+- O eixo apresentado (viewport/recorte: quadro, esticado, fade, compensação) saiu do backend para
+  `ResolveGlWidescreenPresentedAxis` (`gl_widescreen_menu_policy.h`), testado no host
+  (`gl_widescreen_menu_policy_tests`, 18/18, também com ASan/UBSan).
+- **Diagnóstico no console** (`config/widescreen_menus_log`, desligado sem o arquivo; desktop
+  `TRIAEVUM_GL_WIDESCREEN_MENUS_LOG=<arquivo>`): `logs/widescreen_menus.txt` com uma linha por draw
+  distinto no alvo alargado: decisão (`QUADRO`, `QUADRO+COMP`, `ESTICA`, `TELA`), viewport, recorte,
+  domínio/camada, projeção c0-c3, anisotropia, cobertura, textura. Apague o arquivo depois.
+- Não é do posicionamento: o Link 3D e a caixa "...adventure through time itself!" atrás dos cartões
+  (só no console; no host, sem passar pela escolha Normal/Master Quest, não aparecem) vêm da
+  composição do frontend do port, que mantém a tela de cima atrás do menu realocado e suprime o fundo
+  CommonBackground00 do menu; no 3DS com o TopScreen o menu fica sobre o próprio fundo. As linhas
+  finas verticais no cabeçalho "Please select a file." existem com e sem a correção, na mesma posição
+  do conteúdo do menu (emendas do painel em partes, a ~28 px de cada borda): não vêm do quadro.
+
 ## Próximos passos
 
 - Ideias futuras (pedido do usuário, 2026-10-17):

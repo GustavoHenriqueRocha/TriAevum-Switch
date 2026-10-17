@@ -1950,6 +1950,75 @@ float ResolvePicaGlWidescreenFactor() {
                                      static_cast<uint32_t>(height));
 }
 
+// Diagnostic of the widescreen placement (config/widescreen_menus_log): one
+// line per distinct draw signature on the widened target, capped. GL draws
+// are submitted from a single thread.
+void LogPicaGlWidescreenPlacement(const std::string& path,
+                                  const GfxNativePicaDrawView& draw,
+                                  const Oot3d::GlWidescreenDrawEvidence& evidence,
+                                  const Oot3d::GlWidescreenDrawPlacement& placement,
+                                  bool uniformsAvailable) {
+    constexpr size_t kMaximumLines = 4000U;
+    static std::unordered_map<uint64_t, uint32_t> seen;
+    static std::ofstream file;
+    static bool opened = false;
+    if (seen.size() >= kMaximumLines) {
+        return;
+    }
+    Oot3d::GlWidescreenDrawLogFacts facts;
+    facts.Viewport = {draw.ViewportX, draw.ViewportY, draw.ViewportWidth,
+                      draw.ViewportHeight};
+    facts.FramebufferWidth = draw.FramebufferWidth;
+    facts.FramebufferHeight = draw.FramebufferHeight;
+    facts.ScissorMode = draw.ScissorMode;
+    facts.Scissor = {draw.ScissorX1, draw.ScissorY1, draw.ScissorX2,
+                     draw.ScissorY2};
+    facts.Domain = static_cast<uint8_t>(draw.CompositionDomain);
+    facts.Layer = static_cast<uint8_t>(draw.Composition.Layer);
+    facts.VertexCount = draw.VertexCount;
+    facts.VertexShaderKey = draw.VertexShaderKey;
+    facts.TextureCount = static_cast<uint8_t>(
+        std::min<size_t>(draw.Textures.size(), 255U));
+    if (!draw.Textures.empty()) {
+        facts.Texture0Address = draw.Textures.front().PhysicalAddress;
+        facts.Texture0Format = draw.Textures.front().NativeFormat;
+    }
+    facts.TypedTransform =
+        draw.TemporalVertexProgram.Hooks.TransformProgram() != nullptr;
+    facts.RowsAvailable = uniformsAvailable;
+    if (uniformsAvailable) {
+        std::memcpy(facts.Rows.data(),
+                    draw.VertexUniformBytes.data() +
+                        Oot3d::kPicaPackedVertexFloatOffset,
+                    sizeof(facts.Rows));
+    }
+    const uint64_t signature =
+        Oot3d::GlWidescreenDrawLogSignature(facts, evidence, placement);
+    auto [entry, inserted] = seen.try_emplace(signature, 0U);
+    ++entry->second;
+    if (!inserted) {
+        return;
+    }
+    if (!opened) {
+        opened = true;
+        file.open(path, std::ios::app);
+        if (file) {
+            file << "# widescreen_menus: draw_id assinatura decisao ...\n";
+        }
+    }
+    if (!file) {
+        return;
+    }
+    char prefix[64];
+    std::snprintf(prefix, sizeof(prefix), "%llu %016llx ",
+                  static_cast<unsigned long long>(draw.SubmissionId),
+                  static_cast<unsigned long long>(signature));
+    file << prefix
+         << Oot3d::FormatGlWidescreenDrawLogLine(facts, evidence, placement)
+         << '\n';
+    file.flush();
+}
+
 // Placement of one draw on the widened top-screen target: the scene's
 // stretched mapping or the centred native canvas
 // (gl_widescreen_menu_policy.h). Reads 64 bytes of uniforms; the vertex
@@ -1992,24 +2061,41 @@ Oot3d::GlWidescreenDrawPlacement ResolvePicaGlWidescreenPlacement(
             draw.Textures.begin(), draw.Textures.end(),
             [](const auto& texture) { return !texture.CopyReferences.empty(); });
     }
+    if (menus) {
+        evidence.Untextured = draw.Textures.empty();
+        evidence.GuestScissor = draw.ScissorMode != 0U;
+    }
+    const bool relocatedFill =
+        menus && Oot3d::GlWidescreenRelocatedFillCandidate(evidence);
     const bool needsCoverage =
         uniformsAvailable &&
         ((evidence.UiDomain && evidence.ViewportCoversTarget) ||
-         (menus && Oot3d::GlWidescreenOrthographicPanelCandidate(evidence)));
+         (menus && Oot3d::GlWidescreenOrthographicPanelCandidate(evidence)) ||
+         relocatedFill);
     if (needsCoverage) {
         uint32_t booleanUniforms = 0U;
         std::memcpy(&booleanUniforms,
                     draw.VertexUniformBytes.data() +
                         Oot3d::kPicaPackedVertexBooleanMaskOffset,
                     sizeof(booleanUniforms));
+        const auto bounds = Renderer3ds::PicaDrawGeometryNdcBounds(
+            draw, booleanUniforms,
+            draw.VertexUniformBytes.subspan(Oot3d::kPicaPackedVertexFloatOffset));
+        // A fill of the relocated menu covers its native viewport, whose edge
+        // a widened frustum puts at 1/factor on the presented horizontal.
+        const float horizontal = relocatedFill
+            ? Oot3d::GlWidescreenNativeHorizontalExtent(evidence, widescreenFactor)
+            : 1.0F;
         evidence.GeometryCoversViewport =
-            Renderer3ds::PicaDrawGeometryCoversViewport(
-                draw, booleanUniforms,
-                draw.VertexUniformBytes.subspan(
-                    Oot3d::kPicaPackedVertexFloatOffset));
+            bounds.has_value() && bounds->Reaches({1.0F, horizontal});
     }
-    return Oot3d::ResolveGlWidescreenDrawPlacement(evidence, widescreenFactor,
-                                                   menus);
+    const auto placement = Oot3d::ResolveGlWidescreenDrawPlacement(
+        evidence, widescreenFactor, menus);
+    if (const auto& logPath = Oot3d::GlWidescreenMenusLogPath(); !logPath.empty()) {
+        LogPicaGlWidescreenPlacement(logPath, draw, evidence, placement,
+                                     uniformsAvailable);
+    }
+    return placement;
 }
 
 PicaGlTarget& GetPicaGlTarget(
@@ -3359,63 +3445,40 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             // (gl_widescreen_menu_policy.h, config/widescreen_menus).
             const auto placement = ResolvePicaGlWidescreenPlacement(
                 draw, target.ScaleY / resolutionScale);
-            const bool placedUi = placement.Canvas;
+            // Presented horizontal axis (target Y): canvas, stretch, fill of
+            // the relocated menu's fade, widening compensation and their
+            // clipping (ResolveGlWidescreenPresentedAxis, host-tested).
+            Oot3d::GlWidescreenPresentedAxisInput axisInput;
+            axisInput.ViewportY = draw.ViewportY;
+            axisInput.ViewportHeight = draw.ViewportHeight;
+            axisInput.GuestScissor = draw.ScissorMode == 3U;
+            axisInput.ScissorY1 = draw.ScissorY1;
+            axisInput.ScissorY2 = draw.ScissorY2;
+            axisInput.FramebufferHeight = draw.FramebufferHeight;
+            axisInput.TargetHeight = target.Height;
+            axisInput.ResolutionScale = resolutionScale;
+            axisInput.TargetScaleY = target.ScaleY;
+            const auto axis =
+                Oot3d::ResolveGlWidescreenPresentedAxis(placement, axisInput);
             const float scaleX = resolutionScale;
-            const float scaleY = placedUi ? scaleX : target.ScaleY;
-            const float offsetY = placedUi
-                ? std::floor((static_cast<float>(target.Height) -
-                              static_cast<float>(draw.FramebufferHeight) *
-                                  scaleX) * 0.5F)
-                : 0.0F;
             const auto edgeX = [&](float native) {
                 return static_cast<GLint>(std::lround(native * scaleX));
             };
-            const auto edgeY = [&](float native) {
-                return static_cast<GLint>(std::lround(offsetY + native * scaleY));
-            };
             const GLint viewportX0 = edgeX(draw.ViewportX);
-            GLint viewportY0 = edgeY(draw.ViewportY);
-            GLint viewportY1 = edgeY(draw.ViewportY + draw.ViewportHeight);
-            if (placement.CompensateWidening) {
-                // The projection hook widened this frustum by the target's
-                // factor: widen its viewport by the same amount about its
-                // centre so it keeps its proportions; the canvas scissor
-                // below still clips it.
-                const float centre = offsetY +
-                    (draw.ViewportY + draw.ViewportHeight * 0.5F) * scaleX;
-                const float half = draw.ViewportHeight * 0.5F * target.ScaleY;
-                viewportY0 = static_cast<GLint>(std::lround(centre - half));
-                viewportY1 = static_cast<GLint>(std::lround(centre + half));
-            }
-            setViewport(viewportX0, viewportY0,
+            setViewport(viewportX0, axis.ViewportBegin,
                         std::max<GLint>(0, edgeX(draw.ViewportX + draw.ViewportWidth) - viewportX0),
-                        std::max<GLint>(0, viewportY1 - viewportY0));
+                        axis.ViewportEnd - axis.ViewportBegin);
             GLint scissorX0 = 0;
-            GLint scissorY0 = 0;
             GLint scissorX1 = static_cast<GLint>(target.Width);
-            GLint scissorY1 = static_cast<GLint>(target.Height);
             if (draw.ScissorMode == 3U) {
                 scissorX0 = edgeX(static_cast<float>(draw.ScissorX1));
-                scissorY0 = edgeY(static_cast<float>(draw.ScissorY1));
                 scissorX1 = draw.ScissorX2 >= draw.ScissorX1
                     ? edgeX(static_cast<float>(draw.ScissorX2) + 1.0F)
                     : scissorX0;
-                scissorY1 = draw.ScissorY2 >= draw.ScissorY1
-                    ? edgeY(static_cast<float>(draw.ScissorY2) + 1.0F)
-                    : scissorY0;
             }
-            if (placedUi) {
-                // Placed UI never reaches past its native canvas.
-                const GLint canvasY0 = static_cast<GLint>(offsetY);
-                const GLint canvasY1 = canvasY0 +
-                    static_cast<GLint>(PicaGlScale::ScaledEdge(
-                        draw.FramebufferHeight, resolutionScale));
-                scissorY0 = std::max(scissorY0, canvasY0);
-                scissorY1 = std::min(scissorY1, canvasY1);
-            }
-            setScissor(scissorX0, scissorY0,
+            setScissor(scissorX0, axis.ScissorBegin,
                        std::max<GLint>(0, scissorX1 - scissorX0),
-                       std::max<GLint>(0, scissorY1 - scissorY0));
+                       axis.ScissorEnd - axis.ScissorBegin);
         }
 
         // GPU lean: a draw that cannot change any buffer is not issued (its
