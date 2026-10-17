@@ -49,6 +49,12 @@ bool Oot3dWholeAotAvailable() noexcept;
 // Substituições nativas de funções guest (oot3d_native_guest_overrides).
 // Sem efeito quando o build não as compila (módulo whole-AOT pré-compilado).
 void SetOot3dGuestOverridesActive(bool enabled) noexcept;
+// Liga o perfil guest às substituições nativas (Oot3dGuestOverrideProfileHook
+// em oot3d_native_guest_overrides.h); sem substituições no build, nada faz.
+void RegisterOot3dGuestOverrideProfileHook(
+    oot3d::recomp::a32::BlockEntryCallback callback,
+    bool (*forwards)(const void* user, uint32_t first, uint32_t last) noexcept,
+    void (*mark)(void* user, uint32_t pc) noexcept) noexcept;
 // Uma linha por substituição: entrada, nome, execuções nativas e recusas.
 std::string DescribeOot3dGuestOverrides();
 std::span<const uint32_t> Oot3dCompiledFunctionEntryPoints(

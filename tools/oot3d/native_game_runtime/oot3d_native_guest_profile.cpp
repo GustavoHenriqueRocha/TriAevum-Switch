@@ -1,4 +1,5 @@
 #include "oot3d_native_guest_profile.h"
+#include "oot3d_native_compiled_functions.h"
 
 #include <algorithm>
 #include <chrono>
@@ -94,6 +95,7 @@ bool GuestBlockProfiler::Start(const GuestProfileOptions& options,
     mMaxGapTicks = TicksPerSecond() * mOptions.MaxGapMicroseconds / 1000000U;
     Reset();
     mActive = mSlots != 0U;
+    if (mActive) RegisterWithGuestOverrides();
     return mActive;
 }
 
@@ -133,30 +135,64 @@ bool GuestBlockProfiler::IsHook(uint32_t pc) const noexcept {
     return std::binary_search(mHooks.begin(), mHooks.end(), pc);
 }
 
+bool GuestBlockProfiler::ForwardsRange(uint32_t first, uint32_t last) const noexcept {
+    if (mCallback == nullptr) return false;
+    if (mForwardAll) return true;
+    const auto hook = std::lower_bound(mHooks.begin(), mHooks.end(), first);
+    return hook != mHooks.end() && *hook <= last;
+}
+
+void GuestBlockProfiler::Note(uint32_t pc, uint64_t now) noexcept {
+    if (mLastSlot != UINT32_MAX) {
+        const uint64_t delta = now - mLastTicks;
+        if (delta <= mMaxGapTicks) {
+            mTicks[mLastSlot] += delta;
+        } else {
+            ++mGaps;
+            mGapTicks += delta;
+        }
+    }
+    ++mTotalEntries;
+    const uint32_t slot = (pc - mBase) >> 2U;
+    if (slot < mSlots && pc >= mBase) {
+        ++mCounts[slot];
+        mLastSlot = slot;
+    } else {
+        ++mOutside;
+        mLastSlot = UINT32_MAX;
+    }
+}
+
+namespace {
+
+// Registro para as substituições nativas (oot3d_native_guest_overrides.h):
+// elas consultam o filtro de repasse e marcam a própria entrada.
+bool OverrideForwards(const void* user, uint32_t first, uint32_t last) noexcept {
+    return static_cast<const GuestBlockProfiler*>(user)->ForwardsRange(first, last);
+}
+
+void OverrideMark(void* user, uint32_t pc) noexcept {
+    static_cast<GuestBlockProfiler*>(user)->MarkNative(pc);
+}
+
+} // namespace
+
+void GuestBlockProfiler::MarkNative(uint32_t pc) noexcept {
+    Note(pc, Ticks());
+    mLastTicks = Ticks();
+}
+
+void GuestBlockProfiler::RegisterWithGuestOverrides() noexcept {
+    RegisterOot3dGuestOverrideProfileHook(&GuestBlockProfiler::OnBlockEntry,
+                                          &OverrideForwards, &OverrideMark);
+}
+
 void GuestBlockProfiler::OnBlockEntry(uint32_t pc,
                                       oot3d::recomp::a32::GuestState& state,
                                       oot3d::recomp::a32::MemoryBus& memory,
                                       void* user) {
     auto& self = *static_cast<GuestBlockProfiler*>(user);
-    const uint64_t now = Ticks();
-    if (self.mLastSlot != UINT32_MAX) {
-        const uint64_t delta = now - self.mLastTicks;
-        if (delta <= self.mMaxGapTicks) {
-            self.mTicks[self.mLastSlot] += delta;
-        } else {
-            ++self.mGaps;
-            self.mGapTicks += delta;
-        }
-    }
-    ++self.mTotalEntries;
-    const uint32_t slot = (pc - self.mBase) >> 2U;
-    if (slot < self.mSlots && pc >= self.mBase) {
-        ++self.mCounts[slot];
-        self.mLastSlot = slot;
-    } else {
-        ++self.mOutside;
-        self.mLastSlot = UINT32_MAX;
-    }
+    self.Note(pc, Ticks());
     if (self.mCallback != nullptr && self.IsHook(pc)) {
         self.mCallback(pc, state, memory, self.mCallbackUser);
         // O tempo do gancho (política do host) não é do bloco guest.

@@ -75,6 +75,13 @@ public:
     static void OnBlockEntry(uint32_t pc, oot3d::recomp::a32::GuestState& state,
                              oot3d::recomp::a32::MemoryBus& memory, void* user);
 
+    // Para as substituições nativas: o perfil repassaria algum PC de
+    // [first, last] ao callback original? (então elas recusam). Senão a
+    // substituição roda e MarkNative conta uma entrada em `pc` e atribui a
+    // ele o tempo até a próxima entrada de bloco (o tempo da versão nativa).
+    [[nodiscard]] bool ForwardsRange(uint32_t first, uint32_t last) const noexcept;
+    void MarkNative(uint32_t pc) noexcept;
+
     // Chamado uma vez por quadro do host; grava no intervalo configurado e
     // diz se o próximo quadro deve ser medido (callback do perfil instalado).
     bool OnHostFrame(uint64_t hostFrame);
@@ -92,6 +99,8 @@ private:
     static uint64_t Ticks() noexcept;
     static uint64_t TicksPerSecond() noexcept;
     bool IsHook(uint32_t pc) const noexcept;
+    void Note(uint32_t pc, uint64_t now) noexcept;
+    void RegisterWithGuestOverrides() noexcept;
     void LoadFunctionMap();
     void Reset() noexcept;
 

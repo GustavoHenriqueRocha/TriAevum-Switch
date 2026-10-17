@@ -1,6 +1,6 @@
 {
   "format": "oot3d_guest_overrides_v1",
-  "description": "Funcoes guest com substituicao nativa escrita a mao (tools/oot3d/native_game_runtime/oot3d_native_guest_overrides.cpp), ligadas no C++ gerado por apply_guest_overrides.py. So entram aqui depois de passar em run_guest_override_equivalence.py sem nenhuma diferenca. Amostras: perfil de blocos Kokiri (profiles/navi_kokiri_main_forest_source_coverage.json); switch_share = fracao do tempo guest no perfil do console (comparacao/2026-10-16-pgo1, logs-final-pgo/guest_profile.txt). Itens com 'function' sao substituicoes de bloco: o prologo vai no rotulo block_<entry> da funcao 'function' e a versao nativa retoma em um dos PCs de 'resume'.",
+  "description": "Funcoes guest com substituicao nativa escrita a mao (tools/oot3d/native_game_runtime/oot3d_native_guest_overrides.cpp), ligadas no C++ gerado por apply_guest_overrides.py. So entram aqui depois de passar em run_guest_override_equivalence.py sem nenhuma diferenca. Amostras: perfil de blocos Kokiri (profiles/navi_kokiri_main_forest_source_coverage.json); switch_share = fracao do tempo guest no perfil do console (comparacao/2026-10-16-pgo1, logs-final-pgo/guest_profile.txt). Itens com 'function' sao substituicoes de bloco: o prologo vai no rotulo block_<entry> da funcao 'function' e a versao nativa retoma em um dos PCs de 'resume'. 'inline': prologo numa linha so, sem deslocar as linhas do shard (preserva o PGO das outras funcoes do shard). kokiri_real_us_per_frame: custo real estimado no perfil de 2026-10-17 (tempo menos ~180 ns de sobrecarga por entrada de bloco, por quadro medido).",
   "overrides": [
     {"entry": "0x004A0338", "name": "AudioEffect_ProcessStereoReverb", "switch_share": "5.35%"},
     {"entry": "0x004A022C", "name": "AudioEffect_ProcessFourChannelDelay", "switch_share": "2.02%"},
@@ -24,6 +24,7 @@
     {"entry": "0x002BBB14", "name": "Math3D_CirSquareVsTriSquare", "switch_share": "0.70%"},
     {"entry": "0x00303C78", "function": "0x00303B24", "resume": ["0x00303CA4"], "name": "FUN_00303b24:copia", "switch_share": "0.23%"},
     {"entry": "0x0046700C", "function": "0x00466F78", "resume": ["0x0046705C"], "name": "MeshCommandPacket_PatchBoneUniforms:copia", "switch_share": "0.21%"},
-    {"entry": "0x003563E0", "function": "0x003562C0", "resume": ["0x003563EC", "0x0035646C"], "name": "FUN_003562c0:percurso", "switch_share": "0.55%"}
+    {"entry": "0x003563E0", "function": "0x003562C0", "resume": ["0x003563EC", "0x0035646C"], "name": "FUN_003562c0:percurso", "switch_share": "0.55%"},
+    {"entry": "0x002DCEF4", "name": "Mtx3x3_Multiply", "inline": true, "kokiri_real_us_per_frame": "46"}
   ]
 }

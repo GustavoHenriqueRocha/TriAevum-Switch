@@ -9,6 +9,10 @@ partir do bloco)
 guest_override_equivalence.cpp com os mesmos cabeçalhos do runtime e as
 mesmas opções de ponto flutuante do build (-fno-fast-math -ffp-contract=off).
 
+Com --qemu-aarch64 o mesmo teste é compilado com o devkitA64 (as opções de
+ponto flutuante e de CPU dos shards do Switch, VFP nativo de ARM64 nas duas
+versões) e roda sob qemu-aarch64, com o code.bin embutido no binário.
+
 Exemplo:
   python run_guest_override_equivalence.py \
       --generated ~/oot3d-work/gen/cpp-opt \
@@ -145,6 +149,10 @@ def main() -> int:
     parser.add_argument("--seed", type=lambda value: int(value, 0), default=0x5EED)
     parser.add_argument("--only", help="entrada hex para testar só uma função")
     parser.add_argument("--extra-flags", default="", help="opções extras do compilador")
+    parser.add_argument("--qemu-aarch64", metavar="QEMU",
+                        help="qemu-aarch64 (user mode): compila com --qemu-cxx e roda nele")
+    parser.add_argument("--qemu-cxx",
+                        default="/opt/devkitpro/devkitA64/bin/aarch64-none-elf-g++")
     parser.add_argument("--codegen-cxx",
                         help="compilador ARM64 (ex.: aarch64-none-elf-g++): só compila a "
                              "versão traduzida e a nativa e conta as instruções geradas")
@@ -161,6 +169,8 @@ def main() -> int:
     fixture.write_text(render_fixture(args.generated.expanduser(), manifest), encoding="utf-8")
     if args.codegen_cxx:
         return codegen(args, manifest, fixture)
+    if args.qemu_aarch64:
+        return run_qemu(args, fixture)
 
     upstream = HERE / "upstream"
     sources = [
@@ -187,11 +197,60 @@ def main() -> int:
                             str(source), "-o", str(obj)], check=True)
         objects.append(str(obj))
     exe = args.output / "guest_override_equivalence"
-    subprocess.run([args.cxx, *objects, "-o", str(exe)], check=True)
+    # As opções extras (ex.: -fsanitize=address,undefined) valem na ligação.
+    subprocess.run([args.cxx, *args.extra_flags.split(), *objects, "-o", str(exe)], check=True)
     command = [str(exe), str(args.code.expanduser()), str(args.trials), str(args.seed)]
     if args.only:
         command.append(args.only)
     return subprocess.run(command).returncode
+
+
+def run_qemu(args, fixture: Path) -> int:
+    """Compila para AArch64 (devkitA64, runtime mínimo de qemu_aarch64_test_runtime)
+    e roda sob qemu-aarch64. Parâmetros fixos no binário (sem argv)."""
+    upstream = HERE / "upstream"
+    out = args.output
+    embed = out / "guest_override_code.S"
+    embed.write_text("\n".join([
+        "    .section .rodata",
+        "    .balign 16",
+        "    .global gOot3dEmbeddedCode",
+        "gOot3dEmbeddedCode:",
+        f'    .incbin "{args.code.expanduser().resolve()}"',
+        "    .global gOot3dEmbeddedCodeEnd",
+        "gOot3dEmbeddedCodeEnd:",
+        "",
+    ]), encoding="utf-8")
+    sources = [
+        HERE / "qemu_aarch64_test_runtime.cpp",
+        HERE / "guest_override_equivalence.cpp",
+        RUNTIME / "oot3d_native_guest_overrides.cpp",
+        RUNTIME / "oot3d_native_a32_memory.cpp",
+        RUNTIME / "oot3d_memory_bus_abi.cpp",
+        HERE / "oot3d_native_a32_vfp_ops.cpp",
+        upstream / "recomp" / "a32_vfp_binary64.cpp",
+        upstream / "recomp" / "a32_vfp_transport.cpp",
+        embed,
+    ]
+    includes = [out, RUNTIME, HERE, upstream, upstream / "recomp",
+                HERE / "mass_cpp", args.nlohmann.expanduser()]
+    only = int(args.only, 16) if args.only else 0
+    # As do build dos shards do Switch; thread_local vira global (o runtime
+    # mínimo não tem TLS e o teste tem uma thread só).
+    flags = ["-std=c++20", "-O2", "-march=armv8-a+crc+crypto", "-mtune=cortex-a57",
+             "-fno-fast-math", "-ffp-contract=off", "-w", "-static", "-nostartfiles",
+             "-Dthread_local=", "-DOOT3D_GUEST_OVERRIDE_QEMU=1",
+             f"-DOOT3D_QEMU_TRIALS={args.trials}ULL", f"-DOOT3D_QEMU_SEED={args.seed}ULL",
+             f"-DOOT3D_QEMU_ONLY={only}U", *args.extra_flags.split()]
+    objects = []
+    for source in sources:
+        obj = out / (source.stem + ".a64.o")
+        subprocess.run([args.qemu_cxx, *flags, *(f"-I{p}" for p in includes), "-c",
+                        str(source), "-o", str(obj)], check=True)
+        objects.append(str(obj))
+    exe = out / "guest_override_equivalence.a64.elf"
+    subprocess.run([args.qemu_cxx, *flags, *objects, "-o", str(exe)], check=True)
+    return subprocess.run([args.qemu_aarch64, str(exe)]).returncode
 
 
 def codegen(args, manifest, fixture: Path) -> int:

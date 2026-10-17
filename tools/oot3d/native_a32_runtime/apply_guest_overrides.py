@@ -16,6 +16,14 @@ bloco traduzido roda normalmente.
 É idempotente (marcadores "guest-override") e --remove desfaz. Rodar depois
 de generate_whole_aot_cpp.py (ou usar a opção --guest-overrides dele); só os
 shards que contêm funções listadas mudam, então a recompilação é pequena.
+
+Itens com "inline": true usam o prólogo numa linha só, anexado à linha do
+rótulo (bloco) ou da assinatura (função), e o #include ocupa a linha vazia
+depois dos includes do shard: nenhuma linha do shard muda de número. Assim o
+PGO do GCC (que confere, por função, o checksum do CFG e o da linha de
+início) continua valendo para todas as outras funções do shard; só a função
+que recebe o prólogo perde o perfil. Os itens antigos ficam no formato de
+várias linhas, que é o que a coleta de PGO atual viu.
 """
 
 from __future__ import annotations
@@ -28,6 +36,10 @@ from pathlib import Path
 from typing import Iterable
 
 INCLUDE_LINE = '#include "oot3d_native_guest_overrides.h" // guest-override'
+# Formato em linha: o #include no lugar de uma linha vazia e o prólogo no fim
+# de uma linha existente, entre estes marcadores (strip restaura a linha).
+INLINE_INCLUDE_LINE = '#include "oot3d_native_guest_overrides.h" // guest-override-inline'
+INLINE_BEGIN = " /*guest-override-inline*/ "
 PROLOGUE_BEGIN = "    // guest-override begin"
 PROLOGUE_END = "    // guest-override end"
 DEFAULT_MANIFEST = Path(__file__).resolve().with_name("guest_overrides.json")
@@ -39,6 +51,8 @@ MANIFEST_NAME = "whole_aot_cpp_manifest.json"
 # as entradas (assim generate_whole_aot_cpp.py não precisa saber de blocos) e
 # consulta esta tabela.
 BLOCK_OVERRIDES: dict[int, tuple[int, tuple[int, ...]]] = {}
+# Entradas (de função ou de bloco) com prólogo em linha.
+INLINE_OVERRIDES: set[int] = set()
 
 
 def load_manifest(path: Path) -> list[dict[str, object]]:
@@ -56,6 +70,8 @@ def load_manifest(path: Path) -> list[dict[str, object]]:
                 raise ValueError(f"{path}: bloco 0x{entry:08X} sem PCs de retomada")
             parsed.update(function=function, resume=list(resume))
             BLOCK_OVERRIDES[entry] = (function, resume)
+        if item.get("inline", False):
+            INLINE_OVERRIDES.add(entry)
         entries.append(parsed)
     return entries
 
@@ -108,12 +124,18 @@ def block_prologue(entry: int, resume: Iterable[int]) -> list[str]:
     return lines
 
 
+def inline(lines: list[str]) -> str:
+    """Um prólogo de várias linhas numa linha só (sem os marcadores)."""
+    body = [line.strip() for line in lines if line not in (PROLOGUE_BEGIN, PROLOGUE_END)]
+    return INLINE_BEGIN + " ".join(body)
+
+
 def function_end(lines: list[str], index: int) -> int:
     return lines.index("}", index)
 
 
 def patch_block(lines: list[str], entry: int, function: int,
-                resume: Iterable[int]) -> bool:
+                resume: Iterable[int], in_line: bool = False) -> bool:
     """Insere o prólogo de bloco depois do rótulo block_<entry> da função."""
     found = find_definition(lines, function)
     if found is None:
@@ -126,8 +148,11 @@ def patch_block(lines: list[str], entry: int, function: int,
     if label not in body or not labels <= set(body):
         raise SystemExit(
             f"bloco 0x{entry:08X} ou retomada ausente na função 0x{function:08X}")
-    at = index + body.index(label) + 1
-    lines[at:at] = block_prologue(entry, resume)
+    at = index + body.index(label)
+    if in_line:
+        lines[at] += inline(block_prologue(entry, resume))
+    else:
+        lines[at + 1:at + 1] = block_prologue(entry, resume)
     return True
 
 
@@ -135,6 +160,11 @@ def strip(lines: list[str]) -> list[str]:
     out: list[str] = []
     skipping = False
     for line in lines:
+        if line == INLINE_INCLUDE_LINE:
+            out.append("")
+            continue
+        if INLINE_BEGIN in line:
+            line = line[:line.index(INLINE_BEGIN)]
         if line == PROLOGUE_BEGIN:
             skipping = True
             continue
@@ -151,21 +181,34 @@ def strip(lines: list[str]) -> list[str]:
 def patch_text(text: str, entries: Iterable[int]) -> tuple[str, list[int]]:
     lines = strip(text.split("\n"))
     patched: list[int] = []
+    multiline = False
     for entry in sorted(set(entries)):
+        in_line = entry in INLINE_OVERRIDES
         if entry in BLOCK_OVERRIDES:
             function, resume = BLOCK_OVERRIDES[entry]
-            if patch_block(lines, entry, function, resume):
+            if patch_block(lines, entry, function, resume, in_line):
                 patched.append(entry)
+                multiline |= not in_line
             continue
         found = find_definition(lines, entry)
         if found is None:
             continue
         index, _ = found
-        lines[index + 4:index + 4] = prologue(entry)
+        if in_line:
+            lines[index + 3] += inline(prologue(entry))
+        else:
+            lines[index + 4:index + 4] = prologue(entry)
+            multiline = True
         patched.append(entry)
     if patched:
         first_include = next(i for i, line in enumerate(lines) if line.startswith("#include"))
-        lines.insert(first_include + 1, INCLUDE_LINE)
+        if multiline:
+            lines.insert(first_include + 1, INCLUDE_LINE)
+        else:
+            # Só prólogos em linha: o include ocupa a primeira linha vazia
+            # depois dos includes, sem deslocar o resto do shard.
+            blank = next(i for i in range(first_include, len(lines)) if lines[i] == "")
+            lines[blank] = INLINE_INCLUDE_LINE
     return "\n".join(lines), patched
 
 

@@ -3,6 +3,11 @@
 // run_guest_override_equivalence.py, que extrai as funções traduzidas (e as
 // chamadas que elas fazem) do diretório gerado para guest_override_fixture.inc.
 //
+// Em AArch64 (nativo ou qemu-aarch64: run_guest_override_equivalence_qemu.sh)
+// cada execução roda como no produto, com o modo do FPSCR guest no FPCR e as
+// flags acumuladas pelo FPSR (o VFP nativo de --native-vfp-aarch64 do C++
+// gerado e das substituições), e o código vem embutido no binário.
+//
 // Para cada função: milhões de estados aleatórios + casos de borda. As duas
 // versões partem de cópias idênticas (estado guest, memória, orçamento de
 // blocos, ganchos, modo de rastreio) e precisam terminar com tudo igual:
@@ -32,6 +37,13 @@ namespace Oot3dNativeGame::GeneratedWholeAot {
 namespace a32 = oot3d::recomp::a32;
 #include "guest_override_fixture.inc"
 } // namespace Oot3dNativeGame::GeneratedWholeAot
+
+#if defined(OOT3D_GUEST_OVERRIDE_QEMU)
+// code.bin embutido (guest_override_code.S) e parâmetros fixos: o runtime
+// mínimo do qemu não passa argumentos nem abre arquivos.
+extern "C" const unsigned char gOot3dEmbeddedCode[];
+extern "C" const unsigned char gOot3dEmbeddedCodeEnd[];
+#endif
 
 using namespace Oot3dNativeGame;
 namespace a32 = oot3d::recomp::a32;
@@ -145,6 +157,35 @@ void RecordHook(uint32_t pc, a32::GuestState&, a32::MemoryBus&, void* user) {
     static_cast<HookLog*>(user)->Pcs.push_back(pc);
 }
 
+// Perfil guest simulado (modos 4 e 5): callback em todos os blocos que só
+// repassa (registra) os PCs do seu filtro, registrado em
+// gOot3dGuestOverrideProfileHook como o perfil de verdade faz. O que se
+// compara é a sequência repassada, igual ao que o callback original veria.
+struct FakeProfile {
+    const uint32_t* Pcs = nullptr;
+    size_t Count = 0;
+    HookLog* Log = nullptr;
+    uint64_t Marks = 0;
+};
+
+void FakeProfileEntry(uint32_t pc, a32::GuestState&, a32::MemoryBus&, void* user) {
+    auto& profile = *static_cast<FakeProfile*>(user);
+    if (std::binary_search(profile.Pcs, profile.Pcs + profile.Count, pc)) {
+        profile.Log->Pcs.push_back(pc);
+    }
+}
+
+bool FakeProfileForwards(const void* user, uint32_t first, uint32_t last) noexcept {
+    const auto& profile = *static_cast<const FakeProfile*>(user);
+    const uint32_t* end = profile.Pcs + profile.Count;
+    const uint32_t* hook = std::lower_bound(profile.Pcs, end, first);
+    return hook != end && *hook <= last;
+}
+
+void FakeProfileMark(void* user, uint32_t) noexcept {
+    ++static_cast<FakeProfile*>(user)->Marks;
+}
+
 using Fn = Oot3dWholeAotFlow (*)(Oot3dWholeAotFrame&, Oot3dWholeAotContext&,
                                  Oot3dAotArchitecturalState&, uint32_t);
 using OverrideFn = bool (*)(Oot3dWholeAotFrame&, Oot3dWholeAotContext&,
@@ -153,7 +194,7 @@ using OverrideFn = bool (*)(Oot3dWholeAotFrame&, Oot3dWholeAotContext&,
 struct Scenario {
     a32::GuestState Guest{};
     uint32_t Budget = 0;
-    uint32_t HookMode = 0; // 0 nenhum, 1 fora, 2 dentro, 3 todos
+    uint32_t HookMode = 0; // 0 nenhum, 1 fora, 2 dentro, 3 todos, 4/5 perfil (fora/dentro)
     bool SkipFirst = false;
     bool Trace = false;
 };
@@ -178,7 +219,14 @@ Outcome Run(const GeneratedWholeAot::OverrideCase& testCase, bool patched,
     HookLog log;
     const std::array<uint32_t, 2> outside{0x00100000U, 0x00600000U};
     const std::array<uint32_t, 3> inside{0x00100000U, testCase.Entry, 0x00600000U};
-    if (scenario.HookMode != 0U) {
+    FakeProfile profile;
+    if (scenario.HookMode >= 4U) {
+        const bool in = scenario.HookMode == 5U;
+        profile = {in ? inside.data() : outside.data(), in ? inside.size() : outside.size(), &log};
+        context.BlockEntry = FakeProfileEntry;
+        context.BlockEntryUser = &profile;
+        context.RefreshBlockEntryGate();
+    } else if (scenario.HookMode != 0U) {
         context.BlockEntry = RecordHook;
         context.BlockEntryUser = &log;
         if (scenario.HookMode == 1U) {
@@ -195,6 +243,11 @@ Outcome Run(const GeneratedWholeAot::OverrideCase& testCase, bool patched,
     Oot3dWholeAotFrame frame(out.Guest);
     Oot3dAotArchitecturalState state(out.Guest);
     Oot3dWholeAotFlow flow{};
+#if OOT3D_GUEST_FP_AARCH64
+    // Como ExecuteOot3dWholeAotFunction (Oot3dGuestFpScope): FPCR com o modo
+    // guest, FPSR zerado, e as flags do FPSR dobradas no FPSCR na saída.
+    Oot3dGuestFpScope fpScope(out.Guest.fpscr);
+#endif
     if (testCase.Patched != nullptr) {
         // Substituição de bloco: a função traduzida começa no próprio bloco;
         // a versão com prólogo chama a nativa e retoma no código traduzido.
@@ -208,6 +261,9 @@ Outcome Run(const GeneratedWholeAot::OverrideCase& testCase, bool patched,
         if (!done) flow = testCase.Translated(frame, context, state, testCase.Entry);
     }
     state.Flush(0x7FFFU, true);
+#if OOT3D_GUEST_FP_AARCH64
+    Oot3dGuestFpFoldFlags(out.Guest.fpscr);
+#endif
     out.Flow = flow;
     out.Remaining = context.BlocksRemaining;
     out.Consumed = context.BlocksConsumed();
@@ -751,6 +807,39 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
         if (rng.Chance(30)) s.Budget = rng.Below(4U * length + 8U);
         break;
     }
+    case 0x002DCEF4U: { // Mtx3x3_Multiply: matrizes de jogo (com zeros), sobreposições
+        if (!rng.Chance(92)) break;
+        const auto matrix = [&](uint32_t address) {
+            const uint32_t kind = rng.Below(4U);
+            for (uint32_t i = 0; i < 9U; ++i) {
+                uint32_t bits = rng.Float();
+                if (kind == 0U) { // rotação esparsa
+                    bits = rng.Chance(45) ? (rng.Chance(80) ? 0x00000000U : 0x80000000U)
+                                          : rng.Float();
+                } else if (kind == 1U) { // valores de jogo
+                    const float value = static_cast<float>(static_cast<int>(rng.Below(20001U)) - 10000) * 1.0e-4F;
+                    std::memcpy(&bits, &value, 4);
+                }
+                poke(address + 4U * i, bits);
+            }
+        };
+        const auto place = [&]() -> uint32_t {
+            switch (rng.Below(14U)) {
+            case 0: return g.r[13] - 8U + 4U * rng.Below(4U) - 8U;           // sobre o vpush
+            case 1: return kRamBase + 0x1000U * (1U + rng.Below(3U)) - 4U * rng.Below(10U);
+            case 2: return (kRamBase + rng.Below(0x3000U)) | (1U + rng.Below(3U)); // desalinhado
+            case 3: return rng.Pointer();
+            default: return (kRamBase + rng.Below(0x3000U)) & ~3U;
+            }
+        };
+        g.r[1] = place();
+        g.r[2] = place();
+        g.r[0] = rng.Chance(15) ? (rng.Chance(50) ? g.r[1] : g.r[2]) : place();
+        matrix(g.r[1]);
+        matrix(g.r[2]);
+        if (rng.Chance(20)) s.Budget = rng.Below(4U);
+        break;
+    }
     default:
         break;
     }
@@ -758,6 +847,17 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
 
 } // namespace
 
+#if defined(OOT3D_GUEST_OVERRIDE_QEMU)
+int main() {
+    gCode.assign(gOot3dEmbeddedCode, gOot3dEmbeddedCodeEnd);
+    if (gCode.size() < kDataBase - kTextBase) {
+        std::printf("code.bin curto demais\n");
+        return 2;
+    }
+    const uint64_t trials = OOT3D_QEMU_TRIALS;
+    const uint64_t seed = OOT3D_QEMU_SEED;
+    const uint32_t only = OOT3D_QEMU_ONLY;
+#else
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "uso: %s code.bin [tentativas] [semente] [entrada]\n", argv[0]);
@@ -774,10 +874,12 @@ int main(int argc, char** argv) {
     const uint64_t trials = argc > 2 ? std::strtoull(argv[2], nullptr, 0) : 1000000ULL;
     const uint64_t seed = argc > 3 ? std::strtoull(argv[3], nullptr, 0) : 0x5EEDULL;
     const uint32_t only = argc > 4 ? static_cast<uint32_t>(std::strtoul(argv[4], nullptr, 16)) : 0U;
+#endif
 
+    gOot3dGuestOverrideProfileHook = {FakeProfileEntry, FakeProfileForwards, FakeProfileMark};
     NativeA32Memory memoryA, memoryB;
     if (!BuildMemory(memoryA) || !BuildMemory(memoryB)) {
-        std::fprintf(stderr, "falha ao mapear a memoria\n");
+        std::printf("falha ao mapear a memoria\n");
         return 2;
     }
     int failures = 0;
@@ -795,7 +897,11 @@ int main(int argc, char** argv) {
         // Para o microbenchmark: cenários aceitos pela versão nativa, com a RAM
         // exatamente como estava antes da chamada e sem orçamento curto.
         std::vector<std::pair<Scenario, std::vector<uint8_t>>> accepted;
+#if defined(__x86_64__) && !defined(OOT3D_GUEST_OVERRIDE_QEMU)
         const bool benchEnabled = std::getenv("GUEST_OVERRIDE_BENCH") != nullptr;
+#else
+        constexpr bool benchEnabled = false; // o microbenchmark usa o contador do x86
+#endif
         bool failed = false;
         for (uint64_t trial = 0; trial < trials && !failed; ++trial) {
             Scenario s;
@@ -810,7 +916,8 @@ int main(int argc, char** argv) {
             for (auto& v : g.vfp) v = rng.Float();
             s.Budget = rng.Chance(80) ? 1U << 20U : rng.Below(48U);
             const uint32_t hook = rng.Below(100U);
-            s.HookMode = hook < 85U ? 0U : hook < 90U ? 1U : hook < 95U ? 2U : 3U;
+            s.HookMode = hook < 85U ? 0U : hook < 90U ? 1U : hook < 95U ? 2U
+                       : hook < 97U ? 3U : hook < 99U ? 4U : 5U;
             s.SkipFirst = rng.Chance(20);
             s.Trace = rng.Chance(4);
             // Conteúdo aleatório perto de cada ponteiro (escrito igual nas duas memórias).
@@ -850,6 +957,15 @@ int main(int argc, char** argv) {
                 snapshot.resize(kRamSize);
                 memoryA.ReadBytes(kRamBase, snapshot);
             }
+#if defined(OOT3D_QEMU_SIDE) && OOT3D_QEMU_SIDE != 0
+            // Medição (contagem de instruções sob qemu): só a tradução (1), só
+            // a versão com a substituição (2) ou nenhuma (3); sem comparação.
+            if (OOT3D_QEMU_SIDE != 3) {
+                const Outcome only = Run(testCase, OOT3D_QEMU_SIDE == 2, s, memoryA);
+                ++flows[std::min<size_t>(static_cast<size_t>(only.Flow.Kind), 5U)];
+            }
+            continue;
+#endif
             const Outcome a = Run(testCase, false, s, memoryA);
             const uint64_t callsBeforeTrial = info ? info->Calls : 0U;
             const Outcome b = Run(testCase, true, s, memoryB);
@@ -893,6 +1009,7 @@ int main(int argc, char** argv) {
                     " nsup=%" PRIu64 "]\n",
                     failed ? "FALHOU" : "OK    ", testCase.Entry, testCase.Name, trials,
                     calls, declined, flows[0], flows[1], flows[3], flows[4], flows[5]);
+#if defined(__x86_64__) && !defined(OOT3D_GUEST_OVERRIDE_QEMU)
         if (benchEnabled && !accepted.empty() && !failed) {
             // Microbenchmark no host (x86): mesmo conjunto de entradas aceitas,
             // tradução contra substituição; só indicativo da diferença relativa.
@@ -942,6 +1059,7 @@ int main(int argc, char** argv) {
                 ++failures;
             }
         }
+#endif
     }
     return failures == 0 ? 0 : 1;
 }

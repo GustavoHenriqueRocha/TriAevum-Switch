@@ -21,6 +21,7 @@
 #include "oot3d_native_guest_overrides.h"
 
 #include "oot3d_native_a32_memory.h"
+#include "oot3d_native_mtx3x4_kernel.h"
 
 #include <algorithm>
 #include <array>
@@ -31,6 +32,7 @@
 namespace Oot3dNativeGame {
 
 bool gOot3dGuestOverridesEnabled = true;
+Oot3dGuestOverrideProfileHook gOot3dGuestOverrideProfileHook{};
 
 void SetOot3dGuestOverridesEnabled(bool enabled) noexcept {
     gOot3dGuestOverridesEnabled = enabled;
@@ -64,6 +66,7 @@ enum OverrideIndex : size_t {
     kIdx00303C78,
     kIdx0046700C,
     kIdx003563E0,
+    kIdx002DCEF4,
     kOverrideCount,
 };
 
@@ -91,6 +94,7 @@ Oot3dGuestOverrideInfo gOverrides[kOverrideCount] = {
     {0x00303C78U, "FUN_00303b24:copia"},
     {0x0046700CU, "MeshCommandPacket_PatchBoneUniforms:copia"},
     {0x003563E0U, "FUN_003562c0:percurso"},
+    {0x002DCEF4U, "Mtx3x3_Multiply"},
 };
 
 constexpr uint32_t kFpscrTrapMask = 0x00379F00U; // LEN/STRIDE e habilitação de exceções
@@ -107,11 +111,22 @@ inline bool Accept(size_t index) noexcept {
 }
 
 // Algum gancho de entrada de bloco (ou o modo "todos os blocos") cobre
-// [first, last]? Igual a NativeA32UnobservedMemory::Observed.
+// [first, last]? Igual a NativeA32UnobservedMemory::Observed, exceto pelo
+// callback do perfil guest em todos os blocos: ele só observa o que repassa
+// ao callback original (ver Oot3dGuestOverrideProfileHook). `first` é sempre
+// a entrada da substituição.
 inline bool Hooked(const Oot3dWholeAotContext& context, uint32_t first,
                    uint32_t last) noexcept {
     if (context.BlockEntry == nullptr) return false;
-    if (context.BlockEntryPcCount == 0U) return true;
+    if (context.BlockEntryPcCount == 0U) {
+        const auto& profile = gOot3dGuestOverrideProfileHook;
+        if (context.BlockEntry != profile.Callback || profile.Callback == nullptr) {
+            return true;
+        }
+        if (profile.Forwards(context.BlockEntryUser, first, last)) return true;
+        profile.Mark(context.BlockEntryUser, first);
+        return false;
+    }
     const uint32_t* end = context.BlockEntryPcs + context.BlockEntryPcCount;
     const uint32_t* hook = std::lower_bound(context.BlockEntryPcs, end, first);
     return hook != end && *hook <= last;
@@ -228,8 +243,9 @@ struct LocalGuest {
 // (que é incluído por todos os shards: mudá-lo recompilaria os 256). Usa a
 // regra padrão de que instanciações explícitas podem nomear membros privados.
 // As constantes abaixo espelham as de oot3d_native_a32_memory.h e
-// ResolveFast* reproduz FastPageFor + o teste do caminho rápido de
-// ReadFast/WriteFast; CommitFastWrite reproduz a contabilidade de WriteFast.
+// FastPageOf/ResolveCursor reproduzem FastPageFor + o teste do caminho rápido
+// de ReadFast/WriteFast; CommitSamples, CopyRun e afins reproduzem a
+// contabilidade de WriteFast.
 template <class Tag, auto Member> struct ExposeMember {
     friend constexpr auto MemberOf(Tag) noexcept { return Member; }
 };
@@ -261,44 +277,54 @@ inline auto* FastPageOf(NativeA32Memory& memory, uint32_t address, uint32_t size
                  : static_cast<Page*>(nullptr);
 }
 
-// Intervalo resolvido uma vez para os laços de áudio: leituras e escritas
-// pelo ponteiro da página rápida, com a mesma geração/carimbo de WriteFast.
-struct Span {
+// Trecho de palavras guest dentro de uma página rápida de leitura e escrita
+// (os laços de áudio): até `Words` palavras a partir de Bytes, com o carimbo
+// da página. Os laços acessam as palavras por esse ponteiro e reproduzem a
+// contabilidade de WriteFast no fim de cada trecho (CommitSamples).
+struct Cursor {
     uint8_t* Bytes = nullptr;
     uint64_t* Stamp = nullptr;
-    uint32_t Base = 0U;
+    uint32_t Words = 0U;
 };
 
-inline bool ResolveSpan(NativeA32Memory& memory, uint32_t base, uint32_t size,
-                        Span& span) noexcept {
-    if (memory.*MemberOf(TraceTag{})) return false;
-    auto* page = FastPageOf(memory, base, size);
-    if (page == nullptr || page->Write == nullptr || page->Bytes == nullptr ||
-        page->Bytes != page->Write) {
+// Até `words` palavras a partir de `address` (alinhado a 4), cortado no fim
+// da página. Falso se a página não é rápida para leitura e escrita pelo mesmo
+// ponteiro, ou se a escrita é rastreada (impressão digital: aí cada WriteFast
+// conta e o laço fica com o caminho por palavra).
+inline bool ResolveCursor(NativeA32Memory& memory, uint32_t address, uint32_t words,
+                          Cursor& cursor) noexcept {
+    if (memory.*MemberOf(TraceTag{}) || words == 0U || (address & 3U) != 0U) return false;
+    const uint32_t room = (kMemPageSize - (address & kMemPageMask)) >> 2U;
+    const uint32_t take = std::min(room, words);
+    auto* page = FastPageOf(memory, address, 4U * take);
+    if (page == nullptr || page->Write == nullptr || page->Bytes != page->Write ||
+        page->Read != page->Write) {
         return false;
     }
-    const uint32_t offset = base & kMemPageMask;
-    span = {page->Write + offset, &page->WriteGeneration, base};
+    cursor = {page->Write + (address & kMemPageMask), &page->WriteGeneration, take};
     return true;
 }
 
-// O mesmo que WriteFast faz depois do memcpy num acerto do caminho rápido.
-inline void CommitFastWrite(NativeA32Memory& memory, uint64_t* stamp) noexcept {
+inline uint32_t CursorLoad(const Cursor& cursor, uint32_t index) noexcept {
+    return LoadGuestValue<uint32_t>(cursor.Bytes + 4U * index);
+}
+
+inline void CursorStore(const Cursor& cursor, uint32_t index, uint32_t value) noexcept {
+    StoreGuestValue<uint32_t>(cursor.Bytes + 4U * index, value);
+}
+
+// Contabilidade de `samples` amostras de um laço com `slots` WriteFast por
+// amostra, sempre na mesma ordem (stamps[j] = página da j-ésima escrita): a
+// geração anda slots * samples e cada página fica carimbada com a geração da
+// sua última escrita, que é da última amostra (todas as páginas do trecho
+// são escritas em toda amostra); páginas repetidas ficam com o maior j.
+// Pré-condição: GenerationRoom(slots * samples) e samples > 0.
+inline void CommitSamples(NativeA32Memory& memory, uint64_t* const* stamps, uint32_t slots,
+                          uint32_t samples) noexcept {
     auto& generation = memory.*MemberOf(RangeGenerationTag{});
-    *stamp = ++generation;
-    if (*stamp == 0U) [[unlikely]] memory.*MemberOf(RangeVersionsTag{}) = false;
-}
-
-inline uint32_t SpanLoad(const Span& span, uint32_t address) noexcept {
-    uint32_t value;
-    std::memcpy(&value, span.Bytes + (address - span.Base), 4U);
-    return value;
-}
-
-inline void SpanStore(NativeA32Memory& memory, const Span& span, uint32_t address,
-                      uint32_t value) noexcept {
-    std::memcpy(span.Bytes + (address - span.Base), &value, 4U);
-    CommitFastWrite(memory, span.Stamp);
+    const uint64_t last = generation + uint64_t{slots} * (samples - 1U);
+    for (uint32_t j = 0; j < slots; ++j) *stamps[j] = last + j + 1U;
+    generation += uint64_t{slots} * samples;
 }
 
 inline Oot3dAotFlagMask Mask(uint8_t bits) noexcept {
@@ -1270,37 +1296,62 @@ bool Override_004A022C(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
             R[6] = R[1] + 44U;
             R[2] = R[8];
             R[1] = 0U;
-            // Caminho rápido do laço de amostras: buffers e campos do objeto
-            // resolvidos uma vez (cada um numa só página rápida).
-            Span delaySpan, ioSpan, objSpan;
-            const bool fast =
-                ResolveSpan(memory, R[5] + (R[2] << 2U), 640U, delaySpan) &&
-                ResolveSpan(memory, R[4], 640U, ioSpan) &&
-                ResolveSpan(memory, R[0] + 0x2CU, 0x24U, objSpan);
+            // Caminho rápido do laço de amostras, por trechos entre os
+            // cruzamentos de página dos dois buffers: ganho, coeficientes e
+            // estado do canal (r6 = r0 + 0x2C + 4 * canal) em registradores
+            // (os buffers não alcançam o objeto: validado na entrada); as 3
+            // escritas por amostra (estado, atraso, saída) são contabilizadas
+            // no fim do trecho. Cada amostra são 3 blocos (0x004A0298,
+            // 0x004A02BC ou 0x004A02A4, 0x004A02C8) e só entra com cota >= 3,
+            // como no laço por amostra.
+            Cursor stateCell;
+            bool fast = GenerationRoom(memory, 3U * 160U) &&
+                        ResolveCursor(memory, R[6], 1U, stateCell);
+            const uint32_t gain = fast ? Read32(memory, R[0] + 0x44U) : 0U;
+            const uint32_t mix = fast ? Read32(memory, R[0] + 0x48U) : 0U;
+            const uint32_t feedback = fast ? Read32(memory, R[0] + 0x4CU) : 0U;
             while (true) {
                 if (fast && context.BlocksRemaining >= 3U) {
-                    // 0x004A0298, 0x004A02BC/0x004A02A4, 0x004A02C8
-                    Consume(context, 3U);
-                    R[3] = SpanLoad(delaySpan, R[5] + (R[2] << 2U));
-                    flags.SetSubtract(R[3], 0U, Mask(0x9U));
-                    R[10] = SpanLoad(objSpan, R[0] + 0x44U);
-                    if (flags.N() == flags.V()) {
-                        R[12] = Oot3dAotAsr(R[10] * R[3], 7U);
-                    } else {
-                        R[12] = 0U - Oot3dAotAsr(R[10] * (0U - R[3]), 7U);
+                    const uint32_t left = 160U - R[1];
+                    Cursor delay, io;
+                    if (!ResolveCursor(memory, R[5] + (R[2] << 2U), left, delay) ||
+                        !ResolveCursor(memory, R[4] + (R[1] << 2U), left, io)) {
+                        fast = false;
+                        continue;
                     }
-                    R[10] = SpanLoad(ioSpan, R[4] + (R[1] << 2U));
-                    R[11] = SpanLoad(objSpan, R[6]);
-                    R[14] = SpanLoad(objSpan, R[0] + 0x48U);
-                    R[12] = R[10] - R[12];
-                    R[10] = SpanLoad(objSpan, R[0] + 0x4CU) * R[11];
-                    R[12] = Oot3dAotAsr(R[14] * R[12] + R[10], 7U);
-                    SpanStore(memory, objSpan, R[6], R[12]);
-                    SpanStore(memory, delaySpan, R[5] + (R[2] << 2U), R[12]);
-                    SpanStore(memory, ioSpan, R[4] + (R[1] << 2U), R[3]);
-                    R[1] += 1U;
+                    const uint32_t samples = std::min(
+                        {delay.Words, io.Words, context.BlocksRemaining / 3U});
+                    uint32_t state = CursorLoad(stateCell, 0U);
+                    uint32_t r3 = R[3], r10 = R[10], r11 = R[11], r12 = R[12], r14 = R[14];
+                    for (uint32_t i = 0; i < samples; ++i) {
+                        r3 = CursorLoad(delay, i);
+                        r10 = gain;
+                        r12 = static_cast<int32_t>(r3) >= 0
+                                  ? Oot3dAotAsr(r10 * r3, 7U)
+                                  : 0U - Oot3dAotAsr(r10 * (0U - r3), 7U);
+                        r10 = CursorLoad(io, i);
+                        r11 = state;
+                        r14 = mix;
+                        r12 = r10 - r12;
+                        r10 = feedback * r11;
+                        r12 = Oot3dAotAsr(r14 * r12 + r10, 7U);
+                        state = r12;
+                        CursorStore(delay, i, r12);
+                        CursorStore(io, i, r3);
+                    }
+                    CursorStore(stateCell, 0U, state);
+                    uint64_t* const stamps[3] = {stateCell.Stamp, delay.Stamp, io.Stamp};
+                    CommitSamples(memory, stamps, 3U, samples);
+                    Consume(context, 3U * samples);
+                    R[1] += samples;
+                    R[2] += samples;
+                    R[3] = r3;
+                    R[10] = r10;
+                    R[11] = r11;
+                    R[12] = r12;
+                    R[14] = r14;
+                    flags.SetSubtract(R[3], 0U, Mask(0x9U));
                     flags.SetSubtract(R[1], 0x000000A0U, Mask(0x2U));
-                    R[2] += 1U;
                     if (flags.C()) break;
                     continue;
                 }
@@ -1474,112 +1525,145 @@ bool Override_004A0338(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         R[1] = 0U;
         memory.WriteFast<uint32_t>(R[13] + 0x20U, R[2]);
         memory.WriteFast<uint32_t>(R[13] + 0x8U, R[7]);
-        Span stackSpan, objSpan, aSpan, bSpan, cSpan, dSpan, eSpan, ioSpan;
-        bool fast = ResolveSpan(memory, R[13], 0x24U, stackSpan) &&
-                    ResolveSpan(memory, R[0] + 0x38U, 0xB4U, objSpan);
+        // Caminho rápido do laço de amostras (0x004A03A0..0x004A04B4), por
+        // trechos entre os cruzamentos de página dos seis buffers: ponteiros
+        // e coeficientes em registradores, e também as palavras de pilha
+        // [sp], [sp + 4] e o estado do filtro [r9 + 0xCC], que o laço sempre
+        // escreve antes de ler (os buffers não alcançam a pilha nem o objeto:
+        // validado na entrada). As 9 escritas por amostra são contabilizadas
+        // no fim do trecho; cada amostra são 7 a 9 blocos e só entra com
+        // cota >= 9, como no laço por amostra.
+        Cursor stack0, stack4, filterCell;
+        bool fast = GenerationRoom(memory, 9U * 160U) &&
+                    ResolveCursor(memory, R[13], 1U, stack0) &&
+                    ResolveCursor(memory, R[13] + 4U, 1U, stack4) &&
+                    ResolveCursor(memory, R[9] + 0xCCU, 1U, filterCell);
+        uint32_t pointerA = 0U, pointerB = 0U, pointerC = 0U, pointerD = 0U, pointerE = 0U;
+        uint32_t pointerIo = 0U, channelBase = 0U;
+        uint32_t kDC = 0U, kB8 = 0U, kBC = 0U, kC8 = 0U, kE8 = 0U, kE0 = 0U;
         if (fast) {
-            const uint32_t pointerC = SpanLoad(objSpan, R[0] + (R[10] << 3U) + 0x58U);
-            const uint32_t pointerD = SpanLoad(objSpan, R[0] + (R[10] << 3U) + 0x5CU);
-            const uint32_t pointerE = SpanLoad(objSpan, R[9] + 0x78U);
-            const uint32_t pointerIo = SpanLoad(stackSpan, R[13] + 0x10U + (R[10] << 2U));
-            const uint32_t pointerA = SpanLoad(stackSpan, R[13] + 0xCU);
-            const uint32_t pointerB = SpanLoad(stackSpan, R[13] + 0x8U);
-            fast = ResolveSpan(memory, pointerA + (R[3] << 2U), 640U, aSpan) &&
-                   ResolveSpan(memory, pointerB + (R[12] << 2U), 640U, bSpan) &&
-                   ResolveSpan(memory, pointerC + (R[4] << 2U), 640U, cSpan) &&
-                   ResolveSpan(memory, pointerD + (R[5] << 2U), 640U, dSpan) &&
-                   ResolveSpan(memory, pointerE + (R[6] << 2U), 640U, eSpan) &&
-                   ResolveSpan(memory, pointerIo, 640U, ioSpan);
+            pointerA = Read32(memory, R[13] + 0xCU);
+            pointerB = Read32(memory, R[13] + 0x8U);
+            pointerIo = Read32(memory, R[13] + 0x10U + (R[10] << 2U));
+            channelBase = Read32(memory, R[13] + 0x20U);
+            pointerC = Read32(memory, channelBase + 0x58U);
+            pointerD = Read32(memory, channelBase + 0x5CU);
+            pointerE = Read32(memory, R[9] + 0x78U);
+            kDC = Read32(memory, R[0] + 0xDCU);
+            kB8 = Read32(memory, R[0] + 0xB8U);
+            kBC = Read32(memory, R[0] + 0xBCU);
+            kC8 = Read32(memory, R[0] + 0xC8U);
+            kE8 = Read32(memory, R[0] + 0xE8U);
+            kE0 = Read32(memory, R[0] + 0xE0U);
         }
         while (true) {
             if (fast && context.BlocksRemaining >= 9U) {
-                // Mesmo corpo de 0x004A03A0..0x004A04B4 pelos intervalos resolvidos.
-                uint32_t blocks = 7U;
-                const auto stack = [&](uint32_t offset) { return SpanLoad(stackSpan, R[13] + offset); };
-                const auto field = [&](uint32_t offset) { return SpanLoad(objSpan, R[0] + offset); };
-                R[2] = R[13] + 0x10U;
-                R[7] = stack(0xCU);
-                R[2] = stack(0x10U + (R[10] << 2U));
-                R[11] = field(0xDCU);
-                R[8] = SpanLoad(aSpan, R[7] + (R[3] << 2U));
-                R[2] = SpanLoad(ioSpan, R[2] + (R[1] << 2U));
-                SpanStore(memory, aSpan, R[7] + (R[3] << 2U), R[2]);
-                R[7] = stack(0x8U);
-                R[14] = stack(0x8U);
-                R[11] = R[8] * R[11];
-                R[7] = SpanLoad(bSpan, R[7] + (R[12] << 2U));
-                SpanStore(memory, bSpan, R[14] + (R[12] << 2U), R[2]);
-                R[2] = stack(0x20U);
-                R[8] = SpanLoad(objSpan, R[2] + 0x58U);
-                R[2] = SpanLoad(cSpan, R[8] + (R[4] << 2U));
-                SpanStore(memory, stackSpan, R[13] + 0x4U, R[11]);
-                flags.SetSubtract(R[2], 0U, Mask(0x9U));
-                if (flags.N() == flags.V()) {
-                    R[11] = Oot3dAotAsr(field(0xB8U) * R[2], 7U);
-                } else {
-                    R[14] = field(0xB8U);
-                    R[11] = 0U - Oot3dAotAsr(R[14] * (0U - R[2]), 7U);
+                const uint32_t left = 160U - R[1];
+                Cursor a, b, c, d, e, io;
+                if (!ResolveCursor(memory, pointerA + (R[3] << 2U), left, a) ||
+                    !ResolveCursor(memory, pointerB + (R[12] << 2U), left, b) ||
+                    !ResolveCursor(memory, pointerC + (R[4] << 2U), left, c) ||
+                    !ResolveCursor(memory, pointerD + (R[5] << 2U), left, d) ||
+                    !ResolveCursor(memory, pointerE + (R[6] << 2U), left, e) ||
+                    !ResolveCursor(memory, pointerIo + (R[1] << 2U), left, io)) {
+                    fast = false;
+                    continue;
                 }
-                R[11] = R[11] + R[7];
-                SpanStore(memory, cSpan, R[8] + (R[4] << 2U), R[11]);
-                SpanStore(memory, stackSpan, R[13], R[2]);
-                R[2] = stack(0x20U);
-                R[8] = SpanLoad(objSpan, R[2] + 0x5CU);
-                R[2] = SpanLoad(dSpan, R[8] + (R[5] << 2U));
-                flags.SetSubtract(R[2], 0U, Mask(0x9U));
-                if (flags.N() == flags.V()) {
-                    R[11] = Oot3dAotAsr(field(0xBCU) * R[2], 7U);
-                } else {
-                    R[14] = field(0xBCU);
-                    R[11] = 0U - Oot3dAotAsr(R[14] * (0U - R[2]), 7U);
+                const uint32_t limit =
+                    std::min({a.Words, b.Words, c.Words, d.Words, e.Words, io.Words});
+                uint32_t remaining = context.BlocksRemaining;
+                uint32_t filter = CursorLoad(filterCell, 0U);
+                uint32_t st0 = 0U, st4 = 0U;
+                uint32_t r1 = R[1], r2 = R[2], r3 = R[3], r4 = R[4], r5 = R[5], r6 = R[6];
+                uint32_t r7 = R[7], r8 = R[8], r11 = R[11], r12 = R[12], r14 = R[14];
+                uint32_t n = 0U;
+                for (; n < limit && remaining >= 9U; ++n) {
+                    uint32_t blocks = 7U;
+                    r11 = kDC;
+                    r8 = CursorLoad(a, n);
+                    r2 = CursorLoad(io, n);
+                    CursorStore(a, n, r2);
+                    r14 = pointerB;
+                    r11 = r8 * r11;
+                    r7 = CursorLoad(b, n);
+                    CursorStore(b, n, r2);
+                    r8 = pointerC;
+                    r2 = CursorLoad(c, n);
+                    st4 = r11;
+                    if (static_cast<int32_t>(r2) >= 0) {
+                        r11 = Oot3dAotAsr(kB8 * r2, 7U);
+                    } else {
+                        r14 = kB8;
+                        r11 = 0U - Oot3dAotAsr(r14 * (0U - r2), 7U);
+                    }
+                    r11 = r11 + r7;
+                    CursorStore(c, n, r11);
+                    st0 = r2;
+                    r8 = pointerD;
+                    r2 = CursorLoad(d, n);
+                    if (static_cast<int32_t>(r2) >= 0) {
+                        r11 = Oot3dAotAsr(kBC * r2, 7U);
+                    } else {
+                        r14 = kBC;
+                        r11 = 0U - Oot3dAotAsr(r14 * (0U - r2), 7U);
+                    }
+                    r7 = r7 + r11;
+                    CursorStore(d, n, r7);
+                    r7 = st0;
+                    r11 = pointerE;
+                    r8 = r7 - r2;
+                    r2 = kC8;
+                    r7 = CursorLoad(e, n);
+                    r14 = r7;
+                    if (static_cast<int32_t>(r7) >= 0) {
+                        r14 = Oot3dAotAsr(r14 * r2, 7U);
+                    } else {
+                        ++blocks; // 0x004A0480
+                        r14 = 0U - Oot3dAotAsr((0U - r14) * r2, 7U);
+                    }
+                    r8 = r8 + r14;
+                    CursorStore(e, n, r8);
+                    if (static_cast<int32_t>(r8) >= 0) {
+                        r2 = Oot3dAotAsr(r8 * r2, 7U);
+                    } else {
+                        ++blocks; // 0x004A04A4
+                        r8 = 0U - r8;
+                        r2 = 0U - Oot3dAotAsr(r8 * r2, 7U);
+                    }
+                    r8 = filter;
+                    r2 = r7 - r2;
+                    r7 = kE8;
+                    r8 = r8 + r2;
+                    r7 = r7 * r8;
+                    r2 = r2 - Oot3dAotAsr(r7, 7U);
+                    filter = r2;
+                    r8 = kE0;
+                    r7 = st4;
+                    r2 = r2 * r8 + r7;
+                    r7 = pointerIo;
+                    r2 = Oot3dAotAsr(r2, 7U);
+                    CursorStore(io, n, r2);
+                    remaining -= blocks;
                 }
-                R[7] = R[7] + R[11];
-                SpanStore(memory, dSpan, R[8] + (R[5] << 2U), R[7]);
-                R[7] = stack(0x0U);
-                R[11] = SpanLoad(objSpan, R[9] + 0x78U);
-                R[8] = R[7] - R[2];
-                R[2] = field(0xC8U);
-                R[7] = SpanLoad(eSpan, R[11] + (R[6] << 2U));
-                R[14] = R[7];
-                flags.SetSubtract(R[7], 0U, Mask(0x9U));
-                if (flags.N() == flags.V()) {
-                    R[14] = Oot3dAotAsr(R[14] * R[2], 7U);
-                } else {
-                    ++blocks; // 0x004A0480
-                    R[14] = 0U - Oot3dAotAsr((0U - R[14]) * R[2], 7U);
-                }
-                flags.SetAdd(R[8], R[14], Mask(0x8U));
-                R[8] = R[8] + R[14];
-                SpanStore(memory, eSpan, R[11] + (R[6] << 2U), R[8]);
-                if (!flags.N()) {
-                    R[2] = Oot3dAotAsr(R[8] * R[2], 7U);
-                } else {
-                    ++blocks; // 0x004A04A4
-                    R[8] = 0U - R[8];
-                    R[2] = 0U - Oot3dAotAsr(R[8] * R[2], 7U);
-                }
-                R[8] = SpanLoad(objSpan, R[9] + 0xCCU);
-                R[2] = R[7] - R[2];
-                R[7] = field(0xE8U);
-                R[8] = R[8] + R[2];
-                R[3] += 1U;
-                R[12] += 1U;
-                R[7] = R[7] * R[8];
-                R[4] += 1U;
-                R[5] += 1U;
-                R[6] += 1U;
-                R[2] = R[2] - Oot3dAotAsr(R[7], 7U);
-                SpanStore(memory, objSpan, R[9] + 0xCCU, R[2]);
-                R[8] = field(0xE0U);
-                R[7] = stack(0x4U);
-                R[2] = R[2] * R[8] + R[7];
-                R[7] = R[13] + 0x10U;
-                R[7] = stack(0x10U + (R[10] << 2U));
-                R[2] = Oot3dAotAsr(R[2], 7U);
-                SpanStore(memory, ioSpan, R[7] + (R[1] << 2U), R[2]);
-                R[1] += 1U;
+                CursorStore(stack4, 0U, st4);
+                CursorStore(stack0, 0U, st0);
+                CursorStore(filterCell, 0U, filter);
+                uint64_t* const stamps[9] = {a.Stamp, b.Stamp, stack4.Stamp, c.Stamp, stack0.Stamp,
+                                             d.Stamp, e.Stamp, filterCell.Stamp, io.Stamp};
+                CommitSamples(memory, stamps, 9U, n);
+                context.BlocksRemaining = remaining;
+                R[1] = r1 + n;
+                R[2] = r2;
+                R[3] = r3 + n;
+                R[4] = r4 + n;
+                R[5] = r5 + n;
+                R[6] = r6 + n;
+                R[7] = r7;
+                R[8] = r8;
+                R[11] = r11;
+                R[12] = r12 + n;
+                R[14] = r14;
                 flags.SetSubtract(R[1], 0x000000A0U, Mask(0x9U));
-                Consume(context, blocks);
                 if (flags.N() == flags.V()) break;
                 continue;
             }
@@ -1893,6 +1977,80 @@ bool Override_00371738(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         memory.WriteFast<uint8_t>(R[0], static_cast<uint8_t>(R[2]));
         R[0] += 1U;
     }
+    flow = Oot3dAotReturned(R[14]);
+    return Accept(kIdx);
+}
+
+// ---------------------------------------------------------------------------
+// 0x002DCEF4 Mtx3x3_Multiply (folha, 2 blocos): r3 = 0; r1 += r3; r2 += r3;
+// r3 = 12; cmp r3, #12 (sempre igual: o caminho genérico 0x002DCFB4 não roda
+// a partir da entrada) e o bloco 0x002DCF0C:
+//   vpush {d8}; vldmia r2!, {s10-s15}; 9 VMUL e 18 VMLA (não fundidos) com
+//   s16/s17 recarregados de r1; vldmia r2, {s10-s12}; vpop {d8};
+//   vstmia r0, {s0-s8}; bx lr
+// Os acessos à memória são as mesmas chamadas ReadFast/WriteFast, na mesma
+// ordem (as leituras de r1/r2 vêm depois do vpush, então veem o que ele
+// escreveu se se sobrepuserem à pilha). As operações VFP são as da tradução,
+// com os zeros exatos no caminho nativo (Oot3dVfpZeroAware*: o mesmo valor e
+// as mesmas flags).
+bool Override_002DCEF4(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state,
+                       Oot3dWholeAotFlow& flow) noexcept {
+    constexpr size_t kIdx = kIdx002DCEF4;
+    auto& guest = frame.Guest;
+    auto& memory = context.Memory;
+    auto& R = state.R;
+    const uint32_t r0 = R[0], r1 = R[1], r2 = R[2], sp = R[13];
+    if (!Budget(context, 2U) || Hooked(context, 0x002DCEF4U, 0x002DCFB0U) ||
+        !VfpDefault(guest.fpscr) || !Writable(memory, sp - 8U, 8U) ||
+        !Readable(memory, sp - 8U, 8U) || !Readable(memory, r2, 36U) ||
+        !Readable(memory, r1, 36U) || !Writable(memory, r0, 36U)) {
+        return Decline(kIdx);
+    }
+    auto& v = guest.vfp;
+    uint32_t fpscr = guest.fpscr;
+    // vpush {d8}
+    memory.WriteFast<uint32_t>(sp - 8U, v[16]);
+    memory.WriteFast<uint32_t>(sp - 4U, v[17]);
+    // vldmia r2!, {s10-s15}
+    uint32_t b[9];
+    for (uint32_t i = 0; i < 6U; ++i) b[i] = Read32(memory, r2 + 4U * i);
+    uint32_t a[9];
+    a[0] = Read32(memory, r1);
+    a[3] = Read32(memory, r1 + 12U);
+    a[6] = Read32(memory, r1 + 24U);
+    a[1] = Read32(memory, r1 + 4U);
+    a[4] = Read32(memory, r1 + 16U);
+    for (uint32_t i = 6U; i < 9U; ++i) b[i] = Read32(memory, r2 + 24U + 4U * (i - 6U));
+    a[7] = Read32(memory, r1 + 28U);
+    a[2] = Read32(memory, r1 + 8U);
+    a[5] = Read32(memory, r1 + 20U);
+    a[8] = Read32(memory, r1 + 32U);
+    // s[3r + c] = b[c] * a[r] + b[3 + c] * a[r + 3] + b[6 + c] * a[r + 6]
+    // (nessa ordem de soma; a tradução intercala as linhas, o que não muda
+    // nada: cada saída é uma cadeia independente e as flags somam por OU).
+    uint32_t out[9];
+    for (uint32_t row = 0; row < 3U; ++row) {
+        for (uint32_t column = 0; column < 3U; ++column) {
+            uint32_t& value = out[3U * row + column];
+            Oot3dVfpZeroAwareMultiply(value, b[column], a[3U * row], fpscr);
+            Oot3dVfpZeroAwareMultiplyAccumulate(value, value, b[3U + column], a[3U * row + 1U], fpscr);
+            Oot3dVfpZeroAwareMultiplyAccumulate(value, value, b[6U + column], a[3U * row + 2U], fpscr);
+        }
+    }
+    // vpop {d8}; vstmia r0, {s0-s8}
+    const uint32_t s16 = Read32(memory, sp - 8U);
+    const uint32_t s17 = Read32(memory, sp - 4U);
+    for (uint32_t i = 0; i < 9U; ++i) memory.WriteFast<uint32_t>(r0 + 4U * i, out[i]);
+    for (uint32_t i = 0; i < 9U; ++i) v[i] = out[i];
+    for (uint32_t i = 0; i < 6U; ++i) v[10U + i] = b[(i < 3U ? 6U : 0U) + i];
+    v[16] = s16;
+    v[17] = s17;
+    guest.fpscr = fpscr;
+    R[2] = r2 + 24U;
+    R[3] = 12U;
+    Oot3dAotSetSubtractFlags(state.Flags, 12U, 12U, Mask(0xFU));
+    Consume(context, 2U);
     flow = Oot3dAotReturned(R[14]);
     return Accept(kIdx);
 }

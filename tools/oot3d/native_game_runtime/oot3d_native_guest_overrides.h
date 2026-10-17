@@ -45,6 +45,26 @@ inline bool Oot3dGuestOverridesEnabled() noexcept {
 
 void SetOot3dGuestOverridesEnabled(bool enabled) noexcept;
 
+// Perfil guest (oot3d_native_guest_profile.cpp). Nos quadros medidos o
+// callback de entrada de bloco é o do perfil, chamado em todos os blocos, mas
+// ele só repassa ao callback original os PCs do filtro original. Sem este
+// registro as substituições viam "gancho em todos os blocos" e recusavam em
+// todo quadro medido (e as de bloco no topo de laço recusavam a cada volta),
+// então o perfil media a tradução, nunca a versão nativa. Com ele, uma
+// substituição só recusa se o perfil repassaria algum PC do seu intervalo;
+// senão ela roda e marca no perfil a própria entrada (o tempo nativo fica no
+// bloco de entrada). Preenchido pelo perfil; vazio, nada muda.
+struct Oot3dGuestOverrideProfileHook {
+    // Callback que o perfil instala (GuestBlockProfiler::OnBlockEntry).
+    oot3d::recomp::a32::BlockEntryCallback Callback = nullptr;
+    // O perfil repassaria ao callback original algum PC em [first, last]?
+    bool (*Forwards)(const void* user, uint32_t first, uint32_t last) noexcept = nullptr;
+    // Conta uma entrada em `pc` e passa a atribuir o tempo a ele.
+    void (*Mark)(void* user, uint32_t pc) noexcept = nullptr;
+};
+
+extern Oot3dGuestOverrideProfileHook gOot3dGuestOverrideProfileHook;
+
 struct Oot3dGuestOverrideInfo {
     uint32_t Entry = 0;
     const char* Name = "";
@@ -79,6 +99,7 @@ OOT3D_GUEST_OVERRIDE_DECLARE(0047AF24) // busca em 50 entradas
 OOT3D_GUEST_OVERRIDE_DECLARE(00307B50) // PicaTev_ConvertSource
 OOT3D_GUEST_OVERRIDE_DECLARE(00307DC8) // PicaCompare_ConvertFunction
 OOT3D_GUEST_OVERRIDE_DECLARE(002BBB14) // Math3D_CirSquareVsTriSquare
+OOT3D_GUEST_OVERRIDE_DECLARE(002DCEF4) // Mtx3x3_Multiply
 
 #define OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(entry)                             \
     bool Override_##entry(Oot3dWholeAotFrame& frame,                          \

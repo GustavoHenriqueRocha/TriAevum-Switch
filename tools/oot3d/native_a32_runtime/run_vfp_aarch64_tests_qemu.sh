@@ -3,6 +3,7 @@
 # whole-AOT code-generation flags, then run them under qemu-aarch64 user mode:
 #   oot3d_native_a32_vfp_aarch64_tests  native AArch64 VFP vs software (~194M checks)
 #   oot3d_native_a32_vfp_fast_tests     inline host-float fast paths vs software
+#   oot3d_native_mtx3x4_kernel_tests    Mtx3x4_Multiply kernel vs software
 # Usage: run_vfp_aarch64_tests_qemu.sh [output-directory]
 set -euo pipefail
 
@@ -25,7 +26,7 @@ sources=(
 )
 
 status=0
-for test in oot3d_native_a32_vfp_aarch64_tests oot3d_native_a32_vfp_fast_tests; do
+for test in ${TESTS:-oot3d_native_a32_vfp_aarch64_tests oot3d_native_a32_vfp_fast_tests oot3d_native_mtx3x4_kernel_tests}; do
     "$cxx" "${flags[@]}" "${sources[@]}" "$here/$test.cpp" -o "$out/$test.elf"
     echo "== $test"
     if "$qemu" "$out/$test.elf"; then

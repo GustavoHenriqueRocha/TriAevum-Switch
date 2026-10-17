@@ -3,6 +3,7 @@
 #include "oot3d_native_a32_memory.h"
 #include "recomp/a32_vfp_scalar.h"
 #include "oot3d_native_whole_aot_runtime.h"
+#include "oot3d_native_mtx3x4_kernel.h"
 
 #if defined(OOT3D_NATIVE_DIRECT_AOT_PLUGIN)
 #include "oot3d_native_direct_aot.h"
@@ -86,96 +87,7 @@ void RecordWholeAotExternalTarget(uint32_t entry,
     }
 }
 
-constexpr uint32_t kFpscrRoundingModeMask = 3U << 22U;
 constexpr uint32_t kFpscrExceptionEnableMask = 0x00009F00U;
-constexpr uint32_t kFpscrInexact = 1U << 4U;
-
-bool IsFastVfpValue(uint32_t bits) noexcept {
-    const uint32_t exponent = bits & 0x7F800000U;
-    const uint32_t fraction = bits & 0x007FFFFFU;
-    return exponent != 0x7F800000U && (exponent != 0U || fraction == 0U);
-}
-
-bool FastVfpMultiply(uint32_t leftBits, uint32_t rightBits,
-                     uint32_t* resultBits, uint32_t* exceptionFlags) noexcept {
-    if (!IsFastVfpValue(leftBits) || !IsFastVfpValue(rightBits)) {
-        return false;
-    }
-    const float left = std::bit_cast<float>(leftBits);
-    const float right = std::bit_cast<float>(rightBits);
-    const double exact = static_cast<double>(left) * static_cast<double>(right);
-    const float result = static_cast<float>(exact);
-    const uint32_t bits = std::bit_cast<uint32_t>(result);
-    if (!IsFastVfpValue(bits)) {
-        return false;
-    }
-    if (static_cast<double>(result) != exact) {
-        *exceptionFlags |= kFpscrInexact;
-    }
-    *resultBits = bits;
-    return true;
-}
-
-bool FastVfpMultiplyAccumulate(uint32_t accumulatorBits, uint32_t leftBits,
-                              uint32_t rightBits, uint32_t* resultBits,
-                              uint32_t* exceptionFlags) noexcept {
-    uint32_t productBits = 0U;
-    if (!IsFastVfpValue(accumulatorBits) ||
-        !FastVfpMultiply(leftBits, rightBits, &productBits, exceptionFlags)) {
-        return false;
-    }
-    const float accumulator = std::bit_cast<float>(accumulatorBits);
-    const float product = std::bit_cast<float>(productBits);
-    const double exact =
-        static_cast<double>(accumulator) + static_cast<double>(product);
-    const float result = static_cast<float>(exact);
-    const uint32_t bits = std::bit_cast<uint32_t>(result);
-    if (!IsFastVfpValue(bits)) {
-        return false;
-    }
-    if (static_cast<double>(result) != exact) {
-        *exceptionFlags |= kFpscrInexact;
-    }
-    *resultBits = bits;
-    return true;
-}
-
-bool TryFastMtx3x4Multiply(const std::array<uint32_t, 12>& left,
-                          const std::array<uint32_t, 12>& right,
-                          uint32_t fpscr,
-                          std::array<uint32_t, 12>* output,
-                          uint32_t* exceptionFlags) noexcept {
-    if ((fpscr &
-         (kFpscrRoundingModeMask | kFpscrExceptionEnableMask)) != 0U) {
-        return false;
-    }
-    uint32_t flags = 0U;
-    for (size_t row = 0U; row < 3U; ++row) {
-        const size_t leftBase = row * 4U;
-        for (size_t component = 0U; component < 4U; ++component) {
-            uint32_t value = 0U;
-            const bool firstOk =
-                component == 3U
-                    ? FastVfpMultiplyAccumulate(
-                          left[leftBase + 3U], right[3U], left[leftBase],
-                          &value, &flags)
-                    : FastVfpMultiply(right[component], left[leftBase],
-                                      &value, &flags);
-            if (!firstOk ||
-                !FastVfpMultiplyAccumulate(
-                    value, right[4U + component], left[leftBase + 1U],
-                    &value, &flags) ||
-                !FastVfpMultiplyAccumulate(
-                    value, right[8U + component], left[leftBase + 2U],
-                    &value, &flags)) {
-                return false;
-            }
-            (*output)[leftBase + component] = value;
-        }
-    }
-    *exceptionFlags = flags;
-    return true;
-}
 
 void ComputeSoftMtx3x4Multiply(const std::array<uint32_t, 12>& left,
                                const std::array<uint32_t, 12>& right,
@@ -640,8 +552,13 @@ bool ExecuteMtx3x4Multiply(
     }
 
     uint32_t exceptionFlags = 0U;
-    if (TryFastMtx3x4Multiply(left, right, state.fpscr, &output,
-                             &exceptionFlags)) {
+    // Mtx3x4MultiplyFast: exato (valor e flags) contra o software, para todo
+    // FPSCR sem armadilhas (o caminho em double anterior errava IXC quando a
+    // soma em double não era exata, e UFC/sinal num produto que estoura para
+    // baixo até zero). Os outros modos continuam no software.
+    if ((state.fpscr & kFpscrExceptionEnableMask) == 0U) {
+        Mtx3x4MultiplyFast(left.data(), right.data(), state.fpscr, output.data(),
+                           exceptionFlags);
         ++gStats.Mtx3x4FastCalls;
         if (!gExternalTargetCounts.empty() &&
             gStats.Mtx3x4ValidationCalls < 4096U) {
@@ -1144,6 +1061,19 @@ void SetOot3dGuestOverridesActive(bool enabled) noexcept {
     SetOot3dGuestOverridesEnabled(enabled);
 #else
     static_cast<void>(enabled);
+#endif
+}
+
+void RegisterOot3dGuestOverrideProfileHook(
+    oot3d::recomp::a32::BlockEntryCallback callback,
+    bool (*forwards)(const void* user, uint32_t first, uint32_t last) noexcept,
+    void (*mark)(void* user, uint32_t pc) noexcept) noexcept {
+#if defined(OOT3D_GUEST_OVERRIDES)
+    gOot3dGuestOverrideProfileHook = {callback, forwards, mark};
+#else
+    static_cast<void>(callback);
+    static_cast<void>(forwards);
+    static_cast<void>(mark);
 #endif
 }
 
