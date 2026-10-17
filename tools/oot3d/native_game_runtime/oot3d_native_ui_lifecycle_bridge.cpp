@@ -377,8 +377,10 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
       oot3d::ui::UiTextureIdentity uiAtlas;
       if (mTopScreenUiAtlasAvailable)
         uiAtlas.semantic_name = kTopScreen30UiAtlasSemantic;
+      const std::size_t clusterStart = output.size();
       (void)AppendTopScreenTouchClusterPresentation(touchGeometry, uiAtlas,
                                                     output);
+      const std::size_t clusterEnd = output.size();
       TopScreenAuxiliaryTouchInputs auxiliaryInputs;
       std::string auxiliaryInputError;
       if (ReadTopScreenAuxiliaryTouchInputs(mMemory, &auxiliaryInputs,
@@ -395,6 +397,13 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
       output.insert(output.end(),
                     std::make_move_iterator(itemIconCopies.begin()),
                     std::make_move_iterator(itemIconCopies.end()));
+      // 3.0 0x005DCC90: the cross takes 0x005CCF6C on top of the HUD alpha.
+      bool nestedOwner = false;
+      if (ReadTopScreenPlayerNestedOwner(mMemory, &nestedOwner)) {
+        const float dpadAlpha = ResolveTopScreenDpadGroupAlpha(itemOpacity, nestedOwner);
+        for (std::size_t index = clusterStart; index < clusterEnd; ++index)
+          if (output[index].source_quad == 5U) output[index].color.alpha *= dpadAlpha;
+      }
       TopScreenDpadPresentationState dpadState;
       if (ReadTopScreenDpadPresentationState(mMemory, &dpadState)) {
         dpadState.ItemOpacity = itemOpacity;

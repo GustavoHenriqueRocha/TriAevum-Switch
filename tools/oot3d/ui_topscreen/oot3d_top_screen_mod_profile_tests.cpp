@@ -1530,6 +1530,12 @@ int main() {
                                        std::bit_cast<std::uint32_t>(0.25F)) &&
               touchStateMemory.Write32(kItemColors + 4U * 0x40U + 0xCU, 0U),
           "could not seed native item opacity lanes");
+  // 3.0 0x005CCF6C: the D-pad cross follows the first visible ZR/ZL lane.
+  Require(ResolveTopScreenDpadGroupAlpha({0.4F, 1.0F, 1.0F}, true) == 0.4F &&
+              ResolveTopScreenDpadGroupAlpha({0.0F, 2.0F, 1.0F}, true) == 1.0F &&
+              ResolveTopScreenDpadGroupAlpha({0.0F, 0.0F, 1.0F}, true) == 0.3F &&
+              ResolveTopScreenDpadGroupAlpha({0.0F, 0.0F, 1.0F}, false) == 1.0F,
+          "D-pad cross alpha differs from 3.0 0x005CCF6C");
   TopScreenNativeItemOpacity opacity;
   std::vector<oot3d::ui::UiPrimitive> opacityCopies;
   Require(AppendTopScreenNativeItemIconCopies(
