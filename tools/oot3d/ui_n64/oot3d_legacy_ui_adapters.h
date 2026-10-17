@@ -36,6 +36,8 @@ class Fast3dUiRenderBackend final
     Fast::Oot3d::TitleRenderBackend* title_render_backend_ = nullptr;
     Fast::ShaderProgram* solid_shader_ = nullptr;
     Fast::ShaderProgram* textured_shader_ = nullptr;
+    // Packed vertices of the current draw (storage kept between draws).
+    std::vector<float> packed_scratch_;
 };
 
 } // namespace oot3d::ui

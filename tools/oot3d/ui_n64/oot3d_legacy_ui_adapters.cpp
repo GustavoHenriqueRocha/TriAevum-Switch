@@ -132,7 +132,8 @@ bool Fast3dUiRenderBackend::DrawUiTriangles(
     };
     rendering_api_.SetOot3dNativeTransform(kClipSpaceIdentity.data());
 
-    std::vector<float> packed;
+    auto& packed = packed_scratch_;
+    packed.clear();
     packed.reserve(vertices.size() * (textured ? 10U : 8U));
     for (const auto& vertex : vertices) {
         packed.push_back(vertex.X);

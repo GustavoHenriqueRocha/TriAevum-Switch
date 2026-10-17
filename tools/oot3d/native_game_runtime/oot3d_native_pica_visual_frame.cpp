@@ -15,6 +15,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -1217,10 +1218,14 @@ struct VisualFactoredPalette {
 // from the actor: a bone the actor's matched draws also use this frame (the
 // same matrix) takes that bone's previous pose, so both copies move together;
 // any other bone is carried by the actor's common motion (inverse(D) * N1).
-std::vector<VisualFactoredPalette> ShareVisualPaletteMotions(
+// `result` is overwritten; its storage is reused (one entry per draw, ~1.7
+// KiB each: a large block per sample if allocated anew).
+void ShareVisualPaletteMotions(
     const Oot3dPicaVisualFrame& previous, const Oot3dPicaVisualFrame& current,
-    const std::vector<std::optional<VisualDrawMatch>>& previousByCurrent) {
-    std::vector<VisualFactoredPalette> result(current.Draws.size());
+    const std::vector<std::optional<VisualDrawMatch>>& previousByCurrent,
+    std::vector<VisualFactoredPalette>& result) {
+    result.clear();
+    result.resize(current.Draws.size());
     using Key = std::tuple<uint64_t, uint64_t, VisualMatrixBits>;
     struct Group {
         VisualMatrixBits PriorSpace{};
@@ -1320,7 +1325,6 @@ std::vector<VisualFactoredPalette> ShareVisualPaletteMotions(
         entry.SharedMotion = motion;
         entry.CarriedPrevious = prior;
     }
-    return result;
 }
 
 // An unmatched draw of an actor, interpolated from its carried palette.
@@ -1546,9 +1550,9 @@ bool SampleVisualFrameWithMatching(const Oot3dPicaVisualFrame& previous, const O
     output.InterpolatedPerVertexDraws = 0;
     output.Draws.resize(current.Draws.size());
     VisualSceneLightInterpolation scenePoints;
-    const auto palettes = alpha > 0.0F && alpha < 1.0F
-        ? ShareVisualPaletteMotions(previous, current, matching.PreviousByCurrent)
-        : std::vector<VisualFactoredPalette>{};
+    std::vector<VisualFactoredPalette> palettes;
+    if (alpha > 0.0F && alpha < 1.0F)
+        ShareVisualPaletteMotions(previous, current, matching.PreviousByCurrent, palettes);
 
     for (size_t currentIndex = 0; currentIndex < current.Draws.size(); ++currentIndex) {
         const auto& currentDraw = current.Draws[currentIndex];
@@ -1616,7 +1620,8 @@ bool SampleVisualFrameWithMatching(const Oot3dPicaVisualFrame& previous, const O
 bool SampleVisualFrameViewWithMatching(const Oot3dPicaVisualFrame& previous, const Oot3dPicaVisualFrame& current,
                                        float alpha, const VisualDrawMatching& matching,
                                        Oot3dPicaVisualFrameViewSample& output,
-                                       const std::vector<VisualDrawDeltaFlags>& drawDeltas) {
+                                       const std::vector<VisualDrawDeltaFlags>& drawDeltas,
+                                       std::vector<VisualFactoredPalette>* paletteScratch = nullptr) {
     output.TopTransfer = current.TopTransfer;
     output.MemoryFills = current.MemoryFills;
     output.DisplayTransfers = current.DisplayTransfers;
@@ -1631,9 +1636,11 @@ bool SampleVisualFrameViewWithMatching(const Oot3dPicaVisualFrame& previous, con
     output.InterpolatedPerVertexDraws = 0;
     output.Draws.resize(current.Draws.size());
     VisualSceneLightInterpolation scenePoints;
-    const auto palettes = alpha > 0.0F && alpha < 1.0F
-        ? ShareVisualPaletteMotions(previous, current, matching.PreviousByCurrent)
-        : std::vector<VisualFactoredPalette>{};
+    std::vector<VisualFactoredPalette> localPalettes;
+    auto& palettes = paletteScratch != nullptr ? *paletteScratch : localPalettes;
+    palettes.clear();
+    if (alpha > 0.0F && alpha < 1.0F)
+        ShareVisualPaletteMotions(previous, current, matching.PreviousByCurrent, palettes);
 
     for (size_t currentIndex = 0; currentIndex < current.Draws.size(); ++currentIndex) {
         const auto& currentDraw = current.Draws[currentIndex];
@@ -1722,6 +1729,8 @@ struct Oot3dPicaPreparedVisualTransition::Impl {
     size_t PreviousDrawCount = 0U;
     size_t CurrentDrawCount = 0U;
     bool Prepared = false;
+    // Sample() scratch (its storage is kept between samples and frames).
+    mutable std::vector<VisualFactoredPalette> Palettes;
 };
 
 Oot3dPicaPreparedVisualTransition::Oot3dPicaPreparedVisualTransition()
@@ -1787,7 +1796,7 @@ bool Oot3dPicaPreparedVisualTransition::Sample(
     const auto samplingStart = std::chrono::steady_clock::now();
     const bool sampled = SampleVisualFrameViewWithMatching(
         previous, current, alpha, mImpl->Matching, output,
-        mImpl->DrawDeltas);
+        mImpl->DrawDeltas, &mImpl->Palettes);
     if (timing != nullptr) {
         const auto finished = std::chrono::steady_clock::now();
         timing->SamplingNanoseconds += static_cast<uint64_t>(
@@ -1990,7 +1999,9 @@ bool ViewOot3dPicaVisualFrame(
         view.Viewport.reset();
         view.BlendConstantColor.reset();
         view.LightBinding.reset();
-        view.VertexBindings.clear();
+        // Not cleared: without HasVertexBindingOverrides they are ignored,
+        // and the next interpolated sample reuses their byte storage instead
+        // of allocating it again every guest frame.
         view.HasVertexBindingOverrides = false;
     }
     return !frame.Draws.empty();
@@ -2015,6 +2026,88 @@ void CollectOot3dPicaFrameCopyReferences(
     std::vector<Fast::Renderer3ds::PicaTextureCopyReference>& out) {
     for (const auto& plan : frame.Draws) {
         CollectOot3dPicaPlanCopyReferences(plan, out);
+    }
+}
+
+namespace {
+
+// Storages of dropped plan vectors (Oot3dPicaPlanVector). Frames die on the
+// render thread and are taken on the guest thread, hence the lock; both run
+// once per frame. A handful is enough: an accumulator frame, the previous
+// and latest replay frames and one in flight.
+struct PlanVectorPool {
+    static constexpr size_t kMaxSpares = 6U;
+    // Below this a vector is not worth keeping (its storage is small).
+    static constexpr size_t kMinCapacity = 8U;
+    std::mutex Mutex;
+    std::vector<std::vector<Oot3dPicaVulkanDrawPlan>> Spares;
+    uint64_t Taken = 0U;
+    uint64_t Missed = 0U;
+    uint64_t Returned = 0U;
+
+    PlanVectorPool() { Spares.reserve(kMaxSpares); }
+};
+
+PlanVectorPool& PlanPool() {
+    // Never destroyed: frames may die during static destruction.
+    static auto* pool = new PlanVectorPool();
+    return *pool;
+}
+
+} // namespace
+
+Oot3dPicaPlanVector Oot3dPicaPlanVector::Take(size_t minimum) {
+    Oot3dPicaPlanVector result;
+    {
+        auto& pool = PlanPool();
+        std::lock_guard lock(pool.Mutex);
+        if (!pool.Spares.empty()) {
+            // The largest storage: it fits any frame seen so far.
+            auto best = std::max_element(
+                pool.Spares.begin(), pool.Spares.end(),
+                [](const auto& left, const auto& right) {
+                    return left.capacity() < right.capacity();
+                });
+            static_cast<Base&>(result) = std::move(*best);
+            pool.Spares.erase(best);
+            ++pool.Taken;
+        } else {
+            ++pool.Missed;
+        }
+    }
+    if (result.capacity() < minimum) {
+        result.reserve(minimum);
+    }
+    return result;
+}
+
+Oot3dPicaPlanVector::PoolStats Oot3dPicaPlanVector::Stats() noexcept {
+    auto& pool = PlanPool();
+    std::lock_guard lock(pool.Mutex);
+    return {pool.Taken, pool.Missed, pool.Returned, pool.Spares.size()};
+}
+
+void Oot3dPicaPlanVector::Recycle() noexcept {
+    if (capacity() < PlanVectorPool::kMinCapacity) {
+        return;
+    }
+    clear();
+    auto& pool = PlanPool();
+    std::lock_guard lock(pool.Mutex);
+    if (pool.Spares.size() < PlanVectorPool::kMaxSpares) {
+        pool.Spares.push_back(std::move(static_cast<Base&>(*this)));
+        ++pool.Returned;
+        return;
+    }
+    // Full: keep the larger storages, free the smallest.
+    auto smallest = std::min_element(
+        pool.Spares.begin(), pool.Spares.end(),
+        [](const auto& left, const auto& right) {
+            return left.capacity() < right.capacity();
+        });
+    if (smallest->capacity() < capacity()) {
+        smallest->swap(static_cast<Base&>(*this));
+        ++pool.Returned;
     }
 }
 
@@ -2085,7 +2178,7 @@ std::vector<Oot3dPicaVisualFrame> Oot3dPicaVisualFrameAccumulator::FinishFrames(
                draw.State.Framebuffer.ColorPhysicalAddress == topTransfer.InputPhysicalAddress &&
                !continuesFrame(draw);
     };
-    std::vector<Oot3dPicaVulkanDrawPlan> nextDraws;
+    Oot3dPicaPlanVector nextDraws;
     std::vector<Oot3dPicaMemoryFillSubmission> nextFills;
     std::vector<Oot3dPicaDisplayTransferSubmission> nextTransfers;
     const auto next = std::find_if(mPendingDraws.begin(), mPendingDraws.end(), [&](const auto& draw) {
@@ -2093,7 +2186,10 @@ std::vector<Oot3dPicaVisualFrame> Oot3dPicaVisualFrameAccumulator::FinishFrames(
     });
     if (next != mPendingDraws.begin() && next != mPendingDraws.end()) {
         const uint64_t nextStart = next->SubmissionId;
-        nextDraws.assign(std::make_move_iterator(next), std::make_move_iterator(mPendingDraws.end()));
+        nextDraws = Oot3dPicaPlanVector::Take(
+            static_cast<size_t>(std::distance(next, mPendingDraws.end())));
+        nextDraws.insert(nextDraws.end(), std::make_move_iterator(next),
+                         std::make_move_iterator(mPendingDraws.end()));
         mPendingDraws.erase(next, mPendingDraws.end());
         const auto fill = std::find_if(mPendingMemoryFills.begin(), mPendingMemoryFills.end(),
                                        [&](const auto& item) { return item.BeforeDrawSubmissionId >= nextStart; });
@@ -2155,7 +2251,9 @@ std::vector<Oot3dPicaVisualFrame> Oot3dPicaVisualFrameAccumulator::FinishFrames(
         frame.TopTransfer = tops[segment];
         const size_t firstDraw = draw;
         while (draw < mPendingDraws.size() && mPendingDraws[draw].SubmissionId <= end) ++draw;
-        frame.Draws.assign(std::make_move_iterator(mPendingDraws.begin() + firstDraw),
+        frame.Draws = Oot3dPicaPlanVector::Take(draw - firstDraw);
+        frame.Draws.insert(frame.Draws.end(),
+                           std::make_move_iterator(mPendingDraws.begin() + firstDraw),
                            std::make_move_iterator(mPendingDraws.begin() + draw));
         // A frame holding deferred placeholders gets its identities when they
         // are resolved (ResolveOot3dPicaDeferredVisualFrame), not here.
@@ -2184,7 +2282,13 @@ std::vector<Oot3dPicaVisualFrame> Oot3dPicaVisualFrameAccumulator::FinishFrames(
     const size_t largest = std::max_element(frames.begin(), frames.end(), [](const auto& a, const auto& b) {
         return a.Draws.size() < b.Draws.size();
     })->Draws.size();
-    mPendingDraws = std::move(nextDraws);
+    // The pending vector keeps its storage (no reallocation per frame); the
+    // carried-over draws move into it and nextDraws' storage returns to the
+    // pool.
+    mPendingDraws.clear();
+    mPendingDraws.insert(mPendingDraws.end(),
+                         std::make_move_iterator(nextDraws.begin()),
+                         std::make_move_iterator(nextDraws.end()));
     mPendingMemoryFills = std::move(nextFills);
     mPendingDisplayTransfers = std::move(nextTransfers);
     // Draw plans are several kilobytes each. Starting the next frame at this

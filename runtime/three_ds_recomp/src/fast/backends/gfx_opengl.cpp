@@ -6,6 +6,7 @@
 #include <stdio.h>
 
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <unordered_map>
 
@@ -1026,8 +1027,51 @@ void GfxRenderingAPIOGL::BindArrayBufferForCurrentShader(GLuint buffer) {
     }
 }
 
+// Appends the vertices to the stream ring and draws them from there. The
+// attribute pointers stay at offset 0 (VertexArraySetAttribs): a range that
+// starts at a multiple of the vertex stride is reached with glDrawArrays'
+// first vertex. False when the ring cannot take them (the caller uploads).
+bool GfxRenderingAPIOGL::DrawStreamedTriangles(const float* buf_vbo, size_t buf_vbo_len,
+                                               size_t buf_vbo_num_tris) {
+    const size_t vertexCount = 3U * buf_vbo_num_tris;
+    const size_t bytes = sizeof(float) * buf_vbo_len;
+    if (mStreamVbo == 0U || vertexCount == 0U || bytes == 0U || bytes % vertexCount != 0U ||
+        bytes > kStreamVboBytes) {
+        return false;
+    }
+    const size_t stride = bytes / vertexCount;
+    size_t offset = (mStreamHead + stride - 1U) / stride * stride;
+    BindArrayBufferForCurrentShader(mStreamVbo);
+    if (offset > kStreamVboBytes || kStreamVboBytes - offset < bytes) {
+        // New storage; the GPU keeps the previous one until it is done.
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(kStreamVboBytes), nullptr,
+                     GL_STREAM_DRAW);
+        offset = 0U;
+    }
+    void* mapped = glMapBufferRange(GL_ARRAY_BUFFER, static_cast<GLintptr>(offset),
+                                    static_cast<GLsizeiptr>(bytes),
+                                    GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT |
+                                        GL_MAP_INVALIDATE_RANGE_BIT);
+    if (mapped == nullptr) {
+        mStreamHead = kStreamVboBytes; // orphan before the next use
+        return false;
+    }
+    std::memcpy(mapped, buf_vbo, bytes);
+    if (glUnmapBuffer(GL_ARRAY_BUFFER) == GL_FALSE) {
+        mStreamHead = kStreamVboBytes;
+        return false;
+    }
+    mStreamHead = offset + bytes;
+    glDrawArrays(GL_TRIANGLES, static_cast<GLint>(offset / stride),
+                 static_cast<GLsizei>(vertexCount));
+    return true;
+}
+
 void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
     PrepareTriangleDraw();
+    if (DrawStreamedTriangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris)) {
+        return;
+    }
     BindArrayBufferForCurrentShader(mOpenglVbo);
 
     // printf("flushing %d tris\n", buf_vbo_num_tris);
@@ -1085,6 +1129,8 @@ void GfxRenderingAPIOGL::Init() {
 #endif
 
     glGenBuffers(1, &mOpenglVbo);
+    glGenBuffers(1, &mStreamVbo);
+    mStreamHead = kStreamVboBytes;
     glBindBuffer(GL_ARRAY_BUFFER, mOpenglVbo);
     mCurrentArrayBuffer = mOpenglVbo;
 

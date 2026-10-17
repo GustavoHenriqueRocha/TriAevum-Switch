@@ -1631,11 +1631,17 @@ void GfxRenderingAPIOGL::InitNativePica() {
         glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &alignment);
         if (alignment > 0) state.UniformAlignment = static_cast<uint64_t>(alignment);
         // A draw's fragment block is 6 KiB: the uniform ring wraps about
-        // once a frame at most; the others less often.
+        // once a frame; the others less often. At most 2 MiB each: nouveau
+        // suballocates buffers up to 2 MiB from slabs it keeps
+        // (nouveau_mm), so orphaning one recycles a slab chunk. A larger
+        // ring is a fresh memalign() from the newlib heap on every orphan
+        // (with the old storage freed when the GPU is done), and those
+        // multi-MiB holes fragmented the heap: on the console the arena
+        // grew from 631 to 1659 MB in 8.5 min with ~700 MB in use.
         state.UniformRing = {GL_UNIFORM_BUFFER, 0U,
-                             PicaGlResidency::StreamRing(8ULL << 20U)};
+                             PicaGlResidency::StreamRing(2ULL << 20U)};
         state.VertexRing = {GL_ARRAY_BUFFER, 0U,
-                            PicaGlResidency::StreamRing(4ULL << 20U)};
+                            PicaGlResidency::StreamRing(2ULL << 20U)};
         state.IndexRing = {GL_ELEMENT_ARRAY_BUFFER, 0U,
                            PicaGlResidency::StreamRing(1ULL << 20U)};
         glGenBuffers(1, &state.UniformRing.Handle);

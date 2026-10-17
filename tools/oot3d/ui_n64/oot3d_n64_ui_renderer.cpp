@@ -71,10 +71,10 @@ float ClipY(float y, float canvasHeight, bool invertY) noexcept {
     return invertY ? -clip : clip;
 }
 
-void AppendVertex(std::vector<Oot3d::Renderer::UiOverlayVertex>& output,
+Oot3d::Renderer::UiOverlayVertex MakeVertex(
                   float x, float y, float u, float v, const UiColor& color,
                   float canvasWidth, float canvasHeight, bool invertY) {
-    output.push_back({
+    return {
         ClipX(x, canvasWidth),
         ClipY(y, canvasHeight, invertY),
         u,
@@ -83,10 +83,10 @@ void AppendVertex(std::vector<Oot3d::Renderer::UiOverlayVertex>& output,
         color.green,
         color.blue,
         color.alpha,
-    });
+    };
 }
 
-std::vector<Oot3d::Renderer::UiOverlayVertex>
+std::array<Oot3d::Renderer::UiOverlayVertex, 6>
 BuildQuad(const UiPrimitive& primitive, float canvasWidth, float canvasHeight,
           bool invertY) {
     const float left = primitive.destination.x;
@@ -104,21 +104,18 @@ BuildQuad(const UiPrimitive& primitive, float canvasWidth, float canvasHeight,
         primitive.uv_quarter_turn
             ? std::array<Uv, 4>{{{u0, v1}, {u1, v1}, {u1, v0}, {u0, v0}}}
             : std::array<Uv, 4>{{{u0, v0}, {u0, v1}, {u1, v1}, {u1, v0}}};
-    std::vector<Oot3d::Renderer::UiOverlayVertex> vertices;
-    vertices.reserve(6U);
-    AppendVertex(vertices, left, top, corners[0].u, corners[0].v, primitive.color,
-                 canvasWidth, canvasHeight, invertY);
-    AppendVertex(vertices, left, bottom, corners[1].u, corners[1].v, primitive.color,
-                 canvasWidth, canvasHeight, invertY);
-    AppendVertex(vertices, right, bottom, corners[2].u, corners[2].v, primitive.color,
-                 canvasWidth, canvasHeight, invertY);
-    AppendVertex(vertices, left, top, corners[0].u, corners[0].v, primitive.color,
-                 canvasWidth, canvasHeight, invertY);
-    AppendVertex(vertices, right, bottom, corners[2].u, corners[2].v, primitive.color,
-                 canvasWidth, canvasHeight, invertY);
-    AppendVertex(vertices, right, top, corners[3].u, corners[3].v, primitive.color,
-                 canvasWidth, canvasHeight, invertY);
-    return vertices;
+    const auto vertex = [&](float x, float y, const Uv& uv) {
+        return MakeVertex(x, y, uv.u, uv.v, primitive.color, canvasWidth,
+                          canvasHeight, invertY);
+    };
+    return {
+        vertex(left, top, corners[0]),
+        vertex(left, bottom, corners[1]),
+        vertex(right, bottom, corners[2]),
+        vertex(left, top, corners[0]),
+        vertex(right, bottom, corners[2]),
+        vertex(right, top, corners[3]),
+    };
 }
 
 } // namespace
@@ -203,12 +200,23 @@ void N64UiFast3dRenderer::SetTextureProvider(
 const N64UiFast3dRenderer::ResidentTexture*
 N64UiFast3dRenderer::ResolveTexture(const UiTextureIdentity& identity,
                                     std::string* error) {
-    const std::string semanticKey = BuildUiTextureCacheKey(identity);
-    const auto resident = textures_.find(semanticKey);
+    // The key in a kept string: a resident texture (every frame's case)
+    // allocates nothing.
+    key_scratch_.assign(identity.semantic_name);
+    if (identity.guest_resource_address != 0U ||
+        identity.guest_surface_address != 0U) {
+        std::array<char, 32> suffix{};
+        std::snprintf(suffix.data(), suffix.size(), "@%08X:%08X",
+                      identity.guest_resource_address,
+                      identity.guest_surface_address);
+        key_scratch_.append(suffix.data());
+    }
+    const auto resident = textures_.find(key_scratch_);
     if (resident != textures_.end()) {
         ++stats_.texture_cache_hits;
         return &resident->second;
     }
+    const std::string semanticKey = key_scratch_;
     if (failed_textures_.contains(semanticKey)) {
         return nullptr;
     }
@@ -341,15 +349,24 @@ bool N64UiFast3dRenderer::Render(std::span<const UiPrimitive> primitives,
     }
     ++stats_.frames_with_primitives;
 
-    std::vector<const UiPrimitive*> ordered;
+    auto& ordered = ordered_scratch_;
+    ordered.clear();
     ordered.reserve(primitives.size());
     for (const UiPrimitive& primitive : primitives) {
         ordered.push_back(&primitive);
     }
-    std::stable_sort(ordered.begin(), ordered.end(),
-                     [](const UiPrimitive* left, const UiPrimitive* right) {
-                         return left->layer < right->layer;
-                     });
+    // Stable by layer. An insertion sort: a frame has a few dozen
+    // primitives, mostly in order already, and std::stable_sort takes a
+    // temporary buffer from the heap on every call.
+    for (std::size_t index = 1; index < ordered.size(); ++index) {
+        const UiPrimitive* primitive = ordered[index];
+        std::size_t position = index;
+        while (position > 0 && primitive->layer < ordered[position - 1]->layer) {
+            ordered[position] = ordered[position - 1];
+            --position;
+        }
+        ordered[position] = primitive;
+    }
 
     const std::uint32_t width = std::max<std::uint32_t>(1U, framebufferWidth);
     const std::uint32_t height =

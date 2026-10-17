@@ -347,6 +347,37 @@ Desempenho e usabilidade:
   fps por sessão, fases, memória e, com `glperf`, top etapas de GPU, CPU da render thread e
   contadores por tipo de quadro.
 
+### Heap estável e menos trabalho fantasma por quadro (2026-10-17)
+Medido (`switch-logs/interp1`, fps60, escala 2, 8,5 min): `heap_arena_mb` 631 → 1659 MB com
+`heap_used_mb` ~700 MB (fragmentação do malloc do newlib, que o Mesa/nouveau também usa: o
+`libdrm_nouveau` do devkitPro aloca cada BO com `memalign`).
+- **Vetor de planos por quadro visual**: um plano de draw tem ~16 KiB; cada quadro do jogo montava
+  um vetor novo de ~200 planos (3–4 MB) para o quadro visual e outro para os draws pendentes (que
+  ainda crescia por dobra), e liberava os de quadros antigos na render thread: blocos grandes de
+  tamanhos variados a 30/s. Agora `Oot3dPicaVisualFrame::Draws` é um `Oot3dPicaPlanVector`, cuja
+  memória volta limpa a um pool (até 6) quando o quadro morre; o acumulador pega dali e o vetor
+  pendente mantém a capacidade.
+- **Paletas da interpolação** (`ShareVisualPaletteMotions`, ~1,7 KiB por draw) eram alocadas a cada
+  amostra: agora um rascunho da transição preparada, reaproveitado.
+- **Views da amostra**: os bindings de vértice não são mais limpos entre quadros (sem
+  `HasVertexBindingOverrides` são ignorados), então a cópia interpolada reaproveita os bytes.
+- Teste de longa duração no host: `oot3d_native_pica_visual_frame_soak_tests` (1800 quadros,
+  180–220 draws, matching + 2 amostras por quadro, `operator new` contado): antes 12 MB e 4,8
+  alocações ≥ 256 KiB por quadro; agora ~0,24 MB e 0 grandes, constante no tempo.
+- **Anéis de upload PICA ≤ 2 MiB** (eram 8/4 MiB): o nouveau subaloca buffers até 2 MiB de slabs
+  que ele mantém (`nouveau_mm`); acima disso cada orphan do anel era um `memalign` novo de 8/4 MiB
+  (1610 orphans na sessão).
+- **ImGui sem contexto GL**: com a render thread, `ImGui_ImplOpenGL3_NewFrame/RenderDrawData`
+  rodavam na thread do jogo, onde o contexto não está atual: tudo ia para o despacho nulo do Mesa,
+  e o backend refazia a cada quadro shaders, buffers e o upload do atlas de fontes (~1 MB). Era o
+  `tex_upload_kb` ≈ 1 MB e parte de `gen_delete`/`gets`/`buf_reallocs` até em quadros hold (os
+  ganchos do glperf contam chamadas de qualquer thread). Agora sem contexto atual só o atlas é
+  mantido construído na CPU; nada do ImGui aparecia na tela antes e continua assim.
+- **UI legada (HUD TopScreen)**: os triângulos vão para um anel de 1 MiB por map não
+  sincronizado (orphan só ao dar a volta) em vez de um `glBufferData` por draw (~29 por quadro);
+  o renderer da UI não aloca mais por quadro (ordenação por inserção em vez de `stable_sort`, quad
+  em `std::array`, chave de textura e vetores de rascunho mantidos).
+
 ## Próximos passos
 
 - Ideias futuras (pedido do usuário, 2026-10-17):

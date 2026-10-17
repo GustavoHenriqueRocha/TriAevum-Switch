@@ -222,6 +222,13 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     ShaderProgram* mLastLoadedShader = nullptr;
 
     GLuint mOpenglVbo = 0;
+    // Streamed triangles (UI overlay, legacy draws): a 1 MiB ring written
+    // through unsynchronized maps; its storage is orphaned only when it wraps
+    // (a glBufferData per draw reallocated the buffer every draw).
+    static constexpr size_t kStreamVboBytes = size_t{1} << 20U;
+    GLuint mStreamVbo = 0;
+    size_t mStreamHead = kStreamVboBytes;
+    bool DrawStreamedTriangles(const float* buf_vbo, size_t buf_vbo_len, size_t buf_vbo_num_tris);
     GLuint mCurrentArrayBuffer = 0;
     std::unordered_map<uint64_t, CachedVertexBuffer> mOot3dCachedVertexBuffers;
     GLuint mOot3dShadow2dDepthEncodeProgram = 0;

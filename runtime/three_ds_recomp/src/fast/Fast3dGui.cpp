@@ -531,11 +531,35 @@ std::shared_ptr<ImDrawData> CloneImGuiDrawData(const ImDrawData* source) {
 
 } // namespace
 
+#ifdef ENABLE_OPENGL
+namespace {
+// With the render worker (Switch, parallel presentation) the GL context is
+// current on the render thread only, while ImGui's frame runs on the guest
+// thread. There every ImGui GL call went to Mesa's no-op dispatch: without
+// device objects, the OpenGL3 backend re-ran its whole setup each frame
+// (shaders, buffers, and the ~1 MB font atlas upload) and replayed the draw
+// data, all for nothing and all counted by the GL profiler as real work.
+// Nothing ImGui draws there reaches the screen, as before.
+bool OpenGlContextCurrent() {
+    return SDL_GL_GetCurrentContext() != nullptr;
+}
+} // namespace
+#endif
+
 void Fast3dGui::ImGuiBackendNewFrame() {
     switch (mImpl.Backend) {
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
-            ImGui_ImplOpenGL3_NewFrame();
+            if (OpenGlContextCurrent()) {
+                ImGui_ImplOpenGL3_NewFrame();
+            } else {
+                // ImGui::NewFrame needs a built atlas; after the first call
+                // this returns the cached pixels.
+                unsigned char* pixels = nullptr;
+                int width = 0;
+                int height = 0;
+                ImGui::GetIO().Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+            }
             break;
 #endif
 
@@ -624,7 +648,9 @@ void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
     switch (mImpl.Backend) {
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
-            ImGui_ImplOpenGL3_RenderDrawData(data);
+            if (OpenGlContextCurrent()) {
+                ImGui_ImplOpenGL3_RenderDrawData(data);
+            }
             break;
 #endif
 

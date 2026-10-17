@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <span>
@@ -12,10 +13,70 @@
 
 namespace Oot3dNativeGame {
 
+// The draw plans of a visual frame. A plan is ~16 KiB, so a frame's vector is
+// several MiB; one was allocated (and a different-sized one freed, frames
+// later, on the render thread) for every guest frame, and those large blocks
+// of varying size fragmented the console's heap (newlib malloc, shared with
+// the GL driver). The storage of a dropped vector now goes back to a small
+// process-wide pool, cleared, and the accumulator takes its next frame's
+// vector from there: in steady state no frame allocates its plan array.
+class Oot3dPicaPlanVector : public std::vector<Oot3dPicaVulkanDrawPlan> {
+  public:
+    using Base = std::vector<Oot3dPicaVulkanDrawPlan>;
+    using Base::Base;
+
+    Oot3dPicaPlanVector() = default;
+    Oot3dPicaPlanVector(const Oot3dPicaPlanVector&) = default;
+    Oot3dPicaPlanVector(Oot3dPicaPlanVector&&) noexcept = default;
+    Oot3dPicaPlanVector(Base&& other) noexcept : Base(std::move(other)) {}
+    Oot3dPicaPlanVector& operator=(const Oot3dPicaPlanVector& other) {
+        Base::operator=(other);
+        return *this;
+    }
+    Oot3dPicaPlanVector& operator=(Oot3dPicaPlanVector&& other) noexcept {
+        if (this != &other) {
+            Recycle();
+            Base::operator=(std::move(static_cast<Base&>(other)));
+        }
+        return *this;
+    }
+    Oot3dPicaPlanVector& operator=(Base&& other) noexcept {
+        Recycle();
+        Base::operator=(std::move(other));
+        return *this;
+    }
+    Oot3dPicaPlanVector& operator=(const Base& other) {
+        Base::operator=(other);
+        return *this;
+    }
+    Oot3dPicaPlanVector& operator=(
+        std::initializer_list<Oot3dPicaVulkanDrawPlan> plans) {
+        Base::operator=(plans);
+        return *this;
+    }
+    ~Oot3dPicaPlanVector() { Recycle(); }
+
+    // An empty vector with room for at least `minimum` plans, from the pool
+    // when it has one.
+    [[nodiscard]] static Oot3dPicaPlanVector Take(size_t minimum);
+
+    struct PoolStats {
+        uint64_t Taken = 0;     // Take() calls served from the pool
+        uint64_t Missed = 0;    // Take() calls that had to allocate
+        uint64_t Returned = 0;  // storages kept by the pool
+        uint64_t Spares = 0;    // storages in the pool now
+    };
+    [[nodiscard]] static PoolStats Stats() noexcept;
+
+  private:
+    // Destroys the plans and hands the storage to the pool.
+    void Recycle() noexcept;
+};
+
 struct Oot3dPicaVisualFrame {
     uint64_t Sequence = 0;
     Oot3dPicaDisplayTransferSubmission TopTransfer;
-    std::vector<Oot3dPicaVulkanDrawPlan> Draws;
+    Oot3dPicaPlanVector Draws;
     std::vector<uint64_t> StrictDrawIdentities;
     std::vector<Oot3dPicaMemoryFillSubmission> MemoryFills;
     std::vector<Oot3dPicaDisplayTransferSubmission> DisplayTransfers;

@@ -122,6 +122,9 @@ class N64UiFast3dRenderer {
     std::unordered_set<std::string> prepared_keys_;
     // Rendering side: prepared payloads not consumed yet.
     std::unordered_map<std::string, PreparedUiTexture> staged_textures_;
+    // Per-frame scratch (storage kept between frames).
+    std::vector<const UiPrimitive*> ordered_scratch_;
+    std::string key_scratch_;
     N64UiRendererStats stats_;
 };
 
