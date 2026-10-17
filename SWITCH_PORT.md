@@ -423,6 +423,18 @@ Medido (`switch-logs/interp1`, fps60, escala 2, 8,5 min): `heap_arena_mb` 631 �
   o renderer da UI não aloca mais por quadro (ordenação por inserção em vez de `stable_sort`, quad
   em `std::array`, chave de textura e vetores de rascunho mantidos).
 
+### Heap por programa GL no Mesa 26 (2026-10-17)
+- Com o Mesa 26 o heap cresce ~6–8 MB por programa PICA novo (20.1: ~1,5 MB). O Mesa 26 converte o
+  GLSL para NIR já no `glCompileShader` e guarda esse NIR no objeto de shader; como os shaders ficavam
+  anexados ao programa, o `glDeleteShader` só os marcava e o NIR vivia junto com o programa.
+  `LinkPicaGlProgram` e o programa de scanout agora fazem `glDetachShader` antes de apagar.
+  Medido no host (Mesa 26.2.2, iris e llvmpipe, VS PICA real de 30 KB): −2,0 MB por programa
+  (iris 8,6 → 6,6 MB).
+- O resto é do driver: o nvc0 do Mesa 26 guarda o NIR inteiro (`nvc0_program::nir`, só usado para
+  retraduzir quando muda o número de planos de clip) além do NIR serializado do st/mesa; o 20.1
+  guardava só tokens TGSI. Reduzir isso exige patch no Mesa (serializar `prog->nir` depois de
+  `nvc0_program_translate` e desserializar só na retradução).
+
 ### GPU: ZCULL/early-Z no nvc0 e economias exatas `config/gl_gpu_lean` (2026-10-17)
 **O que o Mesa 20.1 (nvc0) faz** (fonte em `mesa-cache/work/mesa-20.1.0-rc3`):
 - **ZCULL nunca liga.** `nvc0_screen.c` grava `ZCULL_REGION = 0x3f` ("deactivate ZCULL") na criação

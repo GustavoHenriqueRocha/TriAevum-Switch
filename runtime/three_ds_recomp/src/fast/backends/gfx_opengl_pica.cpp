@@ -554,6 +554,12 @@ GLuint LinkPicaGlProgram(std::string_view vertexSource, std::string_view fragmen
         glDeleteShader(vertex);
         throw;
     }
+    // Detach before deleting: an attached shader is only marked for deletion
+    // and lives as long as the program. Mesa 26 keeps the NIR of every
+    // compiled shader in it (compile-time glsl_to_nir), ~2 MB per program
+    // with these sources, never used again after the link.
+    glDetachShader(program, fragment);
+    glDetachShader(program, vertex);
     glDeleteShader(fragment);
     glDeleteShader(vertex);
     return program;
@@ -1748,6 +1754,8 @@ void main() {
         ShutdownNativePica();
         throw;
     }
+    glDetachShader(state.ScanoutProgram, fragment); // see LinkPicaGlProgram
+    glDetachShader(state.ScanoutProgram, vertex);
     glDeleteShader(fragment);
     glDeleteShader(vertex);
     // Optional scanout effects and anisotropy; nothing is created when the
