@@ -1878,7 +1878,7 @@ def _emit_terminal(
                 )
             return_pc = pc + 4
             body = [
-                "++context.Stats.DirectCalls;",
+                "OOT3D_AOT_STAT(context.Stats.DirectCalls);",
                 f"state.R[14] = 0x{return_pc:08X}U;",
                 *call_prefix,
                 f"const Oot3dWholeAotFlow callFlow = {call};",
@@ -1928,7 +1928,7 @@ def _emit_terminal(
     if (raw & 0x0FFFFFF0) == 0x012FFF30:
         register = raw & 0xF
         body = [
-            "++context.Stats.IndirectCalls;",
+            "OOT3D_AOT_STAT(context.Stats.IndirectCalls);",
             f"state.R[14] = 0x{pc + 4:08X}U;",
             "commitState();",
             "const Oot3dWholeAotFlow callFlow =",
@@ -1963,7 +1963,7 @@ def _emit_terminal(
                 )
             return_pc = int(resume_edges[0]["target"])
             body = [
-                "++context.Stats.IndirectCalls;",
+                "OOT3D_AOT_STAT(context.Stats.IndirectCalls);",
                 "commitState();",
                 "const Oot3dWholeAotFlow callFlow =",
                 "    ExecuteOot3dWholeAotIndirect(",
@@ -2096,7 +2096,6 @@ def _render_function(
         lines.extend([
             "    NativeA32UnobservedMemory regionMemory(context.Memory);",
             "    uint32_t regionBlocksRemaining = context.BlocksRemaining;",
-            "    uint32_t regionBlocksConsumed = 0U;",
         ])
     # Calls and observers commit before they can unwind. Ordinary exits commit
     # explicitly below: no caller cleanup may overwrite newer callee state.
@@ -2108,8 +2107,8 @@ def _render_function(
     if memory_view:
         lines.extend([
             "        regionMemory.Commit();",
+            # Consumed blocks are derived (BlockBudget - BlocksRemaining).
             "        context.BlocksRemaining = regionBlocksRemaining;",
-            "        context.BlocksConsumed += regionBlocksConsumed;",
         ])
     lines.extend([
         "    };",
@@ -2174,7 +2173,7 @@ def _render_function(
             ]
         )
         if memory_view:
-            lines.extend(["        --regionBlocksRemaining;", "        ++regionBlocksConsumed;"])
+            lines.append("        --regionBlocksRemaining;")
         for item in block.instructions[:-1]:
             live_flags = instruction_optimization[item.pc].required_flag_writes
             for emitted in _emit_non_control(item, live_flags):
@@ -2398,7 +2397,7 @@ def _render_source(
         lines.extend(
             [
                 f"    case 0x{entry:08X}U:",
-                "        ++context.Stats.ResolvedIndirectCalls;",
+                "        OOT3D_AOT_STAT(context.Stats.ResolvedIndirectCalls);",
                 f"        return Execute_{symbol}(frame, context, state, pc);",
             ]
         )
@@ -2442,7 +2441,7 @@ def _render_source(
             "        memory, memory, *stats, externalCall, blockEntry, blockEntryUser,",
             "        blockEntryPcs, blockEntryPcCount, blockEntryFilter,",
             "        skipFirstBlockEntry,",
-            "        blockBudget, 0U};",
+            "        blockBudget};",
             "    Oot3dWholeAotFlow flow{};",
             "    a32::GuestState observableExitState{};",
             "    bool restoreObservableExitState = false;",
@@ -2478,8 +2477,8 @@ def _render_source(
             "    ++stats->Calls;",
             "    state.r[15] = flow.Pc;",
             "    if (blocksConsumed != nullptr) {",
-            "        *blocksConsumed = context.BlocksConsumed != 0U",
-            "                              ? context.BlocksConsumed : 1U;",
+            "        *blocksConsumed = context.BlocksConsumed() != 0U",
+            "                              ? context.BlocksConsumed() : 1U;",
             "    }",
             "    switch (flow.Kind) {",
             "    case Oot3dWholeAotFlowKind::Returned:",
@@ -2493,7 +2492,7 @@ def _render_source(
             "        return true;",
             "    case Oot3dWholeAotFlowKind::BlockLimit:",
             "        *result = {a32::ExitKind::BlockLimit, flow.Pc,",
-            "                   a32::FallbackReason::None, context.BlocksConsumed};",
+            "                   a32::FallbackReason::None, context.BlocksConsumed()};",
             "        return true;",
             "    case Oot3dWholeAotFlowKind::MemoryFault:",
             "        *result = {a32::ExitKind::MemoryFault, flow.Pc,",
@@ -2695,7 +2694,7 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
             "    if (entry == nullptr) {",
             "        return Oot3dAotCallExternal(context, pc, frame, state);",
             "    }",
-            "    ++context.Stats.ResolvedIndirectCalls;",
+            "    OOT3D_AOT_STAT(context.Stats.ResolvedIndirectCalls);",
             "    return entry->Execute(frame, context, state, pc);",
             "}",
             "",
@@ -2729,7 +2728,7 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
             "        memory, memory, *stats, externalCall, blockEntry, blockEntryUser,",
             "        blockEntryPcs, blockEntryPcCount, blockEntryFilter,",
             "        skipFirstBlockEntry,",
-            "        blockBudget, 0U};",
+            "        blockBudget};",
             "    Oot3dWholeAotFlow flow{};",
             "    a32::GuestState observableExitState{};",
             "    bool restoreObservableExitState = false;",
@@ -2756,8 +2755,8 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
             "    ++stats->Calls;",
             "    state.r[15] = flow.Pc;",
             "    if (blocksConsumed != nullptr) {",
-            "        *blocksConsumed = context.BlocksConsumed != 0U",
-            "                              ? context.BlocksConsumed : 1U;",
+            "        *blocksConsumed = context.BlocksConsumed() != 0U",
+            "                              ? context.BlocksConsumed() : 1U;",
             "    }",
             "    switch (flow.Kind) {",
             "    case Oot3dWholeAotFlowKind::Returned:",
@@ -2771,7 +2770,7 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
             "        return true;",
             "    case Oot3dWholeAotFlowKind::BlockLimit:",
             "        *result = {a32::ExitKind::BlockLimit, flow.Pc,",
-            "                   a32::FallbackReason::None, context.BlocksConsumed};",
+            "                   a32::FallbackReason::None, context.BlocksConsumed()};",
             "        return true;",
             "    case Oot3dWholeAotFlowKind::MemoryFault:",
             "        *result = {a32::ExitKind::MemoryFault, flow.Pc,",

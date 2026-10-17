@@ -101,6 +101,18 @@ set(OOT3D_WHOLE_AOT_PROFILE_FILE "" CACHE FILEPATH
     "LLVM indexed or sample profile consumed by whole-AOT profile-use; with GCC, the directory holding the .gcda files")
 set(OOT3D_WHOLE_AOT_GCC_PROFILE_RUNTIME_DIR "sdmc:/switch/oot3dre/pgo" CACHE STRING
     "GCC profile-generate: directory the instrumented program writes its .gcda files to")
+# Compiles out the per-call statistics of the generated code (OOT3D_AOT_STAT:
+# direct/indirect/resolved-indirect call counters, reported only in the host
+# summary JSON). Guest state, scheduling, block budget and the boot-status
+# block-limit counter are unaffected.
+if (OOT3D_WHOLE_AOT_PRODUCT_MODE)
+    set(_oot3d_whole_aot_lean_stats_default ON)
+else()
+    set(_oot3d_whole_aot_lean_stats_default OFF)
+endif()
+option(OOT3D_WHOLE_AOT_LEAN_STATS
+    "Compile out whole-AOT per-call statistics (summary-only counters)"
+    ${_oot3d_whole_aot_lean_stats_default})
 option(OOT3D_WHOLE_AOT_NATIVE_VFP_AARCH64
     "Regenerate whole-AOT C++ with native AArch64 VFP (generate_whole_aot_cpp.py --native-vfp-aarch64)" OFF)
 set(OOT3D_WHOLE_AOT_ORDER_FILE "" CACHE FILEPATH
@@ -397,6 +409,10 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
         endif()
         target_compile_options(oot3d_native_whole_aot PRIVATE
             "${WARNING_OVERRIDE}")
+        if (OOT3D_WHOLE_AOT_LEAN_STATS)
+            target_compile_definitions(oot3d_native_whole_aot PRIVATE
+                OOT3D_WHOLE_AOT_LEAN_STATS=1)
+        endif()
         if (NOT MSVC)
             # Affinity-sharded guest callees are deliberately colocated so
             # normal release builds can remove their translated call ABI.

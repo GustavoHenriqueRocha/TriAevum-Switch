@@ -283,7 +283,7 @@ bool ExecuteOot3dWholeAotFunction(
                                blockEntry,       blockEntryUser,
                                blockEntryPcs,    blockEntryPcCount,
                                blockEntryFilter, skipFirstBlockEntry,
-                               blockBudget,      0U};
+                               blockBudget};
   Oot3dWholeAotFlow flow{};
   a32::GuestState observableExitState{};
   bool restoreObservableExitState = false;
@@ -312,7 +312,7 @@ bool ExecuteOot3dWholeAotFunction(
   state.r[15] = flow.Pc;
   if (blocksConsumed != nullptr) {
     *blocksConsumed =
-        context.BlocksConsumed != 0U ? context.BlocksConsumed : 1U;
+        context.BlocksConsumed() != 0U ? context.BlocksConsumed() : 1U;
   }
   switch (flow.Kind) {
   case Oot3dWholeAotFlowKind::Returned:
@@ -325,7 +325,7 @@ bool ExecuteOot3dWholeAotFunction(
     return true;
   case Oot3dWholeAotFlowKind::BlockLimit:
     *result = {a32::ExitKind::BlockLimit, flow.Pc, a32::FallbackReason::None,
-               context.BlocksConsumed};
+               context.BlocksConsumed()};
     return true;
   case Oot3dWholeAotFlowKind::MemoryFault:
     *result = {a32::ExitKind::MemoryFault, flow.Pc, a32::FallbackReason::None,
