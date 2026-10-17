@@ -25,6 +25,7 @@ add_library(oot3d_native_audio STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_audio_dsp.cpp
     tools/oot3d/native_game_runtime/oot3d_native_audio_resampler.cpp
     tools/oot3d/native_game_runtime/oot3d_host_audio_resampler.cpp
+    tools/oot3d/native_game_runtime/oot3d_host_audio_stream.cpp
     tools/oot3d/native_game_runtime/oot3d_native_audio_service.cpp
 )
 target_include_directories(oot3d_native_audio PUBLIC

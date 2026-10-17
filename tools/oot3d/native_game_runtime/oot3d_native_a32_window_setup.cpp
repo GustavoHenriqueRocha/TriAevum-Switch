@@ -7,6 +7,9 @@
 #include <switch.h>
 #include <fstream>
 #endif
+#include <cstdlib>
+#include <string>
+#include <string_view>
 #include "oot3d_native_direct_aot.h"
 #include "oot3d_title_grass_rules.h"
 #include "fast/oot3d/graphics_settings_persistence.h"
@@ -63,6 +66,26 @@ uint32_t ReadSwitchAudioSampleRate() {
   return static_cast<uint32_t>(value);
 }
 #endif
+
+// Host audio stream switches: on the Switch config/audio_thread and
+// config/audio_stretch ("0" turns each off; absent = on); on the desktop
+// TRIAEVUM_AUDIO_THREAD / TRIAEVUM_AUDIO_STRETCH ("1" turns each on).
+bool ReadHostAudioSwitch(const char *configName, const char *environmentName) {
+#if defined(__SWITCH__)
+  (void)environmentName;
+  std::ifstream input(std::string("sdmc:/switch/oot3dre/config/") + configName);
+  if (!input) {
+    return true;
+  }
+  std::string value;
+  input >> value;
+  return value != "0";
+#else
+  (void)configName;
+  const char *value = std::getenv(environmentName);
+  return value != nullptr && std::string_view(value) == "1";
+#endif
+}
 
 } // namespace
 
@@ -1007,6 +1030,31 @@ void NativeA32WindowSession::Setup() {
     hostAudioResampler.emplace(
         Oot3dNativeGame::NativeA32DspHle::NativeSampleRate,
         static_cast<uint32_t>(audioPlayer->GetSampleRate()));
+  }
+  {
+    const bool audioThread = ReadHostAudioSwitch("audio_thread", "TRIAEVUM_AUDIO_THREAD");
+    const bool audioStretch = ReadHostAudioSwitch("audio_stretch", "TRIAEVUM_AUDIO_STRETCH");
+    if (audioPlayer != nullptr && audioPlayer->IsInitialized() && !launch.DisableAudio &&
+        (audioThread || audioStretch)) {
+      Oot3dNativeGame::HostAudioStream::Options options;
+      options.InputRate = Oot3dNativeGame::NativeA32DspHle::NativeSampleRate;
+      options.OutputRate = static_cast<uint32_t>(audioPlayer->GetSampleRate());
+      options.TargetFrames = audioPlayer->GetDesiredBuffered();
+      options.DeviceFrames = audioPlayer->GetSampleLength();
+      options.Thread = audioThread;
+      options.Stretch = audioStretch;
+      std::shared_ptr<Ship::AudioPlayer> player = audioPlayer;
+      Oot3dNativeGame::HostAudioStream::Sink sink;
+      sink.Buffered = [player]() { return player->Buffered(); };
+      sink.Play = [player](const int16_t *samples, size_t count) {
+        player->Play(reinterpret_cast<const uint8_t *>(samples), count * sizeof(int16_t));
+      };
+      sink.Flush = [player]() { player->Flush(); };
+      hostAudioStream = std::make_unique<Oot3dNativeGame::HostAudioStream>(options, std::move(sink));
+    }
+    std::fprintf(stderr, "audio: host stream %s (thread=%d stretch=%d)\n",
+                 hostAudioStream != nullptr ? "on" : "off", audioThread ? 1 : 0,
+                 audioStretch ? 1 : 0);
   }
 #if defined(__SWITCH__)
   std::fprintf(stderr, "audio: DSP %u Hz -> device %d Hz (%s), %d frames per device buffer\n",

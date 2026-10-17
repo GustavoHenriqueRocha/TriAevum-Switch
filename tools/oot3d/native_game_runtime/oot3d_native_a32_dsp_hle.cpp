@@ -55,6 +55,11 @@ struct NativeA32DspHle::Impl {
     std::vector<AudioCore::HLE::Source> Sources;
     AudioCore::HLE::Mixers Mixers;
     const NativeDspMemoryAccess* CurrentMemory = nullptr;
+    // Host copies of the two shared-memory regions, reused every frame: both
+    // are overwritten whole by the reads below, so zero-filling 2 x 64 KiB
+    // per frame (the former stack locals) only cost game-thread time.
+    AudioCore::HLE::SharedMemory Region0;
+    AudioCore::HLE::SharedMemory Region1;
 };
 
 NativeA32DspHle::NativeA32DspHle(
@@ -75,8 +80,8 @@ bool NativeA32DspHle::ProcessFrame(
         SetError(error, "native DSP memory contract is incomplete");
         return false;
     }
-    AudioCore::HLE::SharedMemory region0{};
-    AudioCore::HLE::SharedMemory region1{};
+    AudioCore::HLE::SharedMemory& region0 = mImpl->Region0;
+    AudioCore::HLE::SharedMemory& region1 = mImpl->Region1;
     auto region0Bytes = std::span<uint8_t>(
         reinterpret_cast<uint8_t*>(&region0), sizeof(region0));
     auto region1Bytes = std::span<uint8_t>(

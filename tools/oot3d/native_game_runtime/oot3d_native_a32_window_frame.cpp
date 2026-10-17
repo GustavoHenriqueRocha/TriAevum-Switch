@@ -569,6 +569,9 @@ bool NativeA32WindowSession::RunFrame() {
       }
       perf << " guest_in_pica=" << phaseTiming.GuestInsidePicaSubmitSeconds
            << " total_ms=" << (seconds * 1000.0 / hostFrames);
+      if (hostAudioStream != nullptr) {
+        perf << ' ' << hostAudioStream->PerfSummary();
+      }
       // Totals of a Mesa built with the Horizon shader cache (absent from
       // the stock devkitPro library, hence weak).
       if (mesa_switch_get_stats != nullptr) {
@@ -1146,8 +1149,14 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
     pcmDumpSamples.insert(pcmDumpSamples.end(), audioSamples.begin(),
                           audioSamples.end());
   }
-  if (!launch.DisableAudio && audioPlayer != nullptr &&
-      audioPlayer->IsInitialized() && !audioSamples.empty()) {
+  if (hostAudioStream != nullptr && !audioSamples.empty()) {
+    // Stretch, resampling and the device queue run on the audio worker.
+    const auto audioOutputStart = std::chrono::steady_clock::now();
+    hostAudioStream->Submit(audioSamples);
+    phaseTiming.AudioOutputSeconds += SecondsSince(audioOutputStart);
+  } else if (hostAudioStream == nullptr && !launch.DisableAudio &&
+             audioPlayer != nullptr && audioPlayer->IsInitialized() &&
+             !audioSamples.empty()) {
     const auto audioOutputStart = std::chrono::steady_clock::now();
     CpuProbe::Scope cpuAudio(CpuProbe::Phase::AudioOutput);
     const int32_t bufferedBefore = audioPlayer->Buffered();

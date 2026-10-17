@@ -461,7 +461,9 @@ bool NativeA32WindowSession::LoadState(const std::filesystem::path &path,
   RestoreSavestatePicaTextureCache(runtime);
   RestoreSavestatePicaColorTargets(runtime);
   RestoreSavestatePicaPresentationState(runtime);
-  if (audioPlayer != nullptr && audioPlayer->IsInitialized()) {
+  if (hostAudioStream != nullptr) {
+    hostAudioStream->Flush();
+  } else if (audioPlayer != nullptr && audioPlayer->IsInitialized()) {
     audioPlayer->Flush();
   }
   if (hostAudioResampler.has_value()) {

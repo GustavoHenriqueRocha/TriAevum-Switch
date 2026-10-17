@@ -185,6 +185,8 @@ void NativeA32WindowSession::Finish() {
     rendererTiming = &phaseTiming;
   }
   CpuProbe::Thread.Active = false;
+  // The audio worker stops before anything below can tear the device down.
+  hostAudioStream.reset();
 
 #if defined(__SWITCH__)
   WriteSwitchBootStage(

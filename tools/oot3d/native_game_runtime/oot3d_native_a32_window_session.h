@@ -32,6 +32,7 @@
 #include "oot3d_native_a32_ctr_host.h"
 #include "oot3d_native_a32_dsp_hle.h"
 #include "oot3d_host_audio_resampler.h"
+#include "oot3d_host_audio_stream.h"
 #include "oot3d_native_a32_dsp_memory_adapter.h"
 #include "oot3d_native_a32_process_image.h"
 #include "oot3d_native_a32_registry.h"
@@ -450,6 +451,10 @@ private:
   std::optional<Oot3dNativeGame::HostAudioResampler> hostAudioResampler;
   std::vector<int16_t> hostAudioResampled;
   double hostAudioQueueEstimate = -1.0;
+  // Host audio off the game thread (stretch on a low queue, concealment of
+  // late frames, resampling, device queue). Null: the inline path above.
+  // Declared after audioPlayer so its worker stops before the player goes.
+  std::unique_ptr<Oot3dNativeGame::HostAudioStream> hostAudioStream;
   std::chrono::steady_clock::time_point phaseStart{};
   Oot3dNativeGame::NativeA32ProcessRunResult processResult;
   uint32_t frameCount = 0;

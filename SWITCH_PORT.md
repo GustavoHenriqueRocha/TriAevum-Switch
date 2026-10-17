@@ -117,6 +117,23 @@ Desempenho e usabilidade:
   herdava divisores de instância e amostrava um único texel. Áudio: teto da fila de áudio maior,
   reamostragem de alta qualidade e render thread abaixo da prioridade do áudio (chiado residual em estudo).
 
+### Áudio fora da thread do jogo (2026-10-17)
+- O DSP HLE (mixagem) continua na thread do jogo: cada quadro de áudio lê as regiões compartilhadas
+  do DSP, escreve status/aux/final_samples na memória do guest e sinaliza o guest, que roda logo em
+  seguida e escreve a configuração do próximo quadro (inclusive os buffers aux de reverb/eco). É uma
+  cadeia estritamente sequencial com o guest; levar para outra thread não paralelizaria nada.
+  Só as cópias de 2 × 64 KiB zeradas a cada quadro foram eliminadas (buffers persistentes).
+- O lado host (stretch, reamostragem 32728→48000, fila do SDL) roda numa thread própria
+  (núcleo 1/2, prioridade 0x2B), acordada a cada envio do jogo e a cada 4 ms.
+- Com a fila abaixo de 70% do alvo, períodos de pitch inteiros são inseridos (tempo até 1,5× mais
+  lento, sem mudar o tom); acima de 180%, removidos. Se o jogo atrasa e a fila chega a ~32 ms, o
+  último período é repetido (40 ms em nível cheio, depois fade de 80 ms até silêncio) e a volta é
+  contínua, em vez da pausa de re-prime. `logs/perf.txt` ganha `audio: ... inserted_ms concealed_ms
+  conceal_events starved min_queued pump_ms_*`.
+- A/B: `config/audio_thread` = `0` (mixagem host volta para a thread do jogo, stretch continua) e
+  `config/audio_stretch` = `0`; ambos `0` = caminho antigo idêntico. Desktop: `TRIAEVUM_AUDIO_THREAD=1`,
+  `TRIAEVUM_AUDIO_STRETCH=1`.
+
 ## Próximos passos
 
 - Opção para liberar o Master Quest sem zerar o jogo (flag de desbloqueio no save; `config/unlock_master_quest`, testar numa cópia do save).

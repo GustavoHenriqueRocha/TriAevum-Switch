@@ -1,6 +1,7 @@
 #include "oot3d_native_audio.h"
 #include "oot3d_native_audio_service.h"
 #include "oot3d_host_audio_resampler.h"
+#include "oot3d_host_audio_stream.h"
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,11 @@
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <thread>
+#include <utility>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -182,11 +188,220 @@ void TestHostAudioResampler() {
     }
 }
 
+std::vector<int16_t> MakeStereoTone(size_t firstFrame, size_t frames, double frequency,
+                                    double amplitude = 12000.0) {
+    constexpr double kPi = 3.14159265358979323846;
+    std::vector<int16_t> samples;
+    samples.reserve(frames * 2U);
+    for (size_t frame = firstFrame; frame < firstFrame + frames; ++frame) {
+        const double phase = 2.0 * kPi * frequency * static_cast<double>(frame) / 32728.0;
+        // A fundamental and a weaker overtone: a pitched, non-sinusoidal wave.
+        const double value = amplitude * (0.8 * std::sin(phase) + 0.2 * std::sin(3.0 * phase));
+        samples.push_back(static_cast<int16_t>(std::lrint(value)));
+        samples.push_back(static_cast<int16_t>(std::lrint(-0.5 * value)));
+    }
+    return samples;
+}
+
+int32_t MaximumStep(std::span<const int16_t> stereo) {
+    int32_t maximum = 0;
+    for (size_t index = 2; index < stereo.size(); ++index) {
+        maximum = std::max(maximum, std::abs(static_cast<int32_t>(stereo[index]) - stereo[index - 2U]));
+    }
+    return maximum;
+}
+
+// Rising zero crossings per second of the left channel over [first, end).
+double ZeroCrossingFrequency(std::span<const int16_t> stereo, size_t first, size_t end) {
+    size_t crossings = 0;
+    for (size_t frame = first + 1U; frame < end; ++frame) {
+        if (stereo[(frame - 1U) * 2U] < 0 && stereo[frame * 2U] >= 0) {
+            ++crossings;
+        }
+    }
+    return static_cast<double>(crossings) * 32728.0 / static_cast<double>(end - first);
+}
+
+// The host-side stretcher: an exact copy at ratio 1, pitch-preserving tempo
+// change without clicks, and a held period with a fade when the input is late.
+void TestHostAudioStretcher() {
+    using Oot3dNativeGame::HostAudioStretcher;
+    constexpr double kTone = 220.0;
+    const auto tone = MakeStereoTone(0, 32728, kTone);
+    const int32_t toneStep = MaximumStep(tone);
+    {
+        HostAudioStretcher stretcher;
+        std::vector<int16_t> output;
+        for (size_t offset = 0; offset < tone.size(); offset += 1090) {
+            const size_t count = std::min<size_t>(1090, tone.size() - offset);
+            stretcher.Process(std::span<const int16_t>(tone).subspan(offset, count), 1.0, 0, output);
+        }
+        Expect(output == tone, "stretcher at ratio 1 is a plain copy");
+    }
+    {
+        const size_t period = HostAudioStretcher::FindPeriod(tone.data(), 800, true);
+        const double expected = 32728.0 / kTone;
+        Expect(std::abs(static_cast<double>(period) - expected) <= 1.5 ||
+                   std::abs(static_cast<double>(period) - 2.0 * expected) <= 1.5,
+               "stretcher finds the pitch period");
+    }
+    for (const double ratio : {1.4, 0.8}) {
+        HostAudioStretcher stretcher;
+        std::vector<int16_t> output;
+        for (size_t offset = 0; offset < tone.size(); offset += 1090) {
+            const size_t count = std::min<size_t>(1090, tone.size() - offset);
+            stretcher.Process(std::span<const int16_t>(tone).subspan(offset, count), ratio, 0, output);
+        }
+        stretcher.Process({}, 1.0, 0, output);  // release what was held back
+        const double frames = static_cast<double>(output.size() / 2U);
+        Expect(std::abs(frames / 32728.0 - ratio) < 0.03, "stretcher tempo ratio");
+        Expect(MaximumStep(output) <= toneStep * 5 / 4 + 64, "stretcher splices without clicks");
+        const double frequency = ZeroCrossingFrequency(output, 0, output.size() / 2U);
+        Expect(std::abs(frequency - kTone) < kTone * 0.02, "stretcher keeps the pitch");
+    }
+    {
+        HostAudioStretcher::Settings settings;
+        HostAudioStretcher stretcher(settings);
+        std::vector<int16_t> output;
+        const auto first = MakeStereoTone(0, 6000, kTone);
+        stretcher.Process(first, 1.3, 0, output);  // low queue: holds a period back
+        const size_t beforeConceal = output.size() / 2U;
+        const size_t concealTotal = settings.ConcealFullFrames + settings.ConcealFadeFrames + 2000U;
+        for (size_t produced = 0; produced < concealTotal; produced += 500) {
+            stretcher.Process({}, 1.3, 500, output);
+        }
+        Expect(stretcher.Concealing() && stretcher.ConcealEvents() == 1U, "stretcher conceals a late input");
+        Expect(output.size() / 2U >= beforeConceal + concealTotal, "stretcher fills the requested frames");
+        Expect(MaximumStep(output) <= toneStep * 5 / 4 + 64, "concealment loops without clicks");
+        // Full level first, silence after the fade.
+        int32_t earlyPeak = 0;
+        for (size_t frame = beforeConceal; frame < beforeConceal + 600U; ++frame) {
+            earlyPeak = std::max(earlyPeak, std::abs(static_cast<int32_t>(output[frame * 2U])));
+        }
+        int32_t tonePeak = 0;
+        for (size_t frame = 0; frame < 6000U; ++frame) {
+            tonePeak = std::max(tonePeak, std::abs(static_cast<int32_t>(first[frame * 2U])));
+        }
+        Expect(earlyPeak * 10 > tonePeak * 9, "concealment keeps the level at first");
+        Expect(output[output.size() - 2U] == 0 && output[output.size() - 1U] == 0,
+               "concealment fades to silence");
+        // The real input continues the timeline: a ramp back, no step.
+        const size_t resumedAt = output.size() / 2U;
+        const auto second = MakeStereoTone(6000, 4000, kTone);
+        stretcher.Process(second, 1.0, 0, output);
+        Expect(!stretcher.Concealing(), "stretcher resumes with the input");
+        Expect(MaximumStep(std::span<const int16_t>(output).subspan((resumedAt - 1U) * 2U)) <=
+                   toneStep * 5 / 4 + 64,
+               "resume after concealment without a click");
+        Expect(output.back() == second.back(), "full level after the resume ramp");
+    }
+}
+
+// The host stream against a simulated device: a game frame that arrives late
+// is concealed instead of draining the device queue, and a game that runs
+// slower than real time is stretched instead of stuttering.
+void TestHostAudioStream() {
+    struct Device {
+        int64_t Queued = 0;
+        uint64_t EmptyTicks = 0;
+        bool Playing = false;
+    };
+    const auto run = [](bool stretch, const std::vector<int>& lateTicks, double speed) {
+        auto device = std::make_shared<Device>();
+        Oot3dNativeGame::HostAudioStream::Options options;
+        options.Thread = false;
+        options.Stretch = stretch;
+        options.TargetFrames = 4800;
+        options.DeviceFrames = 512;
+        Oot3dNativeGame::HostAudioStream::Sink sink;
+        sink.Buffered = [device]() { return static_cast<int32_t>(device->Queued); };
+        sink.Play = [device](const int16_t*, size_t samples) {
+            device->Queued += static_cast<int64_t>(samples / 2U);
+            if (device->Queued >= 4800) {
+                device->Playing = true;
+            }
+        };
+        sink.Flush = [device]() { device->Queued = 0; device->Playing = false; };
+        Oot3dNativeGame::HostAudioStream stream(options, sink);
+        // 4 ms ticks: the device plays 192 frames per tick once primed; the
+        // game delivers 160-frame DSP frames at `speed` of real time, except
+        // during the late ticks.
+        double owed = 0.0;
+        size_t frame = 0;
+        for (int tick = 0; tick < 2500; ++tick) {
+            const bool late = std::find(lateTicks.begin(), lateTicks.end(), tick) != lateTicks.end();
+            owed += 32728.0 * 0.004 * (tick < 250 ? 1.0 : speed);
+            std::vector<int16_t> input;
+            while (!late && owed >= 160.0) {
+                const auto chunk = MakeStereoTone(frame, 160, 330.0);
+                input.insert(input.end(), chunk.begin(), chunk.end());
+                frame += 160;
+                owed -= 160.0;
+            }
+            if (!input.empty()) {
+                stream.Submit(input);
+            } else {
+                stream.Pump();
+            }
+            if (device->Playing) {
+                if (device->Queued < 192) {
+                    ++device->EmptyTicks;  // the device ran out within the tick
+                }
+                device->Queued = std::max<int64_t>(0, device->Queued - 192);
+            }
+        }
+        return std::make_pair(device->EmptyTicks, stream.GetStats());
+    };
+    std::vector<int> stall;
+    for (int tick = 800; tick < 830; ++tick) {
+        stall.push_back(tick);  // 120 ms without a guest frame
+    }
+    const auto [plainStall, plainStallStats] = run(false, stall, 1.0);
+    const auto [stretchStall, stretchStallStats] = run(true, stall, 1.0);
+    Expect(plainStall > 0, "a 120 ms stall drains the plain queue");
+    Expect(stretchStall == 0 && stretchStallStats.ConcealEvents >= 1U,
+           "a 120 ms stall is concealed");
+    const auto [plainSlow, plainSlowStats] = run(false, {}, 0.8);
+    const auto [stretchSlow, stretchSlowStats] = run(true, {}, 0.8);
+    Expect(plainSlow > 0, "80% game speed drains the plain queue");
+    Expect(stretchSlow == 0 && stretchSlowStats.InsertedFrames > 0U,
+           "80% game speed is stretched");
+    {
+        // Worker thread: submissions reach the device, Flush clears it.
+        auto queued = std::make_shared<std::atomic<int64_t>>(0);
+        auto flushed = std::make_shared<std::atomic<int>>(0);
+        Oot3dNativeGame::HostAudioStream::Options options;
+        options.Thread = true;
+        Oot3dNativeGame::HostAudioStream::Sink sink;
+        sink.Buffered = [queued]() { return static_cast<int32_t>(queued->load()); };
+        sink.Play = [queued](const int16_t*, size_t samples) {
+            queued->fetch_add(static_cast<int64_t>(samples / 2U));
+        };
+        sink.Flush = [queued, flushed]() { queued->store(0); flushed->fetch_add(1); };
+        Oot3dNativeGame::HostAudioStream stream(options, sink);
+        for (size_t chunk = 0; chunk < 20; ++chunk) {
+            stream.Submit(MakeStereoTone(chunk * 545U, 545, 330.0));
+        }
+        for (int wait = 0; wait < 200 && queued->load() < 14000; ++wait) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        Expect(queued->load() > 14000, "audio worker delivers the submitted frames");
+        stream.Flush();
+        Expect(queued->load() == 0 && flushed->load() == 1, "audio worker flush");
+    }
+    std::cout << "host audio stream: stall empty ticks " << plainStall << " -> " << stretchStall
+              << ", 80% speed " << plainSlow << " -> " << stretchSlow << " (inserted "
+              << stretchSlowStats.InsertedFrames << ", concealed " << stretchSlowStats.ConcealedFrames
+              << ")\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     try {
         TestHostAudioResampler();
+        TestHostAudioStretcher();
+        TestHostAudioStream();
         // Without arguments the inputs come from the private extracted title
         // named by OOT3D_TEST_EXTRACT_ROOT (its romfs/ and exefs/; the sample
         // wave is the first effect of QueenSound's WARC_SE wave archive as
