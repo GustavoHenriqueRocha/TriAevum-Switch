@@ -6,6 +6,7 @@
 #include <fstream>
 #include "fast/renderer3ds/pica_surface_debug.h"
 #include "oot3d_native_room_shadow_shell.h"
+#include "oot3d_switch_threads.h"
 #include "fast/backends/gl_frame_profiler.h"
 #if defined(__SWITCH__)
 #include <malloc.h>
@@ -760,8 +761,55 @@ bool NativeA32WindowSession::RunFrame() {
              // Must stay small and constant (recycled batches).
              << " plan_batches_live=" << planStats.LiveBatches
              << " plan_batches_queued=" << planStats.QueuedBatches
-             << " plan_batches_allocated=" << planStats.AllocatedBatches;
+             << " plan_batches_allocated=" << planStats.AllocatedBatches
+             // Build-mutex contention, ms per host frame and count: render
+             // thread (resolves) and worker; resolve_locks = acquisitions by
+             // the resolves (runs of up to 32 draws, not one per draw).
+             << " plan_lock_wait_render_ms="
+             << perFrameMs(planStats.ConsumerLockWaitNanoseconds,
+                           windowPlanStats.ConsumerLockWaitNanoseconds)
+             << " plan_lock_waits_render="
+             << (planStats.ConsumerLockWaits - windowPlanStats.ConsumerLockWaits)
+             << " plan_lock_wait_worker_ms="
+             << perFrameMs(planStats.WorkerLockWaitNanoseconds,
+                           windowPlanStats.WorkerLockWaitNanoseconds)
+             << " plan_resolve_locks="
+             << (planStats.ConsumerLocks - windowPlanStats.ConsumerLocks)
+             << " plan_worker_idle_ms="
+             << perFrameMs(planStats.WorkerIdleNanoseconds,
+                           windowPlanStats.WorkerIdleNanoseconds);
         windowPlanStats = planStats;
+      }
+      // Waits between threads, ms per host frame: the guest blocked by the
+      // frames-in-flight limit (renderer behind) or in Drain/Run (synchronous
+      // renderer work), the render thread without commands (guest behind),
+      // and the pacer's tail (spin = busy-wait, oversleep = woke late).
+      {
+        static Oot3dNativeGame::NativeRenderCommandStream::WaitStats previousWaits{};
+        static Oot3dNativeGame::NativePacerTailCounters previousTail{};
+        const auto waits = renderStream.GetWaitStats();
+        const auto tail = realtimePacer.TailCounters();
+        const auto perFrameMs = [&](uint64_t now, uint64_t before) {
+          return static_cast<double>(now - before) / 1.0e6 / hostFrames;
+        };
+        perf << " sync: guest_wait_frames_ms="
+             << perFrameMs(waits.SubmitWaitNanoseconds, previousWaits.SubmitWaitNanoseconds)
+             << " guest_wait_frames_n=" << (waits.SubmitWaits - previousWaits.SubmitWaits)
+             << " guest_wait_drain_ms="
+             << perFrameMs(waits.DrainWaitNanoseconds, previousWaits.DrainWaitNanoseconds)
+             << " guest_wait_drain_n=" << (waits.DrainWaits - previousWaits.DrainWaits)
+             << " render_idle_ms="
+             << perFrameMs(waits.WorkerIdleNanoseconds, previousWaits.WorkerIdleNanoseconds)
+             << " signals_skipped=" << (waits.SkippedNotifies - previousWaits.SkippedNotifies)
+             << " pacer_spin_ms="
+             << perFrameMs(tail.SpinNanoseconds, previousTail.SpinNanoseconds)
+             << " pacer_oversleep_ms="
+             << perFrameMs(tail.OversleepNanoseconds, previousTail.OversleepNanoseconds)
+             << " pacer_oversleep_max_ms="
+             << static_cast<double>(realtimePacer.TakeMaximumOversleepNanoseconds()) / 1.0e6
+             << ' ' << Oot3dNativeGame::SwitchThreadPerfSummary();
+        previousWaits = waits;
+        previousTail = tail;
       }
       // Paced interpolation (config/fps60) and frame costs: frames of each
       // kind in the window, their GPU ms (GL_TIMESTAMP; gpu_timer=0 until

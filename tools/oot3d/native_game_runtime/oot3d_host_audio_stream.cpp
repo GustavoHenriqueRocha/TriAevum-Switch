@@ -624,11 +624,12 @@ void HostAudioStream::WorkerMain() {
 #if defined(__SWITCH__)
     // Above the render worker (0x2D) and the game's other threads (0x2C), like
     // SDL's own audio thread: it only runs for a fraction of a millisecond.
+    // Core 1 with the PICA plan worker, off the render worker's core 2
+    // (oot3d_switch_thread_layout.h).
+    PlaceSwitchThread(SwitchThreadRole::HostAudio);
     if (mOptions.SwitchPriority != 0) {
         svcSetThreadPriority(CUR_THREAD_HANDLE, mOptions.SwitchPriority);
     }
-    // Core 1 with the PICA plan worker, off the render worker's core 2.
-    (void)SetSwitchThreadCore(kSwitchAudioThreadCore);
 #endif
     const auto poll = std::chrono::microseconds(std::max<uint32_t>(mOptions.PollMicroseconds, 500U));
     for (;;) {

@@ -18,7 +18,20 @@
 namespace Oot3dNativeGame {
 namespace {
 
-constexpr auto kMaximumSpinDuration = std::chrono::microseconds(500);
+// Owner-only accumulation into a counter others read.
+void AddRelaxed(std::atomic<uint64_t>& counter, uint64_t value) noexcept {
+    counter.store(counter.load(std::memory_order_relaxed) + value,
+                  std::memory_order_relaxed);
+}
+
+uint64_t NanosecondsBetween(std::chrono::steady_clock::time_point from,
+                            std::chrono::steady_clock::time_point to) noexcept {
+    return to > from ? static_cast<uint64_t>(
+                           std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               to - from)
+                               .count())
+                     : 0U;
+}
 
 #ifdef _WIN32
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
@@ -147,10 +160,7 @@ void NativeRealtimeRefreshPacer::WaitForNextRefresh() {
         return;
     }
 
-    const auto spinDuration = std::min(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            kMaximumSpinDuration),
-        period / 8);
+    const auto spinDuration = std::min(mMaximumSpin, period / 8);
     const auto coarseDeadline = mNextDeadline - spinDuration;
     if (now < coarseDeadline) {
         const auto sleepStart = now;
@@ -158,14 +168,25 @@ void NativeRealtimeRefreshPacer::WaitForNextRefresh() {
         now = std::chrono::steady_clock::now();
         mStats.SleepSeconds +=
             std::chrono::duration<double>(now - sleepStart).count();
+        const uint64_t oversleep = NanosecondsBetween(coarseDeadline, now);
+        AddRelaxed(mTailOversleepNanoseconds, oversleep);
+        if (oversleep >
+            mTailMaximumOversleepNanoseconds.load(std::memory_order_relaxed)) {
+            mTailMaximumOversleepNanoseconds.store(oversleep,
+                                                   std::memory_order_relaxed);
+        }
     }
 
     const auto spinStart = now;
-    while ((now = std::chrono::steady_clock::now()) < mNextDeadline) {
-        std::atomic_signal_fence(std::memory_order_seq_cst);
+    if (spinDuration.count() > 0) {
+        while ((now = std::chrono::steady_clock::now()) < mNextDeadline) {
+            std::atomic_signal_fence(std::memory_order_seq_cst);
+        }
     }
     mStats.SpinSeconds +=
         std::chrono::duration<double>(now - spinStart).count();
+    AddRelaxed(mTailSpinNanoseconds, NanosecondsBetween(spinStart, now));
+    AddRelaxed(mTailWaits, 1U);
     ++mStats.Waits;
 }
 
@@ -209,6 +230,28 @@ void NativeRealtimeRefreshPacer::ResetDeadline() noexcept {
     mHasPresentationTime = false;
     mNextDeadline = std::chrono::steady_clock::now();
     mNanosecondRemainder = 0;
+}
+
+void NativeRealtimeRefreshPacer::SetMaximumSpin(
+    std::chrono::nanoseconds spin) noexcept {
+    mMaximumSpin = std::max(spin, std::chrono::nanoseconds::zero());
+}
+
+NativePacerTailCounters NativeRealtimeRefreshPacer::TailCounters() const noexcept {
+    NativePacerTailCounters counters;
+    counters.Waits = mTailWaits.load(std::memory_order_relaxed);
+    counters.SpinNanoseconds = mTailSpinNanoseconds.load(std::memory_order_relaxed);
+    counters.OversleepNanoseconds =
+        mTailOversleepNanoseconds.load(std::memory_order_relaxed);
+    counters.MaximumOversleepNanoseconds =
+        mTailMaximumOversleepNanoseconds.load(std::memory_order_relaxed);
+    return counters;
+}
+
+uint64_t NativeRealtimeRefreshPacer::TakeMaximumOversleepNanoseconds() noexcept {
+    // The owner may overwrite the reset with an older value: a perf window
+    // then shows the previous window's maximum, never a wrong total.
+    return mTailMaximumOversleepNanoseconds.exchange(0U, std::memory_order_relaxed);
 }
 
 bool NativeRealtimeRefreshPacer::Enabled() const noexcept {

@@ -1,6 +1,7 @@
 // Native A32 window session: setup (process image, host services, renderer, UI, initial state).
 #include "oot3d_native_a32_window_session.h"
 #include "oot3d_native_guest_overrides.h"
+#include "oot3d_switch_threads.h"
 #if defined(__SWITCH__)
 #include <EGL/egl.h>
 #include <glad/glad.h>
@@ -1205,6 +1206,12 @@ void NativeA32WindowSession::Setup() {
   realtimePacer.Configure(presentationPacingPolicy.Enabled &&
                               !hostArgs.ThroughputBenchmark,
                           presentationPacingPolicy.TargetRateHz);
+#if defined(__SWITCH__)
+  // No busy-wait tail on the render thread by default (config/thread_layout:
+  // pacer_spin_us=N, or the legacy layout's 500 us, for A/B).
+  realtimePacer.SetMaximumSpin(std::chrono::microseconds(
+      Oot3dNativeGame::ActiveSwitchThreadLayout().PacerSpinMicroseconds));
+#endif
   visualInterpolationEnabled =
       Oot3dNativeGame::ShouldUseNativeVisualInterpolation(
           frameRateContract,

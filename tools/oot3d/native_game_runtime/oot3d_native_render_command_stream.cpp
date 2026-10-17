@@ -2,10 +2,7 @@
 #include "oot3d_switch_threads.h"
 #include "fast/backends/gl_frame_profiler.h"
 
-#if defined(__SWITCH__)
-#include <switch.h>
-#endif
-
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 
@@ -13,6 +10,28 @@ namespace Oot3dNativeGame {
 namespace {
 
 thread_local bool tInCommand = false;
+
+uint64_t NanosecondsSince(std::chrono::steady_clock::time_point start) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - start)
+            .count());
+}
+
+// cv.wait(lock, ready), counting the waiter and the blocked time only when
+// it really blocks.
+template <typename Ready>
+void CountedWait(std::condition_variable& cv,
+                 std::unique_lock<std::mutex>& lock, uint32_t& waiters,
+                 uint64_t& waits, uint64_t& nanoseconds, Ready ready) {
+    if (ready()) return;
+    const auto start = std::chrono::steady_clock::now();
+    ++waiters;
+    cv.wait(lock, ready);
+    --waiters;
+    ++waits;
+    nanoseconds += NanosecondsSince(start);
+}
 thread_local bool tSynchronous = false;
 
 struct CommandScope {
@@ -57,6 +76,12 @@ uint64_t NativeRenderCommandStream::ExecutedCommands() const noexcept {
     return mExecuted;
 }
 
+NativeRenderCommandStream::WaitStats
+NativeRenderCommandStream::GetWaitStats() const noexcept {
+    std::lock_guard lock(mMutex);
+    return mWaitStats;
+}
+
 void NativeRenderCommandStream::Submit(Command command, bool endsFrame) {
     Enqueue(std::move(command), endsFrame, false);
 }
@@ -80,10 +105,12 @@ void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
     std::unique_lock lock(mMutex);
     RethrowPendingFailureLocked(lock);
     if (endsFrame) {
-        mProgress.wait(lock, [&] {
-            return mFailure != nullptr || ShutdownRequested() ||
-                   mFramesQueued < mMaxFramesInFlight;
-        });
+        CountedWait(mProgress, lock, mProgressWaiters,
+                    mWaitStats.SubmitWaits, mWaitStats.SubmitWaitNanoseconds,
+                    [&] {
+                        return mFailure != nullptr || ShutdownRequested() ||
+                               mFramesQueued < mMaxFramesInFlight;
+                    });
         if (ShutdownRequested()) return;
         RethrowPendingFailureLocked(lock);
         ++mFramesQueued;
@@ -91,7 +118,11 @@ void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
     if (ShutdownRequested()) return;
     mQueue.push_back({std::move(command), endsFrame, synchronous});
     ++mSubmitted;
-    mWork.notify_one();
+    if (mWorkerWaiting) {
+        mWork.notify_one();
+    } else {
+        ++mWaitStats.SkippedNotifies;
+    }
 }
 
 bool NativeRenderCommandStream::Run(Command command) {
@@ -111,9 +142,10 @@ bool NativeRenderCommandStream::Run(Command command) {
 void NativeRenderCommandStream::Drain() {
     if (mMode == Mode::Inline || !mWorker.joinable()) return;
     std::unique_lock lock(mMutex);
-    mProgress.wait(lock, [&] {
-        return mFailure != nullptr || (mQueue.empty() && !mBusy);
-    });
+    CountedWait(mProgress, lock, mProgressWaiters, mWaitStats.DrainWaits,
+                mWaitStats.DrainWaitNanoseconds, [&] {
+                    return mFailure != nullptr || (mQueue.empty() && !mBusy);
+                });
     // A failure behind an exit request is not reported: Shutdown drops it.
     if (ShutdownRequested()) return;
     RethrowPendingFailureLocked(lock);
@@ -152,7 +184,10 @@ size_t NativeRenderCommandStream::Shutdown(Command last) noexcept {
         {
             std::unique_lock lock(mMutex);
             // The command already running finishes; nothing after it starts.
-            mProgress.wait(lock, [&] { return !mBusy; });
+            CountedWait(mProgress, lock, mProgressWaiters,
+                        mWaitStats.DrainWaits,
+                        mWaitStats.DrainWaitNanoseconds,
+                        [&] { return !mBusy; });
             if (last) {
                 Entry entry;
                 entry.Work = std::move(last);
@@ -207,18 +242,21 @@ void NativeRenderCommandStream::StopWorker() {
 }
 
 void NativeRenderCommandStream::WorkerLoop() {
-#if defined(__SWITCH__)
-    // One step below the game and audio threads (0x2C): Horizon does not
-    // time-slice equal priorities, so a busy render worker sharing a core
-    // with the audio thread starved it and the sound crackled.
-    svcSetThreadPriority(threadGetCurHandle(), 0x2D);
-    // The heaviest thread after the game: core 2 to itself (the plan worker
-    // and audio take core 1) instead of wherever creation order put it.
-    (void)SetSwitchThreadCore(kSwitchRenderThreadCore);
-#endif
+    // Switch: 0x2D, below the game (0x2C) and audio (0x2B) threads: Horizon
+    // does not time-slice equal priorities, so a busy render worker sharing a
+    // core with the audio thread starved it and the sound crackled. Core 2
+    // (layout fixed) or cores 1|2 (float): oot3d_switch_thread_layout.h.
+    PlaceSwitchThread(SwitchThreadRole::Render);
     std::unique_lock lock(mMutex);
     for (;;) {
-        mWork.wait(lock, [&] { return mStop || !mQueue.empty(); });
+        if (!mStop && mQueue.empty()) {
+            const auto idleStart = std::chrono::steady_clock::now();
+            mWorkerWaiting = true;
+            mWork.wait(lock, [&] { return mStop || !mQueue.empty(); });
+            mWorkerWaiting = false;
+            ++mWaitStats.WorkerIdleWaits;
+            mWaitStats.WorkerIdleNanoseconds += NanosecondsSince(idleStart);
+        }
         if (mQueue.empty()) return;  // stopping with nothing left to run
         Entry entry = std::move(mQueue.front());
         mQueue.pop_front();
@@ -229,11 +267,13 @@ void NativeRenderCommandStream::WorkerLoop() {
             lock.unlock();
             entry = {};
             lock.lock();
-            mProgress.notify_all();
+            if (mProgressWaiters != 0U) mProgress.notify_all();
             continue;
         }
         mBusy = true;
         lock.unlock();
+        // Where the render thread runs, once per frame (perf.txt threads:).
+        if (entry.EndsFrame) NoteSwitchThreadCore();
         std::exception_ptr failure;
         try {
             CommandScope scope(entry.Synchronous);
@@ -252,7 +292,11 @@ void NativeRenderCommandStream::WorkerLoop() {
         } else {
             ++mExecuted;
         }
-        mProgress.notify_all();
+        if (mProgressWaiters != 0U) {
+            mProgress.notify_all();
+        } else {
+            ++mWaitStats.SkippedNotifies;
+        }
     }
 }
 

@@ -245,6 +245,13 @@ target_include_directories(oot3d_native_render_command_stream_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/three_ds_recomp/include)
 oot3d_target_defaults(oot3d_native_render_command_stream_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Switch thread layout policy (config/thread_layout): pure, host-testable.
+add_executable(oot3d_switch_thread_layout_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_switch_thread_layout_tests.cpp
+)
+target_compile_features(oot3d_switch_thread_layout_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_switch_thread_layout_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Leaving the game with frames in flight (run under ASan and TSan).
 add_executable(oot3d_native_render_shutdown_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_render_shutdown_tests.cpp

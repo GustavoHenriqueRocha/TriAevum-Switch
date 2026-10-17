@@ -86,6 +86,24 @@ class NativeRenderCommandStream final {
     [[nodiscard]] bool InSynchronousCommand() const noexcept;
     [[nodiscard]] uint64_t ExecutedCommands() const noexcept;
 
+    // Time spent blocked on the stream, cumulative (logs/perf.txt keeps the
+    // previous copy and prints the difference). Clocks are read only when a
+    // wait actually blocks.
+    struct WaitStats {
+        // Submitter blocked by MaxFramesInFlight (the renderer is behind).
+        uint64_t SubmitWaits = 0U;
+        uint64_t SubmitWaitNanoseconds = 0U;
+        // Submitter blocked in Drain / Run / Shutdown (synchronous work).
+        uint64_t DrainWaits = 0U;
+        uint64_t DrainWaitNanoseconds = 0U;
+        // Worker without a command (the guest is behind).
+        uint64_t WorkerIdleWaits = 0U;
+        uint64_t WorkerIdleNanoseconds = 0U;
+        // Condition-variable signals skipped because nobody waited.
+        uint64_t SkippedNotifies = 0U;
+    };
+    [[nodiscard]] WaitStats GetWaitStats() const noexcept;
+
   private:
     struct Entry {
         Command Work;
@@ -116,6 +134,11 @@ class NativeRenderCommandStream final {
     uint64_t mSubmitted = 0U;
     std::atomic<bool> mShutdown{false};
     uint64_t mDiscarded = 0U;
+    // Waiters, under mMutex: signals go out only when someone waits (each
+    // one is a kernel call on Horizon).
+    bool mWorkerWaiting = false;
+    uint32_t mProgressWaiters = 0U;
+    WaitStats mWaitStats;
 };
 
 } // namespace Oot3dNativeGame

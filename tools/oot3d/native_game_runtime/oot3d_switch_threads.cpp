@@ -1,19 +1,31 @@
 // Switch thread placement (linked with -Wl,--wrap=pthread_create).
 //
 // libnx creates every pthread on the process's default core (core 0) at
-// priority 0x3B, below the main thread's 0x2C, with a 128 KiB stack. The
-// render worker, audio and the shader warm-up thread would then share the
-// game's core and run only while it waits; Horizon does not time-slice equal
-// priorities either. Here the main (game) thread keeps core 0 to itself and
-// every other thread alternates between cores 1 and 2 at the main thread's
-// priority, with a stack large enough for Mesa's GLSL compiler.
-// (Approach taken from centollOS/SwitchWaker switch/native/source/thread_wrap.c.)
+// priority 0x3B with a 128 KiB stack. Here every new pthread gets a 4 MiB
+// stack (Mesa's GLSL compiler) and starts as a service thread of the active
+// layout (oot3d_switch_thread_layout.h): by default priority 0x3B on cores
+// 1|2, below everything that draws or plays sound, never on the game's core
+// 0. The threads that matter (render worker, PICA plan worker, host audio)
+// ask for their role when they start; SDL's audio thread is recognized by
+// its TIME_CRITICAL request.
+//
+// Before (layout "legacy", kept for A/B) every pthread ran at the game's
+// priority 0x2C on core 1 or 2, so spdlog's writer, Mesa's shader-cache
+// maintenance (compaction), the resource pool and the loaders preempted the
+// render worker (0x2D) whenever they had work: Horizon does not time-slice
+// any priority but 0x3B.
+// (Wrapping approach from centollOS/SwitchWaker switch/native/source/thread_wrap.c.)
 #if defined(__SWITCH__)
 #include <switch.h>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <mutex>
 #include <pthread.h>
+#include <sstream>
+#include <string>
 
 #include "oot3d_switch_threads.h"
 
@@ -23,10 +35,11 @@ extern "C" Result __real_threadCreate(Thread* t, ThreadFunc entry, void* arg, vo
                                       size_t stack_sz, int prio, int cpuid);
 extern "C" void* __aarch64_read_tp();
 
+namespace Oot3dNativeGame {
 namespace {
 
-constexpr int kThreadPriority = 0x2C;
 constexpr size_t kMinimumStackSize = 4U * 1024U * 1024U;
+constexpr const char* kLayoutPath = "sdmc:/switch/oot3dre/config/thread_layout";
 
 std::atomic<int> gNextCore{1};
 
@@ -65,24 +78,203 @@ uint32_t ApplicationCoreMask() {
     return static_cast<uint32_t>(mask) & 0x7U;
 }
 
+// ---- layout (read once) ----------------------------------------------------
+
+SwitchThreadLayoutConfig ReadLayout() {
+    char text[128] = {};
+    if (FILE* file = std::fopen(kLayoutPath, "rb")) {
+        const size_t read = std::fread(text, 1, sizeof(text) - 1, file);
+        std::fclose(file);
+        text[read] = '\0';
+        return ParseSwitchThreadLayoutConfig(std::string_view(text, read));
+    }
+    return ParseSwitchThreadLayoutConfig({});
+}
+
+const SwitchThreadLayoutConfig& Layout() {
+    // Function-local static: thread-safe, read on the first placement (the
+    // main thread's, before any pthread exists in practice).
+    static const SwitchThreadLayoutConfig config = ReadLayout();
+    return config;
+}
+
+// ---- registry of live threads (perf summary) -----------------------------------
+
+struct ThreadRecord {
+    Handle ThreadHandle = INVALID_HANDLE;  // INVALID_HANDLE: free slot
+    SwitchThreadRole Role = SwitchThreadRole::Service;
+    uint64_t LastTicks = 0;   // summary reader only
+    bool HasLastTicks = false;
+    // Written only by the owning thread (load + store, no RMW); read by the
+    // summary. Reset by the summary under the registry lock is not needed:
+    // it keeps its own previous copy.
+    std::array<std::atomic<uint32_t>, 3> CoreSeen{};
+    std::array<uint32_t, 3> LastCoreSeen{};
+};
+
+std::mutex gRegistryMutex;
+std::array<ThreadRecord, 48> gRecords;
+uint64_t gLastSummaryTick = 0;
+thread_local ThreadRecord* tRecord = nullptr;
+
+void RegisterCurrentThread(SwitchThreadRole role) {
+    const Handle self = threadGetCurHandle();
+    std::lock_guard lock(gRegistryMutex);
+    if (tRecord == nullptr) {
+        for (auto& record : gRecords) {
+            if (record.ThreadHandle == INVALID_HANDLE) {
+                record.ThreadHandle = self;
+                record.HasLastTicks = false;
+                for (size_t core = 0; core < 3; ++core) {
+                    record.CoreSeen[core].store(0, std::memory_order_relaxed);
+                    record.LastCoreSeen[core] = 0;
+                }
+                tRecord = &record;
+                break;
+            }
+        }
+    }
+    if (tRecord != nullptr) {
+        tRecord->Role = role;
+    }
+}
+
+void UnregisterCurrentThread() {
+    std::lock_guard lock(gRegistryMutex);
+    if (tRecord != nullptr) {
+        tRecord->ThreadHandle = INVALID_HANDLE;
+        tRecord = nullptr;
+    }
+}
+
+void ApplyPlacement(SwitchThreadRole role, int alternateCore) {
+    const SwitchThreadPlacement placement =
+        ResolveSwitchThreadPlacement(Layout().Layout, role, ApplicationCoreMask());
+    const Handle self = threadGetCurHandle();
+    svcSetThreadPriority(self, placement.Priority);
+    if (placement.IdealCore == -2) {
+        if (alternateCore >= 0) {
+            svcSetThreadCoreMask(self, alternateCore, 1U << alternateCore);
+        }
+    } else if (placement.IdealCore >= 0 && placement.CoreMask != 0U) {
+        svcSetThreadCoreMask(self, placement.IdealCore, placement.CoreMask);
+    }
+    RegisterCurrentThread(role);
+}
+
 struct Trampoline {
     void* (*Start)(void*);
     void* Argument;
-    int Core;
+    int AlternateCore;  // legacy layout only
 };
 
 void* RunPlaced(void* raw) {
     const Trampoline trampoline = *static_cast<Trampoline*>(raw);
     delete static_cast<Trampoline*>(raw);
-    const Handle self = threadGetCurHandle();
-    svcSetThreadPriority(self, kThreadPriority);
-    if (trampoline.Core >= 0) {
-        svcSetThreadCoreMask(self, trampoline.Core, 1U << trampoline.Core);
-    }
-    return trampoline.Start(trampoline.Argument);
+    ApplyPlacement(SwitchThreadRole::Service, trampoline.AlternateCore);
+    void* const result = trampoline.Start(trampoline.Argument);
+    UnregisterCurrentThread();
+    return result;
 }
 
 } // namespace
+
+void PlaceSwitchThread(SwitchThreadRole role) {
+    ApplyPlacement(role, -1);
+}
+
+void NoteSwitchThreadCore() {
+    ThreadRecord* const record = tRecord;
+    if (record == nullptr) {
+        return;
+    }
+    const uint32_t core = svcGetCurrentProcessorNumber();
+    if (core < 3U) {
+        auto& counter = record->CoreSeen[core];
+        counter.store(counter.load(std::memory_order_relaxed) + 1U,
+                      std::memory_order_relaxed);
+    }
+}
+
+SwitchThreadLayoutConfig ActiveSwitchThreadLayout() {
+    return Layout();
+}
+
+std::string SwitchThreadPerfSummary() {
+    struct RoleTotals {
+        double Percent = 0.0;
+        uint32_t Threads = 0;
+        uint32_t Measured = 0;
+        std::array<uint64_t, 3> Cores{};
+    };
+    std::array<RoleTotals, static_cast<size_t>(SwitchThreadRole::Count)> totals{};
+    const uint64_t now = armGetSystemTick();
+    {
+        std::lock_guard lock(gRegistryMutex);
+        const uint64_t window = gLastSummaryTick != 0 ? now - gLastSummaryTick : 0;
+        gLastSummaryTick = now;
+        for (auto& record : gRecords) {
+            if (record.ThreadHandle == INVALID_HANDLE) {
+                continue;
+            }
+            auto& role = totals[static_cast<size_t>(record.Role)];
+            ++role.Threads;
+            uint64_t ticks = 0;
+            Result result = svcGetInfo(&ticks, InfoType_ThreadTickCount, record.ThreadHandle,
+                                       UINT64_MAX);
+            if (R_FAILED(result)) {
+                result = svcGetInfo(&ticks, InfoType_ThreadTickCountDeprecated,
+                                    record.ThreadHandle, UINT64_MAX);
+            }
+            if (R_SUCCEEDED(result)) {
+                if (record.HasLastTicks && window != 0 && ticks >= record.LastTicks) {
+                    role.Percent += static_cast<double>(ticks - record.LastTicks) * 100.0 /
+                                    static_cast<double>(window);
+                    ++role.Measured;
+                }
+                record.LastTicks = ticks;
+                record.HasLastTicks = true;
+            }
+            for (size_t core = 0; core < 3; ++core) {
+                const uint32_t seen = record.CoreSeen[core].load(std::memory_order_relaxed);
+                role.Cores[core] += seen - record.LastCoreSeen[core];
+                record.LastCoreSeen[core] = seen;
+            }
+        }
+    }
+    const auto& layout = Layout();
+    std::ostringstream text;
+    text.setf(std::ios::fixed);
+    text.precision(1);
+    text << "threads: layout=" << SwitchThreadLayoutName(layout.Layout)
+         << (layout.Valid ? "" : "(invalid)") << " pacer_spin_us=" << layout.PacerSpinMicroseconds;
+    // Per role: CPU % of one core over the window (sum over its threads),
+    // "/nN" when several threads share the role, "@c0:c1:c2" commands or
+    // batches seen on each core (threads that note it).
+    for (size_t index = 0; index < totals.size(); ++index) {
+        const auto& role = totals[index];
+        if (role.Threads == 0) {
+            continue;
+        }
+        text << ' ' << SwitchThreadRoleName(static_cast<SwitchThreadRole>(index)) << "_cpu=";
+        if (role.Measured != 0) {
+            text << role.Percent;
+        } else {
+            text << "na";
+        }
+        if (role.Threads > 1) {
+            text << "/n" << role.Threads;
+        }
+        if (role.Cores[0] + role.Cores[1] + role.Cores[2] != 0) {
+            text << '@' << role.Cores[0] << ':' << role.Cores[1] << ':' << role.Cores[2];
+        }
+    }
+    return text.str();
+}
+
+} // namespace Oot3dNativeGame
+
+using Oot3dNativeGame::ApplicationCoreMask;
 
 extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
                                      void* (*start)(void*), void* arg) {
@@ -92,21 +284,26 @@ extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* at
     if (attr != nullptr) {
         pthread_attr_getstacksize(attr, &stackSize);
     }
-    pthread_attr_setstacksize(&placed, stackSize > kMinimumStackSize ? stackSize : kMinimumStackSize);
+    pthread_attr_setstacksize(&placed, stackSize > Oot3dNativeGame::kMinimumStackSize
+                                           ? stackSize
+                                           : Oot3dNativeGame::kMinimumStackSize);
 
-    const uint32_t cores = ApplicationCoreMask() & ~1U; // core 0 belongs to the game thread
+    // Legacy layout: alternate cores 1/2 by creation order (core 0 belongs to
+    // the game thread). The other layouts ignore it.
+    const uint32_t cores = ApplicationCoreMask() & ~1U;
     int core = -1;
     if (cores != 0U) {
         for (int attempt = 0; attempt < 3; ++attempt) {
-            const int candidate = 1 + (gNextCore.fetch_add(1) & 1);
+            const int candidate = 1 + (Oot3dNativeGame::gNextCore.fetch_add(1) & 1);
             if ((cores & (1U << candidate)) != 0U) {
                 core = candidate;
                 break;
             }
         }
     }
-    auto* trampoline = new Trampoline{start, arg, core};
-    const int result = __real_pthread_create(thread, &placed, RunPlaced, trampoline);
+    auto* trampoline = new Oot3dNativeGame::Trampoline{start, arg, core};
+    const int result =
+        __real_pthread_create(thread, &placed, Oot3dNativeGame::RunPlaced, trampoline);
     pthread_attr_destroy(&placed);
     if (result != 0) {
         delete trampoline;
@@ -116,8 +313,9 @@ extern "C" int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* at
 
 extern "C" Result __wrap_threadCreate(Thread* t, ThreadFunc entry, void* arg, void* stack_mem,
                                       size_t stack_sz, int prio, int cpuid) {
-    auto* wrapped = new ThreadEntry{entry, arg};
-    const Result result = __real_threadCreate(t, RunThreadEntry, wrapped, stack_mem, stack_sz, prio, cpuid);
+    auto* wrapped = new Oot3dNativeGame::ThreadEntry{entry, arg};
+    const Result result = __real_threadCreate(t, Oot3dNativeGame::RunThreadEntry, wrapped,
+                                              stack_mem, stack_sz, prio, cpuid);
     if (R_FAILED(result)) {
         delete wrapped;
     }
@@ -127,38 +325,24 @@ extern "C" Result __wrap_threadCreate(Thread* t, ThreadFunc entry, void* arg, vo
 // SDL's audio thread asks for SDL_THREAD_PRIORITY_TIME_CRITICAL when it
 // starts (SDL_RunAudio). devkitPro's SDL 2.28 maps every priority except HIGH
 // to 0x3B (SDL_SYS_SetThreadPriority: HIGH -> 0x2B, anything else -> 0x3B),
-// which overrode the 0x2C set above: the thread that refills the audio
-// renderer every 5 ms ran below the render worker sharing its core and could
-// only run when that worker waited, starving the voice (constant crackle).
-// Time-critical now maps to 0x2B, ahead of the game's threads (it only copies
-// a buffer per audren frame).
+// which would leave the thread that refills the audio renderer every 5 ms
+// below the render worker and starve the voice (constant crackle). It gets
+// the SdlAudio role: 0x2B, ahead of the game's threads (it only copies a
+// buffer per audren frame), and core 1 with the host audio thread instead of
+// wherever creation order put it (legacy: priority only).
 extern "C" int __real_SDL_SetThreadPriority(int priority);
 extern "C" int __wrap_SDL_SetThreadPriority(int priority) {
     constexpr int kSdlThreadPriorityTimeCritical = 3;
-    constexpr int kAudioThreadPriority = 0x2B;
-    if (priority == kSdlThreadPriorityTimeCritical &&
-        R_SUCCEEDED(svcSetThreadPriority(CUR_THREAD_HANDLE, kAudioThreadPriority))) {
+    if (priority == kSdlThreadPriorityTimeCritical) {
+        Oot3dNativeGame::PlaceSwitchThread(Oot3dNativeGame::SwitchThreadRole::SdlAudio);
         return 0;
     }
     return __real_SDL_SetThreadPriority(priority);
 }
-// See oot3d_switch_threads.h. The wrapper's alternating placement put the
-// heavy render worker and the PICA plan worker on the same core while the
-// other stayed almost idle; the threads that matter now ask for their core.
-bool SetSwitchThreadCore(int core) {
-    if (core < 0 || core > 2 || (ApplicationCoreMask() & (1U << core)) == 0U) {
-        return false;
-    }
-    return R_SUCCEEDED(svcSetThreadCoreMask(threadGetCurHandle(), core, 1U << core));
-}
 
 // Called once from main: the game thread runs alone on core 0.
 void PlaceSwitchMainThread() {
-    MirrorTlsPointer();
-    const Handle self = threadGetCurHandle();
-    svcSetThreadPriority(self, kThreadPriority);
-    if ((ApplicationCoreMask() & 1U) != 0U) {
-        svcSetThreadCoreMask(self, 0, 1U);
-    }
+    Oot3dNativeGame::MirrorTlsPointer();
+    Oot3dNativeGame::PlaceSwitchThread(Oot3dNativeGame::SwitchThreadRole::Game);
 }
 #endif

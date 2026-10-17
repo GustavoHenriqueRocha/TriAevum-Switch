@@ -36,8 +36,9 @@ Desempenho e usabilidade:
 - **Cache de shaders em disco**: Mesa do devkitPro reconstruído com os patches de cache dos ports
   de Wind Waker do centollOS (`MESA_SHADER_CACHE_DIR=sdmc:/switch/oot3dre/mesacache`); shaders já
   vistos carregam em ~12 ms em vez de 1–3 s. Veja `docs/OOT3D_SWITCH_WHOLE_AOT_PORT.md`.
-- **Threads**: jogo sozinho no core 0; demais threads nos cores 1/2 com a prioridade do jogo e pilha
-  de 4 MiB (`oot3d_switch_threads.cpp`, `--wrap=pthread_create`).
+- **Threads**: jogo sozinho no core 0; render thread, worker de planos e áudio com papel próprio;
+  demais threads como serviço (0x3B, núcleos 1|2), pilha de 4 MiB (`oot3d_switch_threads.cpp`,
+  `--wrap=pthread_create`; política em `oot3d_switch_thread_layout.h`, A/B em `config/thread_layout`).
 - **Render thread** (opcional): arquivo `config/parallel_presentation` no SD.
 - **Resolução interna** (opcional): arquivo `config/resolution_scale` no SD com `1`, `2` ou `3`
   (ausente = 2 no Switch, 1 no PC). Alvos PICA, depth/stencil, sombras e imagens de display
@@ -237,9 +238,53 @@ Desempenho e usabilidade:
   recursos da submissão são liberados: o tráfego de heap é igual ao serial. `perf.txt` mostra
   `plan_batches_live/queued/allocated` (devem ficar pequenos e constantes). Teste de longa duração:
   `oot3d_native_pica_deferred_plan_soak_tests` (2400 quadros × 160 draws, nos três modos).
-- Núcleos fixos (`SetSwitchThreadCore`, `oot3d_switch_threads.h`; vale só se a máscara do processo
+- Núcleos fixos (`PlaceSwitchThread`, `oot3d_switch_threads.h`; vale só se a máscara do processo
   permitir): render thread no núcleo 2; worker de planos PICA e thread de áudio no núcleo 1. Antes a
   ordem de criação punha a render thread e o worker no mesmo núcleo, com o outro quase ocioso.
+
+### Escalonamento das threads (2026-10-17)
+Regras do Horizon (confirmadas pelo StevensND/nfsmw-nx): só a prioridade 0x3B reveza tempo; em
+qualquer outra, uma thread ocupada bloqueia as de prioridade igual/menor no mesmo núcleo, mesmo com
+outros núcleos ociosos; máscara de um núcleo nunca migra.
+
+| Thread | Antes (núcleo, prio) | Agora `fixed` (padrão) | `float` | Espera |
+|---|---|---|---|---|
+| Jogo (main: CPU guest, DSP HLE, submissão) | 0, 0x2C | 0, 0x2C | 0, 0x2C | condvar (frames em voo, Drain) |
+| Render thread (`NativeRenderCommandStream`) | 2, 0x2D | 2, 0x2D | 1\|2 (ideal 2), 0x2D | condvar; pacer: dormir + spin 500 us → só dormir |
+| Worker de planos PICA | 1, 0x2E | 1, 0x2E | 1\|2 (ideal 1), 0x2E | condvar; mutex de build |
+| Áudio do host (`HostAudioStream`) | 1, 0x2B | 1, 0x2B | 1, 0x2B | condvar com timeout 4 ms |
+| Áudio do SDL (audren, TIME_CRITICAL) | núcleo da criação (1 ou 2), 0x2B | 1, 0x2B | 1, 0x2B | audren (bloqueante) |
+| spdlog (escritor assíncrono) | 1 ou 2, **0x2C** | 1\|2, 0x3B; fila cheia descarta o mais antigo | idem | condvar |
+| Mesa: fila do cache de shader em disco (util_queue) | 1 ou 2, **0x2C** | 1\|2, 0x3B | idem | condvar |
+| ResourceManager (BS::thread_pool), sombra de salas, texture pack, prebuild de sol interno | 1 ou 2, **0x2C** | 1\|2, 0x3B | idem | condvar |
+| SDL joystick/eventos | — (sem thread no Switch: polling na thread do jogo) | — | — | — |
+
+Sem glthread, o Mesa compila os shaders na render thread (nenhuma thread de compilação própria).
+Antes, toda pthread de serviço nascia na prioridade do jogo (0x2C) e preemptava a render thread
+(0x2D) e o worker (0x2E) sempre que tinha trabalho (escrita de log, compactação do cache do Mesa,
+carregamentos).
+
+- **`config/thread_layout`** (primeira palavra; ausente = `fixed`): `fixed`, `float` (render thread
+  e worker com máscara 1|2 — o nfsmw-nx viu o pior caso piorar com a render thread fixa) ou
+  `legacy` (comportamento anterior exato, incluindo o spin de 500 us). Opção `pacer_spin_us=N`
+  (0–4000) depois do modo, p. ex. `float pacer_spin_us=200`.
+- **Espera ativa**: o pacer não gira mais antes do prazo (`svcSleepThread` acorda no prazo); a
+  `NativeRenderCommandStream` só sinaliza condvar quando alguém espera (cada sinal é uma chamada ao
+  kernel); o worker de planos verifica o pedido de parada por um atômico, sem lock por draw.
+- **Atômicos por draw** (A57 sem LSE): contador de placeholders por lote (somado no `Publish`),
+  contadores do worker por lote; os resolves na render thread pegam o mutex de build uma vez a cada
+  sequência de até 32 draws do mesmo lote (a sequência termina logo depois de um draw construído
+  ali, para o worker não esperar).
+- **`perf.txt`**: `plan_lock_wait_render_ms/_worker_ms` (contenção do mutex de build),
+  `plan_resolve_locks`, `plan_worker_idle_ms`; `sync: guest_wait_frames_ms` (jogo esperando a render
+  thread), `guest_wait_drain_ms`, `render_idle_ms` (render thread esperando o jogo),
+  `signals_skipped`, `pacer_spin_ms`, `pacer_oversleep_ms/_max_ms`; `threads: layout=… <papel>_cpu=%
+  @c0:c1:c2` (CPU de cada papel por `svcGetInfo(ThreadTickCount)` e onde a render thread/worker
+  foram vistos rodando).
+- **Como medir (A/B)**: mesma cena e mesmo save, 2–3 min por modo, gravando `config/thread_layout`
+  com `fixed`, `float` e `legacy`; comparar `fps`, pior quadro, `guest_wait_frames_ms` (cai = render
+  thread menos atrasada), `pacer_oversleep_max_ms` (se passar de ~0,5 ms, testar `pacer_spin_us=200`)
+  e, em `float`, quanto `render@…` aparece no núcleo 1.
 
 ### fps60 de verdade e economia de GPU no backend GL (2026-10-17)
 - **fps60 não apresentava a 60 Hz**: o pacer e a cadência de amostras vêm do modo `FrameRate` das

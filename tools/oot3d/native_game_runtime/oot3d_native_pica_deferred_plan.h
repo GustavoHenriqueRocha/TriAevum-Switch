@@ -41,6 +41,9 @@ struct Oot3dPicaDeferredPlanBatch {
     std::vector<SlotStatus> Status;
     std::vector<std::string> Errors;
     bool Published = false;
+    // Placeholders made by MakeDeferredPlan (guest thread only): counted
+    // into the builder's stats once, at Publish, not with an atomic per draw.
+    uint32_t PlaceholderCount = 0U;
 };
 
 struct Oot3dPicaDeferredPlanStats {
@@ -57,6 +60,16 @@ struct Oot3dPicaDeferredPlanStats {
     uint64_t WorkerBuildNanoseconds = 0;
     uint64_t ConsumerBuildNanoseconds = 0;
     uint64_t SerialBuildNanoseconds = 0;
+    // Blocked on the build mutex (contention between the render thread and
+    // the worker): resolves (render thread / dependency flush) and worker.
+    uint64_t ConsumerLockWaits = 0;
+    uint64_t ConsumerLockWaitNanoseconds = 0;
+    uint64_t WorkerLockWaits = 0;
+    uint64_t WorkerLockWaitNanoseconds = 0;
+    // Build-mutex acquisitions by the resolves (one per run of draws).
+    uint64_t ConsumerLocks = 0;
+    // Worker without a batch to build.
+    uint64_t WorkerIdleNanoseconds = 0;
 };
 
 // Builds PICA draw plans for the guest thread. Serial builds (Build) run on
@@ -109,6 +122,7 @@ class Oot3dPicaDeferredPlanBuilder final {
   private:
     friend bool ResolveOot3dPicaDeferredDrawPlan(Oot3dPicaVulkanDrawPlan&,
                                                  std::string*);
+    friend class DeferredPlanResolver;
 
     // Outlives the builder: a batch may be released by the last frame that
     // holds one of its placeholders, on any thread.
@@ -123,9 +137,13 @@ class Oot3dPicaDeferredPlanBuilder final {
         void operator()(Oot3dPicaDeferredPlanBatch* batch) const noexcept;
     };
 
-    void BuildSlotLocked(Oot3dPicaDeferredPlanBatch& batch, size_t index,
-                         std::atomic<uint64_t>& builds,
-                         std::atomic<uint64_t>& nanoseconds);
+    // Builds a pending slot; returns the nanoseconds spent (0: nothing to
+    // build). Callers accumulate and publish their counters in bulk.
+    uint64_t BuildSlotLocked(Oot3dPicaDeferredPlanBatch& batch, size_t index);
+    // Takes the build mutex, timing it only when it is contended.
+    void LockBuild(std::unique_lock<std::mutex>& lock,
+                   std::atomic<uint64_t>& waits,
+                   std::atomic<uint64_t>& nanoseconds);
     void WorkerLoop();
 
     Oot3dPicaVulkanShaderSourceCache& mShaderCache;
@@ -137,6 +155,8 @@ class Oot3dPicaDeferredPlanBuilder final {
     std::condition_variable mQueueReady;
     std::deque<std::shared_ptr<Oot3dPicaDeferredPlanBatch>> mQueue;
     bool mStop = false;
+    // Mirror of mStop the worker polls between slots without a lock.
+    std::atomic<bool> mStopRequested{false};
     std::thread mThread;
     std::atomic<uint64_t> mDeferredDraws{0};
     std::atomic<uint64_t> mWorkerBuilds{0};
@@ -145,6 +165,12 @@ class Oot3dPicaDeferredPlanBuilder final {
     std::atomic<uint64_t> mWorkerNanoseconds{0};
     std::atomic<uint64_t> mConsumerNanoseconds{0};
     std::atomic<uint64_t> mSerialNanoseconds{0};
+    std::atomic<uint64_t> mConsumerLockWaits{0};
+    std::atomic<uint64_t> mConsumerLockWaitNanoseconds{0};
+    std::atomic<uint64_t> mWorkerLockWaits{0};
+    std::atomic<uint64_t> mWorkerLockWaitNanoseconds{0};
+    std::atomic<uint64_t> mConsumerLocks{0};
+    std::atomic<uint64_t> mWorkerIdleNanoseconds{0};
 };
 
 // Replaces a deferred placeholder with its built plan (no-op for a built

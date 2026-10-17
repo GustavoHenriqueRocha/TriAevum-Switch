@@ -136,6 +136,54 @@ void TestSynchronousCommandsAreDistinguished() {
 
 } // namespace
 
+// Wait counters (logs/perf.txt "sync:"): a blocked submitter, a blocked
+// Drain and an idle worker are timed; signals with nobody waiting are
+// skipped without losing a wake-up (many tiny commands, each could race the
+// worker going to sleep).
+void TestWaitStatsAndSkippedSignals() {
+    NativeRenderCommandStream stream(Mode::Worker, 1U);
+    std::atomic<bool> release{false};
+    stream.Submit([&] {
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }, true);
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        release = true;
+    });
+    stream.Submit([] {}, true);  // blocks: one frame in flight
+    releaser.join();
+    stream.Drain();
+    auto stats = stream.GetWaitStats();
+    Require(stats.SubmitWaits == 1U && stats.SubmitWaitNanoseconds >= 10'000'000U,
+            "blocked submission was not timed");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::atomic<bool> releaseDrain{false};
+    stream.Submit([&] {
+        while (!releaseDrain.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    std::thread drainReleaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        releaseDrain = true;
+    });
+    const auto before = stream.GetWaitStats();
+    stream.Drain();
+    drainReleaser.join();
+    stats = stream.GetWaitStats();
+    Require(stats.DrainWaits == before.DrainWaits + 1U &&
+                stats.DrainWaitNanoseconds - before.DrainWaitNanoseconds >= 5'000'000U,
+            "blocked Drain was not timed");
+    Require(stats.WorkerIdleWaits >= 1U && stats.WorkerIdleNanoseconds >= 10'000'000U,
+            "idle worker time was not counted");
+    for (int round = 0; round < 2000; ++round) {
+        int value = -1;
+        stream.Submit([&value, round] { value = round; }, true);
+        stream.Drain();
+        Require(value == round, "a command was lost after a skipped signal");
+    }
+    stats = stream.GetWaitStats();
+    Require(stats.SkippedNotifies > 0U, "no signal was ever skipped");
+}
+
 int main() {
     TestInlineRunsAtSubmission();
     TestWorkerKeepsProgramOrder();
@@ -143,6 +191,7 @@ int main() {
     TestWorkerFailureIsRethrownOnce();
     TestModeSwitchDrainsAndDestructorRunsPending();
     TestSynchronousCommandsAreDistinguished();
+    TestWaitStatsAndSkippedSignals();
     std::cout << "oot3d_native_render_command_stream_tests: ok\n";
     return 0;
 }

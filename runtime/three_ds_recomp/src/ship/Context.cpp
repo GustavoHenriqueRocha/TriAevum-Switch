@@ -180,8 +180,16 @@ bool Context::InitLogging(spdlog::level::level_enum debugBuildLogLevel,
         GetLogger()->flush_on(spdlog::level::trace);
 #else
         mLogThreadPool = std::make_shared<spdlog::details::thread_pool>(8192, 1);
+#if defined(__SWITCH__)
+        // The writer runs as a service thread (priority 0x3B, below the game's
+        // threads; oot3d_switch_thread_layout.h): with a full queue the game
+        // must drop the oldest line instead of blocking on it.
+        constexpr auto kLogOverflowPolicy = spdlog::async_overflow_policy::overrun_oldest;
+#else
+        constexpr auto kLogOverflowPolicy = spdlog::async_overflow_policy::block;
+#endif
         mLogger = std::make_shared<spdlog::async_logger>(GetName(), sinks.begin(), sinks.end(), mLogThreadPool,
-                                                         spdlog::async_overflow_policy::block);
+                                                         kLogOverflowPolicy);
         GetLogger()->set_level(releaseBuildLogLevel);
         GetLogger()->flush_on(spdlog::level::info);
 #endif

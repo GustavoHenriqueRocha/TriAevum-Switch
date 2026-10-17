@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include "native_presentation_thread_scope.h"
@@ -20,6 +21,15 @@ struct NativeRealtimeRefreshPacerStats {
     double MaximumLatenessSeconds = 0.0;
     double MaximumIntervalErrorSeconds = 0.0;
     double SquaredIntervalErrorSeconds = 0.0;
+};
+
+// Cumulative, readable from any thread (logs/perf.txt): the owner writes
+// with a load and a store (no read-modify-write).
+struct NativePacerTailCounters {
+    uint64_t Waits = 0;
+    uint64_t SpinNanoseconds = 0;       // busy-wait before the deadline
+    uint64_t OversleepNanoseconds = 0;  // woke after the sleep's target
+    uint64_t MaximumOversleepNanoseconds = 0;
 };
 
 enum class NativePacerDeadlineAction : uint8_t {
@@ -53,6 +63,14 @@ class NativeRealtimeRefreshPacer final {
     void ObservePresentation(
         std::chrono::steady_clock::time_point presentationTime) noexcept;
     void ResetDeadline() noexcept;
+    // Busy-wait tail before each deadline (at most period / 8). Default
+    // 500 us (Windows timer quantization); the Switch passes its layout's
+    // value (0: svcSleepThread wakes on time and the spin burns the render
+    // thread's core).
+    void SetMaximumSpin(std::chrono::nanoseconds spin) noexcept;
+    [[nodiscard]] NativePacerTailCounters TailCounters() const noexcept;
+    // Largest oversleep since the previous call (perf windows).
+    uint64_t TakeMaximumOversleepNanoseconds() noexcept;
 
     [[nodiscard]] bool Enabled() const noexcept;
     [[nodiscard]] bool HighResolutionWaitAvailable() const noexcept;
@@ -79,6 +97,11 @@ class NativeRealtimeRefreshPacer final {
     std::chrono::steady_clock::time_point mNextDeadline;
     std::chrono::steady_clock::time_point mLastPresentationTime;
     NativeRealtimeRefreshPacerStats mStats;
+    std::chrono::nanoseconds mMaximumSpin{std::chrono::microseconds(500)};
+    std::atomic<uint64_t> mTailWaits{0};
+    std::atomic<uint64_t> mTailSpinNanoseconds{0};
+    std::atomic<uint64_t> mTailOversleepNanoseconds{0};
+    std::atomic<uint64_t> mTailMaximumOversleepNanoseconds{0};
 #ifdef _WIN32
     void* mHighResolutionTimer = nullptr;
 #endif
