@@ -17,12 +17,22 @@
 //   Full     - the in-between sample at the configured resolution;
 //   Reduced  - the same sample drawn at a lower scale (config/interp_scale);
 //   Dropped  - the step image is presented again (no scene replay).
-// Hysteresis: a better level than the current one must fit with margin
-// (RecoverFraction), the current one only within BudgetFraction. The cost of
-// a level not drawn lately is estimated from the step frame's cost (both are
-// one replay of the same scene) times the ratio last measured, so it follows
-// the scene without probing; a probe still runs after a long stretch at a
-// worse level, in case the ratio went stale.
+// It starts at the preferred level (full) and only goes down on real
+// measurements: the current level must have been measured and its pair must
+// stay above the budget (BudgetFraction, 100%) for DropAfter decisions in a
+// row. A better level comes back as soon as its pair fits with a small
+// margin (RecoverFraction, 97%). The cost of a level not drawn lately is
+// estimated from the step frame's cost (both are one replay of the same
+// scene) times the ratio last measured, so it follows the scene; a probe
+// re-measures the level above every ProbeInterval decisions below the
+// preferred one, in case the ratio went stale.
+//
+// Console bug of the first version (2026-10-17): budget 95% / recover 90%,
+// probes every 150 decisions and, before the GPU clock was calibrated, a
+// cost of render-thread time plus the swap (which includes the vsync wait).
+// The first seconds dropped on those inflated costs, and a pair of ~16 + 16
+// ms (31.9 of 33.3, it fits) never came back under 90%: stuck at dropped,
+// 30 real frames a second presented irregularly.
 //
 // Pure logic (no GL, no clock): tested by
 // oot3d_native_interpolation_pacing_tests.cpp.
@@ -89,12 +99,15 @@ struct InterpolationPacingConfig {
   float ReducedScale = 0.0F;
   InterpolationReducedScaleMode ReducedMode =
       InterpolationReducedScaleMode::Auto;
-  // Fractions of the pair budget (two refresh periods).
-  double BudgetFraction = 0.95;
-  double RecoverFraction = 0.90;
+  // Fractions of the pair budget (two refresh periods): a level is left when
+  // its measured pair exceeds BudgetFraction for DropAfter decisions in a
+  // row, and a better one is taken when its pair fits RecoverFraction.
+  double BudgetFraction = 1.0;
+  double RecoverFraction = 0.97;
+  uint32_t DropAfter = 3U;
   // After this many consecutive in-between frames below the full level, one
   // is drawn a level higher to refresh its estimate (if not hopeless).
-  uint32_t ProbeInterval = 150U;
+  uint32_t ProbeInterval = 60U;
 };
 
 // Parses config/interp_scale ("1.5", "1,5"; multiples of 0.25 from 1 up to
@@ -165,6 +178,7 @@ public:
     mMeasured = {};
     mProbing.reset();
     mBelowPreferred = 0U;
+    mOverBudget = 0U;
     mLevel = PreferredLevel();
   }
 
@@ -182,64 +196,73 @@ public:
       return Commit(preferred, false);
     }
     const double budget = mPairBudgetMs;
+    const auto index = [](InterpolatedSampleLevel level) {
+      return static_cast<uint8_t>(level);
+    };
+    // A better level must fit with margin; the current one is kept while
+    // it fits the budget, and always while it has not been measured (no
+    // drop on a guess).
     const auto fits = [&](InterpolatedSampleLevel level) {
-      const double fraction =
-          static_cast<uint8_t>(level) < static_cast<uint8_t>(mLevel)
-              ? mConfig.RecoverFraction
-              : mConfig.BudgetFraction;
+      if (level == mLevel && !mMeasured[index(level)])
+        return true;
+      const double fraction = index(level) < index(mLevel)
+                                  ? mConfig.RecoverFraction
+                                  : mConfig.BudgetFraction;
       return mStepCostMs + Estimate(level) <= fraction * budget;
     };
-    std::optional<InterpolatedSampleLevel> chosen;
+    std::optional<InterpolatedSampleLevel> best;
     for (auto level : {InterpolatedSampleLevel::Full,
                        InterpolatedSampleLevel::Reduced}) {
-      if (static_cast<uint8_t>(level) < static_cast<uint8_t>(preferred))
+      if (index(level) < index(preferred))
         continue;
       if (level == InterpolatedSampleLevel::Reduced && !mReducedAvailable)
         continue;
       if (fits(level)) {
-        chosen = level;
+        best = level;
         break;
       }
     }
-    if (!chosen.has_value()) {
-      if (mConfig.KeepGameSpeed) {
-        chosen = InterpolatedSampleLevel::Dropped;
-      } else {
-        // Never dropped: the cheapest drawn level.
-        chosen = mReducedAvailable ? InterpolatedSampleLevel::Reduced
+    if (!best.has_value()) {
+      // Never dropped without KeepGameSpeed: the cheapest drawn level.
+      best = mConfig.KeepGameSpeed ? InterpolatedSampleLevel::Dropped
+             : mReducedAvailable   ? InterpolatedSampleLevel::Reduced
                                    : InterpolatedSampleLevel::Full;
-      }
     }
-    // Probe: a long stretch below the preferred level re-measures the next
-    // level up once (at once if it was never measured: the first estimate is
-    // a guess), unless it clearly cannot fit.
-    // A probe's cost arrives some frames later (GPU timestamps): one at a
-    // time, and a probe whose cost never came expires.
+    InterpolatedSampleLevel chosen = *best;
+    if (index(chosen) > index(mLevel)) {
+      // Down only when the overrun lasts.
+      if (++mOverBudget < std::max<uint32_t>(1U, mConfig.DropAfter))
+        chosen = mLevel;
+      else
+        mOverBudget = 0U;
+    } else {
+      mOverBudget = 0U;
+    }
+    // Probe: a stretch below the preferred level re-measures the next level
+    // up once (at once if it was never measured), unless it clearly cannot
+    // fit. A probe's cost arrives some frames later (GPU timestamps): one at
+    // a time, and one whose cost never came expires.
     if (mProbing.has_value() && ++mProbeAge > 8U)
       mProbing.reset();
-    if (*chosen != preferred && !mProbing.has_value()) {
-      const auto up = static_cast<InterpolatedSampleLevel>(
-          static_cast<uint8_t>(*chosen) - 1U);
-      const auto probe =
-          up == InterpolatedSampleLevel::Reduced && !mReducedAvailable
-              ? InterpolatedSampleLevel::Full
-              : up;
+    if (chosen != preferred && !mProbing.has_value()) {
+      auto probe = static_cast<InterpolatedSampleLevel>(index(chosen) - 1U);
+      if (probe == InterpolatedSampleLevel::Reduced && !mReducedAvailable)
+        probe = InterpolatedSampleLevel::Full;
       if (++mBelowPreferred >= mConfig.ProbeInterval ||
-          !mMeasured[static_cast<size_t>(probe)]) {
-        if (static_cast<uint8_t>(probe) >= static_cast<uint8_t>(preferred) &&
+          !mMeasured[index(probe)]) {
+        mBelowPreferred = 0U;
+        if (index(probe) >= index(preferred) &&
             mStepCostMs + Estimate(probe) <= 1.25 * budget) {
-          mBelowPreferred = 0U;
           ++mStats.Probes;
           mProbing = probe;
           mProbeAge = 0U;
           return Commit(probe, true);
         }
-        mBelowPreferred = 0U;
       }
-    } else if (*chosen == preferred) {
+    } else if (chosen == preferred) {
       mBelowPreferred = 0U;
     }
-    return Commit(*chosen, false);
+    return Commit(chosen, false);
   }
 
   void ObserveStep(double costMs) noexcept {
@@ -328,6 +351,7 @@ private:
   std::optional<InterpolatedSampleLevel> mProbing;
   uint32_t mProbeAge = 0U;
   uint32_t mBelowPreferred = 0U;
+  uint32_t mOverBudget = 0U;
   InterpolationPacingStats mStats{};
 };
 

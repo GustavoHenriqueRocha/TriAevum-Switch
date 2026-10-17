@@ -3,6 +3,7 @@
 // eligibility of a sample and the config parser.
 #include "oot3d_native_interpolation_pacing.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -91,8 +92,9 @@ void TestHeavyLoadDropsWithoutReducedLevel() {
                    ? 1
                    : 0;
   }
-  // Only the probes (one in ProbeInterval) draw a full in-between frame.
-  CHECK(dropped >= 590);
+  // Only the first DropAfter decisions and the probes (one in
+  // ProbeInterval) draw a full in-between frame.
+  CHECK(dropped >= 580);
   CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
 }
 
@@ -106,7 +108,7 @@ void TestHeavyLoadReducesWhenTheReducedFrameFits() {
                    ? 1
                    : 0;
   }
-  CHECK(reduced >= 590);
+  CHECK(reduced >= 580);
   CHECK(governor.Level() == InterpolatedSampleLevel::Reduced);
 }
 
@@ -148,12 +150,12 @@ void TestRecoversWhenTheSceneGetsLighterWithoutProbing() {
 
 void TestHysteresisDoesNotFlapNearTheBudget() {
   auto governor = Make();
-  // Pairs between the recover (0.90) and budget (0.95) fractions, noisy.
+  // Pairs between the recover (0.97) and budget (1.0) fractions, noisy.
   uint32_t seed = 12345U;
   for (int pair = 0; pair < 2000; ++pair) {
     seed = seed * 1664525U + 1013904223U;
-    const double noise = ((seed >> 8) % 1000U) / 1000.0 - 0.5; // +-0.5 ms
-    const double cost = 15.25 + noise;                          // pair ~30.5
+    const double noise = ((seed >> 8) % 1000U) / 2500.0 - 0.2; // +-0.2 ms
+    const double cost = 16.4 + noise;                           // pair ~32.8
     Pair(governor, cost, [&](auto level) { return Costs(level, cost, cost); });
   }
   CHECK(governor.Stats().LevelChanges <= 2U);
@@ -167,7 +169,7 @@ void TestHysteresisDoesNotFlapNearTheBudget() {
   CHECK(dropped.Level() == InterpolatedSampleLevel::Dropped);
   const auto changes = dropped.Stats().LevelChanges;
   for (int pair = 0; pair < 600; ++pair)
-    Pair(dropped, 15.25, [](auto level) { return Costs(level, 15.25, 15.25); });
+    Pair(dropped, 16.4, [](auto level) { return Costs(level, 16.4, 16.4); });
   CHECK(dropped.Stats().LevelChanges == changes);
 }
 
@@ -295,6 +297,91 @@ void TestDelayedMeasurements() {
   CHECK(governor.Stats().Probes <= 10U);
 }
 
+// Console, 2026-10-17 (fps60, scale 2): perf.txt after 2.7 min showed
+// level=dropped, interp_frames=0, probes=0, level_changes=0 with
+// gpu_ms_step=15.93 rt_ms_step=11.68 est_step_ms=13.13 est_full_ms=13.22
+// pair_budget_ms=33.33. The first seconds (no calibrated GPU clock) fed
+// render-thread time plus the swap, vsync wait included (~27 ms a frame):
+// dropped. Afterwards the pair fits and the governor must come back to full.
+void TestConsoleStuckAtDroppedComesBackToFull() {
+  auto governor = Make();
+  CHECK(governor.Level() == InterpolatedSampleLevel::Full);
+  // Start-up: inflated costs (11.7 ms of render thread + ~15 ms of swap).
+  for (int pair = 0; pair < 30; ++pair)
+    Pair(governor, 27.0, [](auto level) { return Costs(level, 27.0, 27.0); });
+  CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
+  // Calibrated GPU clock: the numbers of the console window.
+  int full = 0;
+  int pairsToFull = -1;
+  for (int pair = 0; pair < 150; ++pair) {
+    const auto level = Pair(governor, 13.13, [](auto level) {
+      return Costs(level, 13.22, 13.22, 0.059);
+    });
+    if (level == InterpolatedSampleLevel::Full) {
+      ++full;
+      if (pairsToFull < 0) pairsToFull = pair;
+    }
+  }
+  CHECK(pairsToFull >= 0 && pairsToFull <= 5);
+  CHECK(full >= 140);
+  CHECK(governor.Level() == InterpolatedSampleLevel::Full);
+  CHECK(std::abs(governor.StepCostMs() - 13.13) < 0.01);
+  CHECK(std::abs(governor.Estimate(InterpolatedSampleLevel::Full) - 13.22) <
+        0.05);
+
+  // The GPU side of that window: 15.93 ms step frames (render thread
+  // 11.68). A 15.93 + 15.93 pair is 31.9 of 33.3: it fits, stays full.
+  for (int pair = 0; pair < 600; ++pair) {
+    CHECK(Pair(governor, std::max(15.93, 11.68), [](auto level) {
+            return Costs(level, 15.93, 15.93, 0.059);
+          }) == InterpolatedSampleLevel::Full);
+  }
+  // And from dropped it comes back to it as well (97% of 33.3 = 32.3).
+  auto fromDropped = Make();
+  for (int pair = 0; pair < 30; ++pair)
+    Pair(fromDropped, 27.0, [](auto level) { return Costs(level, 27.0, 27.0); });
+  CHECK(fromDropped.Level() == InterpolatedSampleLevel::Dropped);
+  for (int pair = 0; pair < 60; ++pair)
+    Pair(fromDropped, 15.93, [](auto level) {
+      return Costs(level, 15.93, 15.93, 0.059);
+    });
+  CHECK(fromDropped.Level() == InterpolatedSampleLevel::Full);
+}
+
+// Full at the start, and no drop on a guess or on one slow pair.
+void TestStartsFullAndDropsOnlyOnLastingMeasurements() {
+  auto governor = Make();
+  governor.ObserveStep(25.0);
+  // The full in-between frame was never measured: kept.
+  CHECK(governor.Decide() == InterpolatedSampleLevel::Full);
+  CHECK(governor.Decide() == InterpolatedSampleLevel::Full);
+  CHECK(governor.Decide() == InterpolatedSampleLevel::Full);
+  governor.ObserveInterpolated(InterpolatedSampleLevel::Full, 25.0);
+  // Measured over budget (50 of 33.3): dropped only on the third decision.
+  CHECK(governor.Decide() == InterpolatedSampleLevel::Full);
+  CHECK(governor.Decide() == InterpolatedSampleLevel::Full);
+  CHECK(governor.Decide() == InterpolatedSampleLevel::Dropped);
+  // One slow pair in a light scene does not drop.
+  auto light = Make();
+  for (int pair = 0; pair < 60; ++pair)
+    Pair(light, 12.0, [](auto level) { return Costs(level, 12.0, 8.0); });
+  light.ObserveStep(24.0);
+  CHECK(light.Decide() == InterpolatedSampleLevel::Full);
+  light.ObserveStep(12.0);
+  for (int pair = 0; pair < 10; ++pair)
+    CHECK(Pair(light, 12.0, [](auto level) { return Costs(level, 12.0, 8.0); }) ==
+          InterpolatedSampleLevel::Full);
+}
+
+// Below the preferred level, probes keep re-measuring the level above.
+void TestProbesHappenWhileDropped() {
+  auto governor = Make();
+  for (int pair = 0; pair < 600; ++pair)
+    Pair(governor, 19.0, [](auto level) { return Costs(level, 19.0, 19.0); });
+  CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
+  CHECK(governor.Stats().Probes >= 8U);
+}
+
 void TestSampleClearsEveryTarget() {
   using Oot3dNativeGame::ReducedReplayDraw;
   using Oot3dNativeGame::ReducedReplayFill;
@@ -375,6 +462,9 @@ int main() {
   TestProbeRefreshesAStaleEstimate();
   TestDroppingKeepsStepFramesOnTime();
   TestDelayedMeasurements();
+  TestConsoleStuckAtDroppedComesBackToFull();
+  TestStartsFullAndDropsOnlyOnLastingMeasurements();
+  TestProbesHappenWhileDropped();
   TestSampleClearsEveryTarget();
   TestParseReducedScale();
   if (gFailures != 0) {

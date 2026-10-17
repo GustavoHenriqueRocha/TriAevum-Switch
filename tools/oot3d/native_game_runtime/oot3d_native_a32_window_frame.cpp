@@ -249,9 +249,10 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
     observe(result.Kind, std::max(result.Milliseconds, result.CpuMilliseconds));
   });
   if (!gpuAvailable) {
-    // No GPU clock (yet): render-thread time plus the last swap, which
-    // blocks while the GPU is behind.
-    observe(kind, cpuMs + lastSwapMs);
+    // No GPU clock (yet): render-thread time only. The swap is left out:
+    // it includes the vsync wait, which made every pair look over budget
+    // in the first seconds and dropped in-between frames that fit.
+    observe(kind, cpuMs);
   }
   std::lock_guard lock(interpolationPerfMutex);
   auto &perf = interpolationPerf;
@@ -3215,9 +3216,12 @@ void NativeA32WindowSession::ExecuteVisualSample(const Oot3dNativeGame::Oot3dPic
   if (present) Fast::Oot3d::GrassInteractionBridge::Instance().SelectSample(temporalSample);
   PinGpuCopyResources(sample);
   // config/gpu_timing: step/interp frame and canonical (hidden) draws.
+  // A new guest frame is every kind but the repeated (in-between) sample:
+  // with interpolation the step frame presents an InterpolatedFrame (the
+  // delayed sample at alpha 0), and the native replay may be skipped, so
+  // counting only NativeFrame/CurrentFrame classified every step as interp.
   Fast::GlPerf::SampleScope perfSample(
-      kind == Oot3dNativeGame::Oot3dPicaPresentationExecutionKind::NativeFrame ||
-          kind == Oot3dNativeGame::Oot3dPicaPresentationExecutionKind::CurrentFrame,
+      kind != Oot3dNativeGame::Oot3dPicaPresentationExecutionKind::RepeatedFrame,
       present);
   if (!picaPresentationScheduler.Execute(
           api, sample, renderTargetNamespace, kind,

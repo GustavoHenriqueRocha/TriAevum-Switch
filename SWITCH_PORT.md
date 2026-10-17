@@ -361,8 +361,14 @@ Desempenho e usabilidade:
   (`oot3d_native_interpolation_pacing.h`) aprende o custo recente de cada tipo de quadro (máximo entre
   o tempo de GPU e o da render thread) e, para cada intermediário, escolhe o melhor nível cujo par
   (passo + intermediário) cabe em dois refreshes (33,3 ms): cheio, reduzido ou **descartado**
-  (reapresenta a imagem do passo: só cópia já feita + RCAS, sem replay da cena). Histerese: subir de
-  nível exige caber em 90% do orçamento, manter em 95%. O custo de um nível não desenhado é estimado
+  (reapresenta a imagem do passo: só cópia já feita + RCAS, sem replay da cena). Começa no cheio e só
+  desce com medição real: o nível atual precisa ter sido medido e o par passar de 100% do orçamento em
+  3 decisões seguidas; sobe quando o par do nível melhor cabe em 97%. Sondas a cada 60 decisões abaixo
+  do preferido. (1ª versão, bug no console: 95%/90%, sondas a cada 150 e, antes da calibração do relógio
+  da GPU, custo = render thread + swap — o swap inclui a espera do vsync —; os primeiros segundos
+  descartavam por custos inflados e um par de ~16+16 ms, que cabe, nunca voltava abaixo de 90%: preso
+  em `dropped`, ~30 quadros reais apresentados de forma irregular. Sem relógio de GPU o custo agora é só
+  o da render thread.) O custo de um nível não desenhado é estimado
   pelo custo do passo × a razão medida por último (os dois são um replay da mesma cena), então ele
   volta sozinho quando a cena fica leve; sondas (uma por vez, nível nunca medido ou a cada 150
   intermediários abaixo do preferido) refrescam a razão. Picos contam no máximo 2× a média
