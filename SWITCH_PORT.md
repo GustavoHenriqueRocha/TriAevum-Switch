@@ -585,6 +585,25 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
   depois "Salvar?" Sim/Não centralizado, depois "Continuar?"; Não/Sim devem voltar ao jogo com 3
   corações ou ir para o título. Apague o arquivo depois (dispara uma vez por sessão).
 
+### Polígono gigante na mira em 1ª pessoa: recorte no plano near (2026-10-17)
+- Sintoma (desde a 1ª versão no Switch): na mira do estilingue, um polígono marrom enorme saía do
+  canto superior esquerdo e cobria meia tela por um instante ("as texturas dão uma pulada e voltam").
+  Continuava com `config/no_guest_overrides`, com `fps60_mode=legacy` e não dependia da interpolação.
+- Causa: `GfxRenderingAPIOGL::Init` liga `GL_DEPTH_CLAMP` (para o renderizador legado) e nunca
+  desliga; o caminho PICA desenhava com ele. Com o clamp o GL não recorta nos planos near/far: um
+  triângulo com vértice entre o olho e o plano near (braço, manga ou estilingue colados na câmera em
+  1ª pessoa; z do PICA > 0 com w > 0) era rasterizado inteiro, com profundidade presa no near, em vez
+  de recortado como no PICA (e no Vulkan do PC, `depthClampEnable = false`; o dialeto GL
+  `z_gl = -2z - w` já supõe o recorte).
+- Correção: os draws PICA rodam com `GL_DEPTH_CLAMP` desligado (`PicaGlStateCache::DepthClamp`, uma
+  troca por passagem PICA → legado, não por draw); o legado o recebe de volta em
+  `RestoreLegacyVertexArray` (antes de todo draw legado) e no `ShutdownNativePica`.
+- Testes: `gfx_opengl_pica_near_clip_tests` (contexto GL real via EGL surfaceless, pulado sem ele):
+  shader pelo dialeto GL de verdade, triângulo da "manga" com um vértice a 0,2 do olho (near = 1);
+  com o clamp ligado cobre 9295 px contra 4334 px do recorte do PICA (referência em CPU), e um
+  triângulo inteiro dentro do near cobre 17280 px em vez de 0; com a sequência do backend, 4325 px e 0.
+  `gfx_opengl_pica_state_cache_tests` (`PicaGlDepthClamp`): todo draw PICA sem clamp, todo legado com.
+
 ### Seleção de arquivo no widescreen: aba BACK, fade da transição (2026-10-17)
 - Sintomas (prints do console, widescreen e `widescreen_menus` ligados): a aba "B BACK" sai do
   canto do menu (x=128 em vez de 160, de 1280); o cartão que entra deslizando aparece até x=1152; o

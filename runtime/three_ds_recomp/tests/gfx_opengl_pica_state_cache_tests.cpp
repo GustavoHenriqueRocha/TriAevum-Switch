@@ -222,5 +222,42 @@ TEST(PicaGlStateCache, SyntheticFrameCallsPerDraw) {
     EXPECT_LT(perDrawAfter, perDrawBefore / 3.0);
 }
 
+// GL_DEPTH_CLAMP as the backend drives it: Init enables it for the legacy
+// path; every PICA draw must run with it off (near/far clipping, as the PICA)
+// and every legacy draw with it on, whatever the state cache forgets.
+TEST(PicaGlDepthClamp, PicaDrawsClipAndLegacyDrawsKeepTheClamp) {
+    bool glDepthClamp = true; // GfxRenderingAPIOGL::Init
+    DepthClamp clamp;
+    State gl;
+    uint32_t calls = 0U;
+    const auto picaDraw = [&] {
+        gl.Invalidate(); // PicaGlStateMayBeStale after legacy work
+        if (clamp.EnterPica()) {
+            glDepthClamp = false;
+            ++calls;
+        }
+        EXPECT_FALSE(glDepthClamp) << "PICA draw without near-plane clipping";
+    };
+    const auto legacyDraw = [&] {
+        if (clamp.LeavePica()) {
+            glDepthClamp = true;
+            ++calls;
+        }
+        EXPECT_TRUE(glDepthClamp);
+    };
+    legacyDraw();
+    EXPECT_EQ(calls, 0U);
+    // A frame: 300 PICA draws, then the HUD (legacy), twice.
+    for (int frame = 0; frame < 2; ++frame) {
+        for (int draw = 0; draw < 300; ++draw) picaDraw();
+        for (int draw = 0; draw < 20; ++draw) legacyDraw();
+    }
+    // One disable and one enable per PICA -> legacy switch, not per draw.
+    EXPECT_EQ(calls, 4U);
+    EXPECT_FALSE(clamp.LeavePica());
+    EXPECT_TRUE(clamp.EnterPica());
+    EXPECT_FALSE(clamp.EnterPica());
+}
+
 } // namespace
 } // namespace Fast::PicaGlStateCache

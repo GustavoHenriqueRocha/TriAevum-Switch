@@ -170,6 +170,41 @@ struct State {
     }
 };
 
+// GL_DEPTH_CLAMP across the PICA and legacy paths. The legacy Fast3D
+// renderer enables it once (GfxRenderingAPIOGL::Init) and never turns it
+// off. With it on, GL does not clip at the near/far planes: geometry between
+// the eye and the near plane (PICA clip z > 0 with w > 0) is rasterized with
+// its depth clamped to the near value instead of being clipped. The PICA
+// clips there (as do the Vulkan backend, depthClampEnable = false, and the
+// GL dialect's z_gl = -2z - w mapping, which assumes clipping), so in first
+// person - Link's arm and sleeve right in front of the camera, the
+// slingshot aim - a huge polygon covered half the screen on the Switch.
+// PICA draws therefore run with the clamp off; the legacy path gets it back
+// before its next draw (RestoreLegacyVertexArray). Kept outside State: no
+// one else touches GL_DEPTH_CLAMP, so Invalidate() must not forget it.
+struct DepthClamp {
+    // GL_DEPTH_CLAMP is currently disabled for the PICA path.
+    bool PicaOff = false;
+
+    // Before a PICA draw: true means glDisable(GL_DEPTH_CLAMP).
+    [[nodiscard]] bool EnterPica() noexcept {
+        if (PicaOff) {
+            return false;
+        }
+        PicaOff = true;
+        return true;
+    }
+
+    // Before legacy GL work: true means glEnable(GL_DEPTH_CLAMP).
+    [[nodiscard]] bool LeavePica() noexcept {
+        if (!PicaOff) {
+            return false;
+        }
+        PicaOff = false;
+        return true;
+    }
+};
+
 [[nodiscard]] inline uint32_t FloatBits(float value) noexcept {
     uint32_t bits = 0U;
     std::memcpy(&bits, &value, sizeof(bits));

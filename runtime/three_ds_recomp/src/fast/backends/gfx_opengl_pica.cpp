@@ -1113,6 +1113,9 @@ struct GfxRenderingAPIOGL::NativePicaState {
     // config/gl_state_cache: shadow of the draw path's GL state (see
     // gfx_opengl_pica_state_cache.h); counters run in both modes.
     PicaGlStateCache::State Gl;
+    // GL_DEPTH_CLAMP is off for PICA draws (near/far clipping, as the PICA)
+    // and back on for the legacy path (gfx_opengl_pica_state_cache.h).
+    PicaGlStateCache::DepthClamp DepthClamp;
     // config/gl_stats: draw counters and render-thread time inside
     // SubmitPicaDraw, published at each presentation for perf.txt.
     bool Stats = false;
@@ -1770,6 +1773,9 @@ void GfxRenderingAPIOGL::ShutdownNativePica() noexcept {
     }
 #if !defined(USE_OPENGLES) && !defined(__APPLE__)
     auto& state = *mNativePica;
+    if (state.DepthClamp.LeavePica()) {
+        glEnable(GL_DEPTH_CLAMP);
+    }
     for (auto& [key, program] : state.Programs) {
         glDeleteProgram(program.Handle);
     }
@@ -1839,6 +1845,12 @@ void GfxRenderingAPIOGL::InvalidateLegacyStateAfterPica() noexcept {
 }
 
 void GfxRenderingAPIOGL::RestoreLegacyVertexArray() noexcept {
+#if !defined(USE_OPENGLES) && !defined(__APPLE__)
+    // The legacy path draws with the GL_DEPTH_CLAMP its Init enabled.
+    if (mNativePica != nullptr && mNativePica->DepthClamp.LeavePica()) {
+        glEnable(GL_DEPTH_CLAMP);
+    }
+#endif
     if (!mPicaVertexArrayBound) {
         return;
     }
@@ -3341,6 +3353,12 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             }
         }
 
+        // Clip at the near/far planes like the PICA (and the Vulkan
+        // backend): with the legacy path's GL_DEPTH_CLAMP, geometry between
+        // the eye and the near plane was drawn as a screen-sized polygon.
+        if (mNativePica->DepthClamp.EnterPica()) {
+            glDisable(GL_DEPTH_CLAMP);
+        }
         if (draw.DepthTestEnabled || draw.DepthWriteEnabled) {
             toggle(gl.DepthTest, GL_DEPTH_TEST, true);
             const uint32_t depthFunc = draw.DepthTestEnabled

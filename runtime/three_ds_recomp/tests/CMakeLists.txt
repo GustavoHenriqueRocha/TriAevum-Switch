@@ -945,6 +945,24 @@ target_include_directories(gfx_opengl_pica_state_cache_tests
 target_link_libraries(gfx_opengl_pica_state_cache_tests PRIVATE gtest_main)
 gtest_discover_tests(gfx_opengl_pica_state_cache_tests DISCOVERY_TIMEOUT 30)
 
+# Near-plane clipping of PICA draws on a real GL context (EGL surfaceless;
+# skipped at run time without one): GL_DEPTH_CLAMP off, as the PICA clips.
+if(NOT WIN32 AND NOT APPLE)
+    find_package(OpenGL QUIET COMPONENTS OpenGL EGL)
+    if(TARGET OpenGL::OpenGL AND TARGET OpenGL::EGL)
+        add_executable(gfx_opengl_pica_near_clip_tests
+            gfx_opengl_pica_near_clip_tests.cpp
+        )
+        set_property(TARGET gfx_opengl_pica_near_clip_tests PROPERTY CXX_STANDARD 20)
+        target_include_directories(gfx_opengl_pica_near_clip_tests
+            PRIVATE ../src ../include)
+        target_link_libraries(gfx_opengl_pica_near_clip_tests
+            PRIVATE gtest_main ThreeDsRecomp::Renderer3dsPicaCore
+                    OpenGL::OpenGL OpenGL::EGL)
+        gtest_discover_tests(gfx_opengl_pica_near_clip_tests DISCOVERY_TIMEOUT 30)
+    endif()
+endif()
+
 # Exact GPU savings of the OpenGL PICA draw path (config/gl_gpu_lean).
 add_executable(gfx_opengl_pica_gpu_lean_tests
     gfx_opengl_pica_gpu_lean_tests.cpp
