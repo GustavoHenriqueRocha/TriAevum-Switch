@@ -654,6 +654,7 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 | `logs/oot3d_native_game.log`, `logs/glthread.txt` | log geral e troca de contexto GL |
 | `logs/guest_profile.txt` | perfil por função (com `config/guest_profile`) |
 | `logs/failed_pica_*.glsl` | fonte de shader PICA que falhou |
+| `logs/hang.txt` | watchdog de travamento: etapa e PC/LR/pilha de cada thread quando o jogo ou a render thread param > 3 s; "HEAP CORROMPIDO" da varredura do heap |
 
 ### 5.2 Campos importantes do `perf.txt`
 
@@ -689,12 +690,42 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   quadro (`step`/`interp`/`hold`). `gpu_*` inclui espera da CPU quando a render thread é o gargalo.
 - `config/gl_stats`: draws, chamadas de estado emitidas/puladas, binds, `gl_us_per_draw`.
 - `config/heap_stats`, `config/heap_check_windows=1`: acha corrupção de heap ~5 s depois de ela
-  acontecer.
+  acontecer. Usa uma varredura limitada dos bins do newlib (`oot3d_heap_bin_check.h`), não o
+  `mallinfo()`: este percorre as listas sem limite segurando o lock do malloc e, com uma lista
+  corrompida, congela o processo inteiro sem crash (foi o congelamento de 2026-10-17).
 - `config/debug_force_game_over` (exemplo de gatilho de teste específico do jogo): zera a vida após
   N s para testar uma tela rara.
 - Fotos do Status Monitor (overlay) e capturas do álbum (`album_sd:` via FTP) para GPU %/núcleos.
 
-### 5.4 Protocolo de A/B
+### 5.4 Travamentos sem crash report: watchdog
+
+Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita usada no port:
+
+1. **Marcadores baratos por thread** (`oot3d_hang_watchdog.h`): um slot por papel (jogo, render,
+   planos, áudio) atribuído onde a thread já recebe prioridade/núcleo; a etapa atual é um store
+   relaxed, o progresso um load + store da dona (por quadro / por comando, nunca por draw).
+2. **Thread vigia de prioridade mínima** (0x3B) acordando a cada ~1 s; "travado" = jogo ou render
+   thread não ociosa sem progresso por > 3 s com o app em foco (`appletGetFocusState`); ignora
+   saltos do próprio relógio (sleep do console).
+3. **Gravar sem alocar**: a trava pode ser o lock do malloc. Texto num buffer estático com
+   formatação própria (nada de `printf` de float, que aloca no `dtoa` do newlib), arquivo pela API
+   de FS da libnx (`fsdevGetDeviceFileSystem("sdmc")`, `fsFsOpenFile` com `Append`, `fsFileWrite`
+   com `FsWriteOption_Flush`). Uma vez por travamento; "recuperou após N ms" se voltar.
+4. **PC/LR das outras threads**: `svcSetThreadActivity(h, Paused)` (o kernel espera a thread sair
+   do núcleo), `svcGetThreadContext3`, ler a cadeia de FP e varrer a pilha com
+   `svcQueryMemory` antes de cada leitura, `svcSetThreadActivity(h, Runnable)`. Só funciona com a
+   thread pausada e só se o NPDM permitir: testar `envIsSyscallHinted(0x32)`/`(0x33)` antes (SVC
+   não permitida derruba o processo). `svcGetDebugThreadContext` exige sessão de debug e não serve
+   para o próprio processo. Endereços: offset em relação ao início do segmento de código do NRO
+   (`svcQueryMemory` num endereço de função) → `addr2line`.
+5. **Última chamada de serviço** (nome literal + ticks de início/fim) em volta de cada IPC que
+   pode bloquear (`smGetService` de serviço inexistente espera o registro; porta cheia espera
+   sessão).
+6. **Ler a última linha do `perf.txt`**: um `ofstream` por janela grava em pedaços de `BUFSIZ`
+   (1024 no devkitA64); uma linha cortada sem `\n` diz que a thread parou dentro daquele bloco,
+   depois do último pedaço e antes do próximo — dá para localizar o trecho pelo número de bytes.
+
+### 5.5 Protocolo de A/B
 
 1. **Mesmo clock.** Overclock (sys-clk: CPU 1785, memória 1600) e clock padrão dão resultados
    diferentes: com clock padrão a lógica do OoT3D chega a ~17 ms por passo (game_cpu 95–98%, jogo
@@ -775,8 +806,8 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
    render thread; `TIME_CRITICAL` do SDL vira 0x3B.
 7. Contexto GL só na thread que o tornou atual; nvc0 sem lock no push buffer compartilhado.
 8. FS do Horizon não renomeia por cima.
-9. Heap do newlib: lock global e fragmentação; `mallinfo()` trava tudo; nada de alocação grande por
-   quadro.
+9. Heap do newlib: lock global e fragmentação; `mallinfo()` trava tudo (e com heap corrompido
+   não termina nunca: congelamento sem crash); nada de alocação grande por quadro.
 10. Cache de texturas sem descarte = crash por memória de GPU depois de minutos.
 11. Substituição nativa com recusa alta é pior que nada; o perfil guest força recusas nos quadros
     medidos.
@@ -789,6 +820,8 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 18. O relógio de GPU do switch-mesa não está em ns: calibrar.
 19. WSL desliga com a última sessão: `schtasks` para builds longos.
 20. Prompt de agente: dizer onde pode compilar (Ryzen) e o limite de temperatura do notebook.
+21. Congelou sem crash report: ver `logs/hang.txt` (watchdog) e onde a última linha do
+    `perf.txt` foi cortada antes de supor deadlock.
 
 ---
 

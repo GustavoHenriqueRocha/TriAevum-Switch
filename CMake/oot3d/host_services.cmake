@@ -245,6 +245,25 @@ target_include_directories(oot3d_native_render_command_stream_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/three_ds_recomp/include)
 oot3d_target_defaults(oot3d_native_render_command_stream_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Lost wakeup / deadlock stress of the render command stream (run under TSan).
+add_executable(oot3d_native_render_command_stream_stress_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_render_command_stream_stress_tests.cpp
+    tools/oot3d/native_game_runtime/oot3d_native_render_command_stream.cpp
+)
+target_compile_features(oot3d_native_render_command_stream_stress_tests PRIVATE cxx_std_20)
+target_include_directories(oot3d_native_render_command_stream_stress_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/three_ds_recomp/include)
+oot3d_target_defaults(oot3d_native_render_command_stream_stress_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
+# Hang watchdog policy and the bounded newlib heap walk (run under ASan).
+add_executable(oot3d_hang_watchdog_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_hang_watchdog_tests.cpp
+    tools/oot3d/native_game_runtime/oot3d_hang_watchdog.cpp
+    tools/oot3d/native_game_runtime/oot3d_heap_bin_check.cpp
+)
+target_compile_features(oot3d_hang_watchdog_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_hang_watchdog_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Switch thread layout policy (config/thread_layout): pure, host-testable.
 add_executable(oot3d_switch_thread_layout_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_switch_thread_layout_tests.cpp

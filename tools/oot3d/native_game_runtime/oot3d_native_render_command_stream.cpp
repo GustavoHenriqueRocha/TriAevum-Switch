@@ -1,5 +1,6 @@
 #include "oot3d_native_render_command_stream.h"
 #include "oot3d_switch_threads.h"
+#include "oot3d_hang_watchdog.h"
 #include "fast/backends/gl_frame_profiler.h"
 
 #include <chrono>
@@ -19,12 +20,14 @@ uint64_t NanosecondsSince(std::chrono::steady_clock::time_point start) {
 }
 
 // cv.wait(lock, ready), counting the waiter and the blocked time only when
-// it really blocks.
+// it really blocks (and marking the wait for the hang watchdog).
 template <typename Ready>
 void CountedWait(std::condition_variable& cv,
                  std::unique_lock<std::mutex>& lock, uint32_t& waiters,
-                 uint64_t& waits, uint64_t& nanoseconds, Ready ready) {
+                 uint64_t& waits, uint64_t& nanoseconds,
+                 HangWatch::Stage stage, Ready ready) {
     if (ready()) return;
+    HangWatch::StageScope hangStage(stage);
     const auto start = std::chrono::steady_clock::now();
     ++waiters;
     cv.wait(lock, ready);
@@ -82,6 +85,23 @@ NativeRenderCommandStream::GetWaitStats() const noexcept {
     return mWaitStats;
 }
 
+bool NativeRenderCommandStream::TryGetSyncSnapshot(
+    SyncSnapshot& out) const noexcept {
+    std::unique_lock lock(mMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    out.Queued = mQueue.size();
+    out.FramesQueued = mFramesQueued;
+    out.Busy = mBusy;
+    out.WorkerWaiting = mWorkerWaiting;
+    out.Stop = mStop;
+    out.Failed = mFailure != nullptr;
+    out.ProgressWaiters = mProgressWaiters;
+    out.Submitted = mSubmitted;
+    out.Executed = mExecuted;
+    out.Waits = mWaitStats;
+    return true;
+}
+
 void NativeRenderCommandStream::Submit(Command command, bool endsFrame) {
     Enqueue(std::move(command), endsFrame, false);
 }
@@ -107,7 +127,7 @@ void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
     if (endsFrame) {
         CountedWait(mProgress, lock, mProgressWaiters,
                     mWaitStats.SubmitWaits, mWaitStats.SubmitWaitNanoseconds,
-                    [&] {
+                    HangWatch::Stage::WaitFramesInFlight, [&] {
                         return mFailure != nullptr || ShutdownRequested() ||
                                mFramesQueued < mMaxFramesInFlight;
                     });
@@ -129,6 +149,7 @@ bool NativeRenderCommandStream::Run(Command command) {
     Drain();
     if (ShutdownRequested()) return false;
     {
+        HangWatch::StageScope hangStage(HangWatch::Stage::SyncCommand);
         CommandScope scope(true);
         Fast::GlPerf::CommandScope perfCommand;
         command();
@@ -143,7 +164,7 @@ void NativeRenderCommandStream::Drain() {
     if (mMode == Mode::Inline || !mWorker.joinable()) return;
     std::unique_lock lock(mMutex);
     CountedWait(mProgress, lock, mProgressWaiters, mWaitStats.DrainWaits,
-                mWaitStats.DrainWaitNanoseconds, [&] {
+                mWaitStats.DrainWaitNanoseconds, HangWatch::Stage::WaitDrain, [&] {
                     return mFailure != nullptr || (mQueue.empty() && !mBusy);
                 });
     // A failure behind an exit request is not reported: Shutdown drops it.
@@ -187,7 +208,7 @@ size_t NativeRenderCommandStream::Shutdown(Command last) noexcept {
             CountedWait(mProgress, lock, mProgressWaiters,
                         mWaitStats.DrainWaits,
                         mWaitStats.DrainWaitNanoseconds,
-                        [&] { return !mBusy; });
+                        HangWatch::Stage::WaitDrain, [&] { return !mBusy; });
             if (last) {
                 Entry entry;
                 entry.Work = std::move(last);
@@ -227,7 +248,11 @@ void NativeRenderCommandStream::RethrowPendingFailureLocked(
 
 void NativeRenderCommandStream::StartWorker() {
     if (mWorker.joinable()) return;
-    mStop = false;
+    {
+        // Under the lock: TryGetSyncSnapshot (hang watchdog) reads it.
+        std::lock_guard lock(mMutex);
+        mStop = false;
+    }
     mWorker = std::thread([this] { WorkerLoop(); });
 }
 
@@ -251,6 +276,7 @@ void NativeRenderCommandStream::WorkerLoop() {
     for (;;) {
         if (!mStop && mQueue.empty()) {
             const auto idleStart = std::chrono::steady_clock::now();
+            HangWatch::Mark(HangWatch::Stage::RenderIdle);
             mWorkerWaiting = true;
             mWork.wait(lock, [&] { return mStop || !mQueue.empty(); });
             mWorkerWaiting = false;
@@ -272,6 +298,7 @@ void NativeRenderCommandStream::WorkerLoop() {
         }
         mBusy = true;
         lock.unlock();
+        HangWatch::Mark(HangWatch::Stage::RenderCommand);
         // Where the render thread runs, once per frame (perf.txt threads:).
         if (entry.EndsFrame) NoteSwitchThreadCore();
         std::exception_ptr failure;
@@ -282,6 +309,8 @@ void NativeRenderCommandStream::WorkerLoop() {
         } catch (...) {
             failure = std::current_exception();
         }
+        // Progress for the hang watchdog: one command done.
+        HangWatch::Advance();
         lock.lock();
         mBusy = false;
         if (entry.EndsFrame && mFramesQueued != 0U) --mFramesQueued;

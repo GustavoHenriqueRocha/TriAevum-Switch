@@ -2,6 +2,7 @@
 #include "oot3d_native_a32_window.h"
 #include "oot3d_native_a32_window_session.h"
 #include "oot3d_native_a32_window_summary.h"
+#include "oot3d_hang_watchdog.h"
 
 namespace Oot3dA32Window {
 
@@ -152,6 +153,42 @@ void NativeA32WindowSession::Run() {
     return;
   }
   auto &window = *windowPointer;
+#if defined(__SWITCH__)
+  // Hang watchdog (oot3d_hang_watchdog.h): logs/hang.txt when the game or
+  // the render thread stops for > 3 s. The extra section reads the stream's
+  // sync state with try_lock only (it runs while something may be stuck).
+  Oot3dNativeGame::HangWatch::Start(
+      [](void *user, Oot3dNativeGame::HangWatch::Text &text) {
+        auto &session = *static_cast<NativeA32WindowSession *>(user);
+        Oot3dNativeGame::NativeRenderCommandStream::SyncSnapshot sync;
+        text.Str("stream: shutdown=")
+            .Dec(session.renderStream.ShutdownRequested() ? 1U : 0U);
+        if (session.renderStream.TryGetSyncSnapshot(sync)) {
+          text.Str(" queued=").Dec(sync.Queued)
+              .Str(" frames_queued=").Dec(sync.FramesQueued)
+              .Str(" busy=").Dec(sync.Busy ? 1U : 0U)
+              .Str(" worker_waiting=").Dec(sync.WorkerWaiting ? 1U : 0U)
+              .Str(" progress_waiters=").Dec(sync.ProgressWaiters)
+              .Str(" stop=").Dec(sync.Stop ? 1U : 0U)
+              .Str(" failed=").Dec(sync.Failed ? 1U : 0U)
+              .Str(" submitted=").Dec(sync.Submitted)
+              .Str(" executed=").Dec(sync.Executed)
+              .Str(" submit_waits=").Dec(sync.Waits.SubmitWaits)
+              .Str(" drain_waits=").Dec(sync.Waits.DrainWaits)
+              .Str(" worker_idle_waits=").Dec(sync.Waits.WorkerIdleWaits)
+              .Str(" signals_skipped=").Dec(sync.Waits.SkippedNotifies);
+        } else {
+          text.Str(" mutex=OCUPADO");
+        }
+        if (session.realtimePacerStorage.has_value()) {
+          const auto tail = session.realtimePacerStorage->TailCounters();
+          text.Str("\npacer: waits=").Dec(tail.Waits)
+              .Str(" oversleep_max_us=")
+              .Dec(tail.MaximumOversleepNanoseconds / 1000U);
+        }
+      },
+      this);
+#endif
   while (window.IsRunning() &&
          processResult.Kind !=
              Oot3dNativeGame::NativeA32ProcessRunKind::Terminated) {
@@ -160,7 +197,13 @@ void NativeA32WindowSession::Run() {
   Finish();
 }
 
-NativeA32WindowSession::~NativeA32WindowSession() { StopRendering(); }
+NativeA32WindowSession::~NativeA32WindowSession() {
+#if defined(__SWITCH__)
+  // A run that left by an exception never reached Finish.
+  Oot3dNativeGame::HangWatch::Stop();
+#endif
+  StopRendering();
+}
 
 void NativeA32WindowSession::StopRendering() noexcept {
   if (renderingStopped) return;
@@ -188,6 +231,10 @@ void NativeA32WindowSession::StopRendering() noexcept {
 }
 
 void NativeA32WindowSession::Finish() {
+#if defined(__SWITCH__)
+  // Before anything the watchdog's extra section reads goes away.
+  Oot3dNativeGame::HangWatch::Stop();
+#endif
   auto &hostServices = *hostServicesStorage;
   auto &frameRatePolicy = *frameRatePolicyStorage;
   auto &blockTraceWriter = *blockTraceWriterStorage;

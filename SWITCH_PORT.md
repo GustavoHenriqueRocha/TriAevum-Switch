@@ -116,6 +116,105 @@ Desempenho e usabilidade:
 - `logs/perf.txt` — FPS e ms por fase; `logs/oot3d_native_game.log`; `logs/glthread.txt`.
 - Crashes: `atmosphere/crash_reports/` (o `.nro` é carregado pelo hbloader; a base pode ser
   achada alinhando os endereços de retorno com instruções `bl/blr` do ELF).
+- Travamentos (imagem parada, sem crash report): `logs/hang.txt`, do watchdog de travamento
+  (abaixo). Desligar com `config/no_hang_watchdog`.
+
+### Congelamento na escolha Normal/Master Quest e watchdog de travamento (2026-10-17)
+Sintoma (integ5, `fps60` legacy, `parallel_presentation`, `config/heap_check_windows=1`): ~5 s
+depois de abrir, a imagem parou nos cartões em animação; sem crash report nem erro no log.
+`switch-logs/crash1/perf.txt`, sessão 68: janelas 150 e 300 e nada mais.
+
+**Onde a thread do jogo parou (provável, por evidência do arquivo).** A última linha (janela
+300) termina no meio, em `... present_4p=0 hold_`, sem `\n`. A linha é montada por um
+`std::ofstream` aberto e fechado a cada janela; o buffer do libstdc++ no devkitA64 é `BUFSIZ` =
+1024 bytes e, quando uma string não cabe, o `xsputn` escreve buffer + string de uma vez: o arquivo
+só recebe a linha em pedaços de ~1 KiB e, se a janela termina, o destrutor fecha e grava o resto.
+Os 2060 bytes gravados são dois desses pedaços; o terceiro sairia por volta do byte ~3083, que numa
+linha completa fica dentro de `mesa:`. Logo a thread do jogo entrou no bloco da janela 300 e nunca
+chegou ao `close`: parou entre `hold_` e o fim de `mesa:`. Nesse trecho não há espera da render
+thread, do pacer nem do stream (o `GetWaitStats` e o mutex de `interpolationPerf` vêm antes de
+`hold_`); o sys-clk já tinha respondido (`clocks: ... clk_ipc_us=16` está na linha); as estatísticas
+do backend e do Mesa (`mesa_switch_get_stats`, `cache_status`) só leem atômicos/um vetor estático.
+Sobram: o **`mallinfo()`** do `config/heap_check_windows=1` (todas as janelas) e a escrita do
+pedaço no SD. O `mallinfo()` do newlib (`__malloc_update_mallinfo`, conferido no desassembly do
+`libc.a`) segura o lock global do malloc e percorre cada bin por `bk` até voltar ao cabeçalho, sem
+limite nem checagem: com uma lista livre corrompida (um double free deixa `p->bk == p`; um
+use-after-free escreve no `fd/bk`) o laço não termina, o lock fica preso e qualquer thread que
+aloque para — o processo inteiro congela sem crash. Já houve corrupção de heap achada pelo
+`mallinfo` (crash na 21ª janela, `interp_scale=1.5`, seção de interpolação), e a config estava
+ligada justamente para caçar a próxima. Causa provável: **corrupção de heap (origem ainda
+desconhecida) + `mallinfo` em laço infinito segurando o lock do malloc**; não comprovada (falta o
+PC da thread), e a escrita no SD não está descartada. O watchdog abaixo responde isso na próxima vez.
+Outras três sessões do mesmo arquivo também acabam no meio de uma linha (3150, 13650, 34950;
+a 34950 também em `hold_`): podem ser saídas pelo HOME durante o bloco, nada se conclui delas.
+
+**Hipóteses revisadas e descartadas para este caso:**
+- *Lost wakeup no `NativeRenderCommandStream`* (sinal só com alguém esperando, 9b45d8e6): todo o
+  estado dos predicados e os contadores de esperas (`mWorkerWaiting`, `mProgressWaiters`) mudam
+  sob `mMutex`; quem espera incrementa o contador sob o lock antes do `wait`, que solta o lock de
+  forma atômica; quem sinaliza testa o contador sob o mesmo lock depois de mudar o estado. Ou o
+  sinalizador vê o contador > 0 e sinaliza, ou mudou o estado antes e o predicado (testado sob o
+  lock antes de dormir) já o vê. O `BeginShutdown` muda `mShutdown` sob o lock e sinaliza as duas
+  condvars sempre. Não há sinal perdido. Prova de estresse:
+  `oot3d_native_render_command_stream_stress_tests` (frames em voo 1 e 2, Run/Drain misturados,
+  comandos vazios/yield/sleep, leitor concorrente com `try_lock` como o watchdog, parada pedida de
+  dentro de um comando; um vigia aborta se nada andar por 20 s): limpo com TSan (100 mil e 300
+  mil comandos por configuração) e, sem TSan, 4 milhões de comandos (2 M com 1 e 2 M com 2 frames
+  em voo: 952 mil esperas do submissor, 436 mil do worker, 2,19 M sinais pulados) mais 1050
+  paradas de dentro de um comando, sem nenhum travamento. O TSan achou só uma corrida nova do próprio leitor (o `StartWorker`
+  escrevia `mStop` fora do lock): corrigida.
+- *Resolves do plano PICA com o mutex de build a cada até 32 draws*: um único mutex de build,
+  nunca segurado junto com o da fila; o pool de lotes (`BatchPool::Mutex`) só é tomado sozinho
+  ou dentro do de build (nunca o contrário): grafo de locks sem ciclo. A parada atômica
+  (`mStopRequested`) é só um atalho; a espera do worker usa `mStop` sob o mutex da fila.
+- *sys-clk*: a chamada da janela 300 respondeu (16 us). A sessão é aberta uma vez, na janela 1.
+- *Pacer/cadência e menus em pedaços/fade 16:9*: rodam na render thread ou fora do bloco do
+  `perf.txt`; não explicam a thread do jogo parada dentro dele.
+
+**Correção: varredura limitada no lugar do `mallinfo()`** (`oot3d_heap_bin_check.h`). Mesma soma
+(livres = bins + top; `heap_used_mb` = arena − livres, o `uordblks`), com o lock do malloc, mas
+cada elo é conferido (ponteiro dentro de `[fake_heap_start, fake_heap_end)` e alinhado, tamanho
+plausível, `p->bk->fd == p` e `p->fd->bk == p`), ciclo detectado (Brent) e teto de passos. Uma
+lista corrompida vira `heap_corrupt=<motivo> bin=… chunk=… size=… fd=… bk=…` no `perf.txt` e um
+relatório "HEAP CORROMPIDO" no `hang.txt` com o estado de todas as threads; a varredura então para
+nesta sessão. Campo novo `heap_free_chunks`. Testes: `oot3d_hang_watchdog_tests` (heap sintético
+no layout do newlib: soma igual à do `mallinfo`, double free, auto-laço, ciclo, ponteiros fora do
+heap/desalinhados, tamanhos absurdos e 3000 heaps com elos aleatórios — sempre termina e nunca
+lê fora do heap, ASan/UBSan). A corrupção em si continua: o relatório traz o chunk e as threads.
+
+**Watchdog de travamento** (`oot3d_hang_watchdog.h/.cpp`, ligado por padrão no Switch,
+`config/no_hang_watchdog` desliga):
+- Marcadores baratos: cada thread com papel (jogo, render, planos, áudio do host, áudio do SDL)
+  ganha um slot no `PlaceSwitchThread`. Etapa = um store relaxed (`frame_begin`, `guest_refresh`,
+  `present_visual`, `ui_submit`, `present_submit`, `frame_end`, `perf_window`, `perf_clocks`,
+  `perf_heap_walk`, `perf_file_close`, `wait_frames_in_flight`, `wait_drain`, `sync_command`,
+  `render_idle`, `render_command`, `render_pacer`, `render_swap`, `render_resolve_plans`);
+  progresso = load + store da dona (um por quadro de host no jogo, um por comando na render thread).
+  Nada por draw; as esperas do stream só marcam quando de fato bloqueiam.
+- Uma thread de serviço (0x3B, núcleos 1|2) acorda a cada ~1 s. Se o jogo ou a render thread
+  (não ociosa) ficar > 3 s sem progresso com o app em foco, grava **uma vez**
+  `logs/hang.txt` (append, `FsWriteOption_Flush`), pela API de FS da libnx direto — sem `fopen`,
+  sem `printf` de float, sem nenhuma alocação: o travamento pode ser o próprio lock do malloc.
+  Quando tudo volta a andar, escreve `--- recuperou após N ms` e se rearma (no máximo 8
+  relatórios por execução). Fora de foco (HOME) e saltos de > 2,5 s do próprio watchdog (sleep do
+  console) zeram a contagem.
+- Conteúdo: etapa, progresso (= `host_frames` do jogo / comandos da render thread), tempo parado
+  e, para cada thread registrada (inclusive as de serviço: Mesa, spdlog…), **PC, LR, SP, FP, x0–x2,
+  x19, a cadeia de frame pointers (16) e uma varredura da pilha** atrás de endereços de código. A
+  thread é pausada por um instante com `svcSetThreadActivity` (a pausa espera ela sair do núcleo),
+  lida com `svcGetThreadContext3` (só funciona com a thread pausada; da mesma forma que um
+  depurador) e retomada; só se o NPDM permitir (`envIsSyscallHinted(0x32/0x33)`), senão o
+  relatório diz isso e fica com os marcadores. Endereços dentro do NRO saem com o offset
+  `(+0x…)` para `aarch64-none-elf-addr2line -e oot3d_native_game.elf`. Também: a última chamada de
+  serviço (`sm:AtmosphereHasService(sys:clk)`, `sm:GetService(sys:clk)`, `sys:clk GetApiVersion`,
+  `sys:clk GetCurrentContext`; `EM_ANDAMENTO` se não voltou), o estado do stream lido com
+  `try_lock` (`queued`, `frames_queued`, `busy`, `worker_waiting`, `progress_waiters`,
+  `submitted/executed`, esperas e `signals_skipped`; `mutex=OCUPADO` se preso) e o pacer.
+- `perf.txt` (`threads:`) ganhou `hang_wd=1 hang_reports=N`.
+- Como ler: jogo em `perf_heap_walk` com PC no malloc/`__libc_lock_acquire_recursive` = lock do
+  malloc preso; procure nas outras threads quem está dentro de `malloc/free`. Jogo em
+  `wait_frames_in_flight` + render em `render_swap`/`render_pacer` = render thread presa no
+  swap/pacer. `ultima_chamada_servico=… EM_ANDAMENTO` = IPC sem resposta.
 
 ### Atualização (2026-10-16, noite)
 - Perfil real no console (`config/guest_profile` → `logs/guest_profile.txt`): as funções mais caras

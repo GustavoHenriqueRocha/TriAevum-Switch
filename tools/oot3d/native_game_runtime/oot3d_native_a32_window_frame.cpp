@@ -8,6 +8,8 @@
 #include "oot3d_native_room_shadow_shell.h"
 #include "oot3d_switch_threads.h"
 #include "oot3d_switch_clocks.h"
+#include "oot3d_hang_watchdog.h"
+#include "oot3d_heap_bin_check.h"
 #include "fast/backends/gl_frame_profiler.h"
 #if defined(__SWITCH__)
 #include <malloc.h>
@@ -288,6 +290,9 @@ bool NativeA32WindowSession::RunFrame() {
   auto &picaSemanticTrace = *picaSemanticTraceStorage;
   auto &presentationScheduler = *presentationSchedulerStorage;
   auto &realtimePacer = *realtimePacerStorage;
+  // Hang watchdog: one host frame of progress, then the stage markers below.
+  Oot3dNativeGame::HangWatch::Advance();
+  Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameBegin);
   const auto phaseBeforeFrame = phaseTiming.Values();
   const double nestedGuestBeforeFrame = phaseTiming.GuestInsidePicaSubmitSeconds;
   const double guestClockBeforeFrame = phaseTiming.GuestClockSeconds;
@@ -657,9 +662,11 @@ bool NativeA32WindowSession::RunFrame() {
       if (!UpdateGuestServicesForRefresh(topScreenStartRoutingEligible, inputFrame)) {
         break;
       }
+      Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::GuestRefresh);
       RunGuestRefresh();
     }
     if (presentHostFrame) {
+      Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PresentVisual);
       PresentVisualFrame(presentationElapsedSeconds, visualInterpolationAlpha);
     }
     frameCount += advanceGuest ? 1U : 0U;
@@ -669,6 +676,7 @@ bool NativeA32WindowSession::RunFrame() {
     inputConsumerDiagnostics.Observe(process.Memory(), frameCount);
   }
 
+  Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::UiSubmit);
   for (std::size_t subsystemIndex = 0;
        subsystemIndex < oot3d::ui::kUiSubsystemCount; ++subsystemIndex) {
     const auto subsystem =
@@ -729,6 +737,7 @@ bool NativeA32WindowSession::RunFrame() {
     });
   }
 
+  Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PresentSubmit);
   phaseStart = std::chrono::steady_clock::now();
   CpuProbe::Scope cpuPresent(CpuProbe::Phase::Present);
   Fast::Renderer3ds::SlowStepTrace presentSteps("present");
@@ -763,11 +772,19 @@ bool NativeA32WindowSession::RunFrame() {
         cadenceThirtyPair &&
         presentedKind ==
             static_cast<uint8_t>(Oot3dNativeGame::RenderFrameKind::Step);
-    realtimePacer.WaitForNextRefresh(thirtyStep ? 2U : 1U, thirtyStep);
+    {
+      Oot3dNativeGame::HangWatch::StageScope hangPacer(
+          Oot3dNativeGame::HangWatch::Stage::RenderPacer);
+      realtimePacer.WaitForNextRefresh(thirtyStep ? 2U : 1U, thirtyStep);
+    }
     cpuPacing.Stop();
     rendererTiming->PacingWaitSeconds += SecondsSince(waitStart);
     const auto swapStart = std::chrono::steady_clock::now();
-    window.EndFrame();
+    {
+      Oot3dNativeGame::HangWatch::StageScope hangSwap(
+          Oot3dNativeGame::HangWatch::Stage::RenderSwap);
+      window.EndFrame();
+    }
     lastSwapMs = SecondsSince(swapStart) * 1000.0;
     ObservePresentCadence(presentedKind);
   }, true);
@@ -778,6 +795,7 @@ bool NativeA32WindowSession::RunFrame() {
   cpuPresent.Stop();
   ++presentationFrameCount;
   ++runFrameCount;
+  Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameEnd);
   if (guestProfiler.Active()) {
     // Perfil guest por amostragem de quadros: nos quadros medidos o perfil
     // recebe todos os blocos; nos outros volta o callback original com o
@@ -823,6 +841,7 @@ bool NativeA32WindowSession::RunFrame() {
     static uint64_t windowHostFrames = 0U;
     static uint64_t windowGuestFrames = 0U;
     if (runFrameCount - windowHostFrames >= 150U) {
+      Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PerfWindow);
       const auto now = std::chrono::steady_clock::now();
       const double seconds = std::chrono::duration<double>(now - windowStart).count();
       const auto values = phaseTiming.Values();
@@ -842,7 +861,11 @@ bool NativeA32WindowSession::RunFrame() {
            << " total_ms=" << (seconds * 1000.0 / hostFrames);
       // Clocks of this window (sys-clk IPC, read only; -1 when unknown): one
       // IPC per window, after `now`, so it is not billed to this window.
-      perf << ' ' << Oot3dNativeGame::SwitchClockPerfSummary();
+      {
+        Oot3dNativeGame::HangWatch::StageScope hangClocks(
+            Oot3dNativeGame::HangWatch::Stage::PerfClocks);
+        perf << ' ' << Oot3dNativeGame::SwitchClockPerfSummary();
+      }
       if (hostAudioStream != nullptr) {
         perf << ' ' << hostAudioStream->PerfSummary();
       }
@@ -917,7 +940,10 @@ bool NativeA32WindowSession::RunFrame() {
              << perFrameMs(tail.OversleepNanoseconds, previousTail.OversleepNanoseconds)
              << " pacer_oversleep_max_ms="
              << static_cast<double>(realtimePacer.TakeMaximumOversleepNanoseconds()) / 1.0e6
-             << ' ' << Oot3dNativeGame::SwitchThreadPerfSummary();
+             << ' ' << Oot3dNativeGame::SwitchThreadPerfSummary()
+             // Hang watchdog (logs/hang.txt): on, and reports written.
+             << " hang_wd=" << (Oot3dNativeGame::HangWatch::Running() ? 1 : 0)
+             << " hang_reports=" << Oot3dNativeGame::HangWatch::ReportsWritten();
         previousWaits = waits;
         previousTail = tail;
       }
@@ -1093,9 +1119,35 @@ bool NativeA32WindowSession::RunFrame() {
                      : 0U;
         }();
         const uint32_t heapEvery = heapCheckWindows != 0U ? heapCheckWindows : 20U;
-        if ((heapStats || heapCheckWindows != 0U) && heapWindows++ % heapEvery == 0U) {
-          const struct mallinfo heap = mallinfo();
-          perf << " heap_used_mb=" << (static_cast<double>(heap.uordblks) / kMb);
+        // Not mallinfo(): with a corrupted free list (a double free leaves
+        // p->bk == p) its walk never ends while it holds the malloc lock, and
+        // the whole process freezes without a crash report (switch-logs/
+        // crash1, 2026-10-17). The bounded walk checks every link and reports
+        // instead (oot3d_heap_bin_check.h); after a corruption it stops.
+        static bool heapCorrupt = false;
+        if ((heapStats || heapCheckWindows != 0U) && !heapCorrupt &&
+            heapWindows++ % heapEvery == 0U) {
+          uint64_t usedBytes = 0U;
+          Oot3dNativeGame::HeapBinCheckResult heap;
+          {
+            Oot3dNativeGame::HangWatch::StageScope hangHeap(
+                Oot3dNativeGame::HangWatch::Stage::PerfHeapWalk);
+            heap = Oot3dNativeGame::CheckSwitchMallocHeap(&usedBytes);
+          }
+          perf << " heap_used_mb=" << (static_cast<double>(usedBytes) / kMb)
+               << " heap_free_chunks=" << heap.FreeChunks;
+          if (!heap.Ok) {
+            heapCorrupt = true;
+            char details[512];
+            Oot3dNativeGame::HangWatch::Text text(details, sizeof(details));
+            text.Str("heap_corrupt=").Str(heap.Reason).Str(" bin=").Dec(heap.Bin)
+                .Str(" chunk=").Hex(heap.Chunk).Str(" size=").Hex(heap.ChunkSize)
+                .Str(" fd=").Hex(heap.ChunkFd).Str(" bk=").Hex(heap.ChunkBk)
+                .Str(" steps=").Dec(heap.Steps).Str(" host_frames=").Dec(runFrameCount);
+            perf << ' ' << text.Data();
+            Oot3dNativeGame::HangWatch::ReportEvent(
+                "HEAP CORROMPIDO (varredura dos bins do malloc)", text.Data());
+          }
         }
         uint64_t usedMemory = 0U;
         uint64_t totalMemory = 0U;
@@ -1189,6 +1241,9 @@ bool NativeA32WindowSession::RunFrame() {
       windowValues = values;
       windowHostFrames = runFrameCount;
       windowGuestFrames = frameCount;
+      Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PerfFileClose);
+      perf.close();
+      Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameEnd);
     }
   }
   // Write once at the first frame and at most once more when a persistent
@@ -2454,6 +2509,8 @@ void NativeA32WindowSession::PresentVisualFrame(
         // Deferred plans of the closed frames are built (or taken from the
         // plan worker) here, on the render thread, before any use.
         if (completedFrame != nullptr) {
+          Oot3dNativeGame::HangWatch::StageScope hangResolve(
+              Oot3dNativeGame::HangWatch::Stage::RenderResolvePlans);
           if (supersededFrames != nullptr) {
             for (auto &superseded : *supersededFrames) {
               if (!Oot3dNativeGame::ResolveOot3dPicaDeferredVisualFrame(

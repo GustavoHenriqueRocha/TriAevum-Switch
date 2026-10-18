@@ -10,6 +10,8 @@
 
 #include "oot3d_switch_thread_layout.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace Oot3dNativeGame {
@@ -27,6 +29,9 @@ SwitchThreadLayoutConfig ActiveSwitchThreadLayout();
 // of each registered thread since the previous call and, for threads that
 // note their core, the cores they were seen on.
 std::string SwitchThreadPerfSummary();
+// Watchdog de travamento: handles e papéis das threads registradas, sem
+// bloquear (try_lock; 0 se o registro estiver ocupado) e sem alocar.
+size_t SnapshotSwitchThreads(uint32_t* handles, SwitchThreadRole* roles, size_t capacity) noexcept;
 #else
 inline void PlaceSwitchThread(SwitchThreadRole) {}
 inline void NoteSwitchThreadCore() {}

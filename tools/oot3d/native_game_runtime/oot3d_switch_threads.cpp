@@ -28,6 +28,7 @@
 #include <string>
 
 #include "oot3d_switch_threads.h"
+#include "oot3d_hang_watchdog.h"
 
 extern "C" int __real_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
                                      void* (*start)(void*), void* arg);
@@ -137,6 +138,16 @@ void RegisterCurrentThread(SwitchThreadRole role) {
     if (tRecord != nullptr) {
         tRecord->Role = role;
     }
+    // Slot do watchdog de travamento (oot3d_hang_watchdog.h) para os papéis
+    // que ele acompanha.
+    switch (role) {
+    case SwitchThreadRole::Game: HangWatch::Bind(HangWatch::Thread::Game, self); break;
+    case SwitchThreadRole::Render: HangWatch::Bind(HangWatch::Thread::Render, self); break;
+    case SwitchThreadRole::PicaPlan: HangWatch::Bind(HangWatch::Thread::PicaPlan, self); break;
+    case SwitchThreadRole::HostAudio: HangWatch::Bind(HangWatch::Thread::HostAudio, self); break;
+    case SwitchThreadRole::SdlAudio: HangWatch::Bind(HangWatch::Thread::SdlAudio, self); break;
+    default: break;
+    }
 }
 
 void UnregisterCurrentThread() {
@@ -194,6 +205,28 @@ void NoteSwitchThreadCore() {
         counter.store(counter.load(std::memory_order_relaxed) + 1U,
                       std::memory_order_relaxed);
     }
+}
+
+size_t SnapshotSwitchThreads(uint32_t* handles, SwitchThreadRole* roles,
+                             size_t capacity) noexcept {
+    std::unique_lock lock(gRegistryMutex, std::try_to_lock);
+    for (int attempt = 0; !lock.owns_lock() && attempt < 20; ++attempt) {
+        svcSleepThread(5'000'000LL);
+        lock.try_lock();
+    }
+    if (!lock.owns_lock()) {
+        return 0U;
+    }
+    size_t count = 0U;
+    for (const auto& record : gRecords) {
+        if (record.ThreadHandle == INVALID_HANDLE || count == capacity) {
+            continue;
+        }
+        handles[count] = record.ThreadHandle;
+        roles[count] = record.Role;
+        ++count;
+    }
+    return count;
 }
 
 SwitchThreadLayoutConfig ActiveSwitchThreadLayout() {

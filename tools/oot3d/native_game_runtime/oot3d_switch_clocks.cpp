@@ -13,6 +13,7 @@
 #include <string>
 
 #include "oot3d_switch_clocks.h"
+#include "oot3d_hang_watchdog.h"
 
 namespace Oot3dNativeGame {
 namespace {
@@ -87,13 +88,27 @@ struct SysClkClient {
         }
         Probed = true;
         WindowsUntilRetry = 60U;
-        if (!SysClkRegistered() || R_FAILED(smGetService(&Session, "sys:clk"))) {
-            return false;
+        {
+            // Watchdog de travamento: a última chamada de serviço vai no hang.txt.
+            HangWatch::ServiceCallScope call("sm:AtmosphereHasService(sys:clk)");
+            if (!SysClkRegistered()) {
+                return false;
+            }
+        }
+        {
+            HangWatch::ServiceCallScope call("sm:GetService(sys:clk)");
+            if (R_FAILED(smGetService(&Session, "sys:clk"))) {
+                return false;
+            }
         }
         Open = true;
         u32 version = 0;
-        if (R_FAILED(serviceDispatchOut(&Session, kSysClkCmdGetApiVersion, version)) ||
-            version == 0U) {
+        Result versionResult;
+        {
+            HangWatch::ServiceCallScope call("sys:clk GetApiVersion");
+            versionResult = serviceDispatchOut(&Session, kSysClkCmdGetApiVersion, version);
+        }
+        if (R_FAILED(versionResult) || version == 0U) {
             // API 0 tinha outro contexto: não arrisca ler.
             Close();
             return false;
@@ -122,8 +137,11 @@ std::string SwitchClockPerfSummary() {
     if (gSysClk.Ensure()) {
         SysClkContextV4 context{};
         const uint64_t start = armGetSystemTick();
-        const Result result =
-            serviceDispatchOut(&gSysClk.Session, kSysClkCmdGetCurrentContext, context);
+        Result result;
+        {
+            HangWatch::ServiceCallScope call("sys:clk GetCurrentContext");
+            result = serviceDispatchOut(&gSysClk.Session, kSysClkCmdGetCurrentContext, context);
+        }
         ipcMicroseconds = static_cast<double>(armTicksToNs(armGetSystemTick() - start)) / 1000.0;
         if (R_SUCCEEDED(result)) {
             // realFreqs (medido pelo sys-clk) quando houver; senão o alvo.
