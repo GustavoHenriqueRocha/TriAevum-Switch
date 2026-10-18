@@ -533,6 +533,36 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
             poke(g.r[0], bits);
             std::memcpy(&g.vfp[0], &target, 4);
         }
+        if (rng.Chance(25)) { // bordas: perto de FLT_MAX, inf, NaN, subnormais
+            const auto edge = [&]() -> uint32_t {
+                const uint32_t sign = rng.Chance(50) ? 0x80000000U : 0U;
+                switch (rng.Below(8U)) {
+                case 0: case 1: case 2: // perto de FLT_MAX (estouro no TwoSum)
+                    return sign | (0x7F7FFFFFU - (rng.U32() & ((1U << rng.Below(24U)) - 1U)));
+                case 3: // expoentes altos
+                    return sign | ((0xF0U + rng.Below(15U)) << 23U) | (rng.U32() & 0x007FFFFFU);
+                case 4: // inf, NaN silencioso ou sinalizador
+                    return sign | 0x7F800000U |
+                           (rng.Chance(30) ? 0U : (rng.Chance(50) ? 0x00400000U : 0U) |
+                                                  (1U + rng.Below(0x003FFFFFU)));
+                case 5: // subnormal
+                    return sign | (1U + rng.Below(0x007FFFFFU));
+                case 6: // normais mínimos
+                    return sign | ((1U + rng.Below(24U)) << 23U) | (rng.U32() & 0x007FFFFFU);
+                default:
+                    return rng.Float();
+                }
+            };
+            poke(g.r[0], edge());
+            for (const int i : {0, 1, 2, 3}) {
+                if (rng.Chance(70)) g.vfp[i] = edge();
+            }
+            // Qualquer combinação de RMode, FZ, DN e flags acumuladas.
+            if (rng.Chance(60)) {
+                g.fpscr = (rng.Below(16U) << 22U) | (rng.Chance(40) ? rng.U32() & 0x9FU : 0U) |
+                          (rng.U32() & 0xF0000000U);
+            }
+        }
         break;
     }
     case 0x003325F0U: { // Math3D_CylOutsideCylDist: dois cilindros com floats de jogo
@@ -858,6 +888,50 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
     }
 }
 
+// Casos de regressão fixos, rodados como as primeiras tentativas (o cenário
+// aleatório da tentativa é gerado antes e sobrescrito, então as tentativas
+// seguintes continuam iguais). Devolve quantos a função tem.
+uint32_t Regression(uint32_t entry, uint64_t trial, Scenario& s,
+                    const std::function<void(uint32_t, uint32_t)>& poke) {
+    switch (entry) {
+    case 0x0036E168U: {
+        // Math_SmoothStepToF, tentativa 140844 (semente 0x5EED): s0 - s4 com
+        // s4 = FLT_MAX. O TwoSum do caminho rápido de Oot3dVfpSubtract estourava
+        // (OFC/IOC a mais no FPSR do host, dobrados no FPSCR guest). Com
+        // FPSCR = 0 e nos outros 15 modos de RMode x FZ x DN.
+        constexpr uint32_t kCases = 16U;
+        if (trial >= kCases) return kCases;
+        static constexpr uint32_t kR[16] = {
+            0x08004D70U, 0x08004D5CU, 0x08002118U, 0x08006F08U, 0xC77B6A27U, 0x0800488CU,
+            0x59A21DE7U, 0x24638D00U, 0x39B5C13CU, 0x00512960U, 0x0EAA3FE3U, 0xB10047AFU,
+            0x08007518U, 0x08003F04U, 0x003464CCU, 0x0036E168U};
+        static constexpr uint32_t kS[32] = {
+            0x7EC70697U, 0x343AF7A5U, 0x3DAF3BBDU, 0x7F800002U, 0x80000001U, 0x4565884FU,
+            0xB4EFF3AEU, 0x45BA987EU, 0xE1AB017FU, 0xC5825537U, 0x05712722U, 0x007FFFFFU,
+            0xFF7FFFFEU, 0xC5A309FBU, 0xCB287D7BU, 0x748F4CA7U, 0x00800000U, 0x00800000U,
+            0x80000000U, 0xFF800000U, 0xC3FB8000U, 0x397FFFFFU, 0xEE69BE69U, 0xBEAF22D4U,
+            0xB9EA5C5DU, 0x3D93A5AFU, 0xB434D0F6U, 0x8D965D1BU, 0xE7C4100AU, 0x46490E48U,
+            0x34D37AC4U, 0xBD8080F7U};
+        auto& g = s.Guest;
+        std::copy(std::begin(kR), std::end(kR), g.r.begin());
+        std::copy(std::begin(kS), std::end(kS), g.vfp.begin());
+        g.cpsr = 0xF8040010U;
+        g.fpscr = static_cast<uint32_t>(trial) << 22U; // RMode, FZ, DN
+        s.Budget = 1U << 20U;
+        s.HookMode = 0U;
+        s.SkipFirst = false;
+        s.Trace = false;
+        constexpr uint32_t kContext = kRamBase + 0x1000U;
+        poke(0x0051B2F4U, kContext);
+        poke(kContext + 0x110U, 0x0000C6F5U); // taxa -14603
+        poke(g.r[0], 0x7F7FFFFFU);           // *pValue = FLT_MAX
+        return kCases;
+    }
+    default:
+        return 0U;
+    }
+}
+
 } // namespace
 
 #if defined(OOT3D_GUEST_OVERRIDE_QEMU)
@@ -911,6 +985,7 @@ int main(int argc, char** argv) {
         const uint64_t callsBefore = info ? info->Calls : 0U;
         const uint64_t declinedBefore = info ? info->Declined : 0U;
         uint64_t flows[6] = {};
+        uint64_t regressions = 0; // casos de regressão fixos rodados
         uint64_t guestCalls = 0; // chamadas diretas e indiretas executadas (cobertura)
         // Para o microbenchmark: cenários aceitos pela versão nativa, com a RAM
         // exatamente como estava antes da chamada e sem orçamento curto.
@@ -944,6 +1019,9 @@ int main(int argc, char** argv) {
                 pokes.emplace_back(address, value);
             };
             Prepare(testCase.Entry, rng, s, poke);
+            if (trial < Regression(testCase.Entry, trial, s, poke)) {
+                ++regressions;
+            }
             std::array<uint8_t, 512> window{};
             const auto fill = [&](uint32_t address) {
                 for (size_t i = 0; i < window.size(); i += 4) {
@@ -1025,10 +1103,10 @@ int main(int argc, char** argv) {
         const uint64_t declined = info ? info->Declined - declinedBefore : 0U;
         std::printf("%s %08X %-36s tentativas=%" PRIu64 " nativa=%" PRIu64 " recusou=%" PRIu64
                     " fluxos[ret=%" PRIu64 " br=%" PRIu64 " lim=%" PRIu64 " falta=%" PRIu64
-                    " nsup=%" PRIu64 "] chamadas=%" PRIu64 "\n",
+                    " nsup=%" PRIu64 "] chamadas=%" PRIu64 " regressao=%" PRIu64 "\n",
                     failed ? "FALHOU" : "OK    ", testCase.Entry, testCase.Name, trials,
                     calls, declined, flows[0], flows[1], flows[3], flows[4], flows[5],
-                    guestCalls);
+                    guestCalls, regressions);
 #if defined(__x86_64__) && !defined(OOT3D_GUEST_OVERRIDE_QEMU)
         if (benchEnabled && !accepted.empty() && !failed) {
             // Microbenchmark no host (x86): mesmo conjunto de entradas aceitas,

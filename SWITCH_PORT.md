@@ -352,6 +352,20 @@ Provas da rodada (scripts no repositório; rodadas na Ryzen e no notebook):
   `Math_SmoothStepToF` (0x36E168, tentativa 140844: FPSCR com OFC a mais na substituição nativa,
   FZ=0/RN), **já existia**: repete igual com o `cpp-lean` atual. É da substituição, não desta
   rodada (o lado traduzido usa o software nesse modo); a corrigir na própria substituição.
+  **Corrigido (2026-10-18):** a substituição usava `Oot3dVfpAdd/Subtract/Multiply`
+  (`oot3d_native_a32_vfp_fast.h`), cujo caminho rápido faz contas de float do host. No console e
+  no qemu elas rodam dentro do `Oot3dGuestFpScope` (FPCR do guest, FPSR dobrado no FPSCR guest na
+  saída), então as flags das contas auxiliares vazam para o guest: no TwoSum de `s0 - s4`
+  (0x36E1C0) com `s4 = FLT_MAX` e `s0 = 0x7EC70697`, `sum - a` estoura (OFC, e IOC de inf - inf)
+  embora a subtração em si não estoure. Agora a substituição usa as mesmas `Oot3dVfpNative*` do
+  código gerado (instrução do guest com FZ=1, software inteiro nos outros casos; a primeira
+  comparação, antes da última recusa, segue no software). O teste diferencial ganhou bordas para
+  essa função (perto de FLT_MAX, inf, NaN, subnormais, todos os RMode×FZ×DN) e 16 casos de
+  regressão fixos (a tentativa 140844 nos 16 modos; a versão antiga falha já no primeiro). Prova:
+  host 20 milhões e qemu-aarch64 4 milhões de tentativas, zero falhas.
+  **Mesmo risco latente** nas outras substituições que ainda usam o caminho rápido dentro do
+  escopo guest: 0x00372070, 0x002CDE90, 0x003325F0 e 0x003727F0 (soma/subtração/VMLA com operando
+  perto de FLT_MAX). Não mexido nesta correção.
 - `test_whole_aot_cpp.py` (44 testes, inclusive os das flags novas: opcionais, saem do manifesto
   quando desligadas, C++ idêntico sem elas).
 

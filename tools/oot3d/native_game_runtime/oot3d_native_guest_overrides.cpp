@@ -631,6 +631,20 @@ bool Override_002F9430(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
 //   rate = (s16)*(*(ctx**)0x0051B2F4 + 0x110); s3/s1/s2 *= rate/3
 //   passo = (alvo - s4) * fração (|alvo - s4| < 1e-5 usa o resto inteiro),
 //   limitado por máximo/mínimo, gravado em *pValue; s0 = |alvo - *pValue|
+//
+// A aritmética usa as MESMAS chamadas do código gerado (Oot3dVfpNative*, na
+// mesma ordem e com os mesmos operandos). Antes usava Oot3dVfpAdd/Multiply
+// (oot3d_native_a32_vfp_fast.h), cujo caminho rápido faz contas de float do
+// host: no console (e no qemu) elas rodam dentro do Oot3dGuestFpScope, com o
+// FPCR do guest e o FPSR dobrado no FPSCR guest na saída, então as flags das
+// contas auxiliares vazavam para o guest. O TwoSum da subtração s0 - s4
+// (`sum - a`) estoura quando |s4| está perto de FLT_MAX e a soma arredonda
+// para fora (ex.: 0x7EC70697 - 0x7F7FFFFF): OFC (e IOC de inf - inf) a mais,
+// com FZ=0/RN, que a tradução não levanta (caso de regressão no teste
+// diferencial). As Oot3dVfpNative* só executam a instrução do guest (FZ=1) ou
+// o software, que é só aritmética inteira.
+// A primeira comparação, antes da última recusa possível, fica no software
+// (Compare: só locais), igual ao valor e às flags da nativa.
 bool Override_0036E168(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
                        Oot3dAotArchitecturalState& state,
                        Oot3dWholeAotFlow& flow) noexcept {
@@ -651,71 +665,76 @@ bool Override_0036E168(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     const uint32_t s4 = Read32(memory, r0);
     Compare(fpscr, flags, s4, s0, false);
     uint32_t blocks = 2U; // 0x0036E168 e 0x0036E26C
+    // VCMP(E) + VMRS APSR_nzcv como no código gerado.
+    const auto compare = [&](uint32_t left, uint32_t right) noexcept {
+        Oot3dVfpNativeCompare(left, right, true, fpscr);
+        flags.AssignPackedNzcv(fpscr);
+    };
     if (!flags.Z()) {
         blocks += 1U; // 0x0036E178
         const uint32_t globalContext = Read32(memory, 0x0051B2F4U);
         if (!Readable(memory, globalContext + 0x110U, 2U, 2U)) return Decline(kIdx);
+        // Daqui em diante não há mais recusa (r0 já validado para escrita).
         uint16_t rate16 = 0U;
         memory.ReadFast<uint16_t>(globalContext + 0x110U, &rate16);
         r2 = 0x3727C5ACU; // 1e-5
         r1 = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(rate16)));
         s6 = r1;
         s5 = r1;
-        s6 = Commit(fpscr, Oot3dVfpFromSigned(s6, fpscr));
-        s5 = Commit(fpscr, Oot3dVfpFromSigned(s5, fpscr));
-        s3 = Commit(fpscr, Oot3dVfpMultiply(s6, s3, fpscr));
+        Oot3dVfpNativeFromSigned(s6, s6, fpscr);
+        Oot3dVfpNativeFromSigned(s5, s5, fpscr);
+        Oot3dVfpNativeMultiply(s3, s6, s3, fpscr);
         s6 = r1;
-        s1 = Commit(fpscr, Oot3dVfpMultiply(s5, s1, fpscr));
+        Oot3dVfpNativeMultiply(s1, s5, s1, fpscr);
         s5 = 0x3EAAAAABU; // literal em 0x0036E280 (1/3)
-        s6 = Commit(fpscr, Oot3dVfpFromSigned(s6, fpscr));
-        s3 = Commit(fpscr, Oot3dVfpMultiply(s3, s5, fpscr));
-        s1 = Commit(fpscr, Oot3dVfpMultiply(s1, s5, fpscr));
-        s2 = Commit(fpscr, Oot3dVfpMultiply(s6, s2, fpscr));
-        s2 = Commit(fpscr, Oot3dVfpMultiply(s2, s5, fpscr));
-        s5 = Commit(fpscr, Oot3dVfpSubtract(s0, s4, fpscr));
+        Oot3dVfpNativeFromSigned(s6, s6, fpscr);
+        Oot3dVfpNativeMultiply(s3, s3, s5, fpscr);
+        Oot3dVfpNativeMultiply(s1, s1, s5, fpscr);
+        Oot3dVfpNativeMultiply(s2, s6, s2, fpscr);
+        Oot3dVfpNativeMultiply(s2, s2, s5, fpscr);
+        Oot3dVfpNativeSubtract(s5, s0, s4, fpscr);
         s6 = s5 & 0x7FFFFFFFU;
-        s1 = Commit(fpscr, Oot3dVfpMultiply(s5, s1, fpscr));
+        Oot3dVfpNativeMultiply(s1, s5, s1, fpscr);
         r1 = s6;
         flags.SetSubtract(r1, r2, Mask(0x9U));
         if (flags.N() != flags.V()) s1 = s5;
-        Compare(fpscr, flags, s1, s3, true);
+        compare(s1, s3);
         bool toClamp = flags.N() == flags.V(); // ge -> 0x0036E1F4
         if (!toClamp) {
             blocks += 1U; // 0x0036E1E4
             s5 = s3 ^ 0x80000000U;
-            Compare(fpscr, flags, s1, s5, true);
+            compare(s1, s5);
             toClamp = !(flags.C() && !flags.Z()); // hi -> 0x0036E21C
         }
-        // Daqui em diante não há mais recusa (r0 já validado para escrita).
         if (toClamp) {
             blocks += 1U; // 0x0036E1F4
-            Compare(fpscr, flags, s1, s2, true);
+            compare(s1, s2);
             if (!flags.Z() && flags.N() == flags.V()) s1 = s2;
             s2 = s2 ^ 0x80000000U;
-            Compare(fpscr, flags, s1, s2, true);
+            compare(s1, s2);
             if (!flags.C()) s1 = s2;
-            s1 = Commit(fpscr, Oot3dVfpAdd(s4, s1, fpscr));
+            Oot3dVfpNativeAdd(s1, s4, s1, fpscr);
             memory.WriteFast<uint32_t>(r0, s1);
         } else {
             blocks += 1U; // 0x0036E21C
-            Compare(fpscr, flags, s1, s3, true);
+            compare(s1, s3);
             if (!flags.C()) {
                 blocks += 1U; // 0x0036E228
                 s1 = s3;
-                s2 = Commit(fpscr, Oot3dVfpAdd(s4, s1, fpscr));
+                Oot3dVfpNativeAdd(s2, s4, s1, fpscr);
                 memory.WriteFast<uint32_t>(r0, s2);
-                Compare(fpscr, flags, s2, s0, true);
+                compare(s2, s0);
                 if (!flags.Z() && flags.N() == flags.V()) s2 = s0;
                 memory.WriteFast<uint32_t>(r0, s2);
             }
             blocks += 1U; // 0x0036E244
-            Compare(fpscr, flags, s1, s5, true);
+            compare(s1, s5);
             if (!flags.Z() && flags.N() == flags.V()) {
                 blocks += 1U; // 0x0036E250
                 s1 = Read32(memory, r0);
-                s1 = Commit(fpscr, Oot3dVfpAdd(s1, s5, fpscr));
+                Oot3dVfpNativeAdd(s1, s1, s5, fpscr);
                 memory.WriteFast<uint32_t>(r0, s1);
-                Compare(fpscr, flags, s1, s0, true);
+                compare(s1, s0);
                 if (flags.Z() || flags.N() != flags.V()) s1 = s0;
                 memory.WriteFast<uint32_t>(r0, s1);
             }
@@ -723,7 +742,7 @@ bool Override_0036E168(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     }
     // 0x0036E26C
     s1 = Read32(memory, r0);
-    s0 = Commit(fpscr, Oot3dVfpSubtract(s0, s1, fpscr));
+    Oot3dVfpNativeSubtract(s0, s0, s1, fpscr);
     s0 &= 0x7FFFFFFFU;
     state.Flags = flags;
     state.R[1] = r1;
