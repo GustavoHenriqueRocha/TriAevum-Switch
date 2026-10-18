@@ -259,6 +259,16 @@ class Oot3dPicaPreparedVisualTransition final {
 class Oot3dPicaVisualFrameAccumulator final {
   public:
     void Append(Oot3dPicaVulkanDrawPlan plan);
+    // A default-constructed plan appended in place, for the caller to fill
+    // (deferred placeholders): no ~16 KiB plan is moved into the vector.
+    // The reference is valid until the next Append/Emplace/Finish.
+    Oot3dPicaVulkanDrawPlan& EmplaceDraw();
+    // config/offload_plan: FinishFrames hands the pending vector's storage
+    // to a frame that takes every pending draw (one guest frame closed, the
+    // usual case) instead of moving each plan. Same frames, same order;
+    // false keeps the element-wise move.
+    void SetMoveFreeFinish(bool enabled) noexcept { mMoveFreeFinish = enabled; }
+    [[nodiscard]] bool MoveFreeFinish() const noexcept { return mMoveFreeFinish; }
     void Append(Oot3dPicaMemoryFillSubmission fill);
     void Append(Oot3dPicaDisplayTransferSubmission transfer);
     std::optional<Oot3dPicaVisualFrame>
@@ -303,6 +313,7 @@ class Oot3dPicaVisualFrameAccumulator final {
 
   private:
     uint64_t mNextSequence = 1;
+    bool mMoveFreeFinish = true;
     std::vector<Oot3dPicaVulkanDrawPlan> mPendingDraws;
     std::vector<Oot3dPicaMemoryFillSubmission> mPendingMemoryFills;
     std::vector<Oot3dPicaDisplayTransferSubmission> mPendingDisplayTransfers;

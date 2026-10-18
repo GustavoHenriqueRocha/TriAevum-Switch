@@ -113,6 +113,12 @@ class Oot3dPicaDeferredPlanBuilder final {
     Oot3dPicaVulkanDrawPlan MakeDeferredPlan(
         const std::shared_ptr<Oot3dPicaDeferredPlanBatch>& batch,
         size_t index);
+    // The same placeholder written into a default-constructed plan that
+    // already sits where it will stay (the accumulator's pending vector),
+    // so the guest thread moves no plan (config/offload_plan).
+    void FillDeferredPlan(
+        const std::shared_ptr<Oot3dPicaDeferredPlanBatch>& batch,
+        size_t index, Oot3dPicaVulkanDrawPlan& plan);
     // Hands the batch over; the guest thread must not touch its submissions
     // afterwards.
     void Publish(std::shared_ptr<Oot3dPicaDeferredPlanBatch> batch);

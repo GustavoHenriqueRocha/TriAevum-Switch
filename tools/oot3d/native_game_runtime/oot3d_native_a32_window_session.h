@@ -64,6 +64,7 @@
 #include "oot3d_native_pica_vulkan_bridge.h"
 #include "oot3d_native_pica_vulkan_plan.h"
 #include "oot3d_native_pica_deferred_plan.h"
+#include "oot3d_native_offload.h"
 #include "oot3d_native_player_temporal_bridge.h"
 #include "oot3d_native_scenario_bootstrap.h"
 #include "oot3d_native_temporal_event_ledger.h"
@@ -604,6 +605,16 @@ private:
   bool interpolationPacingConfigured = false;
   uint32_t interpolationPacingRateHz = 0U;
   bool skipNativeReplay = false;
+  // Work taken off the game thread (config/offload_*; oot3d_native_offload.h).
+  Oot3dNativeGame::NativeOffloadOptions offload;
+  // logs/perf.txt through a service thread (config/offload_perf).
+  std::optional<Oot3dNativeGame::AsyncLineWriter> perfWriter;
+  // Game-thread cost of the previous perf.txt window line (format + write
+  // or enqueue), ms, and of the PICA capture inside the guest's GX
+  // commands (SubmitDrawPacket), cumulative.
+  double perfLineGameMs = 0.0;
+  // DSP HLE frames of one refresh: storage reused across refreshes.
+  std::vector<int16_t> refreshAudioSamples;
   // Kind of the frame the render thread is drawing (RenderFrameKind) and
   // its render-thread milliseconds so far.
   uint8_t renderFrameKind = 0U;

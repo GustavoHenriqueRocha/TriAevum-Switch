@@ -49,6 +49,13 @@ uint64_t HashSnapshotBytes(std::span<const uint8_t> bytes) {
     return HashOot3dPicaSnapshot(bytes);
 }
 
+// FNV-1a continued from `hash`: HashOot3dPicaSnapshot(a ++ b) equals
+// ContinueSnapshotHash(HashOot3dPicaSnapshot(a), b).
+uint64_t ContinueSnapshotHash(uint64_t hash, std::span<const uint8_t> bytes) {
+    for (const auto value : bytes) hash = (hash ^ value) * 1099511628211ULL;
+    return hash;
+}
+
 void HashCombine(size_t& hash, uint64_t value) {
     hash ^= static_cast<size_t>(
                 value + 0x9e3779b97f4a7c15ULL +
@@ -280,7 +287,8 @@ bool Oot3dNativePicaSubmissionQueue::SubmitHardwareRegisterWrite(
 bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
     Oot3dPicaResourceKind kind, uint8_t slot, uint32_t physicalAddress,
     uint32_t firstElement, size_t byteCount,
-    Oot3dPicaResourceSnapshot &resource, std::string *error) {
+    Oot3dPicaResourceSnapshot &resource, std::string *error,
+    GeometrySnapshotCacheEntry **entryOut) {
   const auto source = mMemory.View(physicalAddress, byteCount);
   if (!source.has_value()) {
     SetError(error, kind == Oot3dPicaResourceKind::IndexBuffer
@@ -310,6 +318,7 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
         cached->second.ContentHash == HashSnapshotBytes(*source)));
   const bool cacheHit =
       versionHit || contentMatch;
+  if (compared && cached->second.Bytes == nullptr) mCounters.HashedBytes += source->size();
   if (mRuntimeProfilingEnabled) {
     if (versionHit) {
       ++mRuntimeProfile.GeometrySnapshotVersionHits;
@@ -341,7 +350,14 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
     GeometrySnapshotCacheEntry entry;
     entry.Bytes = std::make_shared<const std::vector<uint8_t>>(source->begin(),
                                                                source->end());
-    entry.ContentHash = HashSnapshotBytes(*source);
+    mCounters.CopiedBytes += source->size();
+    if (mLeanCapture) {
+      // Only a savestate reads it (CaptureState hashes the bytes then).
+      entry.ContentHashValid = false;
+    } else {
+      entry.ContentHash = HashSnapshotBytes(*source);
+      mCounters.HashedBytes += source->size();
+    }
     entry.ContentVersion = mNextGeometryContentVersion++;
     entry.SourceWriteGeneration = sourceWriteGeneration.value_or(0U);
     if (mNextGeometryContentVersion == 0U) {
@@ -354,10 +370,12 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
       cached->second.Bytes =
           std::make_shared<const std::vector<uint8_t>>(source->begin(),
                                                        source->end());
+      mCounters.CopiedBytes += source->size();
     }
     cached->second.SourceWriteGeneration = sourceWriteGeneration.value_or(0U);
   }
   cached->second.LastUsedSequence = ++mGeometrySnapshotSequence;
+  if (entryOut != nullptr) *entryOut = &cached->second;
 
   resource.Kind = kind;
   resource.Slot = slot;
@@ -391,23 +409,42 @@ bool Oot3dNativePicaSubmissionQueue::CaptureIndexAndVertexResources(
       return false;
     }
     Oot3dPicaResourceSnapshot indices;
+    GeometrySnapshotCacheEntry* indexEntry = nullptr;
     if (!CaptureGeometryResource(
             Oot3dPicaResourceKind::IndexBuffer, 0U, vertex.IndexPhysicalAddress,
             0U, static_cast<size_t>(vertex.VertexCount) * indexSize, indices,
-            error)) {
+            error, &indexEntry)) {
       return false;
     }
     const auto indexBytes = indices.ResolvedBytes();
-    minimumIndex = std::numeric_limits<uint32_t>::max();
-    maximumIndex = 0U;
-    for (size_t index = 0; index < vertex.VertexCount; ++index) {
-      const uint32_t value =
-          vertex.IndicesAre16Bit
-              ? static_cast<uint32_t>(indexBytes[index * 2U]) |
-                    (static_cast<uint32_t>(indexBytes[index * 2U + 1U]) << 8U)
-              : indexBytes[index];
-      minimumIndex = std::min(minimumIndex, value);
-      maximumIndex = std::max(maximumIndex, value);
+    const uint8_t rangeKind = vertex.IndicesAre16Bit ? 2U : 1U;
+    // The range is a function of the cached bytes (the snapshot reads
+    // exactly those) and of the index width: remembered with the entry.
+    if (mLeanCapture && indexEntry != nullptr &&
+        indexEntry->IndexRangeKind == rangeKind &&
+        indexEntry->Bytes != nullptr &&
+        indexEntry->Bytes->data() == indexBytes.data()) {
+      minimumIndex = indexEntry->IndexMinimum;
+      maximumIndex = indexEntry->IndexMaximum;
+      ++mCounters.IndexRangeReuses;
+    } else {
+      minimumIndex = std::numeric_limits<uint32_t>::max();
+      maximumIndex = 0U;
+      for (size_t index = 0; index < vertex.VertexCount; ++index) {
+        const uint32_t value =
+            vertex.IndicesAre16Bit
+                ? static_cast<uint32_t>(indexBytes[index * 2U]) |
+                      (static_cast<uint32_t>(indexBytes[index * 2U + 1U]) << 8U)
+                : indexBytes[index];
+        minimumIndex = std::min(minimumIndex, value);
+        maximumIndex = std::max(maximumIndex, value);
+      }
+      if (mLeanCapture && indexEntry != nullptr && indexEntry->Bytes != nullptr &&
+          indexEntry->Bytes->data() == indexBytes.data()) {
+        indexEntry->IndexRangeKind = rangeKind;
+        indexEntry->IndexMinimum = minimumIndex;
+        indexEntry->IndexMaximum = maximumIndex;
+      }
     }
     submission.Resources.push_back(std::move(indices));
   } else {
@@ -809,9 +846,29 @@ bool Oot3dNativePicaSubmissionQueue::CaptureTextureResources(
             TextureSnapshotCacheEntry entry;
             entry.SourceBytes = std::move(sourceBytes);
             entry.ResolvedBytes = std::move(resolvedBytes);
+            mCounters.CopiedBytes += entry.SourceBytes->size();
+            const auto baseLevelBytes = Oot3dPicaTextureMipLevelByteSize(texture, 0U);
+            if (mLeanCapture && baseLevelBytes.has_value() &&
+                *baseLevelBytes <= entry.ResolvedBytes->size()) {
+                // One pass: FNV-1a is sequential, so the base level's hash is
+                // the state after its bytes, and without a payload transform
+                // the resolved bytes are the source bytes.
+                const std::span<const uint8_t> resolved(*entry.ResolvedBytes);
+                entry.BaseLevelContentHash =
+                    HashSnapshotBytes(resolved.first(*baseLevelBytes));
+                entry.ContentHash = ContinueSnapshotHash(
+                    entry.BaseLevelContentHash, resolved.subspan(*baseLevelBytes));
+                mCounters.HashedBytes += resolved.size();
+                if (entry.SourceBytes == entry.ResolvedBytes) {
+                    entry.SourceHash = entry.ContentHash;
+                } else {
+                    entry.SourceHash = HashSnapshotBytes(*entry.SourceBytes);
+                    mCounters.HashedBytes += entry.SourceBytes->size();
+                }
+            } else {
             entry.SourceHash = HashSnapshotBytes(*entry.SourceBytes);
             entry.ContentHash = HashSnapshotBytes(*entry.ResolvedBytes);
-            const auto baseLevelBytes = Oot3dPicaTextureMipLevelByteSize(texture, 0U);
+            mCounters.HashedBytes += entry.SourceBytes->size() + entry.ResolvedBytes->size();
             if (!baseLevelBytes.has_value() || *baseLevelBytes > entry.ResolvedBytes->size()) {
                 SetError(error, "PICA texture base mip is invalid");
                 return false;
@@ -821,6 +878,9 @@ bool Oot3dNativePicaSubmissionQueue::CaptureTextureResources(
             entry.BaseLevelContentHash = *baseLevelBytes == entry.ResolvedBytes->size()
                 ? entry.ContentHash
                 : HashSnapshotBytes(std::span<const uint8_t>(*entry.ResolvedBytes).first(*baseLevelBytes));
+            if (*baseLevelBytes != entry.ResolvedBytes->size())
+                mCounters.HashedBytes += *baseLevelBytes;
+            }
             cached = mTextureSnapshotCache.insert_or_assign(
                 key, std::move(entry)).first;
         }
@@ -841,27 +901,72 @@ bool Oot3dNativePicaSubmissionQueue::SubmitDrawPacket(
     CpuPhaseProbe::Scope cpuLock(CpuPhaseProbe::Phase::QueueLock);
     std::lock_guard guard(mQueueMutex);
     cpuLock.Stop();
+    const auto countersStart = RuntimeProfileClock::now();
     const auto totalStart =
         mRuntimeProfilingEnabled ? RuntimeProfileClock::now()
                                  : RuntimeProfileClock::time_point{};
     if (mRuntimeProfilingEnabled) {
         ++mRuntimeProfile.DrawCalls;
     }
-    auto phaseStart =
+    const auto phaseStart =
         mRuntimeProfilingEnabled ? RuntimeProfileClock::now()
                                  : RuntimeProfileClock::time_point{};
     // Construct the very large PICA packet directly from its source.  The
     // previous default construction zeroed both 4096-word shader stores and
     // immediately overwrote them with the packet copy on every draw.
     mPendingDraws.emplace_back(mNextSubmissionId, packet);
-    Oot3dPicaDrawSubmission& submission = mPendingDraws.back();
     if (mRuntimeProfilingEnabled) {
         mRuntimeProfile.PacketCopyNanoseconds +=
             RuntimeProfileElapsedNanoseconds(phaseStart);
     }
+    const bool submitted = SubmitDrawLocked(mPendingDraws.back(), error);
     if (mRuntimeProfilingEnabled) {
-        phaseStart = RuntimeProfileClock::now();
+        mRuntimeProfile.TotalNanoseconds +=
+            RuntimeProfileElapsedNanoseconds(totalStart);
     }
+    ++mCounters.Draws;
+    mCounters.Nanoseconds += RuntimeProfileElapsedNanoseconds(countersStart);
+    return submitted;
+}
+
+bool Oot3dNativePicaSubmissionQueue::SubmitDrawPacketSource(
+    const Oot3dPicaDrawPacketSource& source, std::string* error) {
+    CpuPhaseProbe::Scope cpuLock(CpuPhaseProbe::Phase::QueueLock);
+    std::lock_guard guard(mQueueMutex);
+    cpuLock.Stop();
+    const auto countersStart = RuntimeProfileClock::now();
+    const auto totalStart =
+        mRuntimeProfilingEnabled ? RuntimeProfileClock::now()
+                                 : RuntimeProfileClock::time_point{};
+    if (mRuntimeProfilingEnabled) {
+        ++mRuntimeProfile.DrawCalls;
+    }
+    const auto phaseStart =
+        mRuntimeProfilingEnabled ? RuntimeProfileClock::now()
+                                 : RuntimeProfileClock::time_point{};
+    // The packet is made from the frontend state right here: the same bytes
+    // as the frontend's own packet copied in, one ~11 KiB copy less.
+    mPendingDraws.emplace_back(mNextSubmissionId, source);
+    if (mRuntimeProfilingEnabled) {
+        mRuntimeProfile.PacketCopyNanoseconds +=
+            RuntimeProfileElapsedNanoseconds(phaseStart);
+    }
+    const bool submitted = SubmitDrawLocked(mPendingDraws.back(), error);
+    if (mRuntimeProfilingEnabled) {
+        mRuntimeProfile.TotalNanoseconds +=
+            RuntimeProfileElapsedNanoseconds(totalStart);
+    }
+    ++mCounters.Draws;
+    mCounters.Nanoseconds += RuntimeProfileElapsedNanoseconds(countersStart);
+    return submitted;
+}
+
+bool Oot3dNativePicaSubmissionQueue::SubmitDrawLocked(
+    Oot3dPicaDrawSubmission& submission, std::string* error) {
+    const Oot3dPicaDrawPacket& packet = submission.Packet;
+    auto phaseStart =
+        mRuntimeProfilingEnabled ? RuntimeProfileClock::now()
+                                 : RuntimeProfileClock::time_point{};
     if (!DecodeOot3dPicaDrawState(packet, submission.State, error)) {
         mPendingDraws.pop_back();
         return false;
@@ -923,8 +1028,6 @@ bool Oot3dNativePicaSubmissionQueue::SubmitDrawPacket(
     if (mRuntimeProfilingEnabled) {
         mRuntimeProfile.EnqueueNanoseconds +=
             RuntimeProfileElapsedNanoseconds(phaseStart);
-        mRuntimeProfile.TotalNanoseconds +=
-            RuntimeProfileElapsedNanoseconds(totalStart);
     }
     return true;
 }
@@ -1248,7 +1351,9 @@ nlohmann::json Oot3dNativePicaSubmissionQueue::CaptureState() const {
              {"slot", key.Slot},
              {"physical_address", key.PhysicalAddress},
              {"size", key.Size},
-             {"content_hash", entry->ContentHash},
+             {"content_hash", entry->ContentHashValid || entry->Bytes == nullptr
+                                  ? entry->ContentHash
+                                  : HashSnapshotBytes(*entry->Bytes)},
              {"content_version", entry->ContentVersion},
              {"last_used_sequence", entry->LastUsedSequence}});
     }

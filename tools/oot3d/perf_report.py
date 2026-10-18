@@ -255,6 +255,7 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
         print("  memória (início→fim): " + "; ".join(memory))
 
     summarize_cadence(windows, seconds)
+    summarize_offload(windows)
 
     gl_windows = [w for w in windows if w.glperf is not None]
     if not gl_windows:
@@ -338,6 +339,34 @@ def summarize_clocks(all_windows: list[Window], windows: list[Window],
 
 
 CADENCE_BUCKETS = ["1", "2", "3", "4p"]
+
+
+def summarize_offload(windows: list[Window]) -> None:
+    # Bloco "offload:" (config/offload_*): trabalho tirado da thread do jogo.
+    marked = [w.main for w in windows if "offload_capture" in w.main]
+    if not marked:
+        return
+    def mean(key: str) -> float:
+        series = [num(m, key) for m in marked if key in m]
+        return sum(series) / len(series) if series else math.nan
+    modes = " ".join(f"{name}={int(num(marked[-1], 'offload_' + name))}"
+                     for name in ("capture", "plan", "perf", "actors"))
+    print(f"  offload ({len(marked)} janelas; última: {modes}):")
+    print(f"    captura PICA dentro do guest {fmt(mean('pica_capture_ms'))} ms/quadro"
+          f" ({fmt(mean('pica_capture_draws'), 0)} draws, cópia {fmt(mean('capture_copy_kb'), 0)} KiB,"
+          f" hash {fmt(mean('capture_hash_kb'), 0)} KiB, faixas de índice reaproveitadas"
+          f" {fmt(mean('index_range_reuses'), 0)})")
+    print(f"    pica_submit sem o guest {fmt(mean('pica_submit_host_ms'))} ms/quadro;"
+          f" linha do perf.txt na thread do jogo {fmt(mean('perf_line_ms'), 3)} ms/janela"
+          + (f"; escritor {fmt(mean('perf_writer_ms'), 2)} ms/janela,"
+             f" descartadas {int(num(marked[-1], 'perf_dropped'))}" if "perf_writer_ms" in marked[-1] else ""))
+    # pica_plan está dentro de pica_submit; frame_start contém input e
+    # host_frame_start.
+    host = sum(mean(key) for key in ("pica_submit_host_ms", "visual_present",
+                                     "dsp_mix", "frame_start")
+               if not math.isnan(mean(key)))
+    print(f"    thread do jogo fora do guest (pica_submit sem guest + visual_present"
+          f" + dsp_mix + frame_start): {fmt(host)} ms/quadro")
 
 
 def summarize_cadence(windows: list[Window], seconds: float) -> None:

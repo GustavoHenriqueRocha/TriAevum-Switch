@@ -4,6 +4,7 @@
 #include "oot3d_native_a32_window_session.h"
 #include "oot3d_whole_aot_gcov.h"
 #include <fstream>
+#include <sstream>
 #include "fast/renderer3ds/pica_surface_debug.h"
 #include "oot3d_native_room_shadow_shell.h"
 #include "oot3d_switch_threads.h"
@@ -850,7 +851,10 @@ bool NativeA32WindowSession::RunFrame() {
           "guest", "frame_start", "host_frame_start", "input", "renderer_frame_start",
           "dsp_mix", "audio_out", "pica_submit", "pica_plan", "pica_backend",
           "pica_diag", "visual_present", "visual_replay", "present", "pacing_wait"};
-      std::ofstream perf("sdmc:/switch/oot3dre/logs/perf.txt", std::ios::app);
+      // The line is built in memory and written in one piece: by the
+      // service thread (config/offload_perf) or here, as before.
+      const auto perfLineStart = std::chrono::steady_clock::now();
+      std::ostringstream perf;
       perf << "host_frames=" << runFrameCount << " fps=" << (hostFrames / seconds)
            << " guest_fps=" << ((frameCount - windowGuestFrames) / seconds) << " ms/frame:";
       for (size_t index = 0; index < values.size(); ++index) {
@@ -1209,6 +1213,54 @@ bool NativeA32WindowSession::RunFrame() {
           windowGl = gl;
         }
       }
+      // Work taken off the game thread (config/offload_*), per host frame:
+      // the guest thread's time inside the draw submissions (part of
+      // `guest`: decode, vertex/index/texture snapshots, hashes) and its
+      // bytes, pica_submit without the guest resumed inside it, and the
+      // game-thread cost of the previous perf line (format + write/enqueue).
+      {
+        static Oot3dNativeGame::Oot3dNativePicaSubmissionQueue::CaptureCounters
+            previousCapture{};
+        static double previousGuestInPica = 0.0;
+        static double previousPicaSubmit = 0.0;
+        static uint64_t previousWriterNanoseconds = 0U;
+        const auto capture = submissionQueueStorage->Counters();
+        const double picaSubmitSeconds = phaseTiming.PicaSubmitSeconds;
+        perf << " offload: offload_capture=" << (offload.Capture ? 1 : 0)
+             << " offload_plan=" << (offload.Plan ? 1 : 0)
+             << " offload_perf=" << (perfWriter.has_value() ? 1 : 0)
+             << " offload_actors=" << (offload.Actors ? 1 : 0)
+             << " pica_capture_ms="
+             << static_cast<double>(capture.Nanoseconds - previousCapture.Nanoseconds) /
+                    1.0e6 / hostFrames
+             << " pica_capture_draws="
+             << static_cast<double>(capture.Draws - previousCapture.Draws) / hostFrames
+             << " capture_copy_kb="
+             << static_cast<double>(capture.CopiedBytes - previousCapture.CopiedBytes) /
+                    1024.0 / hostFrames
+             << " capture_hash_kb="
+             << static_cast<double>(capture.HashedBytes - previousCapture.HashedBytes) /
+                    1024.0 / hostFrames
+             << " index_range_reuses="
+             << static_cast<double>(capture.IndexRangeReuses -
+                                    previousCapture.IndexRangeReuses) /
+                    hostFrames
+             << " pica_submit_host_ms="
+             << ((picaSubmitSeconds - previousPicaSubmit) -
+                 (phaseTiming.GuestInsidePicaSubmitSeconds - previousGuestInPica)) *
+                    1000.0 / hostFrames
+             << " perf_line_ms=" << perfLineGameMs;
+        if (perfWriter.has_value()) {
+          const uint64_t writer = perfWriter->WriteNanoseconds();
+          perf << " perf_writer_ms="
+               << static_cast<double>(writer - previousWriterNanoseconds) / 1.0e6
+               << " perf_dropped=" << perfWriter->Dropped();
+          previousWriterNanoseconds = writer;
+        }
+        previousCapture = capture;
+        previousGuestInPica = phaseTiming.GuestInsidePicaSubmitSeconds;
+        previousPicaSubmit = picaSubmitSeconds;
+      }
       // Totals of a Mesa built with the Horizon shader cache (absent from
       // the stock devkitPro library, hence weak).
       if (mesa_switch_get_stats != nullptr) {
@@ -1237,12 +1289,19 @@ bool NativeA32WindowSession::RunFrame() {
       if (Fast::GlPerf::Enabled()) {
         perf << Fast::GlPerf::TakeReport(runFrameCount) << '\n';
       }
+      if (perfWriter.has_value()) {
+        (void)perfWriter->Push(std::move(perf).str());
+      } else {
+        // The SD write (open, write, close) as before, on this thread.
+        Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PerfFileClose);
+        std::ofstream file("sdmc:/switch/oot3dre/logs/perf.txt", std::ios::app);
+        file << perf.str();
+      }
+      perfLineGameMs = SecondsSince(perfLineStart) * 1000.0;
       windowStart = now;
       windowValues = values;
       windowHostFrames = runFrameCount;
       windowGuestFrames = frameCount;
-      Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PerfFileClose);
-      perf.close();
       Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameEnd);
     }
   }
@@ -1757,7 +1816,10 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
   }
   const uint32_t dspAudioFrames =
       hostServices.TakePendingDspAudioFrames();
-  std::vector<int16_t> audioSamples;
+  // Storage kept across refreshes (no allocation per refresh); the samples
+  // are the same.
+  std::vector<int16_t> &audioSamples = refreshAudioSamples;
+  audioSamples.clear();
   audioSamples.reserve(static_cast<size_t>(dspAudioFrames) * 320U);
   for (uint32_t audioFrame = 0; audioFrame < dspAudioFrames;
        ++audioFrame) {
@@ -2104,6 +2166,23 @@ void NativeA32WindowSession::RunGuestRefresh() {
               suppressTopScreenFrontendBackdrop, targetsFrontendBackdrop,
               usesCommonBackground, isOpaqueTargetInitialization,
               Oot3dNativeGame::TopScreenMenuBackdropEnabled());
+      if (deferredPlans != nullptr && offload.Plan) {
+        // config/offload_plan: the placeholder is written where the
+        // accumulator keeps it; no plan is built, moved or copied here.
+        const auto placeholderStart = std::chrono::steady_clock::now();
+        if (!suppressNativeFrontendBackdropDraw) {
+          picaPlanBuilder.FillDeferredPlan(
+              deferredPlans, drawIndex,
+              picaPresentationScheduler.CaptureInPlace());
+        }
+        phaseTiming.PicaPlanSeconds += SecondsSince(placeholderStart);
+        if (suppressNativeFrontendBackdropDraw) {
+          picaStats.NativeMenuBackdropDrawOmissionCount +=
+              usesCommonBackground ? 1U : 0U;
+          picaStats.NativeMenuClearDrawOmissionCount +=
+              isOpaqueTargetInitialization ? 1U : 0U;
+        }
+      } else {
       Oot3dNativeGame::Oot3dPicaVulkanDrawPlan plan;
       auto drawPhaseStart = std::chrono::steady_clock::now();
       if (deferredPlans != nullptr) {
@@ -2318,6 +2397,7 @@ void NativeA32WindowSession::RunGuestRefresh() {
       if (!suppressNativeFrontendBackdropDraw) {
         picaPresentationScheduler.Capture(std::move(plan));
       }
+      }
       while (completionIndex < completions.size() &&
              completions[completionIndex].AfterDrawSubmissionId ==
                  draw.Id) {
@@ -2482,10 +2562,16 @@ void NativeA32WindowSession::PresentVisualFrame(
                   std::move(finishedFrames));
           }
           if (finished.has_value()) {
-            frameActors = Oot3dNativeGame::CollectNativeActorInteractions(
-                process.Memory(),
-                sceneViewProbe.Stats().LastPlayStateAddress,
-                finished->Sequence);
+            // The grass colliders are read only by the Vulkan/NRI grass;
+            // config/offload_actors skips the walk on the GL backend.
+            const bool actorsRead =
+                !offload.Actors || api.PicaNativeNamespaceObservable();
+            if (actorsRead) {
+              frameActors = Oot3dNativeGame::CollectNativeActorInteractions(
+                  process.Memory(),
+                  sceneViewProbe.Stats().LastPlayStateAddress,
+                  finished->Sequence);
+            }
             ++visualStats.SnapshotCount;
             suppressTopScreenBackdrop = relocatedFrontend;
             completedFrame =

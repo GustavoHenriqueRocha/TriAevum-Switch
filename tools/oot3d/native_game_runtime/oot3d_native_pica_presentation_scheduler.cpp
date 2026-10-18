@@ -52,6 +52,11 @@ void Oot3dPicaPresentationScheduler::Capture(Oot3dPicaVulkanDrawPlan plan) {
   mAccumulator.Append(std::move(plan));
 }
 
+Oot3dPicaVulkanDrawPlan &Oot3dPicaPresentationScheduler::CaptureInPlace() {
+  ++mStats.ProducedGuestDraws;
+  return mAccumulator.EmplaceDraw();
+}
+
 void Oot3dPicaPresentationScheduler::Capture(
     Oot3dPicaMemoryFillSubmission fill) {
   ++mStats.CapturedMemoryFills;
@@ -412,7 +417,9 @@ void Oot3dPicaPresentationScheduler::SetTimingEnabled(bool enabled) noexcept {
 
 void Oot3dPicaPresentationScheduler::Reset() {
   const bool timingEnabled = mTimings.Enabled;
+  const bool moveFreeFinish = mAccumulator.MoveFreeFinish();
   mAccumulator = {};
+  mAccumulator.SetMoveFreeFinish(moveFreeFinish);
   mPresentationSerial.reset();
   mExecutedDrawsThisPresentation.clear();
   mCompositionDrawScratch.clear();

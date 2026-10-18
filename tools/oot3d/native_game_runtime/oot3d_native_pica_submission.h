@@ -129,6 +129,11 @@ struct Oot3dPicaDrawSubmission {
         : Id(id), Packet(packet) {
     }
 
+    Oot3dPicaDrawSubmission(uint64_t id,
+                            const Oot3dPicaDrawPacketSource& source)
+        : Id(id), Packet(source) {
+    }
+
     uint64_t Id = 0;
     Oot3dPicaDrawPacket Packet;
     Oot3dPicaDecodedDrawState State;
@@ -216,6 +221,26 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
         Oot3dPicaPhysicalMemoryView memory,
         bool deferGpuBackedDisplayTransfers = false);
     void SetRuntimeProfilingEnabled(bool enabled);
+    // config/offload_capture: texture hashes in one pass over the bytes,
+    // geometry content hashes only when a savestate needs them, index
+    // ranges remembered with the cached index bytes. Same snapshots, same
+    // hashes; false keeps the previous passes.
+    void SetLeanCapture(bool enabled) noexcept { mLeanCapture = enabled; }
+    [[nodiscard]] bool LeanCapture() const noexcept { return mLeanCapture; }
+    // Always counted, cumulative (logs/perf.txt): time inside the draw
+    // submissions (the guest's GX command, on the guest thread) and the bytes
+    // copied into snapshots and hashed there.
+    struct CaptureCounters {
+        uint64_t Draws = 0;
+        uint64_t Nanoseconds = 0;
+        uint64_t CopiedBytes = 0;
+        uint64_t HashedBytes = 0;
+        uint64_t IndexRangeReuses = 0;
+    };
+    [[nodiscard]] CaptureCounters Counters() const noexcept {
+        std::lock_guard guard(mQueueMutex);
+        return mCounters;
+    }
     void SetTexturePayloadTransform(TexturePayloadTransform transform);
     Oot3dPicaSubmissionRuntimeProfile RuntimeProfile() const noexcept;
 
@@ -246,6 +271,10 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
         std::string* error = nullptr) override;
     bool SubmitDrawPacket(const Oot3dPicaDrawPacket& packet,
                           std::string* error = nullptr) override;
+    // The packet is constructed in the queue's own submission (one copy of
+    // the frontend state instead of two).
+    bool SubmitDrawPacketSource(const Oot3dPicaDrawPacketSource& source,
+                                std::string* error = nullptr) override;
     bool SubmitInterruptAfterGpuWork(
         Oot3dPicaInterruptId interrupt,
         std::string* error = nullptr) override;
@@ -294,6 +323,14 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     struct GeometrySnapshotCacheEntry {
       std::shared_ptr<const std::vector<uint8_t>> Bytes;
       uint64_t ContentHash = 0;
+      // Lean capture: the hash of Bytes is computed when first needed
+      // (savestate); a restored entry without bytes always has it.
+      bool ContentHashValid = true;
+      // Index range of Bytes read as 8- or 16-bit indices (lean capture):
+      // 0 = not computed, 1 = 8-bit, 2 = 16-bit.
+      uint8_t IndexRangeKind = 0;
+      uint32_t IndexMinimum = 0;
+      uint32_t IndexMaximum = 0;
       uint64_t ContentVersion = 0;
       uint64_t SourceWriteGeneration = 0;
       uint64_t LastUsedSequence = 0;
@@ -371,7 +408,10 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
                                  uint32_t physicalAddress,
                                  uint32_t firstElement, size_t byteCount,
                                  Oot3dPicaResourceSnapshot &resource,
-                                 std::string *error);
+                                 std::string *error,
+                                 GeometrySnapshotCacheEntry **entry = nullptr);
+    bool SubmitDrawLocked(Oot3dPicaDrawSubmission& submission,
+                          std::string* error);
     bool CaptureTextureResources(Oot3dPicaDrawSubmission &submission,
                                  std::string *error);
 
@@ -390,6 +430,8 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     GuestWriteRegistrar mGuestWriteRegistrar;
     bool mDeferGpuBackedDisplayTransfers = false;
     bool mRuntimeProfilingEnabled = false;
+    bool mLeanCapture = false;
+    CaptureCounters mCounters;
     TexturePayloadTransform mTexturePayloadTransform;
     TextureSnapshotTransform mTextureSnapshotTransform;
     std::unordered_map<TextureSnapshotKey, TextureSnapshotCacheEntry,

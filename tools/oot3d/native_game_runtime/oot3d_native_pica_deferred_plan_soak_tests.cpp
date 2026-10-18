@@ -234,6 +234,9 @@ RunResult Run(bool deferred, bool worker) {
     builder.Configure(deferred, worker);
     Frontend frontend;
     Oot3dPicaVisualFrameAccumulator accumulator;
+    // TRIAEVUM_SOAK_MOVE_FREE=0: frames closed plan by plan (config/offload_plan off).
+    if (const char* moveFree = std::getenv("TRIAEVUM_SOAK_MOVE_FREE"))
+        accumulator.SetMoveFreeFinish(std::string_view(moveFree) != "0");
     std::vector<Oot3dPicaDrawSubmission> queue;    // the submission queue's vector
     std::vector<Oot3dPicaDrawSubmission> drained;  // the session's drainedDraws
     std::vector<std::weak_ptr<Oot3dPicaDeferredPlanBatch>> batches;

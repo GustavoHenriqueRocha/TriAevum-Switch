@@ -83,6 +83,12 @@ struct Oot3dPicaPresentationSchedulerState {
 class Oot3dPicaPresentationScheduler final {
 public:
   void Capture(Oot3dPicaVulkanDrawPlan plan);
+  // A plan appended in place for the caller to fill (deferred placeholders,
+  // config/offload_plan): valid until the next Capture or FinishFrames.
+  Oot3dPicaVulkanDrawPlan &CaptureInPlace();
+  void SetMoveFreeFinish(bool enabled) noexcept {
+    mAccumulator.SetMoveFreeFinish(enabled);
+  }
   void Capture(Oot3dPicaMemoryFillSubmission fill);
   void Capture(Oot3dPicaDisplayTransferSubmission transfer);
 

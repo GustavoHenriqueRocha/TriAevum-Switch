@@ -306,6 +306,16 @@ target_link_libraries(oot3d_native_pica_deferred_plan_soak_tests PRIVATE
     oot3d_native_pica_vulkan_plan)
 oot3d_target_defaults(oot3d_native_pica_deferred_plan_soak_tests FOLDER Tests)
 
+# config/offload_*: capture, in-place placeholders and frame closing against
+# the previous paths on random inputs, the perf.txt line writer (run with
+# ASan and TSan too; --bench for the game-thread cost per draw).
+add_executable(oot3d_native_offload_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_offload_tests.cpp
+)
+target_link_libraries(oot3d_native_offload_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_offload_tests FOLDER Tests)
+
 add_executable(oot3d_native_pica_visual_frame_soak_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_visual_frame_soak_tests.cpp
 )

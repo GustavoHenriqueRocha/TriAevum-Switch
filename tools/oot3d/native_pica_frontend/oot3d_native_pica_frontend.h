@@ -264,8 +264,39 @@ struct Oot3dPicaLightingLutState {
 [[nodiscard]] uint64_t ComputeOot3dPicaLightingLutContentHash(
     const Oot3dPicaLightingLutState& state);
 
+// The frontend state a draw packet is made of, by reference: a sink that
+// keeps packets constructs one directly where it stores it.
+struct Oot3dPicaDrawPacketSource {
+    uint32_t CommandListAddress = 0;
+    uint32_t CommandListOffsetWords = 0;
+    Oot3dPicaCompositionDomain CompositionDomain =
+        Oot3dPicaCompositionDomain::Unknown;
+    Oot3dPicaCompositionAttribution Composition;
+    // nullptr: the packet keeps its default light binding.
+    const Fast::Renderer3ds::PicaNativeLightBinding* LightBinding = nullptr;
+    bool Indexed = false;
+    const std::array<uint32_t, 0x300>* Registers = nullptr;
+    const Oot3dPicaShaderState* VertexShader = nullptr;
+    const Oot3dPicaShaderState* GeometryShader = nullptr;
+    const std::array<uint32_t, 128>* FogLut = nullptr;
+    const Oot3dPicaProcTexLutState* ProcTexLuts = nullptr;
+    std::shared_ptr<const Oot3dPicaLightingLutState> LightingLuts;
+    const std::array<std::array<float, 4>, 16>* DefaultAttributes = nullptr;
+};
+
 struct Oot3dPicaDrawPacket {
     Oot3dPicaDrawPacket() = default;
+
+    explicit Oot3dPicaDrawPacket(const Oot3dPicaDrawPacketSource& source)
+        : Oot3dPicaDrawPacket(source.CommandListAddress,
+                              source.CommandListOffsetWords,
+                              source.CompositionDomain, source.Composition,
+                              source.Indexed, *source.Registers,
+                              *source.VertexShader, *source.GeometryShader,
+                              *source.FogLut, *source.ProcTexLuts,
+                              source.LightingLuts, *source.DefaultAttributes) {
+        if (source.LightBinding != nullptr) LightBinding = *source.LightBinding;
+    }
 
     Oot3dPicaDrawPacket(
         uint32_t commandListAddress, uint32_t commandListOffsetWords,
@@ -310,6 +341,13 @@ class Oot3dPicaPacketSink {
         std::string* error = nullptr) = 0;
     virtual bool SubmitDrawPacket(const Oot3dPicaDrawPacket& packet,
                                   std::string* error = nullptr) = 0;
+    // The same draw from the frontend state itself; a sink that stores
+    // packets may construct it in place (one copy less per draw).
+    virtual bool SubmitDrawPacketSource(const Oot3dPicaDrawPacketSource& source,
+                                        std::string* error = nullptr) {
+        const Oot3dPicaDrawPacket packet(source);
+        return SubmitDrawPacket(packet, error);
+    }
     virtual bool SubmitInterruptAfterGpuWork(
         Oot3dPicaInterruptId interrupt, std::string* error = nullptr) {
         (void)interrupt;
@@ -346,6 +384,11 @@ class Oot3dNativePicaFrontend {
         Oot3dPicaPacketSink* packetSink = nullptr);
     void SetPacketSink(Oot3dPicaPacketSink* packetSink);
     void SetDiagnosticHistoryEnabled(bool enabled);
+    // config/offload_capture: without diagnostic history, draws reach the
+    // sink as SubmitDrawPacketSource (built in place by the queue).
+    void SetInPlaceDrawPackets(bool enabled) noexcept {
+        mInPlaceDrawPackets = enabled;
+    }
     void SetCommandListCompositionDomain(
         Oot3dPicaCompositionDomain domain) noexcept;
     bool SetNextCommandListCompositionSpans(
@@ -411,6 +454,7 @@ class Oot3dNativePicaFrontend {
     PackedAttributeQueue mDefaultAttributeQueue;
     size_t mHardwareWriteCount = 0;
     bool mDiagnosticHistoryEnabled = true;
+    bool mInPlaceDrawPackets = false;
     Oot3dPicaCompositionDomain mCommandListCompositionDomain =
         Oot3dPicaCompositionDomain::Unknown;
     uint32_t mCompositionSpanCommandListAddress = 0;

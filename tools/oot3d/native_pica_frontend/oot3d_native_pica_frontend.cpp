@@ -659,6 +659,29 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
                     case Oot3dPicaCompositionLayer::Unknown:
                         break;
                 }
+                if (mInPlaceDrawPackets && !mDiagnosticHistoryEnabled &&
+                    mPacketSink != nullptr) {
+                    // The sink constructs the packet where it keeps it.
+                    Oot3dPicaDrawPacketSource source;
+                    source.CommandListAddress = commandListAddress;
+                    source.CommandListOffsetWords = offsetWords;
+                    source.CompositionDomain = domain;
+                    source.Composition = composition;
+                    if (metadata != nullptr && domain == Oot3dPicaCompositionDomain::Scene)
+                        source.LightBinding = &metadata->LightBinding;
+                    source.Indexed = id == kPicaTriggerDrawIndexed;
+                    source.Registers = &mPicaRegisters;
+                    source.VertexShader = &mVertexShader;
+                    source.GeometryShader = &mGeometryShader;
+                    source.FogLut = &mFogLut;
+                    source.ProcTexLuts = &mProcTexLuts;
+                    source.LightingLuts = mLightingLuts;
+                    source.DefaultAttributes = &mDefaultAttributes;
+                    if (!mPacketSink->SubmitDrawPacketSource(source, error)) {
+                        return false;
+                    }
+                    drawSubmitted = true;
+                } else {
                 Oot3dPicaDrawPacket draw(
                     commandListAddress, offsetWords,
                     domain, composition,
@@ -674,6 +697,7 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
                 drawSubmitted = true;
                 if (mDiagnosticHistoryEnabled) {
                     mPendingDrawPackets.push_back(std::move(draw));
+                }
                 }
             }
             if (id == kPicaIrqRequest && supported) {

@@ -820,6 +820,14 @@ void NativeA32WindowSession::Setup() {
   }
   submissionQueue.SetRuntimeProfilingEnabled(launch.ProfileA32Runtime);
   picaFrontend.SetPacketSink(&submissionQueue);
+  // Work off the game thread (config/offload_*, oot3d_native_offload.h).
+  offload = Oot3dNativeGame::ReadNativeOffloadOptions();
+  submissionQueue.SetLeanCapture(offload.Capture);
+  picaFrontend.SetInPlaceDrawPackets(offload.Capture);
+  picaPresentationScheduler.SetMoveFreeFinish(offload.Plan);
+#if defined(__SWITCH__)
+  if (offload.Perf) perfWriter.emplace("sdmc:/switch/oot3dre/logs/perf.txt");
+#endif
 
   hostArgs = launch.Host;
   hostArgs.AudioSampleRate = Oot3dNativeGame::NativeA32DspHle::NativeSampleRate;

@@ -929,6 +929,96 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
   Defeito "texturas pulam e voltam": não reproduzido; candidatos eram as 18 trocas de trava e os quadros
   de host com dois refreshes ou com zero (repetição) do laço de 30, que deixaram de existir.
 
+### Núcleo 0 mais leve: `config/offload_*` (2026-10-17)
+Diagnóstico (`switch-logs/integ5`, sessão 67, CPU 1785, fps60): a thread do jogo é o gargalo
+(`game_cpu` 68/81/85% nos trechos a 57–60 / 45–57 / <45 fps; render 39%, planos 20%). Fora do
+guest ela gastava por quadro de host `pica_submit` 1,62 ms (que **inclui** o guest retomado dentro
+da drenagem: `guest_in_pica` ≈ 0,6 ms/quadro na sessão), `visual_present` 0,91, `dsp_mix` 0,50,
+`pica_plan` 0,28 (dentro de `pica_submit`) e `frame_start` 0,25.
+
+Onde ia o tempo: um plano PICA tem **15,7 KiB** (`sizeof(Oot3dPicaVulkanDrawPlan)`: uniforms do
+fragment shader e do uber com a fog LUT, 6 KiB cada) e um pacote de draw 11 KiB. Com o plano adiado,
+o *placeholder* de cada draw ainda era construído zerado duas vezes (a variável `plan` do laço e o
+retorno de `MakeDeferredPlan`), copiado por atribuição e movido três vezes (`Capture` →
+`Append` → `push_back`); fechar o quadro (`FinishFrames`, em `visual_present`) movia cada plano mais
+uma vez. Mover um `std::array` é copiá-lo: ~6 cópias de 15,7 KiB por draw na thread do jogo. O
+pacote era montado no frontend e copiado de novo na fila (2 × 11 KiB por draw, dentro do guest).
+
+O que mudou (cada parte desligável, `0` no arquivo volta ao caminho antigo; sem arquivo = ligado
+no Switch; desktop: `TRIAEVUM_OFFLOAD=1` ou `TRIAEVUM_OFFLOAD_<PARTE>=0/1`, desligado por padrão):
+- **`config/offload_plan`**: o placeholder é escrito no lugar onde o acumulador o guarda
+  (`CaptureInPlace` + `FillDeferredPlan`): uma construção por draw, nenhuma cópia. `FinishFrames`
+  entrega o vetor pendente inteiro ao quadro quando um só quadro do jogo fecha (o caso comum) em vez
+  de mover plano a plano; com vários quadros (host atrasado) segue o caminho antigo. Mesmos quadros,
+  mesma ordem, mesmos planos resolvidos.
+- **`config/offload_capture`** (dentro do guest, nos comandos GX): o pacote é construído direto na
+  submissão da fila a partir do estado do frontend (`SubmitDrawPacketSource`, uma cópia de 11 KiB a
+  menos); hashes de textura numa passada só (FNV-1a é sequencial: o hash do mip base é o estado depois
+  dos seus bytes, e sem transformação o hash da origem é o do conteúdo — eram até 3 passadas); hash de
+  geometria só quando um savestate pede (`CaptureState` calcula; o savestate é o mesmo documento);
+  faixa mín/máx de índices lembrada com os bytes de índice em cache (mesmos bytes, mesma faixa).
+- **`config/offload_perf`**: a linha do `perf.txt` é montada em memória e escrita por uma thread de
+  serviço (`AsyncLineWriter`, prioridade 0x3B, núcleos 1|2): abrir/escrever no SD sai da thread do
+  jogo. Fila de 32 linhas; cheia, descarta (nunca espera) e conta em `perf_dropped`.
+- **`config/offload_actors`**: a varredura dos atores para os colisores da grama
+  (`CollectNativeActorInteractions`, até 255 atores por categoria lidos da memória do guest + um
+  `unordered_set` por quadro) só é feita quando o backend pode usá-la: o GL nunca lê a ponte da grama
+  (só o Vulkan/NRI). No Switch a imagem não muda.
+- Sem chave: o vetor de amostras do DSP de cada refresh é reaproveitado (sem `malloc` por refresh).
+
+O que **não** saiu do núcleo 0, e por quê:
+- `dsp_mix`: cada quadro do DSP lê a configuração que o guest escreveu na resposta ao quadro
+  anterior e escreve status, buffers aux e `final_samples` na memória do guest antes do sinal; o
+  guest fica parado esperando esse sinal. Não há o que sobrepor sem especular (ou mudar a ordem
+  observável); a reamostragem/stretch já está na thread de áudio. Só o buffer foi reaproveitado.
+- Decodificação do estado e cópias de vértice/índice/textura: precisam ser feitas no momento da
+  submissão (o guest reescreve a memória logo depois); o cache por geração de escrita já evita as
+  cópias repetidas.
+- Entrada (SDL polling): mudaria em que quadro o jogo vê o botão.
+
+`perf.txt`, bloco novo `offload:` (antes de `mesa:`, sem mexer nos campos existentes):
+`offload_capture/plan/perf/actors` (modos), `pica_capture_ms` (tempo da thread do jogo dentro das
+submissões de draw: parte do `guest`), `pica_capture_draws`, `capture_copy_kb`, `capture_hash_kb`,
+`index_range_reuses` (por quadro de host), `pica_submit_host_ms` (`pica_submit` sem o guest
+retomado dentro dele), `perf_line_ms` (custo da linha anterior na thread do jogo),
+`perf_writer_ms`/`perf_dropped` (thread de serviço). Nada novo espera por lock: a fila do perf só
+segura o mutex para empilhar/desempilhar. `perf_report.py` resume o bloco.
+
+Prova de equivalência (`oot3d_native_offload_tests`, limpo também com ASan/UBSan e TSan): captura
+antiga × enxuta (+ pacote da fonte) em milhares de draws aleatórios sobre memória sintética com
+escritas do guest (com e sem gerações de escrita, reescritas com o mesmo valor, com transformação de
+payload): submissões, snapshots, hashes, faixas de índice e o savestate (`CaptureState`, também
+depois de restaurar) idênticos; frontend copiando × construindo pela fonte em listas de comandos
+aleatórias (com spans de composição e light binding): pacotes idênticos; acumulador movendo ×
+entregando o vetor com draws, fills, transfers, cópias raw, quadros superados, draws do quadro
+seguinte e telas de continuação: quadros e pendências idênticos; placeholders movidos × no lugar,
+com o worker de planos ligado e flushes de dependência: quadros idênticos antes e depois de
+resolver; escritor do perf: todas as linhas, em ordem. Rodado na Ryzen (g++ 15.2, -O2, ASan/UBSan,
+TSan): offload, plano adiado (unitário e soak), visual frame (soak e equivalência, também
+`--threads`), vulkan plan, submission, frontend, command stream (inclusive o stress) e shutdown
+passam. O soak do plano adiado no modo worker mede tráfego de heap/lotes vivos e falhou uma vez com a
+máquina carregada por outro build; sozinho passou 4/4 com `TRIAEVUM_SOAK_MOVE_FREE=1` e 4/4 com `=0`
+(caminho antigo), base e ASan. Os 8 TUs alterados compilam com as flags do Switch (devkitA64 16.1).
+
+Ganho estimado na thread do jogo. `oot3d_native_offload_tests --bench` (Ryzen 5 5600G, -O2, 200
+draws por quadro, mediana de 3): caminho antigo 2,08 µs/draw no placeholder (dos quais 0,68 µs no
+trecho que o `pica_plan` mede) + 0,78 µs/draw no `FinishFrames` = 2,86 µs/draw; caminho novo
+1,20 + 0,006 = 1,21 µs/draw. Escalando pelo `pica_plan` medido no console (0,28 ms/quadro ↔ 0,68
+µs/draw): antes ~0,86 ms em `pica_submit` (cabe nos ~1,0 ms de `pica_submit` sem guest) + ~0,32 ms em
+`visual_present`; depois ~0,49 ms. **Ganho estimado ≈ 0,7 ms por quadro de host** (~4% do orçamento
+de 16,7 ms), mais a captura (uma cópia de 11 KiB por draw a menos e ~75% menos bytes com hash nos
+testes; o custo real no console aparece em `pica_capture_ms`, que não era medido) e a escrita do
+perf.txt (uma abertura+escrita no SD a cada 150 quadros, que podia travar a thread do jogo: ver o
+congelamento analisado no watchdog). O `bench capture` não serve de estimativa: a memória sintética
+com endereços aleatórios enche o cache de geometria (4096 entradas) e o custo fica dominado pela
+expulsão LRU por varredura linear (`std::min_element`), que já existia e não muda aqui.
+
+A/B no console: criar `config/offload_plan`, `config/offload_capture`, `config/offload_perf` ou
+`config/offload_actors` com `0` (um de cada vez) e comparar `pica_submit`, `pica_plan`,
+`visual_present`, `pica_submit_host_ms`, `pica_capture_ms` e `game_cpu` na mesma cena e clock.
+Com `offload_perf` ligado, a linha do perf.txt é escrita inteira de uma vez (não fica mais cortada no
+meio); para achar onde a thread do jogo parou, use o `logs/hang.txt` do watchdog.
+
 ### Estado em 2026-10-17 (melhor versão até agora)
 - PGO (2ª coleta) + modo enxuto + planos PICA no núcleo 1 + render thread no núcleo 2 + áudio em thread própria.
 - Medido a 30 FPS, escala 2×: 29,9 FPS médios, 93% do tempo em 30, lógica ~11 ms por passo.

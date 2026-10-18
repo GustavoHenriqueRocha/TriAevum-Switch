@@ -139,6 +139,14 @@ Oot3dPicaDeferredPlanBuilder::BeginBatch(
 
 Oot3dPicaVulkanDrawPlan Oot3dPicaDeferredPlanBuilder::MakeDeferredPlan(
     const std::shared_ptr<Oot3dPicaDeferredPlanBatch>& batch, size_t index) {
+    Oot3dPicaVulkanDrawPlan plan;
+    FillDeferredPlan(batch, index, plan);
+    return plan;
+}
+
+void Oot3dPicaDeferredPlanBuilder::FillDeferredPlan(
+    const std::shared_ptr<Oot3dPicaDeferredPlanBatch>& batch, size_t index,
+    Oot3dPicaVulkanDrawPlan& plan) {
     const auto& submission = batch->Submissions[index];
     auto& slot = batch->Slots[index];
     // The producers the built plan's textures will carry (the plan builder
@@ -162,7 +170,6 @@ Oot3dPicaVulkanDrawPlan Oot3dPicaDeferredPlanBuilder::MakeDeferredPlan(
     }
     batch->Status[index] = Oot3dPicaDeferredPlanBatch::SlotStatus::Pending;
 
-    Oot3dPicaVulkanDrawPlan plan;
     plan.SubmissionId = submission.Id;
     plan.CommandListAddress = submission.Packet.CommandListAddress;
     plan.CommandListOffsetWords = submission.Packet.CommandListOffsetWords;
@@ -173,7 +180,6 @@ Oot3dPicaVulkanDrawPlan Oot3dPicaDeferredPlanBuilder::MakeDeferredPlan(
     plan.Deferred = std::shared_ptr<const Oot3dPicaDeferredPlanSlot>(
         batch, &slot);
     ++batch->PlaceholderCount;
-    return plan;
 }
 
 void Oot3dPicaDeferredPlanBuilder::Publish(

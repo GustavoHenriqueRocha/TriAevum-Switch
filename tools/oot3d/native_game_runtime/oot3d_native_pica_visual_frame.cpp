@@ -2466,6 +2466,10 @@ void Oot3dPicaVisualFrameAccumulator::Append(Oot3dPicaVulkanDrawPlan plan) {
     mPendingDraws.push_back(std::move(plan));
 }
 
+Oot3dPicaVulkanDrawPlan& Oot3dPicaVisualFrameAccumulator::EmplaceDraw() {
+    return mPendingDraws.emplace_back();
+}
+
 void Oot3dPicaVisualFrameAccumulator::Append(
     Oot3dPicaMemoryFillSubmission fill) {
     mPendingMemoryFills.push_back(std::move(fill));
@@ -2595,6 +2599,7 @@ std::vector<Oot3dPicaVisualFrame> Oot3dPicaVisualFrameAccumulator::FinishFrames(
     ends.push_back(UINT64_MAX);
 
     size_t draw = 0U, fill = 0U, transfer = 0U;
+    bool storageHandedOver = false;
     for (size_t segment = 0U; segment < ends.size(); ++segment) {
         const uint64_t end = ends[segment];
         Oot3dPicaVisualFrame frame;
@@ -2602,10 +2607,20 @@ std::vector<Oot3dPicaVisualFrame> Oot3dPicaVisualFrameAccumulator::FinishFrames(
         frame.TopTransfer = tops[segment];
         const size_t firstDraw = draw;
         while (draw < mPendingDraws.size() && mPendingDraws[draw].SubmissionId <= end) ++draw;
-        frame.Draws = Oot3dPicaPlanVector::Take(draw - firstDraw);
-        frame.Draws.insert(frame.Draws.end(),
-                           std::make_move_iterator(mPendingDraws.begin() + firstDraw),
-                           std::make_move_iterator(mPendingDraws.begin() + draw));
+        if (mMoveFreeFinish && ends.size() == 1U && firstDraw == 0U &&
+            draw == mPendingDraws.size()) {
+            // The only frame takes every pending draw: hand over the storage
+            // (the plans stay where they are) instead of moving each one.
+            frame.Draws = Oot3dPicaPlanVector(std::move(mPendingDraws));
+            mPendingDraws = {};
+            storageHandedOver = true;
+            draw = frame.Draws.size();
+        } else {
+            frame.Draws = Oot3dPicaPlanVector::Take(draw - firstDraw);
+            frame.Draws.insert(frame.Draws.end(),
+                               std::make_move_iterator(mPendingDraws.begin() + firstDraw),
+                               std::make_move_iterator(mPendingDraws.begin() + draw));
+        }
         // A frame holding deferred placeholders gets its identities when they
         // are resolved (ResolveOot3dPicaDeferredVisualFrame), not here.
         const bool deferredDraws = std::any_of(frame.Draws.begin(), frame.Draws.end(),
@@ -2635,11 +2650,21 @@ std::vector<Oot3dPicaVisualFrame> Oot3dPicaVisualFrameAccumulator::FinishFrames(
     })->Draws.size();
     // The pending vector keeps its storage (no reallocation per frame); the
     // carried-over draws move into it and nextDraws' storage returns to the
-    // pool.
-    mPendingDraws.clear();
-    mPendingDraws.insert(mPendingDraws.end(),
-                         std::make_move_iterator(nextDraws.begin()),
-                         std::make_move_iterator(nextDraws.end()));
+    // pool. When the frame took the storage, the pending vector starts from
+    // the carried-over draws' storage or from a pooled one.
+    if (storageHandedOver) {
+        if (!nextDraws.empty()) {
+            mPendingDraws = std::move(static_cast<Oot3dPicaPlanVector::Base&>(nextDraws));
+        } else {
+            auto pooled = Oot3dPicaPlanVector::Take(largest);
+            mPendingDraws = std::move(static_cast<Oot3dPicaPlanVector::Base&>(pooled));
+        }
+    } else {
+        mPendingDraws.clear();
+        mPendingDraws.insert(mPendingDraws.end(),
+                             std::make_move_iterator(nextDraws.begin()),
+                             std::make_move_iterator(nextDraws.end()));
+    }
     mPendingMemoryFills = std::move(nextFills);
     mPendingDisplayTransfers = std::move(nextTransfers);
     // Draw plans are several kilobytes each. Starting the next frame at this
