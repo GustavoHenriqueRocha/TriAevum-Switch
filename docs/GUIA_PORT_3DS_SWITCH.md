@@ -348,7 +348,10 @@ no runtime de cabeçalho (`tools/oot3d/native_game_runtime/oot3d_native_whole_ao
 | Modo enxuto | `0126356c`, `fbb68c15`; `OOT3D_WHOLE_AOT_LEAN_STATS` | `69a49b4d` (diferencial da memória contra a base) | a medir *(notas de sessão: ~10% de instruções)* |
 | Orçamento de blocos | `WholeAotBlockBudget` 2048 no Switch | quadro ≤ 240 B, < 0,5 MiB da pilha de 1 MiB | Linux: 64 → 128 deu +3,93%; 2048: a medir |
 | PGO (GCC) | `OOT3D_WHOLE_AOT_PROFILE_MODE=generate/use` | coleta 3 com 0 coverage-mismatch | Switch: a medir isolado; Windows: 0,864 do tempo pré-NRI |
-| Registradores em locais | `--local-state` | — | **em andamento** (3.8) |
+| VFP com zero exato no nativo | `--vfp-zero-aware` (com `--native-vfp-aarch64`) | 299 milhões de checagens no qemu, 16 modos; 9 mutações detectadas; diferencial de 314 funções reais | ver SWITCH_PORT.md, "Rodada do cabeçalho" |
+| Fluxo de 16 bytes | `OOT3D_WHOLE_AOT_FLOW_IN_REGISTERS` (padrão 1) | só layout; diferenciais com o layout novo | stores −18% a −33%, stores de pilha −28% a −69% (estático) |
+| Pilha enxuta nas leituras/LDM | `--lean-stack` | diferencial de 314 funções reais (host e qemu) | ver SWITCH_PORT.md |
+| Registradores em locais | `--local-state`; `--promote-registers` | `run_register_promotion_equivalence.py` | piora no A57 (3.8); desligado |
 
 ### 3.1 VFP nativo (`--native-vfp-aarch64`)
 
@@ -361,8 +364,13 @@ no runtime de cabeçalho (`tools/oot3d/native_game_runtime/oot3d_native_whole_ao
 - Onde o ARMv8 difere do modelo de software (sinal do zero com FZ, NaN em VSUB com DN=0, UFC com
   FZ=0, VCMP denormal com FZ=1) cai no software; aritmética com FZ=0 fica toda no software. O software
   continua sendo o oráculo.
-- Validar: `run_vfp_aarch64_tests_qemu.sh` (≈194M checagens, valor e flags, 16 modos RMode×FZ×DN; as
+- Validar: `run_vfp_aarch64_tests_qemu.sh` (≈299M checagens, valor e flags, 16 modos RMode×FZ×DN; as
   mutações conhecidas precisam ser detectadas).
+- `--vfp-zero-aware`: em vez de mandar todo resultado zero/NaN ao software, uma metade fria
+  (`ZeroAwareSlow<Op>`) mantém o zero nativo quando ele é exato nos dois modelos (operandos finitos
+  e não subnormais com cancelamento exato, dois zeros ou fator zero). Cuidado com FZ: soma de
+  normais que vira subnormal descartado NÃO é cancelamento exato. Mutações do critério:
+  `run_vfp_zero_aware_mutations.sh`.
 
 ### 3.2 Aliasing (TBAA)
 
@@ -470,8 +478,9 @@ substituições + fps60).
 
 ### 3.8 Promoção de registradores para locais (`--local-state`)
 
-> **EM ANDAMENTO** (worktree `.claude/worktrees/agent-a894c323f335affac`). Completar: forma final
-> (só depois do inline? só nas funções quentes?), validação, efeito no PGO e ganho medido no console.
+> **Avaliado e desligado** (2026-10-17): `--promote-registers` (conjunto sujo exato por bloco,
+> diferencial `run_register_promotion_equivalence.py`) piora no A57: shard 243 +36% de instruções,
+> loads +77%, stores +89%. Integrado ao gerador e ao cabeçalho, desligado por padrão.
 >
 > Contexto já documentado: no Windows, `--local-state` em todas as funções + PGO não ganhou nada
 > (1,000, módulo de 318 MB, TRIAEVUM_AOT_LEVERS_RESULTS.md). No Switch o nfsmw-nx mediu o

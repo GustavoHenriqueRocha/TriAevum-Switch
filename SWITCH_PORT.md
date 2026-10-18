@@ -247,9 +247,113 @@ lê fora do heap, ASan/UBSan). A corrupção em si continua: o relatório traz o
 - Prólogos novos usam `"inline": true` em `guest_overrides.json`: não deslocam linhas do shard, e
   o PGO das outras funções do shard continua valendo (só a função com o prólogo perde o perfil).
 - Gargalo sistêmico do VFP gerado: `Oot3dVfpNative*` volta ao software em todo resultado zero,
-  inclusive zeros exatos (x*0, a-a), comuns em matrizes de rotação/escala. A guarda refinada
-  (`Oot3dVfpZeroAware*`, validada no teste do núcleo) resolveria no cabeçalho, mas mudar o
-  cabeçalho recompila todos os shards e exige nova coleta de PGO.
+  inclusive zeros exatos (x*0, a-a), comuns em matrizes de rotação/escala. Resolvido na rodada
+  do cabeçalho (abaixo, `--vfp-zero-aware`).
+
+### Rodada do cabeçalho e do gerador (2026-10-17)
+Mudanças que recompilam os 256 shards e pedem nova coleta de PGO, juntas numa rodada só. Cada uma
+tem chave para A/B; sem as flags do gerador o C++ gerado é byte a byte o de antes.
+
+**Comando de geração do C++ final** (de `tools/oot3d/native_a32_runtime`; o `--guest-overrides`
+já aplica as substituições, então o `apply_guest_overrides.py` depois é idempotente e não muda
+nada):
+```sh
+python generate_whole_aot_cpp.py --program ~/oot3d-work/gen/aot_program.json \
+  --selection whole_aot_functions.json --code ~/oot3d-work/extract/exefs/code.bin \
+  --output ~/oot3d-work/gen/cpp-lean --shards 256 --shard-strategy affinity \
+  --native-vfp-aarch64 --vfp-zero-aware --lean-stack --guest-overrides \
+  --giant-function-instructions 1000
+python apply_guest_overrides.py --generated ~/oot3d-work/gen/cpp-lean
+```
+(Sem `--vfp-zero-aware --lean-stack` sai exatamente o `cpp-lean` atual; conferido arquivo a arquivo.)
+
+1. **VFP com zero exato no nativo** (`--vfp-zero-aware`, exige `--native-vfp-aarch64`). Todas as
+   operações aritméticas (VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT/VMLA/VMLS/VNMLA/VNMLS) usam
+   `Oot3dVfpZeroAware*` (`oot3d_native_a32_vfp_aarch64.h`). Caminho quente idêntico ao do
+   `Oot3dVfpNative*` (uma instrução e um teste); resultado zero/NaN chama a metade fria
+   `ZeroAwareSlow<Op>`, que mantém o zero nativo quando ele é exato nos dois modelos (operandos
+   finitos e não subnormais; cancelamento exato `x == -y`, dois zeros, ou fator zero; no VMLA e
+   família o produto nativo também tem de ser o do software) e senão roda o software como antes.
+   Caso FZ: a soma/produto de normais que dá um subnormal descartado NÃO é exato (o ARMv8 mantém o
+   sinal, o software dá +0, e há UFC/IXC): vai ao software. O núcleo Mtx3x4 usa os mesmos
+   predicados. Prova: `run_vfp_aarch64_tests_qemu.sh` (devkitA64 -O3 do Switch sob qemu, 16 modos
+   RMode×FZ×DN, valor e flags) com 299 milhões de checagens: 3,6 milhões de zeros exatos ficaram no
+   nativo e 1,5 milhão de zeros inexatos foram recalculados, zero divergências; Mtx3x4 (230
+   milhões de operações) e vfp_fast passam. `run_vfp_zero_aware_mutations.sh`: 9 mutações do
+   critério (aceitar subnormal na soma ou no produto, aceitar produto descartado, aceitar qualquer
+   zero em cada operação) são todas detectadas.
+2. **Tráfego de pilha.**
+   - `Oot3dWholeAotFlow` de 16 bytes (`OOT3D_WHOLE_AOT_FLOW_IN_REGISTERS`, padrão 1; 0 volta ao
+     layout de 12 bytes, sempre no programa inteiro). Com 12 bytes (um byte, padding e duas
+     palavras) o GCC montava o fluxo numa temporária de pilha em todo retorno e em toda chamada
+     (store, reload, store de novo antes do epílogo comum), inclusive no caminho quente de cada
+     chamada guest. Com um quarto campo `Reserved` (sempre 0) vai direto em x0/x1.
+   - `--lean-stack`: o destino de uma leitura guest não é mais inicializado com 0 (o `ReadFast`
+     escreve sempre que retorna true; com false o valor é morto) e o LDM com caminho de uma página
+     não passa o endereço de `spanWords` ao caminho palavra a palavra (que lê em temporárias
+     próprias): o array fica em registradores e as palavras vão do load direto para o estado. Os
+     `str wzr, [sp]` antes de cada load e a ida e volta das palavras do LDM pela pilha somem do
+     caminho quente; o caminho frio (página cruzada/MMIO) fica um pouco maior.
+   - Derrames em volta de chamadas frias: ficam só nos caminhos frios (o GCC já divide as faixas
+     vivas); os que sobram no caminho quente são os ponteiros `frame`/`context`/`state` em volta
+     de cada chamada guest, que custam o mesmo em callee-saved. Não mexido.
+3. **Contador de geração `mRangeGeneration`: avaliado, sem mudança.** A escrita rápida faz load,
+   add, store do contador e store do carimbo da página. As gerações são observáveis (monitor
+   exclusivo LDREX/STREX pelo `WriteGeneration()`, carimbos de página dos caches da GPU,
+   `CaptureState`), então não dá para eliminar. Reordenar (ler antes do store guest, gravar o
+   contador por último) não mudou nenhuma instrução dos shards medidos: depois de cada escrita o
+   caminho rápido e o lento (`WriteFastSlow`, que altera o contador) se juntam, e na junção o GCC
+   recarrega. Fazer em lote exigiria um contador local por função, gravado antes de todo caminho
+   lento, chamada, gancho e saída (o mesmo problema da promoção de registradores); não feito.
+4. **Promoção de registradores** (`--promote-registers`, commit da avaliação integrado; desligada,
+   só acrescenta `Oot3dAotRunBlockEntryHook` no fim do cabeçalho): futuras rodadas não precisam de
+   build completo só por ela.
+
+Medição estática (devkitA64 GCC 16.1 com as flags reais dos shards, sem PGO; instruções / loads /
+stores / loads de pilha / stores de pilha; "tudo" = cabeçalho novo + `--vfp-zero-aware
+--lean-stack`):
+
+| shard | antes | Flow 16 B | tudo |
+|---|---|---|---|
+| 000 | 157339 / 30343 / 27669 / 4505 / 13287 | 157204 / 29464 / 18464 / 3622 / 4080 | 160288 / 28969 / 17239 / 2950 / 2277 |
+| 091 | 84854 / 16718 / 14211 / 1864 / 6479 | 87987 / 16569 / 9986 / 1722 / 2258 | 87840 / 16690 / 9334 / 1826 / 1586 |
+| 150 | 116001 / 28857 / 22997 / 10189 / 14011 | 116861 / 28229 / 18800 / 9527 / 9809 | 123776 / 30679 / 19965 / 11559 / 10481 |
+| 243 | 114658 / 28978 / 20779 / 10090 / 11973 | 115653 / 27833 / 18886 / 8957 / 10102 | 124378 / 30696 / 19982 / 11171 / 10490 |
+
+A contagem estática mistura caminho quente e frio: as duas flags do gerador aumentam o código frio
+(chamada a `ZeroAwareSlow`; um `ReadFast` por palavra no LDM palavra a palavra) e diminuem o
+quente. A contagem dinâmica no qemu está na tabela seguinte.
+
+Contagem dinâmica (qemu-aarch64 com uma instrução por TB, PCs executados × objdump; harness do
+diferencial com o mesmo código dos dois lados, 32 casos × 40 tentativas, mesmas entradas; só o
+código traduzido, em milhões; instruções / loads / stores / loads de pilha / stores de pilha):
+
+| variante | instr | ld | st | ld pilha | st pilha |
+|---|---|---|---|---|---|
+| antes | 1459,85 | 362,05 | 197,71 | 32,13 | 40,53 |
+| Flow 16 B | 1459,81 | 362,00 | 197,70 | 32,08 | 40,52 |
+| `--lean-stack` | 1451,42 (−0,58%) | 362,05 | 189,28 (−4,3%) | 32,13 | 32,10 (−20,8%) |
+| tudo | 1451,38 (−0,58%) | 362,00 | 189,27 (−4,3%) | 32,08 | 32,09 (−20,8%) |
+
+As funções do harness (substituições e o fecho delas: reverb, memcpy, curvas, matrizes) são
+laços com poucas chamadas: o ganho do Flow quase não aparece aqui; ele está nos sítios de chamada
+e retorno (estático acima), proporcional ao número de chamadas guest do jogo. As entradas são
+aleatórias e quase não exercitam o VFP com FZ=1 (54 mil instruções de software VFP em 1,46
+bilhão), então o efeito do `--vfp-zero-aware` só aparece no jogo; o núcleo Mtx3x4, que usa o
+mesmo critério, mediu ~4,7x menos instruções com os zeros exatos no nativo.
+
+Provas da rodada (scripts no repositório; rodadas na Ryzen e no notebook):
+- `run_register_promotion_equivalence.py --baseline <cpp-lean atual> --promoted <gerado com
+  --vfp-zero-aware --lean-stack>`: as mesmas 314 funções reais (substituições, funções com
+  substituição de bloco e o fecho de chamadas) dos dois geradores em dois namespaces, estado,
+  memória, gerações, orçamento, ganchos e rastreio iguais: host 32 casos × 100 mil, qemu-aarch64
+  (-O3 do Switch, VFP nativo) 32 casos × 20 mil, zero falhas.
+- `run_guest_override_equivalence.py --qemu-aarch64` no gerado novo: 20 de 21 casos OK. A falha,
+  `Math_SmoothStepToF` (0x36E168, tentativa 140844: FPSCR com OFC a mais na substituição nativa,
+  FZ=0/RN), **já existia**: repete igual com o `cpp-lean` atual. É da substituição, não desta
+  rodada (o lado traduzido usa o software nesse modo); a corrigir na própria substituição.
+- `test_whole_aot_cpp.py` (44 testes, inclusive os das flags novas: opcionais, saem do manifesto
+  quando desligadas, C++ idêntico sem elas).
 
 ### Áudio fora da thread do jogo (2026-10-17)
 - O DSP HLE (mixagem) continua na thread do jogo: cada quadro de áudio lê as regiões compartilhadas
