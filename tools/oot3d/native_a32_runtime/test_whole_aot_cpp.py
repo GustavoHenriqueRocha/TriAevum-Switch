@@ -468,6 +468,87 @@ class WholeAotCppTests(unittest.TestCase):
             generate(*inputs, output)
             self.assertEqual(original, (output / SOURCE_NAME).read_bytes())
 
+    def test_vfp_zero_aware_is_opt_in_and_cache_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs = self.write_inputs(
+                root,
+                # VADD, VSUB, VMUL, VNMUL, VMLA, VMLS, VNMLA, VNMLS, VDIV,
+                # VSQRT, VCVT.S32.F32, VCMP.
+                words(0xEE300A00, 0xEE300A40, 0xEE200A00, 0xEE200A40,
+                      0xEE000A00, 0xEE000A40, 0xEE100A40, 0xEE100A00,
+                      0xEE800A00, 0xEEB10AC0, 0xEEBD0AC0, 0xEEB40A40,
+                      0xE12FFF1E),
+            )
+            output = root / "output"
+            with self.assertRaises(ValueError):
+                generate(*inputs, output, vfp_zero_aware=True)
+            generate(*inputs, output, native_vfp_aarch64=True)
+            native = (output / SOURCE_NAME).read_bytes()
+            self.assertNotIn(b"ZeroAware", native)
+            manifest = generate(*inputs, output, native_vfp_aarch64=True,
+                                vfp_zero_aware=True)
+            self.assertTrue(manifest["vfp_zero_aware"])
+            source = (output / SOURCE_NAME).read_text(encoding="utf-8")
+            for operation in (
+                "Add", "Subtract", "Multiply", "NegativeMultiply",
+                "MultiplyAccumulate", "MultiplySubtract",
+                "NegativeMultiplyAccumulate", "NegativeMultiplySubtract",
+                "Divide", "SquareRoot",
+            ):
+                self.assertIn(f"Oot3dVfpZeroAware{operation}(", source)
+                self.assertNotIn(f"Oot3dVfpNative{operation}(", source)
+            # Conversions and compares have no zero-aware variant.
+            self.assertIn("Oot3dVfpNativeToSigned(", source)
+            self.assertIn("Oot3dVfpNativeCompare(", source)
+            manifest = generate(*inputs, output, native_vfp_aarch64=True)
+            self.assertNotIn("vfp_zero_aware", manifest)
+            self.assertEqual(native, (output / SOURCE_NAME).read_bytes())
+
+    def test_lean_stack_reads_and_multiple_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs = self.write_inputs(
+                root,
+                words(
+                    0xE5910004,  # LDR r0, [r1, #4]
+                    0xE1D120B2,  # LDRH r2, [r1, #2]
+                    0xE1C120D0,  # LDRD r2, r3, [r1]
+                    0xE8BD0030,  # POP {r4, r5}
+                    0xED920A00,  # VLDR s0, [r2]
+                    0xE12FFF1E,
+                ),
+            )
+            output = root / "output"
+            generate(*inputs, output)
+            original = (output / SOURCE_NAME).read_bytes()
+            text = original.decode("utf-8")
+            self.assertIn("uint32_t value = 0;", text)
+            self.assertIn("&spanWords[1]", text)
+            manifest = generate(*inputs, output, lean_stack=True)
+            self.assertTrue(manifest["lean_stack"])
+            source = (output / SOURCE_NAME).read_text(encoding="utf-8")
+            # Single reads: no dead initializer, same ReadFast call.
+            self.assertIn("uint32_t value;", source)
+            self.assertIn("uint16_t value;", source)
+            self.assertNotIn("uint32_t value = 0;", source)
+            self.assertNotIn("uint16_t value = 0;", source)
+            # LDRD keeps its initialized fault address (read by the fault exit).
+            self.assertIn("uint32_t faultAddress = address;", source)
+            # LDM: the single-page path still fills spanWords; the fallback
+            # reads into its own temporaries, in the same order, and faults at
+            # the same addresses.
+            self.assertNotIn("&spanWords[", source)
+            self.assertIn("context.Memory.ReadWordsFast(firstAddress, spanWords, 2U)", source)
+            self.assertIn("firstAddress + 4U, &word)) {", source)
+            self.assertIn("spanWords[1] = word;", source)
+            self.assertIn("r5 = spanWords[1];", source)
+            self.assertLess(source.index("firstAddress + 0U, &word"),
+                            source.index("firstAddress + 4U, &word"))
+            manifest = generate(*inputs, output)
+            self.assertNotIn("lean_stack", manifest)
+            self.assertEqual(original, (output / SOURCE_NAME).read_bytes())
+
     def test_emits_exact_vfp_square_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

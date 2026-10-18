@@ -67,25 +67,13 @@ inline constexpr std::uint32_t kFlushToZero = 1U << 24U;
 inline constexpr std::uint32_t kRoundingMode = 3U << 22U;
 
 #if OOT3D_GUEST_FP_AARCH64
-[[nodiscard]] constexpr bool ExactZero(std::uint32_t bits) noexcept {
-    return (bits & 0x7FFFFFFFU) == 0U;
-}
-
-// Finito e não subnormal (zero incluído).
-[[nodiscard]] constexpr bool FiniteNotDenormal(std::uint32_t bits) noexcept {
-    const std::uint32_t exponent = bits & 0x7F800000U;
-    return exponent != 0x7F800000U && (exponent != 0U || ExactZero(bits));
-}
-
-// O produto nativo deu zero sem nenhum arredondamento nem descarte para zero:
-// um fator é zero e o outro é finito e não subnormal. Aí o sinal (o OU
-// exclusivo dos sinais) e a ausência de flags são os do IEEE nos dois
-// modelos; o descarte de subnormal (FZ), único caso em que o ARMv8 e o
-// software diferem no sinal de um zero, não acontece.
-[[nodiscard]] constexpr bool ExactZeroProduct(std::uint32_t left, std::uint32_t right) noexcept {
-    return FiniteNotDenormal(left) && FiniteNotDenormal(right) &&
-           (ExactZero(left) || ExactZero(right));
-}
+// Zeros exatos: NativeVfpDetail::ExactZero, FiniteNotDenormal e
+// ExactZeroProduct (oot3d_native_a32_vfp_aarch64.h, onde está a explicação):
+// o produto nativo deu zero sem arredondamento nem descarte para zero quando
+// um fator é zero e o outro é finito e não subnormal.
+using NativeVfpDetail::ExactZero;
+using NativeVfpDetail::ExactZeroProduct;
+using NativeVfpDetail::FiniteNotDenormal;
 
 // VMUL nativo como Oot3dVfpNativeMultiply (FZ = 1), mas um zero exato
 // (ExactZeroProduct) fica com o resultado nativo em vez de ir ao software.
@@ -197,34 +185,9 @@ inline void HostFloat(const std::uint32_t* left, const std::uint32_t* right,
 
 } // namespace Mtx3x4Detail
 
-// VMUL/VMLA para código que já roda com o FPCR no modo guest (o C++ gerado e
-// as substituições nativas): o mesmo valor e as mesmas flags que
-// Oot3dVfpNativeMultiply / Oot3dVfpNativeMultiplyAccumulate (e portanto que o
-// software), mas com FZ = 1 os zeros exatos (Mtx3x4Detail::Multiply e
-// MultiplyAccumulate) ficam no caminho nativo.
-OOT3D_AOT_HOT void Oot3dVfpZeroAwareMultiply(std::uint32_t& destination, std::uint32_t left,
-                                             std::uint32_t right, std::uint32_t& fpscr) noexcept {
-#if OOT3D_GUEST_FP_AARCH64
-    if ((fpscr & Mtx3x4Detail::kFlushToZero) != 0U) [[likely]] {
-        Mtx3x4Detail::Multiply(destination, left, right, fpscr);
-        return;
-    }
-#endif
-    Oot3dVfpNativeMultiply(destination, left, right, fpscr);
-}
-
-OOT3D_AOT_HOT void Oot3dVfpZeroAwareMultiplyAccumulate(std::uint32_t& destination,
-                                                       std::uint32_t accumulator,
-                                                       std::uint32_t left, std::uint32_t right,
-                                                       std::uint32_t& fpscr) noexcept {
-#if OOT3D_GUEST_FP_AARCH64
-    if ((fpscr & Mtx3x4Detail::kFlushToZero) != 0U) [[likely]] {
-        Mtx3x4Detail::MultiplyAccumulate(destination, accumulator, left, right, fpscr);
-        return;
-    }
-#endif
-    Oot3dVfpNativeMultiplyAccumulate(destination, accumulator, left, right, fpscr);
-}
+// Oot3dVfpZeroAwareMultiply / Oot3dVfpZeroAwareMultiplyAccumulate (o VMUL
+// e o VMLA isolados, com o mesmo critério de zero exato) ficam em
+// oot3d_native_a32_vfp_aarch64.h, junto das outras operações.
 
 // O mesmo resultado (out e flags) que Mtx3x4MultiplySoftware, mais rápido.
 // out não pode se sobrepor a left nem a right (o chamador usa cópias locais).

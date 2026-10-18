@@ -277,6 +277,260 @@ OOT3D_AOT_HOT void Oot3dVfpNativeNegativeMultiplySubtract(
 
 #undef OOT3D_NATIVE_VFP_ARITHMETIC
 
+// Zero-aware variants (whole_aot_cpp.py --vfp-zero-aware, the native
+// overrides, the Mtx3x4 kernel). The same value and the same flags as the
+// Oot3dVfpNative* entry points above (and therefore as the software model),
+// but under FPSCR.FZ=1 a zero result that is EXACT in both models stays on
+// the native path instead of being recomputed in software. Zeros of this
+// kind (x * 0, x - x, accumulator - product cancelling exactly) are frequent
+// in rotation/scale matrices, and each one used to cost a software operation
+// plus the spills around its call.
+//
+// A native zero is exact when no rounding and no flush to zero happened:
+// every operand that reaches the final add/sub is finite and not subnormal
+// (a subnormal operand is flushed to a signed zero by ARMv8 and to +0 by the
+// software model) and the exact result is zero (x + y with y == -x, or two
+// zeros; a product with a zero factor and a finite non-subnormal other
+// factor). Then the value is the IEEE signed zero of the rounding mode in
+// both models and no flag is raised. NOT exact, and so still recomputed:
+// a sum or product of normals whose exact result is a nonzero subnormal that
+// FZ discards (ARMv8 keeps the sign there, the software model gives +0, and
+// UFC/IXC are raised), any denormal input, NaN results.
+namespace NativeVfpDetail {
+
+[[nodiscard]] constexpr bool ExactZero(std::uint32_t bits) noexcept {
+    return (bits & 0x7FFFFFFFU) == 0U;
+}
+
+// Finite and not subnormal (zero included).
+[[nodiscard]] constexpr bool FiniteNotDenormal(std::uint32_t bits) noexcept {
+    const std::uint32_t exponent = bits & 0x7F800000U;
+    return exponent != 0x7F800000U && (exponent != 0U || ExactZero(bits));
+}
+
+// left * right is an exact (signed) zero in both models.
+[[nodiscard]] constexpr bool ExactZeroProduct(std::uint32_t left,
+                                              std::uint32_t right) noexcept {
+    return FiniteNotDenormal(left) && FiniteNotDenormal(right) &&
+           (ExactZero(left) || ExactZero(right));
+}
+
+// left + right is an exact (signed) zero in both models: exact cancellation
+// of two finite non-subnormal operands, or two zeros. Callers pass operands
+// that are bit-identical in both models (guest registers, or a native
+// product already known to be the software product).
+[[nodiscard]] constexpr bool ExactZeroSum(std::uint32_t left,
+                                          std::uint32_t right) noexcept {
+    return FiniteNotDenormal(left) && FiniteNotDenormal(right) &&
+           ((left ^ right) == 0x80000000U || (ExactZero(left) && ExactZero(right)));
+}
+
+// The native product under FZ=1 is the software product (value and flags)
+// whenever it is nonzero (then it is normal or infinite) or an exact zero.
+// A zero product from a flushed underflow is not.
+[[nodiscard]] constexpr bool ProductAgrees(std::uint32_t product, std::uint32_t left,
+                                           std::uint32_t right) noexcept {
+    return !ExactZero(product) || ExactZeroProduct(left, right);
+}
+
+// Hot/cold split: the inline part is the same as Oot3dVfpNative* (one native
+// instruction, one test of the result); a zero or NaN result calls the cold
+// ZeroAwareSlow, which keeps the native zero when it is exact and otherwise
+// runs the software operation as before. The generated code therefore grows
+// by nothing in the hot path, and an exact zero costs a short out-of-line
+// check instead of a software operation.
+enum class ZeroAwareOperation : std::uint8_t {
+    Add, Subtract, Multiply, NegativeMultiply, Divide, SquareRoot,
+    MultiplyAccumulate, MultiplySubtract, NegativeMultiplyAccumulate,
+    NegativeMultiplySubtract,
+};
+
+#if OOT3D_GUEST_FP_AARCH64
+// Cold half, reached under FZ=1 with a native result that is a zero or NaN
+// (for VDIV also an infinity). `nativeResult` is that result; its flags are
+// already in FPSR. For the multiply-accumulate family the native product is
+// recomputed here: same operands, same FPCR, so the same value, and its flags
+// (sticky, already raised once) change nothing.
+template <ZeroAwareOperation Operation>
+OOT3D_AOT_COLD std::uint32_t ZeroAwareSlow(
+    std::uint32_t nativeResult, std::uint32_t accumulator, std::uint32_t left,
+    std::uint32_t right, std::uint32_t& fpscr) noexcept {
+    namespace a32 = oot3d::recomp::a32;
+    bool exact = false;
+    if (ExactZero(nativeResult)) {
+        if constexpr (Operation == ZeroAwareOperation::Add) {
+            exact = ExactZeroSum(left, right);
+        } else if constexpr (Operation == ZeroAwareOperation::Subtract) {
+            exact = ExactZeroSum(left, right ^ 0x80000000U);
+        } else if constexpr (Operation == ZeroAwareOperation::Multiply || Operation == ZeroAwareOperation::NegativeMultiply) {
+            exact = ExactZeroProduct(left, right);
+        } else if constexpr (Operation == ZeroAwareOperation::Divide) {
+            // 0 / y (y nonzero, not subnormal, possibly infinite) and
+            // x / infinity; infinite quotients still go to software.
+            exact = FiniteNotDenormal(left) &&
+                    (ExactZero(left) ? !Denormal(right) && !ExactZero(right)
+                                     : (right & 0x7FFFFFFFU) == 0x7F800000U);
+        } else if constexpr (Operation == ZeroAwareOperation::SquareRoot) {
+            exact = ExactZero(left);
+        } else {
+            const std::uint32_t product = NativeVfpDetail::Multiply(left, right);
+            if constexpr (Operation == ZeroAwareOperation::MultiplyAccumulate) {
+                exact = ExactZeroSum(accumulator, product);
+            } else if constexpr (Operation == ZeroAwareOperation::MultiplySubtract) {
+                exact = ExactZeroSum(accumulator, product ^ 0x80000000U);
+            } else if constexpr (Operation == ZeroAwareOperation::NegativeMultiplyAccumulate) {
+                exact = ExactZeroSum(accumulator ^ 0x80000000U, product ^ 0x80000000U);
+            } else {
+                static_assert(Operation == ZeroAwareOperation::NegativeMultiplySubtract);
+                exact = ExactZeroSum(product, accumulator ^ 0x80000000U);
+            }
+            exact = exact && ProductAgrees(product, left, right);
+        }
+    }
+    if (exact) {
+        return nativeResult;
+    }
+    a32::VfpBinary32Result result{};
+    if constexpr (Operation == ZeroAwareOperation::Add) {
+        result = a32::VfpBinary32Add(left, right, fpscr);
+    } else if constexpr (Operation == ZeroAwareOperation::Subtract) {
+        result = a32::VfpBinary32Subtract(left, right, fpscr);
+    } else if constexpr (Operation == ZeroAwareOperation::Multiply) {
+        result = a32::VfpBinary32Multiply(left, right, fpscr);
+    } else if constexpr (Operation == ZeroAwareOperation::NegativeMultiply) {
+        result = a32::VfpBinary32NegativeMultiply(left, right, fpscr);
+    } else if constexpr (Operation == ZeroAwareOperation::Divide) {
+        result = a32::VfpBinary32Divide(left, right, fpscr);
+    } else if constexpr (Operation == ZeroAwareOperation::SquareRoot) {
+        result = a32::VfpBinary32SquareRoot(left, fpscr);
+    } else if constexpr (Operation == ZeroAwareOperation::MultiplyAccumulate) {
+        result = a32::VfpBinary32MultiplyAccumulate(accumulator, left, right, fpscr);
+    } else if constexpr (Operation == ZeroAwareOperation::MultiplySubtract) {
+        result = a32::VfpBinary32MultiplySubtract(accumulator, left, right, fpscr);
+    } else if constexpr (Operation == ZeroAwareOperation::NegativeMultiplyAccumulate) {
+        result = a32::VfpBinary32NegativeMultiplyAccumulate(accumulator, left, right, fpscr);
+    } else {
+        result = a32::VfpBinary32NegativeMultiplySubtract(accumulator, left, right, fpscr);
+    }
+    fpscr |= result.exception_flags;
+    return result.value;
+}
+#endif
+
+} // namespace NativeVfpDetail
+
+#if OOT3D_GUEST_FP_AARCH64
+#define OOT3D_ZERO_AWARE_VFP(operation, guard, nativeValue, accumulator, left, right, software) \
+    if ((fpscr & NativeVfpDetail::kFlushToZero) != 0U) [[likely]] {             \
+        const std::uint32_t nativeResult = (nativeValue);                       \
+        if (!NativeVfpDetail::guard(nativeResult)) [[likely]] {                 \
+            destination = nativeResult;                                         \
+            return;                                                             \
+        }                                                                       \
+        destination = NativeVfpDetail::ZeroAwareSlow<                           \
+            NativeVfpDetail::ZeroAwareOperation::operation>(                    \
+            nativeResult, (accumulator), (left), (right), fpscr);               \
+        return;                                                                 \
+    }                                                                           \
+    NativeVfpDetail::Commit(destination, fpscr, (software))
+#else
+#define OOT3D_ZERO_AWARE_VFP(operation, guard, nativeValue, accumulator, left, right, software) \
+    NativeVfpDetail::Commit(destination, fpscr, (software))
+#endif
+
+OOT3D_AOT_HOT void Oot3dVfpZeroAwareAdd(
+    std::uint32_t& destination, std::uint32_t left, std::uint32_t right,
+    std::uint32_t& fpscr) noexcept {
+    OOT3D_ZERO_AWARE_VFP(Add, ZeroOrNan, NativeVfpDetail::Add(left, right), 0U, left, right,
+                         oot3d::recomp::a32::VfpBinary32Add(left, right, fpscr));
+}
+
+OOT3D_AOT_HOT void Oot3dVfpZeroAwareSubtract(
+    std::uint32_t& destination, std::uint32_t left, std::uint32_t right,
+    std::uint32_t& fpscr) noexcept {
+    OOT3D_ZERO_AWARE_VFP(Subtract, ZeroOrNan, NativeVfpDetail::Subtract(left, right), 0U,
+                         left, right,
+                         oot3d::recomp::a32::VfpBinary32Subtract(left, right, fpscr));
+}
+
+OOT3D_AOT_HOT void Oot3dVfpZeroAwareMultiply(
+    std::uint32_t& destination, std::uint32_t left, std::uint32_t right,
+    std::uint32_t& fpscr) noexcept {
+    OOT3D_ZERO_AWARE_VFP(Multiply, ZeroOrNan, NativeVfpDetail::Multiply(left, right), 0U,
+                         left, right,
+                         oot3d::recomp::a32::VfpBinary32Multiply(left, right, fpscr));
+}
+
+OOT3D_AOT_HOT void Oot3dVfpZeroAwareNegativeMultiply(
+    std::uint32_t& destination, std::uint32_t left, std::uint32_t right,
+    std::uint32_t& fpscr) noexcept {
+    OOT3D_ZERO_AWARE_VFP(NegativeMultiply, ZeroOrNan,
+                         NativeVfpDetail::NegativeMultiply(left, right), 0U, left, right,
+                         oot3d::recomp::a32::VfpBinary32NegativeMultiply(left, right, fpscr));
+}
+
+OOT3D_AOT_HOT void Oot3dVfpZeroAwareDivide(
+    std::uint32_t& destination, std::uint32_t left, std::uint32_t right,
+    std::uint32_t& fpscr) noexcept {
+    OOT3D_ZERO_AWARE_VFP(Divide, ZeroInfinityOrNan, NativeVfpDetail::Divide(left, right), 0U,
+                         left, right,
+                         oot3d::recomp::a32::VfpBinary32Divide(left, right, fpscr));
+}
+
+OOT3D_AOT_HOT void Oot3dVfpZeroAwareSquareRoot(
+    std::uint32_t& destination, std::uint32_t value,
+    std::uint32_t& fpscr) noexcept {
+    OOT3D_ZERO_AWARE_VFP(SquareRoot, ZeroOrNan, NativeVfpDetail::SquareRoot(value), 0U,
+                         value, 0U,
+                         oot3d::recomp::a32::VfpBinary32SquareRoot(value, fpscr));
+}
+
+// Multiply-accumulate family (same native sequences as Oot3dVfpNative*).
+OOT3D_AOT_HOT void Oot3dVfpZeroAwareMultiplyAccumulate(
+    std::uint32_t& destination, std::uint32_t accumulator, std::uint32_t left,
+    std::uint32_t right, std::uint32_t& fpscr) noexcept {
+    OOT3D_ZERO_AWARE_VFP(
+        MultiplyAccumulate, ZeroOrNan,
+        NativeVfpDetail::Add(accumulator, NativeVfpDetail::Multiply(left, right)),
+        accumulator, left, right,
+        oot3d::recomp::a32::VfpBinary32MultiplyAccumulate(accumulator, left, right, fpscr));
+}
+
+OOT3D_AOT_HOT void Oot3dVfpZeroAwareMultiplySubtract(
+    std::uint32_t& destination, std::uint32_t accumulator, std::uint32_t left,
+    std::uint32_t right, std::uint32_t& fpscr) noexcept {
+    OOT3D_ZERO_AWARE_VFP(
+        MultiplySubtract, ZeroOrNan,
+        NativeVfpDetail::Subtract(accumulator, NativeVfpDetail::Multiply(left, right)),
+        accumulator, left, right,
+        oot3d::recomp::a32::VfpBinary32MultiplySubtract(accumulator, left, right, fpscr));
+}
+
+OOT3D_AOT_HOT void Oot3dVfpZeroAwareNegativeMultiplyAccumulate(
+    std::uint32_t& destination, std::uint32_t accumulator, std::uint32_t left,
+    std::uint32_t right, std::uint32_t& fpscr) noexcept {
+    OOT3D_ZERO_AWARE_VFP(
+        NegativeMultiplyAccumulate, ZeroOrNan,
+        NativeVfpDetail::Subtract(accumulator ^ 0x80000000U,
+                                  NativeVfpDetail::Multiply(left, right)),
+        accumulator, left, right,
+        oot3d::recomp::a32::VfpBinary32NegativeMultiplyAccumulate(
+            accumulator, left, right, fpscr));
+}
+
+OOT3D_AOT_HOT void Oot3dVfpZeroAwareNegativeMultiplySubtract(
+    std::uint32_t& destination, std::uint32_t accumulator, std::uint32_t left,
+    std::uint32_t right, std::uint32_t& fpscr) noexcept {
+    OOT3D_ZERO_AWARE_VFP(
+        NegativeMultiplySubtract, ZeroOrNan,
+        NativeVfpDetail::Subtract(NativeVfpDetail::Multiply(left, right), accumulator),
+        accumulator, left, right,
+        oot3d::recomp::a32::VfpBinary32NegativeMultiplySubtract(
+            accumulator, left, right, fpscr));
+}
+
+#undef OOT3D_ZERO_AWARE_VFP
+
 // Conversions match the software model in every FPSCR mode.
 OOT3D_AOT_HOT void Oot3dVfpNativeFromSigned(
     std::uint32_t& destination, std::uint32_t value, std::uint32_t& fpscr) noexcept {

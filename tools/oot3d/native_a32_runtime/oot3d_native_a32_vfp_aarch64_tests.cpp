@@ -27,6 +27,13 @@ std::uint64_t gChecks = 0;
 // Hot-path coverage: add/multiply results under FZ=1 that the native
 // instruction keeps (nonzero, non-NaN).
 std::uint64_t gNativeKept = 0;
+// Zero-aware coverage: zero results under FZ=1 that the Oot3dVfpZeroAware*
+// entry points keep on the native path (exact zeros), per operation family.
+std::uint64_t gZeroKept = 0;
+// Zero results under FZ=1 that are NOT exact (flushed underflow, denormal
+// operands) and must still be recomputed: the zero-aware criterion has to
+// reject them, or the sign/flags would differ (they are checked like the rest).
+std::uint64_t gZeroRejected = 0;
 
 struct Observed {
     std::uint32_t value;
@@ -130,6 +137,48 @@ void CheckCompare(std::uint32_t a, std::uint32_t b, bool signalAllNans,
            {reference.value & 0xF0000000U, reference.exception_flags}, a, b, 0U, mode);
 }
 
+// The zero-aware entry points against the software model, every operation.
+void CheckZeroAware(std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t mode) {
+    const bool flush = (mode & NativeVfpDetail::kFlushToZero) != 0U;
+    const auto count = [&](a32::VfpBinary32Result reference, bool exact) {
+        if (flush && NativeVfpDetail::ExactZero(reference.value)) {
+            ++(exact ? gZeroKept : gZeroRejected);
+        }
+    };
+    const a32::VfpBinary32Result add = a32::VfpBinary32Add(a, b, mode);
+    count(add, NativeVfpDetail::ExactZeroSum(a, b));
+    Expect("za_add", RunBinary(Oot3dVfpZeroAwareAdd, a, b, mode), add, a, b, c, mode);
+    const a32::VfpBinary32Result sub = a32::VfpBinary32Subtract(a, b, mode);
+    count(sub, NativeVfpDetail::ExactZeroSum(a, b ^ 0x80000000U));
+    Expect("za_sub", RunBinary(Oot3dVfpZeroAwareSubtract, a, b, mode), sub, a, b, c, mode);
+    const a32::VfpBinary32Result mul = a32::VfpBinary32Multiply(a, b, mode);
+    count(mul, NativeVfpDetail::ExactZeroProduct(a, b));
+    Expect("za_mul", RunBinary(Oot3dVfpZeroAwareMultiply, a, b, mode), mul, a, b, c, mode);
+    Expect("za_nmul", RunBinary(Oot3dVfpZeroAwareNegativeMultiply, a, b, mode),
+           a32::VfpBinary32NegativeMultiply(a, b, mode), a, b, c, mode);
+    Expect("za_div", RunBinary(Oot3dVfpZeroAwareDivide, a, b, mode),
+           a32::VfpBinary32Divide(a, b, mode), a, b, c, mode);
+    const a32::VfpBinary32Result mla = a32::VfpBinary32MultiplyAccumulate(c, a, b, mode);
+    const std::uint32_t product = a32::VfpBinary32Multiply(a, b, mode).value;
+    count(mla, NativeVfpDetail::ExactZeroSum(c, product) &&
+                   NativeVfpDetail::ProductAgrees(product, a, b));
+    Expect("za_mla", RunTernary(Oot3dVfpZeroAwareMultiplyAccumulate, c, a, b, mode),
+           mla, a, b, c, mode);
+    const a32::VfpBinary32Result mls = a32::VfpBinary32MultiplySubtract(c, a, b, mode);
+    count(mls, NativeVfpDetail::ExactZeroSum(c, product ^ 0x80000000U) &&
+                   NativeVfpDetail::ProductAgrees(product, a, b));
+    Expect("za_mls", RunTernary(Oot3dVfpZeroAwareMultiplySubtract, c, a, b, mode),
+           mls, a, b, c, mode);
+    Expect("za_nmla",
+           RunTernary(Oot3dVfpZeroAwareNegativeMultiplyAccumulate, c, a, b, mode),
+           a32::VfpBinary32NegativeMultiplyAccumulate(c, a, b, mode), a, b, c, mode);
+    Expect("za_nmls",
+           RunTernary(Oot3dVfpZeroAwareNegativeMultiplySubtract, c, a, b, mode),
+           a32::VfpBinary32NegativeMultiplySubtract(c, a, b, mode), a, b, c, mode);
+    Expect("za_sqrt", RunUnary(Oot3dVfpZeroAwareSquareRoot, a, mode),
+           a32::VfpBinary32SquareRoot(a, mode), a, b, c, mode);
+}
+
 void CheckAll(std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t mode) {
     const auto kept = [&](std::uint32_t value) {
         if ((mode & NativeVfpDetail::kFlushToZero) != 0U &&
@@ -169,6 +218,7 @@ void CheckAll(std::uint32_t a, std::uint32_t b, std::uint32_t c, std::uint32_t m
            a32::VfpBinary32ToUnsigned(a, mode), a, b, c, mode);
     CheckCompare(a, b, false, mode);
     CheckCompare(a, b, true, mode);
+    CheckZeroAware(a, b, c, mode);
 }
 
 std::array<std::uint32_t, 16> Modes() {
@@ -229,7 +279,7 @@ void RunCampaign(std::uint64_t seed, std::size_t iterations) {
     std::vector<Triple> triples;
     triples.reserve(iterations);
     for (std::size_t i = 0; i < iterations; ++i) {
-        const std::uint32_t a = Operand(random);
+        std::uint32_t a = Operand(random);
         std::uint32_t b = Operand(random);
         std::uint32_t c = Operand(random);
         switch (random() % 8U) {
@@ -255,6 +305,18 @@ void RunCampaign(std::uint64_t seed, std::size_t iterations) {
             break;
         case 4:
             b = a;  // x - x, x / x, equal compares
+            break;
+        case 5:
+            // Zero factor with a zero accumulator of either sign (exact
+            // zero products and sums), or a product cancelling the
+            // accumulator under FZ (VMLS/VNMLS cancellation).
+            if ((random() & 1U) != 0U) {
+                a &= 0x80000000U;
+                c &= 0x80000000U;
+            } else {
+                c = a32::VfpBinary32Multiply(a, b, 1U << 24U).value ^
+                    ((random() & 1U) != 0U ? 0x80000000U : 0U);
+            }
             break;
         default:
             break;
@@ -284,6 +346,8 @@ void RunUnarySweep() {
                     for (const std::uint32_t edge : {fraction, 0x007FFFFFU - fraction}) {
                         const std::uint32_t value = (sign << 31U) | (exponent << 23U) | edge;
                         Expect("sqrt", RunUnary(Oot3dVfpNativeSquareRoot, value, mode),
+                               a32::VfpBinary32SquareRoot(value, mode), value, 0, 0, mode);
+                        Expect("za_sqrt", RunUnary(Oot3dVfpZeroAwareSquareRoot, value, mode),
                                a32::VfpBinary32SquareRoot(value, mode), value, 0, 0, mode);
                         Expect("to_signed", RunUnary(Oot3dVfpNativeToSigned, value, mode),
                                a32::VfpBinary32ToSigned(value, mode), value, 0, 0, mode);
@@ -329,14 +393,34 @@ int main() {
     gHostFpcr = Oot3dReadFpcr();
 #endif
     RunSpecialGrid();
+#if defined(OOT3D_VFP_TEST_QUICK)
+    // Só para as mutações (run_vfp_zero_aware_mutations.sh): grade especial
+    // e uma campanha curta; o teste completo é o de baixo.
+    RunCampaign(0x0A32F00DULL, 20000U);
+#else
     RunUnarySweep();
     RunCampaign(0x0A32F00DULL, 400000U);
     RunCampaign(0xA64E5ULL, 200000U);
+#endif
 #if OOT3D_GUEST_FP_AARCH64
     Oot3dWriteFpcr(gHostFpcr);
+#if defined(OOT3D_VFP_TEST_QUICK)
+    if (gNativeKept < 100000U) {
+#else
     if (gNativeKept < 1000000U) {
+#endif
         std::printf("native results kept too rarely: %llu\n",
                     static_cast<unsigned long long>(gNativeKept));
+        return 1;
+    }
+#if defined(OOT3D_VFP_TEST_QUICK)
+    if (gZeroKept < 1000U || gZeroRejected < 100U) {
+#else
+    if (gZeroKept < 100000U || gZeroRejected < 10000U) {
+#endif
+        std::printf("zero-aware coverage too low: kept %llu, rejected %llu\n",
+                    static_cast<unsigned long long>(gZeroKept),
+                    static_cast<unsigned long long>(gZeroRejected));
         return 1;
     }
 #endif
@@ -346,9 +430,13 @@ int main() {
         return 1;
     }
     std::printf("native AArch64 VFP matches the software implementation "
-                "(%llu checks, %llu add/mul results on the native path, native=%d)\n",
+                "(%llu checks, %llu add/mul results on the native path, "
+                "%llu exact zeros kept native by the zero-aware entry points, "
+                "%llu inexact zeros recomputed, native=%d)\n",
                 static_cast<unsigned long long>(gChecks),
                 static_cast<unsigned long long>(gNativeKept),
+                static_cast<unsigned long long>(gZeroKept),
+                static_cast<unsigned long long>(gZeroRejected),
                 OOT3D_GUEST_FP_AARCH64);
     return 0;
 }

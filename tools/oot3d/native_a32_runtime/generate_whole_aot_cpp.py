@@ -94,6 +94,19 @@ def main(argv: Sequence[str] | None = None) -> int:
              "FPSR (exact; software operations on other hosts)",
     )
     parser.add_argument(
+        "--vfp-zero-aware", action="store_true",
+        help="com --native-vfp-aarch64: as operações aritméticas usam "
+             "Oot3dVfpZeroAware*, que mantêm no caminho nativo os zeros "
+             "exatos (x*0, x-x, cancelamento exato) em vez de recalculá-los "
+             "no software (mesmo valor e mesmas flags)",
+    )
+    parser.add_argument(
+        "--lean-stack", action="store_true",
+        help="leituras guest sem inicializar o destino e LDM sem o endereço "
+             "do array spanWords no caminho rápido: tira da pilha o caminho "
+             "quente de cada load (mesmo efeito)",
+    )
+    parser.add_argument(
         "--giant-function-instructions", type=int, default=0,
         help="marca funções com pelo menos N instruções guest com "
              "[[gnu::optimize]] sem sched1 nem gcse-after-reload (GCC); "
@@ -126,6 +139,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         giant_function_instructions=args.giant_function_instructions,
         hot_entries=_read_hot_entries(args.hot_functions),
         promote_registers=args.promote_registers,
+        vfp_zero_aware=args.vfp_zero_aware,
+        lean_stack=args.lean_stack,
     )
     if args.guest_overrides is not None:
         from apply_guest_overrides import apply as apply_overrides, load_manifest

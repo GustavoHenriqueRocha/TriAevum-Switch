@@ -97,6 +97,18 @@ _NATIVE_VFP_AARCH64 = False
 # (estático); (3) o prólogo salva x19-x28. Sem os caminhos lentos
 # (experimento, não exato) ainda fica 19% pior. Por isso continua desligado.
 _PROMOTE_REGISTERS = False
+# Set by generate() (--vfp-zero-aware, only with the native VFP): arithmetic
+# goes through Oot3dVfpZeroAware*, which keep exact zero results (x * 0,
+# x - x, exact cancellation in VMLA/VMLS) on the native path instead of the
+# software operation; same value and flags (oot3d_native_a32_vfp_aarch64.h).
+_VFP_ZERO_AWARE = False
+# Set by generate() (--lean-stack): no guest value lives on the stack in the
+# hot path of a load. A read destination is not zero-initialized (ReadFast
+# writes it whenever it returns true, and it is dead when it returns false),
+# and the word-by-word LDM fallback reads into its own temporaries, so the
+# spanWords array of the single-page path never has its address taken and is
+# kept in registers. Same values, faults and order.
+_LEAN_STACK = False
 # Funções gigantes e frias marcadas com GIANT_COLD_ATTRIBUTE (ver generate).
 _GIANT_COLD_ENTRIES: frozenset[int] = frozenset()
 # O escalonador pré-alocação (sched1, que no AArch64 o GCC só liga em -O3) e
@@ -1210,6 +1222,20 @@ def _emit_block_transfer(item: Instruction) -> list[str]:
                     f"                                   firstAddress + {offset * 4}U);",
                     "    }",
                 )
+            ] if not _LEAN_STACK else [
+                line
+                for offset in range(count)
+                for line in (
+                    "    {",
+                    "        uint32_t word;",
+                    "        if (!context.Memory.ReadFast<uint32_t>(",
+                    f"                firstAddress + {offset * 4}U, &word)) {{",
+                    f"            return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
+                    f"                                       firstAddress + {offset * 4}U);",
+                    "        }",
+                    f"        spanWords[{offset}] = word;",
+                    "    }",
+                )
             ]
         else:
             sources = ", ".join(_reg(register, pc) for register in registers)
@@ -1320,6 +1346,15 @@ _NATIVE_VFP_UNARY = {
 }
 
 
+def _native_vfp_name(operation: str | None) -> str | None:
+    """Arithmetic entry point for the current option: Oot3dVfpNative* or,
+    with --vfp-zero-aware, Oot3dVfpZeroAware* (conversions and compares
+    have no zero-aware variant)."""
+    if operation is None or not _VFP_ZERO_AWARE:
+        return operation
+    return operation.replace("Oot3dVfpNative", "Oot3dVfpZeroAware", 1)
+
+
 def _emit_native_vfp(
     raw: int, pc: int, destination: int, left: int, right: int
 ) -> list[str] | None:
@@ -1329,13 +1364,13 @@ def _emit_native_vfp(
     integer bit operations there)."""
     del pc
     ternary = raw & 0x0FB00F50
-    operation = _NATIVE_VFP_TERNARY.get(ternary)
+    operation = _native_vfp_name(_NATIVE_VFP_TERNARY.get(ternary))
     if operation is not None:
         return [
             f"{operation}({_lane(destination)}, {_lane(destination)},",
             f"    {_lane(left)}, {_lane(right)}, frame.Guest.fpscr);",
         ]
-    operation = _NATIVE_VFP_BINARY.get(ternary)
+    operation = _native_vfp_name(_NATIVE_VFP_BINARY.get(ternary))
     if operation is not None:
         return [
             f"{operation}({_lane(destination)}, {_lane(left)}, {_lane(right)},",
@@ -1343,6 +1378,8 @@ def _emit_native_vfp(
         ]
     unary = raw & 0x0FBF0FD0
     operation = _NATIVE_VFP_UNARY.get(unary)
+    if unary == 0x0EB10AC0:
+        operation = _native_vfp_name(operation)
     if operation is not None:
         return [
             f"{operation}({_lane(destination)}, {_lane(right)}, frame.Guest.fpscr);",
@@ -2274,6 +2311,8 @@ def _render_function(
             for helper in promoted_helpers:
                 line = line.replace(f"{helper}(state,", f"{helper}(flags,")
         lines[index] = line
+    if _LEAN_STACK and not memory_view:
+        _drop_read_zero_initializers(lines, body_start)
     if promote:
         return _promote_function_body(function, lines, body_start, promoted_helpers)
     committed = lines[:body_start]
@@ -2561,6 +2600,23 @@ def _promote_function_body(
         output.append("    return exitFlow;")
     output.extend(["}", ""])
     return output
+_READ_DESTINATION = re.compile(r"^(\s*)(uint(?:8|16|32|64)_t) (value\d*) = 0;$")
+
+
+def _drop_read_zero_initializers(lines: list[str], start: int) -> None:
+    """--lean-stack: `T valueN = 0;` immediately followed (within three lines)
+    by the ReadFast that writes it loses the dead initializer. The variable's
+    address escapes only into the cold ReadFastSlow, so the initializer was a
+    stack store on the hot path of every guest load."""
+    for index in range(start, len(lines)):
+        match = _READ_DESTINATION.match(lines[index])
+        if match is None:
+            continue
+        name = match.group(3)
+        window = " ".join(lines[index + 1:index + 4])
+        if ("ReadFast<" in window and
+                re.search(rf"&{name}\b(?!\[)", window) is not None):
+            lines[index] = f"{match.group(1)}{match.group(2)} {name};"
 
 
 def _render_region_function(
@@ -3546,11 +3602,22 @@ def generate(
     giant_function_instructions: int = 0,
     hot_entries: frozenset[int] = frozenset(),
     promote_registers: bool = False,
+    vfp_zero_aware: bool = False,
+    lean_stack: bool = False,
 ) -> dict[str, object]:
     """``giant_function_instructions`` > 0 marca as funções com pelo menos
     tantas instruções guest, exceto as de ``hot_entries`` (perfil), com
     GIANT_COLD_ATTRIBUTE. 0 (padrão) gera exatamente o mesmo C++ de antes."""
-    global _LITERAL_IMAGE, _NATIVE_VFP_AARCH64, _GIANT_COLD_ENTRIES, _PROMOTE_REGISTERS
+    global _LITERAL_IMAGE, _NATIVE_VFP_AARCH64, _GIANT_COLD_ENTRIES
+    global _VFP_ZERO_AWARE, _LEAN_STACK, _PROMOTE_REGISTERS
+    if vfp_zero_aware and not native_vfp_aarch64:
+        raise ValueError("--vfp-zero-aware requires --native-vfp-aarch64")
+    # Absent from the manifest when off: without the options the output (and
+    # the manifest) is byte for byte the previous one.
+    option_contract: dict[str, object] = {
+        **({"vfp_zero_aware": True} if vfp_zero_aware else {}),
+        **({"lean_stack": True} if lean_stack else {}),
+    }
     if giant_function_instructions < 0:
         raise ValueError("giant function threshold must not be negative")
     giant_contract: dict[str, object] = (
@@ -3605,6 +3672,7 @@ def generate(
             **({"native_vfp_aarch64": True} if native_vfp_aarch64 else {}),
             **({"register_promotion": True} if promote_registers else {}),
             **giant_contract,
+            **option_contract,
         }
         files = cached.get("files", {})
         cached_shards = {
@@ -3620,6 +3688,9 @@ def generate(
             # Absent in manifests generated without the giant-function marks.
             cached.get("giant_cold_instructions", 0)
             == giant_function_instructions
+        ) and all(
+            cached.get(key, False) == (key in option_contract)
+            for key in ("vfp_zero_aware", "lean_stack")
         ) and all(
             (output / name).is_file() and
             _sha256((output / name).read_bytes()) == digest
@@ -3643,6 +3714,8 @@ def generate(
         _LITERAL_IMAGE = LiteralImage(int(program["base"]), code[:text_size])
     _NATIVE_VFP_AARCH64 = native_vfp_aarch64
     _PROMOTE_REGISTERS = promote_registers
+    _VFP_ZERO_AWARE = vfp_zero_aware
+    _LEAN_STACK = lean_stack
     _GIANT_COLD_ENTRIES = frozenset(
         function.entry
         for function in functions
@@ -3656,11 +3729,13 @@ def generate(
             output, functions, external_entries, shard_count, shard_strategy,
             region_entries, memory_entries, local_state, fold_literals,
             memory_contract, program_sha256, selection_sha256, code_sha256,
-            generator_sha256, giant_contract)
+            generator_sha256, {**giant_contract, **option_contract})
     finally:
         _LITERAL_IMAGE = None
         _NATIVE_VFP_AARCH64 = False
         _PROMOTE_REGISTERS = False
+        _VFP_ZERO_AWARE = False
+        _LEAN_STACK = False
         _GIANT_COLD_ENTRIES = frozenset()
 
 
@@ -3778,7 +3853,7 @@ def _generate_files(
         **(giant_contract or {}),
         **(
             {"giant_cold_functions": sorted(_GIANT_COLD_ENTRIES)}
-            if giant_contract
+            if "giant_cold_instructions" in (giant_contract or {})
             else {}
         ),
         "folded_literal_addresses": len(_FOLDED_LITERALS),

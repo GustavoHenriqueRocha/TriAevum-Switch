@@ -73,11 +73,29 @@ enum class Oot3dWholeAotFlowKind : uint8_t {
     Unsupported,
 };
 
+// OOT3D_WHOLE_AOT_FLOW_IN_REGISTERS (default 1): the flow is 16 bytes. Every
+// generated function returns one, and AAPCS64 returns a composite of up to 16
+// bytes in x0/x1 in both cases, but GCC (16.1, AArch64) builds the 12-byte
+// layout (a byte, padding and two words) in a stack temporary at every return
+// and call site (store, reload, store again before the shared epilogue). The
+// explicit fourth word removes the padding; GCC then assembles the flow
+// directly in x0/x1. Purely a layout change: Reserved is always zero and
+// nothing reads it. 0 restores the previous layout (for A/B); the whole
+// program (runtime, shards, overrides) must be built with the same value.
+#ifndef OOT3D_WHOLE_AOT_FLOW_IN_REGISTERS
+#define OOT3D_WHOLE_AOT_FLOW_IN_REGISTERS 1
+#endif
+
 struct Oot3dWholeAotFlow {
     Oot3dWholeAotFlowKind Kind = Oot3dWholeAotFlowKind::Unsupported;
     uint32_t Pc = 0;
     uint32_t Detail = 0;
+#if OOT3D_WHOLE_AOT_FLOW_IN_REGISTERS
+    uint32_t Reserved = 0;
+#endif
 };
+static_assert(sizeof(Oot3dWholeAotFlow) ==
+              (OOT3D_WHOLE_AOT_FLOW_IN_REGISTERS ? 16U : 12U));
 
 struct Oot3dWholeAotObservableExit final {
     uint32_t Pc = 0;
