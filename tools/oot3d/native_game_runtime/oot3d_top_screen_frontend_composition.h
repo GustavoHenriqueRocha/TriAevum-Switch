@@ -6,6 +6,11 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdlib>
+#include <fstream>
+#include <optional>
+#include <string>
+#include <string_view>
 
 namespace Oot3dNativeGame {
 
@@ -58,6 +63,66 @@ struct TopScreenFrontendCanvas {
                Viewport.HalfHeight == state.Viewport.HalfHeight;
     }
 };
+
+// The relocated menu's own backdrop (CommonBackground00 of File Select and
+// Name Entry, common_bg01 of the version choice). On the 3DS that backdrop and
+// the menu form the lower screen, which the mod moves to the upper screen as a
+// unit (target swap above): the upper scene - the title logo and copyright,
+// File Select's 3D Link and its caption panel - is not behind the menu there.
+// Removing the backdrop showed exactly that scene between and through the
+// cards. Only the menu's opaque canvas clear stays removed, so the upper sky
+// remains beside the 4:3 menu on a widened target, as it is beside the 320-wide
+// menu on the 400-wide upper screen.
+// Read once: on the Switch sdmc:/switch/oot3dre/config/topscreen_menu_backdrop
+// ("0" restores the previous sky-behind-the-cards composition; missing = on);
+// elsewhere TRIAEVUM_TOPSCREEN_MENU_BACKDROP with the same format.
+[[nodiscard]] inline bool ParseTopScreenMenuBackdropSetting(std::string_view text) noexcept {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t'))
+        text.remove_prefix(1);
+    return text.empty() || text.front() != '0';
+}
+
+namespace TopScreenMenuBackdropDetail {
+inline int& TestOverride() noexcept {
+    static int value = -1;
+    return value;
+}
+} // namespace TopScreenMenuBackdropDetail
+
+inline void SetTopScreenMenuBackdropForTesting(std::optional<bool> enabled) noexcept {
+    TopScreenMenuBackdropDetail::TestOverride() = enabled ? (*enabled ? 1 : 0) : -1;
+}
+
+[[nodiscard]] inline bool TopScreenMenuBackdropEnabled() {
+    if (const int forced = TopScreenMenuBackdropDetail::TestOverride(); forced >= 0)
+        return forced != 0;
+    static const bool enabled = [] {
+#if defined(__SWITCH__)
+        std::ifstream file("sdmc:/switch/oot3dre/config/topscreen_menu_backdrop");
+        std::string text;
+        if (!file || !std::getline(file, text))
+            return true;
+        return ParseTopScreenMenuBackdropSetting(text);
+#else
+        const char* value = std::getenv("TRIAEVUM_TOPSCREEN_MENU_BACKDROP");
+        return value == nullptr || ParseTopScreenMenuBackdropSetting(value);
+#endif
+    }();
+    return enabled;
+}
+
+// Which draws on a relocated menu canvas the composition omits: always the
+// menu's opaque canvas clear (it would cover the upper scene that the shared
+// target keeps beside the menu); the backdrop texture only when the backdrop
+// is disabled.
+[[nodiscard]] inline bool OmitTopScreenFrontendMenuDraw(bool relocationActive,
+                                                        bool targetsMenuCanvas,
+                                                        bool usesMenuBackdrop,
+                                                        bool isOpaqueCanvasClear,
+                                                        bool backdropEnabled) noexcept {
+    return relocationActive && targetsMenuCanvas &&
+           (isOpaqueCanvasClear || (usesMenuBackdrop && !backdropEnabled));
+}
 
 inline bool ComposeTopScreenFrontendFrame(Oot3dPicaVisualFrame& frame,
                                          bool frontendActive) {

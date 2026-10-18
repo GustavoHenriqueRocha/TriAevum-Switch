@@ -75,5 +75,28 @@ int main() {
     assert(frame.TopTransfer.AfterDrawSubmissionId == 20);
     frame.Draws.clear();
     assert(!ComposeTopScreenFrontendFrame(frame, true));
+
+    // The menu backdrop stays by default; the canvas clear never does.
+    assert(ParseTopScreenMenuBackdropSetting(""));
+    assert(ParseTopScreenMenuBackdropSetting("1"));
+    assert(!ParseTopScreenMenuBackdropSetting("0"));
+    assert(!ParseTopScreenMenuBackdropSetting(" 0\n"));
+    for (const bool backdrop : {true, false}) {
+        // relocation, canvas, backdrop texture, clear, setting
+        assert(OmitTopScreenFrontendMenuDraw(true, true, false, true, backdrop));
+        assert(OmitTopScreenFrontendMenuDraw(true, true, true, false, backdrop) == !backdrop);
+        // Cards, header and text on the canvas are never omitted.
+        assert(!OmitTopScreenFrontendMenuDraw(true, true, false, false, backdrop));
+        // The scene's clear on the shared target is not the menu canvas.
+        assert(!OmitTopScreenFrontendMenuDraw(true, false, false, true, backdrop));
+        assert(!OmitTopScreenFrontendMenuDraw(true, false, true, false, backdrop));
+        // Without the relocation (OoT3D profile, gameplay) nothing changes.
+        assert(!OmitTopScreenFrontendMenuDraw(false, true, true, true, backdrop));
+    }
+    SetTopScreenMenuBackdropForTesting(false);
+    assert(!TopScreenMenuBackdropEnabled());
+    SetTopScreenMenuBackdropForTesting(true);
+    assert(TopScreenMenuBackdropEnabled());
+    SetTopScreenMenuBackdropForTesting(std::nullopt);
     std::cout << "TopScreen frontend composition tests passed\n";
 }

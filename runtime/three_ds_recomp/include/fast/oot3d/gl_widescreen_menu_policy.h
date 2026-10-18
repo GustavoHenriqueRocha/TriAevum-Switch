@@ -301,6 +301,54 @@ inline constexpr std::int32_t kGlWidescreenCornerHeight = 40; // linhas
     return placement;
 }
 
+// Texturas da tela de baixo realocada (seleção de arquivo, escolha Normal/
+// Master Quest, criação de nome) amostradas com GL_NEAREST na ampliação.
+// O menu é montado com peças de um atlas desenhadas texel por pixel nativo
+// (ortográfica 320x240, anisotropia 1): na resolução do 3DS cada pixel cai no
+// centro de um texel e o filtro linear devolve o texel exato. Com resolução
+// interna N×, os fragmentos da borda de uma peça caem a 1/(2N) de texel do
+// limite e o linear mistura o texel vizinho do atlas: no cabeçalho "Please
+// select a file." a emenda entre o canto e o meio virou uma linha clara
+// vertical a ~28 px de cada borda (some com escala 1, aparece em 2 e 3). O
+// nearest numa escala inteira reproduz o resultado nativo pixel a pixel (o
+// mesmo texel em cada um dos N×N fragmentos) e não lê fora da peça; minificação
+// continua linear. Escala fracionária (1,5×) fica linear: o nearest daria
+// texels de larguras desiguais.
+// Lido uma vez: Switch, config/menu_nearest ("0" desliga; sem o arquivo,
+// ligado); fora dele, TRIAEVUM_GL_MENU_NEAREST.
+[[nodiscard]] inline bool GlMenuNearestEnabled() {
+    static const bool enabled = [] {
+        constexpr bool kDefault = true;
+#if defined(__SWITCH__)
+        std::ifstream file("sdmc:/switch/oot3dre/config/menu_nearest");
+        std::string text;
+        if (!file || !std::getline(file, text))
+            return kDefault;
+        return ParseGlWidescreenSetting(text, kDefault);
+#else
+        const char* value = std::getenv("TRIAEVUM_GL_MENU_NEAREST");
+        return value == nullptr ? kDefault : ParseGlWidescreenSetting(value, kDefault);
+#endif
+    }();
+    return enabled;
+}
+
+// O draw é uma peça da tela de baixo realocada (viewport que não cobre o eixo
+// horizontal apresentado, ortográfica de pixels quadrados, com textura
+// própria) e a escala interna é inteira >= 2. Vale nos dois domínios: a
+// criação de nome (teclado e cabeçalho, mesma emenda) vem no domínio Ui, como
+// os painéis do Game Over e as páginas centradas da pausa; HUD, Items, Map e
+// System cobrem a largura toda e ficam lineares.
+[[nodiscard]] inline bool GlRelocatedMenuNearestSampling(
+    const GlWidescreenDrawEvidence& evidence, float resolutionScale) noexcept {
+    const bool integerScale = resolutionScale >= 2.0F - 1.0e-3F &&
+                              std::abs(resolutionScale - std::round(resolutionScale)) <= 1.0e-3F;
+    return integerScale && !evidence.ViewportSpansPresentedWidth &&
+           !evidence.Untextured && !evidence.SamplesRenderedCopy &&
+           evidence.Projection == GlProjectionShape::Orthographic &&
+           GlAnisotropyNear(evidence.PixelAnisotropy, 1.0F);
+}
+
 // Eixo horizontal apresentado (Y do alvo alargado, em pixels do alvo) de um
 // draw: viewport e recorte. O eixo vertical (X) não muda com o widescreen.
 struct GlWidescreenPresentedAxisInput {

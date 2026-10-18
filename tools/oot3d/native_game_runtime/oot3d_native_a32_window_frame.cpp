@@ -2097,10 +2097,13 @@ void NativeA32WindowSession::RunGuestRefresh() {
                       });
       const bool isOpaqueTargetInitialization =
           IsNativeFrontendOpaqueTargetInitializationDraw(draw);
+      // The menu's own backdrop stays (config/topscreen_menu_backdrop); only
+      // its canvas clear is removed so the upper sky stays beside the menu.
       const bool suppressNativeFrontendBackdropDraw =
-          suppressTopScreenFrontendBackdrop &&
-          targetsFrontendBackdrop &&
-          (usesCommonBackground || isOpaqueTargetInitialization);
+          Oot3dNativeGame::OmitTopScreenFrontendMenuDraw(
+              suppressTopScreenFrontendBackdrop, targetsFrontendBackdrop,
+              usesCommonBackground, isOpaqueTargetInitialization,
+              Oot3dNativeGame::TopScreenMenuBackdropEnabled());
       Oot3dNativeGame::Oot3dPicaVulkanDrawPlan plan;
       auto drawPhaseStart = std::chrono::steady_clock::now();
       if (deferredPlans != nullptr) {

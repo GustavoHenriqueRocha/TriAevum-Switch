@@ -1100,6 +1100,9 @@ struct GfxRenderingAPIOGL::NativePicaState {
     float ResolutionScale = 1.0F;
     // Namespaces drawn at their own scale (a reduced in-between frame).
     std::map<uint64_t, float> NamespaceScales;
+    // Samplers GL_NEAREST das peças do menu realocado, um por unidade PICA
+    // (PicaGlRelocatedMenuNearestSampling); 0 até o primeiro uso.
+    std::array<GLuint, 3> MenuNearestSamplers{};
     // config/gl_lean (exact savings; see PicaGlScale::ParseLeanSetting).
     bool Lean = true;
     // config/gl_gpu_lean (exact GPU savings; gfx_opengl_pica_gpu_lean.h).
@@ -1796,6 +1799,11 @@ void GfxRenderingAPIOGL::ShutdownNativePica() noexcept {
     }
     DeletePicaGlPost(state.Post);
     glDeleteProgram(state.ScanoutProgram);
+    if (state.MenuNearestSamplers[0] != 0U) {
+        glDeleteSamplers(static_cast<GLsizei>(state.MenuNearestSamplers.size()),
+                         state.MenuNearestSamplers.data());
+        state.MenuNearestSamplers = {};
+    }
     glDeleteTextures(1, &state.FallbackColor);
     glDeleteTextures(1, &state.FallbackInteger);
     glDeleteBuffers(static_cast<GLsizei>(state.VertexBuffers.size()),
@@ -2130,6 +2138,39 @@ Oot3d::GlWidescreenDrawPlacement ResolvePicaGlWidescreenPlacement(
                                      uniformsAvailable);
     }
     return placement;
+}
+
+// Peças da tela de baixo realocada: GL_NEAREST na ampliação numa escala
+// inteira (GlRelocatedMenuNearestSampling). Vale com e sem widescreen.
+bool PicaGlRelocatedMenuNearestSampling(const GfxNativePicaDrawView& draw,
+                                        float resolutionScale) {
+    if (draw.Textures.empty() || !Oot3d::GlMenuNearestEnabled()) {
+        return false;
+    }
+    Oot3d::GlWidescreenDrawEvidence evidence;
+    evidence.UiDomain =
+        draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Ui;
+    evidence.ViewportSpansPresentedWidth =
+        draw.ViewportY <= 0.5F &&
+        draw.ViewportY + draw.ViewportHeight >=
+            static_cast<float>(draw.FramebufferHeight) - 0.5F;
+    if (evidence.ViewportSpansPresentedWidth ||
+        draw.VertexUniformBytes.size() <
+            Oot3d::kPicaPackedVertexFloatOffset + 4U * Oot3d::kPicaPackedVec4Bytes) {
+        return false;
+    }
+    std::array<float, 16> rows{};
+    std::memcpy(rows.data(),
+                draw.VertexUniformBytes.data() + Oot3d::kPicaPackedVertexFloatOffset,
+                sizeof(rows));
+    const auto projection = Oot3d::DecodeGlProjection(rows);
+    evidence.Projection = projection.Shape;
+    evidence.PixelAnisotropy = Oot3d::GlNativePixelAnisotropy(
+        projection, draw.ViewportWidth, draw.ViewportHeight, draw.FramebufferWidth);
+    evidence.SamplesRenderedCopy = std::any_of(
+        draw.Textures.begin(), draw.Textures.end(),
+        [](const auto& texture) { return !texture.CopyReferences.empty(); });
+    return Oot3d::GlRelocatedMenuNearestSampling(evidence, resolutionScale);
 }
 
 PicaGlTarget& GetPicaGlTarget(
@@ -3574,6 +3615,33 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             }
         };
 
+        // Peças do menu realocado: GL_NEAREST na ampliação (sem a emenda do
+        // atlas na resolução interna; GlRelocatedMenuNearestSampling). O
+        // sampler sobrepõe filtro e repetição da textura só neste draw.
+        uint32_t menuNearestUnits = 0U;
+        if (PicaGlRelocatedMenuNearestSampling(draw, resolutionScale)) {
+            auto& samplers = mNativePica->MenuNearestSamplers;
+            if (samplers[0] == 0U) {
+                glGenSamplers(static_cast<GLsizei>(samplers.size()), samplers.data());
+            }
+            for (const auto& texture : draw.Textures) {
+                if (texture.Slot >= samplers.size() || texture.NativeType != 0U ||
+                    !texture.MagLinear) {
+                    continue;
+                }
+                const GLuint sampler = samplers[texture.Slot];
+                glSamplerParameteri(sampler, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glSamplerParameteri(sampler, GL_TEXTURE_MIN_FILTER,
+                                    PicaGlMinFilter(texture, texture.MaxMipLevel + 1U));
+                glSamplerParameteri(sampler, GL_TEXTURE_WRAP_S,
+                                    ToPicaGlWrap(texture.NativeWrapS));
+                glSamplerParameteri(sampler, GL_TEXTURE_WRAP_T,
+                                    ToPicaGlWrap(texture.NativeWrapT));
+                glBindSampler(texture.Slot + 1U, sampler);
+                menuNearestUnits |= 1U << texture.Slot;
+            }
+        }
+
         // GPU lean: a draw that cannot change any buffer is not issued (its
         // uploads and state above are kept, so later draws see the same).
         PicaGlGpuLean::DrawEffects effects;
@@ -3691,6 +3759,11 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 glDrawArrays(topology, 0,
                              static_cast<GLsizei>(draw.VertexCount));
             });
+        }
+        for (uint32_t slot = 0U; slot < 3U; ++slot) {
+            if ((menuNearestUnits & (1U << slot)) != 0U) {
+                glBindSampler(slot + 1U, 0U);
+            }
         }
         // Ordinary raster and framebuffer commands are ordered by GL. Only
         // the PICA shadow producer writes through an image binding and needs

@@ -76,6 +76,20 @@ accepted captures unchanged; S01 late (first START after the hidden panels have
 entered) now shows the choice on its first START and reaches File Select on the
 second, as the new captures show.
 
+## Menu backdrop restored (2026-10-17)
+
+Removing the backdrop was a port choice, not the mod's behavior: on the 3DS the
+menu and its own backdrop are the lower screen, which the mod's target swap
+moves to the upper screen as a whole, so the upper scene is never behind the
+cards. With the backdrop removed the title logo and copyright showed between
+and through the version cards, and File Select's 3D Link and caption panel
+behind its cards (user report). The composition now keeps CommonBackground00
+and common_bg01 and removes only the menu's opaque canvas clear
+(`OmitTopScreenFrontendMenuDraw`), so the upper sky remains beside the 4:3 menu
+on a widened target. `config/topscreen_menu_backdrop` = `0` (desktop
+`TRIAEVUM_TOPSCREEN_MENU_BACKDROP=0`) restores the sky-behind-the-cards
+composition described above.
+
 ## Verification
 
 Fast ROM-free regression test (about three seconds including compilation):

@@ -746,12 +746,44 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
   `TRIAEVUM_GL_WIDESCREEN_MENUS_LOG=<arquivo>`): `logs/widescreen_menus.txt` com uma linha por draw
   distinto no alvo alargado: decisão (`QUADRO`, `QUADRO+COMP`, `ESTICA`, `TELA`), viewport, recorte,
   domínio/camada, projeção c0-c3, anisotropia, cobertura, textura. Apague o arquivo depois.
-- Não é do posicionamento: o Link 3D e a caixa "...adventure through time itself!" atrás dos cartões
-  (só no console; no host, sem passar pela escolha Normal/Master Quest, não aparecem) vêm da
-  composição do frontend do port, que mantém a tela de cima atrás do menu realocado e suprime o fundo
-  CommonBackground00 do menu; no 3DS com o TopScreen o menu fica sobre o próprio fundo. As linhas
-  finas verticais no cabeçalho "Please select a file." existem com e sem a correção, na mesma posição
-  do conteúdo do menu (emendas do painel em partes, a ~28 px de cada borda): não vêm do quadro.
+- O Link 3D, a caixa "...adventure through time itself!" e o logo atrás dos cartões e as linhas
+  finas do cabeçalho: ver a seção seguinte.
+
+### Menus realocados sobre o próprio fundo; emendas do atlas (2026-10-17)
+- Sintomas (prints do console, MQ liberado): na seleção de arquivo o Link 3D da tela de cima e a
+  caixa de texto dela aparecem atrás e através dos cartões; na escolha Normal/Master Quest o logo do
+  título e o "© 1998-2011 Nintendo / Codeveloped..." aparecem entre os cartões e através do cartão do
+  Master Quest (semitransparente); linhas finas claras verticais no cabeçalho "Please select a file."
+  (e no da criação de nome), a ~28 px de cada borda.
+- Reprodução no host: build Linux do produto na Ryzen (`/root/agentes/menus-visual`, Xvfb/llvmpipe,
+  1280x720, TopScreen, escala 2, widescreen) com `TRIAEVUM_UNLOCK_MASTER_QUEST=1`: o caminho pela escolha
+  de versões mostra exatamente os prints (sem ela o Link e a caixa não aparecem na seleção).
+- Causa 1 (cena atrás do menu): a composição do frontend do port (`TRIAEVUM_TOPSCREEN_FRONTEND_SKY.md`)
+  removia o fundo do próprio menu (CommonBackground00 da seleção/criação de nome, common_bg01 da escolha
+  de versões) para mostrar a cena de cima atrás. No 3DS o menu e esse fundo (pedra marrom com ornamentos)
+  formam a tela de baixo, que o mod leva inteira para a tela de cima (troca dos alvos 0x400/0x401); a
+  cena de cima (logo, copyright, Link 3D e a caixa da seleção) não fica atrás do menu. Correção: o fundo
+  do menu volta a ser desenhado; só o clear opaco do canvas do menu continua removido, então o céu da
+  cena fica nas laterais do 4:3 no widescreen (como nas laterais do menu de 320 na tela de 400).
+  `OmitTopScreenFrontendMenuDraw` (`oot3d_top_screen_frontend_composition.h`); `config/topscreen_menu_backdrop`
+  = `0` volta à composição antiga (desktop `TRIAEVUM_TOPSCREEN_MENU_BACKDROP=0`).
+- Causa 2 (linhas do cabeçalho): emenda das peças do atlas do menu com resolução interna N×. O menu é
+  montado com peças desenhadas texel por pixel nativo; no 3DS cada pixel cai no centro de um texel e o
+  linear devolve o texel exato, mas com 2× ou 3× os fragmentos da borda de uma peça ficam a 1/(2N) de
+  texel do limite e misturam o texel vizinho do atlas. Prova: com escala 1 a linha some, com 2 e 3
+  aparece; com nearest some. Correção: as peças da tela de baixo realocada (viewport que não cobre a
+  largura apresentada, ortográfica de pixels quadrados, com textura; nos dois domínios, o que inclui a
+  criação de nome e os painéis do Game Over) usam um sampler GL_NEAREST na ampliação quando a escala é
+  inteira ≥ 2: reproduz o resultado nativo pixel a pixel e não lê fora da peça. Minificação continua
+  com o filtro da textura; escala fracionária (1,5×) fica linear. HUD, Items, Map e System (largura
+  toda) não mudam. `GlRelocatedMenuNearestSampling` (`gl_widescreen_menu_policy.h`), sampler em
+  `gfx_opengl_pica.cpp`; `config/menu_nearest` = `0` desliga (desktop `TRIAEVUM_GL_MENU_NEAREST=0`).
+- Resíduo conhecido: depois da escolha de versões, a caixa de texto 3D da cena de cima é mais larga que
+  o 4:3 e uma tira dela (~25 px) aparece nas laterais, junto do céu, na parte de baixo da seleção.
+- Testes: `gl_widescreen_menu_policy_tests` (22/22, ASan/UBSan) e
+  `oot3d_top_screen_frontend_composition_tests` (compilar junto com `oot3d_native_pica_visual_frame.cpp`).
+  Capturas no host conferidas: escolha de versões, seleção, arquivo 1, criação de nome, cópia, fade até
+  entrar no jogo, aba BACK no canto.
 
 ## Próximos passos
 

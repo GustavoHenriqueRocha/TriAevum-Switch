@@ -585,6 +585,53 @@ TEST(GlWidescreenMenuPolicy, TouchInTheWindowCornerReachesTheMenuCorner) {
     EXPECT_FLOAT_EQ(RemapGlWidescreenCornerPointer(20.0F, 700.0F, 1200.0F, 720.0F).X, 20.0F);
 }
 
+TEST(GlWidescreenMenuPolicy, RelocatedMenuPiecesSampleTheirTexelsAtIntegerScales) {
+    // Peça do atlas do menu realocado: ortográfica 320x240 no viewport Y 40..360.
+    GlWidescreenDrawEvidence piece = RelocatedMenuDraw();
+    piece.Projection = GlProjectionShape::Orthographic;
+    piece.PixelAnisotropy = GlNativePixelAnisotropy(
+        DecodeGlProjection(RotatedOrtho(320.0F, 240.0F)), 480.0F, 320.0F, 480U);
+    EXPECT_TRUE(GlRelocatedMenuNearestSampling(piece, 2.0F));
+    EXPECT_TRUE(GlRelocatedMenuNearestSampling(piece, 3.0F));
+    // Escala 1: o linear já cai no centro do texel. Fracionária: texels
+    // desiguais com nearest; as duas ficam lineares.
+    EXPECT_FALSE(GlRelocatedMenuNearestSampling(piece, 1.0F));
+    EXPECT_FALSE(GlRelocatedMenuNearestSampling(piece, 1.5F));
+    EXPECT_FALSE(GlRelocatedMenuNearestSampling(piece, 2.5F));
+
+    // Cena e painéis na tela inteira continuam lineares.
+    GlWidescreenDrawEvidence scene = FullViewport();
+    scene.Projection = GlProjectionShape::Perspective;
+    scene.PixelAnisotropy = 1.0F;
+    EXPECT_FALSE(GlRelocatedMenuNearestSampling(scene, 2.0F));
+    GlWidescreenDrawEvidence panel = FullViewport();
+    panel.Projection = GlProjectionShape::Orthographic;
+    panel.PixelAnisotropy = 1.0F;
+    EXPECT_FALSE(GlRelocatedMenuNearestSampling(panel, 2.0F));
+    // Domínio Ui no mesmo viewport (criação de nome, Game Over): também.
+    GlWidescreenDrawEvidence ui = piece;
+    ui.UiDomain = true;
+    EXPECT_TRUE(GlRelocatedMenuNearestSampling(ui, 2.0F));
+    // HUD na tela inteira: linear.
+    GlWidescreenDrawEvidence hud = panel;
+    hud.UiDomain = true;
+    EXPECT_FALSE(GlRelocatedMenuNearestSampling(hud, 2.0F));
+    // Modelo em perspectiva no menu, cópia do quadro e cor sólida (fade):
+    // lineares.
+    GlWidescreenDrawEvidence model = piece;
+    model.Projection = GlProjectionShape::Perspective;
+    EXPECT_FALSE(GlRelocatedMenuNearestSampling(model, 2.0F));
+    GlWidescreenDrawEvidence stretched = piece;
+    stretched.PixelAnisotropy = 1.25F;
+    EXPECT_FALSE(GlRelocatedMenuNearestSampling(stretched, 2.0F));
+    GlWidescreenDrawEvidence copy = piece;
+    copy.SamplesRenderedCopy = true;
+    EXPECT_FALSE(GlRelocatedMenuNearestSampling(copy, 2.0F));
+    GlWidescreenDrawEvidence fade = piece;
+    fade.Untextured = true;
+    EXPECT_FALSE(GlRelocatedMenuNearestSampling(fade, 2.0F));
+}
+
 TEST(GlWidescreenMenuPolicy, ParsesTheSwitch) {
     EXPECT_FALSE(ParseGlWidescreenSetting("0\n", true));
     EXPECT_TRUE(ParseGlWidescreenSetting("1", false));
