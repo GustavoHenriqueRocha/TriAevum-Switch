@@ -363,9 +363,50 @@ Provas da rodada (scripts no repositório; rodadas na Ryzen e no notebook):
   essa função (perto de FLT_MAX, inf, NaN, subnormais, todos os RMode×FZ×DN) e 16 casos de
   regressão fixos (a tentativa 140844 nos 16 modos; a versão antiga falha já no primeiro). Prova:
   host 20 milhões e qemu-aarch64 4 milhões de tentativas, zero falhas.
-  **Mesmo risco latente** nas outras substituições que ainda usam o caminho rápido dentro do
-  escopo guest: 0x00372070, 0x002CDE90, 0x003325F0 e 0x003727F0 (soma/subtração/VMLA com operando
-  perto de FLT_MAX). Não mexido nesta correção.
+  **As outras (2026-10-18):** 0x00372070, 0x002CDE90, 0x003325F0 e 0x003727F0 também usavam o
+  caminho rápido dentro do escopo guest. Dois vazamentos reais, achados pelas bordas novas no qemu:
+  - `oot3d_translate_mtx3x4_local` (tentativa 9019, FZ=0/RN): `m[7] += 2^-24 * -0x0C7FFFFF`. O
+    produto exato fica logo abaixo de 2^-126 e arredonda para -2^-126; a conversão double -> float
+    do caminho rápido detecta tininess antes do arredondamento (ARMv8) e levanta UFC, que o
+    software não levanta;
+  - `Math3D_CylOutsideCylDist` (tentativa 7766, FZ=1): o TwoSum de `dx = x0 - x1` com `x1` perto de
+    FLT_MAX estoura (OFC/IOC a mais).
+  `FUN_002cde90` (só `s0 * 0.1f`) e `Math_SinF` (entradas limitadas por |x| < 12867) não vazaram em
+  4 milhões de tentativas com bordas, mas tinham o mesmo mecanismo.
+  Correção: todas as substituições fazem a aritmética VFP pelo namespace `Vfp` de
+  `oot3d_native_guest_overrides.cpp`. No AArch64 ele chama as `Oot3dVfpZeroAware*`/`Native*` do C++
+  gerado (`--native-vfp-aarch64 --vfp-zero-aware`): uma instrução com FZ=1, software inteiro nos
+  outros casos. Nos outros hosts (sem escopo FP guest) usa o caminho rápido de float do host.
+  O teste diferencial ganhou `EdgeFloat`/`NearMinNormalFactor`/`EdgeFpscr` (perto de ±FLT_MAX,
+  expoentes altos, inf, NaN silencioso e sinalizador, subnormais, normais mínimos, produtos logo
+  abaixo de 2^-126, os 16 modos RMode×FZ×DN com flags acumuladas) nas funções com VFP (as 5 acima,
+  `FUN_003094cc`, `Math3D_CirSquareVsTriSquare`, as duas curvas e `Mtx3x3_Multiply`). Também ganhou
+  casos fixos: 0x00372070 com os dois casos nos 16 modos (32) e 0x003325F0 com 16. As versões
+  antigas falham já no primeiro; sem os casos fixos, as bordas aleatórias acham as duas falhas.
+  Prova (Ryzen): qemu-aarch64 com 4 milhões de tentativas por função VFP (10 funções; duas sementes
+  nas 5 principais) e 200 mil em todas; host com 20 milhões por função VFP e 1 milhão em todas.
+  Zero falhas. Novos knobs de medição no teste: `OOT3D_QEMU_FPSCR`, `OOT3D_QEMU_CLEAN` e
+  `OOT3D_NO_REGRESSION`.
+  Núcleo Mtx3x4 (`Mtx3x4MultiplyFast`): o caminho `HostFloat` (FZ=0) roda numa chamada externa,
+  sob `Oot3dGuestFpHostCallScope`, com FPCR do host e FPSR descartado na volta, então não vaza. O
+  caminho nativo salva e restaura o FPSR. `Mtx3x3_Multiply` já usava `Oot3dVfpZeroAware*`.
+  **Custo e decisão:** instruções executadas no qemu (`-one-insn-per-tb`), FPSCR do jogo
+  (0x03000000), sem ganchos nem orçamento curto, 2000 tentativas, por chamada e com as recusas
+  incluídas:
+
+  | função | tradução | nova | antiga |
+  |---|---|---|---|
+  | 0x00372070 mtx3x4_local | 1410 | 1606 | 2470 |
+  | 0x002CDE90 | 569 | 664 | 684 |
+  | 0x003325F0 CylOutsideCylDist | 917 | 1521 | 1794 |
+  | 0x003727F0 Math_SinF | 37197 | 37270 | 37649 |
+  | 0x0036E168 SmoothStepToF | 807 | 1032 | 981 |
+
+  A versão nova é mais barata que a antiga em 4 das 5, mas nenhuma ganha da tradução atual (que já
+  tem `--vfp-zero-aware --lean-stack`). Por isso as 5 ficaram com `"disabled"` em
+  `guest_overrides.json`: não são ligadas no C++ gerado (`load_manifest` as pula) e continuam no
+  teste diferencial (`include_disabled=True`). Isso vale na próxima geração do C++. A contagem de
+  instruções não é tempo no A57; para religar alguma, medir no console.
 - `test_whole_aot_cpp.py` (44 testes, inclusive os das flags novas: opcionais, saem do manifesto
   quando desligadas, C++ idêntico sem elas).
 

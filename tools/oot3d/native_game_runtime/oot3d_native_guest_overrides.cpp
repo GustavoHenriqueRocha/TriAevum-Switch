@@ -15,8 +15,10 @@
 //  3. Literais de VLDR no segmento de texto (somente leitura, igual ao
 //     dobramento de literais do gerador) viram constantes.
 //  4. As operações de VFP usam os mesmos auxiliares do código gerado
-//     (Oot3dVfp*, a32::VfpBinary32*) com o FPSCR evoluindo na mesma ordem;
-//     nenhuma aritmética de ponto flutuante do host é usada diretamente.
+//     (namespace Vfp abaixo: no AArch64 as Oot3dVfpZeroAware*/Native* do
+//     --native-vfp-aarch64, nos outros hosts os caminhos rápidos
+//     Oot3dVfp*), com o FPSCR evoluindo na mesma ordem; nenhuma aritmética
+//     de ponto flutuante do host é usada diretamente.
 
 #include "oot3d_native_guest_overrides.h"
 
@@ -183,7 +185,8 @@ inline uint32_t Commit(uint32_t& fpscr, a32::VfpBinary32Result result) noexcept 
     return result.value;
 }
 
-// VCMP/VCMPE seguido de VMRS APSR_nzcv: NZCV do FPSCR e das flags.
+// VCMP/VCMPE seguido de VMRS APSR_nzcv: NZCV do FPSCR e das flags. No
+// software (só locais, nada no FPSR): serve também antes de uma recusa.
 inline void Compare(uint32_t& fpscr, Oot3dAotLazyFlags& flags, uint32_t left,
                     uint32_t right, bool signaling) noexcept {
     const auto comparison = a32::VfpBinary32Compare(left, right, signaling);
@@ -191,6 +194,87 @@ inline void Compare(uint32_t& fpscr, Oot3dAotLazyFlags& flags, uint32_t left,
     fpscr |= comparison.exception_flags;
     flags.AssignPackedNzcv(fpscr);
 }
+
+// Aritmética VFP das substituições: as mesmas chamadas do código gerado.
+//
+// No AArch64 (Switch, qemu-aarch64) as substituições rodam dentro do
+// Oot3dGuestFpScope: FPCR com o modo do FPSCR guest e o FPSR dobrado no
+// FPSCR guest na saída (e em todo VMRS). Lá valem só as
+// Oot3dVfpZeroAware*/Native* (oot3d_native_a32_vfp_aarch64.h, as do C++
+// gerado com --native-vfp-aarch64 --vfp-zero-aware), que executam a
+// instrução do guest (FZ=1, uma instrução no caminho quente) ou o software,
+// que é só aritmética inteira. Os caminhos rápidos de
+// oot3d_native_a32_vfp_fast.h NÃO servem ali: as contas AUXILIARES deles
+// (o TwoSum da soma, o produto exato em double convertido para float)
+// levantam flags no FPSR que o resultado não levanta e que vazam para o
+// guest:
+//   - TwoSum: `sum - a` estoura (OFC, e IOC de inf - inf) quando o
+//     operando da direita está perto de ±FLT_MAX e a soma arredonda para
+//     fora (Math_SmoothStepToF, tentativa 140844);
+//   - produto: a conversão double -> float detecta tininess ANTES do
+//     arredondamento (ARMv8) e levanta UFC num produto que arredonda para
+//     ±2^-126, onde o modelo de software só levanta IXC (FZ=0, RN:
+//     oot3d_translate_mtx3x4_local com 2^-24 * -0x8C7FFFFF).
+// Nos outros hosts não há escopo FP guest (as flags do host nunca chegam ao
+// FPSCR) e o código gerado usa os caminhos rápidos: continuam aqui.
+namespace Vfp {
+#if OOT3D_GUEST_FP_AARCH64
+inline void Add(uint32_t& d, uint32_t l, uint32_t r, uint32_t& fpscr) noexcept {
+    Oot3dVfpZeroAwareAdd(d, l, r, fpscr);
+}
+inline void Subtract(uint32_t& d, uint32_t l, uint32_t r, uint32_t& fpscr) noexcept {
+    Oot3dVfpZeroAwareSubtract(d, l, r, fpscr);
+}
+inline void Multiply(uint32_t& d, uint32_t l, uint32_t r, uint32_t& fpscr) noexcept {
+    Oot3dVfpZeroAwareMultiply(d, l, r, fpscr);
+}
+// VMLA: d = acc + l * r.
+inline void MultiplyAccumulate(uint32_t& d, uint32_t acc, uint32_t l, uint32_t r,
+                               uint32_t& fpscr) noexcept {
+    Oot3dVfpZeroAwareMultiplyAccumulate(d, acc, l, r, fpscr);
+}
+// VMLS: d = acc - l * r.
+inline void MultiplySubtract(uint32_t& d, uint32_t acc, uint32_t l, uint32_t r,
+                             uint32_t& fpscr) noexcept {
+    Oot3dVfpZeroAwareMultiplySubtract(d, acc, l, r, fpscr);
+}
+inline void SquareRoot(uint32_t& d, uint32_t value, uint32_t& fpscr) noexcept {
+    Oot3dVfpZeroAwareSquareRoot(d, value, fpscr);
+}
+#else
+inline void Add(uint32_t& d, uint32_t l, uint32_t r, uint32_t& fpscr) noexcept {
+    d = Commit(fpscr, Oot3dVfpAdd(l, r, fpscr));
+}
+inline void Subtract(uint32_t& d, uint32_t l, uint32_t r, uint32_t& fpscr) noexcept {
+    d = Commit(fpscr, Oot3dVfpSubtract(l, r, fpscr));
+}
+inline void Multiply(uint32_t& d, uint32_t l, uint32_t r, uint32_t& fpscr) noexcept {
+    d = Commit(fpscr, Oot3dVfpMultiply(l, r, fpscr));
+}
+inline void MultiplyAccumulate(uint32_t& d, uint32_t acc, uint32_t l, uint32_t r,
+                               uint32_t& fpscr) noexcept {
+    d = Commit(fpscr, Oot3dVfpMultiplyAccumulate(acc, l, r, fpscr));
+}
+inline void MultiplySubtract(uint32_t& d, uint32_t acc, uint32_t l, uint32_t r,
+                             uint32_t& fpscr) noexcept {
+    d = Commit(fpscr, Oot3dVfpMultiplySubtract(acc, l, r, fpscr));
+}
+inline void SquareRoot(uint32_t& d, uint32_t value, uint32_t& fpscr) noexcept {
+    d = Commit(fpscr, a32::VfpBinary32SquareRoot(value, fpscr));
+}
+#endif
+// VCVT.F32.S32 e VCVT.S32.F32 (nativos no AArch64, software nos outros).
+inline void FromSigned(uint32_t& d, uint32_t value, uint32_t& fpscr) noexcept {
+#if OOT3D_GUEST_FP_AARCH64
+    Oot3dVfpNativeFromSigned(d, value, fpscr);
+#else
+    d = Commit(fpscr, Oot3dVfpFromSigned(value, fpscr));
+#endif
+}
+inline void ToSigned(uint32_t& d, uint32_t value, uint32_t& fpscr) noexcept {
+    Oot3dVfpNativeToSigned(d, value, fpscr);
+}
+} // namespace Vfp
 
 inline uint32_t Read32(NativeA32Memory& memory, uint32_t address) noexcept {
     uint32_t value = 0U;
@@ -439,7 +523,7 @@ bool Override_00372070(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     for (uint32_t i = 0; i < 3U; ++i) v[i] = Read32(memory, r2 + 4U * i);
     uint32_t fpscr = guest.fpscr;
     const auto mla = [&](uint32_t& acc, uint32_t a, uint32_t b) {
-        acc = Commit(fpscr, Oot3dVfpMultiplyAccumulate(acc, a, b, fpscr));
+        Vfp::MultiplyAccumulate(acc, acc, a, b, fpscr);
     };
     mla(m[3], m[0], v[0]);
     mla(m[7], m[4], v[0]);
@@ -499,7 +583,7 @@ bool Override_002CDE90(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         ++blocks; // 0x002CDEAC
         const uint32_t s0 = Read32(memory, r0 + 4U);
         guest.vfp[1] = 0x3DCCCCCDU; // literal em 0x002CDEC0 (0.1f)
-        guest.vfp[0] = Commit(fpscr, Oot3dVfpMultiply(s0, 0x3DCCCCCDU, fpscr));
+        Vfp::Multiply(guest.vfp[0], s0, 0x3DCCCCCDU, fpscr);
     }
     guest.fpscr = fpscr;
     Consume(context, blocks);
@@ -632,17 +716,16 @@ bool Override_002F9430(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
 //   passo = (alvo - s4) * fração (|alvo - s4| < 1e-5 usa o resto inteiro),
 //   limitado por máximo/mínimo, gravado em *pValue; s0 = |alvo - *pValue|
 //
-// A aritmética usa as MESMAS chamadas do código gerado (Oot3dVfpNative*, na
-// mesma ordem e com os mesmos operandos). Antes usava Oot3dVfpAdd/Multiply
-// (oot3d_native_a32_vfp_fast.h), cujo caminho rápido faz contas de float do
-// host: no console (e no qemu) elas rodam dentro do Oot3dGuestFpScope, com o
-// FPCR do guest e o FPSR dobrado no FPSCR guest na saída, então as flags das
-// contas auxiliares vazavam para o guest. O TwoSum da subtração s0 - s4
-// (`sum - a`) estoura quando |s4| está perto de FLT_MAX e a soma arredonda
-// para fora (ex.: 0x7EC70697 - 0x7F7FFFFF): OFC (e IOC de inf - inf) a mais,
-// com FZ=0/RN, que a tradução não levanta (caso de regressão no teste
-// diferencial). As Oot3dVfpNative* só executam a instrução do guest (FZ=1) ou
-// o software, que é só aritmética inteira.
+// A aritmética usa as MESMAS chamadas do código gerado (Vfp::, na mesma
+// ordem e com os mesmos operandos; ver o namespace Vfp). Antes usava
+// Oot3dVfpAdd/Multiply (oot3d_native_a32_vfp_fast.h) também no AArch64,
+// cujo caminho rápido faz contas de float do host: no console (e no qemu)
+// elas rodam dentro do Oot3dGuestFpScope, com o FPCR do guest e o FPSR
+// dobrado no FPSCR guest na saída, então as flags das contas auxiliares
+// vazavam para o guest. O TwoSum da subtração s0 - s4 (`sum - a`) estoura
+// quando |s4| está perto de FLT_MAX e a soma arredonda para fora (ex.:
+// 0x7EC70697 - 0x7F7FFFFF): OFC (e IOC de inf - inf) a mais, com FZ=0/RN,
+// que a tradução não levanta (caso de regressão no teste diferencial).
 // A primeira comparação, antes da última recusa possível, fica no software
 // (Compare: só locais), igual ao valor e às flags da nativa.
 bool Override_0036E168(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
@@ -681,20 +764,20 @@ bool Override_0036E168(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         r1 = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(rate16)));
         s6 = r1;
         s5 = r1;
-        Oot3dVfpNativeFromSigned(s6, s6, fpscr);
-        Oot3dVfpNativeFromSigned(s5, s5, fpscr);
-        Oot3dVfpNativeMultiply(s3, s6, s3, fpscr);
+        Vfp::FromSigned(s6, s6, fpscr);
+        Vfp::FromSigned(s5, s5, fpscr);
+        Vfp::Multiply(s3, s6, s3, fpscr);
         s6 = r1;
-        Oot3dVfpNativeMultiply(s1, s5, s1, fpscr);
+        Vfp::Multiply(s1, s5, s1, fpscr);
         s5 = 0x3EAAAAABU; // literal em 0x0036E280 (1/3)
-        Oot3dVfpNativeFromSigned(s6, s6, fpscr);
-        Oot3dVfpNativeMultiply(s3, s3, s5, fpscr);
-        Oot3dVfpNativeMultiply(s1, s1, s5, fpscr);
-        Oot3dVfpNativeMultiply(s2, s6, s2, fpscr);
-        Oot3dVfpNativeMultiply(s2, s2, s5, fpscr);
-        Oot3dVfpNativeSubtract(s5, s0, s4, fpscr);
+        Vfp::FromSigned(s6, s6, fpscr);
+        Vfp::Multiply(s3, s3, s5, fpscr);
+        Vfp::Multiply(s1, s1, s5, fpscr);
+        Vfp::Multiply(s2, s6, s2, fpscr);
+        Vfp::Multiply(s2, s2, s5, fpscr);
+        Vfp::Subtract(s5, s0, s4, fpscr);
         s6 = s5 & 0x7FFFFFFFU;
-        Oot3dVfpNativeMultiply(s1, s5, s1, fpscr);
+        Vfp::Multiply(s1, s5, s1, fpscr);
         r1 = s6;
         flags.SetSubtract(r1, r2, Mask(0x9U));
         if (flags.N() != flags.V()) s1 = s5;
@@ -713,7 +796,7 @@ bool Override_0036E168(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
             s2 = s2 ^ 0x80000000U;
             compare(s1, s2);
             if (!flags.C()) s1 = s2;
-            Oot3dVfpNativeAdd(s1, s4, s1, fpscr);
+            Vfp::Add(s1, s4, s1, fpscr);
             memory.WriteFast<uint32_t>(r0, s1);
         } else {
             blocks += 1U; // 0x0036E21C
@@ -721,7 +804,7 @@ bool Override_0036E168(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
             if (!flags.C()) {
                 blocks += 1U; // 0x0036E228
                 s1 = s3;
-                Oot3dVfpNativeAdd(s2, s4, s1, fpscr);
+                Vfp::Add(s2, s4, s1, fpscr);
                 memory.WriteFast<uint32_t>(r0, s2);
                 compare(s2, s0);
                 if (!flags.Z() && flags.N() == flags.V()) s2 = s0;
@@ -732,7 +815,7 @@ bool Override_0036E168(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
             if (!flags.Z() && flags.N() == flags.V()) {
                 blocks += 1U; // 0x0036E250
                 s1 = Read32(memory, r0);
-                Oot3dVfpNativeAdd(s1, s1, s5, fpscr);
+                Vfp::Add(s1, s1, s5, fpscr);
                 memory.WriteFast<uint32_t>(r0, s1);
                 compare(s1, s0);
                 if (flags.Z() || flags.N() != flags.V()) s1 = s0;
@@ -742,7 +825,7 @@ bool Override_0036E168(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     }
     // 0x0036E26C
     s1 = Read32(memory, r0);
-    Oot3dVfpNativeSubtract(s0, s0, s1, fpscr);
+    Vfp::Subtract(s0, s0, s1, fpscr);
     s0 &= 0x7FFFFFFFU;
     state.Flags = flags;
     state.R[1] = r1;
@@ -820,16 +903,16 @@ bool Override_003325F0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     uint32_t s1 = Read32(memory, kScratch + 12U);
     s0 = Read32(memory, kCopy + 12U);
     uint32_t s2 = Read32(memory, kCopy + 20U);
-    s1 = Commit(fpscr, Oot3dVfpSubtract(s1, s0, fpscr));
+    Vfp::Subtract(s1, s1, s0, fpscr);
     s0 = Read32(memory, kScratch + 20U);
-    s0 = Commit(fpscr, Oot3dVfpSubtract(s0, s2, fpscr));
-    s1 = Commit(fpscr, Oot3dVfpMultiply(s1, s1, fpscr));
-    s1 = Commit(fpscr, Oot3dVfpMultiplyAccumulate(s1, s0, s0, fpscr));
-    s0 = Commit(fpscr, a32::VfpBinary32SquareRoot(s1, fpscr));
+    Vfp::Subtract(s0, s0, s2, fpscr);
+    Vfp::Multiply(s1, s1, s1, fpscr);
+    Vfp::MultiplyAccumulate(s1, s1, s0, s0, fpscr);
+    Vfp::SquareRoot(s0, s1, fpscr);
     memory.WriteFast<uint32_t>(out6, s0);
     s1 = Read32(memory, kScratch);
     s2 = Read32(memory, kCopy);
-    s1 = Commit(fpscr, Oot3dVfpAdd(s1, s2, fpscr));
+    Vfp::Add(s1, s1, s2, fpscr);
     Compare(fpscr, flags, s1, s0, true);
     uint32_t s3 = guest.vfp[3], s4 = guest.vfp[4], s5 = guest.vfp[5];
     uint32_t result = 0U;
@@ -839,19 +922,19 @@ bool Override_003325F0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         s2 = Read32(memory, kScratch + 16U);
         s3 = Read32(memory, kScratch + 8U);
         s5 = Read32(memory, kCopy + 8U);
-        s2 = Commit(fpscr, Oot3dVfpAdd(s2, s3, fpscr));
+        Vfp::Add(s2, s2, s3, fpscr);
         s3 = Read32(memory, kScratch + 4U);
-        s4 = Commit(fpscr, Oot3dVfpAdd(s2, s3, fpscr));
+        Vfp::Add(s4, s2, s3, fpscr);
         s3 = Read32(memory, kCopy + 16U);
-        s3 = Commit(fpscr, Oot3dVfpAdd(s3, s5, fpscr));
+        Vfp::Add(s3, s3, s5, fpscr);
         Compare(fpscr, flags, s4, s3, true);
         if (flags.C()) {
             // 0x003326C0
             s4 = Read32(memory, kCopy + 4U);
-            s3 = Commit(fpscr, Oot3dVfpAdd(s3, s4, fpscr));
+            Vfp::Add(s3, s3, s4, fpscr);
             Compare(fpscr, flags, s2, s3, true);
             if (flags.Z() || flags.N() != flags.V()) {
-                s0 = Commit(fpscr, Oot3dVfpSubtract(s1, s0, fpscr));
+                Vfp::Subtract(s0, s1, s0, fpscr);
                 result = 1U;
                 memory.WriteFast<uint32_t>(out5, s0);
             } else {
@@ -1070,21 +1153,21 @@ bool Override_003727F0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         s1 = 0x3F22F983U; // 2/pi
         s2 = 0x4B000000U; // 2^23
         s3 = 0x39FDA000U;
-        s1 = Commit(fpscr, Oot3dVfpMultiply(s0, s1, fpscr));
-        if (!flags.Z()) s1 = Commit(fpscr, Oot3dVfpSubtract(s1, s2, fpscr));
-        s1 = Commit(fpscr, Oot3dVfpAdd(s1, s2, fpscr));
-        if (flags.Z()) s1 = Commit(fpscr, Oot3dVfpSubtract(s1, s2, fpscr));
-        s2 = Commit(fpscr, a32::VfpBinary32ToSigned(s1, fpscr));
+        Vfp::Multiply(s1, s0, s1, fpscr);
+        if (!flags.Z()) Vfp::Subtract(s1, s1, s2, fpscr);
+        Vfp::Add(s1, s1, s2, fpscr);
+        if (flags.Z()) Vfp::Subtract(s1, s1, s2, fpscr);
+        Vfp::ToSigned(s2, s1, fpscr);
         r0 = s2;
         s2 = 0x3FC90000U;
         r0 &= 0x00000003U;
-        s0 = Commit(fpscr, Oot3dVfpMultiplySubtract(s0, s1, s2, fpscr));
+        Vfp::MultiplySubtract(s0, s0, s1, s2, fpscr);
         s2 = 0x33A22000U;
         memory.WriteFast<uint32_t>(frameSp, r0);
-        s0 = Commit(fpscr, Oot3dVfpMultiplySubtract(s0, s1, s3, fpscr));
+        Vfp::MultiplySubtract(s0, s0, s1, s3, fpscr);
         s3 = 0x2C34611AU;
-        s0 = Commit(fpscr, Oot3dVfpMultiplySubtract(s0, s1, s2, fpscr));
-        s0 = Commit(fpscr, Oot3dVfpMultiplySubtract(s0, s1, s3, fpscr));
+        Vfp::MultiplySubtract(s0, s0, s1, s2, fpscr);
+        Vfp::MultiplySubtract(s0, s0, s1, s3, fpscr);
     }
     // 0x0037288C
     blocks += 1U;
@@ -1120,7 +1203,7 @@ bool Override_003727F0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
                 OOT3D_AOT_STAT(context.Stats.DirectCalls);
                 r14 = 0x003728BCU;
                 s0 = 0x10000000U; // literal em 0x002C0B30
-                s0 = Commit(fpscr, Oot3dVfpMultiply(s0, s0, fpscr));
+                Vfp::Multiply(s0, s0, s0, fpscr);
             }
             blocks += 1U; // 0x003728BC
             s0 = s16;
@@ -1132,16 +1215,16 @@ bool Override_003727F0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         if (flags.Z()) {
             // 0x00372900: quadrantes pares (polinômio de seno)
             blocks += 1U;
-            s0 = Commit(fpscr, Oot3dVfpMultiply(s16, s16, fpscr));
+            Vfp::Multiply(s0, s16, s16, fpscr);
             flags.SetLogical(r0 & 0x00000002U, flags.C(), Mask(0xEU));
             s1 = 0x394C6D33U;
             s2 = 0x3C0882DAU;
-            s2 = Commit(fpscr, Oot3dVfpMultiplySubtract(s2, s0, s1, fpscr));
+            Vfp::MultiplySubtract(s2, s2, s0, s1, fpscr);
             s1 = 0xBE2AAAA0U;
-            s1 = Commit(fpscr, Oot3dVfpMultiplyAccumulate(s1, s0, s2, fpscr));
-            s1 = Commit(fpscr, Oot3dVfpMultiply(s1, s0, fpscr));
+            Vfp::MultiplyAccumulate(s1, s1, s0, s2, fpscr);
+            Vfp::Multiply(s1, s1, s0, fpscr);
             s0 = s16;
-            s0 = Commit(fpscr, Oot3dVfpMultiplyAccumulate(s0, s16, s1, fpscr));
+            Vfp::MultiplyAccumulate(s0, s0, s16, s1, fpscr);
             if (!flags.Z()) {
                 blocks += 2U; // 0x00372934 (b) e 0x00372968
                 negate = true;
@@ -1149,7 +1232,7 @@ bool Override_003727F0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         } else {
             // 0x00372938: quadrantes ímpares (polinômio de cosseno)
             blocks += 1U;
-            s1 = Commit(fpscr, Oot3dVfpMultiply(s16, s16, fpscr));
+            Vfp::Multiply(s1, s16, s16, fpscr);
             s0 = 0xBAB23AB9U;
             flags.SetLogical(r0 & 0x00000002U, flags.C(), Mask(0xEU));
             s3 = 0x3D2A9FCAU;
@@ -1160,10 +1243,10 @@ bool Override_003727F0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
                 s16 = Read32(memory, frameSp + 4U);
                 s17 = Read32(memory, frameSp + 8U);
             }
-            s3 = Commit(fpscr, Oot3dVfpMultiplyAccumulate(s3, s1, s0, fpscr));
+            Vfp::MultiplyAccumulate(s3, s3, s1, s0, fpscr);
             s0 = 0x3F800000U;
-            s2 = Commit(fpscr, Oot3dVfpMultiplyAccumulate(s2, s1, s3, fpscr));
-            s0 = Commit(fpscr, Oot3dVfpMultiplyAccumulate(s0, s1, s2, fpscr));
+            Vfp::MultiplyAccumulate(s2, s2, s1, s3, fpscr);
+            Vfp::MultiplyAccumulate(s0, s0, s1, s2, fpscr);
             if (early) {
                 const uint32_t target = Read32(memory, frameSp + 12U);
                 state.R[0] = r0;
@@ -2491,7 +2574,7 @@ bool Override_002FA674(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
 // Laços de busca das curvas de animação: acham o primeiro quadro-chave com
 // tempo (inteiro convertido para float) maior que s0/s1. Só registradores,
 // VFP e flags mudam; tudo é simulado em locais com as mesmas operações VFP
-// do código gerado (Oot3dVfpNative*) e gravado no fim. Recusar depois de
+// do código gerado (Vfp::, Oot3dVfpNativeCompare) e gravado no fim. Recusar depois de
 // simular é seguro: nada foi gravado no estado guest, e as flags acumuladas
 // que a VFP nativa do console já tiver levantado no FPSR são as mesmas que a
 // tradução vai levantar ao refazer as mesmas operações sobre os mesmos dados.
@@ -2535,7 +2618,7 @@ bool Override_00308920(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         r6 = Read32(memory, r2);
         s1 = s0;
         s2 = r6;
-        Oot3dVfpNativeFromSigned(s2, s2, fpscr);
+        Vfp::FromSigned(s2, s2, fpscr);
         Oot3dVfpNativeCompare(s2, s1, true, fpscr);
         flags.AssignPackedNzcv(fpscr);
         if (!flags.Z() && flags.N() == flags.V()) break;
@@ -2586,7 +2669,7 @@ bool Override_00308604(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         memory.ReadFast<uint16_t>(r1, &value);
         r6 = static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(value)));
         s2 = r6;
-        Oot3dVfpNativeFromSigned(s2, s2, fpscr);
+        Vfp::FromSigned(s2, s2, fpscr);
         Oot3dVfpNativeCompare(s2, s1, true, fpscr);
         flags.AssignPackedNzcv(fpscr);
         if (!flags.Z() && flags.N() == flags.V()) break;
@@ -2668,19 +2751,19 @@ bool Override_002BBB14(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     }
     bool inside = false;
     ++blocks; // 0x002BBB7C
-    Oot3dVfpNativeSubtract(s[0], s[0], s[8], fpscr);
+    Vfp::Subtract(s[0], s[0], s[8], fpscr);
     compare(s[0], s[6]);
     if (!(flags.C() && !flags.Z())) {
         ++blocks; // 0x002BBB8C
-        Oot3dVfpNativeAdd(s[0], s[9], s[8], fpscr);
+        Vfp::Add(s[0], s[9], s[8], fpscr);
         compare(s[0], s[6]);
         if (flags.N() == flags.V()) {
             ++blocks; // 0x002BBB9C
-            Oot3dVfpNativeSubtract(s[0], s[1], s[8], fpscr);
+            Vfp::Subtract(s[0], s[1], s[8], fpscr);
             compare(s[0], s[7]);
             if (!(flags.C() && !flags.Z())) {
                 ++blocks; // 0x002BBBAC
-                Oot3dVfpNativeAdd(s[0], s[10], s[8], fpscr);
+                Vfp::Add(s[0], s[10], s[8], fpscr);
                 compare(s[0], s[7]);
                 inside = flags.N() == flags.V();
             }

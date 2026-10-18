@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -165,6 +166,59 @@ struct Rng {
 struct HookLog {
     std::vector<uint32_t> Pcs;
 };
+
+// Bordas de ponto flutuante para as substituições com aritmética VFP. Pegam
+// flags que as contas auxiliares de um caminho rápido em float do host
+// (oot3d_native_a32_vfp_fast.h: TwoSum, produto em double) deixariam no FPSR
+// dentro do Oot3dGuestFpScope, e que no qemu-aarch64 (e no console) seriam
+// dobradas no FPSCR guest: estouro no TwoSum com um operando perto de
+// ±FLT_MAX, UFC de um produto que só arredonda para 2^-126, etc.
+uint32_t EdgeFloat(Rng& rng) {
+    const uint32_t sign = rng.Chance(50) ? 0x80000000U : 0U;
+    switch (rng.Below(11U)) {
+    case 0: case 1: case 2: // perto de FLT_MAX
+        return sign | (0x7F7FFFFFU - (rng.U32() & ((1U << rng.Below(24U)) - 1U)));
+    case 3: // expoentes altos
+        return sign | ((0xF0U + rng.Below(15U)) << 23U) | (rng.U32() & 0x007FFFFFU);
+    case 4: // inf, NaN silencioso ou sinalizador
+        return sign | 0x7F800000U |
+               (rng.Chance(30) ? 0U : (rng.Chance(50) ? 0x00400000U : 0U) |
+                                      (1U + rng.Below(0x003FFFFFU)));
+    case 5: // subnormal
+        return sign | (1U + rng.Below(0x007FFFFFU));
+    case 6: // normais mínimos
+        return sign | ((1U + rng.Below(24U)) << 23U) | (rng.U32() & 0x007FFFFFU);
+    case 7: // [0,5, 2): multiplicador que mantém o outro fator perto do limite
+        return sign | (0x3F000000U + rng.Below(0x01000000U));
+    case 8: // perto de 2^-63: o quadrado fica perto de 2^-126
+        return sign | (0x20000000U + rng.Below(64U) - 32U);
+    default:
+        return rng.Float();
+    }
+}
+
+// Fator b tal que a * b fica logo abaixo de 2^-126 (ou nele): arredonda para
+// o menor normal, onde a detecção de tininess antes do arredondamento do
+// ARMv8 (UFC) e a do modelo de software divergem.
+uint32_t NearMinNormalFactor(Rng& rng, uint32_t a) {
+    float af;
+    std::memcpy(&af, &a, 4);
+    const uint32_t exponent = (a >> 23U) & 0xFFU;
+    if (exponent == 0U || exponent == 0xFFU) return rng.Float();
+    const double target = std::ldexp(1.0, -126) *
+                          (1.0 - std::ldexp(static_cast<double>(rng.Below(8U)), -27));
+    const float bf = static_cast<float>(target / static_cast<double>(af));
+    uint32_t b;
+    std::memcpy(&b, &bf, 4);
+    b += rng.Below(5U) - 2U;
+    return rng.Chance(50) ? b ^ 0x80000000U : b;
+}
+
+// Qualquer combinação de RMode, FZ e DN, com ou sem flags acumuladas e NZCV.
+uint32_t EdgeFpscr(Rng& rng) {
+    return (rng.Below(16U) << 22U) | (rng.Chance(40) ? rng.U32() & 0x9FU : 0U) |
+           (rng.U32() & 0xF0000000U);
+}
 
 void RecordHook(uint32_t pc, a32::GuestState&, a32::MemoryBus&, void* user) {
     static_cast<HookLog*>(user)->Pcs.push_back(pc);
@@ -515,7 +569,60 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
     }
     case 0x003094CCU: // índice pequeno dentro da estrutura
         if (rng.Chance(85)) g.r[1] = rng.Below(8U);
+        if (rng.Chance(25)) { // bordas: VCMPE/VCMP com inf, NaN, subnormais
+            g.vfp[0] = EdgeFloat(rng);
+            if (rng.Chance(50)) poke(g.r[0] + 4U * g.r[1] + 72U, rng.Chance(30) ? g.vfp[0] : EdgeFloat(rng));
+            if (rng.Chance(70)) g.fpscr = EdgeFpscr(rng);
+        }
         break;
+    case 0x00372070U: { // oot3d_translate_mtx3x4_local: VMLA de linha · v
+        if (!rng.Chance(85)) break;
+        uint32_t m[12], v[3];
+        const bool edges = rng.Chance(40);
+        for (auto& x : m) x = edges && rng.Chance(60) ? EdgeFloat(rng) : rng.Float();
+        for (auto& x : v) x = edges && rng.Chance(60) ? EdgeFloat(rng) : rng.Float();
+        if (edges && rng.Chance(25)) {
+            // Cancelamento perto de FLT_MAX: acumulador e produto de sinais
+            // opostos (o TwoSum da soma estoura no caminho rápido).
+            // O produto (operando da direita da soma) perto de FLT_MAX é o
+            // que estoura `sum - a`; às vezes os papéis se invertem.
+            const uint32_t row = rng.Below(3U), column = rng.Below(3U);
+            const uint32_t big = 0x7F7FFFFFU - (rng.U32() & ((1U << rng.Below(24U)) - 1U));
+            const uint32_t large = 0x7E800000U + (rng.U32() & 0x00FFFFFFU);
+            const bool productBig = rng.Chance(70);
+            m[4U * row + 3U] = (productBig ? large : big) | (rng.Chance(50) ? 0x80000000U : 0U);
+            m[4U * row + column] = (productBig ? big : large) | (rng.Chance(50) ? 0x80000000U : 0U);
+            v[column] = rng.Chance(60) ? 0x3F800000U : (0x3F000000U + rng.Below(0x01000000U));
+        }
+        if (edges && rng.Chance(25)) { // produto logo abaixo de 2^-126
+            const uint32_t row = rng.Below(3U), column = rng.Below(3U);
+            if (rng.Chance(50)) m[4U * row + column] = rng.Float();
+            v[column] = NearMinNormalFactor(rng, m[4U * row + column]);
+            if (rng.Chance(50)) m[4U * row + 3U] = rng.Chance(50) ? 0U : 0x80000000U;
+        }
+        if (edges && rng.Chance(70)) g.fpscr = EdgeFpscr(rng);
+        g.r[1] = rng.Chance(95) ? alloc(48U) : rng.Pointer(64U);
+        g.r[2] = rng.Chance(95) ? alloc(12U) : rng.Pointer(16U);
+        g.r[0] = rng.Chance(15) ? g.r[1] : (rng.Chance(95) ? alloc(48U) : rng.Pointer(64U));
+        for (uint32_t i = 0; i < 12U; ++i) poke(g.r[1] + 4U * i, m[i]);
+        for (uint32_t i = 0; i < 3U; ++i) poke(g.r[2] + 4U * i, v[i]);
+        break;
+    }
+    case 0x002CDE90U: { // FUN_002cde90: byte, VCMP com 0 e s0 * 0.1f
+        if (!rng.Chance(85)) break;
+        g.r[0] = rng.Chance(95) ? alloc(20U) : rng.Pointer(32U);
+        poke(g.r[0], rng.Chance(50) ? (rng.U32() & ~0xFFU) : (rng.U32() | 1U));
+        uint32_t value = rng.Float(), test = rng.Chance(40) ? (rng.Chance(50) ? 0U : 0x80000000U)
+                                                           : rng.Float();
+        if (rng.Chance(40)) {
+            value = rng.Chance(30) ? NearMinNormalFactor(rng, 0x3DCCCCCDU) : EdgeFloat(rng);
+            if (rng.Chance(50)) test = EdgeFloat(rng);
+            if (rng.Chance(70)) g.fpscr = EdgeFpscr(rng);
+        }
+        poke(g.r[0] + 4U, value);
+        poke(g.r[0] + 16U, test);
+        break;
+    }
     case 0x0036E168U: { // Math_SmoothStepToF: contexto global com taxa de atualização
         if (rng.Chance(90)) {
             const uint32_t context = kRamBase + (rng.Below(kRamSize - 0x200U) & ~3U);
@@ -582,6 +689,31 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
                     poke(base + 4U * i, rng.Chance(90) ? bits : rng.Float());
                 }
             }
+            if (rng.Chance(30)) {
+                // Bordas (perto de FLT_MAX, inf, NaN, subnormais, quadrados
+                // perto de 2^-126) por cima dos valores de jogo, e todos os
+                // modos do FPSCR.
+                for (uint32_t base : {g.r[0], g.r[1]}) {
+                    for (uint32_t i = 0; i < 6U; ++i) {
+                        if (rng.Chance(40)) poke(base + 4U * i, EdgeFloat(rng));
+                    }
+                }
+                if (rng.Chance(25)) {
+                    // Diferença das posições (x ou z) com um lado perto de
+                    // ±FLT_MAX e o outro grande: TwoSum no limite do estouro.
+                    // (O operando da direita perto de FLT_MAX é o que estoura
+                    // `sum - a`; os dois lados são sorteados.)
+                    const uint32_t i = rng.Chance(50) ? 3U : 5U;
+                    const uint32_t sign = rng.Chance(50) ? 0x80000000U : 0U;
+                    const bool right = rng.Chance(70);
+                    poke((right ? g.r[1] : g.r[0]) + 4U * i,
+                         sign | (0x7F7FFFFFU - (rng.U32() & ((1U << rng.Below(24U)) - 1U))));
+                    poke((right ? g.r[0] : g.r[1]) + 4U * i,
+                         (rng.Chance(80) ? sign : sign ^ 0x80000000U) |
+                             (0x7E800000U + (rng.U32() & 0x00FFFFFFU)));
+                }
+                if (rng.Chance(70)) g.fpscr = EdgeFpscr(rng);
+            }
         }
         break;
     }
@@ -608,6 +740,29 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
             angle = (static_cast<float>(rng.Below(2001U)) - 1000.0f) * 20.0f; // perto de 12867
         }
         if (kind < 75U) std::memcpy(&g.vfp[0], &angle, 4);
+        if (rng.Chance(25)) { // bordas e todos os modos do FPSCR
+            switch (rng.Below(4U)) {
+            case 0: g.vfp[0] = EdgeFloat(rng); break;
+            case 1: { // perto de k * pi/2 (resto minúsculo na redução)
+                const double k = static_cast<double>(1U + rng.Below(8191U));
+                const float near = static_cast<float>(k * 1.57079632679489661923);
+                std::memcpy(&g.vfp[0], &near, 4);
+                g.vfp[0] += rng.Below(5U) - 2U;
+                break;
+            }
+            case 2: // perto dos limites |x| = pi/4, 2^-12 e 12867.57
+                g.vfp[0] = (rng.Chance(50) ? 0x80000000U : 0U) |
+                           ((rng.Chance(34) ? 0x3F490FDBU : rng.Chance(50) ? 0x39800000U : 0x46490E49U) +
+                            rng.Below(9U) - 4U);
+                break;
+            default: // minúsculos e subnormais (classificação e underflow)
+                g.vfp[0] = (rng.Chance(50) ? 0x80000000U : 0U) |
+                           (rng.Chance(50) ? 1U + rng.Below(0x007FFFFFU)
+                                           : ((1U + rng.Below(100U)) << 23U) | (rng.U32() & 0x007FFFFFU));
+                break;
+            }
+            if (rng.Chance(80)) g.fpscr = EdgeFpscr(rng);
+        }
         break;
     }
     case 0x00466E68U: { // MeshCommandPacket_Submit: cópia de n pares de palavras
@@ -750,6 +905,10 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
         uint32_t bits;
         std::memcpy(&bits, &sample, 4);
         if (rng.Chance(85)) g.vfp[wide ? 0 : 1] = bits;
+        if (rng.Chance(20)) { // bordas no tempo amostrado e todos os modos do FPSCR
+            g.vfp[wide ? 0 : 1] = EdgeFloat(rng);
+            if (rng.Chance(70)) g.fpscr = EdgeFpscr(rng);
+        }
         g.r[0] = index;
         if (wide) {
             g.r[1] = count;
@@ -772,6 +931,12 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
             if (rng.Chance(92)) g.vfp[i] = bits;
         }
         if (rng.Chance(10)) g.vfp[rng.Below(9U)] = g.vfp[rng.Below(9U)]; // empates
+        if (rng.Chance(25)) { // bordas e todos os modos do FPSCR
+            for (int i = 0; i < 9; ++i) {
+                if (rng.Chance(30)) g.vfp[i] = EdgeFloat(rng);
+            }
+            if (rng.Chance(70)) g.fpscr = EdgeFpscr(rng);
+        }
         if (rng.Chance(20)) s.Budget = rng.Below(16U);
         break;
     }
@@ -880,6 +1045,19 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
         g.r[0] = rng.Chance(15) ? (rng.Chance(50) ? g.r[1] : g.r[2]) : place();
         matrix(g.r[1]);
         matrix(g.r[2]);
+        if (rng.Chance(25)) { // bordas por cima e todos os modos do FPSCR
+            for (const uint32_t base : {g.r[1], g.r[2]}) {
+                for (uint32_t i = 0; i < 9U; ++i) {
+                    if (rng.Chance(30)) poke(base + 4U * i, EdgeFloat(rng));
+                }
+            }
+            if (rng.Chance(30)) { // um produto logo abaixo de 2^-126
+                const uint32_t factor = rng.Float();
+                poke(g.r[1] + 4U * rng.Below(9U), factor);
+                poke(g.r[2] + 4U * rng.Below(9U), NearMinNormalFactor(rng, factor));
+            }
+            if (rng.Chance(70)) g.fpscr = EdgeFpscr(rng);
+        }
         if (rng.Chance(20)) s.Budget = rng.Below(4U);
         break;
     }
@@ -925,6 +1103,69 @@ uint32_t Regression(uint32_t entry, uint64_t trial, Scenario& s,
         poke(0x0051B2F4U, kContext);
         poke(kContext + 0x110U, 0x0000C6F5U); // taxa -14603
         poke(g.r[0], 0x7F7FFFFFU);           // *pValue = FLT_MAX
+        return kCases;
+    }
+    case 0x00372070U: {
+        // oot3d_translate_mtx3x4_local nos 16 modos de RMode x FZ x DN:
+        //  0-15: m[7] += m[6] * v[2] com 2^-24 * -0x0C7FFFFF, que arredonda
+        //        para -2^-126 (tentativa 9019, semente 0x5EED, FZ=0/RN): a
+        //        conversão double -> float do caminho rápido levantava UFC
+        //        (tininess antes do arredondamento), o software só IXC;
+        // 16-31: m[3] += m[0] * v[0] = 0x7EC70697 + (FLT_MAX * -1): o TwoSum
+        //        do caminho rápido estourava (OFC/IOC a mais).
+        constexpr uint32_t kCases = 32U;
+        if (trial >= kCases) return kCases;
+        auto& g = s.Guest;
+        g.r[0] = kRamBase + 0x0400U;
+        g.r[1] = kRamBase + 0x0200U;
+        g.r[2] = kRamBase + 0x0300U;
+        g.r[13] = kRamBase + 0x6000U;
+        g.r[14] = 0x002AA9F4U;
+        g.cpsr = 0x80060010U;
+        g.fpscr = static_cast<uint32_t>(trial & 15U) << 22U;
+        s.Budget = 1U << 20U;
+        s.HookMode = 0U;
+        s.SkipFirst = false;
+        s.Trace = false;
+        uint32_t m[12] = {}, v[3] = {};
+        if (trial < 16U) {
+            m[6] = 0x33800000U;
+            v[2] = 0x8C7FFFFFU;
+        } else {
+            m[3] = 0x7EC70697U;
+            m[0] = 0x7F7FFFFFU;
+            v[0] = 0xBF800000U;
+        }
+        for (uint32_t i = 0; i < 12U; ++i) poke(g.r[1] + 4U * i, m[i]);
+        for (uint32_t i = 0; i < 3U; ++i) poke(g.r[2] + 4U * i, v[i]);
+        return kCases;
+    }
+    case 0x003325F0U: {
+        // Math3D_CylOutsideCylDist nos 16 modos: dx = 0x7EC70697 - FLT_MAX
+        // (posição x dos dois cilindros); o TwoSum do caminho rápido
+        // estourava (OFC/IOC a mais no FPSCR).
+        constexpr uint32_t kCases = 16U;
+        if (trial >= kCases) return kCases;
+        auto& g = s.Guest;
+        g.r[0] = kRamBase + 0x0200U;
+        g.r[1] = kRamBase + 0x0240U;
+        g.r[2] = kRamBase + 0x0300U;
+        g.r[3] = kRamBase + 0x0340U;
+        g.r[13] = kRamBase + 0x6000U;
+        g.r[14] = 0x002AA9F4U;
+        g.cpsr = 0x80060010U;
+        g.fpscr = static_cast<uint32_t>(trial) << 22U;
+        s.Budget = 1U << 20U;
+        s.HookMode = 0U;
+        s.SkipFirst = false;
+        s.Trace = false;
+        // raio, altura, deslocamento em y, x, y, z
+        const uint32_t first[6] = {0x41200000U, 0x41A00000U, 0U, 0x7EC70697U, 0U, 0U};
+        const uint32_t second[6] = {0x41200000U, 0x41A00000U, 0U, 0x7F7FFFFFU, 0U, 0U};
+        for (uint32_t i = 0; i < 6U; ++i) {
+            poke(g.r[0] + 4U * i, first[i]);
+            poke(g.r[1] + 4U * i, second[i]);
+        }
         return kCases;
     }
     default:
@@ -1019,9 +1260,23 @@ int main(int argc, char** argv) {
                 pokes.emplace_back(address, value);
             };
             Prepare(testCase.Entry, rng, s, poke);
+#if !defined(OOT3D_NO_REGRESSION) // (sem os fixos: só as bordas aleatórias)
             if (trial < Regression(testCase.Entry, trial, s, poke)) {
                 ++regressions;
             }
+#endif
+#if defined(OOT3D_QEMU_FPSCR)
+            // Medição: FPSCR fixo (0x03000000 = o modo do jogo: RN, FZ, DN).
+            g.fpscr = OOT3D_QEMU_FPSCR;
+#endif
+#if defined(OOT3D_QEMU_CLEAN)
+            // Medição: sem orçamento curto, ganchos nem rastreio (as recusas
+            // que sobram são só de ponteiro inválido).
+            s.Budget = 1U << 20U;
+            s.HookMode = 0U;
+            s.SkipFirst = false;
+            s.Trace = false;
+#endif
             std::array<uint8_t, 512> window{};
             const auto fill = [&](uint32_t address) {
                 for (size_t i = 0; i < window.size(); i += 4) {

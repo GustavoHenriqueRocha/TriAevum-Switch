@@ -163,7 +163,8 @@ def main() -> int:
                         help="opções da regra dos shards no build.ninja do Switch")
     args = parser.parse_args()
 
-    manifest = overrides.load_manifest(args.manifest)
+    # Inclui as desligadas ("disabled"): continuam provadas.
+    manifest = overrides.load_manifest(args.manifest, include_disabled=True)
     args.output.mkdir(parents=True, exist_ok=True)
     fixture = args.output / "guest_override_fixture.inc"
     fixture.write_text(render_fixture(args.generated.expanduser(), manifest), encoding="utf-8")

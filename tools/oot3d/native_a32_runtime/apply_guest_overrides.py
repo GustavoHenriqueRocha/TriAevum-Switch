@@ -55,12 +55,17 @@ BLOCK_OVERRIDES: dict[int, tuple[int, tuple[int, ...]]] = {}
 INLINE_OVERRIDES: set[int] = set()
 
 
-def load_manifest(path: Path) -> list[dict[str, object]]:
+def load_manifest(path: Path, include_disabled: bool = False) -> list[dict[str, object]]:
+    """Itens do manifesto. Os com "disabled" (o motivo, em texto) não são
+    ligados no C++ gerado; o teste diferencial os lê com include_disabled
+    para continuar provando a equivalência."""
     data = json.loads(path.read_text(encoding="utf-8"))
     if data.get("format") != "oot3d_guest_overrides_v1":
         raise ValueError(f"{path}: formato desconhecido")
     entries = []
     for item in data["overrides"]:
+        if item.get("disabled") and not include_disabled:
+            continue
         entry = int(str(item["entry"]), 0)
         parsed = {**item, "entry": entry}
         if "function" in item:
