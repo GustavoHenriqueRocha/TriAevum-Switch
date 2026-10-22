@@ -954,6 +954,29 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
     de texturas (`.o3tu`/PICA), depois da correção de memória de vídeo; substituição de arquivos de dados
     (modelos/textos) pelo runtime; mods de código exigem regenerar o AOT por mod.
 
+### Frame generation: opções avaliadas (2026-10-22, só anotado, nada implementado)
+1. **Eden no PC com LSFG.** O código já existe no Eden (`src/video_core/frame_gen` e
+   `renderer_vulkan/present/lsfg_*`), mas só compila no Android (`ENABLE_LSFG` via
+   `cmake_dependent_option "ANDROID"`), e a UI Qt esconde as opções (`IsAndroidOnly` em
+   `src/yuzu/configuration/shared_widget.cpp`). Há um patch local, ainda não compilado nem testado
+   (`~/projetos/eden-framegen-pc/framegen-pc.patch`, base em `BASE_COMMIT`). Ele liga o `ENABLE_LSFG` em
+   todas as plataformas, mostra na UI frame_gen, multiplier, target_rate e flow_scale e adiciona as
+   traduções em `src/qt_common/config/shared_translation.cpp`. Precisa do `Lossless.dll` do próprio
+   usuário em `%APPDATA%\eden\lossless\`; o Eden só lê o arquivo, sem login.
+   - Pendente na Ryzen: atualizar o Eden para o Nightly PGO v3, guardar o `Lossless.dll` em
+     `D:\Ferramentas`, compilar com o patch e testar. A GPU é a Vega integrada, então é preciso medir o
+     custo.
+2. **Frame gen no port (Switch): não recomendado por agora.** O LSFG do Eden é Vulkan (shaders
+   DXBC→SPIR-V), e o port é OpenGL/Mesa. A GPU do Switch já é o gargalo: a escala 3× travou e voltamos a
+   2×. O caminho preferido é a interpolação nativa de 60 FPS que já está no roteiro
+   (`native30_interpolated`). Uma versão simplificada só deve ser reavaliada se o custo medido no Eden
+   do PC (Vega) for baixo. O repositório é público e o código do Eden é GPL-3: antes, checar a
+   compatibilidade de licença e exigir que o usuário traga o próprio `Lossless.dll`.
+3. **Frame gen direto no Switch (sysmodule): não existe nada conhecido.** A alternativa é o Switch Frame
+   Tap, um homebrew que transmite por USB para o PC em 1080p60 (https://gbatemp.net/posts/10917720/),
+   combinado com o Lossless Scaling no PC. Funciona com qualquer jogo, inclusive o port, mas acrescenta
+   latência. A compatibilidade com AMS 1.11.1 / FW 22.1.0 ainda não foi verificada.
+
 ### Interpolação a 60 FPS mais barata e com pacing (2026-10-17)
 - **Replay nativo pulado no GL** (`config/native_replay` = `1` volta ao antigo). Cada quadro de passo
   era desenhado duas vezes: no namespace nativo (1), que existe para devolver pixels à memória do guest
