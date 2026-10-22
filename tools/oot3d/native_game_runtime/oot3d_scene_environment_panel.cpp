@@ -1,3 +1,4 @@
+#include "oot3d_key_hint.h"
 #include "fast/oot3d/graphics_settings_runtime.h"
 #include "fast/oot3d/settings_panel_widgets.h"
 #include "oot3d_scene_environment.h"
@@ -80,7 +81,7 @@ private:
         settings.Preset == Fast::Oot3d::GraphicsPreset::Authentic ||
         graphics.NativePresentationOverrideActive())
       ImGui::TextWrapped(
-          "Inactive: needs the Modern lighting model, F2 native override off "
+          "Inactive: needs the Modern lighting model, " TRIAEVUM_KEY_HINT("native override", "F2 native override") " off "
           "and a supported renderer.");
     ImGui::BeginDisabled(!value.Enabled || !supported);
     changed |= ImGui::Checkbox("Preserve scene brightness", &value.PreserveSceneBrightness);
@@ -534,7 +535,8 @@ private:
     ImGui::Text("Applied: day %.0f%% / night %.0f%%", (1 - applied.AppliedNightWeight) * 100,
                  applied.AppliedNightWeight * 100);
     if (applied.ForcedWeight) ImGui::TextUnformatted("Lab weight override active (process environment).");
-    ImGui::TextWrapped("Edit either tab at any time. Auto follows native dawn and dusk; forced preview ends on F2 or closing F1.");
+    ImGui::TextWrapped(TRIAEVUM_KEY_HINT("Edit either tab at any time. Auto follows native dawn and dusk; forced preview ends when the menu closes.",
+                                        "Edit either tab at any time. Auto follows native dawn and dusk; forced preview ends on F2 or closing F1."));
     if (!state.NightProfileExists) {
       ImGui::TextWrapped("Day applies at all times until a night profile is created.");
       if (ImGui::Button("Create night (from day)") && mRuntime->CreateNightProfile()) mRequestedTab = true;

@@ -1,3 +1,4 @@
+#include "oot3d_key_hint.h"
 #include "oot3d_savestate_panel.h"
 
 #include <imgui.h>
@@ -70,11 +71,11 @@ class SavestatePanel final : public Fast::Oot3d::GraphicsSettingsPanelTab {
   void Draw() override {
     const bool fixedSlot = !mLibrary->FixedSlot().empty();
     ImGui::SeparatorText("Save");
-    if (ImGui::Button("Save state (F5)")) {
+    if (ImGui::Button(TRIAEVUM_KEY_HINT("Save state", "Save state (F5)"))) {
       mLibrary->Request({SavestateRequestKind::Save, false, {}});
     }
     ImGui::SameLine();
-    if (ImGui::Button("Save state + settings (Shift+F5)")) {
+    if (ImGui::Button(TRIAEVUM_KEY_HINT("Save state + settings", "Save state + settings (Shift+F5)"))) {
       mLibrary->Request({SavestateRequestKind::Save, true, {}});
     }
     ImGui::TextWrapped(
@@ -87,11 +88,11 @@ class SavestatePanel final : public Fast::Oot3d::GraphicsSettingsPanelTab {
     ImGui::Text("Last state: %s",
                 last.has_value() ? PathText(last->filename()).c_str() : "none yet");
     ImGui::BeginDisabled(!last.has_value());
-    if (ImGui::Button("Load last state (F8)")) {
+    if (ImGui::Button(TRIAEVUM_KEY_HINT("Load last state", "Load last state (F8)"))) {
       mLibrary->Request({SavestateRequestKind::Load, false, {}});
     }
     ImGui::SameLine();
-    if (ImGui::Button("Load last state + settings (Shift+F8)")) {
+    if (ImGui::Button(TRIAEVUM_KEY_HINT("Load last state + settings", "Load last state + settings (Shift+F8)"))) {
       mLibrary->Request({SavestateRequestKind::Load, true, {}});
     }
     ImGui::EndDisabled();
@@ -161,7 +162,8 @@ class SavestatePanel final : public Fast::Oot3d::GraphicsSettingsPanelTab {
       ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.4F, 1.0F), "%s", mListError.c_str());
     }
     if (mEntries.empty()) return;
-    ImGui::TextDisabled("Select a state to make it the one F8 loads.");
+    ImGui::TextDisabled(TRIAEVUM_KEY_HINT("Select a state to make it the one \"Load last state\" loads.",
+                                          "Select a state to make it the one F8 loads."));
     constexpr ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
                                       ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
     const float height = ImGui::GetTextLineHeightWithSpacing() *

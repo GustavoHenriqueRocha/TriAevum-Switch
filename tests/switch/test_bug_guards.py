@@ -91,6 +91,10 @@ GUARDS = [
           r'.*?KeyUp\(int32_t scancode\) \{\s+#if defined\(__SWITCH__\).*?return true;'
           r'.*?KeyDown\(int32_t scancode\) \{\s+#if defined\(__SWITCH__\).*?return true;',
           "Eden: F5/F8 não fazem nada; menu L3+R3 continua abrindo"),
+    Guard("Menu de debug do Switch mostrava atalhos de PC (F5/F8, F6, F2, teclado/mouse)",
+          "tools/oot3d/native_game_runtime/oot3d_savestate_panel.cpp",
+          r'TRIAEVUM_KEY_HINT\("Save state", "Save state \(F5\)"\)',
+          "grep de F[0-9] nas abas: só dentro de TRIAEVUM_KEY_HINT ou #else de __SWITCH__"),
     Guard("SELECT parou de abrir Salvar/Sair (upstream #80)",
           "tools/oot3d/native_game_runtime/oot3d_top_screen_pause_transaction.cpp",
           r'.',

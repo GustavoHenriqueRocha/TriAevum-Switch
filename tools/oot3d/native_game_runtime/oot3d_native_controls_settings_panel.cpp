@@ -1,3 +1,4 @@
+#include "oot3d_key_hint.h"
 #include "oot3d_native_controls_settings_panel.h"
 #include "oot3d_top_screen_control_widgets.h"
 
@@ -337,6 +338,10 @@ class NativeControlsSettingsPanel final
   }
 
   void DrawDevices() {
+#if defined(__SWITCH__)
+    // Console build: controller only, no keyboard or mouse options.
+    return;
+#endif
     bool deviceSelectionChanged = false;
     deviceSelectionChanged |=
         ImGui::Checkbox("Keyboard", &mControlDraft.KeyboardEnabled);
@@ -437,6 +442,10 @@ class NativeControlsSettingsPanel final
   }
 
   void DrawBindings() {
+#if defined(__SWITCH__)
+    // Console build: only the controller's bindings.
+    mBindingDevice = BindingDevice::Controller;
+#else
     for (const auto& [label, device] : std::array{
              std::pair{"Keyboard", BindingDevice::Keyboard},
              std::pair{"Mouse", BindingDevice::Mouse},
@@ -444,6 +453,7 @@ class NativeControlsSettingsPanel final
       if (device != BindingDevice::Keyboard) ImGui::SameLine();
       if (ImGui::RadioButton(label, mBindingDevice == device)) mBindingDevice = device;
     }
+#endif
     ImGui::SetNextItemWidth(-1.0F);
     ImGui::InputTextWithHint("##ActionFilter", "Find control...", mActionFilter.data(), mActionFilter.size());
     const bool enabled = mBindingDevice == BindingDevice::Keyboard ? mControlDraft.KeyboardEnabled :
@@ -459,7 +469,8 @@ class NativeControlsSettingsPanel final
       MarkCustom(mControlDraft, mControlDirty);
     }
     if (mBindingDevice == BindingDevice::Controller && ImGui::IsItemHovered()) {
-      ImGui::SetTooltip("Exchange both pairs of controller bindings. Keyboard and mouse bindings are unchanged.");
+      ImGui::SetTooltip(TRIAEVUM_KEY_HINT("Exchange both pairs of controller bindings.",
+                                        "Exchange both pairs of controller bindings. Keyboard and mouse bindings are unchanged."));
     }
     ImGui::PushID(static_cast<int>(mBindingDevice));
     bool any = false;

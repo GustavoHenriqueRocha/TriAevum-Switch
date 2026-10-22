@@ -3422,7 +3422,13 @@ void NativeA32WindowSession::UpdateDevFreeCamera(Oot3dNativeGame::NativeA32Input
   auto &freeCamera = *nativeCandidateDispatch.DevFreeCamera;
   const Uint8 *keys = SDL_GetKeyboardState(nullptr);
   const auto &io = ImGui::GetIO();
+#if defined(__SWITCH__)
+  // Console build: controller only (Fast3dWindow ignores the keyboard too).
+  const bool keyboard = false;
+  (void)io;
+#else
   const bool keyboard = keys != nullptr && !io.WantCaptureKeyboard;
+#endif
   const bool toggle = keyboard && keys[SDL_SCANCODE_F6] != 0U;
   if (toggle && !devFreeCameraToggleHeld) freeCamera.SetActive(!freeCamera.Active());
   devFreeCameraToggleHeld = toggle;
