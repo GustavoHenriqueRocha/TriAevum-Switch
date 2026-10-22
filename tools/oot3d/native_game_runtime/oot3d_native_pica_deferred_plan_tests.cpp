@@ -3,13 +3,29 @@
 #include "oot3d_native_pica_deferred_plan.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <new>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
+
+// Heap allocations of this process: the console's malloc has one lock for
+// every thread, so a plan build that allocates stalls the game and the
+// renderer behind the low-priority plan worker (hang watchdog, 2026-10-22).
+std::atomic<uint64_t> gAllocations{0};
+
+void* operator new(std::size_t size) {
+    gAllocations.fetch_add(1U, std::memory_order_relaxed);
+    if (void* pointer = std::malloc(size != 0U ? size : 1U)) return pointer;
+    throw std::bad_alloc();
+}
+void operator delete(void* pointer) noexcept { std::free(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
 
 namespace {
 
@@ -272,7 +288,13 @@ void TestDeferredMatchesSerial(bool worker) {
     }
     // Resolving again is a no-op for built plans.
     Require(ResolveOot3dPicaDeferredVisualFrame(frames[0], &error), error);
-    const auto stats = builder.Stats();
+    // The worker publishes its build count once per batch (no per-draw
+    // atomics on the A57): give it until the batch's end to do so.
+    auto stats = builder.Stats();
+    for (int wait = 0; wait < 2000 && stats.WorkerBuilds + stats.ConsumerBuilds != kDraws; ++wait) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        stats = builder.Stats();
+    }
     Require(stats.DeferredDraws == kDraws &&
                 stats.WorkerBuilds + stats.ConsumerBuilds == kDraws &&
                 (worker || stats.WorkerBuilds == 0U),
@@ -353,7 +375,32 @@ void TestConcurrentBatches() {
 
 } // namespace
 
+constexpr uint64_t kMaxPlanAllocations = 5U;  // medido em 2026-10-22
+constexpr uint64_t kMaxPlanAllocationsTextured = 5U;
+
+// Allocations of one plan build once the shader cache is warm. The
+// submission's payloads move into the plan; what is left is the plan's own
+// vectors. A rise here is heap traffic on every draw of every frame.
+void TestPlanBuildAllocations() {
+    Oot3dPicaVulkanShaderSourceCache cache;
+    Oot3dPicaDeferredPlanBuilder builder(cache);
+    std::string error;
+    Oot3dPicaVulkanDrawPlan plan;
+    for (bool textured : {false, true}) {
+        auto warm = MakeSubmission(1U, 1U, 0x1F000000U, textured);
+        Require(builder.Build(warm, plan, &error), error);
+        auto submission = MakeSubmission(2U, 1U, 0x1F000000U, textured);
+        const uint64_t before = gAllocations.load();
+        Require(builder.Build(submission, plan, &error), error);
+        const uint64_t spent = gAllocations.load() - before;
+        std::cout << "plan build allocations (textured=" << textured << "): " << spent << '\n';
+        Require(spent <= (textured ? kMaxPlanAllocationsTextured : kMaxPlanAllocations),
+                "plan build allocates more than before");
+    }
+}
+
 int main() {
+    TestPlanBuildAllocations();
     TestDeferredMatchesSerial(true);
     TestDeferredMatchesSerial(false);
     TestSkippedAndFailedSlots();
