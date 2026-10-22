@@ -8,6 +8,9 @@
 #include "three_ds_sdl_controller.h"
 #include "oot3d_prebackend_budget.h"
 #include "oot3d_cpu_phase_probe.h"
+#if defined(__SWITCH__)
+#include "fast/oot3d/debug_menu.h"
+#endif
 #include "fast/renderer/frame_time_distribution.h"
 #include "fast/renderer/slow_frame_samples.h"
 #include "fast/renderer3ds/pica_program_preparation.h"
@@ -651,6 +654,9 @@ struct NativeControlPollingState {
   ThreeDsRecomp::Input::VirtualMotionState VirtualMotion;
   uint32_t PreviousControllerButtons = 0;
   uint32_t PendingControllerButtons = 0;
+#if defined(__SWITCH__)
+  Fast::Oot3d::DebugMenuCombo DebugMenuCombo;
+#endif
   // The developer free camera's own physical sources, apart from the game's
   // bindings (the right mouse button is the game's R): mouse motion since it
   // last read it, the right mouse button, and the pad's sticks (-1..1, dead

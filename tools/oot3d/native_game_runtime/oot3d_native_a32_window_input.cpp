@@ -1,6 +1,9 @@
 // Host input polling of the A32 window and the TopScreen pause transitions it drives.
 #include "oot3d_native_a32_window_shared.h"
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
+#if defined(__SWITCH__)
+#include "fast/oot3d/debug_menu.h"
+#endif
 
 #if defined(__SWITCH__)
 #include <mutex>
@@ -103,10 +106,6 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
   if (hostGuiVisible) pollingState.PendingInputSeconds = 0.0;
   host.SamplePeriodSeconds = ThreeDsRecomp::Input::ConsumeInputPeriod(
       samplePeriodSeconds, guestRefreshWillConsume || hostGuiVisible, pollingState.PendingInputSeconds);
-  const auto &io = ImGui::GetIO();
-  const bool keyboardCaptured = hostGuiVisible || io.WantCaptureKeyboard;
-  const bool mouseCaptured = hostGuiVisible;
-
   ThreeDsRecomp::Input::SdlControllerSelection selectedController;
   auto *context = Ship::Context::GetRawInstance();
   auto controlDeck = context != nullptr ? context->GetControlDeck() : nullptr;
@@ -124,6 +123,27 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
     pollingState.PreviousControllerButtons = pollingState.PendingControllerButtons = 0;
   }
   pollingState.ControllerInstance = selectedController.InstanceId;
+#if defined(__SWITCH__)
+  // L3+R3 opens/closes the debug menu (fast/oot3d/debug_menu.h). Read from the
+  // physical pad even when the controller is disabled for gameplay; while the
+  // menu is open the game sees it as host UI (no buttons, sticks or touch).
+  {
+    SDL_GameController *pad = selectedController.Controller;
+    const bool debugCombo =
+        pad != nullptr &&
+        SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK) != 0 &&
+        SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSTICK) != 0;
+    if (pollingState.DebugMenuCombo.Update(debugCombo)) Fast::Oot3d::ToggleDebugMenu();
+  }
+  if (Fast::Oot3d::DebugMenuOpen()) {
+    hostGuiVisible = true;
+    pollingState.PendingInputSeconds = 0.0;
+  }
+#endif
+  const auto &io = ImGui::GetIO();
+  const bool keyboardCaptured = hostGuiVisible || io.WantCaptureKeyboard;
+  const bool mouseCaptured = hostGuiVisible;
+
   const auto selectedDevice = std::find_if(selectedController.Devices.begin(), selectedController.Devices.end(),
       [](const auto& device) { return device.Selected; });
   config = ControlsForDevice(config, selectedDevice != selectedController.Devices.end() ? &*selectedDevice : nullptr);
