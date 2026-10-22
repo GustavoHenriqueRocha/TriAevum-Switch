@@ -3381,7 +3381,7 @@ void NativeA32WindowSession::UpdateDevLab(uint64_t guestFrame) {
       } else if (op == "quit") {
         finish("ok", place());
         devLabQuit = true;
-      } else if (op != "wait") {
+      } else if (op != "wait" && op != "gameplay") {
         finish("rejected", {{"reason", "unknown op"}});
       }
     } catch (const std::exception &error) {
@@ -3421,6 +3421,10 @@ void NativeA32WindowSession::UpdateDevLab(uint64_t guestFrame) {
       finish("timeout", {{"frame", guestFrame}, {"applied", applied}, {"activeCamera", activeCamera}});
   } else if (op == "wait") {
     if (devLabFrames >= command.value("frames", 30U)) finish("ok", place());
+  } else if (op == "gameplay") {
+    // Until the player is in control (a script started at boot waits here
+    // through the title screen and the file select).
+    if (seen.Gameplay) finish("ok", place());
   }
 }
 

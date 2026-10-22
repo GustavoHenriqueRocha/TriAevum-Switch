@@ -5,14 +5,17 @@
 // JSON object per line with an "id" and an "op"; each is answered, in order,
 // by a line of <dir>/acks.jsonl. With TRIAEVUM_ENVIRONMENT_HOT_RELOAD the
 // scene profiles reload from disk meanwhile, so a look is iterated (edit,
-// capture, compare) without restarting the game.
+// capture, compare) without restarting the game. A <dir>/script.jsonl found
+// at start runs first, once (it is renamed to script.running).
 
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace Oot3dNativeGame {
@@ -37,6 +40,7 @@ public:
 private:
   std::filesystem::path mDirectory;
   uint64_t mOffset = 0;
+  std::deque<std::string> mScript;
   std::FILE *mAcks = nullptr;
 };
 

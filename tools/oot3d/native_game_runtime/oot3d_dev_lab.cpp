@@ -13,6 +13,20 @@ DevLabChannel::DevLabChannel(std::filesystem::path directory) : mDirectory(std::
                 ? std::filesystem::file_size(mDirectory / "commands.jsonl", error)
                 : 0U;
   if (error) mOffset = 0;
+  // A script left on the SD (the console's FTP closes while the game runs)
+  // runs once from the top, before anything appended to commands.jsonl.
+  const auto script = mDirectory / "script.jsonl";
+  if (std::filesystem::exists(script, error)) {
+    const auto running = mDirectory / "script.running";
+    std::filesystem::remove(running, error);
+    std::filesystem::rename(script, running, error);
+    std::ifstream stream(error ? script : running, std::ios::binary);
+    for (std::string line; std::getline(stream, line);) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      if (line.find_first_not_of(" \t") != std::string::npos) mScript.push_back(line);
+    }
+    error.clear();
+  }
   mAcks = std::fopen((mDirectory / "acks.jsonl").string().c_str(), "ab");
   if (mAcks == nullptr) std::fprintf(stderr, "TRIAEVUM_DEV_LAB cannot open %s\n", (mDirectory / "acks.jsonl").string().c_str());
 }
@@ -22,14 +36,19 @@ DevLabChannel::~DevLabChannel() {
 }
 
 std::optional<nlohmann::json> DevLabChannel::Next() {
-  std::ifstream stream(mDirectory / "commands.jsonl", std::ios::binary);
-  if (!stream) return std::nullopt;
-  stream.seekg(static_cast<std::streamoff>(mOffset));
   std::string line;
-  // Only a line its writer finished (newline-terminated).
-  if (!std::getline(stream, line) || stream.eof()) return std::nullopt;
-  mOffset += line.size() + 1U;
-  if (!line.empty() && line.back() == '\r') line.pop_back();
+  if (!mScript.empty()) {
+    line = std::move(mScript.front());
+    mScript.pop_front();
+  } else {
+    std::ifstream stream(mDirectory / "commands.jsonl", std::ios::binary);
+    if (!stream) return std::nullopt;
+    stream.seekg(static_cast<std::streamoff>(mOffset));
+    // Only a line its writer finished (newline-terminated).
+    if (!std::getline(stream, line) || stream.eof()) return std::nullopt;
+    mOffset += line.size() + 1U;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+  }
   if (line.find_first_not_of(" \t") == std::string::npos) return Next();
   auto command = nlohmann::json::parse(line, nullptr, false);
   if (command.is_discarded() || !command.is_object() || !command.contains("op") || !command["op"].is_string()) {
