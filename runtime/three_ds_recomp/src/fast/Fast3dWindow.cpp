@@ -259,6 +259,10 @@ void Fast3dWindow::EnableOot3dVulkanBackend() {
 }
 
 bool Fast3dWindow::IsKeyDown(int32_t scancode) const {
+#if defined(__SWITCH__)
+    (void)scancode;
+    return false;
+#endif
     return sPressedKeys.contains(scancode);
 }
 
@@ -415,6 +419,13 @@ const char* Fast3dWindow::GetKeyName(int32_t scancode) {
 }
 
 bool Fast3dWindow::KeyUp(int32_t scancode) {
+#if defined(__SWITCH__)
+    // Console build: controller only. A USB keyboard drives no shortcut
+    // (F5/F8 savestates, F11, F2) and no game button; the debug menu
+    // (L3+R3) holds those tools.
+    (void)scancode;
+    return true;
+#endif
     sPressedKeys.erase(scancode);
     if (scancode == Ship::LUS_KB_ESCAPE) return true;
 
@@ -441,6 +452,13 @@ bool Fast3dWindow::KeyUp(int32_t scancode) {
 }
 
 bool Fast3dWindow::KeyDown(int32_t scancode) {
+#if defined(__SWITCH__)
+    // Console build: controller only. A USB keyboard drives no shortcut
+    // (F5/F8 savestates, F11, F2) and no game button; the debug menu
+    // (L3+R3) holds those tools.
+    (void)scancode;
+    return true;
+#endif
     const bool firstPress = sPressedKeys.insert(scancode).second;
     if (scancode == Ship::LUS_KB_ESCAPE) {
         auto window = std::static_pointer_cast<Fast3dWindow>(Ship::Context::GetRawInstance()->GetWindow());

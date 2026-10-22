@@ -85,6 +85,12 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/triaevum_oot3d_input_backend.cpp",
           r'if \(Fast::Oot3d::DebugMenuOpen\(\)\) \{\s+const auto sequence = mState\.sampleSequence;\s+mState = \{\};',
           "oot3d_debug_menu_tests"),
+    Guard("Atalhos de teclado (F5/F8, F11, F2, teclas do jogo) ativos no Switch: console é só controle",
+          "runtime/three_ds_recomp/src/fast/Fast3dWindow.cpp",
+          r'IsKeyDown\(int32_t scancode\) const \{\s+#if defined\(__SWITCH__\)\s+\(void\)scancode;\s+return false;'
+          r'.*?KeyUp\(int32_t scancode\) \{\s+#if defined\(__SWITCH__\).*?return true;'
+          r'.*?KeyDown\(int32_t scancode\) \{\s+#if defined\(__SWITCH__\).*?return true;',
+          "Eden: F5/F8 não fazem nada; menu L3+R3 continua abrindo"),
     Guard("SELECT parou de abrir Salvar/Sair (upstream #80)",
           "tools/oot3d/native_game_runtime/oot3d_top_screen_pause_transaction.cpp",
           r'.',
