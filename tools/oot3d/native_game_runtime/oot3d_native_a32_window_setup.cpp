@@ -826,7 +826,11 @@ void NativeA32WindowSession::Setup() {
   picaFrontend.SetInPlaceDrawPackets(offload.Capture);
   picaPresentationScheduler.SetMoveFreeFinish(offload.Plan);
 #if defined(__SWITCH__)
-  if (offload.Perf) perfWriter.emplace("sdmc:/switch/oot3dre/logs/perf.txt");
+  if (offload.Perf) {
+    perfWriter.emplace("sdmc:/switch/oot3dre/logs/perf.txt");
+    hitchWriter.emplace("sdmc:/switch/oot3dre/logs/hitches.txt", 64U);
+    (void)hitchWriter->Push("session_start\n");
+  }
 #endif
 
   hostArgs = launch.Host;

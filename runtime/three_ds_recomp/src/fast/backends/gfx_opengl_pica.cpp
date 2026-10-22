@@ -5,6 +5,7 @@
 #if defined(__SWITCH__)
 #include <EGL/egl.h>
 #include <switch.h>
+#include <optional>
 #endif
 
 
@@ -90,12 +91,19 @@ uint64_t HashBytes(std::span<const uint8_t> bytes) {
 float ReadPicaGlResolutionScale() {
     static const float scale = [] {
 #if defined(__SWITCH__)
-        std::ifstream file("sdmc:/switch/oot3dre/config/resolution_scale");
-        std::string text;
-        if (!file || !std::getline(file, text)) {
-            return 2.0F; // console default: 3x (720p) made the GPU the bottleneck (perf.txt: 23.4 vs 28.5 fps)
-        }
-        return PicaGlScale::ParseResolutionScale(text);
+        // Chosen at boot like the window size (gfx_sdl2.cpp): docking later
+        // keeps the boot mode's scale and 1280x720 window.
+        const auto readFirstLine = [](const char* path) -> std::optional<std::string> {
+            std::ifstream file(path);
+            std::string text;
+            if (!file || !std::getline(file, text)) return std::nullopt;
+            return text;
+        };
+        const auto docked = readFirstLine("sdmc:/switch/oot3dre/config/resolution_scale_docked");
+        const auto common = readFirstLine("sdmc:/switch/oot3dre/config/resolution_scale");
+        return PicaGlScale::SelectResolutionScale(
+            docked ? &*docked : nullptr, common ? &*common : nullptr,
+            appletGetOperationMode() == AppletOperationMode_Console);
 #else
         const char* value = std::getenv("TRIAEVUM_GL_RESOLUTION_SCALE");
         return value != nullptr ? PicaGlScale::ParseResolutionScale(value)

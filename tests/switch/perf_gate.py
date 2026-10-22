@@ -24,7 +24,10 @@ import perf_report  # noqa: E402
 BASELINE = Path(__file__).with_name("perf_baseline.json")
 
 # Quanto cada métrica pode piorar antes de reprovar (relativo à referência).
-TOLERANCE = {"fps_global": 0.03, "fps_p10": 0.10, "speed": 0.01, "slow_share": 0.05}
+TOLERANCE = {"fps_global": 0.03, "fps_p10": 0.10, "speed": 0.01, "slow_share": 0.05,
+             "hitches_per_min": 0.10, "big_hitches_per_min": 0.10}
+# Menor é melhor nestas (as outras: maior é melhor).
+LOWER_IS_BETTER = {"slow_share", "hitches_per_min", "big_hitches_per_min"}
 
 
 def metrics(session: perf_report.Session, skip: int) -> dict[str, float]:
@@ -40,7 +43,13 @@ def metrics(session: perf_report.Session, skip: int) -> dict[str, float]:
     fps = [num(w.main, "fps") for w in windows]
     guest = [num(w.main, "guest_fps") for w in windows]
     clock = perf_report.clock_key(windows[-1].main)
+    # Engasgo = quadro que ficou 2+ intervalos na tela (hold_2..hold_4p);
+    # grande = 3+ (>= 100 ms a 30 FPS).
+    hitches = sum(num(w.main, k) for w in windows for k in ("hold_2", "hold_3", "hold_4p"))
+    big = sum(num(w.main, k) for w in windows for k in ("hold_3", "hold_4p"))
     return {
+        "hitches_per_min": hitches / (seconds / 60.0) if seconds else 0.0,
+        "big_hitches_per_min": big / (seconds / 60.0) if seconds else 0.0,
         "fps_global": frames / seconds if seconds else 0.0,
         "fps_p10": perf_report.percentile(fps, 0.1),
         "speed": sum(guest) / len(guest) / 60.0,
@@ -91,8 +100,12 @@ def main() -> int:
           f"(referência: {reference.get('source', '?')})")
     for key, tolerance in TOLERANCE.items():
         ref, now = reference[key], current[key]
-        # slow_share: menor é melhor; as outras: maior é melhor.
-        worse = now - ref > tolerance if key == "slow_share" else now < ref * (1.0 - tolerance)
+        if key == "slow_share":
+            worse = now - ref > tolerance
+        elif key in LOWER_IS_BETTER:
+            worse = now > ref * (1.0 + tolerance) + 0.05
+        else:
+            worse = now < ref * (1.0 - tolerance)
         failed |= worse
         print(f"  {'REGRESSÃO' if worse else 'ok':<9} {key:<11} {now:8.3f}  (ref {ref:.3f}, tolerância {tolerance:.0%})")
     return 1 if failed else 0

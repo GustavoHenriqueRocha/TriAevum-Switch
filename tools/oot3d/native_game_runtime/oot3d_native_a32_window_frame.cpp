@@ -272,6 +272,22 @@ void NativeA32WindowSession::ObservePresentCadence(uint8_t frameKind) {
                          Oot3dNativeGame::InterpolatedSampleLevel::Full)
           : 0.0;
   cadenceGovernor.ObservePresent(picture, now, gpuPairMs);
+  if (hitchWriter.has_value()) {
+    const auto gpu = apiPointer->GetNativePicaBackendStats();
+    const Oot3dNativeGame::HitchSample sample{hitchGuestMs, hitchGameBusyMs,
+                                              gpu.TexturesCreated, gpu.ProgramsLive};
+    const uint32_t rateHz = cadenceGovernor.DropsInBetween()
+                                ? 30U
+                                : std::max<uint32_t>(interpolationPacingRateHz, 1U);
+    if (auto line = hitchRecorder.Observe(now, hitchPresents, 1000.0 / rateHz, sample)) {
+      (void)hitchWriter->Push(std::move(*line));
+      for (size_t cause = 0U; cause < hitchCounts.size(); ++cause)
+        hitchCounts[cause].store(
+            hitchRecorder.Count(static_cast<Oot3dNativeGame::HitchCause>(cause)),
+            std::memory_order_relaxed);
+    }
+    ++hitchPresents;
+  }
   cadenceLockedThirty.store(cadenceGovernor.DropsInBetween(),
                             std::memory_order_relaxed);
   std::lock_guard lock(interpolationPerfMutex);
@@ -389,6 +405,8 @@ bool NativeA32WindowSession::RunFrame() {
                            refreshes = previous.Refreshes,
                            step = hostFrameCompletedStep] {
         cadenceGovernor.ObserveGameFrame(busyMs, guestMs, refreshes, step);
+        hitchGameBusyMs = busyMs;
+        hitchGuestMs = guestMs;
       });
     }
     previous.Valid = true;
@@ -1089,6 +1107,12 @@ bool NativeA32WindowSession::RunFrame() {
                                    static_cast<double>(pairs)
                              : 0.0)
              << " game_pair_p90_ms=" << gameP90;
+        // Late presentations by cause since the start (logs/hitches.txt).
+        for (size_t cause = 0U; cause < hitchCounts.size(); ++cause)
+          perf << " hitch_"
+               << Oot3dNativeGame::HitchCauseName(
+                      static_cast<Oot3dNativeGame::HitchCause>(cause))
+               << '=' << hitchCounts[cause].load(std::memory_order_relaxed);
         previousCadence = cadence;
         previousSuperseded = superseded;
       }

@@ -65,6 +65,7 @@
 #include "oot3d_native_pica_vulkan_plan.h"
 #include "oot3d_native_pica_deferred_plan.h"
 #include "oot3d_native_offload.h"
+#include "oot3d_hitch_recorder.h"
 #include "oot3d_native_player_temporal_bridge.h"
 #include "oot3d_native_scenario_bootstrap.h"
 #include "oot3d_native_temporal_event_ledger.h"
@@ -609,6 +610,14 @@ private:
   Oot3dNativeGame::NativeOffloadOptions offload;
   // logs/perf.txt through a service thread (config/offload_perf).
   std::optional<Oot3dNativeGame::AsyncLineWriter> perfWriter;
+  // logs/hitches.txt (render thread): one line per late presentation.
+  std::optional<Oot3dNativeGame::AsyncLineWriter> hitchWriter;
+  Oot3dNativeGame::HitchRecorder hitchRecorder;
+  uint64_t hitchPresents = 0U;
+  double hitchGameBusyMs = 0.0;
+  double hitchGuestMs = 0.0;
+  std::array<std::atomic<uint64_t>, static_cast<size_t>(Oot3dNativeGame::HitchCause::Count)>
+      hitchCounts{};
   // Game-thread cost of the previous perf.txt window line (format + write
   // or enqueue), ms, and of the PICA capture inside the guest's GX
   // commands (SubmitDrawPacket), cumulative.

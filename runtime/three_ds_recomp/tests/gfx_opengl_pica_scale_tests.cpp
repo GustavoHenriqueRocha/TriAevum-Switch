@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <string>
 
 namespace Fast::PicaGlScale {
 namespace {
@@ -62,6 +63,21 @@ TEST(PicaGlScale, FractionalRectanglesTileWithoutGapsOrOverlap) {
     EXPECT_EQ(ScaledExtent(400U, scale), 1000U);
     EXPECT_EQ(ScaledExtent(320U, scale), 800U);
     EXPECT_EQ(ScaledExtent(1U, scale), 3U); // never zero for a non-empty extent
+}
+
+TEST(PicaGlScale, DockedScaleWinsOnlyInTheDock) {
+    const std::string docked = "4.5";
+    const std::string common = "2";
+    EXPECT_EQ(SelectResolutionScale(&docked, &common, true), 4.5F);
+    EXPECT_EQ(SelectResolutionScale(&docked, &common, false), 2.0F);
+    EXPECT_EQ(SelectResolutionScale(nullptr, &common, true), 2.0F);
+    EXPECT_EQ(SelectResolutionScale(&docked, nullptr, false), kDefaultResolutionScale);
+    EXPECT_EQ(SelectResolutionScale(nullptr, nullptr, true), kDefaultResolutionScale);
+    // The handheld limit stays 3; the docked one is 4.5 (1080 lines).
+    const std::string five = "5";
+    EXPECT_EQ(SelectResolutionScale(&five, &five, true), 4.5F);
+    EXPECT_EQ(SelectResolutionScale(&five, &five, false), 3.0F);
+    EXPECT_EQ(ParseResolutionScale("3.75", kMaxDockedResolutionScale), 3.75F);
 }
 
 TEST(PicaGlScale, FitsTheDriverLimit) {

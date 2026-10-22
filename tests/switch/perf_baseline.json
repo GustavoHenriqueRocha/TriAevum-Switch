@@ -1,5 +1,7 @@
 {
   "30": {
+    "hitches_per_min": 20.308540553859892,
+    "big_hitches_per_min": 3.768595154324516,
     "fps_global": 29.57300364157433,
     "fps_p10": 29.99972,
     "speed": 0.9884325663716814,
@@ -9,6 +11,8 @@
     "source": "final4-30/perf.txt sessão 71"
   },
   "60": {
+    "hitches_per_min": 172.5099615363573,
+    "big_hitches_per_min": 36.35000200134462,
     "fps_global": 57.53237726831522,
     "fps_p10": 52.98008,
     "speed": 0.9974820454545453,

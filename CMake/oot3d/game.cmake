@@ -63,6 +63,13 @@ add_executable(oot3d_fps_counter_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_fps_counter_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_fps_counter_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Late-presentation log (logs/hitches.txt; header-only).
+add_executable(oot3d_hitch_recorder_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_hitch_recorder_tests.cpp
+)
+target_compile_features(oot3d_hitch_recorder_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_hitch_recorder_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Presentation cadence of fps60 (header-only governor and pipeline simulation;
 # --report prints the before/after table).
 add_executable(oot3d_native_cadence_governor_tests EXCLUDE_FROM_ALL

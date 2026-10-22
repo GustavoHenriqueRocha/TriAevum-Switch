@@ -15,13 +15,19 @@
 namespace Fast::PicaGlScale {
 
 inline constexpr float kMaxResolutionScale = 3.0F;
+// Docked (1920x1080 window): 4.5 renders the 240-line screen at 1080 lines,
+// so FSR EASU runs 1:1; lower values are enlarged by EASU.
+inline constexpr float kMaxDockedResolutionScale = 4.5F;
+// Without any config file (perf.txt: 3x made the handheld GPU the bottleneck).
+inline constexpr float kDefaultResolutionScale = 2.0F;
 
 // config/resolution_scale (Switch) or TRIAEVUM_GL_RESOLUTION_SCALE: "1", "2"
 // and "3" as before, plus a decimal between them ("2.5" or "2,5"), rounded to
 // a multiple of 1/4 so every host edge stays a short, exact binary fraction.
 // Values above 3 are clamped to 3; anything unreadable or below 1 is 1 (the
 // integer behaviour of the former parser: "10" was 1, "7" was 3).
-[[nodiscard]] inline float ParseResolutionScale(std::string_view text) noexcept {
+[[nodiscard]] inline float ParseResolutionScale(std::string_view text,
+                                               float maxScale = kMaxResolutionScale) noexcept {
     while (!text.empty() && (text.front() == ' ' || text.front() == '\t' ||
                              text.front() == '\n' || text.front() == '\r')) {
         text.remove_prefix(1U);
@@ -49,7 +55,21 @@ inline constexpr float kMaxResolutionScale = 3.0F;
         }
         value = std::round(value * 4.0F) / 4.0F;
     }
-    return std::clamp(value, 1.0F, kMaxResolutionScale);
+    return std::clamp(value, 1.0F, maxScale);
+}
+
+// Switch: config/resolution_scale_docked wins in the dock (up to 4.5), then
+// config/resolution_scale (both modes, up to 3), then the default. A null
+// pointer is a missing file.
+[[nodiscard]] inline float SelectResolutionScale(const std::string* docked, const std::string* common,
+                                                 bool isDocked) noexcept {
+    if (isDocked && docked != nullptr) {
+        return ParseResolutionScale(*docked, kMaxDockedResolutionScale);
+    }
+    if (common != nullptr) {
+        return ParseResolutionScale(*common);
+    }
+    return kDefaultResolutionScale;
 }
 
 [[nodiscard]] inline bool IsIntegerScale(float scale) noexcept {
