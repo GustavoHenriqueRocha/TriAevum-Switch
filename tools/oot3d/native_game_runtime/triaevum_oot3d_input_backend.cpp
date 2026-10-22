@@ -2,6 +2,7 @@
 #include "three_ds_sdl_controller.h"
 
 #include "fast/Fast3dWindow.h"
+#include "fast/oot3d/debug_menu.h"
 #include "ship/Context.h"
 #include "ship/controller/controldeck/ControlDeck.h"
 #include "ship/controller/physicaldevice/ConnectedPhysicalDeviceManager.h"
@@ -162,6 +163,20 @@ bool TriAevumOot3dInputBackend::Poll(Fast::Fast3dWindow &window,
     mState.accelerometerZ = frame.Hid.Accelerometer[2];
     mState.flags |= TRIAEVUM_INPUT_ACCELEROMETER_VALID_V1;
   }
+#if defined(__SWITCH__)
+  // L3+R3 opens/closes the debug menu (fast/oot3d/debug_menu.h); while it
+  // is open the controller belongs to the menu and the game sees nothing.
+  const bool debugCombo =
+      controller != nullptr &&
+      SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_LEFTSTICK) != 0 &&
+      SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_RIGHTSTICK) != 0;
+  if (mDebugMenuCombo.Update(debugCombo)) Fast::Oot3d::ToggleDebugMenu();
+  if (Fast::Oot3d::DebugMenuOpen()) {
+    const auto sequence = mState.sampleSequence;
+    mState = {};
+    mState.sampleSequence = sequence;
+  }
+#endif
   return window.IsRunning();
 }
 

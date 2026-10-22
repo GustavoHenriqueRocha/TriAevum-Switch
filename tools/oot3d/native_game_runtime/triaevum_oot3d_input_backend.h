@@ -1,5 +1,7 @@
 #pragma once
 
+#include "fast/oot3d/debug_menu.h"
+
 #include "oot3d_native_a32_input.h"
 #include "triaevum/input_service_adapter.h"
 
@@ -36,6 +38,7 @@ private:
   NativeControlConfig mConfig;
   std::int32_t mControllerInstance = -1;
   NativeRightStickProfileState mRightStickProfile;
+  Fast::Oot3d::DebugMenuCombo mDebugMenuCombo;
   ThreeDsRecomp::Input::VirtualMotionState mVirtualMotion;
   triaevum::module::InputStateV1 mState;
   TriAevumOot3dInputStats mStats;

@@ -49,6 +49,9 @@ void InstallGraphicsSettingsPanelTabs(
 // Backward-compatible convenience wrapper for frontends with one tab.
 void InstallGraphicsSettingsPanelTab(
     std::shared_ptr<GraphicsSettingsPanelTab> tab);
+// The installed application tabs alone (no renderer settings), one tab per
+// group: the console's debug menu (debug_menu.h).
+void DrawApplicationSettingsTabs();
 void EndGraphicsSettingsPreviews();
 // The host F2 action, including ending application-owned previews.
 void ToggleGraphicsNativePresentation();

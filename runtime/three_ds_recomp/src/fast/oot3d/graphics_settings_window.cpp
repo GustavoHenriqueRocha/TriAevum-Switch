@@ -6,6 +6,7 @@
 #include <chrono>
 #include <iterator>
 #include <mutex>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -40,6 +41,33 @@ void InstallGraphicsSettingsPanelTab(
         tabs.push_back(std::move(tab));
     }
     InstallGraphicsSettingsPanelTabs(std::move(tabs));
+}
+
+void DrawApplicationSettingsTabs() {
+    std::vector<std::pair<std::string, std::vector<std::shared_ptr<GraphicsSettingsPanelTab>>>> groups;
+    for (const auto& tab : SnapshotPanelTabs()) {
+        const char* group = tab->Group();
+        const std::string name = group != nullptr ? group : tab->Label();
+        auto existing = std::find_if(groups.begin(), groups.end(),
+                                     [&](const auto& entry) { return entry.first == name; });
+        if (existing == groups.end()) {
+            groups.emplace_back(name, std::vector<std::shared_ptr<GraphicsSettingsPanelTab>>{});
+            existing = std::prev(groups.end());
+        }
+        existing->second.push_back(tab);
+    }
+    if (!ImGui::BeginTabBar("##DebugMenuTabs", ImGuiTabBarFlags_FittingPolicyScroll)) return;
+    for (const auto& [name, tabs] : groups) {
+        if (!ImGui::BeginTabItem(name.c_str())) continue;
+        for (const auto& tab : tabs) {
+            if (tabs.size() > 1U) ImGui::SeparatorText(tab->Label());
+            ImGui::PushID(tab->Label());
+            tab->Draw();
+            ImGui::PopID();
+        }
+        ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
 }
 
 void EndGraphicsSettingsPreviews() {

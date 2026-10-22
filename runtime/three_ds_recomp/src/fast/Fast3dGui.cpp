@@ -15,6 +15,11 @@
 #include "fast/oot3d/graphics_settings_runtime.h"
 #include "fast/oot3d/graphics_settings_window.h"
 #endif
+#if defined(__SWITCH__)
+#include "fast/oot3d/debug_menu.h"
+#include <algorithm>
+#include "fast/oot3d/graphics_settings_window.h"
+#endif
 #include "ship/window/gui/resource/GuiTextureFactory.h"
 #include "ship/resource/File.h"
 
@@ -221,6 +226,57 @@ ImGuiMouseSource Oot3dMouseSource(uint32_t which) {
 Fast3dGui::Fast3dGui() : Ship::Gui() {
 }
 
+#if defined(__SWITCH__)
+namespace {
+// The console's debug menu (fast/oot3d/debug_menu.h): L3+R3 opens it; the
+// controller navigates (D-pad/stick, A selects, B goes back, L/R switch tabs).
+class Oot3dDebugMenuWindow final : public Ship::GuiWindow {
+  public:
+    Oot3dDebugMenuWindow()
+        : GuiWindow("gOpenWindows.TriAevumDebug", false, "TriAevum Debug",
+                    ImVec2(900.0F, 600.0F)) {
+        SetVisibility(false);
+    }
+
+    void Draw() override {
+        const bool open = Oot3d::DebugMenuOpen();
+        auto& io = ImGui::GetIO();
+        if (open != IsVisible()) {
+            SetVisibility(open);
+            if (open) {
+                ImGui::SetNextWindowFocus();
+                io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+                io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+            } else {
+                io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+            }
+        }
+        if (!open) return;
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.05F,
+                                       viewport->WorkPos.y + viewport->WorkSize.y * 0.05F),
+                                ImGuiCond_Appearing);
+        ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x * 0.9F, viewport->WorkSize.y * 0.9F),
+                                 ImGuiCond_Appearing);
+        ImGui::SetNextWindowBgAlpha(0.92F);
+        GuiWindow::Draw();
+        // Closed with the window's X: the game takes the input back.
+        if (!IsVisible()) Oot3d::DebugMenuOpenFlag().store(false, std::memory_order_relaxed);
+    }
+
+  protected:
+    void InitElement() override {}
+    void UpdateElement() override {}
+    void DrawElement() override {
+        // Readable on a TV: about twice the default font at 1080p.
+        ImGui::SetWindowFontScale(std::max(1.0F, ImGui::GetMainViewport()->WorkSize.y / 540.0F));
+        ImGui::TextDisabled("L3+R3 fecha  |  A seleciona  B volta  L/R troca de aba");
+        Oot3d::DrawApplicationSettingsTabs();
+    }
+};
+} // namespace
+#endif
+
 Fast3dGui::Fast3dGui(std::vector<std::shared_ptr<Ship::GuiWindow>> guiWindows) : Ship::Gui(guiWindows) {
 }
 
@@ -234,6 +290,9 @@ void Fast3dGui::Init(GuiWindowInitData windowImpl) {
         AddGuiWindow(std::make_shared<Oot3dDisplayConfirmationWindow>());
         AddGuiWindow(std::make_shared<Oot3dHostNoticeWindow>());
     }
+#endif
+#if defined(__SWITCH__)
+    AddGuiWindow(std::make_shared<Oot3dDebugMenuWindow>());
 #endif
     Gui::Init();
 }

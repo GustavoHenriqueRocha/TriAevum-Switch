@@ -199,8 +199,10 @@ option(OOT3D_FAST_DEV_LINK
     "Disable large linker debug artifacts during iterative native builds" OFF)
 option(TRIAEVUM_DEVELOPER_TOOLS
     "Developer build: F1 Dev Tools (warp screen and warp points); never public" OFF)
-if(TRIAEVUM_DEVELOPER_TOOLS)
-    # Renderer diagnostics for the lighting lab (pica_surface_debug.h).
+if(TRIAEVUM_DEVELOPER_TOOLS AND NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    # Renderer diagnostics for the lighting lab (pica_surface_debug.h; Vulkan
+    # only). Not on the Switch: a global definition would rebuild the 256
+    # whole-AOT shards for a personal build that only wants the debug menu.
     add_compile_definitions(TRIAEVUM_RENDERER_DEVELOPER_TOOLS=1)
 endif()
 option(OOT3D_ENABLE_VULKAN_RENDERER
