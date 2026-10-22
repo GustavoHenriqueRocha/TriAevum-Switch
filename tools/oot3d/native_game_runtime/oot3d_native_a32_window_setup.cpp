@@ -900,6 +900,13 @@ void NativeA32WindowSession::Setup() {
     devLab = std::make_unique<Oot3dNativeGame::DevLabChannel>(lab);
     std::fprintf(stderr, "TRIAEVUM_DEV_LAB %s\n", lab);
   }
+#if defined(__SWITCH__)
+  // No environment on the console/emulator: config/dev_lab turns the channel
+  // on in sdmc:/switch/oot3dre/lab (warps in one session, e.g. a shader sweep).
+  else if (std::filesystem::exists("sdmc:/switch/oot3dre/config/dev_lab")) {
+    devLab = std::make_unique<Oot3dNativeGame::DevLabChannel>("sdmc:/switch/oot3dre/lab");
+  }
+#endif
   if (const char *emitters = std::getenv("TRIAEVUM_DEV_EMITTERS"); emitters != nullptr && *emitters != '\0') {
     devEmitterLog = std::make_unique<Oot3dNativeGame::NativeEmitterInventoryLog>(emitters);
     std::fprintf(stderr, "TRIAEVUM_DEV_EMITTERS %s\n", emitters);
