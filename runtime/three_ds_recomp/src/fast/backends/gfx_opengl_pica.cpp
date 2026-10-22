@@ -437,11 +437,92 @@ struct PicaGlGeometryBuffer {
 };
 
 // One stream ring (PicaGlResidency::StreamRing) and its buffer object.
+//
+// Persistent mode (Switch, with config/gl_thread): Mesa's GL thread runs a
+// glMapBufferRange synchronously (it returns a pointer), so mapping per draw
+// would drain the GL thread three times a draw. The ring is then kSlots
+// buffers with immutable storage (glBufferStorage), each mapped once,
+// persistent and coherent: a write is a memcpy. A new generation moves to the
+// next slot instead of orphaning (immutable storage cannot be reallocated),
+// after a fence shows the GPU is done with that slot's previous generation.
 struct PicaGlStreamBuffer {
+    static constexpr size_t kSlots = 4U;
     GLenum Target = GL_ARRAY_BUFFER;
     GLuint Handle = 0U;
     PicaGlResidency::StreamRing Ring;
+    bool Persistent = false;
+    size_t Slot = 0U;
+    std::array<GLuint, kSlots> Slots{};
+    std::array<uint8_t*, kSlots> Mapped{};
+    std::array<GLsync, kSlots> Fences{};
 };
+
+#if defined(__SWITCH__)
+// glad here is GL 4.3 core: glBufferStorage (GL 4.4 / ARB_buffer_storage)
+// comes from the driver when it advertises the extension.
+using PicaGlBufferStorageProc = void (*)(GLenum, GLsizeiptr, const void*, GLbitfield);
+constexpr GLbitfield kPicaGlMapPersistent = 0x0040U;
+constexpr GLbitfield kPicaGlMapCoherent = 0x0080U;
+
+PicaGlBufferStorageProc PicaGlPersistentStreamStorage() {
+    std::error_code error;
+    if (!std::filesystem::exists("sdmc:/switch/oot3dre/config/gl_thread", error)) {
+        return nullptr;
+    }
+    GLint count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+    bool advertised = false;
+    for (GLint i = 0; i < count && !advertised; ++i) {
+        const auto* name = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+        advertised = name != nullptr && std::strcmp(name, "GL_ARB_buffer_storage") == 0;
+    }
+    return advertised ? reinterpret_cast<PicaGlBufferStorageProc>(eglGetProcAddress("glBufferStorage"))
+                      : nullptr;
+}
+#endif
+
+// Persistent slots of `stream` (see PicaGlStreamBuffer); false leaves the
+// ring as one ordinary buffer.
+bool CreatePicaGlPersistentStream(PicaGlStreamBuffer& stream) {
+#if defined(__SWITCH__)
+    static const PicaGlBufferStorageProc storage = PicaGlPersistentStreamStorage();
+    if (storage == nullptr) return false;
+    const GLbitfield flags = GL_MAP_WRITE_BIT | kPicaGlMapPersistent | kPicaGlMapCoherent;
+    glGenBuffers(static_cast<GLsizei>(stream.Slots.size()), stream.Slots.data());
+    for (size_t i = 0; i < stream.Slots.size(); ++i) {
+        glBindBuffer(stream.Target, stream.Slots[i]);
+        storage(stream.Target, static_cast<GLsizeiptr>(stream.Ring.Capacity()), nullptr, flags);
+        stream.Mapped[i] = static_cast<uint8_t*>(glMapBufferRange(
+            stream.Target, 0, static_cast<GLsizeiptr>(stream.Ring.Capacity()), flags));
+        if (stream.Mapped[i] == nullptr) {
+            glDeleteBuffers(static_cast<GLsizei>(stream.Slots.size()), stream.Slots.data());
+            stream.Slots = {};
+            stream.Mapped = {};
+            return false;
+        }
+    }
+    stream.Persistent = true;
+    stream.Slot = 0U;
+    stream.Handle = stream.Slots[0];
+    return true;
+#else
+    (void)stream;
+    return false;
+#endif
+}
+
+void DeletePicaGlStream(PicaGlStreamBuffer& stream) {
+    if (!stream.Persistent) {
+        glDeleteBuffers(1, &stream.Handle);
+        return;
+    }
+    for (GLsync& fence : stream.Fences) {
+        if (fence != nullptr) glDeleteSync(fence);
+        fence = nullptr;
+    }
+    glDeleteBuffers(static_cast<GLsizei>(stream.Slots.size()), stream.Slots.data());
+    stream.Persistent = false;
+}
 
 // Live GPU objects and bytes, published at each frame's first draw for the
 // stats reader (another thread).
@@ -1672,9 +1753,19 @@ void GfxRenderingAPIOGL::InitNativePica() {
                             PicaGlResidency::StreamRing(2ULL << 20U)};
         state.IndexRing = {GL_ELEMENT_ARRAY_BUFFER, 0U,
                            PicaGlResidency::StreamRing(1ULL << 20U)};
-        glGenBuffers(1, &state.UniformRing.Handle);
-        glGenBuffers(1, &state.VertexRing.Handle);
-        glGenBuffers(1, &state.IndexRing.Handle);
+        for (auto* stream : {&state.UniformRing, &state.VertexRing, &state.IndexRing}) {
+            if (!CreatePicaGlPersistentStream(*stream)) glGenBuffers(1, &stream->Handle);
+        }
+#if defined(__SWITCH__)
+        // Own file: logs/glthread.txt is rewritten after this, when the
+        // context moves to the render thread.
+        if (FILE* log = std::fopen("sdmc:/switch/oot3dre/logs/gl_streams.txt", "w")) {
+            std::fprintf(log, "persistent_streams=%d\n",
+                         state.UniformRing.Persistent && state.VertexRing.Persistent &&
+                                 state.IndexRing.Persistent ? 1 : 0);
+            std::fclose(log);
+        }
+#endif
     }
 
     const std::array<uint8_t, 4> white{255U, 255U, 255U, 255U};
@@ -1796,9 +1887,9 @@ void GfxRenderingAPIOGL::ShutdownNativePica() noexcept {
     glDeleteBuffers(1, &state.IndexBuffer);
     glDeleteBuffers(1, &state.VertexUniformBuffer);
     glDeleteBuffers(1, &state.FragmentUniformBuffer);
-    glDeleteBuffers(1, &state.UniformRing.Handle);
-    glDeleteBuffers(1, &state.VertexRing.Handle);
-    glDeleteBuffers(1, &state.IndexRing.Handle);
+    DeletePicaGlStream(state.UniformRing);
+    DeletePicaGlStream(state.VertexRing);
+    DeletePicaGlStream(state.IndexRing);
     glDeleteVertexArrays(1, &state.VertexArray);
 #endif
     mNativePica.reset();
@@ -2694,7 +2785,21 @@ void BeginPicaGlFrame(GfxRenderingAPIOGL::NativePicaState& state,
 bool ReservePicaGlStream(GfxRenderingAPIOGL::NativePicaState& state,
                          PicaGlStreamBuffer& stream, uint64_t total) {
     if (!stream.Ring.Fits(total)) return false;
-    if (stream.Ring.Reserve(total)) {
+    if (!stream.Ring.Reserve(total)) return true;
+    if (stream.Persistent) {
+        // Next slot, once the GPU is done with its previous generation.
+        stream.Fences[stream.Slot] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        stream.Slot = (stream.Slot + 1U) % stream.Slots.size();
+        if (GLsync& fence = stream.Fences[stream.Slot]; fence != nullptr) {
+            while (glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ULL) ==
+                   GL_TIMEOUT_EXPIRED) {
+            }
+            glDeleteSync(fence);
+            fence = nullptr;
+        }
+        stream.Handle = stream.Slots[stream.Slot];
+        state.Counters.RingOrphans.fetch_add(1U, std::memory_order_relaxed);
+    } else {
         // Fresh storage; the GPU keeps reading the previous one until done.
         glBindBuffer(stream.Target, stream.Handle);
         glBufferData(stream.Target,
@@ -2713,7 +2818,12 @@ uint64_t WritePicaGlStream(PicaGlStreamBuffer& stream,
     if (!allocation.Valid) {
         throw std::runtime_error("PICA stream range was not reserved");
     }
+    // The bind also sets the VAO's element binding for the index ring.
     glBindBuffer(stream.Target, stream.Handle);
+    if (stream.Persistent) {
+        std::memcpy(stream.Mapped[stream.Slot] + allocation.Offset, bytes.data(), bytes.size());
+        return allocation.Offset;
+    }
     void* mapped = glMapBufferRange(
         stream.Target, static_cast<GLintptr>(allocation.Offset),
         static_cast<GLsizeiptr>(bytes.size()),
