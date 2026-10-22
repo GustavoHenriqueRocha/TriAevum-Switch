@@ -263,6 +263,8 @@ def summarize(session: Session, skip: int, show_windows: bool, top: int) -> None
     else:
         refresh = 60.0 if percentile(fps, 0.9) > 45.0 else 30.0
         summarize_glperf(gl_windows, top, refresh)
+    if percentile(fps, 0.9) > 45.0:
+        summarize_verdict(windows, gl_windows, overall)
 
     if show_windows:
         has_clocks = any(clock_key(w.main) is not None for w in windows)
@@ -479,6 +481,73 @@ def summarize_glperf(windows: list[Window], top: int, refresh: float) -> None:
             warnings.append("glBufferData (realocação) por quadro")
         if warnings:
             print("    atenção: " + "; ".join(warnings))
+
+
+HITCHES = ["hitch_shader", "hitch_texturas", "hitch_logica", "hitch_render"]
+
+
+def summarize_verdict(windows: list[Window], gl_windows: list[Window], overall: float) -> None:
+    """O que segura os 60 FPS: cada recurso contra o orçamento do quadro.
+
+    A 60 Hz cada quadro na tela tem 16,7 ms de GPU e de render thread; a
+    lógica roda a 30 passos por segundo, então o par de passos do jogo
+    (game_pair_ms, dois passos guest) tem 33,3 ms. Os contadores hitch_* são
+    acumulados na sessão: a diferença entre a primeira e a última janela.
+    """
+    budget = 1000.0 / 60.0
+    rows = []
+
+    def frames_of(kind: str) -> float:
+        return sum(num(w.glperf, f"{kind}_frames") for w in gl_windows)
+
+    def weighted(key: str, weight: str) -> float:
+        total = sum(num(w.glperf, weight) for w in gl_windows)
+        if total == 0:
+            return math.nan
+        return sum(num(w.glperf, key) * num(w.glperf, weight) for w in gl_windows) / total
+
+    if gl_windows:
+        # O quadro mais comum a 60 FPS é o interpolado; o de passo pesa junto.
+        for kind in ("interp", "step"):
+            if frames_of(kind) == 0:
+                continue
+            gpu = weighted(f"{kind}_gpu_ms", f"{kind}_gpu_samples")
+            cpu = weighted(f"{kind}_cpu_ms", f"{kind}_frames")
+            if not math.isnan(gpu):
+                rows.append((f"GPU ({kind})", gpu, budget))
+            if not math.isnan(cpu):
+                # StartFrame→swap menos a espera (ociosa e pacer): o trabalho.
+                waits = (weighted(f"{kind}_cpu_idle", f"{kind}_frames") +
+                         weighted(f"{kind}_cpu_pacing", f"{kind}_frames"))
+                rows.append((f"render thread ocupada ({kind})", cpu - waits, budget))
+    pairs = [num(w.main, "game_pair_ms", math.nan) for w in windows if "game_pair_ms" in w.main]
+    p90 = [num(w.main, "game_pair_p90_ms", math.nan) for w in windows if "game_pair_p90_ms" in w.main]
+    if pairs:
+        rows.append(("lógica (par de passos, média)", sum(pairs) / len(pairs), 2.0 * budget))
+    if p90:
+        rows.append(("lógica (par de passos, p90)", sum(p90) / len(p90), 2.0 * budget))
+
+    print(f"  veredito 60 FPS (fps global {fmt(overall, 1)}; orçamento {fmt(budget, 1)} ms por quadro):")
+    if not gl_windows:
+        print("    sem glperf: GPU e render thread não medidos (crie config/gpu_timing no SD)")
+    over = []
+    for name, value, limit in rows:
+        share = 100.0 * value / limit
+        mark = "  <-- ESTOURA" if share > 100.0 else ("  (no limite)" if share > 90.0 else "")
+        print(f"    {name:<34}{fmt(value):>7} ms de {fmt(limit, 1):>5} ({share:4.0f}%){mark}")
+        if share > 100.0:
+            over.append(name)
+    hitches = []
+    for key in HITCHES:
+        series = [num(w.main, key) for w in windows if key in w.main]
+        if series and series[-1] > series[0]:
+            hitches.append(f"{key[6:]} {int(series[-1] - series[0])}")
+    if hitches:
+        print("    travadas na sessão: " + "  ".join(hitches))
+    if over:
+        print("    gargalo: " + ", ".join(over))
+    elif rows and overall < 57.0:
+        print("    nada estoura na média: a queda vem de picos (travadas ou janelas lentas)")
 
 
 def main() -> int:

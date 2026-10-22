@@ -694,6 +694,14 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   resumo por sessão (uma sessão nova começa quando `host_frames` diminui): fps, clocks, fases,
   memória e, com `glperf`, top etapas de GPU, CPU da render thread e contadores. Se o clock muda no
   meio da sessão, avisa (janela e clock antes/depois) e separa fps/`total_ms` por clock.
+  Em sessões a 60 FPS termina com o **veredito 60 FPS**: GPU e render thread *ocupada* (StartFrame→swap
+  menos ocioso e pacer) contra 16,7 ms, o par de passos da lógica (`game_pair_ms`) contra 33,3 ms e as
+  travadas (`hitch_*`) da sessão; marca o que estoura. Para ter GPU e render thread, `config/gpu_timing`.
+- Bench de input (`config/bench_record` / `config/bench_replay`, `oot3d_input_bench.h`): grava o
+  controle por quadro do jogo a partir do warp de boot e reproduz o mesmo trajeto em cada build; no
+  replay o próprio jogo passa a tela título. `~/oot3d-work/bench/run_bench.sh <nro> <rótulo>` roda no
+  Eden e tira a média do `perf.txt`. Serve para regressão de comportamento, não para medir velocidade
+  (ver lição 22).
 - `config/gpu_timing` (N, padrão 30): GPU por etapa com `GL_TIMESTAMP` sem bloquear, CPU da render
   thread por etapa, contadores de chamadas GL (ganchos nos ponteiros do glad), separado por tipo de
   quadro (`step`/`interp`/`hold`). `gpu_*` inclui espera da CPU quando a render thread é o gargalo.
@@ -831,6 +839,21 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
 20. Prompt de agente: dizer onde pode compilar (Ryzen) e o limite de temperatura do notebook.
 21. Congelou sem crash report: ver `logs/hang.txt` (watchdog) e onde a última linha do
     `perf.txt` foi cortada antes de supor deadlock.
+22. Não otimizar guiado pelo Eden (2026-10-22): ele roda o ARM do Switch por JIT no x86, varia 5–10%
+    entre rodadas iguais, a 1ª rodada de cada .nro é mais lenta (JIT frio) e, com a janela fora da tela
+    (workspace escondida no Hyprland), o FPS cai a ~⅓. O mesmo build fez 3 FPS escondido e 10 visível;
+    o console já fazia 30 FPS a 99,5%. Medir no console, com `config/gpu_timing`.
+23. Cota de blocos do whole-AOT no Switch é 2048 (pilha de 1 MiB da thread principal). Substituições
+    nativas com laço longo (reverb/delay de áudio, ~2–3 mil blocos) saem pela cota no meio do laço e o
+    resto roda na tradução, porque a retomada entra pelo `switch(entryPc)` da função traduzida, não pela
+    substituição. Subir a cota para 16384 não mudou a lógica no Eden (82 ms nas duas): não é o freio.
+24. O perfil guest (`config/guest_profile`) custa ~1,5 µs por entrada de bloco no Eden e dobra o tempo
+    do jogo; o perfil sai plano (nenhuma função > ~10%): o custo está espalhado na tradução, e
+    substituir função por função não chega a ganhos grandes.
+25. Os logs antigos do console já dizem muito: antes de pedir rodada nova, passar o `perf_report.py`
+    em `~/oot3d-work/switch-logs/*`. Em `iscale` (sessão 46, ~17/10, 60 FPS interpolado) a GPU usava
+    10,4 ms e a render thread 18,3 ms ocupada por quadro interpolado: o limite era CPU de render, com
+    ~1 MB de upload de textura por quadro mesmo nos quadros sem cena nova.
 
 ---
 
