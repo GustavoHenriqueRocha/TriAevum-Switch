@@ -7,6 +7,11 @@
 #include "fast/backends/gfx_metal.h"
 #include "fast/interpreter.h"
 #include "fast/backends/gfx_rendering_api.h"
+#ifdef ENABLE_OPENGL
+namespace Fast {
+void FlushDeferredWindowClear(); // gfx_opengl.h (its GL headers stay out)
+}
+#endif
 #ifdef ENABLE_OOT3D_VULKAN
 #include "fast/backends/gfx_vulkan.h"
 #endif
@@ -708,6 +713,7 @@ void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
             if (OpenGlContextCurrent()) {
+                FlushDeferredWindowClear();
                 ImGui_ImplOpenGL3_RenderDrawData(data);
             } else if (mRendererRouting.Deferred && data != nullptr && data->TotalVtxCount > 0) {
                 // Render worker (Switch): the copy is drawn where the context
@@ -715,6 +721,7 @@ void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
                 // that draw something (config/fps_counter, an open window) pay
                 // for it; the backend's device objects are made there once.
                 mRendererRouting.Deferred([copy = CloneImGuiDrawData(data)] {
+                    FlushDeferredWindowClear();
                     ImGui_ImplOpenGL3_NewFrame();
                     ImGui_ImplOpenGL3_RenderDrawData(copy.get());
                 });

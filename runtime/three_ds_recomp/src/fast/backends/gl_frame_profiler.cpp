@@ -275,6 +275,33 @@ inline void Add(Counter counter, uint64_t value = 1U) {
     gFrameCounters[counter] += value;
 }
 
+// Sonda: quem são os envios grandes de textura e as realocações de buffer
+// (o console mostrou 1 MB de textura e ~29 glBufferData em todo quadro,
+// até nos de reapresentação). Só a thread do contexto escreve; o
+// relatório lê sem trava (diagnóstico, um valor rasgado não importa).
+struct UploadProbe {
+    uint32_t TexW = 0, TexH = 0, TexCount = 0;
+    Stage TexStage{};
+    GLenum BufTarget = 0;
+    int64_t BufBytes = 0;
+    Stage BufStage{};
+};
+UploadProbe gUploadProbe;
+void NoteTexUpload(GLsizei w, GLsizei h, uint64_t bytes) {
+    if (bytes < 256U * 1024U) return;
+    auto& probe = gUploadProbe;
+    probe.TexW = static_cast<uint32_t>(w);
+    probe.TexH = static_cast<uint32_t>(h);
+    probe.TexStage = S().Cpu;
+    ++probe.TexCount;
+}
+void NoteBufferRealloc(GLenum target, GLsizeiptr bytes) {
+    auto& probe = gUploadProbe;
+    probe.BufTarget = target;
+    probe.BufBytes = static_cast<int64_t>(bytes);
+    probe.BufStage = S().Cpu;
+}
+
 uint64_t PixelBytes(GLenum format, GLenum type) {
     switch (type) {
     case GL_UNSIGNED_SHORT_5_6_5:
@@ -381,7 +408,7 @@ TRIAEVUM_GL_PERF_HOOK(glBindBufferRange,
                       (t, i, b, o, s), Add(kUboBinds))
 TRIAEVUM_GL_PERF_HOOK(glBufferData, (GLenum t, GLsizeiptr s, const void* d, GLenum u),
                       (t, s, d, u),
-                      Add(kBufferReallocs);
+                      Add(kBufferReallocs); NoteBufferRealloc(t, s);
                       if (d != nullptr && s > 0) Add(kBufferUploadBytes, static_cast<uint64_t>(s)))
 TRIAEVUM_GL_PERF_HOOK(glBufferSubData, (GLenum t, GLintptr o, GLsizeiptr s, const void* d),
                       (t, o, s, d),
@@ -394,18 +421,22 @@ TRIAEVUM_GL_PERF_HOOK(glTexImage2D,
                       (GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f,
                        GLenum y, const void* p),
                       (t, l, i, w, h, b, f, y, p),
-                      if (p != nullptr && w > 0 && h > 0)
-                          Add(kTextureUploadBytes,
-                              static_cast<uint64_t>(w) * static_cast<uint64_t>(h) *
-                                  PixelBytes(f, y)))
+                      if (p != nullptr && w > 0 && h > 0) {
+                          const uint64_t bytes = static_cast<uint64_t>(w) *
+                                                 static_cast<uint64_t>(h) * PixelBytes(f, y);
+                          Add(kTextureUploadBytes, bytes);
+                          NoteTexUpload(w, h, bytes);
+                      })
 TRIAEVUM_GL_PERF_HOOK(glTexSubImage2D,
                       (GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f,
                        GLenum ty, const void* p),
                       (t, l, x, y, w, h, f, ty, p),
-                      if (p != nullptr && w > 0 && h > 0)
-                          Add(kTextureUploadBytes,
-                              static_cast<uint64_t>(w) * static_cast<uint64_t>(h) *
-                                  PixelBytes(f, ty)))
+                      if (p != nullptr && w > 0 && h > 0) {
+                          const uint64_t bytes = static_cast<uint64_t>(w) *
+                                                 static_cast<uint64_t>(h) * PixelBytes(f, ty);
+                          Add(kTextureUploadBytes, bytes);
+                          NoteTexUpload(w, h, bytes);
+                      })
 TRIAEVUM_GL_PERF_HOOK(glCompressedTexImage2D,
                       (GLenum t, GLint l, GLenum i, GLsizei w, GLsizei h, GLint b, GLsizei s,
                        const void* d),
@@ -715,6 +746,15 @@ std::string TakeReport(uint64_t hostFrames) {
         << " gpu_timer=" << (state.GpuTimer ? 1 : 0) << " timer_bits=" << state.TimerBits
         << " gl_hooks=" << (state.Hooks ? 1 : 0) << " gpu_dropped=" << window.GpuDropped
         << " gpu_overflows=" << window.GpuOverflows << " unbalanced=" << window.Unbalanced;
+#if defined(TRIAEVUM_GL_PERF_GPU) && defined(__SWITCH__)
+    if (state.Hooks) {
+        const auto& probe = gUploadProbe;
+        out << " tex_big=" << probe.TexW << 'x' << probe.TexH << '@'
+            << kStageNames[static_cast<size_t>(probe.TexStage)] << " tex_big_n=" << probe.TexCount
+            << " realloc_last=0x" << std::hex << probe.BufTarget << std::dec << ':'
+            << probe.BufBytes << '@' << kStageNames[static_cast<size_t>(probe.BufStage)];
+    }
+#endif
     for (size_t kindIndex = 0; kindIndex < kKindCount; ++kindIndex) {
         const auto& kind = window.Kinds[kindIndex];
         if (kind.Frames == 0U) continue;

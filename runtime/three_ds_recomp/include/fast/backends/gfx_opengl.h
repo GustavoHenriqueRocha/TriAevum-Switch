@@ -198,6 +198,7 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     std::string BuildFsShader(const CCFeatures& cc_features);
     void SetPerDrawUniforms();
     void PrepareTriangleDraw();
+    void ClearFramebufferNow(bool color, bool depth);
     void BindArrayBufferForCurrentShader(GLuint buffer);
     bool EnsureOot3dShadow2dDepthEncodeProgram();
 
@@ -254,7 +255,28 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     // GL state may have changed outside consecutive PICA draws.
     bool mPicaGlStateForeign = true;
     std::unique_ptr<NativePicaState> mNativePica;
+
+  public:
+    // Switch: the window's back buffer is dequeued (blocking until the
+    // display frees one) on the first clear or draw into framebuffer 0. The
+    // frame-begin clear did that before the scene, which goes to its own
+    // framebuffers: the render thread waited 4-5 ms per frame with the
+    // scene unsubmitted. The clear is kept pending and done right before the
+    // window's first real use (scanout, UI, ImGui, copies, swap).
+    // config/gl_eager_clear keeps the old order.
+    void FlushDeferredWindowClear();
+
+  private:
+    bool mDeferWindowClear = false;
+    bool mWindowClearPending = false;
+    bool mWindowClearColor = false;
+    bool mWindowClearDepth = false;
+    float mWindowClearRgba[4] = {};
 };
+
+// The window clear left pending by the current OpenGL backend, if any
+// (ImGui and the swap draw to the window outside the backend).
+void FlushDeferredWindowClear();
 
 } // namespace Fast
 #endif

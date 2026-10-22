@@ -4073,6 +4073,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
             const int viewportY = (windowHeight - viewportHeight) / 2;
 
             GlPerf::Mark(GlPerf::Stage::Scanout);
+            FlushDeferredWindowClear();
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(viewportX, viewportY, viewportWidth, viewportHeight);
             glDisable(GL_DEPTH_TEST);
