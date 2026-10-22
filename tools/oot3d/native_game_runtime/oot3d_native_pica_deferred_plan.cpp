@@ -1,6 +1,8 @@
 #include "oot3d_native_pica_deferred_plan.h"
 #include "oot3d_switch_threads.h"
 
+#include "fast/oot3d/pica_texture_predecode.h"
+
 #include <chrono>
 #include <exception>
 #include <utility>
@@ -216,6 +218,56 @@ void Oot3dPicaDeferredPlanBuilder::LockBuild(
     nanoseconds.fetch_add(NanosecondsSince(started), std::memory_order_relaxed);
 }
 
+namespace {
+
+// A texture of a freshly built plan the worker decodes for the render thread
+// (bytes shared with the plan, so it outlives a plan the renderer takes).
+struct PredecodeJob {
+    ::Fast::Oot3d::PicaPredecodeKey Key;
+    uint8_t MaxMipLevel = 0U;
+    std::shared_ptr<const std::vector<uint8_t>> Bytes;
+};
+
+// Under the build lock: claims the plan's textures nobody decoded yet.
+// Shadow maps and render-target copies take other paths in the backend.
+void CollectPredecodeJobs(const Oot3dPicaVulkanDrawPlan& plan,
+                          std::vector<PredecodeJob>& jobs) {
+    auto& cache = ::Fast::Oot3d::SharedPicaPredecodeCache();
+    for (const auto& texture : plan.Textures) {
+        if (texture.State.Type == 2U || !texture.NativeContentHashAvailable ||
+            !texture.CopyReferences.empty() ||
+            texture.SharedNativeBytes == nullptr) {
+            continue;
+        }
+        const uint32_t levels = ::Fast::Oot3d::PicaTextureMipCount(
+            texture.State.Width, texture.State.Height,
+            texture.State.MaxMipLevel);
+        if (levels == 0U) {
+            continue;
+        }
+        const ::Fast::Oot3d::PicaPredecodeKey key{
+            texture.NativeContentHash, texture.State.Width,
+            texture.State.Height, texture.State.Format,
+            static_cast<uint8_t>(levels)};
+        if (cache.Claim(key)) {
+            jobs.push_back({key, texture.State.MaxMipLevel,
+                            texture.SharedNativeBytes});
+        }
+    }
+}
+
+void RunPredecodeJobs(std::vector<PredecodeJob>& jobs) {
+    auto& cache = ::Fast::Oot3d::SharedPicaPredecodeCache();
+    for (auto& job : jobs) {
+        cache.Put(job.Key, ::Fast::Oot3d::DecodePicaTextureMips(
+                               job.Key.Format, job.Key.Width, job.Key.Height,
+                               job.MaxMipLevel, *job.Bytes));
+    }
+    jobs.clear();
+}
+
+} // namespace
+
 uint64_t Oot3dPicaDeferredPlanBuilder::BuildSlotLocked(
     Oot3dPicaDeferredPlanBatch& batch, size_t index) {
     using Status = Oot3dPicaDeferredPlanBatch::SlotStatus;
@@ -280,6 +332,7 @@ void Oot3dPicaDeferredPlanBuilder::WorkerLoop() {
         uint64_t builds = 0U;
         uint64_t nanoseconds = 0U;
         bool stopping = false;
+        std::vector<PredecodeJob> predecode;
         for (size_t index = 0; index < batch->Status.size(); ++index) {
             // Nobody holds a placeholder of this batch any more (a dropped
             // frame, a reset): nothing left worth building.
@@ -296,7 +349,14 @@ void Oot3dPicaDeferredPlanBuilder::WorkerLoop() {
             if (spent != 0U) {
                 ++builds;
                 nanoseconds += spent;
+                if (mPredecodeTextures.load(std::memory_order_relaxed) && batch->Status[index] ==
+                        Oot3dPicaDeferredPlanBatch::SlotStatus::Built) {
+                    CollectPredecodeJobs(batch->Plans[index], predecode);
+                }
             }
+            buildLock.unlock();
+            // Outside the lock: the renderer may build or take plans meanwhile.
+            RunPredecodeJobs(predecode);
         }
         mWorkerBuilds.fetch_add(builds, std::memory_order_relaxed);
         mWorkerNanoseconds.fetch_add(nanoseconds, std::memory_order_relaxed);

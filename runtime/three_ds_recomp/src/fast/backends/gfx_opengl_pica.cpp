@@ -26,6 +26,7 @@
 #include "fast/renderer3ds/pica_composition_schedule.h"
 #include "fast/renderer3ds/pica_gl_shader_dialect.h"
 #include "oot3d/renderer/pica_texture_decode.h"
+#include "fast/oot3d/pica_texture_predecode.h"
 
 #include <algorithm>
 #include <array>
@@ -881,37 +882,13 @@ GLenum ToPicaGlWrap(uint8_t wrap) {
 }
 
 uint32_t PicaMipCount(const GfxNativePicaTextureView& texture) {
-    if (texture.Width == 0U || texture.Height == 0U) {
-        return 0U;
-    }
-    uint32_t width = texture.Width;
-    uint32_t height = texture.Height;
-    uint32_t levels = 1U;
-    while (width > 8U && height > 8U) {
-        ++levels;
-        width >>= 1U;
-        height >>= 1U;
-    }
-    return std::min(
-        levels, static_cast<uint32_t>(texture.MaxMipLevel) + 1U);
+    return Oot3d::PicaTextureMipCount(texture.Width, texture.Height,
+                                      texture.MaxMipLevel);
 }
 
 std::optional<size_t> PicaEncodedMipSize(
     uint8_t format, uint32_t width, uint32_t height) {
-    static constexpr std::array<uint8_t, 14> kNibblesPerPixel{
-        8U, 6U, 4U, 4U, 4U, 4U, 4U,
-        2U, 2U, 2U, 1U, 1U, 1U, 2U};
-    if (format >= kNibblesPerPixel.size() || width == 0U || height == 0U) {
-        return std::nullopt;
-    }
-    const uint64_t tiledWidth = (std::max(8U, width) + 7U) & ~7ULL;
-    const uint64_t tiledHeight = (std::max(8U, height) + 7U) & ~7ULL;
-    const uint64_t bytes =
-        (tiledWidth * tiledHeight * kNibblesPerPixel[format] + 1U) / 2U;
-    if (bytes > std::numeric_limits<size_t>::max()) {
-        return std::nullopt;
-    }
-    return static_cast<size_t>(bytes);
+    return Oot3d::PicaTextureEncodedMipSize(format, width, height);
 }
 
 GLint PicaGlMinFilter(const GfxNativePicaTextureView& texture,
@@ -2403,6 +2380,11 @@ PicaGlTexture& GetPicaGlTexture(
             if (mipLevels == 0U) {
                 throw std::runtime_error("PICA texture has no mip levels");
             }
+            // Decoded ahead by the PICA plan worker when it got here first
+            // (oot3d_native_pica_deferred_plan.cpp); same mips either way.
+            const auto predecoded = Oot3d::SharedPicaPredecodeCache().Take(
+                {contentHash, texture.Width, texture.Height,
+                 texture.NativeFormat, static_cast<uint8_t>(mipLevels)});
             size_t nativeOffset = 0U;
             for (uint32_t level = 0U; level < mipLevels; ++level) {
                 const uint32_t width =
@@ -2414,6 +2396,16 @@ PicaGlTexture& GetPicaGlTexture(
                 if (!encoded.has_value() ||
                     nativeOffset + *encoded > texture.NativeBytes.size()) {
                     throw std::runtime_error("PICA texture mip chain is truncated");
+                }
+                if (predecoded != nullptr) {
+                    glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(level),
+                                 GL_RGBA8, static_cast<GLsizei>(width),
+                                 static_cast<GLsizei>(height), 0, GL_RGBA,
+                                 GL_UNSIGNED_BYTE,
+                                 predecoded->Mips[level].data());
+                    result.Bytes += static_cast<uint64_t>(width) * height * 4U;
+                    nativeOffset += *encoded;
+                    continue;
                 }
                 std::vector<uint8_t> rgba8;
                 std::string decodeError;

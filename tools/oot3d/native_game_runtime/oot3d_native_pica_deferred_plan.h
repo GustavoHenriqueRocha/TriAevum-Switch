@@ -93,6 +93,12 @@ class Oot3dPicaDeferredPlanBuilder final {
     void Configure(bool deferred, bool worker);
     [[nodiscard]] bool Deferred() const noexcept { return mDeferred; }
     [[nodiscard]] bool WorkerEnabled() const noexcept { return mWorker; }
+    // The worker also decodes the new textures of each plan it builds into
+    // Fast::Oot3d::SharedPicaPredecodeCache(), which the GL backend uploads
+    // from instead of decoding on the render thread (pica_texture_predecode.h).
+    void SetPredecodeTextures(bool enabled) noexcept {
+        mPredecodeTextures.store(enabled, std::memory_order_relaxed);
+    }
     // Joins the worker (it finishes at most the plan it is building). Plans
     // still pending are built when resolved.
     void StopWorker();
@@ -156,6 +162,7 @@ class Oot3dPicaDeferredPlanBuilder final {
     std::shared_ptr<BatchPool> mPool = std::make_shared<BatchPool>();
     bool mDeferred = false;
     bool mWorker = false;
+    std::atomic<bool> mPredecodeTextures{false};
     std::mutex mBuildMutex;
     mutable std::mutex mQueueMutex;
     std::condition_variable mQueueReady;

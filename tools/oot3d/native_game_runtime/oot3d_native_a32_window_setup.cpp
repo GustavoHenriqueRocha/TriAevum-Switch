@@ -1435,6 +1435,17 @@ void NativeA32WindowSession::Setup() {
       picaPlanWorker = value == "1";
     }
 #endif
+    // Texture decode moved off the render thread (the hitches entering a new
+    // area). Only the OpenGL backend takes the decoded mips. Switch:
+    // config/no_texture_predecode turns it off.
+    bool predecodeTextures =
+        std::string_view(apiPointer->GetName()) == "OpenGL";
+#ifdef __SWITCH__
+    predecodeTextures = predecodeTextures &&
+        !std::filesystem::exists(
+            "sdmc:/switch/oot3dre/config/no_texture_predecode", picaPlanError);
+#endif
+    picaPlanBuilder.SetPredecodeTextures(predecodeTextures);
     picaPlanBuilder.Configure(deferredPicaPlans && parallelPresentation,
                               picaPlanWorker);
   }

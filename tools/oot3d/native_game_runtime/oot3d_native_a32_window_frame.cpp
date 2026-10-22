@@ -12,6 +12,7 @@
 #include "oot3d_hang_watchdog.h"
 #include "oot3d_heap_bin_check.h"
 #include "oot3d_fps_counter.h"
+#include "fast/oot3d/pica_texture_predecode.h"
 #include <imgui.h>
 #include "fast/backends/gl_frame_profiler.h"
 #if defined(__SWITCH__)
@@ -1113,6 +1114,16 @@ bool NativeA32WindowSession::RunFrame() {
                << Oot3dNativeGame::HitchCauseName(
                       static_cast<Oot3dNativeGame::HitchCause>(cause))
                << '=' << hitchCounts[cause].load(std::memory_order_relaxed);
+        // Textures the plan worker decoded ahead (hit) or the render thread
+        // still decoded itself (miss), since the start.
+        {
+          const auto predecode =
+              Fast::Oot3d::SharedPicaPredecodeCache().Snapshot();
+          perf << " predecode_hit=" << predecode.Hits
+               << " predecode_miss=" << predecode.Misses
+               << " predecode_evicted=" << predecode.Evicted
+               << " predecode_kb=" << (predecode.Bytes >> 10U);
+        }
         previousCadence = cadence;
         previousSuperseded = superseded;
       }

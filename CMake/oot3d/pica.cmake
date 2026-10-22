@@ -275,7 +275,7 @@ target_include_directories(oot3d_native_pica_vulkan_plan PUBLIC
     tools/oot3d/native_pica_frontend
 )
 target_link_libraries(oot3d_native_pica_vulkan_plan PUBLIC
-    oot3d_native_pica_submission)
+    oot3d_native_pica_submission oot3d_renderer_texture_decode)
 oot3d_target_defaults(oot3d_native_pica_vulkan_plan FOLDER Tools)
 
 add_executable(oot3d_native_pica_temporal_tests EXCLUDE_FROM_ALL
@@ -290,6 +290,13 @@ add_executable(oot3d_native_pica_deferred_plan_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_native_pica_deferred_plan_tests PRIVATE
     oot3d_native_pica_vulkan_plan)
 oot3d_target_defaults(oot3d_native_pica_deferred_plan_tests FOLDER Tests)
+
+# Texture decode ahead of the render thread (pica_texture_predecode.h).
+add_executable(oot3d_pica_texture_predecode_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_pica_texture_predecode_tests.cpp)
+target_link_libraries(oot3d_pica_texture_predecode_tests PRIVATE
+    oot3d_renderer_texture_decode)
+oot3d_target_defaults(oot3d_pica_texture_predecode_tests FOLDER Tests)
 
 # Reduced in-between path under the session's threads (run with ASan/TSan).
 add_executable(oot3d_native_reduced_replay_stress_tests EXCLUDE_FROM_ALL
