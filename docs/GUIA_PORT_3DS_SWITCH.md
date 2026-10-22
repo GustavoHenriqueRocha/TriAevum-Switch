@@ -594,11 +594,14 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   `NativeGpuFrameBusyTicks`) tiram o buraco; `config/interp_count_acquire_wait` volta a medida
   antiga. Teste: `oot3d_native_gpu_frame_timer_tests`. Junto, um `glFlush` logo antes do acquire
   entrega a cena já gravada à GPU enquanto a CPU espera (`config/gl_acquire_noflush` tira).
-- **Dois quadros em voo** (`config/frames_in_flight` = `2`; ausente = 1): com 1, o fim de quadro do
-  jogo espera a render thread terminar o quadro anterior, que espera o display; um passo longo
-  (16–18 ms) seguido de um intermediário curto não se compensa e o passo perde o refresh. O modelo
+- **Dois quadros em voo** (`config/frames_in_flight`): com 1, o fim de quadro do jogo espera a
+  render thread terminar o quadro anterior, que espera o display; um passo longo (16–18 ms) seguido
+  de um intermediário curto não se compensa e o passo perde o refresh. O modelo
   (`oot3d_native_cadence_governor_tests --report`, cenário "áreas lentas") com o passo de 21 ms:
-  55 → 59,7 imagens/s; 24 ms: 40,9 → 59,6. Custo: +1 quadro de latência.
+  55 → 59,7 imagens/s; 24 ms: 40,9 → 59,6. **No console travou** no primeiro warp (tour3b): jogo e
+  render thread dentro do `malloc` com o heap corrompido — estado compartilhado da sessão supõe o
+  jogo no máximo 1 quadro à frente. O stream suporta (`SetMaxFramesInFlight`, testado), a sessão
+  não: a chave é ignorada até auditar o que os comandos capturam por referência (rodar com TSan).
 - Resultado: fps60 com a versão "final 3" = 48,6 fps médios, 46% ≥ 55, velocidade 99,7%
   *(notas de sessão)*. Áreas pesadas ficam limitadas pela lógica no núcleo 0.
 
@@ -645,7 +648,10 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   (glperf `pica_bottom`). O agendador deixa fora da apresentação os draws, fills e transfers que só
   produzem essa tela (`oot3d_native_bottom_screen_skip.h`), tudo ou nada por amostra: nada sai se
   outro draw amostra ou escreve na memória dela, ou se um transfer a copia para algo usado. Uso em
-  amostra posterior não é visto: é o risco da chave. Teste: `oot3d_native_bottom_screen_skip_tests`.
+  amostra posterior não é visto: é o risco da chave. O transfer de topo (submetido à parte) conta
+  como transfer da amostra, e um transfer posterior cuja fonte foi pulada é deixado de fora
+  (`BottomSkipTracker`; antes o GL lançava "PICA display transfer source is missing" ~5 s após a
+  abertura) e esse alvo volta a ser desenhado. Teste: `oot3d_native_bottom_screen_skip_tests`.
 - Resolução: `config/resolution_scale` 1/2/2,5/3; FSR 1 (`config/upscaler=fsr`), AA, anisotropia. Em
   3× (720p) a GPU virou gargalo: 23,4 contra 28,5 FPS em 2×. Padrão 2×.
 
@@ -913,6 +919,10 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     marcar os bloqueios com timestamps antes e depois. Um governador alimentado com o span inflado
     descartava quase todo quadro intermediário: o contador `fps` (apresentações por segundo) seguia
     perto de 60, mas `interp_dropped` e `hold_2` mostravam ~30 imagens distintas.
+30. Pular trabalho de GPU que "ninguém usa" exige seguir a fonte até o fim: o transfer de topo é
+    submetido fora da lista de transfers da amostra e um transfer de quadro posterior pode ler o
+    alvo pulado. E mais folga na fila entre threads (2 quadros em voo) não é só um número: o heap
+    corrompeu em 21 s porque estado compartilhado supunha 1 quadro (2026-10-22).
 
 ---
 

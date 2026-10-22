@@ -159,6 +159,66 @@ void TestScratchReusedAcrossSamples() {
         plan.SkipDraw[0] == 0U && plan.SkippedDraws == 0U);
 }
 
+// Console tour3 (fps60fix.nro): "PICA display transfer source is missing"
+// ~5 s after boot. The top transfer, submitted apart from the sample's
+// transfers, read the skipped lower target; and a transfer of a later sample
+// can read one skipped earlier.
+void TestTopTransferReadingTheLowerTargetKeepsIt() {
+  auto sample = Usual();
+  // The scheduler appends the top transfer when it is not among them.
+  sample.Transfers.push_back({Range(kBottomColor, 240U * 320U * 4U),
+                              Range(kTopDisplay, 400U * 240U * 4U), true});
+  CHECK(!Plan(sample).Active);
+}
+
+// A backend that throws (here: counts) like GfxRenderingAPIOGL when a
+// transfer's source target was never drawn.
+struct FakeBackend {
+  std::vector<uint32_t> Targets;
+  int MissingSources = 0;
+  void Draw(uint32_t color) {
+    for (auto target : Targets)
+      if (target == color)
+        return;
+    Targets.push_back(color);
+  }
+  void Transfer(uint32_t input) {
+    for (auto target : Targets)
+      if (target == input)
+        return;
+    ++MissingSources;
+  }
+};
+
+void TestLaterTransferOfASkippedTargetIsLeftOut() {
+  constexpr uint64_t kNamespace = 7U;
+  BottomSkipTracker tracker;
+  FakeBackend backend;
+  // Sample 1: lower screen skipped (its own transfer too).
+  const auto plan = Plan(Usual());
+  CHECK(plan.Active);
+  backend.Draw(kTopColor);
+  tracker.Skipped(kNamespace, kBottomColor);
+  backend.Transfer(kTopColor);
+  // Sample 2: no lower-screen draw, a transfer out of it.
+  if (tracker.ForTransfer(kNamespace, kBottomColor) ==
+      BottomSkipTracker::TransferAction::Submit)
+    backend.Transfer(kBottomColor);
+  CHECK(backend.MissingSources == 0);
+  CHECK(tracker.SkippedTransfers() == 1U);
+  // From now on that target is drawn.
+  CHECK(tracker.Unsafe(kNamespace, kBottomColor));
+  CHECK(!tracker.Unsafe(kNamespace + 1U, kBottomColor));
+  // A target drawn again has its image: its transfers go through.
+  tracker.Drawn(kNamespace, kBottomColor);
+  CHECK(tracker.ForTransfer(kNamespace, kBottomColor) ==
+        BottomSkipTracker::TransferAction::Submit);
+  CHECK(tracker.ForTransfer(kNamespace, kTopColor) ==
+        BottomSkipTracker::TransferAction::Submit);
+  tracker.Reset();
+  CHECK(!tracker.Unsafe(kNamespace, kBottomColor));
+}
+
 } // namespace
 
 int main() {
@@ -170,6 +230,8 @@ int main() {
   TestKeptWhenATransferRunsIntoIt();
   TestPartialFillKept();
   TestScratchReusedAcrossSamples();
+  TestTopTransferReadingTheLowerTargetKeepsIt();
+  TestLaterTransferOfASkippedTargetIsLeftOut();
   if (gFailures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", gFailures);
     return 1;

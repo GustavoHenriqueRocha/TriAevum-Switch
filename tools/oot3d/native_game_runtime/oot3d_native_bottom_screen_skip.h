@@ -14,15 +14,25 @@
 // - a draw outside it renders into memory overlapping it;
 // - a transfer out of it lands on memory a drawn target or texture uses, or
 //   on the top screen's transfer.
-// A use in a later sample (a texture sampled frames later) is not seen:
-// that is the risk the config key exists for.
+// The sample's top transfer counts as one of its transfers even when it is
+// not among them (the scheduler submits it apart): reading the lower target
+// keeps everything.
+//
+// Across samples, BottomSkipTracker remembers which lower targets hold no
+// GPU image because their draws were skipped. A later transfer out of one
+// (the GL backend threw "PICA display transfer source is missing" ~5 s
+// after boot, console tour3) is left out instead of submitted, and the
+// target is never skipped again; a texture sampled frames later is still
+// not seen: that is the risk the config key exists for.
 //
 // Pure (no GL, no plan types): the scheduler adapts its sample to these
 // records (oot3d_native_pica_presentation_scheduler.cpp); host tests in
 // oot3d_native_bottom_screen_skip_tests.cpp.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace Oot3dNativeGame {
@@ -160,5 +170,61 @@ inline void PlanBottomScreenSkip(const std::vector<BottomSkipDraw> &draws,
   }
   plan.Active = true;
 }
+
+// Lower targets whose latest content was skipped, per render-target
+// namespace (render thread only; a handful of entries).
+class BottomSkipTracker final {
+public:
+  enum class TransferAction : uint8_t {
+    Submit,
+    // Its source was never drawn: leave the transfer (and, for the top
+    // one, the presentation) out.
+    Skip,
+  };
+
+  // Skipping a target someone once read without its image: never again.
+  [[nodiscard]] bool Unsafe(uint64_t targetNamespace,
+                            uint32_t colorAddress) const noexcept {
+    return Has(mUnsafe, {targetNamespace, colorAddress});
+  }
+  void Skipped(uint64_t targetNamespace, uint32_t colorAddress) {
+    const Key key{targetNamespace, colorAddress};
+    if (!Has(mSkipped, key))
+      mSkipped.push_back(key);
+  }
+  void Drawn(uint64_t targetNamespace, uint32_t colorAddress) {
+    Erase(mSkipped, {targetNamespace, colorAddress});
+  }
+  [[nodiscard]] TransferAction ForTransfer(uint64_t targetNamespace,
+                                           uint32_t inputAddress) {
+    const Key key{targetNamespace, inputAddress};
+    if (!Has(mSkipped, key))
+      return TransferAction::Submit;
+    if (!Has(mUnsafe, key))
+      mUnsafe.push_back(key);
+    ++mSkippedTransfers;
+    return TransferAction::Skip;
+  }
+  [[nodiscard]] uint64_t SkippedTransfers() const noexcept {
+    return mSkippedTransfers;
+  }
+  void Reset() {
+    mSkipped.clear();
+    mUnsafe.clear();
+    mSkippedTransfers = 0U;
+  }
+
+private:
+  using Key = std::pair<uint64_t, uint32_t>;
+  static bool Has(const std::vector<Key> &keys, const Key &key) noexcept {
+    return std::find(keys.begin(), keys.end(), key) != keys.end();
+  }
+  static void Erase(std::vector<Key> &keys, const Key &key) {
+    keys.erase(std::remove(keys.begin(), keys.end(), key), keys.end());
+  }
+  std::vector<Key> mSkipped;
+  std::vector<Key> mUnsafe;
+  uint64_t mSkippedTransfers = 0U;
+};
 
 } // namespace Oot3dNativeGame

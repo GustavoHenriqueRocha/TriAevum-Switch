@@ -39,6 +39,8 @@ struct Oot3dPicaPresentationSchedulerStats {
   // config/skip_bottom_screen: lower-screen draws left out of presentation.
   uint64_t SkippedBottomDraws = 0;
   uint64_t BottomSkipRefusedSamples = 0;
+  // Transfers out of a lower target skipped earlier, left out.
+  uint64_t BottomSkipMissingSources = 0;
   // Draws handed to the backend before their presentation sequence executed.
   uint64_t PreparedDraws = 0;
   uint64_t InterpolatedDraws = 0;
@@ -157,7 +159,7 @@ public:
 
 private:
   void PlanBottomSkip(const Oot3dPicaVisualFrameViewSample &sample,
-                      bool presentation);
+                      uint64_t renderTargetNamespace, bool presentation);
 
   using SnapshotTarget = std::pair<uint64_t, uint32_t>;
 
@@ -181,6 +183,7 @@ private:
   std::vector<BottomSkipTransfer> mBottomSkipTransfers;
   std::vector<BottomSkipRange> mBottomSkipScratch;
   BottomSkipPlan mBottomSkip;
+  BottomSkipTracker mBottomSkipTracker;
 };
 
 } // namespace Oot3dNativeGame

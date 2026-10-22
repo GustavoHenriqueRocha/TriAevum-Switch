@@ -120,7 +120,8 @@ bool Oot3dPicaPresentationScheduler::RestoreState(
 }
 
 void Oot3dPicaPresentationScheduler::PlanBottomSkip(
-    const Oot3dPicaVisualFrameViewSample &sample, bool presentation) {
+    const Oot3dPicaVisualFrameViewSample &sample, uint64_t renderTargetNamespace,
+    bool presentation) {
   mBottomSkip.Active = false;
   if (!mSkipBottomScreen || !presentation)
     return;
@@ -161,8 +162,14 @@ void Oot3dPicaPresentationScheduler::PlanBottomSkip(
                             : static_cast<uint64_t>(texture.Width) *
                                   texture.Height * 4U)};
     }
-    anyBottom = anyBottom || IsBottomScreenFramebuffer(draw.FramebufferWidth,
-                                                       draw.FramebufferHeight);
+    if (IsBottomScreenFramebuffer(draw.FramebufferWidth,
+                                  draw.FramebufferHeight)) {
+      // Once read without its image (a later transfer out of it): drawn.
+      if (mBottomSkipTracker.Unsafe(renderTargetNamespace,
+                                    framebuffer.ColorPhysicalAddress))
+        return;
+      anyBottom = true;
+    }
     mBottomSkipDraws.push_back(draw);
   }
   if (!anyBottom)
@@ -182,13 +189,26 @@ void Oot3dPicaPresentationScheduler::PlanBottomSkip(
     return {address, BottomSkipEnd(address, bytes == 0U ? 1U : bytes)};
   };
   mBottomSkipTransfers.clear();
+  bool topAmongTransfers = false;
   for (const auto &transfer : sample.DisplayTransfers) {
+    topAmongTransfers =
+        topAmongTransfers || SameTransfer(transfer, sample.TopTransfer);
     mBottomSkipTransfers.push_back(
         {extent(transfer.InputPhysicalAddress, transfer.Transfer.InputSize,
                 transfer.Transfer.TextureCopyBytes),
          extent(transfer.OutputPhysicalAddress, transfer.Transfer.OutputSize,
                 transfer.Transfer.TextureCopyBytes),
          SameTransfer(transfer, sample.TopTransfer)});
+  }
+  // Submitted apart when not among them (Execute): it must see it too.
+  if (!topAmongTransfers) {
+    const auto &top = sample.TopTransfer;
+    mBottomSkipTransfers.push_back(
+        {extent(top.InputPhysicalAddress, top.Transfer.InputSize,
+                top.Transfer.TextureCopyBytes),
+         extent(top.OutputPhysicalAddress, top.Transfer.OutputSize,
+                top.Transfer.TextureCopyBytes),
+         true});
   }
   PlanBottomScreenSkip(mBottomSkipDraws, mBottomSkipFills,
                        mBottomSkipTransfers, mBottomSkipScratch, mBottomSkip);
@@ -236,7 +256,7 @@ bool Oot3dPicaPresentationScheduler::Execute(
   const bool presentation =
       kind != Oot3dPicaPresentationExecutionKind::DependencyFlush &&
       kind != Oot3dPicaPresentationExecutionKind::NativeFrame;
-  PlanBottomSkip(sample, presentation);
+  PlanBottomSkip(sample, renderTargetNamespace, presentation);
   const auto skipDraw = [&](size_t index) {
     return mBottomSkip.Active && mBottomSkip.SkipDraw[index] != 0U;
   };
@@ -352,6 +372,7 @@ bool Oot3dPicaPresentationScheduler::Execute(
   size_t fillIndex = 0;
   size_t transferIndex = 0;
   bool topSnapshotExecuted = false;
+  bool topSourceSkipped = false;
   const auto fills = sample.MemoryFills;
   const auto transfers = sample.DisplayTransfers;
   const auto submitFill = [&](const Oot3dPicaMemoryFillSubmission &fill) {
@@ -374,6 +395,18 @@ bool Oot3dPicaPresentationScheduler::Execute(
         mBottomSkip.SkipTransfer[static_cast<size_t>(&transfer -
                                                      transfers.data())] != 0U)
       return true;
+    // Out of a lower target skipped in an earlier sample: no GPU image to
+    // copy (the backend threw "source is missing"). Left out, and that
+    // target is drawn from now on.
+    if (mSkipBottomScreen &&
+        mBottomSkipTracker.ForTransfer(renderTargetNamespace,
+                                       transfer.InputPhysicalAddress) ==
+            BottomSkipTracker::TransferAction::Skip) {
+      ++mStats.BottomSkipMissingSources;
+      if (SameTransfer(transfer, sample.TopTransfer))
+        topSourceSkipped = true;
+      return true;
+    }
     OptionalTimer timer(mTimings.Enabled, mTimings.SnapshotTransferSeconds);
     // Real execution publishes byte visibility and discharges PPF, including
     // guarded deferred RAM. Replayed/interpolated/restored transfers recreate
@@ -411,7 +444,12 @@ bool Oot3dPicaPresentationScheduler::Execute(
     }
     if (skipDraw(drawIndex)) {
       ++mStats.SkippedBottomDraws;
+      mBottomSkipTracker.Skipped(renderTargetNamespace,
+                                 draw.State.Framebuffer.ColorPhysicalAddress);
     } else {
+    if (mSkipBottomScreen)
+      mBottomSkipTracker.Drawn(renderTargetNamespace,
+                               draw.State.Framebuffer.ColorPhysicalAddress);
     const auto overrides = drawView.Overrides();
     {
       OptionalTimer timer(mTimings.Enabled, mTimings.DrawSubmissionSeconds);
@@ -466,6 +504,10 @@ bool Oot3dPicaPresentationScheduler::Execute(
     }
   } else {
     ++mStats.RedundantTopSnapshotCopiesAvoided;
+  }
+  if (present && topSourceSkipped) {
+    // Nothing to show from this sample: the previous picture stays.
+    return true;
   }
   if (present) {
     {
@@ -525,6 +567,7 @@ void Oot3dPicaPresentationScheduler::Reset() {
   mExecutedDrawsThisPresentation.clear();
   mCompositionDrawScratch.clear();
   mSnapshotCompletions.clear();
+  mBottomSkipTracker.Reset();
   mTimings = {};
   mTimings.Enabled = timingEnabled;
   ++mStats.Resets;

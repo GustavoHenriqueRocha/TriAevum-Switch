@@ -1447,20 +1447,18 @@ void NativeA32WindowSession::Setup() {
       renderStream.Drain();
     }
 #if defined(__SWITCH__)
-    // config/frames_in_flight (1 or 2; absent = 1): with 2 the game thread
-    // starts the next host frame while the renderer still waits for the
-    // display on the previous one (one frame more of latency). The pipeline
-    // model (oot3d_native_cadence_governor_tests --report) puts the slow
-    // areas of tour2 (game step 18-24 ms) back at 60 with 2.
+    // config/frames_in_flight=2 is ignored: on the console (fps60fix.nro,
+    // tour3b) it froze at the first warp with the game and render threads
+    // inside malloc (heap corrupted: state shared by the two threads assumes
+    // the guest at most one frame ahead of the renderer). The stream supports
+    // it (SetMaxFramesInFlight, tested); the session does not yet.
     {
-      std::ifstream framesInFlightFile(
-          "sdmc:/switch/oot3dre/config/frames_in_flight");
-      unsigned framesInFlight = 1U;
-      if (framesInFlightFile.good()) {
-        if (!(framesInFlightFile >> framesInFlight)) framesInFlight = 2U;
+      std::error_code framesInFlightError;
+      if (std::filesystem::exists("sdmc:/switch/oot3dre/config/frames_in_flight",
+                                  framesInFlightError)) {
+        std::fprintf(stderr, "TRIAEVUM frames_in_flight ignorado (1 quadro em voo)\n");
       }
-      renderStream.SetMaxFramesInFlight(
-          std::clamp<unsigned>(framesInFlight, 1U, 2U));
+      renderStream.SetMaxFramesInFlight(1U);
     }
 #endif
     // The ImGui overlay (and the display composition it triggers) renders
