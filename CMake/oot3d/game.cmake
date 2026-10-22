@@ -307,6 +307,7 @@ if (TARGET oot3d_native_a32_aot OR TARGET oot3d_native_whole_aot OR
         tools/oot3d/native_game_runtime/oot3d_native_pcm_diagnostics.cpp
         tools/oot3d/native_game_runtime/oot3d_native_controls_settings_panel.cpp
         tools/oot3d/native_game_runtime/oot3d_game_language_panel.cpp
+        tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp
         tools/oot3d/native_game_runtime/oot3d_savestate_panel.cpp
         tools/oot3d/native_game_runtime/oot3d_savestate_settings.cpp
         tools/oot3d/native_game_runtime/oot3d_scene_environment.cpp
@@ -340,6 +341,9 @@ if (TARGET oot3d_native_a32_aot OR TARGET oot3d_native_whole_aot OR
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/oot3d/decomp_support/include")
         target_link_libraries(oot3d_dev_warp_tests PRIVATE oot3d_native_game_runtime)
         oot3d_target_defaults(oot3d_dev_warp_tests FOLDER Tests)
+        add_executable(oot3d_video_settings_tests EXCLUDE_FROM_ALL
+            tools/oot3d/native_game_runtime/oot3d_video_settings_tests.cpp)
+        oot3d_target_defaults(oot3d_video_settings_tests FOLDER Tests)
         # Scene environment profiles for agents and scripts (validate, format,
         # explain), without starting the game.
         add_executable(triaevum_environment_tool EXCLUDE_FROM_ALL

@@ -925,6 +925,10 @@ void NativeA32WindowSession::Setup() {
   applicationSettingsTabs.push_back(
       Oot3dNativeGame::CreateSavestatePanel(savestateLibrary));
   applicationSettingsTabs.push_back(Oot3dNativeGame::CreateGameLanguagePanel(languageSettings));
+#if defined(__SWITCH__)
+  applicationSettingsTabs.push_back(
+      Oot3dNativeGame::CreateVideoSettingsPanel("sdmc:/switch/oot3dre/config"));
+#endif
 #if defined(TRIAEVUM_DEVELOPER_TOOLS)
   devWarp = std::make_shared<Oot3dNativeGame::DevWarpRuntime>(
       std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "developer-tools.json");

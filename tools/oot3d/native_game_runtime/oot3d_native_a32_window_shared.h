@@ -17,6 +17,7 @@
 #include "fast/renderer3ds/slow_step_trace.h"
 #include "oot3d_native_preparation_screen.h"
 #include "oot3d_game_language_panel.h"
+#include "oot3d_video_settings_panel.h"
 #include "oot3d_graphics_settings_schedule.h"
 #include "oot3d_scene_environment.h"
 #ifdef OOT3D_WHOLE_AOT_PRODUCT_MODE
