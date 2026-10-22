@@ -854,6 +854,13 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     em `~/oot3d-work/switch-logs/*`. Em `iscale` (sessão 46, ~17/10, 60 FPS interpolado) a GPU usava
     10,4 ms e a render thread 18,3 ms ocupada por quadro interpolado: o limite era CPU de render, com
     ~1 MB de upload de textura por quadro mesmo nos quadros sem cena nova.
+26. Etapa `clear` cara na render thread (4-5 ms) é espera, não trabalho: o EGL do Mesa no Switch
+    (`egl_switch.c`) só chama `nwindowDequeueBuffer` (bloqueante) no primeiro clear/desenho do
+    framebuffer 0. Limpar a janela no começo do quadro trava a thread antes da cena (que vai para
+    FBOs próprios). Deixar o clear da janela pendente até o primeiro uso real (scanout, UI, ImGui,
+    cópias, fim do quadro): `GfxRenderingAPIOGL::FlushDeferredWindowClear`, `config/gl_eager_clear`
+    desliga. Descontada essa espera, os 18,3 ms "ocupados" da lição 25 viram ~13,6 ms. Vale para
+    qualquer port com o mesmo Mesa: medir o clear da janela antes de culpar a CPU.
 
 ---
 
