@@ -336,3 +336,12 @@ add_executable(oot3d_native_a32_input_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_native_a32_input_tests PRIVATE
     oot3d_native_a32_input)
 oot3d_target_defaults(oot3d_native_a32_input_tests FOLDER Tests)
+
+# Input bench: a walk recorded after the boot warp replays frame for frame
+# (oot3d_input_bench.h; config/bench_record, config/bench_replay).
+add_executable(oot3d_input_bench_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_input_bench_tests.cpp
+)
+target_link_libraries(oot3d_input_bench_tests PRIVATE
+    oot3d_native_a32_input)
+oot3d_target_defaults(oot3d_input_bench_tests FOLDER Tests)

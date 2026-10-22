@@ -12,6 +12,9 @@
 #include "oot3d_hang_watchdog.h"
 #include "oot3d_heap_bin_check.h"
 #include "oot3d_fps_counter.h"
+#if defined(__SWITCH__)
+#include "fast/oot3d/debug_menu.h"
+#endif
 #include "fast/oot3d/pica_texture_predecode.h"
 #include <imgui.h>
 #include "fast/backends/gl_frame_profiler.h"
@@ -1524,6 +1527,9 @@ bool NativeA32WindowSession::SampleGuestRefreshInput(
           nativeCandidateDispatch.TopScreenVersionChoiceReveal)) {
     uiLifecycleBridge.RevealNativeVersionChoice();
   }
+#if defined(TRIAEVUM_DEVELOPER_TOOLS)
+  UpdateInputBench(inputFrame);
+#endif
   inputDiagnostics.Observe(inputFrame);
   if (inputFrame.Exit) {
     window.Close();
@@ -3415,6 +3421,41 @@ void NativeA32WindowSession::UpdateDevLab(uint64_t guestFrame) {
       finish("timeout", {{"frame", guestFrame}, {"applied", applied}, {"activeCamera", activeCamera}});
   } else if (op == "wait") {
     if (devLabFrames >= command.value("frames", 30U)) finish("ok", place());
+  }
+}
+
+void NativeA32WindowSession::UpdateInputBench(Oot3dNativeGame::NativeA32InputFrame &inputFrame) {
+  using Bench = Oot3dNativeGame::InputBench;
+  if (inputBench.GetMode() == Bench::Mode::Off || devWarp == nullptr) return;
+  const bool arrived = devWarp->Status().Phase == Oot3dNativeGame::DevWarpPhase::Arrived;
+#if defined(__SWITCH__)
+  const bool stop = Fast::Oot3d::DebugMenuOpen();
+  const std::filesystem::path root = "sdmc:/switch/oot3dre";
+#else
+  const bool stop = false;
+  const std::filesystem::path root = ".";
+#endif
+  const auto event = inputBench.Step(frameCount, arrived, stop, inputFrame);
+  if (event == Bench::Event::None) return;
+  const bool recording = inputBench.GetMode() == Bench::Mode::Record;
+  std::ofstream status(root / "logs" / "bench_status.txt", std::ios::trunc);
+  if (event == Bench::Event::Started) {
+    inputBenchStarted = std::chrono::steady_clock::now();
+    status << (recording ? "recording" : "replaying") << " guest_frame=" << frameCount << '\n';
+    return;
+  }
+  const double seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - inputBenchStarted).count();
+  const uint32_t frames = inputBench.WalkFrame();
+  if (recording) {
+    std::error_code ignored;
+    std::filesystem::create_directories(root / "bench", ignored);
+    std::ofstream(root / "bench" / "input.json", std::ios::trunc) << inputBench.Recording().ToJson();
+    status << "recorded frames=" << inputBench.Recording().EndFrame()
+           << " segments=" << inputBench.Recording().SegmentCount() << " seconds=" << seconds << '\n';
+  } else {
+    status << "done frames=" << frames << " seconds=" << seconds
+           << " guest_fps=" << (seconds > 0.0 ? frames / seconds : 0.0) << '\n';
   }
 }
 

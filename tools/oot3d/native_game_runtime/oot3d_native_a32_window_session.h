@@ -12,6 +12,7 @@
 #include "fast/renderer3ds/pica_program_preparation.h"
 #include "fast/renderer3ds/slow_step_trace.h"
 #include "oot3d_native_preparation_screen.h"
+#include "oot3d_input_bench.h"
 #include "oot3d_game_language_panel.h"
 #include "oot3d_graphics_settings_schedule.h"
 #include "oot3d_scene_environment.h"
@@ -389,6 +390,12 @@ private:
   // Moves the free camera from the pad, keyboard and mouse and withholds that
   // input from the game while it is active.
   void UpdateDevFreeCamera(Oot3dNativeGame::NativeA32InputFrame &inputFrame);
+  // config/bench_record, config/bench_replay: a walk recorded or replayed
+  // from the boot warp's arrival (oot3d_input_bench.h); the result goes to
+  // logs/bench_status.txt, the recording to bench/input.json.
+  Oot3dNativeGame::InputBench inputBench;
+  std::chrono::steady_clock::time_point inputBenchStarted{};
+  void UpdateInputBench(Oot3dNativeGame::NativeA32InputFrame &inputFrame);
 #endif
   Oot3dNativeGame::TopScreenTextureOverridePack topScreenTextureOverridePack;
   Oot3dNativeGame::NativeHdFontRuntime hdFonts;

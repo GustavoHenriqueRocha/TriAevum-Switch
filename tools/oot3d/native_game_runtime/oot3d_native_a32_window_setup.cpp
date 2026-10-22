@@ -928,6 +928,25 @@ void NativeA32WindowSession::Setup() {
 #if defined(TRIAEVUM_DEVELOPER_TOOLS)
   devWarp = std::make_shared<Oot3dNativeGame::DevWarpRuntime>(
       std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "developer-tools.json");
+#if defined(__SWITCH__)
+  {
+    // The input bench (oot3d_input_bench.h): replay wins over record.
+    using Bench = Oot3dNativeGame::InputBench;
+    std::error_code ignored;
+    const std::filesystem::path root = "sdmc:/switch/oot3dre";
+    if (std::filesystem::exists(root / "config" / "bench_replay", ignored)) {
+      try {
+        inputBench = Bench(Bench::Mode::Replay,
+                           Oot3dNativeGame::NativeA32InputTimeline::LoadFile(root / "bench" / "input.json"));
+      } catch (const std::exception &exception) {
+        std::ofstream(root / "logs" / "bench_status.txt", std::ios::trunc)
+            << "failed " << exception.what() << '\n';
+      }
+    } else if (std::filesystem::exists(root / "config" / "bench_record", ignored)) {
+      inputBench = Bench(Bench::Mode::Record);
+    }
+  }
+#endif
   applicationSettingsTabs.push_back(
       Oot3dNativeGame::CreateDevToolsPanel(devWarp, nativeCandidateDispatch.DevFreeCamera,
                                            languageSettings->BootLanguage()));

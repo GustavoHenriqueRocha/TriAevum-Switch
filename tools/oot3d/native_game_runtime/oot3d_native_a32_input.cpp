@@ -91,9 +91,8 @@ int16_t ReadCircleAxis(const nlohmann::json& segment, const char* key) {
     return static_cast<int16_t>(std::lround(value * kCirclePadMaximum));
 }
 
-uint32_t ButtonMask(std::string_view name) {
-    constexpr std::array<std::pair<std::string_view, NativeA32HidButton>, 16>
-        buttons{{
+constexpr std::array<std::pair<std::string_view, NativeA32HidButton>, 16>
+    kTimelineButtons{{
             {"a", NativeA32HidButton::A},
             {"b", NativeA32HidButton::B},
             {"select", NativeA32HidButton::Select},
@@ -111,7 +110,9 @@ uint32_t ButtonMask(std::string_view name) {
             {"zl", NativeA32HidButton::Zl},
             {"zr", NativeA32HidButton::Zr},
         }};
-    for (const auto& [candidate, button] : buttons) {
+
+uint32_t ButtonMask(std::string_view name) {
+    for (const auto& [candidate, button] : kTimelineButtons) {
         if (candidate == name) {
             return NativeA32HidButtonMask(button);
         }
@@ -603,6 +604,60 @@ const std::filesystem::path& NativeA32InputTimeline::SourcePath() const {
 
 NativeA32InputTimelineFrameOrigin NativeA32InputTimeline::FrameOrigin() const {
     return mFrameOrigin;
+}
+
+uint32_t NativeA32InputTimeline::EndFrame() const {
+    return mSegments.empty() ? 0U : mSegments.back().EndFrameExclusive;
+}
+
+void NativeA32InputRecorder::Observe(uint32_t frame,
+                                     const ThreeDsRecomp::Input::InputFrame& input) {
+    Segment sample;
+    sample.Start = frame;
+    sample.End = frame + 1U;
+    sample.Buttons = input.Hid.Buttons;
+    // The timeline stores axes in [-1, 1] of the circle pad's range.
+    const auto axis = [](int32_t value) {
+        return static_cast<int16_t>(std::clamp<int32_t>(
+            value, -static_cast<int32_t>(kCirclePadMaximum), static_cast<int32_t>(kCirclePadMaximum)));
+    };
+    sample.CircleX = axis(input.Hid.CirclePadX);
+    sample.CircleY = axis(input.Hid.CirclePadY);
+    sample.RightX = axis(input.CStick.X);
+    sample.RightY = axis(input.CStick.Y);
+    if (!mSegments.empty()) {
+        auto& last = mSegments.back();
+        if (last.End == frame && last.Buttons == sample.Buttons && last.CircleX == sample.CircleX &&
+            last.CircleY == sample.CircleY && last.RightX == sample.RightX && last.RightY == sample.RightY) {
+            last.End = sample.End;
+            return;
+        }
+    }
+    mSegments.push_back(sample);
+}
+
+std::string NativeA32InputRecorder::ToJson() const {
+    nlohmann::json segments = nlohmann::json::array();
+    for (const auto& segment : mSegments) {
+        nlohmann::json buttons = nlohmann::json::array();
+        for (const auto& [name, button] : kTimelineButtons)
+            if ((segment.Buttons & NativeA32HidButtonMask(button)) != 0U) buttons.push_back(name);
+        nlohmann::json entry = {{"start_frame", segment.Start},
+                                {"end_frame_exclusive", segment.End}};
+        if (!buttons.empty()) entry["buttons"] = std::move(buttons);
+        const auto put = [&](const char* key, int16_t value) {
+            if (value != 0) entry[key] = static_cast<double>(value) / kCirclePadMaximum;
+        };
+        put("circle_x", segment.CircleX);
+        put("circle_y", segment.CircleY);
+        put("right_x", segment.RightX);
+        put("right_y", segment.RightY);
+        segments.push_back(std::move(entry));
+    }
+    return nlohmann::json{{"schema", kInputTimelineSchema},
+                          {"frame_origin", "guest"},
+                          {"segments", std::move(segments)}}
+        .dump(1);
 }
 
 NativeA32InputFrame NativeA32InputTimeline::Sample(uint32_t guestFrame,

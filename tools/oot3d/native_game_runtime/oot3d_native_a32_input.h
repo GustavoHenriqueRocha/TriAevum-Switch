@@ -233,6 +233,8 @@ class NativeA32InputTimeline {
     const std::filesystem::path& SourcePath() const;
     NativeA32InputTimelineFrameOrigin FrameOrigin() const;
     NativeA32InputFrame Sample(uint32_t guestFrame, uint32_t runFrame) const;
+    // One past the last scripted frame (0 when empty).
+    uint32_t EndFrame() const;
 
   private:
     struct Segment : ThreeDsRecomp::Input::InputFrame {
@@ -244,6 +246,30 @@ class NativeA32InputTimeline {
     std::vector<Segment> mSegments;
     NativeA32InputTimelineFrameOrigin mFrameOrigin =
         NativeA32InputTimelineFrameOrigin::Guest;
+};
+
+// Records the guest input frame by frame as an input timeline (the format
+// NativeA32InputTimeline loads, frame origin "guest"): one segment per run
+// of identical frames. Buttons, circle pad and C-stick; no touch or motion.
+class NativeA32InputRecorder {
+  public:
+    // `frame` counts from 0 and grows by one per call.
+    void Observe(uint32_t frame, const ThreeDsRecomp::Input::InputFrame& input);
+    size_t SegmentCount() const { return mSegments.size(); }
+    uint32_t EndFrame() const { return mSegments.empty() ? 0U : mSegments.back().End; }
+    std::string ToJson() const;
+
+  private:
+    struct Segment {
+        uint32_t Start = 0;
+        uint32_t End = 0;
+        uint32_t Buttons = 0;
+        int16_t CircleX = 0;
+        int16_t CircleY = 0;
+        int16_t RightX = 0;
+        int16_t RightY = 0;
+    };
+    std::vector<Segment> mSegments;
 };
 
 } // namespace Oot3dNativeGame
