@@ -640,6 +640,14 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   (−2,0 MB por programa no host). O resto (~6–8 MB por programa no console contra ~1,5 MB do 20.1) é
   do nvc0 guardando o NIR inteiro: só com patch no Mesa.
 - A 30 FPS com cache quente os dois empatam *(notas de sessão)*; com cache frio o 26 trava mais.
+- **Cache pronto no pacote** (2026-10-22): a chave do cache do Mesa é o build do Mesa + o chip + a
+  fonte do shader, sem nada do aparelho; os `.src` do `shadercache/` (fontes PICA→GLSL que o
+  warm-up da abertura compila) somam entre SDs. Como gerar: passar por todas as áreas (warp pelo
+  canal lab, 5 s cada, ver 5.3) no console ou no Eden, juntar os `.src` (união) no SD do console,
+  abrir o jogo uma vez (warm-up compila e grava o `mesacache/`, inclusive a pasta
+  `mesa_shader_cache_sf/<id>/NV12B/*.foz`) e copiar `shadercache/` + `mesacache/` para o pacote.
+  Conferir em `shadercache/status.txt`: `warmup_skipped=0` e `warmup_seconds` baixo (269 shaders
+  em 2,3 s). No tour, áreas como Water Temple foram de 11,7 a 44 FPS só com o cache quente.
 
 ### 4.10 Crash reports do Atmosphère
 
@@ -702,6 +710,15 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   replay o próprio jogo passa a tela título. `~/oot3d-work/bench/run_bench.sh <nro> <rótulo>` roda no
   Eden e tira a média do `perf.txt`. Serve para regressão de comportamento, não para medir velocidade
   (ver lição 22).
+- Canal lab (`config/dev_lab`, `oot3d_dev_lab.h`): comandos JSON por linha em
+  `lab/commands.jsonl` (warp, wait, capture, status, graphics, peek...), respostas em
+  `lab/acks.jsonl`. No console o FTP do Sphaira **fecha com o jogo aberto**: deixar um roteiro em
+  `lab/script.jsonl`, que o jogo lê uma vez na abertura (renomeia para `script.running`), começando
+  por `{"op":"gameplay"}` (espera o jogador ter o controle). Tour de desempenho: warp por cada área
+  "Better" (0..48; a 49 é a sala Debug e congela) + `wait` de 300 quadros, depois
+  `tools/oot3d/lab_tour_report.py` casa as janelas do `perf.txt` com os acks pelo quadro do guest
+  (soma de `guest_fps × 150/fps` por janela) e ordena as áreas por FPS. Rodar **duas vezes**: a
+  primeira passada mede compilação de shader, a segunda o peso real.
 - `config/gpu_timing` (N, padrão 30): GPU por etapa com `GL_TIMESTAMP` sem bloquear, CPU da render
   thread por etapa, contadores de chamadas GL (ganchos nos ponteiros do glad), separado por tipo de
   quadro (`step`/`interp`/`hold`). `gpu_*` inclui espera da CPU quando a render thread é o gargalo.
@@ -861,6 +878,13 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     cópias, fim do quadro): `GfxRenderingAPIOGL::FlushDeferredWindowClear`, `config/gl_eager_clear`
     desliga. Descontada essa espera, os 18,3 ms "ocupados" da lição 25 viram ~13,6 ms. Vale para
     qualquer port com o mesmo Mesa: medir o clear da janela antes de culpar a CPU.
+27. FTP de homebrew de menu (Sphaira) só existe com o menu aberto: para automatizar algo durante o
+    jogo, o comando tem que estar no SD antes da abertura (roteiro lido no boot) ou vir de um
+    sysmodule. O Wi-Fi do Switch também dorme com a tela apagada: o FTP some até acordar.
+28. Medir por área antes de otimizar (2026-10-22): no tour com cache quente, 20 de 49 áreas ficaram
+    cravadas em 60 e as piores (Water Temple 44, Market 46, Castle Town Buildings 51) têm o guest
+    acima de 12 ms por quadro: é lógica do jogo, não GPU. Uma área só (o Mercado) não representa o
+    jogo.
 
 ---
 
