@@ -62,6 +62,19 @@ public:
       mSettings.Fps60 = rate == 1;
       changed = true;
     }
+    const char *const upscalers[] = {"FSR + nitidez (padrao)", "FSR sem nitidez",
+                                     "Linear (mais leve)"};
+    int upscaler = static_cast<int>(mSettings.Upscaler);
+    if (ImGui::Combo("Ampliacao", &upscaler, upscalers, 3)) {
+      mSettings.Upscaler = static_cast<VideoSettings::Upscale>(upscaler);
+      changed = true;
+    }
+    const char *const filters[] = {"Desligado", "4x (padrao)"};
+    int anisotropy = mSettings.Anisotropy ? 1 : 0;
+    if (ImGui::Combo("Filtro anisotropico", &anisotropy, filters, 2)) {
+      mSettings.Anisotropy = anisotropy == 1;
+      changed = true;
+    }
     if (changed) mError = mSettings.Save(mConfig);
     if (!mError.empty())
       ImGui::TextWrapped("Nao foi possivel gravar config/%s.", mError.c_str());

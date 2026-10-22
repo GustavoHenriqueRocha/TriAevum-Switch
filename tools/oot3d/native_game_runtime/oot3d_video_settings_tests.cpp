@@ -56,6 +56,25 @@ int main() {
     Require(!std::filesystem::exists(dir / "fps60"), "fps60 removed");
     Require(VideoSettings::Load(dir) == saved, "round trip without fps60");
 
+    // Upscaler, sharpen and anisotropy: files only away from the default.
+    saved.Upscaler = VideoSettings::Upscale::Linear;
+    saved.Anisotropy = false;
+    Require(saved.Save(dir).empty(), "save linear");
+    Require(VideoSettings::Load(dir) == saved, "round trip linear, no anisotropy");
+    saved.Upscaler = VideoSettings::Upscale::Fsr;
+    Require(saved.Save(dir).empty(), "save fsr without sharpen");
+    Require(!std::filesystem::exists(dir / "upscaler"), "fsr needs no upscaler file");
+    Require(VideoSettings::Load(dir) == saved, "round trip fsr without sharpen");
+    saved.Upscaler = VideoSettings::Upscale::FsrSharpen;
+    saved.Anisotropy = true;
+    Require(saved.Save(dir).empty(), "save defaults");
+    for (const char *name : {"upscaler", "sharpen", "anisotropy"})
+      Require(!std::filesystem::exists(dir / name), std::string(name) + " removed");
+    WriteText(dir / "upscaler", "FSR1");
+    Require(VideoSettings::Load(dir).Upscaler == VideoSettings::Upscale::FsrSharpen, "FSR1 is fsr");
+    WriteText(dir / "anisotropy", "8");
+    Require(VideoSettings::Load(dir).Anisotropy, "8x counts as on");
+
     std::filesystem::remove_all(dir);
   } catch (const std::exception &error) {
     std::cerr << "FAIL: " << error.what() << '\n';
