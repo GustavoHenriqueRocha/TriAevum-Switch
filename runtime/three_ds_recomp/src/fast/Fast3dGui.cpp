@@ -650,6 +650,15 @@ void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
         case WindowBackend::FAST3D_SDL_OPENGL:
             if (OpenGlContextCurrent()) {
                 ImGui_ImplOpenGL3_RenderDrawData(data);
+            } else if (mRendererRouting.Deferred && data != nullptr && data->TotalVtxCount > 0) {
+                // Render worker (Switch): the copy is drawn where the context
+                // is current, in renderer order (before the swap). Only frames
+                // that draw something (config/fps_counter, an open window) pay
+                // for it; the backend's device objects are made there once.
+                mRendererRouting.Deferred([copy = CloneImGuiDrawData(data)] {
+                    ImGui_ImplOpenGL3_NewFrame();
+                    ImGui_ImplOpenGL3_RenderDrawData(copy.get());
+                });
             }
             break;
 #endif
