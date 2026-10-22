@@ -87,5 +87,10 @@ class GfxWindowBackendSDL2 final : public GfxWindowBackend {
 // calling thread). Returns whether it runs; the outcome goes to
 // logs/glthread.txt.
 bool StartSwitchMesaGlThread();
+// Whether the GL thread runs: every glGetError then drains it, so per-call
+// error checks are left to the one before the swap.
+bool SwitchMesaGlThreadRunning();
+// Whether the pre-swap drain saw GL_OUT_OF_MEMORY since the last call.
+bool TakeSwitchGlOutOfMemory();
 #endif
 } // namespace Fast

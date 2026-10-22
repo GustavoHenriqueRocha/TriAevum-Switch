@@ -69,6 +69,7 @@ namespace Fast {
 #if defined(__SWITCH__)
 // StartSwitchMesaGlThread(): Mesa's GL thread runs on the render context.
 static std::atomic<bool> gSwitchMesaGlThread{false};
+static std::atomic<bool> gSwitchGlOutOfMemory{false};
 #endif
 const SDL_Scancode lus_to_sdl_table[] = {
     SDL_SCANCODE_UNKNOWN,
@@ -911,8 +912,13 @@ void GfxWindowBackendSDL2::SwapBuffersBegin() {
         }
 #if defined(__SWITCH__)
         // A synchronous GL call drains Mesa's GL thread before the swap.
+        // Its errors (the per-call checks are off) are taken here too.
         if (gSwitchMesaGlThread) {
-            glGetError();
+            for (int guard = 0; guard < 8; ++guard) {
+                const GLenum error = glGetError();
+                if (error == GL_NO_ERROR) break;
+                if (error == GL_OUT_OF_MEMORY) gSwitchGlOutOfMemory = true;
+            }
         }
 #endif
         SDL_GL_SwapWindow(mWnd);
@@ -932,6 +938,14 @@ void SetSwitchGlThreadPlacement(struct st_context_iface*, struct util_queue_moni
     svcSetThreadCoreMask(CUR_THREAD_HANDLE, 1, 0x6U);
 }
 } // namespace
+
+bool SwitchMesaGlThreadRunning() {
+    return gSwitchMesaGlThread.load(std::memory_order_relaxed);
+}
+
+bool TakeSwitchGlOutOfMemory() {
+    return gSwitchGlOutOfMemory.exchange(false);
+}
 
 bool StartSwitchMesaGlThread() {
     FILE* config = fopen("sdmc:/switch/oot3dre/config/gl_thread", "r");

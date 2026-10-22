@@ -1,6 +1,9 @@
 #ifdef ENABLE_OPENGL
 
 #include "fast/backends/gfx_opengl.h"
+#if defined(__SWITCH__)
+#include "fast/backends/gfx_sdl.h"
+#endif
 
 #if defined(__SWITCH__)
 #include <EGL/egl.h>
@@ -550,7 +553,13 @@ struct PicaGlOutOfMemory : std::runtime_error {
 };
 
 // Drains the GL error flags; true when one of them was GL_OUT_OF_MEMORY.
+// With Mesa's GL thread each glGetError waits for it to run everything
+// queued (two per new texture: ~26 waits in a scene frame); the pre-swap
+// drain takes the errors instead (BeginPicaGlFrame).
 bool TakePicaGlOutOfMemory() {
+#if defined(__SWITCH__)
+    if (SwitchMesaGlThreadRunning()) return false;
+#endif
     bool outOfMemory = false;
     for (int guard = 0; guard < 8; ++guard) {
         const GLenum error = glGetError();
@@ -2772,6 +2781,12 @@ void BeginPicaGlFrame(GfxRenderingAPIOGL::NativePicaState& state,
                       uint64_t frame) {
     if (state.Frame == frame) return;
     state.Frame = frame;
+#if defined(__SWITCH__)
+    // An allocation of the last frame failed (GL thread: seen at the swap).
+    if (TakeSwitchGlOutOfMemory()) {
+        TrimPicaGlResidency(state, true);
+    }
+#endif
     if (frame % 30U == 0U ||
         state.TextureBytes > state.TexturePolicy.BudgetBytes) {
         TrimPicaGlResidency(state, false);
