@@ -78,4 +78,14 @@ class GfxWindowBackendSDL2 final : public GfxWindowBackend {
     bool mExclusiveDisplayModeConfigured = false;
     void (*mOnAllKeysUp)();
 };
+
+#if defined(__SWITCH__)
+// Mesa's GL thread (glthread) on the calling thread's current context, when
+// config/gl_thread exists: switch-mesa's EGL never starts it. The worker
+// takes the caller's priority on cores 1-2 (the game owns core 0). While it
+// runs, the swap first waits for it (the swap flushes the driver from the
+// calling thread). Returns whether it runs; the outcome goes to
+// logs/glthread.txt.
+bool StartSwitchMesaGlThread();
+#endif
 } // namespace Fast

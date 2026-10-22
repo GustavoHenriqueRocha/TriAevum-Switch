@@ -7,6 +7,7 @@
 #include <EGL/egl.h>
 #include <glad/glad.h>
 #include <switch.h>
+#include "fast/backends/gfx_sdl.h"
 #include <fstream>
 #endif
 #include <cstdlib>
@@ -1418,6 +1419,10 @@ void NativeA32WindowSession::Setup() {
         if (result != 0) {
           throw std::runtime_error(std::string("render worker GL context: ") + SDL_GetError());
         }
+#if defined(__SWITCH__)
+        // config/gl_thread: Mesa's GL thread behind this worker (A/B).
+        Fast::StartSwitchMesaGlThread();
+#endif
       });
       renderStream.Drain();
     }

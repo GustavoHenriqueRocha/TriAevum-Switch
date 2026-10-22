@@ -1,6 +1,7 @@
 #if defined(ENABLE_OPENGL) || defined(__APPLE__)
 
 #include <algorithm>
+#include <atomic>
 #include <stdio.h>
 #include <stdexcept>
 #include <string>
@@ -65,6 +66,10 @@ LONG_PTR SDL_WndProc;
 #endif
 
 namespace Fast {
+#if defined(__SWITCH__)
+// StartSwitchMesaGlThread(): Mesa's GL thread runs on the render context.
+static std::atomic<bool> gSwitchMesaGlThread{false};
+#endif
 const SDL_Scancode lus_to_sdl_table[] = {
     SDL_SCANCODE_UNKNOWN,
     SDL_SCANCODE_ESCAPE,
@@ -904,9 +909,49 @@ void GfxWindowBackendSDL2::SwapBuffersBegin() {
         if (mTargetFps != 0U) {
             SyncFramerateWithTime();
         }
+#if defined(__SWITCH__)
+        // A synchronous GL call drains Mesa's GL thread before the swap.
+        if (gSwitchMesaGlThread) {
+            glGetError();
+        }
+#endif
         SDL_GL_SwapWindow(mWnd);
     }
 }
+
+#if defined(__SWITCH__)
+extern "C" bool mesa_switch_glthread_start(
+    void (*set_background_context)(struct st_context_iface*, struct util_queue_monitoring*))
+    __attribute__((weak));
+
+namespace {
+s32 gGlThreadPriority = 0x2D;
+
+void SetSwitchGlThreadPlacement(struct st_context_iface*, struct util_queue_monitoring*) {
+    svcSetThreadPriority(CUR_THREAD_HANDLE, gGlThreadPriority);
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 1, 0x6U);
+}
+} // namespace
+
+bool StartSwitchMesaGlThread() {
+    FILE* config = fopen("sdmc:/switch/oot3dre/config/gl_thread", "r");
+    if (config == nullptr) {
+        return false;
+    }
+    fclose(config);
+    svcGetThreadPriority(&gGlThreadPriority, CUR_THREAD_HANDLE);
+    const bool running = mesa_switch_glthread_start != nullptr &&
+                         mesa_switch_glthread_start(&SetSwitchGlThreadPlacement);
+    gSwitchMesaGlThread = running;
+    if (FILE* log = fopen("sdmc:/switch/oot3dre/logs/glthread.txt", "a")) {
+        fprintf(log, "gl_thread=%d (mesa_switch_glthread_start %s) priority=0x%X\n", running ? 1 : 0,
+                mesa_switch_glthread_start != nullptr ? "linked" : "missing",
+                static_cast<unsigned>(gGlThreadPriority));
+        fclose(log);
+    }
+    return running;
+}
+#endif
 
 void GfxWindowBackendSDL2::SwapBuffersEnd() {
 }
