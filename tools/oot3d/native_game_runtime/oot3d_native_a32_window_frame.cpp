@@ -3427,7 +3427,9 @@ void NativeA32WindowSession::UpdateDevLab(uint64_t guestFrame) {
 void NativeA32WindowSession::UpdateInputBench(Oot3dNativeGame::NativeA32InputFrame &inputFrame) {
   using Bench = Oot3dNativeGame::InputBench;
   if (inputBench.GetMode() == Bench::Mode::Off || devWarp == nullptr) return;
-  const bool arrived = devWarp->Status().Phase == Oot3dNativeGame::DevWarpPhase::Arrived;
+  const auto warpStatus = devWarp->Status();
+  const bool arrived = warpStatus.Phase == Oot3dNativeGame::DevWarpPhase::Arrived;
+  const bool gameplay = warpStatus.Observation.Gameplay;
 #if defined(__SWITCH__)
   const bool stop = Fast::Oot3d::DebugMenuOpen();
   const std::filesystem::path root = "sdmc:/switch/oot3dre";
@@ -3435,7 +3437,7 @@ void NativeA32WindowSession::UpdateInputBench(Oot3dNativeGame::NativeA32InputFra
   const bool stop = false;
   const std::filesystem::path root = ".";
 #endif
-  const auto event = inputBench.Step(frameCount, arrived, stop, inputFrame);
+  const auto event = inputBench.Step(frameCount, gameplay, arrived, stop, inputFrame);
   if (event == Bench::Event::None) return;
   const bool recording = inputBench.GetMode() == Bench::Mode::Record;
   std::ofstream status(root / "logs" / "bench_status.txt", std::ios::trunc);

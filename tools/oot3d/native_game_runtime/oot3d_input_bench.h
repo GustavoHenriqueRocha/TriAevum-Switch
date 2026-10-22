@@ -31,11 +31,19 @@ class InputBench {
     uint32_t WalkFrame() const { return mWalkFrame; }
     const NativeA32InputRecorder& Recording() const { return mRecorder; }
 
-    // Once per guest frame, before the game reads `input`. `arrived`: the
-    // boot warp has landed; `stop`: end a recording (the debug menu opened).
-    Event Step(uint64_t guestFrame, bool arrived, bool stop, NativeA32InputFrame& input) {
+    // A replay gets itself from the title screen into the game: A or Start
+    // held kTitlePressFrames every kTitlePressPeriod frames (title, file 1,
+    // confirm), so nothing outside the game has to press them.
+    static constexpr uint64_t kTitlePressPeriod = 40U;
+    static constexpr uint64_t kTitlePressFrames = 3U;
+
+    // Once per guest frame, before the game reads `input`. `gameplay`: the
+    // player controls the game (not title or file menu); `arrived`: the boot
+    // warp has landed; `stop`: end a recording (the debug menu opened).
+    Event Step(uint64_t guestFrame, bool gameplay, bool arrived, bool stop, NativeA32InputFrame& input) {
         if (mMode == Mode::Off || mFinished) return Event::None;
         if (!mArrival.has_value()) {
+            if (mMode == Mode::Replay && !gameplay) PressThroughTitle(guestFrame, input);
             if (!arrived) return Event::None;
             mArrival = guestFrame;
         }
@@ -69,6 +77,12 @@ class InputBench {
     }
 
   private:
+    static void PressThroughTitle(uint64_t guestFrame, NativeA32InputFrame& input) {
+        if (guestFrame % kTitlePressPeriod >= kTitlePressFrames) return;
+        const bool start = (guestFrame / kTitlePressPeriod) % 4U == 0U;
+        input.Hid.Buttons |= NativeA32HidButtonMask(start ? NativeA32HidButton::Start : NativeA32HidButton::A);
+    }
+
     static void Neutral(NativeA32InputFrame& input) {
         const bool exit = input.Exit;
         input = {};

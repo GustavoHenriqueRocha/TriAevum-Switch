@@ -51,7 +51,7 @@ std::filesystem::path RecordWalk(uint64_t arrival) {
         auto input = frame >= start ? Walk(static_cast<uint32_t>(frame - start)) : NativeA32InputFrame{};
         if (frame < start) input.Hid.Buttons = NativeA32HidButtonMask(NativeA32HidButton::B);
         const bool stop = frame == start + kWalkFrames;
-        const auto event = bench.Step(frame, arrived, stop, input);
+        const auto event = bench.Step(frame, arrived, arrived, stop, input);
         if (event == InputBench::Event::Started) {
             Require(frame == start, "recording did not start kSettleFrames after the arrival");
             started = true;
@@ -76,9 +76,20 @@ void ReplayWalk(const std::filesystem::path& path, uint64_t arrival) {
     for (uint64_t frame = 0; frame < start + kWalkFrames + 5U; ++frame) {
         NativeA32InputFrame input;
         input.Hid.Buttons = NativeA32HidButtonMask(NativeA32HidButton::Start);  // the player's
-        const auto event = bench.Step(frame, frame >= arrival, false, input);
+        // Title and file menu until `gameplay`; the warp lands a bit later.
+        const bool gameplay = frame + 50U >= arrival;
+        const auto event = bench.Step(frame, gameplay, frame >= arrival, false, input);
         if (frame < arrival) {
-            Require(input.Hid.Buttons != 0U, "replay touched the input before the warp landed");
+            const uint32_t pressed = input.Hid.Buttons & ~NativeA32HidButtonMask(NativeA32HidButton::Start);
+            Require(input.Hid.Buttons & NativeA32HidButtonMask(NativeA32HidButton::Start),
+                    "replay dropped the player's input before the warp landed");
+            if (gameplay) {
+                Require(pressed == 0U, "replay pressed through the title during gameplay");
+            } else if (frame % InputBench::kTitlePressPeriod < InputBench::kTitlePressFrames &&
+                       (frame / InputBench::kTitlePressPeriod) % 4U != 0U) {
+                Require(pressed == NativeA32HidButtonMask(NativeA32HidButton::A),
+                        "replay did not press A through the title screen");
+            }
         } else if (frame < start) {
             Require(input.Hid.Buttons == 0U, "replay let the player act while the scene settled");
         } else if (frame < start + kWalkFrames) {
