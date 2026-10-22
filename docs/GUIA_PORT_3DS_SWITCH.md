@@ -586,6 +586,19 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   caber em 97%, sondas a cada 60.
 - Tempo de GPU sem stall (`oot3d_native_gpu_frame_timer.h`): o relógio da GPU do switch-mesa não está
   em ns (SwitchWakerHD mediu 1,63 ns reais por "ns"); calibrar contra a CPU em ≥ 3 s antes de usar.
+- **Tempo de GPU sem a espera da janela** (2026-10-22): o `end − begin` do quadro incluía o buraco
+  em que a GPU fica ociosa enquanto a render thread espera o `nwindowDequeueBuffer` (lição 26),
+  no meio do quadro. No tour2 o governador via 18,5 ms por passo contra 12,3 ms reais (glperf) e
+  descartava 74 de 75 intermediários (`interp_dropped`): o "60 FPS" era 30 imagens distintas com
+  repetição. Dois timestamps em volta do acquire (`Fast::SetWindowAcquireHook`,
+  `NativeGpuFrameBusyTicks`) tiram o buraco; `config/interp_count_acquire_wait` volta a medida
+  antiga. Teste: `oot3d_native_gpu_frame_timer_tests`. Junto, um `glFlush` logo antes do acquire
+  entrega a cena já gravada à GPU enquanto a CPU espera (`config/gl_acquire_noflush` tira).
+- **Dois quadros em voo** (`config/frames_in_flight` = `2`; ausente = 1): com 1, o fim de quadro do
+  jogo espera a render thread terminar o quadro anterior, que espera o display; um passo longo
+  (16–18 ms) seguido de um intermediário curto não se compensa e o passo perde o refresh. O modelo
+  (`oot3d_native_cadence_governor_tests --report`, cenário "áreas lentas") com o passo de 21 ms:
+  55 → 59,7 imagens/s; 24 ms: 40,9 → 59,6. Custo: +1 quadro de latência.
 - Resultado: fps60 com a versão "final 3" = 48,6 fps médios, 46% ≥ 55, velocidade 99,7%
   *(notas de sessão)*. Áreas pesadas ficam limitadas pela lógica no núcleo 0.
 
@@ -626,6 +639,13 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   medir (estimativa 0,2–0,6 ms no quadro cheio para o logic op).
 - Nvc0 do Mesa 20.1: ZCULL nunca liga (`ZCULL_REGION=0x3f`, `nvc0_validate_zcull` sob `#if 0`).
   Early-Z por pixel é automático salvo `discard`, `gl_FragDepth` ou escrita em imagem.
+- **Tela de baixo no perfil TopScreen** (`config/skip_bottom_screen`, ausente = desenha como antes):
+  o framebuffer 240×320 da tela de baixo nunca aparece nesse perfil (HUD e menus vêm das
+  primitivas de UI do guest), mas custava ~2,7 ms de GPU e ~0,5 ms de render thread por passo
+  (glperf `pica_bottom`). O agendador deixa fora da apresentação os draws, fills e transfers que só
+  produzem essa tela (`oot3d_native_bottom_screen_skip.h`), tudo ou nada por amostra: nada sai se
+  outro draw amostra ou escreve na memória dela, ou se um transfer a copia para algo usado. Uso em
+  amostra posterior não é visto: é o risco da chave. Teste: `oot3d_native_bottom_screen_skip_tests`.
 - Resolução: `config/resolution_scale` 1/2/2,5/3; FSR 1 (`config/upscaler=fsr`), AA, anisotropia. Em
   3× (720p) a GPU virou gargalo: 23,4 contra 28,5 FPS em 2×. Padrão 2×.
 
@@ -816,7 +836,9 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
 - Política sem GL/sem hardware em cabeçalhos puros com teste: `gfx_opengl_pica_state_cache_tests`,
   `gfx_opengl_pica_residency_tests` (30 min simulados), `gfx_opengl_pica_gpu_lean_tests`,
   `gfx_opengl_pica_scale_tests`, `gl_widescreen_menu_policy_tests`, `oot3d_switch_thread_layout_tests`,
-  `oot3d_native_interpolation_pacing_tests`, `triaevum_presentation_clock_tests`.
+  `oot3d_native_interpolation_pacing_tests`, `triaevum_presentation_clock_tests`,
+  `oot3d_native_gpu_frame_timer_tests`, `oot3d_native_bottom_screen_skip_tests`,
+  `oot3d_native_cadence_governor_tests` (modelo do pipeline; `--report`).
 - Concorrência com ASan/UBSan e TSan: `oot3d_native_render_command_stream_tests`,
   `oot3d_native_render_shutdown_tests`, `oot3d_native_reduced_replay_stress_tests`,
   `oot3d_native_pica_deferred_plan_tests`.
@@ -885,6 +907,12 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     cravadas em 60 e as piores (Water Temple 44, Market 46, Castle Town Buildings 51) têm o guest
     acima de 12 ms por quadro: é lógica do jogo, não GPU. Uma área só (o Mercado) não representa o
     jogo.
+29. Tempo de GPU por timestamps de início e fim do quadro mede também a GPU ociosa (2026-10-22):
+    se a render thread bloqueia no meio do quadro (acquire da janela, fence, fila), o buraco entra
+    na conta. Comparar o span com a soma das etapas do glperf (18,5 contra 12,3 ms no tour2) e
+    marcar os bloqueios com timestamps antes e depois. Um governador alimentado com o span inflado
+    descartava quase todo quadro intermediário: o contador `fps` (apresentações por segundo) seguia
+    perto de 60, mas `interp_dropped` e `hold_2` mostravam ~30 imagens distintas.
 
 ---
 
