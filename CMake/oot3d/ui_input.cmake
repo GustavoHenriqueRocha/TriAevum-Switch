@@ -192,6 +192,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 set_property(TARGET oot3d_top_screen_ocarina_text_runtime_tests PROPERTY FOLDER Tests)
 
+# TopScreen texture pack loader: corrupt or truncated packs fail with a clear
+# error; OOT3D_TEST_O3TU=<pack> also loads a real one.
+add_executable(oot3d_top_screen_texture_overrides_tests EXCLUDE_FROM_ALL
+    tools/oot3d/ui_topscreen/oot3d_top_screen_texture_overrides_tests.cpp)
+target_link_libraries(oot3d_top_screen_texture_overrides_tests PRIVATE oot3d_ui_topscreen)
+target_compile_features(oot3d_top_screen_texture_overrides_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_top_screen_texture_overrides_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 add_executable(oot3d_top_screen_pause_transaction_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_top_screen_pause_transaction.cpp
     tools/oot3d/native_game_runtime/oot3d_top_screen_pause_transaction_tests.cpp)

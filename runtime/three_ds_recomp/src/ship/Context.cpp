@@ -173,7 +173,16 @@ bool Context::InitLogging(spdlog::level::level_enum debugBuildLogLevel,
         // The short name: the display name may hold spaces and non-ASCII text.
         auto logPath = GetPathRelativeToAppDirectory(("logs/" + GetShortName() + ".log"));
         // Each launch starts a fresh file; earlier launches stay as .1, .2, ...
-        auto fileSink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(logPath, 1024 * 1024 * 10, 10, true);
+#if defined(__SWITCH__)
+        // Not on Horizon: rename over an existing file fails there, and the
+        // sink left behind by a failed rotation corrupted reads of other SD
+        // files (atlas_overrides.o3tu "payload hash mismatch", 2026-10-22).
+        constexpr bool kRotateOnOpen = false;
+#else
+        constexpr bool kRotateOnOpen = true;
+#endif
+        auto fileSink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(logPath, 1024 * 1024 * 10, 10,
+                                                                               kRotateOnOpen);
         sinks.push_back(fileSink);
 #ifdef _DEBUG
         mLogger = std::make_shared<spdlog::logger>("multi_sink", sinks.begin(), sinks.end());

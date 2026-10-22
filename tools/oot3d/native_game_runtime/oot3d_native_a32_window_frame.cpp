@@ -11,6 +11,8 @@
 #include "oot3d_switch_clocks.h"
 #include "oot3d_hang_watchdog.h"
 #include "oot3d_heap_bin_check.h"
+#include "oot3d_fps_counter.h"
+#include <imgui.h>
 #include "fast/backends/gl_frame_profiler.h"
 #if defined(__SWITCH__)
 #include <malloc.h>
@@ -441,6 +443,24 @@ bool NativeA32WindowSession::RunFrame() {
   hostStartSteps.Mark("mouse");
   gui->StartDraw();
   hostStartSteps.Mark("gui_start_draw");
+  // config/fps_counter: FPS dos quadros apresentados (com os interpolados do
+  // fps60) e o pior intervalo da última meia janela, no canto da tela.
+  static const bool fpsCounterEnabled =
+      std::ifstream("sdmc:/switch/oot3dre/config/fps_counter").good();
+  if (fpsCounterEnabled) {
+    static Oot3dNativeGame::FpsCounter fpsCounter;
+    fpsCounter.Observe(std::chrono::duration<double>(
+                           std::chrono::steady_clock::now().time_since_epoch())
+                           .count());
+    const float fontSize = std::max(16.0F, static_cast<float>(height) / 24.0F);
+    const ImVec2 position(fontSize * 0.5F, fontSize * 0.4F);
+    auto *drawList = ImGui::GetForegroundDrawList();
+    drawList->AddText(ImGui::GetFont(), fontSize,
+                      ImVec2(position.x + 2.0F, position.y + 2.0F),
+                      IM_COL32(0, 0, 0, 200), fpsCounter.Text());
+    drawList->AddText(ImGui::GetFont(), fontSize, position,
+                      IM_COL32(255, 255, 80, 255), fpsCounter.Text());
+  }
   renderStream.Submit([&] {
     window.StartFrame();
     // The window's events are pumped here, on the render thread: an exit
