@@ -166,14 +166,18 @@ void Oot3dPicaPresentationScheduler::PlanBottomSkip(
                                   draw.FramebufferHeight)) {
       // Once read without its image (a later transfer out of it): drawn.
       if (mBottomSkipTracker.Unsafe(renderTargetNamespace,
-                                    framebuffer.ColorPhysicalAddress))
+                                    framebuffer.ColorPhysicalAddress)) {
+        CountBottomSkip(BottomSkipReason::Unsafe);
         return;
+      }
       anyBottom = true;
     }
     mBottomSkipDraws.push_back(draw);
   }
-  if (!anyBottom)
+  if (!anyBottom) {
+    CountBottomSkip(BottomSkipReason::NoBottom);
     return;
+  }
   mBottomSkipFills.clear();
   for (const auto &fill : sample.MemoryFills)
     mBottomSkipFills.push_back(
@@ -214,6 +218,7 @@ void Oot3dPicaPresentationScheduler::PlanBottomSkip(
                        mBottomSkipTransfers, mBottomSkipScratch, mBottomSkip);
   if (!mBottomSkip.Active)
     ++mStats.BottomSkipRefusedSamples;
+  CountBottomSkip(mBottomSkip.Reason);
 }
 
 bool Oot3dPicaPresentationScheduler::Execute(
@@ -403,6 +408,7 @@ bool Oot3dPicaPresentationScheduler::Execute(
                                        transfer.InputPhysicalAddress) ==
             BottomSkipTracker::TransferAction::Skip) {
       ++mStats.BottomSkipMissingSources;
+      mBottomSkipMissing.fetch_add(1U, std::memory_order_relaxed);
       if (SameTransfer(transfer, sample.TopTransfer))
         topSourceSkipped = true;
       return true;
@@ -444,6 +450,7 @@ bool Oot3dPicaPresentationScheduler::Execute(
     }
     if (skipDraw(drawIndex)) {
       ++mStats.SkippedBottomDraws;
+      mBottomSkipDrawCount.fetch_add(1U, std::memory_order_relaxed);
       mBottomSkipTracker.Skipped(renderTargetNamespace,
                                  draw.State.Framebuffer.ColorPhysicalAddress);
     } else {

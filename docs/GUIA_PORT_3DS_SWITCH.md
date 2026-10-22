@@ -651,7 +651,13 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   amostra posterior não é visto: é o risco da chave. O transfer de topo (submetido à parte) conta
   como transfer da amostra, e um transfer posterior cuja fonte foi pulada é deixado de fora
   (`BottomSkipTracker`; antes o GL lançava "PICA display transfer source is missing" ~5 s após a
-  abertura) e esse alvo volta a ser desenhado. Teste: `oot3d_native_bottom_screen_skip_tests`.
+  abertura) e esse alvo volta a ser desenhado. No tour4 quase nada era pulado (`pica_bottom` 2,4 ms):
+  a regra "tudo ou nada" recusava as amostras; a suspeita é o depth buffer único das duas telas
+  (comum no 3DS), agora aceito (só draws da tela de baixo testam aquele depth; o fill que também
+  cobre o uso da tela de cima fica). O `perf.txt` ganhou `bottom_skip: draws= missing_sources=` e
+  as amostras por motivo (`skipped`, `no_bottom`, `unsafe`, `color_shared`, `depth_shared`,
+  `texture_read`, `transfer_into`, `transfer_top`, `transfer_used`). Teste:
+  `oot3d_native_bottom_screen_skip_tests`.
 - Resolução: `config/resolution_scale` 1/2/2,5/3; FSR 1 (`config/upscaler=fsr`), AA, anisotropia. Em
   3× (720p) a GPU virou gargalo: 23,4 contra 28,5 FPS em 2×. Padrão 2×.
 
@@ -923,6 +929,9 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     submetido fora da lista de transfers da amostra e um transfer de quadro posterior pode ler o
     alvo pulado. E mais folga na fila entre threads (2 quadros em voo) não é só um número: o heap
     corrompeu em 21 s porque estado compartilhado supunha 1 quadro (2026-10-22).
+31. Uma otimização "tudo ou nada" precisa de contador de motivo desde a primeira versão: o skip da
+    tela de baixo foi ao console, rodou sem erro e não pulou quase nada (tour4), e sem o motivo no
+    `perf.txt` só restava adivinhar (depth compartilhado entre as telas era a suspeita).
 
 ---
 

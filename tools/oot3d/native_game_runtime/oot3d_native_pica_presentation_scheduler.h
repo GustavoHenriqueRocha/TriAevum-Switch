@@ -5,6 +5,8 @@
 #include "oot3d_native_pica_visual_frame.h"
 #include "oot3d/renderer/pica_render_backend.h"
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -134,6 +136,27 @@ public:
   void SetSkipBottomScreen(bool enabled) noexcept {
     mSkipBottomScreen = enabled;
   }
+  [[nodiscard]] bool SkipBottomScreen() const noexcept {
+    return mSkipBottomScreen;
+  }
+  // Cumulative, readable from any thread (perf.txt bottom_skip:): samples by
+  // BottomSkipReason, lower draws skipped, transfers left out for a
+  // missing source.
+  struct BottomSkipCounters {
+    std::array<uint64_t, static_cast<size_t>(BottomSkipReason::Count)>
+        Samples{};
+    uint64_t SkippedDraws = 0U;
+    uint64_t MissingSources = 0U;
+  };
+  [[nodiscard]] BottomSkipCounters TakeBottomSkipCounters() const noexcept {
+    BottomSkipCounters out;
+    for (size_t index = 0; index < out.Samples.size(); ++index)
+      out.Samples[index] =
+          mBottomSkipSamples[index].load(std::memory_order_relaxed);
+    out.SkippedDraws = mBottomSkipDrawCount.load(std::memory_order_relaxed);
+    out.MissingSources = mBottomSkipMissing.load(std::memory_order_relaxed);
+    return out;
+  }
   void Reset();
   Oot3dPicaPresentationSchedulerState CaptureState() const;
   bool RestoreState(Oot3dPicaPresentationSchedulerState state);
@@ -158,6 +181,10 @@ public:
   const Oot3dPicaPresentationSchedulerTimings &Timings() const noexcept;
 
 private:
+  void CountBottomSkip(BottomSkipReason reason) noexcept {
+    mBottomSkipSamples[static_cast<size_t>(reason)].fetch_add(
+        1U, std::memory_order_relaxed);
+  }
   void PlanBottomSkip(const Oot3dPicaVisualFrameViewSample &sample,
                       uint64_t renderTargetNamespace, bool presentation);
 
@@ -184,6 +211,10 @@ private:
   std::vector<BottomSkipRange> mBottomSkipScratch;
   BottomSkipPlan mBottomSkip;
   BottomSkipTracker mBottomSkipTracker;
+  std::array<std::atomic<uint64_t>, static_cast<size_t>(BottomSkipReason::Count)>
+      mBottomSkipSamples{};
+  std::atomic<uint64_t> mBottomSkipDrawCount{0U};
+  std::atomic<uint64_t> mBottomSkipMissing{0U};
 };
 
 } // namespace Oot3dNativeGame

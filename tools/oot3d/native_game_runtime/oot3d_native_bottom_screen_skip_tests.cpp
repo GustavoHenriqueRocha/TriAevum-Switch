@@ -219,6 +219,48 @@ void TestLaterTransferOfASkippedTargetIsLeftOut() {
   CHECK(!tracker.Unsafe(kNamespace, kBottomColor));
 }
 
+// Console tour4: pica_bottom stayed at 2.4 ms with the key on. One PICA
+// depth buffer shared by the two screens made every sample look "used
+// outside"; the lower draws are now skipped and the shared clear is kept.
+void TestSharedDepthStillSkips() {
+  auto sample = Usual();
+  sample.Draws[1].Depth = Range(kTopDepth, 240U * 320U * 4U);
+  sample.Draws[3].Depth = Range(kTopDepth, 240U * 320U * 4U);
+  sample.Fills[2] = Range(kTopDepth, 240U * 320U * 4U);
+  const auto plan = Plan(sample);
+  CHECK(plan.Active);
+  CHECK(plan.Reason == BottomSkipReason::Skipped);
+  CHECK(plan.SkippedDraws == 2U);
+  CHECK(plan.SkipFill[1] == 1U); // lower color clear
+  CHECK(plan.SkipFill[2] == 0U); // shared depth clear: the top uses it
+}
+
+void TestReasons() {
+  CHECK(Plan(Usual()).Reason == BottomSkipReason::Skipped);
+  Sample top;
+  top.Draws = {TopDraw()};
+  CHECK(Plan(top).Reason == BottomSkipReason::NoBottom);
+  auto sample = Usual();
+  sample.Draws[2].Textures[1] = Range(kBottomColor, 0x100U);
+  CHECK(Plan(sample).Reason == BottomSkipReason::TextureRead);
+  sample = Usual();
+  sample.Draws[0].Color = Range(kBottomColor, 0x100U);
+  CHECK(Plan(sample).Reason == BottomSkipReason::ColorShared);
+  sample = Usual();
+  sample.Draws[0].Color = Range(kBottomDepth, 0x100U);
+  CHECK(Plan(sample).Reason == BottomSkipReason::DepthShared);
+  sample = Usual();
+  sample.Transfers[1].Top = true;
+  CHECK(Plan(sample).Reason == BottomSkipReason::TransferTop);
+  sample = Usual();
+  sample.Transfers[1].Output = Range(kTexture, 0x100U);
+  CHECK(Plan(sample).Reason == BottomSkipReason::TransferUsed);
+  sample = Usual();
+  sample.Transfers.push_back({Range(kBottomColor - 0x100U, 0x1000U),
+                              Range(0x30000000U, 0x1000U), false});
+  CHECK(Plan(sample).Reason == BottomSkipReason::TransferInto);
+}
+
 } // namespace
 
 int main() {
@@ -232,6 +274,8 @@ int main() {
   TestScratchReusedAcrossSamples();
   TestTopTransferReadingTheLowerTargetKeepsIt();
   TestLaterTransferOfASkippedTargetIsLeftOut();
+  TestSharedDepthStillSkips();
+  TestReasons();
   if (gFailures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", gFailures);
     return 1;

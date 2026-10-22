@@ -1173,6 +1173,18 @@ bool NativeA32WindowSession::RunFrame() {
              << " gl_ring_orphans=" << gpu.StreamRingOrphans
              << " gl_oom=" << gpu.OutOfMemoryEvents
              << " gl_draws_skipped=" << gpu.SkippedDraws;
+        // config/skip_bottom_screen: samples by decision (cumulative).
+        if (picaPresentationScheduler.SkipBottomScreen()) {
+          const auto bottom = picaPresentationScheduler.TakeBottomSkipCounters();
+          perf << " bottom_skip: draws=" << bottom.SkippedDraws
+               << " missing_sources=" << bottom.MissingSources;
+          for (size_t reason = 0; reason < bottom.Samples.size(); ++reason) {
+            perf << ' '
+                 << Oot3dNativeGame::BottomSkipReasonName(
+                        static_cast<Oot3dNativeGame::BottomSkipReason>(reason))
+                 << '=' << bottom.Samples[reason];
+          }
+        }
         // Lock-free arena every window. The bytes in use need mallinfo(),
         // which holds the malloc lock shared with Mesa and walks the heap
         // (a corrupted heap crashes there): opt-in only, with

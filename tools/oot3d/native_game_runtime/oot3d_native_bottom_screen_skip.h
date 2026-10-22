@@ -66,8 +66,40 @@ struct BottomSkipTransfer {
   bool Top = false; // the sample's top-screen transfer
 };
 
+// Why a sample with lower-screen draws kept them (perf.txt bottom_skip:).
+enum class BottomSkipReason : uint8_t {
+  Skipped,      // lower screen left out
+  NoBottom,     // no lower-screen draw in the sample
+  Unsafe,       // a target read earlier without its image (tracker)
+  ColorShared,  // another draw writes into the lower color target
+  DepthShared,  // another draw writes colour into the lower depth
+  TextureRead,  // another draw samples the lower color or depth
+  TransferInto, // a transfer only runs into the lower target
+  TransferTop,  // the top-screen transfer reads it
+  TransferUsed, // a transfer out of it lands where something reads
+  Count,
+};
+
+[[nodiscard]] inline const char *BottomSkipReasonName(
+    BottomSkipReason reason) noexcept {
+  switch (reason) {
+  case BottomSkipReason::Skipped: return "skipped";
+  case BottomSkipReason::NoBottom: return "no_bottom";
+  case BottomSkipReason::Unsafe: return "unsafe";
+  case BottomSkipReason::ColorShared: return "color_shared";
+  case BottomSkipReason::DepthShared: return "depth_shared";
+  case BottomSkipReason::TextureRead: return "texture_read";
+  case BottomSkipReason::TransferInto: return "transfer_into";
+  case BottomSkipReason::TransferTop: return "transfer_top";
+  case BottomSkipReason::TransferUsed: return "transfer_used";
+  case BottomSkipReason::Count: break;
+  }
+  return "?";
+}
+
 struct BottomSkipPlan {
   bool Active = false; // something is skipped
+  BottomSkipReason Reason = BottomSkipReason::NoBottom;
   std::vector<uint8_t> SkipDraw;
   std::vector<uint8_t> SkipFill;
   std::vector<uint8_t> SkipTransfer;
@@ -94,22 +126,32 @@ inline void PlanBottomScreenSkip(const std::vector<BottomSkipDraw> &draws,
                                  std::vector<BottomSkipRange> &bottomScratch,
                                  BottomSkipPlan &plan) {
   plan.Active = false;
+  plan.Reason = BottomSkipReason::NoBottom;
   plan.SkippedDraws = 0U;
   plan.SkipDraw.assign(draws.size(), 0U);
   plan.SkipFill.assign(fills.size(), 0U);
   plan.SkipTransfer.assign(transfers.size(), 0U);
+  // Color ranges first, then depth ranges (colorCount splits them).
   bottomScratch.clear();
   for (const auto &draw : draws) {
-    if (!IsBottomScreenFramebuffer(draw.FramebufferWidth,
-                                   draw.FramebufferHeight))
-      continue;
-    if (!draw.Color.Empty())
+    if (IsBottomScreenFramebuffer(draw.FramebufferWidth,
+                                  draw.FramebufferHeight) &&
+        !draw.Color.Empty())
       bottomScratch.push_back(draw.Color);
-    if (!draw.Depth.Empty())
+  }
+  const size_t colorCount = bottomScratch.size();
+  for (const auto &draw : draws) {
+    if (IsBottomScreenFramebuffer(draw.FramebufferWidth,
+                                  draw.FramebufferHeight) &&
+        !draw.Depth.Empty())
       bottomScratch.push_back(draw.Depth);
   }
   if (bottomScratch.empty())
     return;
+  const auto isBottom = [](const BottomSkipDraw &draw) {
+    return IsBottomScreenFramebuffer(draw.FramebufferWidth,
+                                     draw.FramebufferHeight);
+  };
   const auto touchesBottom = [&](const BottomSkipRange &range) {
     for (const auto &bottom : bottomScratch) {
       if (bottom.Overlaps(range))
@@ -124,11 +166,10 @@ inline void PlanBottomScreenSkip(const std::vector<BottomSkipDraw> &draws,
     }
     return false;
   };
-  // Everything the rest of the sample reads or writes.
+  // Anything another draw reads or writes.
   const auto usedOutside = [&](const BottomSkipRange &range) {
     for (const auto &draw : draws) {
-      if (IsBottomScreenFramebuffer(draw.FramebufferWidth,
-                                    draw.FramebufferHeight))
+      if (isBottom(draw))
         continue;
       if (draw.Color.Overlaps(range) || draw.Depth.Overlaps(range))
         return true;
@@ -139,9 +180,26 @@ inline void PlanBottomScreenSkip(const std::vector<BottomSkipDraw> &draws,
     }
     return false;
   };
-  for (const auto &bottom : bottomScratch) {
-    if (usedOutside(bottom))
-      return;
+  const auto refuse = [&](BottomSkipReason reason) { plan.Reason = reason; };
+  for (size_t index = 0U; index < bottomScratch.size(); ++index) {
+    const auto &bottom = bottomScratch[index];
+    const bool color = index < colorCount;
+    for (const auto &draw : draws) {
+      if (isBottom(draw))
+        continue;
+      for (const auto &texture : draw.Textures) {
+        if (texture.Overlaps(bottom))
+          return refuse(BottomSkipReason::TextureRead);
+      }
+      // A depth buffer shared by both screens (one PICA depth target for
+      // the upper and the lower framebuffer) is fine: the lower screen's
+      // depth values are only ever tested by lower-screen draws, and a
+      // clear that also covers the upper use is kept (fills below).
+      if (color && (draw.Color.Overlaps(bottom) || draw.Depth.Overlaps(bottom)))
+        return refuse(BottomSkipReason::ColorShared);
+      if (!color && draw.Color.Overlaps(bottom))
+        return refuse(BottomSkipReason::DepthShared);
+    }
   }
   for (size_t index = 0U; index < transfers.size(); ++index) {
     const auto &transfer = transfers[index];
@@ -151,24 +209,27 @@ inline void PlanBottomScreenSkip(const std::vector<BottomSkipDraw> &draws,
     // bound). One that only runs into it reads it from elsewhere.
     const BottomSkipRange start{transfer.Input.Begin,
                                 BottomSkipEnd(transfer.Input.Begin, 1U)};
-    if (!insideBottom(start) || transfer.Top ||
-        touchesBottom(transfer.Output) ||
-        usedOutside(transfer.Output))
-      return;
+    if (!insideBottom(start))
+      return refuse(BottomSkipReason::TransferInto);
+    if (transfer.Top)
+      return refuse(BottomSkipReason::TransferTop);
+    if (touchesBottom(transfer.Output) || usedOutside(transfer.Output))
+      return refuse(BottomSkipReason::TransferUsed);
     plan.SkipTransfer[index] = 1U;
   }
   for (size_t index = 0U; index < draws.size(); ++index) {
-    if (IsBottomScreenFramebuffer(draws[index].FramebufferWidth,
-                                  draws[index].FramebufferHeight)) {
+    if (isBottom(draws[index])) {
       plan.SkipDraw[index] = 1U;
       ++plan.SkippedDraws;
     }
   }
+  // Only fills nothing else touches (a clear of a shared depth stays).
   for (size_t index = 0U; index < fills.size(); ++index) {
-    if (insideBottom(fills[index]))
+    if (insideBottom(fills[index]) && !usedOutside(fills[index]))
       plan.SkipFill[index] = 1U;
   }
   plan.Active = true;
+  plan.Reason = BottomSkipReason::Skipped;
 }
 
 // Lower targets whose latest content was skipped, per render-target
