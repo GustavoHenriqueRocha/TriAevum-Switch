@@ -184,10 +184,42 @@ void TestWaitStatsAndSkippedSignals() {
     Require(stats.SkippedNotifies > 0U, "no signal was ever skipped");
 }
 
+// config/frames_in_flight=2: a second frame is accepted while the first
+// runs, a third waits.
+void TestTwoFramesInFlight() {
+    NativeRenderCommandStream stream(Mode::Worker, 1U);
+    stream.SetMaxFramesInFlight(2U);
+    Require(stream.MaxFramesInFlight() == 2U, "frames in flight not set");
+    std::atomic<bool> release{false};
+    std::atomic<int> accepted{0};
+    std::atomic<int> executed{0};
+    stream.Submit([&] {
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ++executed;
+    }, true);
+    std::thread producer([&] {
+        stream.Submit([&] { ++executed; }, true);
+        accepted = 1;
+        stream.Submit([&] { ++executed; }, true);
+        accepted = 2;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    Require(accepted.load() == 1,
+            "with two frames in flight the second must pass and the third wait");
+    release = true;
+    producer.join();
+    stream.Drain();
+    Require(accepted.load() == 2 && executed.load() == 3,
+            "every frame must run once, in order");
+    stream.SetMaxFramesInFlight(0U);
+    Require(stream.MaxFramesInFlight() == 1U, "zero frames in flight means one");
+}
+
 int main() {
     TestInlineRunsAtSubmission();
     TestWorkerKeepsProgramOrder();
     TestFramesInFlightBound();
+    TestTwoFramesInFlight();
     TestWorkerFailureIsRethrownOnce();
     TestModeSwitchDrainsAndDestructorRunsPending();
     TestSynchronousCommandsAreDistinguished();

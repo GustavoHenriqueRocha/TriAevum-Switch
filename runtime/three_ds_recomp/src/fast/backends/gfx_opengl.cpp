@@ -1175,6 +1175,7 @@ void GfxRenderingAPIOGL::Init() {
     GlPerf::Init(); // config/gpu_timing; absent: no cost
 #if defined(__SWITCH__)
     mDeferWindowClear = !std::ifstream("sdmc:/switch/oot3dre/config/gl_eager_clear").good();
+    mFlushBeforeAcquire = !std::ifstream("sdmc:/switch/oot3dre/config/gl_acquire_noflush").good();
 #endif
     gWindowClearOwner = this;
 }
@@ -1601,6 +1602,14 @@ void GfxRenderingAPIOGL::StartDrawToFramebuffer(int fb_id, float noise_scale) {
     mCurrentFrameBuffer = fb_id;
 }
 
+namespace {
+WindowAcquireHook gWindowAcquireHook = nullptr;
+}
+
+void SetWindowAcquireHook(WindowAcquireHook hook) {
+    gWindowAcquireHook = hook;
+}
+
 void FlushDeferredWindowClear() {
     if (gWindowClearOwner != nullptr) {
         gWindowClearOwner->FlushDeferredWindowClear();
@@ -1614,8 +1623,19 @@ void GfxRenderingAPIOGL::FlushDeferredWindowClear() {
     mWindowClearPending = false;
     const std::array<float, 4> clearColor{mClearColor[0], mClearColor[1], mClearColor[2], mClearColor[3]};
     std::copy(std::begin(mWindowClearRgba), std::end(mWindowClearRgba), mClearColor);
+    // Binding the window and clearing it dequeues its buffer (blocking).
+    // The scene is recorded by now: hand it to the GPU before waiting.
+    if (mFlushBeforeAcquire) {
+        glFlush();
+    }
+    if (gWindowAcquireHook != nullptr) {
+        gWindowAcquireHook(false);
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     ClearFramebufferNow(mWindowClearColor, mWindowClearDepth);
+    if (gWindowAcquireHook != nullptr) {
+        gWindowAcquireHook(true);
+    }
     std::copy(clearColor.begin(), clearColor.end(), mClearColor);
     // Left bound: every caller goes on drawing to (or rebinding from) the
     // window.

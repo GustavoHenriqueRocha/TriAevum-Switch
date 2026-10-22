@@ -8,6 +8,7 @@
 #include <glad/glad.h>
 #include <switch.h>
 #include "fast/backends/gfx_sdl.h"
+#include <algorithm>
 #include <fstream>
 #endif
 #include <cstdlib>
@@ -1283,6 +1284,18 @@ void NativeA32WindowSession::Setup() {
   guestInterpolationEnabled = visualInterpolationEnabled;
   lastPresentationTime = std::chrono::steady_clock::now();
   picaPresentationScheduler.SetTimingEnabled(launch.ExtendedDiagnostics);
+#if defined(__SWITCH__)
+  // config/skip_bottom_screen (TopScreen only; absent = drawn as before):
+  // the lower screen is never shown in that profile
+  // (oot3d_native_bottom_screen_skip.h).
+  {
+    std::error_code skipBottomError;
+    picaPresentationScheduler.SetSkipBottomScreen(
+        launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen &&
+        std::filesystem::exists("sdmc:/switch/oot3dre/config/skip_bottom_screen",
+                                skipBottomError));
+  }
+#endif
   api.SetPicaPhysicalMemoryAccess(
       [&](uint32_t address, std::span<uint8_t> bytes) {
         RequireStoppedGuest();
@@ -1433,6 +1446,23 @@ void NativeA32WindowSession::Setup() {
       });
       renderStream.Drain();
     }
+#if defined(__SWITCH__)
+    // config/frames_in_flight (1 or 2; absent = 1): with 2 the game thread
+    // starts the next host frame while the renderer still waits for the
+    // display on the previous one (one frame more of latency). The pipeline
+    // model (oot3d_native_cadence_governor_tests --report) puts the slow
+    // areas of tour2 (game step 18-24 ms) back at 60 with 2.
+    {
+      std::ifstream framesInFlightFile(
+          "sdmc:/switch/oot3dre/config/frames_in_flight");
+      unsigned framesInFlight = 1U;
+      if (framesInFlightFile.good()) {
+        if (!(framesInFlightFile >> framesInFlight)) framesInFlight = 2U;
+      }
+      renderStream.SetMaxFramesInFlight(
+          std::clamp<unsigned>(framesInFlight, 1U, 2U));
+    }
+#endif
     // The ImGui overlay (and the display composition it triggers) renders
     // in renderer order, from a copy of each frame's draw data.
     if (fast3dGui != nullptr) {

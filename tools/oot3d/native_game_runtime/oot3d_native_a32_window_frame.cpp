@@ -19,6 +19,13 @@
 #include <imgui.h>
 #include "fast/backends/gl_frame_profiler.h"
 #if defined(__SWITCH__)
+namespace Fast {
+// gfx_opengl.h (its GL headers stay out).
+using WindowAcquireHook = void (*)(bool after);
+void SetWindowAcquireHook(WindowAcquireHook hook);
+} // namespace Fast
+#endif
+#if defined(__SWITCH__)
 #include <malloc.h>
 #include <switch.h>
 #endif
@@ -119,6 +126,10 @@ Oot3dNativeGame::NativeGpuFrameTimer &GpuFrameTimer() {
   return timer;
 }
 
+#if defined(__SWITCH__)
+void MarkGpuFrameAcquire(bool after) { GpuFrameTimer().MarkAcquire(after); }
+#endif
+
 } // namespace
 
 void NativeA32WindowSession::EnsureInterpolationPacing() {
@@ -171,6 +182,16 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
   // them as a whole (the locked 30) and strict60 never.
   interpolationPacing.SetDropAllowed(cadenceGovernor.PerFrameDropAllowed());
   if (firstConfiguration) {
+#if defined(__SWITCH__)
+    // The window acquire's idle gap is not GPU work (gpu_frame_timer.h);
+    // config/interp_count_acquire_wait counts it as before.
+    const bool countAcquireWait =
+        std::ifstream("sdmc:/switch/oot3dre/config/interp_count_acquire_wait")
+            .good();
+    GpuFrameTimer().SetExcludeAcquireWait(!countAcquireWait);
+    Fast::SetWindowAcquireHook(countAcquireWait ? nullptr
+                                                : &MarkGpuFrameAcquire);
+#endif
     skipNativeReplay =
         !options.ForceNativeReplay && !api.PicaNativeNamespaceObservable();
     std::fprintf(stderr,

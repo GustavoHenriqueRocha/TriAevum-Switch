@@ -66,6 +66,12 @@ void NativeRenderCommandStream::SetMode(Mode mode) {
     mMode = mode;
 }
 
+void NativeRenderCommandStream::SetMaxFramesInFlight(size_t frames) {
+    Drain();
+    std::lock_guard lock(mMutex);
+    mMaxFramesInFlight = frames == 0U ? 1U : frames;
+}
+
 bool NativeRenderCommandStream::InCommand() const noexcept {
     return tInCommand;
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "oot3d_native_bottom_screen_skip.h"
+
 #include "oot3d_native_pica_visual_frame.h"
 #include "oot3d/renderer/pica_render_backend.h"
 
@@ -34,6 +36,9 @@ struct Oot3dPicaPresentationSchedulerStats {
   uint64_t SupersededVisualFrames = 0;
   uint64_t SelectedDraws = 0;
   uint64_t ExecutedDraws = 0;
+  // config/skip_bottom_screen: lower-screen draws left out of presentation.
+  uint64_t SkippedBottomDraws = 0;
+  uint64_t BottomSkipRefusedSamples = 0;
   // Draws handed to the backend before their presentation sequence executed.
   uint64_t PreparedDraws = 0;
   uint64_t InterpolatedDraws = 0;
@@ -121,6 +126,12 @@ public:
                    uint64_t renderTargetNamespace) const;
 
   void SetTimingEnabled(bool enabled) noexcept;
+  // config/skip_bottom_screen (TopScreen profile): presentation samples
+  // leave out what only draws the 3DS's lower screen
+  // (oot3d_native_bottom_screen_skip.h). Native-memory work is untouched.
+  void SetSkipBottomScreen(bool enabled) noexcept {
+    mSkipBottomScreen = enabled;
+  }
   void Reset();
   Oot3dPicaPresentationSchedulerState CaptureState() const;
   bool RestoreState(Oot3dPicaPresentationSchedulerState state);
@@ -145,6 +156,9 @@ public:
   const Oot3dPicaPresentationSchedulerTimings &Timings() const noexcept;
 
 private:
+  void PlanBottomSkip(const Oot3dPicaVisualFrameViewSample &sample,
+                      bool presentation);
+
   using SnapshotTarget = std::pair<uint64_t, uint32_t>;
 
   static SnapshotTarget
@@ -161,6 +175,12 @@ private:
   std::vector<Oot3d::Renderer::PicaCompositionDrawReference>
       mCompositionDrawScratch;
   std::map<SnapshotTarget, uint64_t> mSnapshotCompletions;
+  bool mSkipBottomScreen = false;
+  std::vector<BottomSkipDraw> mBottomSkipDraws;
+  std::vector<BottomSkipRange> mBottomSkipFills;
+  std::vector<BottomSkipTransfer> mBottomSkipTransfers;
+  std::vector<BottomSkipRange> mBottomSkipScratch;
+  BottomSkipPlan mBottomSkip;
 };
 
 } // namespace Oot3dNativeGame

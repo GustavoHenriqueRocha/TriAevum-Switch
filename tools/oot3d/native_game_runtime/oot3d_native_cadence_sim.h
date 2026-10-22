@@ -71,6 +71,10 @@ struct Params {
   // Swap: 0 = returns at the vblank that shows the picture; 1 = one picture
   // may wait queued (returns when the previous one reached the screen).
   uint32_t SwapQueue = 0U;
+  // NativeRenderCommandStream MaxFramesInFlight (config/frames_in_flight):
+  // the game thread's end-of-frame command waits until fewer than this many
+  // host frames are pending on the renderer.
+  uint32_t FramesInFlight = 1U;
   uint32_t Seed = 12345U;
   Fps60ModeConfig Mode{};
   InterpolationPacingConfig Pacing{};
@@ -146,6 +150,8 @@ struct Result {
 
   // Render thread / GPU state.
   double renderEnd = 0.0; // previous host frame presented (swap returned)
+  // renderEnd of the last FramesInFlight host frames, oldest first.
+  std::vector<double> renderEnds;
   double lastDisplay = -1.0e9;
   double gpuFree = 0.0;
   bool pacerStarted = false;
@@ -335,8 +341,17 @@ struct Result {
     }
     ++result.HostFrames;
     // Next host frame of the game thread: its end-of-frame command waited
-    // for the previous host frame to be presented.
-    gameStart = std::max(commandsReady, renderStart) + 0.05;
+    // until fewer than FramesInFlight host frames were pending, i.e. host
+    // frame k - FramesInFlight presented (1: the previous one, which is this
+    // one's render start).
+    const size_t inFlight = std::max<size_t>(1U, params.FramesInFlight);
+    double submitted = commandsReady;
+    if (renderEnds.size() >= inFlight)
+      submitted = std::max(submitted, renderEnds[renderEnds.size() - inFlight]);
+    renderEnds.push_back(renderEnd);
+    if (renderEnds.size() > inFlight)
+      renderEnds.erase(renderEnds.begin());
+    gameStart = std::max(commandsReady, submitted) + 0.05;
   }
   result.Seconds = gameStart / 1000.0;
   result.Cadence = cadence.Stats();

@@ -267,6 +267,10 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
     void FlushDeferredWindowClear();
 
   private:
+    // Switch: glFlush right before the blocking acquire, so the GPU runs the
+    // scene already recorded while the render thread waits for the display
+    // (config/gl_acquire_noflush leaves it out).
+    bool mFlushBeforeAcquire = false;
     bool mDeferWindowClear = false;
     bool mWindowClearPending = false;
     bool mWindowClearColor = false;
@@ -277,6 +281,13 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
 // The window clear left pending by the current OpenGL backend, if any
 // (ImGui and the swap draw to the window outside the backend).
 void FlushDeferredWindowClear();
+
+// Called on the render thread right before (after = false) and right after
+// (after = true) the deferred window clear, where the Switch's EGL blocks in
+// nwindowDequeueBuffer until the display frees a buffer. The GPU frame timer
+// takes the idle gap between the two out of the frame's GPU time.
+using WindowAcquireHook = void (*)(bool after);
+void SetWindowAcquireHook(WindowAcquireHook hook);
 
 } // namespace Fast
 #endif

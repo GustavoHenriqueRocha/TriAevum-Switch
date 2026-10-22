@@ -19,6 +19,16 @@
 // the previous one starts when that one ends (nouveau writes a timestamp
 // when the work before it passes the geometry stages, so single passes are
 // approximate but frame totals are right).
+//
+// The window acquire (Switch: nwindowDequeueBuffer, blocking until the
+// display frees a buffer, on the first use of framebuffer 0) happens in the
+// middle of the frame, after the scene. While the render thread waits there
+// the GPU runs dry, and end - begin counted that idle gap as GPU work: the
+// console's tour2 showed 18.5 ms per step frame against 12.3 ms of real GPU
+// work (glperf), so the interpolation governor saw step + in-between at
+// ~37 ms > 33.3 and dropped almost every in-between frame (interp_dropped
+// 74 of 75). Two more timestamps around the acquire (MarkAcquire) take the
+// gap out; config/interp_count_acquire_wait keeps the old measure.
 
 #include <array>
 #include <chrono>
@@ -29,6 +39,25 @@
 #endif
 
 namespace Oot3dNativeGame {
+
+// GPU ticks of one frame: from its begin (or the previous frame's end, when
+// it was queued behind it) to its end, minus the idle gap around the window
+// acquire when both of its timestamps fall inside the frame. Pure, for the
+// host tests.
+[[nodiscard]] inline uint64_t NativeGpuFrameBusyTicks(
+    uint64_t begin, uint64_t end, uint64_t previousEnd, bool hasAcquire,
+    uint64_t acquireBegin, uint64_t acquireEnd) noexcept {
+  if (end < begin)
+    return 0U;
+  const uint64_t start =
+      previousEnd > begin && previousEnd < end ? previousEnd : begin;
+  uint64_t busy = end - start;
+  if (hasAcquire && acquireBegin >= start && acquireEnd >= acquireBegin &&
+      acquireEnd <= end) {
+    busy -= acquireEnd - acquireBegin;
+  }
+  return busy;
+}
 
 struct NativeGpuFrameTime {
   uint8_t Kind = 0;
@@ -41,6 +70,31 @@ class NativeGpuFrameTimer final {
 public:
   [[nodiscard]] bool Available() const noexcept { return mState == State::Ready; }
   [[nodiscard]] double NanosecondsPerTick() const noexcept { return mFactor; }
+  // config/interp_count_acquire_wait: false keeps the acquire gap in.
+  void SetExcludeAcquireWait(bool exclude) noexcept { mExcludeAcquire = exclude; }
+
+  // Around the blocking window acquire of the frame (render thread; only
+  // the first acquire of a begun frame is marked).
+  void MarkAcquire(bool after) noexcept {
+#if defined(__SWITCH__)
+    if (!mExcludeAcquire || mState == State::Failed ||
+        mState == State::Uninitialized || !mBegun)
+      return;
+    auto &slot = mSlots[mNext];
+    if (!after) {
+      if (mAcquireBegun || slot.HasAcquire)
+        return;
+      glQueryCounter(slot.AcquireBegin, GL_TIMESTAMP);
+      mAcquireBegun = true;
+    } else if (mAcquireBegun) {
+      glQueryCounter(slot.AcquireEnd, GL_TIMESTAMP);
+      mAcquireBegun = false;
+      slot.HasAcquire = true;
+    }
+#else
+    (void)after;
+#endif
+  }
 
   // First GPU work of the frame (render thread). Idempotent within a frame.
   void BeginFrame() noexcept {
@@ -48,6 +102,8 @@ public:
     if (!Ensure() || mBegun)
       return;
     glQueryCounter(mSlots[mNext].Begin, GL_TIMESTAMP);
+    mSlots[mNext].HasAcquire = false;
+    mAcquireBegun = false;
     mBegun = true;
 #endif
   }
@@ -64,6 +120,11 @@ public:
     slot.CpuMilliseconds = cpuMilliseconds;
     slot.Pending = true;
     slot.Submitted = std::chrono::steady_clock::now();
+    if (mAcquireBegun) {
+      // Acquire begun without its end: not measured.
+      slot.HasAcquire = false;
+      mAcquireBegun = false;
+    }
     mBegun = false;
     mNext = (mNext + 1U) % mSlots.size();
     // A slot reused while still pending loses its frame (no wait).
@@ -99,10 +160,16 @@ public:
       GLuint64 end = 0U;
       glGetQueryObjectui64v(slot.Begin, GL_QUERY_RESULT, &begin);
       glGetQueryObjectui64v(slot.End, GL_QUERY_RESULT, &end);
+      GLuint64 acquireBegin = 0U;
+      GLuint64 acquireEnd = 0U;
+      if (slot.HasAcquire) {
+        glGetQueryObjectui64v(slot.AcquireBegin, GL_QUERY_RESULT, &acquireBegin);
+        glGetQueryObjectui64v(slot.AcquireEnd, GL_QUERY_RESULT, &acquireEnd);
+      }
       slot.Pending = false;
       mOldest = (mOldest + 1U) % mSlots.size();
-      Observe(begin, end, slot.Kind, slot.CpuMilliseconds, slot.Submitted,
-              onResult);
+      Observe(begin, end, slot.HasAcquire, acquireBegin, acquireEnd, slot.Kind,
+              slot.CpuMilliseconds, slot.Submitted, onResult);
     }
 #else
     (void)onResult;
@@ -118,7 +185,10 @@ private:
 #if defined(__SWITCH__)
     GLuint Begin = 0U;
     GLuint End = 0U;
+    GLuint AcquireBegin = 0U;
+    GLuint AcquireEnd = 0U;
 #endif
+    bool HasAcquire = false;
     uint8_t Kind = 0U;
     double CpuMilliseconds = 0.0;
     bool Pending = false;
@@ -136,12 +206,15 @@ private:
       mState = State::Failed;
       return false;
     }
-    std::array<GLuint, kSlots * 2U> names{};
+    std::array<GLuint, kSlots * 4U> names{};
     glGenQueries(static_cast<GLsizei>(names.size()), names.data());
     for (size_t index = 0U; index < kSlots; ++index) {
-      mSlots[index].Begin = names[index * 2U];
-      mSlots[index].End = names[index * 2U + 1U];
-      if (mSlots[index].Begin == 0U || mSlots[index].End == 0U) {
+      mSlots[index].Begin = names[index * 4U];
+      mSlots[index].End = names[index * 4U + 1U];
+      mSlots[index].AcquireBegin = names[index * 4U + 2U];
+      mSlots[index].AcquireEnd = names[index * 4U + 3U];
+      if (mSlots[index].Begin == 0U || mSlots[index].End == 0U ||
+          mSlots[index].AcquireBegin == 0U || mSlots[index].AcquireEnd == 0U) {
         mState = State::Failed;
         return false;
       }
@@ -152,7 +225,9 @@ private:
 #endif
 
   template <typename OnResult>
-  void Observe(uint64_t begin, uint64_t end, uint8_t kind, double cpuMs,
+  void Observe(uint64_t begin, uint64_t end, bool hasAcquire,
+               uint64_t acquireBegin, uint64_t acquireEnd, uint8_t kind,
+               double cpuMs,
                std::chrono::steady_clock::time_point submitted,
                OnResult &&onResult) noexcept {
     const uint64_t previousEnd = mPreviousEnd;
@@ -190,11 +265,10 @@ private:
     }
     if (mState != State::Ready)
       return;
-    const uint64_t start = previousEnd > begin && previousEnd < end
-                               ? previousEnd
-                               : begin;
+    const uint64_t busy = NativeGpuFrameBusyTicks(
+        begin, end, previousEnd, hasAcquire, acquireBegin, acquireEnd);
     onResult(NativeGpuFrameTime{
-        kind, static_cast<double>(end - start) * mFactor / 1.0e6, cpuMs});
+        kind, static_cast<double>(busy) * mFactor / 1.0e6, cpuMs});
   }
 
   static constexpr size_t kSlots = 8U;
@@ -202,6 +276,8 @@ private:
   size_t mNext = 0U;
   size_t mOldest = 0U;
   bool mBegun = false;
+  bool mAcquireBegun = false;
+  bool mExcludeAcquire = true;
   State mState = State::Uninitialized;
   double mFactor = 1.0;
   bool mBaselineSet = false;

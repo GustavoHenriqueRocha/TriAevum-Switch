@@ -417,10 +417,11 @@ std::vector<Segment> Session() {
 }
 
 Result Simulate(const std::vector<Segment> &segments, Fps60Mode mode,
-                uint32_t swapQueue = 0U) {
+                uint32_t swapQueue = 0U, uint32_t framesInFlight = 1U) {
   Params params;
   params.Mode.Mode = mode;
   params.SwapQueue = swapQueue;
+  params.FramesInFlight = framesInFlight;
   return CadenceSim::Run(segments, params);
 }
 
@@ -508,7 +509,58 @@ void TestSimulationSessionIsMoreRegular() {
   CHECK(strict.InBetweenDropped == 0U);
 }
 
+// Tour tour2 (2026-10-22, CPU 1785, gpu_timing): slow areas with the game
+// pair at 21-24 ms of 33.3 and the GPU (glperf, without the window-acquire
+// bubble) at 12.3 ms per step and 10 ms per in-between; render thread
+// ~10 ms of work per step and ~5 ms per in-between.
+Segment SlowArea(double seconds, double gameStepMs) {
+  Segment segment;
+  segment.Seconds = seconds;
+  segment.GameStepMs = gameStepMs;
+  segment.GameStepSdMs = 2.5;
+  segment.GpuMs = 12.3;
+  segment.GpuSdMs = 1.5;
+  segment.RtStepMinMs = 8.0;
+  segment.RtStepMaxMs = 12.0;
+  segment.RtFullMinMs = 3.0;
+  segment.RtFullMaxMs = 6.0;
+  return segment;
+}
+
+// config/frames_in_flight=2: with the game thread's step host frame longer
+// than a refresh and the in-between one short, a second pending frame lets
+// the pair average out instead of missing the step's refresh.
+void TestSecondFrameInFlightKeepsSlowAreasAtSixty() {
+  for (uint32_t queue : {0U, 1U}) {
+    for (double step : {15.0, 18.0}) {
+      const auto one =
+          Simulate({SlowArea(30, step)}, Fps60Mode::Legacy, queue, 1U);
+      const auto two =
+          Simulate({SlowArea(30, step)}, Fps60Mode::Legacy, queue, 2U);
+      CHECK(two.Pictures >= one.Pictures);
+      CHECK(two.GuestRefreshesPerSecond >= one.GuestRefreshesPerSecond - 0.5);
+    }
+  }
+}
+
+void ReportFramesInFlight() {
+  for (uint32_t queue : {0U, 1U}) {
+    std::printf("\n== areas lentas (tour2), swap %s ==\n",
+                queue == 0U ? "bloqueante" : "com fila de 1 quadro");
+    for (double step : {12.0, 15.0, 18.0, 21.0, 24.0}) {
+      for (uint32_t inFlight : {1U, 2U}) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "g%.0f/f%u", step, inFlight);
+        Print(name, Fps60Mode::Legacy,
+              Simulate({SlowArea(60, step)}, Fps60Mode::Legacy, queue,
+                       inFlight));
+      }
+    }
+  }
+}
+
 void Report() {
+  ReportFramesInFlight();
   struct Scenario {
     const char *Name;
     std::vector<Segment> Segments;
@@ -550,6 +602,7 @@ int main(int argc, char **argv) {
   TestSimulationNearTheLimitKeepsTheAverage();
   TestSimulationOverloadedLocksThirty();
   TestSimulationSessionIsMoreRegular();
+  TestSecondFrameInFlightKeepsSlowAreasAtSixty();
   if (argc > 1 && std::strcmp(argv[1], "--report") == 0)
     Report();
   if (gFailures != 0) {

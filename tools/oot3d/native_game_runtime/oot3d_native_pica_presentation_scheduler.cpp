@@ -119,6 +119,83 @@ bool Oot3dPicaPresentationScheduler::RestoreState(
   return true;
 }
 
+void Oot3dPicaPresentationScheduler::PlanBottomSkip(
+    const Oot3dPicaVisualFrameViewSample &sample, bool presentation) {
+  mBottomSkip.Active = false;
+  if (!mSkipBottomScreen || !presentation)
+    return;
+  const auto colorBytes = [](uint8_t format) -> uint32_t {
+    return format == 0U ? 4U : (format == 1U ? 3U : 2U);
+  };
+  const auto depthBytes = [](uint8_t format) -> uint32_t {
+    return format == 0U ? 2U : (format == 2U ? 3U : 4U);
+  };
+  mBottomSkipDraws.clear();
+  bool anyBottom = false;
+  for (const auto &view : sample.Draws) {
+    const auto &plan = *view.BasePlan;
+    const auto &framebuffer = plan.State.Framebuffer;
+    BottomSkipDraw draw;
+    draw.FramebufferWidth = framebuffer.Width;
+    draw.FramebufferHeight = framebuffer.Height;
+    const uint64_t pixels =
+        static_cast<uint64_t>(framebuffer.Width) * framebuffer.Height;
+    if (framebuffer.ColorPhysicalAddress != 0U)
+      draw.Color = {framebuffer.ColorPhysicalAddress,
+                    BottomSkipEnd(framebuffer.ColorPhysicalAddress,
+                                  pixels * colorBytes(framebuffer.ColorFormat))};
+    if (framebuffer.DepthPhysicalAddress != 0U)
+      draw.Depth = {framebuffer.DepthPhysicalAddress,
+                    BottomSkipEnd(framebuffer.DepthPhysicalAddress,
+                                  pixels * depthBytes(framebuffer.DepthFormat))};
+    for (size_t unit = 0; unit < draw.Textures.size(); ++unit) {
+      const auto &texture = plan.State.Textures[unit];
+      if (!texture.Enabled || texture.PhysicalAddress == 0U)
+        continue;
+      const auto bytes = Oot3dPicaTextureMipChainByteSize(texture);
+      draw.Textures[unit] = {
+          texture.PhysicalAddress,
+          BottomSkipEnd(texture.PhysicalAddress,
+                        bytes.has_value()
+                            ? *bytes
+                            : static_cast<uint64_t>(texture.Width) *
+                                  texture.Height * 4U)};
+    }
+    anyBottom = anyBottom || IsBottomScreenFramebuffer(draw.FramebufferWidth,
+                                                       draw.FramebufferHeight);
+    mBottomSkipDraws.push_back(draw);
+  }
+  if (!anyBottom)
+    return;
+  mBottomSkipFills.clear();
+  for (const auto &fill : sample.MemoryFills)
+    mBottomSkipFills.push_back(
+        {fill.StartPhysicalAddress, fill.EndPhysicalAddress});
+  const auto extent = [](uint32_t address, uint32_t size,
+                         uint32_t textureCopyBytes) -> BottomSkipRange {
+    // Display transfer: size = height << 16 | width; 4 bytes per pixel
+    // bounds every format. TextureCopy: its byte count.
+    const uint64_t bytes =
+        textureCopyBytes != 0U
+            ? textureCopyBytes
+            : static_cast<uint64_t>(size & 0xFFFFU) * (size >> 16U) * 4U;
+    return {address, BottomSkipEnd(address, bytes == 0U ? 1U : bytes)};
+  };
+  mBottomSkipTransfers.clear();
+  for (const auto &transfer : sample.DisplayTransfers) {
+    mBottomSkipTransfers.push_back(
+        {extent(transfer.InputPhysicalAddress, transfer.Transfer.InputSize,
+                transfer.Transfer.TextureCopyBytes),
+         extent(transfer.OutputPhysicalAddress, transfer.Transfer.OutputSize,
+                transfer.Transfer.TextureCopyBytes),
+         SameTransfer(transfer, sample.TopTransfer)});
+  }
+  PlanBottomScreenSkip(mBottomSkipDraws, mBottomSkipFills,
+                       mBottomSkipTransfers, mBottomSkipScratch, mBottomSkip);
+  if (!mBottomSkip.Active)
+    ++mStats.BottomSkipRefusedSamples;
+}
+
 bool Oot3dPicaPresentationScheduler::Execute(
     Oot3d::Renderer::PicaRenderBackend &backend,
     const Oot3dPicaVisualFrameViewSample &sample,
@@ -156,10 +233,20 @@ bool Oot3dPicaPresentationScheduler::Execute(
   }
   mStats.SelectedDraws += sample.Draws.size();
 
+  const bool presentation =
+      kind != Oot3dPicaPresentationExecutionKind::DependencyFlush &&
+      kind != Oot3dPicaPresentationExecutionKind::NativeFrame;
+  PlanBottomSkip(sample, presentation);
+  const auto skipDraw = [&](size_t index) {
+    return mBottomSkip.Active && mBottomSkip.SkipDraw[index] != 0U;
+  };
+
   mCompositionDrawScratch.clear();
   mCompositionDrawScratch.reserve(sample.Draws.size());
-  for (const auto &drawView : sample.Draws) {
-    const auto &draw = *drawView.BasePlan;
+  for (size_t drawIndex = 0; drawIndex < sample.Draws.size(); ++drawIndex) {
+    if (skipDraw(drawIndex))
+      continue;
+    const auto &draw = *sample.Draws[drawIndex].BasePlan;
     const auto &framebuffer = draw.State.Framebuffer;
     mCompositionDrawScratch.push_back({
         .SubmissionId = draw.SubmissionId,
@@ -194,9 +281,6 @@ bool Oot3dPicaPresentationScheduler::Execute(
   if (mNextCompositionSequenceId == 0U) {
     mNextCompositionSequenceId = 1U;
   }
-  const bool presentation =
-      kind != Oot3dPicaPresentationExecutionKind::DependencyFlush &&
-      kind != Oot3dPicaPresentationExecutionKind::NativeFrame;
   {
     OptionalTimer timer(mTimings.Enabled,
                         mTimings.CompositionPublicationSeconds);
@@ -226,9 +310,12 @@ bool Oot3dPicaPresentationScheduler::Execute(
   // Native-memory execution keeps its canonical sequence untouched.
   if (presentation) {
     OptionalTimer timer(mTimings.Enabled, mTimings.DrawPreparationSeconds);
+    size_t compositionIndex = 0;
     for (size_t index = 0; index < sample.Draws.size(); ++index) {
+      if (skipDraw(index))
+        continue;
       if (!backend.WantsPicaSequenceDrawPreparation(
-              mCompositionDrawScratch[index])) {
+              mCompositionDrawScratch[compositionIndex++])) {
         continue;
       }
       const auto &drawView = sample.Draws[index];
@@ -268,6 +355,9 @@ bool Oot3dPicaPresentationScheduler::Execute(
   const auto fills = sample.MemoryFills;
   const auto transfers = sample.DisplayTransfers;
   const auto submitFill = [&](const Oot3dPicaMemoryFillSubmission &fill) {
+    if (mBottomSkip.Active &&
+        mBottomSkip.SkipFill[static_cast<size_t>(&fill - fills.data())] != 0U)
+      return true;
     OptionalTimer timer(mTimings.Enabled, mTimings.MemoryFillSeconds);
     if (!SubmitOot3dPicaVulkanMemoryFill(backend, fill, error,
                                          renderTargetNamespace)) {
@@ -278,6 +368,12 @@ bool Oot3dPicaPresentationScheduler::Execute(
   };
   const auto submitTransfer = [&](const Oot3dPicaDisplayTransferSubmission
                                       &transfer) {
+    // A lower-screen transfer (only ever one of the sample's own).
+    if (mBottomSkip.Active && &transfer >= transfers.data() &&
+        &transfer < transfers.data() + transfers.size() &&
+        mBottomSkip.SkipTransfer[static_cast<size_t>(&transfer -
+                                                     transfers.data())] != 0U)
+      return true;
     OptionalTimer timer(mTimings.Enabled, mTimings.SnapshotTransferSeconds);
     // Real execution publishes byte visibility and discharges PPF, including
     // guarded deferred RAM. Replayed/interpolated/restored transfers recreate
@@ -298,7 +394,8 @@ bool Oot3dPicaPresentationScheduler::Execute(
     return true;
   };
 
-  for (const auto &drawView : sample.Draws) {
+  for (size_t drawIndex = 0; drawIndex < sample.Draws.size(); ++drawIndex) {
+    const auto &drawView = sample.Draws[drawIndex];
     const auto &draw = *drawView.BasePlan;
     while (transferIndex < transfers.size() &&
            transfers[transferIndex].AfterDrawSubmissionId < draw.SubmissionId) {
@@ -312,6 +409,9 @@ bool Oot3dPicaPresentationScheduler::Execute(
         return false;
       }
     }
+    if (skipDraw(drawIndex)) {
+      ++mStats.SkippedBottomDraws;
+    } else {
     const auto overrides = drawView.Overrides();
     {
       OptionalTimer timer(mTimings.Enabled, mTimings.DrawSubmissionSeconds);
@@ -332,6 +432,7 @@ bool Oot3dPicaPresentationScheduler::Execute(
       }
     }
     ++mStats.ExecutedDraws;
+    }
     while (transferIndex < transfers.size() &&
            transfers[transferIndex].AfterDrawSubmissionId ==
                draw.SubmissionId) {
