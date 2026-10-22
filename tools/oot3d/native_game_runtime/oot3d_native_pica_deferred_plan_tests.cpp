@@ -375,8 +375,8 @@ void TestConcurrentBatches() {
 
 } // namespace
 
-constexpr uint64_t kMaxPlanAllocations = 5U;  // medido em 2026-10-22
-constexpr uint64_t kMaxPlanAllocationsTextured = 5U;
+constexpr uint64_t kMaxPlanAllocations = 2U;  // medido em 2026-10-22
+constexpr uint64_t kMaxPlanAllocationsTextured = 3U;
 
 // Allocations of one plan build once the shader cache is warm. The
 // submission's payloads move into the plan; what is left is the plan's own
@@ -387,9 +387,11 @@ void TestPlanBuildAllocations() {
     std::string error;
     Oot3dPicaVulkanDrawPlan plan;
     for (bool textured : {false, true}) {
-        auto warm = MakeSubmission(1U, 1U, 0x1F000000U, textured);
+        // The game's draws share their shader stores: copies of one packet.
+        const auto source = MakeSubmission(1U, 1U, 0x1F000000U, textured);
+        auto warm = source;
         Require(builder.Build(warm, plan, &error), error);
-        auto submission = MakeSubmission(2U, 1U, 0x1F000000U, textured);
+        auto submission = source;
         const uint64_t before = gAllocations.load();
         Require(builder.Build(submission, plan, &error), error);
         const uint64_t spent = gAllocations.load() - before;

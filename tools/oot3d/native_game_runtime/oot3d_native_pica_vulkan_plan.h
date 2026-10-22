@@ -243,6 +243,11 @@ struct Oot3dPicaVulkanShaderSourceCache {
         Oot3dPicaVulkanCachedVertexStructuralState,
         Oot3dPicaVulkanVertexStructuralStateKeyHash>
         VertexStructuralStates;
+    // Fixed (default attribute) bindings by content hash. The defaults barely
+    // change, so a warm build shares these bytes instead of allocating them:
+    // the console's malloc has one lock for every thread.
+    std::unordered_map<uint64_t, std::shared_ptr<const std::vector<uint8_t>>>
+        FixedBindingBytes;
     uint64_t VertexHits = 0;
     uint64_t VertexMisses = 0;
     uint64_t FragmentHits = 0;
