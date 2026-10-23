@@ -108,7 +108,46 @@ struct InterpolationPacingConfig {
   // After this many consecutive in-between frames below the full level, one
   // is drawn a level higher to refresh its estimate (if not hopeless).
   uint32_t ProbeInterval = 60U;
+  // config/interp_margin_ms: the pair must fit the budget minus this much
+  // (ms). tour15 (2026-10-23, pgo5j, costs without the render thread's
+  // acquire wait): areas whose measured GPU pair was 29-33 ms "fit" 33.3
+  // but presented 54.7-57.1 FPS instead of 59.4-60 (the GPU cannot be kept
+  // fed back to back: what it measures as busy is not all a frame occupies);
+  // pairs up to ~27 kept 59+. 5 ms keeps in-between frames where the pair
+  // is <= 28.3 ms (per-area replay of tour14/tour15: 59.32 FPS, 51.6
+  // distinct pictures/s, 22 areas >= 59, against pgo5i's 59.35 / 50.5 / 21).
+  double MarginMs = 5.0;
 };
+
+// Parses config/interp_margin_ms ("5", "1,5"): 0 to 15 ms; nullopt when
+// invalid (the default stays).
+[[nodiscard]] inline std::optional<double>
+ParseInterpolationMarginMs(std::string_view text) noexcept {
+  while (!text.empty() && (text.front() == ' ' || text.front() == '\t'))
+    text.remove_prefix(1U);
+  double value = 0.0, divisor = 1.0;
+  bool digits = false, point = false;
+  for (const char c : text) {
+    if (c >= '0' && c <= '9') {
+      digits = true;
+      if (point) {
+        divisor *= 10.0;
+        value += (c - '0') / divisor;
+      } else {
+        value = value * 10.0 + (c - '0');
+      }
+    } else if ((c == '.' || c == ',') && !point) {
+      point = true;
+    } else if (c == '\r' || c == '\n' || c == ' ' || c == '\t') {
+      break;
+    } else {
+      return std::nullopt;
+    }
+  }
+  if (!digits || value > 15.0)
+    return std::nullopt;
+  return value;
+}
 
 // Parses config/interp_scale ("1.5", "1,5"; multiples of 0.25 from 1 up to
 // the base scale exclusive). 0 when absent, invalid or not below base.
@@ -163,6 +202,10 @@ public:
                  float baseScale, bool reducedAvailable) noexcept {
     mConfig = config;
     mPairBudgetMs = pairBudgetMs > 0.0 ? pairBudgetMs : 1000.0 / 30.0;
+    // The margin never takes more than half the pair.
+    mDecisionBudgetMs =
+        std::max(0.5 * mPairBudgetMs,
+                 mPairBudgetMs - std::max(0.0, config.MarginMs));
     mReducedAvailable = reducedAvailable && config.ReducedScale > 0.0F;
     // Initial guess of a reduced replay against a full one: a fixed part
     // (vertex work, state, present) plus the pixel part scaled by the area.
@@ -195,7 +238,7 @@ public:
     if (mStepCostMs <= 0.0) {
       return Commit(preferred, false);
     }
-    const double budget = mPairBudgetMs;
+    const double budget = mDecisionBudgetMs;
     const auto index = [](InterpolatedSampleLevel level) {
       return static_cast<uint8_t>(level);
     };
@@ -327,6 +370,10 @@ public:
   }
   [[nodiscard]] double StepCostMs() const noexcept { return mStepCostMs; }
   [[nodiscard]] double PairBudgetMs() const noexcept { return mPairBudgetMs; }
+  // The budget the decisions use: the pair minus config/interp_margin_ms.
+  [[nodiscard]] double DecisionBudgetMs() const noexcept {
+    return mDecisionBudgetMs;
+  }
   [[nodiscard]] InterpolatedSampleLevel Level() const noexcept {
     return mLevel;
   }
@@ -359,6 +406,7 @@ private:
 
   InterpolationPacingConfig mConfig{};
   double mPairBudgetMs = 1000.0 / 30.0;
+  double mDecisionBudgetMs = 1000.0 / 30.0;
   bool mReducedAvailable = false;
   bool mDropAllowed = true;
   double mStepCostMs = 0.0;

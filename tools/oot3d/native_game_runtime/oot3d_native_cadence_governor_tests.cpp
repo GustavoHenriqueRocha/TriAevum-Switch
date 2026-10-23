@@ -422,6 +422,9 @@ Result Simulate(const std::vector<Segment> &segments, Fps60Mode mode,
   params.Mode.Mode = mode;
   params.SwapQueue = swapQueue;
   params.FramesInFlight = framesInFlight;
+  // These scenarios were tuned on the bare pair (before
+  // config/interp_margin_ms).
+  params.Pacing.MarginMs = 0.0;
   return CadenceSim::Run(segments, params);
 }
 
@@ -563,8 +566,11 @@ Segment Tour14Heavy(double seconds, double gpuMs) {
 }
 
 Result SimulateSwapchain(const std::vector<Segment> &segments,
-                         bool countWaits) {
+                         bool countWaits, double marginMs = 0.0,
+                         bool split = false) {
   Params params;
+  params.SplitWaitByGpu = split;
+  params.Pacing.MarginMs = marginMs;
   params.Mode.Mode = Fps60Mode::Legacy;
   params.SwapchainBuffers = 3U;
   params.CountRenderWaits = countWaits;
@@ -589,6 +595,77 @@ void TestRenderWaitIsNotCost() {
   // Over the GPU pair the drops stay (only waits were taken out).
   const auto over = SimulateSwapchain({Tour14Heavy(30, 18.0)}, false);
   CHECK(over.InBetweenDropped > over.InBetweenDrawn);
+}
+
+// tour15 (2026-10-23, pgo5j): a heavy area by its measured GPU per replay;
+// render thread ~8.5 ms of work per step, ~6.5 per in-between.
+Segment Tour15(double seconds, double gpuMs, double hiddenMs) {
+  Segment segment = Tour14Heavy(seconds, gpuMs);
+  segment.RtStepMinMs = 7.0;
+  segment.RtStepMaxMs = 10.0;
+  segment.RtFullMinMs = 5.0;
+  segment.RtFullMaxMs = 8.0;
+  segment.GpuSdMs = 1.0;
+  segment.GpuHiddenMs = hiddenMs;
+  return segment;
+}
+
+void SweepMargin() {
+  for (bool split : {false, true}) {
+  std::printf("margem (split %d) | por GPU medida/replay: fps pics\n", split ? 1 : 0);
+  for (double margin : {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0}) {
+    std::printf("%4.1f ms:", margin);
+    double fps = 0.0, pics = 0.0;
+    int n = 0;
+    for (double gpu : {11.0, 12.0, 12.5, 13.15, 13.6, 14.0, 14.5, 14.95, 15.25, 16.4}) {
+      const auto r = SimulateSwapchain({Tour15(60, gpu, 2.75)}, false, margin, split);
+      std::printf(" %.2f:%.1f/%.1f", gpu, r.Presents / r.Seconds, r.Pictures / r.Seconds);
+      fps += r.Presents / r.Seconds;
+      pics += r.Pictures / r.Seconds;
+      ++n;
+    }
+    std::printf("  | media %.2f/%.1f\n", fps / n, pics / n);
+  }
+  }
+  std::printf("conta espera, margem 0 (pgo5i):");
+  for (double gpu : {11.0, 12.0, 12.5, 13.15, 13.6, 14.0, 14.5, 14.95, 15.25, 16.4}) {
+    const auto r = SimulateSwapchain({Tour15(60, gpu, 2.75)}, true, 0.0);
+    std::printf(" %.2f:%.1f/%.1f", gpu, r.Presents / r.Seconds, r.Pictures / r.Seconds);
+  }
+  std::printf("\n");
+}
+
+// GpuHiddenMs against tour15: 2.5-3 ms reproduces 55.8 FPS at a measured
+// 14.95 ms per replay (Kakariko) and 59+ at 13.15-13.6.
+void Calibrate() {
+  for (double hidden : {0.0, 1.0, 1.5, 2.0, 2.5, 3.0}) {
+    std::printf("oculto %.1f:", hidden);
+    for (double gpu : {13.15, 13.6, 14.95, 15.25, 16.4}) {
+      const auto r = SimulateSwapchain({Tour15(60, gpu, hidden)}, false, 0.0);
+      const auto w = SimulateSwapchain({Tour15(60, gpu, hidden)}, true, 0.0);
+      std::printf("  g%.2f fps %.1f pics %.1f | conta %.1f/%.1f", gpu,
+                  r.Presents / r.Seconds, r.Pictures / r.Seconds,
+                  w.Presents / w.Seconds, w.Pictures / w.Seconds);
+    }
+    std::printf("\n");
+  }
+}
+
+// Regression (tour15, pgo5j): without the wait in the cost, measured pairs
+// of 29-33 ms were kept and the area lost 3-5 FPS; the default margin (5 ms)
+// keeps the refresh there and still draws every in-between frame at 12.5.
+void TestMarginKeepsTheRefresh() {
+  const double margin = InterpolationPacingConfig{}.MarginMs;
+  for (double gpu : {14.95, 15.25, 16.4}) {
+    const auto bare = SimulateSwapchain({Tour15(60, gpu, 2.75)}, false, 0.0);
+    const auto kept = SimulateSwapchain({Tour15(60, gpu, 2.75)}, false, margin);
+    CHECK(kept.Presents / kept.Seconds > 59.7);
+    CHECK(kept.Presents >= bare.Presents);
+  }
+  CHECK(SimulateSwapchain({Tour15(60, 14.95, 2.75)}, false, 0.0).Presents /
+            60.0 < 58.0);
+  const auto light = SimulateSwapchain({Tour15(60, 12.5, 2.75)}, false, margin);
+  CHECK(light.Pictures / light.Seconds > 59.5);
 }
 
 void ReportRenderWaits() {
@@ -627,6 +704,10 @@ void ReportFramesInFlight() {
 }
 
 void Report() {
+  std::printf("\n== tour15: calibracao do oculto (margem 0) ==\n");
+  Calibrate();
+  std::printf("\n== tour15: margem do par (oculto 2,75 ms) ==\n");
+  SweepMargin();
   ReportRenderWaits();
   ReportFramesInFlight();
   struct Scenario {
@@ -672,6 +753,7 @@ int main(int argc, char **argv) {
   TestSimulationSessionIsMoreRegular();
   TestSecondFrameInFlightKeepsSlowAreasAtSixty();
   TestRenderWaitIsNotCost();
+  TestMarginKeepsTheRefresh();
   if (argc > 1 && std::strcmp(argv[1], "--report") == 0)
     Report();
   if (gFailures != 0) {

@@ -620,6 +620,25 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   distintas/s); só o ocupado, 0–10 (59,7–59,9/s); GPU de 16,5 ms segue descartando (o par não cabe).
   Testes: `TestRenderWaitIsNotCost` (cadence), `TestRenderThreadBusyWithoutTheWait` e
   `TestGovernorKeepsInBetweenWithoutTheRenderWait` (`oot3d_native_gpu_frame_timer_tests`).
+- **Resultado do tour15 (pgo5j) e margem do par** (`config/interp_margin_ms`, padrão 5): sem a
+  espera no custo, por janela de 150 `interp` 53→65, `hold` 41→32, `interp_dropped` 23→11,
+  imagens distintas ~51→~56/s, mas fps apresentado médio 59,34→58,52 (Haunted Wasteland 60→54,7,
+  Hyrule Castle 59,4→55,5, Kakariko 59,1→55,8, DMC 60→56,5); `rt_wait_ms_step`=4,5. Por área, a perda
+  só aparece onde o par **medido** de GPU é ≥ ~29 ms (29,2–32,8); até ~27 ficou igual ou melhor
+  (Castle Town Buildings 58,8→59,8). Ou seja: o que o timer mede como GPU ocupada não é tudo o que
+  um quadro ocupa — a GPU não se mantém alimentada de ponta a ponta perto de 100%. O modelo
+  (`oot3d_native_cadence_sim.h`, `Segment::GpuHiddenMs`) reproduz o console com 2,5–3 ms ocultos
+  por quadro (14,95 ms medidos → 55,8 FPS). Correção: o governador só mantém o intermediário se o
+  par couber em 33,3 − margem. Replay por área (áreas com par ≤ 33,3 − m usam o tour15, as outras o
+  tour14): m=0 58,51 fps / 54,1 imagens/s; m=4 59,27/51,8; **m=5 59,32/51,6, 22 áreas ≥ 59** (pgo5i:
+  59,35/50,5/21); m=7 59,35/51,5. No modelo (oculto 2,75) m ≥ 4 mantém ≥ 59,8 em todas as cargas;
+  m=4 dá mais imagens (49,7 contra 46,7 de m=5), mas o replay real pede 5. Separar a espera em
+  "GPU ainda ocupada" × "display" (contar só a primeira, `SplitWaitByGpu` no modelo: disponibilidade
+  do carimbo do fim da cena quando o acquire volta) foi avaliado e **não implementado**: no modelo
+  dá 59,84/49,1 sem margem e piora com margem, abaixo da margem sozinha. Para voltar exatamente ao
+  pgo5i sem build: `config/interp_cpu_count_wait` (arquivo vazio) + `config/interp_margin_ms` com
+  `0`. `perf.txt` ganhou `decision_budget_ms`; o log, `margin_ms=`. Testes:
+  `TestMarginDropsPairsNearTheBudget` (pacing), `TestMarginKeepsTheRefresh` (cadence).
 - **Dois quadros em voo** (`config/frames_in_flight`): com 1, o fim de quadro do jogo espera a
   render thread terminar o quadro anterior, que espera o display; um passo longo (16–18 ms) seguido
   de um intermediário curto não se compensa e o passo perde o refresh. O modelo
@@ -1060,6 +1079,12 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     e GPU). E carimbo de GPU só mede o que já foi entregue: um `glQueryCounter` emitido depois do
     último `glFlush` executa no próximo flush, então carimbos "antes" e "depois" de uma espera, sem
     flush entre eles, dão o mesmo tempo. Ao instrumentar, conferir em que flush cada carimbo sai.
+
+37. **Tirar uma medida inflada pode expor que o orçamento nunca foi o que parecia.** Depois de tirar
+    a espera do custo, pares medidos de 29–30 ms "cabiam" em 33,3 e perdiam refresh: a GPU perto de
+    100% não é alimentada de ponta a ponta, e a espera contada antes funcionava, por acaso, como
+    margem. Toda correção de medida que muda uma decisão vem com a margem calibrada no console (por
+    área, contra o melhor bench), não com o orçamento teórico.
 
 ---
 

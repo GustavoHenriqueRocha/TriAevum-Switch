@@ -585,6 +585,8 @@ private:
   struct InterpolationPacingOptions {
     bool KeepGameSpeed = true;
     std::string ReducedScaleText;
+    // config/interp_margin_ms (ms off the pair budget; empty: the default).
+    std::string MarginText;
     bool ReducedAlways = false;
     // config/native_replay=1: replay the native namespace although the
     // backend never observes it (A/B).
@@ -664,6 +666,7 @@ private:
     double FullEstimateMs = 0.0;
     double ReducedEstimateMs = 0.0;
     double BudgetMs = 0.0;
+    double DecisionBudgetMs = 0.0; // BudgetMs minus config/interp_margin_ms
     float ReducedScale = 0.0F;
     // Render-thread visual-frame preparation (matching + analysis) and
     // sampling, cumulative (copy of visualInterpolationTiming).

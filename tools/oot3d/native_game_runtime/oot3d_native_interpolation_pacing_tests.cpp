@@ -28,9 +28,12 @@ void Check(bool condition, const char *what, int line) {
 
 constexpr double kPair = 2000.0 / 60.0;
 
+// The mechanics are tested on the bare pair (margin 0); the margin has its
+// own tests.
 InterpolationPacingGovernor Make(bool keepSpeed = true, float reduced = 0.0F,
-                                 bool always = false) {
+                                 bool always = false, double marginMs = 0.0) {
   InterpolationPacingConfig config;
+  config.MarginMs = marginMs;
   config.KeepGameSpeed = keepSpeed;
   config.ReducedScale = reduced;
   config.ReducedMode = always ? InterpolationReducedScaleMode::Always
@@ -447,7 +450,44 @@ void TestParseReducedScale() {
 
 } // namespace
 
+// tour15 (pgo5j, margin 0): a measured pair of 29-30 ms "fit" 33.3 and the
+// area lost 3-5 FPS. With the default margin (5 ms) that pair drops, one of
+// 26-27 is still drawn.
+void TestMarginDropsPairsNearTheBudget() {
+  using Oot3dNativeGame::ParseInterpolationMarginMs;
+  CHECK(InterpolationPacingConfig{}.MarginMs == 5.0);
+  CHECK(ParseInterpolationMarginMs("0") == 0.0);
+  CHECK(ParseInterpolationMarginMs("1,5\n") == 1.5);
+  CHECK(ParseInterpolationMarginMs(" 2.25") == 2.25);
+  CHECK(!ParseInterpolationMarginMs("x").has_value());
+  CHECK(!ParseInterpolationMarginMs("").has_value());
+  CHECK(!ParseInterpolationMarginMs("16").has_value());
+  const auto steady = [](double marginMs, double stepMs, double fullMs) {
+    auto governor = Make(true, 0.0F, false, marginMs);
+    InterpolatedSampleLevel level = InterpolatedSampleLevel::Full;
+    for (int pair = 0; pair < 300; ++pair) {
+      governor.ObserveStep(stepMs);
+      level = governor.Decide();
+      governor.ObserveInterpolated(
+          level, level == InterpolatedSampleLevel::Full ? fullMs : 0.5);
+    }
+    return governor.Level();
+  };
+  CHECK(steady(0.0, 15.0, 14.9) == InterpolatedSampleLevel::Full);
+  CHECK(steady(5.0, 15.0, 14.9) == InterpolatedSampleLevel::Dropped);
+  CHECK(steady(5.0, 13.5, 13.4) == InterpolatedSampleLevel::Full);
+  // Never more than half the pair.
+  CHECK(Make(true, 0.0F, false, 15.0).DecisionBudgetMs() == kPair - 15.0);
+  InterpolationPacingConfig config;
+  config.MarginMs = 15.0;
+  InterpolationPacingGovernor governor;
+  governor.Configure(config, 20.0, 2.0F, false); // a 100 Hz pair
+  CHECK(governor.DecisionBudgetMs() == 10.0);
+  CHECK(Make().DecisionBudgetMs() == kPair);
+}
+
 int main() {
+  TestMarginDropsPairsNearTheBudget();
   TestNoMeasurementsKeepsPreferredLevel();
   TestLightLoadDrawsEveryInBetweenFrame();
   TestHeavyLoadDropsWithoutReducedLevel();

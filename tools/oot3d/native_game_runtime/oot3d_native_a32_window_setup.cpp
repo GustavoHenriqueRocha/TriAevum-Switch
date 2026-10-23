@@ -1549,6 +1549,8 @@ void NativeA32WindowSession::Setup() {
       options.KeepGameSpeed = trimmed(*text) != "0";
     if (const auto text = readText("interp_scale", "TRIAEVUM_INTERP_SCALE"))
       options.ReducedScaleText = trimmed(*text);
+    if (const auto text = readText("interp_margin_ms", "TRIAEVUM_INTERP_MARGIN_MS"))
+      options.MarginText = trimmed(*text);
     if (const auto text =
             readText("interp_scale_mode", "TRIAEVUM_INTERP_SCALE_MODE"))
       options.ReducedAlways = trimmed(*text) == "always";

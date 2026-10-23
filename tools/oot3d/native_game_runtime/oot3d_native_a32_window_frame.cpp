@@ -178,6 +178,9 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
   config.KeepGameSpeed = options.KeepGameSpeed;
   config.ReducedScale = Oot3dNativeGame::ParseInterpolationReducedScale(
       options.ReducedScaleText, baseScale);
+  if (const auto margin =
+          Oot3dNativeGame::ParseInterpolationMarginMs(options.MarginText))
+    config.MarginMs = *margin;
   config.ReducedMode = options.ReducedAlways
                            ? Oot3dNativeGame::InterpolationReducedScaleMode::Always
                            : Oot3dNativeGame::InterpolationReducedScaleMode::Auto;
@@ -222,13 +225,14 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
                  "TRIAEVUM_INTERP_PACING keep_speed=%d reduced_scale=%.2f "
                  "reduced_available=%d mode=%s base_scale=%.2f "
                  "native_replay=%d fps60_mode=%s cpu_count_wait=%d "
-                 "flush_before_pacing=%d\n",
+                 "flush_before_pacing=%d margin_ms=%.2f\n",
                  config.KeepGameSpeed ? 1 : 0, config.ReducedScale,
                  reducedAvailable ? 1 : 0,
                  options.ReducedAlways ? "always" : "auto", baseScale,
                  skipNativeReplay ? 0 : 1,
                  Oot3dNativeGame::Fps60ModeName(options.Fps60Mode.Mode).data(),
-                 gCountRenderWait ? 1 : 0, gFlushBeforePacing ? 1 : 0);
+                 gCountRenderWait ? 1 : 0, gFlushBeforePacing ? 1 : 0,
+                 config.MarginMs);
   }
   std::lock_guard lock(interpolationPerfMutex);
   interpolationPerf.ReducedScale = reducedAvailable ? config.ReducedScale : 0.0F;
@@ -322,6 +326,7 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   perf.ReducedEstimateMs = interpolationPacing.Estimate(
       Oot3dNativeGame::InterpolatedSampleLevel::Reduced);
   perf.BudgetMs = interpolationPacing.PairBudgetMs();
+  perf.DecisionBudgetMs = interpolationPacing.DecisionBudgetMs();
 }
 
 void NativeA32WindowSession::ObservePresentCadence(uint8_t frameKind) {
@@ -1128,7 +1133,8 @@ bool NativeA32WindowSession::RunFrame() {
         perf << " est_step_ms=" << current.StepCostMs
              << " est_full_ms=" << current.FullEstimateMs
              << " est_reduced_ms=" << current.ReducedEstimateMs
-             << " pair_budget_ms=" << current.BudgetMs;
+             << " pair_budget_ms=" << current.BudgetMs
+             << " decision_budget_ms=" << current.DecisionBudgetMs;
         previous = current;
       }
       // Presentation cadence (config/fps60_mode, oot3d_native_cadence_governor.h),

@@ -50,6 +50,10 @@ struct Segment {
   double RtFullMaxMs = 6.0;
   double SpikeProbability = 0.02; // a step that costs SpikeMs more
   double SpikeMs = 8.0;
+  // GPU time a frame occupies beyond what the GPU timer reports as busy
+  // (the governor never sees it). tour15: measured pairs of 29-30 ms lost
+  // refreshes although they "fit" 33.3.
+  double GpuHiddenMs = 0.0;
 };
 
 struct Params {
@@ -95,6 +99,10 @@ struct Params {
   // including the acquire wait (before config/interp_cpu_count_wait became
   // the exception, 2026-10-23), false = only its work.
   bool CountRenderWaits = false;
+  // config/interp_wait_gpu_split: the acquire wait is counted only when the
+  // GPU had not finished the frame's scene when the acquire returned (the
+  // wait was the GPU's, not the display's).
+  bool SplitWaitByGpu = false;
   uint32_t Seed = 12345U;
   Fps60ModeConfig Mode{};
   InterpolationPacingConfig Pacing{};
@@ -296,8 +304,9 @@ struct Result {
       }
     }
     const double gpuStart = std::max(renderStart + 0.2, gpuFree);
-    double gpuEnd = gpuStart + gpuMs;
+    double gpuEnd = gpuStart + gpuMs + segment.GpuHiddenMs;
     double waitMs = 0.0;
+    bool gpuBusyAtAcquire = false;
     if (params.SwapchainBuffers != 0U) {
       const double acquire =
           renderStart + params.AcquireAtFraction * rtMs;
@@ -307,13 +316,18 @@ struct Result {
         released = displays[displays.size() + 1U - buffers];
       waitMs = std::max(0.0, released - acquire);
       result.AcquireWaitMs += waitMs;
+      gpuBusyAtAcquire =
+          gpuStart + gpuMs + segment.GpuHiddenMs > acquire + waitMs;
       gpuEnd = std::max(gpuEnd, acquire + waitMs + params.ScanoutGpuMs);
     }
     gpuFree = gpuEnd;
     const double rtEnd = renderStart + rtMs + waitMs;
     // Cost the governor learns: max of GPU and render thread.
     const double cost =
-        std::max(gpuMs, params.CountRenderWaits ? rtMs + waitMs : rtMs);
+        std::max(gpuMs, params.CountRenderWaits ||
+                                (params.SplitWaitByGpu && gpuBusyAtAcquire)
+                            ? rtMs + waitMs
+                            : rtMs);
     switch (kind) {
     case RenderFrameKind::Step:
       pacing.ObserveStep(cost);

@@ -53,7 +53,9 @@ void TestGovernorKeepsInBetweenWithoutTheGap() {
   using namespace Oot3dNativeGame;
   const auto decide = [](double stepMs, double fullMs) {
     InterpolationPacingGovernor governor;
-    governor.Configure(InterpolationPacingConfig{}, 2000.0 / 60.0, 2.0F,
+    InterpolationPacingConfig config;
+    config.MarginMs = 0.0; // the measure alone (the margin: pacing tests)
+    governor.Configure(config, 2000.0 / 60.0, 2.0F,
                        false);
     for (int frame = 0; frame < 240; ++frame) {
       governor.ObserveStep(stepMs);
@@ -111,7 +113,9 @@ void TestGovernorKeepsInBetweenWithoutTheRenderWait() {
                                                  frame.Cpu, frame.Wait));
     };
     InterpolationPacingGovernor governor;
-    governor.Configure(InterpolationPacingConfig{}, 2000.0 / 60.0, 2.0F,
+    InterpolationPacingConfig config;
+    config.MarginMs = 0.0; // the measure alone (the margin: pacing tests)
+    governor.Configure(config, 2000.0 / 60.0, 2.0F,
                        false);
     for (int frame = 0; frame < 240; ++frame) {
       governor.ObserveStep(cost(step));
