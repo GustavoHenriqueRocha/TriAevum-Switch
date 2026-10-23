@@ -649,6 +649,7 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 
 ### 4.8 Economias de GPU (exatas)
 
+  Console (tour13, 23/10, pgo5h, GPU 614, Link andando): uniforms 551→203 KB/quadro (Water Temple), 777→318 (Market); `draw_submit_ms` 8,3→3,5 (com o fim da assinatura); média das 29 áreas 58,96→59,4, Water Temple 54,7→59,4, Kakariko 55,9→58,8. **Market segue 58,6 com 2 intermediários e 72 `hold` por janela**: passo 19,4 + intermediário 17,5 ms > 33,3, então o governador descarta o intermediário (60 Hz de imagem com 30 quadros distintos). Faltam ~4 ms no par; alvo: `step_cpu_other` 5,9 ms (cópia dos planos de 15,7 KB em `resolve_plans`) e `pica_top` 6,0.
 - `config/gl_lean` (padrão): pula cópia de display transfer repetida, limpeza da janela que o scanout
   cobre, limpeza de Shadow2D sem uso, uniforms iguais; reaproveita o EASU ao reapresentar.
 - `config/gl_gpu_lean` (padrão, `gfx_opengl_pica_gpu_lean.h`): logic op COPY → desligado, blend
