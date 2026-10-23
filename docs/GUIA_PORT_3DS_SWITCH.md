@@ -1121,6 +1121,8 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     verdade (`*_is_format_supported`): um formato "aceito" pelo GL pode ser um fallback em software
     que aloca e decodifica na CPU.
 
+**Melhor bench até agora (23/10, tour17, pgo5l = 4d512833, padrões do pgo5i + ETC2 desligado, GPU 614, Link andando):** 29 áreas sem crash, média 59,44 (tour14/pgo5i: 59,34), 26 áreas ≥59 (antes 23), hold 41→39 por janela. Pior área: Water Temple 55,1 (mín 51,1).
+
 ---
 
 ## 8. Checklist do próximo jogo
