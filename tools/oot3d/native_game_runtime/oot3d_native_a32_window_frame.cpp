@@ -992,6 +992,10 @@ bool NativeA32WindowSession::RunFrame() {
     }
     frameCount += advanceGuest ? 1U : 0U;
   }
+  if (deferredDspAudioFrames != 0U) {
+    Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::GuestRefresh);
+    DeliverDspAudioFrames(std::exchange(deferredDspAudioFrames, 0U));
+  }
 
   if (launch.ExtendedDiagnostics) {
     inputConsumerDiagnostics.Observe(process.Memory(), frameCount);
@@ -1481,6 +1485,7 @@ bool NativeA32WindowSession::RunFrame() {
         }
         // Guest time per guest thread in this window: thr_<entry>_us and
         // thr_<entry>_n (dispatches).
+        perf << " audio_deferred=" << (deferDspAudio ? 1 : 0);
         if (process.ThreadTimingEnabled()) {
           static std::array<Oot3dNativeGame::NativeA32ThreadTime,
                             Oot3dNativeGame::kNativeA32ThreadTimeSlots>
@@ -2284,6 +2289,27 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
   }
   const uint32_t dspAudioFrames =
       hostServices.TakePendingDspAudioFrames();
+  // config/audio_deferred: the DSP frames of this refresh (HLE mix and the
+  // guest sound thread they wake) run after the host frame is presented,
+  // off the path to the render thread's handoff (DeliverDspAudioFrames).
+  if (deferDspAudio)
+    deferredDspAudioFrames += dspAudioFrames;
+  else
+    DeliverDspAudioFrames(dspAudioFrames);
+  if (!hostServices.SignalVBlank(process.Memory())) {
+    throw std::runtime_error(
+        "native VBlank could not enter the GSP relay queue");
+  }
+  ++vblankCount;
+  return true;
+}
+
+// One DSP audio frame at a time: HLE mix, then the DSP interrupt and the
+// guest threads it wakes (the sound thread), then the host audio output.
+void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames) {
+  auto &hostServices = *hostServicesStorage;
+  auto &process = *processStorage;
+  auto &dspHle = *dspHleStorage;
   // Storage kept across refreshes (no allocation per refresh); the samples
   // are the same.
   std::vector<int16_t> &audioSamples = refreshAudioSamples;
@@ -2368,12 +2394,6 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
         outputSamples->size() / 2U, audioPlayer->GetDesiredBuffered());
     phaseTiming.AudioOutputSeconds += SecondsSince(audioOutputStart);
   }
-  if (!hostServices.SignalVBlank(process.Memory())) {
-    throw std::runtime_error(
-        "native VBlank could not enter the GSP relay queue");
-  }
-  ++vblankCount;
-  return true;
 }
 
 // Runs the guest until it waits and drains the PICA work it submitted during the refresh.

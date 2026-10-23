@@ -1324,6 +1324,17 @@ void NativeA32WindowSession::Setup() {
       Oot3dNativeGame::ActiveSwitchThreadLayout().PacerSpinMicroseconds));
   // config/frame_spikes (or config/gpu_timing): logs/spikes.txt, one line per
   // frame that lost its vsync, and the missed_* summary in perf.txt.
+#if defined(__SWITCH__)
+  // config/audio_deferred: absent = on, "0" = DSP frames before the guest
+  // refresh as before (A/B).
+  {
+    std::ifstream audioDeferredFile("sdmc:/switch/oot3dre/config/audio_deferred");
+    const bool present = audioDeferredFile.good();
+    std::string text;
+    if (present) std::getline(audioDeferredFile, text);
+    deferDspAudio = !present || Oot3dNativeGame::ParseOffloadSwitch(text);
+  }
+#endif
   // config/pacer_vsync: the pacer follows the display's real vsync (phase
   // and period measured from viGetDisplayVsyncEvent) instead of the CPU's
   // 1/60 s; optional content = offset in ms after the vsync (0-15, default

@@ -287,6 +287,7 @@ private:
   bool UpdateGuestServicesForRefresh(
       bool &topScreenStartRoutingEligible,
       Oot3dNativeGame::NativeA32InputFrame &inputFrame);
+  void DeliverDspAudioFrames(uint32_t dspAudioFrames);
   void RunGuestRefresh();
   void PresentVisualFrame(const double &presentationElapsedSeconds, const float &visualInterpolationAlpha);
   void Finish();
@@ -684,6 +685,10 @@ private:
   double perfLineGameMs = 0.0;
   // DSP HLE frames of one refresh: storage reused across refreshes.
   std::vector<int16_t> refreshAudioSamples;
+  // config/audio_deferred (Switch, absent = on, "0" = off): DSP frames of
+  // the host frame's refreshes are delivered after its presentation.
+  bool deferDspAudio = false;
+  uint32_t deferredDspAudioFrames = 0U;
   // Kind of the frame the render thread is drawing (RenderFrameKind) and
   // its render-thread milliseconds so far.
   uint8_t renderFrameKind = 0U;
