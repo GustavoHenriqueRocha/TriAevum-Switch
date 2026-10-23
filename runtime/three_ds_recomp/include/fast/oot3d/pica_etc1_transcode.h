@@ -77,19 +77,26 @@ inline bool TranscodePicaEtc1ToEtc2(std::span<const uint8_t> bytes,
     return true;
 }
 
-// config/gl_etc2: "0" keeps every texture on the RGBA8 decode. On by default.
+// config/gl_etc2: "1" sends ETC1 textures as ETC2 (a886ca69). Off by default
+// since 2026-10-23 (pgo5l): Mesa 20.1's nvc0 accepts ETC/ASTC only on GK20A
+// (class 0xA297), not on the Switch's GM20B, so every ETC2 upload went through
+// st/mesa's compressed fallback: a malloc'd copy of the compressed data per
+// mip image (in the newlib heap shared with the game) and an ETC2 -> RGBA8
+// decode on the render thread, against 4 bits per texel counted by the
+// residency budget. Off, the texture takes the RGBA8 decode, predecoded on
+// the PICA plan worker.
 inline bool PicaEtc2UploadEnabled() {
     static const bool enabled = [] {
 #if defined(__SWITCH__)
         std::ifstream file("sdmc:/switch/oot3dre/config/gl_etc2");
         std::string text;
         if (!file || !std::getline(file, text)) {
-            return true;
+            return false;
         }
-        return text.empty() || text[0] != '0';
+        return !text.empty() && text[0] == '1';
 #else
         const char* value = std::getenv("TRIAEVUM_GL_ETC2");
-        return value == nullptr || value[0] != '0';
+        return value != nullptr && value[0] == '1';
 #endif
     }();
     return enabled;

@@ -637,8 +637,17 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   do carimbo do fim da cena quando o acquire volta) foi avaliado e **não implementado**: no modelo
   dá 59,84/49,1 sem margem e piora com margem, abaixo da margem sozinha. Para voltar exatamente ao
   pgo5i sem build: `config/interp_cpu_count_wait` (arquivo vazio) + `config/interp_margin_ms` com
-  `0`. `perf.txt` ganhou `decision_budget_ms`; o log, `margin_ms=`. Testes:
+  `0` (chaves de até o pgo5k; ver o item seguinte). `perf.txt` ganhou `decision_budget_ms`; o log, `margin_ms=`. Testes:
   `TestMarginDropsPairsNearTheBudget` (pacing), `TestMarginKeepsTheRefresh` (cadence).
+- **Padrões de volta aos do pgo5i (pgo5l, 23/10).** O tour16 (pgo5k) caiu com Data Abort aos ~4 min
+  (heap corrompido, ver 4.7). Sem um bench melhor que o do pgo5i, o padrão voltou a ser o
+  comportamento dele, e as mudanças de 994ccd7d/fd358b46 ficaram atrás de chaves (arquivo vazio
+  liga): `config/interp_cpu_exclude_wait` (custo da render thread sem a espera do acquire; a
+  antiga `interp_cpu_count_wait` não existe mais), `config/interp_margin_ms` (padrão 0; use `5`
+  junto com a anterior, `kExcludedWaitMarginMs`), `config/gl_pacing_flush` (glFlush entre o fim do
+  quadro e o pacer; substitui `gl_pacing_noflush`) e `config/gl_acquire_stamp_before_flush`
+  (carimbo GPU "antes do acquire" antes do glFlush). Para reproduzir o pgo5k: as quatro chaves +
+  `interp_margin_ms` = `5`. O `rt_wait_ms_*` do `perf.txt` continua medido nos dois modos.
 - **Dois quadros em voo** (`config/frames_in_flight`): com 1, o fim de quadro do jogo espera a
   render thread terminar o quadro anterior, que espera o display; um passo longo (16–18 ms) seguido
   de um intermediário curto não se compensa e o passo perde o refresh. O modelo
@@ -674,6 +683,26 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 - Residência (`gfx_opengl_pica_residency.h`): texturas por conteúdo com LRU e orçamento
   (`config/gl_texture_budget_mb`, padrão 96), anéis de upload com map sem sincronização, falta de
   memória não é fatal (pula o draw, conta `gl_oom`). Sem isso o console caía após ~8 min com fps60.
+- **tour16 (pgo5k): Data Abort em `st_FreeTextureImageBuffer` dentro do `glDeleteTextures` do
+  `TrimPicaGlResidency`.** O `st_texture_image` do nível 0 da textura despejada (ociosa havia mais de
+  30 s, despejo por `MaxIdleFrames`; `gl_tex_mb` ≤ 58 de 96, `gl_oom=0`) tinha `pt` = 0x280c97def,
+  um ponteiro ímpar e desalinhado, e o `ldaxr` do refcount falhou. A residência é vítima, não causa:
+  o GL é seguro por nome (refcount do Mesa, nomes nunca reaproveitados, `MaxKey + 1`), o
+  `nouveau_bo_ref` do libdrm do Switch espera a fence do BO (`nvFenceWait`) antes do `free`, e o
+  backend GL não fixa nem guarda handles de textura do cache fora do draw. A struct do Mesa foi
+  sobrescrita antes por alguém no mesmo heap do newlib, e um único dump não diz quem. Teste:
+  `PicaGlResidency.ReleasesEachNameOnceAndNeverAPinnedOne` (sessão de 10 min com warps, pares
+  intermediários e trims de falha no meio do quadro; cada nome liberado uma vez e nunca em voo;
+  ASan limpo; pega `MinIdleFrames` 1 e o trim de falha com 0).
+- **ETC2 no GM20B não é hardware** (`config/gl_etc2`, padrão desligado desde o pgo5l; `1` liga). O
+  `nvc0_screen_is_format_supported` do Mesa 20.1 aceita ETC/ASTC só na classe 0xA297 (GK20A), e o
+  Switch é GM20B (conferido no binário: `mov w0, #0xa297` antes do `return false`). A premissa do
+  a886ca69 ("o GM20B amostra ETC2 em hardware") era falsa: todo upload ETC2 passava pelo fallback
+  do st/mesa (`st_compressed_format_fallback`), com um `malloc` da cópia comprimida por mip no
+  heap compartilhado e uma decodificação ETC2 → RGBA8 na CPU da render thread, enquanto o
+  orçamento de residência contava 4 bits por texel de uma textura que ocupa 32 + 4. Desligado, o
+  ETC1 volta ao RGBA8 decodificado de antemão pelo worker de planos (o A/B do tour8 não viu
+  diferença de FPS).
 - Uniforms soltos fazem o nvc0 copiar o bloco inteiro pela FIFO (SwitchWakerHD: UBO std140 cortou
   comandos a 1/3); não reenviar blocos iguais.
 - **Uniforms enxutos** (`config/gl_uniform_trim`, padrão ligado; `0` desliga;
@@ -1085,6 +1114,12 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     100% não é alimentada de ponta a ponta, e a espera contada antes funcionava, por acaso, como
     margem. Toda correção de medida que muda uma decisão vem com a margem calibrada no console (por
     área, contra o melhor bench), não com o orçamento teórico.
+38. **Crash dentro do driver não acusa o chamador.** Um Data Abort no `free` do Mesa, durante o
+    despejo de uma textura, foi heap corrompido antes por outra coisa: comece pelos registradores
+    (struct do Mesa com ponteiro ímpar = memória sobrescrita, não estado lógico errado) e prove a
+    parte do chamador com um soak de host sob ASan. E confira no binário o que o driver suporta de
+    verdade (`*_is_format_supported`): um formato "aceito" pelo GL pode ser um fallback em software
+    que aloca e decodifica na CPU.
 
 ---
 

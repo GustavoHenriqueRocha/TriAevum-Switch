@@ -67,7 +67,7 @@ namespace Oot3dNativeGame {
 // 15-17 ms of "render thread" of which only 6-8 were work, and the pair
 // went over 33.3 ms: interp=53 hold=41 per window of 150. The wait is
 // measured around the acquire (cntpct_el0 ticks, never cntvct_el0) and
-// taken out; config/interp_cpu_count_wait keeps it in (the old measure).
+// taken out with config/interp_cpu_exclude_wait (the default keeps it in).
 //
 // Busy part of a render-thread frame: wall time minus the waits inside it,
 // never below zero or above the wall time.

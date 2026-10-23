@@ -131,12 +131,14 @@ Oot3dNativeGame::NativeRenderWaitClock &RenderWaitClock() {
   static Oot3dNativeGame::NativeRenderWaitClock clock;
   return clock;
 }
-// config/interp_cpu_count_wait: the governor's render-thread cost keeps the
-// acquire wait (the measure before 2026-10-23).
-bool gCountRenderWait = false;
-// config/gl_pacing_noflush: no glFlush between the frame's last command and
-// the pacer's wait (scanout and UI then reach the GPU only at the swap).
-bool gFlushBeforePacing = true;
+// The governor's render-thread cost keeps the acquire wait (pgo5i, the
+// default again since pgo5l); config/interp_cpu_exclude_wait leaves it out
+// (994ccd7d, with config/interp_margin_ms 5 as in pgo5k).
+bool gCountRenderWait = true;
+// config/gl_pacing_flush: glFlush between the frame's last command and the
+// pacer's wait (994ccd7d). Off by default since pgo5l (pgo5i: scanout and UI
+// reach the GPU at the swap).
+bool gFlushBeforePacing = false;
 
 #if defined(__SWITCH__)
 void MarkGpuFrameAcquire(bool after) {
@@ -211,10 +213,10 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
         std::ifstream("sdmc:/switch/oot3dre/config/interp_count_acquire_wait")
             .good();
     gCountRenderWait =
-        std::ifstream("sdmc:/switch/oot3dre/config/interp_cpu_count_wait")
-            .good();
+        !std::ifstream("sdmc:/switch/oot3dre/config/interp_cpu_exclude_wait")
+             .good();
     gFlushBeforePacing =
-        !std::ifstream("sdmc:/switch/oot3dre/config/gl_pacing_noflush").good();
+        std::ifstream("sdmc:/switch/oot3dre/config/gl_pacing_flush").good();
     GpuFrameTimer().SetExcludeAcquireWait(!countAcquireWait);
     // The hook also times the render thread's wait (perf rt_wait_ms_*).
     Fast::SetWindowAcquireHook(&MarkGpuFrameAcquire);
@@ -1109,7 +1111,7 @@ bool NativeA32WindowSession::RunFrame() {
             perf << " rt_ms_" << Oot3dNativeGame::kRenderFrameKindNames[kind] << '='
                  << ((current.CpuMs[kind] - previous.CpuMs[kind]) / frames(kind))
                  // Part of rt_ms_ blocked at the window acquire (not costed
-                 // unless config/interp_cpu_count_wait).
+                 // with config/interp_cpu_exclude_wait).
                  << " rt_wait_ms_" << Oot3dNativeGame::kRenderFrameKindNames[kind] << '='
                  << ((current.WaitMs[kind] - previous.WaitMs[kind]) / frames(kind));
           }

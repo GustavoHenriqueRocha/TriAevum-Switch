@@ -116,8 +116,14 @@ struct InterpolationPacingConfig {
   // pairs up to ~27 kept 59+. 5 ms keeps in-between frames where the pair
   // is <= 28.3 ms (per-area replay of tour14/tour15: 59.32 FPS, 51.6
   // distinct pictures/s, 22 areas >= 59, against pgo5i's 59.35 / 50.5 / 21).
-  double MarginMs = 5.0;
+  // Default 0 since 2026-10-23 (pgo5l): the defaults are pgo5i's (cost
+  // counts the acquire wait, no margin); kExcludedWaitMarginMs goes with
+  // config/interp_cpu_exclude_wait.
+  double MarginMs = 0.0;
 };
+
+// Margin measured for the cost without the acquire wait (tour15, pgo5k).
+inline constexpr double kExcludedWaitMarginMs = 5.0;
 
 // Parses config/interp_margin_ms ("5", "1,5"): 0 to 15 ms; nullopt when
 // invalid (the default stays).

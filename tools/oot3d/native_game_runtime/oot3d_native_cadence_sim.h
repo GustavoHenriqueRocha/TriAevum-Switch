@@ -96,8 +96,8 @@ struct Params {
   double AcquireAtFraction = 0.8;
   double ScanoutGpuMs = 1.0;
   // What the governor learns from the render thread: true = its wall time
-  // including the acquire wait (before config/interp_cpu_count_wait became
-  // the exception, 2026-10-23), false = only its work.
+  // including the acquire wait (the runtime default, pgo5i/pgo5l), false =
+  // only its work (config/interp_cpu_exclude_wait).
   bool CountRenderWaits = false;
   // config/interp_wait_gpu_split: the acquire wait is counted only when the
   // GPU had not finished the frame's scene when the acquire returned (the

@@ -652,10 +652,10 @@ void Calibrate() {
 }
 
 // Regression (tour15, pgo5j): without the wait in the cost, measured pairs
-// of 29-33 ms were kept and the area lost 3-5 FPS; the default margin (5 ms)
-// keeps the refresh there and still draws every in-between frame at 12.5.
+// of 29-33 ms were kept and the area lost 3-5 FPS; the margin of that mode
+// (5 ms) keeps the refresh there and still draws every in-between frame at 12.5.
 void TestMarginKeepsTheRefresh() {
-  const double margin = InterpolationPacingConfig{}.MarginMs;
+  const double margin = Oot3dNativeGame::kExcludedWaitMarginMs;
   for (double gpu : {14.95, 15.25, 16.4}) {
     const auto bare = SimulateSwapchain({Tour15(60, gpu, 2.75)}, false, 0.0);
     const auto kept = SimulateSwapchain({Tour15(60, gpu, 2.75)}, false, margin);

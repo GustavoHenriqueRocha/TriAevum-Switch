@@ -455,7 +455,8 @@ void TestParseReducedScale() {
 // 26-27 is still drawn.
 void TestMarginDropsPairsNearTheBudget() {
   using Oot3dNativeGame::ParseInterpolationMarginMs;
-  CHECK(InterpolationPacingConfig{}.MarginMs == 5.0);
+  CHECK(InterpolationPacingConfig{}.MarginMs == 0.0); // pgo5i
+  CHECK(Oot3dNativeGame::kExcludedWaitMarginMs == 5.0);
   CHECK(ParseInterpolationMarginMs("0") == 0.0);
   CHECK(ParseInterpolationMarginMs("1,5\n") == 1.5);
   CHECK(ParseInterpolationMarginMs(" 2.25") == 2.25);

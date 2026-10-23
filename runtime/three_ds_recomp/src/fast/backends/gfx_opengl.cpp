@@ -33,6 +33,9 @@
 
 namespace Fast {
 namespace {
+// config/gl_acquire_stamp_before_flush (read at Init, Switch): see
+// FlushDeferredWindowClear.
+bool gAcquireStampBeforeFlush = false;
 constexpr uint32_t kOot3dShadow2dTextureUnit = 6;
 constexpr size_t kOot3dPicaFogLutEntryCount = 128;
 constexpr size_t kOot3dCachedVertexBufferLimit = 1024;
@@ -1176,6 +1179,8 @@ void GfxRenderingAPIOGL::Init() {
 #if defined(__SWITCH__)
     mDeferWindowClear = !std::ifstream("sdmc:/switch/oot3dre/config/gl_eager_clear").good();
     mFlushBeforeAcquire = !std::ifstream("sdmc:/switch/oot3dre/config/gl_acquire_noflush").good();
+    gAcquireStampBeforeFlush =
+        std::ifstream("sdmc:/switch/oot3dre/config/gl_acquire_stamp_before_flush").good();
 #endif
     gWindowClearOwner = this;
 }
@@ -1624,16 +1629,19 @@ void GfxRenderingAPIOGL::FlushDeferredWindowClear() {
     const std::array<float, 4> clearColor{mClearColor[0], mClearColor[1], mClearColor[2], mClearColor[3]};
     std::copy(std::begin(mWindowClearRgba), std::end(mWindowClearRgba), mClearColor);
     // Binding the window and clearing it dequeues its buffer (blocking).
-    // The hook's "before" GPU timestamp goes ahead of the flush: issued after
-    // it (as until 2026-10-23) it reached the GPU only with the next flush,
-    // after the wait, together with the "after" one, and the idle gap it
-    // should take out of the frame's GPU time was ~0.
-    if (gWindowAcquireHook != nullptr) {
+    // config/gl_acquire_stamp_before_flush (994ccd7d): the hook's "before"
+    // GPU timestamp goes ahead of the flush; issued after it it reaches the
+    // GPU only with the next flush, after the wait, together with the
+    // "after" one (idle gap ~0). Off by default since pgo5l: pgo5i's order.
+    if (gAcquireStampBeforeFlush && gWindowAcquireHook != nullptr) {
         gWindowAcquireHook(false);
     }
     // The scene is recorded by now: hand it to the GPU before waiting.
     if (mFlushBeforeAcquire) {
         glFlush();
+    }
+    if (!gAcquireStampBeforeFlush && gWindowAcquireHook != nullptr) {
+        gWindowAcquireHook(false);
     }
     {
         GlPerf::SectionScope perfAcquire(GlPerf::Section::WindowAcquire);

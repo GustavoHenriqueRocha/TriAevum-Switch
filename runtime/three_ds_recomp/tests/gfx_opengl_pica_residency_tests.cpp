@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <random>
 #include <utility>
@@ -138,6 +139,119 @@ TEST(PicaGlResidency, StaysBoundedOverALongSession) {
     // budget filled up, not growing.
     EXPECT_LE(cache.Bytes, cache.Limits.BudgetBytes + 2U * workingSet);
     EXPECT_EQ(cache.Created - cache.Evicted, cache.Textures.size());
+}
+
+// tour16 (pgo5k, 2026-10-23): Data Abort in st_FreeTextureImageBuffer under
+// TrimPicaGlResidency's glDeleteTextures (the level-0 image of an evicted
+// texture had a garbage pipe_resource pointer). Residency side of it: over a
+// long session with scene changes, interpolated pairs that draw the previous
+// frame again and failure trims (BudgetBytes 0, MinIdleFrames 1), each GL
+// name is released exactly once, never while a frame still in flight uses it
+// (pinned: the current and the previous frame; the current one for a failure
+// trim) and the bytes match the map. The GL names follow Mesa (MaxKey + 1,
+// never reused). Run under ASan: the trim walks the map it erases from.
+TEST(PicaGlResidency, ReleasesEachNameOnceAndNeverAPinnedOne) {
+    struct Entry {
+        uint64_t Bytes = 0U;
+        uint64_t LastUsedFrame = 0U;
+        uint32_t Handle = 0U;
+    };
+    std::map<uint64_t, Entry> textures;
+    std::map<uint64_t, Entry> luts;
+    std::vector<uint64_t> textureEvictions;
+    std::vector<uint64_t> lutEvictions;
+    uint64_t textureBytes = 0U;
+    uint64_t lutBytes = 0U;
+    uint32_t nextName = 1U;
+    std::map<uint32_t, uint64_t> live;   // name -> last frame that drew it
+    uint64_t released = 0U;
+    Policy policy;
+    // Below a frame's working set: the LRU reaches the last frames' textures.
+    policy.BudgetBytes = 2U * kMb;
+    std::mt19937_64 random(16U);
+
+    const auto release = [&](std::map<uint64_t, Entry>& map,
+                             std::vector<uint64_t>& keys, uint64_t& bytes,
+                             uint64_t frame, uint64_t pinnedFrames) {
+        for (const uint64_t key : keys) {
+            const auto found = map.find(key);
+            if (found == map.end()) continue;
+            const auto name = live.find(found->second.Handle);
+            ASSERT_NE(name, live.end()) << "name released twice";
+            ASSERT_GE(frame - name->second, pinnedFrames)
+                << "released while a frame in flight uses it";
+            live.erase(name);
+            ++released;
+            bytes -= std::min(bytes, found->second.Bytes);
+            map.erase(found);
+        }
+    };
+    // TrimPicaGlResidency.
+    const auto trim = [&](uint64_t frame, bool all) {
+        auto limits = policy;
+        if (all) {
+            limits.BudgetBytes = 0U;
+            limits.MinIdleFrames = 1U;
+        }
+        CollectEvictions(textures, frame, textureBytes, limits, textureEvictions);
+        // In flight: this frame and the previous one; a failure trim keeps
+        // what this frame already bound.
+        const uint64_t pinned = all ? 1U : 2U;
+        release(textures, textureEvictions, textureBytes, frame, pinned);
+        auto lutLimits = limits;
+        lutLimits.BudgetBytes = all ? 0U : std::numeric_limits<uint64_t>::max();
+        CollectEvictions(luts, frame, lutBytes, lutLimits, lutEvictions);
+        release(luts, lutEvictions, lutBytes, frame, pinned);
+    };
+    // GetPicaGlTexture / GetPicaLightingLut.
+    const auto use = [&](std::map<uint64_t, Entry>& map, uint64_t& bytes,
+                         uint64_t key, uint64_t size, uint64_t frame) {
+        auto [found, inserted] = map.try_emplace(key);
+        found->second.LastUsedFrame = frame;
+        if (inserted) {
+            found->second.Handle = nextName++;
+            found->second.Bytes = size;
+            bytes += size;
+            live[found->second.Handle] = frame;
+        }
+        live[found->second.Handle] = frame;
+    };
+
+    constexpr uint64_t kFrames = 60U * 60U * 10U;
+    for (uint64_t frame = 1U; frame <= kFrames; ++frame) {
+        // BeginPicaGlFrame: a failure of the last frame, then the trim.
+        if (random() % 997U == 0U) trim(frame, true);
+        if (frame % 30U == 0U || textureBytes > policy.BudgetBytes)
+            trim(frame, false);
+        // A warp every ~20 s: a new scene's textures.
+        const uint64_t scene = frame / 1200U;
+        // An in-between frame draws the previous frame's textures again:
+        // same keys, LastUsedFrame moves to this frame.
+        const uint64_t drawn = scene;
+        for (uint64_t texture = 0U; texture < 90U; ++texture) {
+            if ((random() & 3U) == 0U) continue;
+            use(textures, textureBytes, (drawn << 32U) | texture,
+                (32U << (texture % 5U)) * 64U * 4U, frame);
+        }
+        for (uint64_t animated = 0U; animated < 4U; ++animated)
+            use(textures, textureBytes,
+                (1ULL << 62U) | (frame << 4U) | animated, 64U * 64U * 4U,
+                frame);
+        use(luts, lutBytes, (scene << 8U) | (random() & 7U), 256U * 24U * 4U,
+            frame);
+        // A draw that ran out of memory (SubmitPicaDraw's catch): mid-frame,
+        // after this frame's textures were bound.
+        if (random() % 499U == 0U) trim(frame, true);
+        uint64_t sum = 0U;
+        for (const auto& [key, entry] : textures) sum += entry.Bytes;
+        ASSERT_EQ(sum, textureBytes);
+    }
+    trim(kFrames + policy.MaxIdleFrames + 1U, false);
+    EXPECT_TRUE(textures.empty());
+    EXPECT_TRUE(luts.empty());
+    EXPECT_TRUE(live.empty());
+    EXPECT_EQ(released, nextName - 1U);
+    EXPECT_EQ(textureBytes, 0U);
 }
 
 TEST(PicaGlStreamRing, ReservedRangesShareOneGenerationAndNeverOverlap) {
