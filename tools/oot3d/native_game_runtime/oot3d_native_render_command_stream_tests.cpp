@@ -215,6 +215,23 @@ void TestTwoFramesInFlight() {
     Require(stream.MaxFramesInFlight() == 1U, "zero frames in flight means one");
 }
 
+// tour24: o áudio adiado só entra antes da apresentação quando o próximo
+// fim de quadro esperaria o renderer (FrameSlotsFull).
+void TestFrameSlotsFull() {
+    NativeRenderCommandStream inlineStream(Mode::Inline, 1U);
+    Require(!inlineStream.FrameSlotsFull(), "inline stream never waits for a slot");
+    NativeRenderCommandStream stream(Mode::Worker, 1U);
+    Require(!stream.FrameSlotsFull(), "empty stream reported full slots");
+    std::atomic<bool> release{false};
+    stream.Submit([&] {
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }, true);
+    Require(stream.FrameSlotsFull(), "frame in flight did not fill the only slot");
+    release = true;
+    stream.Drain();
+    Require(!stream.FrameSlotsFull(), "slot still full after the frame finished");
+}
+
 int main() {
     TestInlineRunsAtSubmission();
     TestWorkerKeepsProgramOrder();
@@ -224,6 +241,7 @@ int main() {
     TestModeSwitchDrainsAndDestructorRunsPending();
     TestSynchronousCommandsAreDistinguished();
     TestWaitStatsAndSkippedSignals();
+    TestFrameSlotsFull();
     std::cout << "oot3d_native_render_command_stream_tests: ok\n";
     return 0;
 }
