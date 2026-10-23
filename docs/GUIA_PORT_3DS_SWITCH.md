@@ -1312,6 +1312,8 @@ com 79% culpa da thread do jogo (2.2, perfil de pico). Correções no pgo5o.
 
 **Melhor bench até agora (23/10, tour17, pgo5l = 4d512833, padrões do pgo5i + ETC2 desligado, GPU 614, Link andando):** 29 áreas sem crash, média 59,44 (tour14/pgo5i: 59,34), 26 áreas ≥59 (antes 23), hold 41→39 por janela. Pior área: Water Temple 55,1 (mín 51,1).
 
+**Melhor fluidez (23/10, tour20, pgo5o = 8f67f53a, config/dynamic_resolution, base 3,0, GPU 614, Link andando):** hold 39→4,6 por janela (tour17 3x) — igual ao 2x fixo (4,4); interp 53→75; refresh perdido 5,7→3,7 por janela (tour19); média 59,60 (3x 59,44, 2x 59,68), 26 áreas ≥59; FPS mínimo Water Temple 51,1→60,0, Desert Colossus 57,3→59,8, Market 59,9. Custo: a escala cai em quase todas as áreas (média 2,25–2,9; Market/Castle Town 2,25). Vsync: evento falha em vi desc 9 na etapa 2 (abrir display), fonte reserva `acquire` válida.
+
 ---
 
 ## 8. Checklist do próximo jogo
