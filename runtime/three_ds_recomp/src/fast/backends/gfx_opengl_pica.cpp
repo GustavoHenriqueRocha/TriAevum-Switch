@@ -17,6 +17,7 @@
 #include "fast/backends/gl_frame_profiler.h"
 #include "fast/backends/gfx_opengl_pica_residency.h"
 #include "fast/backends/gfx_opengl_pica_scale.h"
+#include "fast/backends/gl_pica_dynamic_scale.h"
 #include "fast/backends/gfx_opengl_pica_uniform_trim.h"
 #include "fast/backends/gfx_opengl_pica_state_cache.h"
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
@@ -320,11 +321,23 @@ struct PicaGlProgram {
 };
 
 struct PicaGlTarget {
-    // Allocated extent: the key's native extent times the resolution scale
-    // (and, for a widescreen top-screen target, its height times the
-    // widescreen factor as well).
+    // Drawn extent: the key's native extent times Scale (and, for a
+    // widescreen top-screen target, its height times the widescreen factor
+    // as well). The allocated extent unless dynamic resolution
+    // (gl_pica_dynamic_scale.h) draws the bottom-left sub-rectangle of it.
     uint32_t Width = 0U;
     uint32_t Height = 0U;
+    // Allocated extent and the scale it was allocated at (never change).
+    uint32_t AllocWidth = 0U;
+    uint32_t AllocHeight = 0U;
+    float AllocScale = 1.0F;
+    float AllocScaleY = 1.0F;
+    float WideFactor = 1.0F;
+    // Dynamic resolution: the top-screen scene target of a namespace without
+    // a scale of its own; Exempt once it took part in a Shadow2D pass (the
+    // consumer filters the image through textureSize()).
+    bool DynamicEligible = false;
+    bool DynamicExempt = false;
     // Host pixels per native pixel along storage Y (the presented horizontal
     // axis of the rotated top screen). ResolutionScale unless Wide.
     float ScaleY = 1.0F;
@@ -375,6 +388,12 @@ struct PicaGlDisplay {
     // widescreen top-screen transfer has a wider Height.
     uint32_t AllocWidth = 0U;
     uint32_t AllocHeight = 0U;
+    // Pixels of the last copy (bottom-left sub-rectangle; the allocated
+    // extent unless the source was drawn at a dynamic scale).
+    uint32_t ContentWidth = 0U;
+    uint32_t ContentHeight = 0U;
+    // Scale of the source that copy came from (perf.txt drs_scale_avg).
+    float ContentScale = 1.0F;
     bool Initialized = false;
     // The copy that produced Color (lean mode skips an identical repeat:
     // a presentation re-submits the transfer the sample already executed).
@@ -403,6 +422,9 @@ struct PicaGlPostProgram {
     uint64_t LastOutputKey = 0U;
     uint64_t LastInputKey = 0U;
     int LastResample = -1;
+    // EASU/RCAS: texture extent of the last source (its content may be a
+    // dynamic-resolution sub-rectangle, LastInputKey).
+    uint64_t LastTextureKey = 0U;
 };
 
 struct PicaGlPostState {
@@ -1153,6 +1175,10 @@ struct GfxRenderingAPIOGL::NativePicaState {
     GLuint FallbackInteger = 0U;
     GLuint ScanoutProgram = 0U;
     GLint ScanoutFlipLocation = -1;
+    // Part of the scanout image the plain scanout samples (dynamic
+    // resolution: its content sub-rectangle); last value uploaded.
+    GLint ScanoutUvScaleLocation = -1;
+    std::array<float, 2> ScanoutUvScale{1.0F, 1.0F};
     uint16_t EnabledAttributeMask = 0U;
     std::array<uint8_t, 16> AttributeDivisors{};
     std::array<PicaGlAttributeState, 16> AttributeStates{};
@@ -1442,10 +1468,14 @@ void InitPicaGlPost(PicaGlPostState& post, std::string_view vertexSource) {
         try {
             post.Rcas = CreatePicaGlPostProgram(
                 vertexSource, PicaGlPost::BuildRcasFragmentShader(),
-                {"pica_rcas_con", "pica_rcas_resample"});
+                {"pica_rcas_con", "pica_rcas_resample",
+                 "pica_rcas_uv_scale"});
             const auto con = PicaGlPost::FsrRcasConstants(config.Sharpen);
             glUseProgram(post.Rcas.Handle);
             glUniform4ui(post.Rcas.Params[0], con[0], con[1], con[2], con[3]);
+            if (post.Rcas.Params[2] >= 0) {
+                glUniform2f(post.Rcas.Params[2], 1.0F, 1.0F);
+            }
         } catch (const std::exception& exception) {
             LogPicaGlPost(std::string("RCAS desligado: ") + exception.what());
             config.Sharpen = 0.0F;
@@ -1529,8 +1559,11 @@ void DrawPicaGlFxaa(PicaGlPostProgram& program, GLuint source,
     DrawPicaGlPostTriangle(source);
 }
 
+// sourceWidth/Height: the content (FSR's input viewport, the bottom-left
+// sub-rectangle at a dynamic scale); textureWidth/Height: the image.
 void DrawPicaGlEasu(PicaGlPostProgram& program, GLuint source,
-                    uint32_t sourceWidth, uint32_t sourceHeight, bool window,
+                    uint32_t sourceWidth, uint32_t sourceHeight,
+                    uint32_t textureWidth, uint32_t textureHeight, bool window,
                     bool flip, uint32_t outputWidth, uint32_t outputHeight) {
     glUseProgram(program.Handle);
     SetPicaGlPostDestination(program, window, flip, outputWidth, outputHeight);
@@ -1539,9 +1572,11 @@ void DrawPicaGlEasu(PicaGlPostProgram& program, GLuint source,
         (static_cast<uint64_t>(sourceWidth) << 48U) |
         (static_cast<uint64_t>(sourceHeight) << 32U) |
         (static_cast<uint64_t>(outputWidth) << 16U) | outputHeight;
-    if (program.LastInputKey != key) {
+    const uint64_t textureKey = PicaGlPostExtentKey(textureWidth, textureHeight);
+    if (program.LastInputKey != key || program.LastTextureKey != textureKey) {
         const auto con = PicaGlPost::FsrEasuConstants(
             static_cast<float>(sourceWidth), static_cast<float>(sourceHeight),
+            static_cast<float>(textureWidth), static_cast<float>(textureHeight),
             static_cast<float>(outputWidth), static_cast<float>(outputHeight));
         for (size_t index = 0U; index < 4U; ++index) {
             glUniform4ui(program.Params[index], con[index * 4U],
@@ -1549,8 +1584,28 @@ void DrawPicaGlEasu(PicaGlPostProgram& program, GLuint source,
                          con[index * 4U + 3U]);
         }
         program.LastInputKey = key;
+        program.LastTextureKey = textureKey;
     }
     DrawPicaGlPostTriangle(source);
+}
+
+// The plain scanout program is bound: sample the content sub-rectangle of a
+// width x height image.
+void SetPicaGlScanoutContent(GfxRenderingAPIOGL::NativePicaState& state,
+                             uint32_t contentWidth, uint32_t contentHeight,
+                             uint32_t width, uint32_t height) {
+    const std::array<float, 2> scale{
+        width != 0U && contentWidth != 0U
+            ? static_cast<float>(contentWidth) / static_cast<float>(width)
+            : 1.0F,
+        height != 0U && contentHeight != 0U
+            ? static_cast<float>(contentHeight) / static_cast<float>(height)
+            : 1.0F,
+    };
+    if (state.ScanoutUvScaleLocation >= 0 && scale != state.ScanoutUvScale) {
+        glUniform2f(state.ScanoutUvScaleLocation, scale[0], scale[1]);
+        state.ScanoutUvScale = scale;
+    }
 }
 
 // Runs the configured chain for one Replace-mode scanout and draws its last
@@ -1566,6 +1621,13 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
     auto& config = post.Config;
     const uint32_t sourceWidth = display.AllocWidth;
     const uint32_t sourceHeight = display.AllocHeight;
+    // Dynamic resolution: the copy filled only this bottom-left part (with a
+    // replicated border); otherwise the whole image. The AA passes never see
+    // a sub-rectangle (dynamic resolution is off with SMAA/FXAA).
+    const uint32_t contentWidth =
+        display.ContentWidth != 0U ? display.ContentWidth : sourceWidth;
+    const uint32_t contentHeight =
+        display.ContentHeight != 0U ? display.ContentHeight : sourceHeight;
     // The window viewport, in the portrait layout of the source image.
     const uint32_t outputWidth = static_cast<uint32_t>(viewportHeight);
     const uint32_t outputHeight = static_cast<uint32_t>(viewportWidth);
@@ -1573,7 +1635,7 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
     // EASU only enlarges; at 1:1 (e.g. scale 3 on the 720p handheld screen)
     // FSR reduces to RCAS.
     const bool easu = config.Upscale == PicaGlPost::Upscaler::Fsr &&
-                      (outputWidth > sourceWidth || outputHeight > sourceHeight);
+                      (outputWidth > contentWidth || outputHeight > contentHeight);
     const bool rcas = config.Sharpen > 0.0F;
     // FXAA alone near 1:1 samples the source from the window pass, exactly
     // like the PC scanout. When the window has at least twice the source's
@@ -1588,8 +1650,10 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
         outputPixels < sourcePixels * 2U;
 
     GLuint current = display.Color;
-    uint32_t currentWidth = sourceWidth;
-    uint32_t currentHeight = sourceHeight;
+    uint32_t currentWidth = contentWidth;
+    uint32_t currentHeight = contentHeight;
+    uint32_t currentTextureWidth = sourceWidth;
+    uint32_t currentTextureHeight = sourceHeight;
     bool complete = true;
 
     if (config.Aa == PicaGlPost::Antialiasing::Smaa) {
@@ -1657,7 +1721,8 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
         if (complete && !upscaledCurrent) {
             BeginPicaGlPostImage(post.Upscaled);
             DrawPicaGlEasu(post.Easu, current, currentWidth, currentHeight,
-                           false, flip, outputWidth, outputHeight);
+                           currentTextureWidth, currentTextureHeight, false,
+                           flip, outputWidth, outputHeight);
             post.UpscaledSource =
                 config.Aa == PicaGlPost::Antialiasing::Off ? display.Color : 0U;
             post.UpscaledCopy = display.LastCopy;
@@ -1667,6 +1732,8 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
             current = post.Upscaled.Texture;
             currentWidth = outputWidth;
             currentHeight = outputHeight;
+            currentTextureWidth = outputWidth;
+            currentTextureHeight = outputHeight;
         }
     }
 
@@ -1682,22 +1749,44 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
         config.Upscale = PicaGlPost::Upscaler::Linear;
         config.Sharpen = 0.0F;
         current = display.Color;
+        currentWidth = contentWidth;
+        currentHeight = contentHeight;
+        currentTextureWidth = sourceWidth;
+        currentTextureHeight = sourceHeight;
     } else if (rcas) {
         glUseProgram(post.Rcas.Handle);
         SetPicaGlPostDestination(post.Rcas, true, flip, outputWidth,
                                  outputHeight);
         const int resample =
-            currentWidth != outputWidth || currentHeight != outputHeight ? 1
-                                                                         : 0;
+            currentWidth != outputWidth || currentHeight != outputHeight ||
+                    currentTextureWidth != outputWidth ||
+                    currentTextureHeight != outputHeight
+                ? 1
+                : 0;
         if (post.Rcas.LastResample != resample) {
             glUniform1i(post.Rcas.Params[1], resample);
             post.Rcas.LastResample = resample;
         }
+        const uint64_t contentKey =
+            PicaGlPostExtentKey(currentWidth, currentHeight);
+        const uint64_t textureKey =
+            PicaGlPostExtentKey(currentTextureWidth, currentTextureHeight);
+        if (post.Rcas.LastInputKey != contentKey ||
+            post.Rcas.LastTextureKey != textureKey) {
+            glUniform2f(post.Rcas.Params[2],
+                        static_cast<float>(currentWidth) /
+                            static_cast<float>(currentTextureWidth),
+                        static_cast<float>(currentHeight) /
+                            static_cast<float>(currentTextureHeight));
+            post.Rcas.LastInputKey = contentKey;
+            post.Rcas.LastTextureKey = textureKey;
+        }
         DrawPicaGlPostTriangle(current);
         return;
     } else if (easu) {
-        DrawPicaGlEasu(post.Easu, current, currentWidth, currentHeight, true,
-                       flip, outputWidth, outputHeight);
+        DrawPicaGlEasu(post.Easu, current, currentWidth, currentHeight,
+                       currentTextureWidth, currentTextureHeight, true, flip,
+                       outputWidth, outputHeight);
         return;
     } else if (fxaaInWindow) {
         DrawPicaGlFxaa(post.Fxaa, current, currentWidth, currentHeight, true,
@@ -1710,6 +1799,8 @@ void PresentPicaGlPost(GfxRenderingAPIOGL::NativePicaState& state,
     if (state.ScanoutFlipLocation >= 0) {
         glUniform1i(state.ScanoutFlipLocation, flip ? 1 : 0);
     }
+    SetPicaGlScanoutContent(state, currentWidth, currentHeight,
+                            currentTextureWidth, currentTextureHeight);
     DrawPicaGlPostTriangle(current);
 }
 
@@ -1751,6 +1842,12 @@ void GfxRenderingAPIOGL::InitNativePica() {
         state.ResolutionScale =
             PicaGlScale::FitResolutionScale(state.ResolutionScale, limit);
     }
+    // Dynamic resolution can lower the configured scale (never raise it)
+    // unless SMAA/FXAA, whose images have the source's extent, are on.
+    PicaGlDynamicScale::gState.MaxScale = state.ResolutionScale;
+    PicaGlDynamicScale::gState.Supported =
+        state.ResolutionScale > 1.0F &&
+        ReadPicaGlPostConfig().Aa == PicaGlPost::Antialiasing::Off;
     glGenVertexArrays(1, &state.VertexArray);
     glGenBuffers(static_cast<GLsizei>(state.VertexBuffers.size()),
                  state.VertexBuffers.data());
@@ -1821,6 +1918,8 @@ void main() {
     static constexpr std::string_view kScanoutFragment = R"glsl(#version 430
 layout(binding=0) uniform sampler2D pica_scanout;
 uniform int pica_flip_y;
+// Content sub-rectangle of the image (dynamic resolution; 1,1 otherwise).
+uniform vec2 pica_uv_scale;
 in vec2 pica_uv;
 layout(location=0) out vec4 pica_color;
 void main() {
@@ -1829,7 +1928,7 @@ void main() {
     // origin before applying the same portrait-to-landscape transform.
     vec2 uv = vec2(pica_uv.y, pica_uv.x);
     if (pica_flip_y != 0) uv.y = 1.0 - uv.y;
-    pica_color = texture(pica_scanout, uv);
+    pica_color = texture(pica_scanout, uv * pica_uv_scale);
 }
 )glsl";
     const GLuint vertex = CompilePicaGlShader(GL_VERTEX_SHADER, kScanoutVertex);
@@ -1853,6 +1952,12 @@ void main() {
         }
         state.ScanoutFlipLocation =
             glGetUniformLocation(state.ScanoutProgram, "pica_flip_y");
+        state.ScanoutUvScaleLocation =
+            glGetUniformLocation(state.ScanoutProgram, "pica_uv_scale");
+        if (state.ScanoutUvScaleLocation >= 0) {
+            glUniform2f(state.ScanoutUvScaleLocation, 1.0F, 1.0F);
+        }
+        state.ScanoutUvScale = {1.0F, 1.0F};
     } catch (...) {
         glDeleteShader(fragment);
         glDeleteShader(vertex);
@@ -2272,6 +2377,54 @@ bool PicaGlRelocatedMenuNearestSampling(const GfxNativePicaDrawView& draw,
     return Oot3d::GlRelocatedMenuNearestSampling(evidence, resolutionScale);
 }
 
+// Dynamic resolution (gl_pica_dynamic_scale.h): the scale a target should
+// be drawn at now. Its allocation scale unless it is the eligible top-screen
+// target and a lower scale is requested.
+float PicaGlDynamicTargetScale(const PicaGlTarget& target) {
+    const auto& dynamic = PicaGlDynamicScale::gState;
+    if (!target.DynamicEligible || target.DynamicExempt ||
+        !dynamic.Supported || !(dynamic.Requested > 0.0F)) {
+        return target.AllocScale;
+    }
+    const float quarter = std::round(dynamic.Requested * 4.0F) / 4.0F;
+    return std::clamp(quarter, 1.0F, target.AllocScale);
+}
+
+// Moves the drawn extent of a target to `scale` (at most its allocation):
+// the bottom-left sub-rectangle of the same images, nothing reallocated.
+// Called only where the target's content starts again (a colour clear), so
+// no frame mixes two scales.
+void SetPicaGlTargetScale(PicaGlTarget& target, const PicaGlTargetKey& key,
+                          float scale) {
+    scale = std::clamp(scale, 1.0F, target.AllocScale);
+    if (scale == target.Scale) {
+        return;
+    }
+    if (scale == target.AllocScale) {
+        target.Width = target.AllocWidth;
+        target.Height = target.AllocHeight;
+        target.ScaleY = target.AllocScaleY;
+    } else {
+        const auto extent = PicaGlScale::DynamicSubRectangle(
+            key.Width, key.Height, scale, target.AllocWidth,
+            target.AllocHeight, target.Wide, target.WideFactor);
+        target.Width = extent.Width;
+        target.Height = extent.Height;
+        target.ScaleY = static_cast<float>(target.Height) /
+                        static_cast<float>(key.Height);
+    }
+    target.Scale = scale;
+    PicaGlDynamicScale::gState.Applied.fetch_add(1U,
+                                                 std::memory_order_relaxed);
+}
+
+void RefreshPicaGlTargetScale(PicaGlTarget& target,
+                              const PicaGlTargetKey& key) {
+    if (target.DynamicEligible) {
+        SetPicaGlTargetScale(target, key, PicaGlDynamicTargetScale(target));
+    }
+}
+
 PicaGlTarget& GetPicaGlTarget(
     GfxRenderingAPIOGL::NativePicaState& state,
     const GfxNativePicaDrawView& draw) {
@@ -2309,14 +2462,23 @@ PicaGlTarget& GetPicaGlTarget(
             target.ScaleY = static_cast<float>(target.Height) /
                             static_cast<float>(key.Height);
             target.Wide = true;
+            target.WideFactor = factor;
         }
     }
+    target.AllocWidth = target.Width;
+    target.AllocHeight = target.Height;
+    target.AllocScale = target.Scale;
+    target.AllocScaleY = target.ScaleY;
+    target.DynamicEligible =
+        namespaceScale == state.NamespaceScales.end() &&
+        key.Width == Oot3d::kNativeTopScreenPhysicalWidth &&
+        key.Height == Oot3d::kNativeTopScreenPhysicalHeight;
     try {
         glGenTextures(1, &target.Color);
         glBindTexture(GL_TEXTURE_2D, target.Color);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
-                     static_cast<GLsizei>(target.Width),
-                     static_cast<GLsizei>(target.Height), 0,
+                     static_cast<GLsizei>(target.AllocWidth),
+                     static_cast<GLsizei>(target.AllocHeight), 0,
                      GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -2324,8 +2486,8 @@ PicaGlTarget& GetPicaGlTarget(
         glGenRenderbuffers(1, &target.DepthStencil);
         glBindRenderbuffer(GL_RENDERBUFFER, target.DepthStencil);
         glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
-                              static_cast<GLsizei>(target.Width),
-                              static_cast<GLsizei>(target.Height));
+                              static_cast<GLsizei>(target.AllocWidth),
+                              static_cast<GLsizei>(target.AllocHeight));
 
         glGenFramebuffers(1, &target.Framebuffer);
         glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
@@ -2343,8 +2505,8 @@ PicaGlTarget& GetPicaGlTarget(
         // The shadow producer addresses this image with gl_FragCoord and the
         // consumer filters it through textureSize(), so both follow the scale.
         glTexImage2D(GL_TEXTURE_2D, 0, GL_R32UI,
-                     static_cast<GLsizei>(target.Width),
-                     static_cast<GLsizei>(target.Height), 0,
+                     static_cast<GLsizei>(target.AllocWidth),
+                     static_cast<GLsizei>(target.AllocHeight), 0,
                      GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -2439,6 +2601,9 @@ GLuint FindLivePicaShadow(
     if (found == nullptr) {
         return 0U;
     }
+    // Sampled as Shadow2D (textureSize() of the allocation): no dynamic
+    // scale for it from its next clear on.
+    found->DynamicExempt = true;
     // A consumer samples it: a deferred clear must land first.
     if (ResolvePicaShadow(*found)) {
         *rebind = true;
@@ -2696,6 +2861,8 @@ void ApplyPicaFill(const GfxNativePicaMemoryFillView& fill,
             (static_cast<uint32_t>(PicaFillByte(fill, 2U)) << 16U) |
             (static_cast<uint32_t>(PicaFillByte(fill, 3U)) << 24U);
         ClearPicaShadow(target, shadow, lean);
+        // The content starts again: the dynamic scale may move here.
+        RefreshPicaGlTargetScale(target, key);
     }
     glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
     glDisable(GL_SCISSOR_TEST);
@@ -3138,6 +3305,12 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             // A shadow producer reads and writes its Shadow2D image.
             if (ResolvePicaShadow(target)) {
                 gl.ForgetClearState();
+            }
+            // Its consumer filters the image through textureSize(): the
+            // whole allocation from now on (dynamic resolution).
+            if (target.DynamicEligible && !target.DynamicExempt) {
+                target.DynamicExempt = true;
+                SetPicaGlTargetScale(target, targetKey, target.AllocScale);
             }
         }
         // Every draw may write colour (a producer masks it, but counting it
@@ -4100,16 +4273,28 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
         // A fractional scale rounds each extent (PicaGlScale::ScaledEdge); a
         // 2:1 transfer then may read one host pixel more or less than twice
         // the output, a sub-pixel offset of the box filter.
-        const float resolutionScale = source->second.Scale;
-        const float sourceScaleY = source->second.ScaleY;
+        // Dynamic resolution (gl_pica_dynamic_scale.h): the source may be
+        // drawn at a lower scale than it was allocated at. The display image
+        // keeps the allocation's extent and the copy fills its bottom-left
+        // part (the content), which the scanout then reads.
+        const auto& sourceTarget = source->second;
+        const float resolutionScale = sourceTarget.Scale;
+        const float sourceScaleY = sourceTarget.ScaleY;
         const auto scaledY = [&](uint32_t native) {
             return static_cast<uint32_t>(std::lround(
                 static_cast<float>(native) * sourceScaleY));
         };
         const uint32_t displayAllocWidth =
-            PicaGlScale::ScaledExtent(outputWidth, resolutionScale);
-        const uint32_t displayAllocHeight =
-            std::max<uint32_t>(1U, scaledY(outputHeight));
+            PicaGlScale::ScaledExtent(outputWidth, sourceTarget.AllocScale);
+        const uint32_t displayAllocHeight = std::max<uint32_t>(
+            1U, static_cast<uint32_t>(std::lround(
+                    static_cast<float>(outputHeight) *
+                    sourceTarget.AllocScaleY)));
+        const uint32_t contentWidth = std::min(
+            displayAllocWidth,
+            PicaGlScale::ScaledExtent(outputWidth, resolutionScale));
+        const uint32_t contentHeight = std::min(
+            displayAllocHeight, std::max<uint32_t>(1U, scaledY(outputHeight)));
         auto& display = GetPicaGlDisplay(
             *mNativePica, transfer.RenderTargetNamespace,
             transfer.OutputPhysicalAddress, outputWidth, outputHeight,
@@ -4137,11 +4322,38 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
             glDisable(GL_SCISSOR_TEST);
             glBlitFramebuffer(
                 0, 0, copy.SourceWidth, copy.SourceHeight,
-                0, 0, static_cast<GLint>(displayAllocWidth),
-                static_cast<GLint>(displayAllocHeight),
+                0, 0, static_cast<GLint>(contentWidth),
+                static_cast<GLint>(contentHeight),
                 GL_COLOR_BUFFER_BIT, static_cast<GLenum>(copy.Filter));
+            if (contentWidth < displayAllocWidth ||
+                contentHeight < displayAllocHeight) {
+                // The filters reading the content (bilinear scanout, EASU's
+                // 12 taps, RCAS) reach up to two texels past its edge, where
+                // an older, larger copy may still lie: replicate the last
+                // column, then the last row (with that border), into a
+                // two-texel band. Same image, disjoint rectangles.
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, display.Framebuffer);
+                const auto cw = static_cast<GLint>(contentWidth);
+                const auto ch = static_cast<GLint>(contentHeight);
+                const GLint bandX = std::min<GLint>(
+                    2, static_cast<GLint>(displayAllocWidth) - cw);
+                const GLint bandY = std::min<GLint>(
+                    2, static_cast<GLint>(displayAllocHeight) - ch);
+                if (bandX > 0) {
+                    glBlitFramebuffer(cw - 1, 0, cw, ch, cw, 0, cw + bandX, ch,
+                                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                }
+                if (bandY > 0) {
+                    glBlitFramebuffer(0, ch - 1, cw + bandX, ch, 0, ch,
+                                      cw + bandX, ch + bandY,
+                                      GL_COLOR_BUFFER_BIT, GL_NEAREST);
+                }
+            }
             display.LastCopy = copy;
         }
+        display.ContentWidth = contentWidth;
+        display.ContentHeight = contentHeight;
+        display.ContentScale = resolutionScale;
         display.Initialized = true;
 
         if (transfer.Present) {
@@ -4166,10 +4378,12 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
             // exact 1:1 fit of the 1280x720 handheld screen).
             // A widescreen top-screen image is presented wider by the same
             // factor its target was widened (16:9 on the Switch: no bars).
+            // (The allocation's scale: a dynamic scale changes the content,
+            // never the presented shape.)
             const float presentedWidth = static_cast<float>(outputHeight) *
                 static_cast<float>(display.AllocHeight) /
                 (static_cast<float>(outputHeight) *
-                 static_cast<float>(resolutionScale));
+                 static_cast<float>(sourceTarget.AllocScale));
             const float presentedHeight = static_cast<float>(outputWidth);
             const float scale = std::min(
                 static_cast<float>(windowWidth) / presentedWidth,
@@ -4242,11 +4456,24 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
                     glUniform1i(mNativePica->ScanoutFlipLocation,
                                 flip ? 1 : 0);
                 }
+                SetPicaGlScanoutContent(*mNativePica, display.ContentWidth,
+                                        display.ContentHeight,
+                                        display.AllocWidth,
+                                        display.AllocHeight);
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, display.Color);
                 glDrawArrays(GL_TRIANGLES, 0, 3);
             }
             mNativePica->LastPresented = transfer;
+            if (sourceTarget.DynamicEligible) {
+                auto& dynamic = PicaGlDynamicScale::gState;
+                dynamic.PresentedFrames.fetch_add(1U,
+                                                  std::memory_order_relaxed);
+                dynamic.PresentedScaleMilli.fetch_add(
+                    static_cast<uint64_t>(
+                        std::lround(display.ContentScale * 1000.0F)),
+                    std::memory_order_relaxed);
+            }
             PublishPicaGlStats(*mNativePica);
         }
         InvalidateLegacyStateAfterPica();
@@ -4277,6 +4504,7 @@ bool GfxRenderingAPIOGL::ClearPicaRenderTarget(
         }
         GlPerf::Mark(GlPerf::Stage::Clear);
         ClearPicaShadow(target, 0xFFFFFFFFU, mNativePica->Lean);
+        RefreshPicaGlTargetScale(target, key);
         ++target.Version;
         glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
         glDisable(GL_SCISSOR_TEST);

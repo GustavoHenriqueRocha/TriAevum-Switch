@@ -47,6 +47,7 @@
 #include "oot3d_native_controls_settings_panel.h"
 #include "oot3d_native_frame_rate.h"
 #include "oot3d_native_cadence_governor.h"
+#include "oot3d_native_dynamic_resolution.h"
 #include "oot3d_native_interpolation_pacing.h"
 #include "oot3d_native_reduced_replay.h"
 #include "oot3d_native_launch_frame_rate.h"
@@ -594,8 +595,16 @@ private:
     // config/fps60_mode (oot3d_native_cadence_governor.h): adaptive
     // (default), strict60 or legacy, then options.
     Oot3dNativeGame::Fps60ModeConfig Fps60Mode{};
+    // config/dynamic_resolution (oot3d_native_dynamic_resolution.h): the
+    // file turns it on (off by default); its text, if any, is the lowest
+    // scale ("2.25").
+    bool DynamicResolution = false;
+    std::string DynamicResolutionText;
   } interpolationPacingOptions;
   Oot3dNativeGame::InterpolationPacingGovernor interpolationPacing;
+  // Dynamic resolution of the top-screen scene (render thread).
+  Oot3dNativeGame::DynamicResolutionController dynamicResolution;
+  bool dynamicResolutionActive = false;
   // Presentation cadence (render thread): counters and the locked 30.
   Oot3dNativeGame::NativeCadenceGovernor cadenceGovernor;
   bool cadenceGovernorConfigured = false;
@@ -678,6 +687,13 @@ private:
     double CadenceHoldSeconds = 0.0;
     double GamePairP90Ms = 0.0;
     uint64_t SupersededFrames = 0;
+    // Dynamic resolution (config/dynamic_resolution): on, current and lowest
+    // scale, the controller's pair average and its changes.
+    bool DrsActive = false;
+    float DrsScale = 0.0F;
+    float DrsMinScale = 0.0F;
+    double DrsPairMs = 0.0;
+    Oot3dNativeGame::DynamicResolutionStats Drs{};
   };
   std::mutex interpolationPerfMutex;
   InterpolationPerfCounters interpolationPerf;

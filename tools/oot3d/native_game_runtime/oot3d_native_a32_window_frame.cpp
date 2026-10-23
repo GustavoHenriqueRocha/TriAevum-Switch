@@ -18,6 +18,7 @@
 #include "fast/oot3d/pica_texture_predecode.h"
 #include <imgui.h>
 #include "fast/backends/gl_frame_profiler.h"
+#include "fast/backends/gl_pica_dynamic_scale.h"
 #if defined(__SWITCH__)
 namespace Fast {
 // gfx_opengl.h (its GL headers stay out).
@@ -193,6 +194,32 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
   // Two presentation periods: one step frame and one in-between frame.
   interpolationPacing.Configure(config, 2000.0 / static_cast<double>(rateHz),
                                 baseScale, reducedAvailable);
+  // Dynamic resolution (config/dynamic_resolution, off by default): between
+  // the backend's scale and the configured lowest one, on the same pair
+  // budget (oot3d_native_dynamic_resolution.h).
+  {
+    auto &backendScale = Fast::PicaGlDynamicScale::gState;
+    Oot3dNativeGame::DynamicResolutionConfig drsConfig;
+    drsConfig.MaxScale = backendScale.MaxScale;
+    drsConfig.MinScale = Oot3dNativeGame::ParseDynamicResolutionMinScale(
+        options.DynamicResolutionText, drsConfig.MaxScale);
+    dynamicResolutionActive = options.DynamicResolution &&
+                              backendScale.Supported &&
+                              drsConfig.MinScale < drsConfig.MaxScale;
+    dynamicResolution.Configure(drsConfig,
+                                2000.0 / static_cast<double>(rateHz));
+    backendScale.Requested = 0.0F;
+    if (options.DynamicResolution)
+      std::fprintf(stderr,
+                   "TRIAEVUM_DYNAMIC_RESOLUTION active=%d supported=%d "
+                   "max=%.2f min=%.2f\n",
+                   dynamicResolutionActive ? 1 : 0,
+                   backendScale.Supported ? 1 : 0, drsConfig.MaxScale,
+                   dynamicResolution.Config().MinScale);
+    std::lock_guard lock(interpolationPerfMutex);
+    interpolationPerf.DrsActive = dynamicResolutionActive;
+    interpolationPerf.DrsMinScale = dynamicResolution.Config().MinScale;
+  }
   // Presentation cadence (config/fps60_mode): its lock only means something
   // at 60 (at 30 every picture holds two refreshes by design).
   auto cadenceConfig = options.Fps60Mode;
@@ -295,6 +322,15 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
     if (result.Kind >= gpuMs.size()) return;
     gpuMs[result.Kind] += result.Milliseconds;
     ++gpuFrames[result.Kind];
+    // Dynamic resolution learns the GPU side only (a smaller image saves
+    // no render-thread time): the step frame, twice while interpolating
+    // (the in-between frame is one more replay of the same scene).
+    if (dynamicResolutionActive &&
+        result.Kind ==
+            static_cast<uint8_t>(Oot3dNativeGame::RenderFrameKind::Step))
+      (void)dynamicResolution.ObservePair(
+          visualInterpolationEnabled ? 2.0 * result.Milliseconds
+                                     : result.Milliseconds);
     // Both sides of a frame overlap the neighbouring frames: the pair fits
     // only if each fits.
     observe(result.Kind, std::max(result.Milliseconds, result.CpuMilliseconds));
@@ -329,6 +365,9 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
       Oot3dNativeGame::InterpolatedSampleLevel::Reduced);
   perf.BudgetMs = interpolationPacing.PairBudgetMs();
   perf.DecisionBudgetMs = interpolationPacing.DecisionBudgetMs();
+  perf.DrsScale = dynamicResolutionActive ? dynamicResolution.Scale() : 0.0F;
+  perf.DrsPairMs = dynamicResolution.AveragePairMs();
+  perf.Drs = dynamicResolution.Stats();
 }
 
 void NativeA32WindowSession::ObservePresentCadence(uint8_t frameKind) {
@@ -1137,6 +1176,38 @@ bool NativeA32WindowSession::RunFrame() {
              << " est_reduced_ms=" << current.ReducedEstimateMs
              << " pair_budget_ms=" << current.BudgetMs
              << " decision_budget_ms=" << current.DecisionBudgetMs;
+        // Dynamic resolution (config/dynamic_resolution): on, the scale now
+        // and its lowest, the mean scale of the presented top-screen frames
+        // in the window, the controller's pair average (GPU ms) and its
+        // changes (down/up, ups undone soon) in the window.
+        {
+          static uint64_t previousPresented = 0U, previousMilli = 0U,
+                          previousApplied = 0U;
+          const auto &backendScale = Fast::PicaGlDynamicScale::gState;
+          const uint64_t presented =
+              backendScale.PresentedFrames.load(std::memory_order_relaxed);
+          const uint64_t milli =
+              backendScale.PresentedScaleMilli.load(std::memory_order_relaxed);
+          const uint64_t applied =
+              backendScale.Applied.load(std::memory_order_relaxed);
+          const uint64_t presentedWindow = presented - previousPresented;
+          perf << " drs=" << (current.DrsActive ? 1 : 0)
+               << " drs_scale=" << current.DrsScale
+               << " drs_min=" << current.DrsMinScale << " drs_scale_avg="
+               << (presentedWindow != 0U
+                       ? static_cast<double>(milli - previousMilli) /
+                             1000.0 / static_cast<double>(presentedWindow)
+                       : 0.0)
+               << " drs_pair_ms=" << current.DrsPairMs
+               << " drs_changes=" << (current.Drs.Changes - previous.Drs.Changes)
+               << " drs_downs=" << (current.Drs.Downs - previous.Drs.Downs)
+               << " drs_ups=" << (current.Drs.Ups - previous.Drs.Ups)
+               << " drs_bounces=" << (current.Drs.Bounces - previous.Drs.Bounces)
+               << " drs_applied=" << (applied - previousApplied);
+          previousPresented = presented;
+          previousMilli = milli;
+          previousApplied = applied;
+        }
         previous = current;
       }
       // Presentation cadence (config/fps60_mode, oot3d_native_cadence_governor.h),
@@ -2833,6 +2904,11 @@ void NativeA32WindowSession::PresentVisualFrame(
             selectedNewVisualFrame = true;
             renderFrameKind =
                 static_cast<uint8_t>(Oot3dNativeGame::RenderFrameKind::Step);
+            // Dynamic resolution moves with the step frame: the backend
+            // applies it at the top-screen target's next colour clear (this
+            // step's), and the in-between frame that follows keeps it.
+            Fast::PicaGlDynamicScale::gState.Requested =
+                dynamicResolutionActive ? dynamicResolution.Scale() : 0.0F;
             auto &sample = visualFrameSampleScratch;
             // Keep the canonical target complete independently of the
             // delayed visual target. Raw-copy prefixes have already

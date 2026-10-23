@@ -172,15 +172,20 @@ inline uint32_t FloatBits(float value) noexcept {
 
 // FsrEasuCon() from ffx_fsr1.h (CPU side), for an input image used whole.
 // Returns con0..con3 as four consecutive uvec4.
-inline std::array<uint32_t, 16> FsrEasuConstants(float inputWidth,
+// FsrEasuCon() of ffx_fsr1.h: the input viewport (the rendered part, at
+// the bottom-left of the image) may be smaller than the input image
+// (dynamic resolution draws a sub-rectangle of the allocated target).
+inline std::array<uint32_t, 16> FsrEasuConstants(float inputViewportWidth,
+                                                 float inputViewportHeight,
+                                                 float inputWidth,
                                                  float inputHeight,
                                                  float outputWidth,
                                                  float outputHeight) noexcept {
     std::array<uint32_t, 16> con{};
-    con[0] = FloatBits(inputWidth * (1.0F / outputWidth));
-    con[1] = FloatBits(inputHeight * (1.0F / outputHeight));
-    con[2] = FloatBits(0.5F * inputWidth * (1.0F / outputWidth) - 0.5F);
-    con[3] = FloatBits(0.5F * inputHeight * (1.0F / outputHeight) - 0.5F);
+    con[0] = FloatBits(inputViewportWidth * (1.0F / outputWidth));
+    con[1] = FloatBits(inputViewportHeight * (1.0F / outputHeight));
+    con[2] = FloatBits(0.5F * inputViewportWidth * (1.0F / outputWidth) - 0.5F);
+    con[3] = FloatBits(0.5F * inputViewportHeight * (1.0F / outputHeight) - 0.5F);
     con[4] = FloatBits(1.0F / inputWidth);
     con[5] = FloatBits(1.0F / inputHeight);
     con[6] = FloatBits(1.0F * (1.0F / inputWidth));
@@ -194,6 +199,15 @@ inline std::array<uint32_t, 16> FsrEasuConstants(float inputWidth,
     con[14] = 0U;
     con[15] = 0U;
     return con;
+}
+
+// The whole image is the input viewport.
+inline std::array<uint32_t, 16> FsrEasuConstants(float inputWidth,
+                                                 float inputHeight,
+                                                 float outputWidth,
+                                                 float outputHeight) noexcept {
+    return FsrEasuConstants(inputWidth, inputHeight, inputWidth, inputHeight,
+                            outputWidth, outputHeight);
 }
 
 // FsrRcasCon() takes stops (sharpness = exp2(-stops)); the config already
@@ -778,6 +792,8 @@ inline std::string BuildRcasFragmentShader() {
 layout(binding=0) uniform sampler2D pica_post_source;
 uniform uvec4 pica_rcas_con;
 uniform int pica_rcas_resample;
+// Resample mode: the source's content sub-rectangle (dynamic resolution).
+uniform vec2 pica_rcas_uv_scale;
 ivec2 pica_rcas_center;
 vec2 pica_rcas_uv;
 vec2 pica_rcas_texel;
@@ -796,7 +812,7 @@ void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
 void main() {
     uvec2 ip = pica_post_output_pixel();
     pica_rcas_center = ivec2(ip);
-    pica_rcas_uv = pica_post_uv();
+    pica_rcas_uv = pica_post_uv() * pica_rcas_uv_scale;
     pica_rcas_texel = 1.0 / vec2(textureSize(pica_post_source, 0));
     float r, g, b, a;
     FsrRcasF(r, g, b, a, ip, pica_rcas_con);

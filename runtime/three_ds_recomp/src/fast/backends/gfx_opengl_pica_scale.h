@@ -105,6 +105,29 @@ inline constexpr float kDefaultResolutionScale = 2.0F;
     return std::max(scale, 1.0F);
 }
 
+// Dynamic resolution (gl_pica_dynamic_scale.h): the drawn extent of a
+// target allocated at allocWidth x allocHeight when drawn at `scale` (its
+// bottom-left sub-rectangle). A widescreen target widens its height by
+// wideFactor as at allocation. Never larger than the allocation.
+struct SubRectangle {
+    uint32_t Width = 0U;
+    uint32_t Height = 0U;
+};
+[[nodiscard]] inline SubRectangle DynamicSubRectangle(
+    uint32_t nativeWidth, uint32_t nativeHeight, float scale,
+    uint32_t allocWidth, uint32_t allocHeight, bool wide,
+    float wideFactor) noexcept {
+    SubRectangle extent;
+    extent.Width = std::min(allocWidth, ScaledExtent(nativeWidth, scale));
+    uint32_t height = ScaledExtent(nativeHeight, scale);
+    if (wide) {
+        height = static_cast<uint32_t>(
+            std::lround(static_cast<float>(height) * wideFactor));
+    }
+    extent.Height = std::min(allocHeight, std::max<uint32_t>(1U, height));
+    return extent;
+}
+
 // config/gl_lean: exact GPU savings of the backend, on unless the file holds
 // "0" (TRIAEVUM_GL_LEAN=0 elsewhere): skip a display copy whose source has not
 // changed since the same copy, skip the window clear a full-window scanout

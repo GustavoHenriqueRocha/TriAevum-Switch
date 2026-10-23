@@ -751,6 +751,57 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   `oot3d_native_bottom_screen_skip_tests`.
 - Resolução: `config/resolution_scale` 1/2/2,5/3; FSR 1 (`config/upscaler=fsr`), AA, anisotropia. Em
   3× (720p) a GPU virou gargalo: 23,4 contra 28,5 FPS em 2×. Padrão 2×.
+- **Resolução dinâmica (DRS) da cena da tela de cima** (`config/dynamic_resolution`; **ausente =
+  desligada**, primeira versão para A/B). Motivo (tour17, pgo5l, 3,0): Water Temple 55,1 FPS com
+  passo de GPU 14,8 ms (`gpu_pica_top` 12,7): par ~29,6 ms + ~2,5–3 ms que o timer não vê não cabe em
+  33,3, e o governador descarta quase todo intermediário (10,5 `interp` contra 65 `hold` por janela).
+  Arquivo presente liga; o texto opcional é a escala mínima (`2.25`, `2,5`; múltiplos de 0,25; vazio =
+  3 degraus abaixo da configurada, 3,0 → 2,25; nunca acima da configurada). Técnica:
+  - **Sub-retângulo, sem realocar.** O alvo da tela de cima (chave 480×400 nativa, sem escala de
+    namespace própria) continua alocado na escala configurada (`AllocWidth/AllocHeight/AllocScale` em
+    `PicaGlTarget`); numa escala menor só `Width/Height/Scale/ScaleY` (a extensão desenhada) mudam, e
+    viewport, scissor e os passes de widescreen já saem dessas (`PicaGlScale::DynamicSubRectangle`).
+    É viável porque o backend GL nunca lê pixels de volta para a memória do guest: o alvo só é lido
+    pelo display transfer e pelo Shadow2D.
+  - **Troca só no clear de cor** (`RefreshPicaGlTargetScale` em `ApplyPicaFill` e
+    `ClearPicaRenderTarget`): um quadro nunca mistura duas escalas, e um quadro que constrói sobre os
+    pixels do anterior (fundo congelado) fica na escala em que eles foram desenhados. O quadro pede a
+    escala (`Fast::PicaGlDynamicScale::gState.Requested`, `gl_pica_dynamic_scale.h`) só ao montar um
+    **passo**; o intermediário seguinte limpa o alvo com o mesmo pedido, então usa a escala do passo.
+  - **Display transfer**: a imagem de display tem a extensão da alocação; a cópia enche o canto
+    inferior esquerdo (`ContentWidth/ContentHeight`) e replica a última coluna e linha numa faixa de
+    2 texels (bilinear, as 12 amostras do EASU e o RCAS passam até 2 texels da borda, onde pode estar
+    uma cópia maior antiga). A forma apresentada usa `AllocScale` (a escala nunca muda o aspecto). A
+    identidade da cópia enxuta (`DisplayCopyIdentity`) já inclui a extensão lida, e o reuso do EASU
+    também.
+  - **Upscale lê o sub-retângulo**: scanout linear com `pica_uv_scale`; EASU com o `FsrEasuCon` de
+    viewport ≠ textura (`FsrEasuConstants` de 6 argumentos, como no ffx_fsr1.h); RCAS em modo
+    reamostragem com `pica_rcas_uv_scale`. Na escala cheia tudo é idêntico ao anterior (escala de UV
+    1, viewport = textura). Com `config/upscaler=fsr` a 2,75 o EASU volta a ampliar (em 3,0 é 1:1).
+  - **Fora da DRS**: SMAA/FXAA ligados (as imagens de AA têm a extensão da fonte; `Supported=false`),
+    escala configurada 1, o namespace reduzido do intermediário (`config/interp_scale`, escala própria)
+    e todo alvo que produziu ou foi amostrado como Shadow2D (`DynamicExempt`: o consumidor filtra por
+    `textureSize()` da alocação). HUD e menus do jogo são desenhados pelo guest **no mesmo alvo** da
+    cena, então escalam junto (não há como separá-los no sub-retângulo); o overlay do host (ImGui,
+    contador de FPS) é desenhado na janela e não muda.
+  - **Controlador** (`oot3d_native_dynamic_resolution.h`, render thread): aprende só o tempo de GPU
+    do passo (o mesmo `GL_TIMESTAMP` sem stall do governador; tempo da render thread não, porque
+    imagem menor não economiza CPU); par = 2 × passo com interpolação. Desce um degrau (0,25) quando a
+    média do par fica > 85% do orçamento (28,3 de 33,3 ms) por 3 passos seguidos; sobe quando o par
+    **previsto** na escala de cima (modelo `0,35 + 0,65·(s'/s)²`) fica ≤ 80% por 60 passos seguidos
+    (histerese: entre 80% previsto e 85% medido nada muda). Depois de cada troca descarta 5
+    resultados (os carimbos chegam até 8 quadros atrasados e ainda são da escala antiga). Subida
+    desfeita em até 180 passos dobra a espera daquele degrau (até 8×); degrau que segura 180 passos
+    volta a 60. Water Temple no modelo: 29,6 → 2,75 (~26,3) e para ali.
+  - perf.txt (`interp:`): `drs` (ligada), `drs_scale` (atual), `drs_min`, `drs_scale_avg` (média da
+    escala dos quadros de cima apresentados na janela), `drs_pair_ms` (média do controlador),
+    `drs_changes`/`drs_downs`/`drs_ups`/`drs_bounces` (na janela) e `drs_applied` (trocas
+    efetivamente aplicadas a um alvo no clear; `drs_changes>0` com `drs_applied=0` = o alvo nunca
+    recebe clear de cor e a DRS não age). Log de arranque `TRIAEVUM_DYNAMIC_RESOLUTION active= supported=
+    max= min=`. Testes: `oot3d_native_dynamic_resolution_tests` (limites, histerese, assentamento,
+    pico isolado, backoff, parser) e `PicaGlScale.DynamicSubRectangle` em `gfx_opengl_pica_scale_tests`.
+    Medir no console antes de pensar em ligar por padrão (A/B: Water Temple e Desert Colossus, e que as
+    áreas ≥59 fiquem em 3,0 com `drs_changes=0`).
 - Junção de draws (técnica do aurora/Dusklight): **medida e descartada, código removido**. A
   assinatura por draw (`step_mergeable=` etc., `gfx_opengl_pica_merge_stats.h`) mostrou no tour11
   (23/10, 15 áreas) 0,7 juntáveis em 74,7 draws por quadro (~1%), maior sequência 1,8: quase todo
@@ -866,7 +917,8 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 - `audio:` `min_queued avg_queued device_hz input_hz trim_pct game_speed inserted_ms removed_ms
   concealed_ms`.
 - `interp:` `level step_frames interp_frames interp_dropped reduced_refused gpu_ms_<tipo>
-  rt_ms_<tipo> est_*`.
+  rt_ms_<tipo> est_*`; resolução dinâmica (4.8): `drs drs_scale drs_min drs_scale_avg drs_pair_ms
+  drs_changes drs_downs drs_ups drs_bounces drs_applied`.
 
 ### 5.3 Ferramentas
 
@@ -995,7 +1047,8 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
   `gfx_opengl_pica_scale_tests`, `gl_widescreen_menu_policy_tests`, `oot3d_switch_thread_layout_tests`,
   `oot3d_native_interpolation_pacing_tests`, `triaevum_presentation_clock_tests`,
   `oot3d_native_gpu_frame_timer_tests`, `oot3d_native_bottom_screen_skip_tests`,
-  `oot3d_native_cadence_governor_tests` (modelo do pipeline; `--report`).
+  `oot3d_native_cadence_governor_tests` (modelo do pipeline; `--report`),
+  `oot3d_native_dynamic_resolution_tests` (controlador da DRS).
 - Concorrência com ASan/UBSan e TSan: `oot3d_native_render_command_stream_tests`,
   `oot3d_native_render_shutdown_tests`, `oot3d_native_reduced_replay_stress_tests`,
   `oot3d_native_pica_deferred_plan_tests`.
@@ -1120,6 +1173,15 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     parte do chamador com um soak de host sob ASan. E confira no binário o que o driver suporta de
     verdade (`*_is_format_supported`): um formato "aceito" pelo GL pode ser um fallback em software
     que aloca e decodifica na CPU.
+
+39. **Resolução dinâmica: mudar o que se desenha, não o que se aloca, e só onde o conteúdo recomeça.**
+    Recriar alvos a cada troca invalida caches que guardam nomes GL (estado, unidade de imagem) e custa
+    alocação no meio do jogo; um sub-retângulo do alvo máximo troca de graça. Antes de escolher, listar
+    quem lê o alvo (aqui: só display transfer e Shadow2D, porque nada volta à memória do guest) e
+    tratar cada leitor (extensão do conteúdo + borda replicada para os filtros; isentar o que usa
+    `textureSize()`). Aplicar a escala no clear de cor, não no pedido, para nenhum quadro misturar
+    escalas. E subir pela **previsão** na escala de cima, não pela folga atual: "abaixo de 85% agora"
+    a 2,75 pode ser 95% a 3,0, e o controlador oscila a cada janela.
 
 **Melhor bench até agora (23/10, tour17, pgo5l = 4d512833, padrões do pgo5i + ETC2 desligado, GPU 614, Link andando):** 29 áreas sem crash, média 59,44 (tour14/pgo5i: 59,34), 26 áreas ≥59 (antes 23), hold 41→39 por janela. Pior área: Water Temple 55,1 (mín 51,1).
 

@@ -122,5 +122,37 @@ TEST(PicaGlScale, DisplayCopyIdentity) {
     EXPECT_NE(a, b);
 }
 
+// Dynamic resolution: the drawn sub-rectangle of the top-screen target
+// (480x400 native, stored rotated) allocated at 3x, 16:9 widened.
+TEST(PicaGlScale, DynamicSubRectangle) {
+    const float wide = 1280.0F / 1200.0F;
+    const uint32_t allocWidth = ScaledExtent(480U, 3.0F);
+    const uint32_t allocHeight = 1280U;
+    // At the allocation's scale: exactly the allocation.
+    auto full = DynamicSubRectangle(480U, 400U, 3.0F, allocWidth, allocHeight,
+                                    true, wide);
+    EXPECT_EQ(full.Width, 1440U);
+    EXPECT_EQ(full.Height, 1280U);
+    auto lower = DynamicSubRectangle(480U, 400U, 2.75F, allocWidth,
+                                     allocHeight, true, wide);
+    EXPECT_EQ(lower.Width, 1320U);
+    EXPECT_EQ(lower.Height, 1173U);
+    auto lowest = DynamicSubRectangle(480U, 400U, 2.25F, allocWidth,
+                                      allocHeight, true, wide);
+    EXPECT_EQ(lowest.Width, 1080U);
+    EXPECT_EQ(lowest.Height, 960U);
+    // 5:3 (no widening).
+    auto narrow = DynamicSubRectangle(480U, 400U, 2.5F, allocWidth, 1200U,
+                                      false, 1.0F);
+    EXPECT_EQ(narrow.Width, 1200U);
+    EXPECT_EQ(narrow.Height, 1000U);
+    // Never past the allocation (a request above it is clamped by the
+    // caller, and rounding cannot grow it either).
+    auto over = DynamicSubRectangle(480U, 400U, 3.5F, allocWidth, allocHeight,
+                                    true, wide);
+    EXPECT_EQ(over.Width, allocWidth);
+    EXPECT_EQ(over.Height, allocHeight);
+}
+
 } // namespace
 } // namespace Fast::PicaGlScale

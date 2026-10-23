@@ -1556,6 +1556,13 @@ void NativeA32WindowSession::Setup() {
       options.ReducedAlways = trimmed(*text) == "always";
     if (const auto text = readText("native_replay", "TRIAEVUM_NATIVE_REPLAY"))
       options.ForceNativeReplay = trimmed(*text) == "1";
+    // config/dynamic_resolution (TRIAEVUM_DYNAMIC_RESOLUTION): present = on;
+    // optional text = lowest scale (oot3d_native_dynamic_resolution.h).
+    if (const auto text =
+            readText("dynamic_resolution", "TRIAEVUM_DYNAMIC_RESOLUTION")) {
+      options.DynamicResolution = true;
+      options.DynamicResolutionText = trimmed(*text);
+    }
     // config/fps60_mode: legacy (default), adaptive, strict60 (A/B of the
     // presentation cadence, oot3d_native_cadence_governor.h). Without it,
     // config/interp_pacing=0 keeps its meaning (every in-between frame
