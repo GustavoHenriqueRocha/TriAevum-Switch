@@ -80,7 +80,7 @@ inline constexpr std::array<const char*, kCountCount> kCountNames{
 inline uint64_t Ticks() noexcept {
 #if defined(__SWITCH__) && defined(__aarch64__)
     uint64_t value;
-    asm volatile("mrs %0, cntvct_el0" : "=r"(value));
+    asm volatile("mrs %0, cntpct_el0" : "=r"(value)); // armGetSystemTick(): o Horizon bloqueia cntvct_el0 no EL0 (Data Abort)
     return value;
 #else
     return static_cast<uint64_t>(

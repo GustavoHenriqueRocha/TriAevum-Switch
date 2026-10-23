@@ -28,6 +28,10 @@ class Guard:
 
 
 GUARDS = [
+    Guard("Crash na abertura com config/gpu_timing (pgo5e): cntvct_el0 dá Data Abort no EL0 do Horizon",
+          "runtime/three_ds_recomp/include/fast/backends/gl_pica_draw_phases.h",
+          r'mrs %0, cntpct_el0',
+          forbid=r'mrs %0, cntvct_el0'),
     Guard("Código gerado com -ffast-math diverge da emulação VFP exata",
           "CMake/oot3d/native_runtime.cmake",
           r'NintendoSwitch.*?oot3d_native_whole_aot PRIVATE\s+-fno-fast-math -ffp-contract=off'),

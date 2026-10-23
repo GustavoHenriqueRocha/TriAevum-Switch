@@ -943,6 +943,10 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     Console (tour10, 23/10, pgo5b, CPU 1785/GPU 614/mem 1600): 29 áreas lentas sem crash, save
     final ok; média 59,59 e 27 áreas ≥59 (PGO5 sem skip, GPU 768: 59,56 e 25); 28.388 amostras
     puladas, 120 `kept_menu`, 2 `kept_empty`, 0 `unsafe`.
+33. **Relógio no Switch: `cntpct_el0` (ou `armGetSystemTick()`), nunca `cntvct_el0`.** O Horizon não
+    libera o contador virtual no EL0: `mrs cntvct_el0` dá Data Abort na primeira leitura (pgo5e
+    morria na abertura com `config/gpu_timing`, PC exatamente no `mrs`). Guarda em
+    `tests/switch/test_bug_guards.py`; conferir no ELF com `objdump -d | grep -c cntvct_el0` = 0.
 
 ---
 
