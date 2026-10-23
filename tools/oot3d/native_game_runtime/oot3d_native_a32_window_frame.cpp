@@ -1562,6 +1562,10 @@ bool NativeA32WindowSession::SampleGuestRefreshInput(
   }
 #if defined(TRIAEVUM_DEVELOPER_TOOLS)
   UpdateInputBench(inputFrame);
+  if (devLabStickX != 0 || devLabStickY != 0) {
+    inputFrame.Hid.CirclePadX = devLabStickX;
+    inputFrame.Hid.CirclePadY = devLabStickY;
+  }
 #endif
   inputDiagnostics.Observe(inputFrame);
   if (inputFrame.Exit) {
@@ -3275,6 +3279,12 @@ void NativeA32WindowSession::UpdateDevLab(uint64_t guestFrame) {
       } else if (op == "camera_off") {
         camera.SetActive(false);
         finish("ok", place());
+      } else if (op == "stick") {
+        // Held on the circle pad from the next input frame until another
+        // "stick" (x/y in -1..1; y=1 walks forward, 0/0 releases).
+        devLabStickX = static_cast<int16_t>(std::lround(std::clamp(command.value("x", 0.0), -1.0, 1.0) * 154.0));
+        devLabStickY = static_cast<int16_t>(std::lround(std::clamp(command.value("y", 0.0), -1.0, 1.0) * 154.0));
+        finish("ok", {{"frame", guestFrame}, {"x", devLabStickX}, {"y", devLabStickY}});
       } else if (op == "capture") {
         // Written by the render stream with this frame; the file appears shortly after.
         pendingForcedScreenshot = command.at("path").get<std::string>();
