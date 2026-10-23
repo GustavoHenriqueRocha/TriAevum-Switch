@@ -936,6 +936,9 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
 32. Um skip nunca pode esvaziar a saída: ao salvar o jogo, todos os draws da amostra eram da tela de
     baixo e a composição ficou sem draws (crash no PGO5). Amostra só com draws de baixo (menu, salvar,
     pausa) nunca é pulada (`kept_empty`) e as 60 amostras seguintes também não (`kept_menu`).
+    Console (tour10, 23/10, pgo5b, CPU 1785/GPU 614/mem 1600): 29 áreas lentas sem crash, save
+    final ok; média 59,59 e 27 áreas ≥59 (PGO5 sem skip, GPU 768: 59,56 e 25); 28.388 amostras
+    puladas, 120 `kept_menu`, 2 `kept_empty`, 0 `unsafe`.
 
 ---
 
