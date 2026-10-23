@@ -656,6 +656,33 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   render thread dentro do `malloc` com o heap corrompido — estado compartilhado da sessão supõe o
   jogo no máximo 1 quadro à frente. O stream suporta (`SetMaxFramesInFlight`, testado), a sessão
   não: a chave é ignorada até auditar o que os comandos capturam por referência (rodar com TSan).
+- **Medição por pico e pacer no vsync real (pgo5n, 23/10).** Sem VRR, o que conta é cada quadro
+  que perde o refresh de 16,7 ms, e médias de 150 quadros escondem os picos. `config/frame_spikes`
+  (ou `config/gpu_timing`) liga `logs/spikes.txt` (formato em 5.1) e o resumo `missed_*` do
+  `perf.txt` (5.2). Por quadro apresentado, só POD num anel SPSC de 256 (`oot3d_frame_spike_log.h`,
+  render thread, sem alocação); a janela do `perf.txt` formata em lote e manda ao `AsyncLineWriter`.
+  Refreshes por quadro: com o relógio de vsync, modelo de latch FIFO (o buffer aparece no 1º vsync
+  depois do swap, e nunca antes do vsync seguinte ao do buffer anterior); sem ele, intervalo entre
+  swaps / 16,67 ms arredondado. A amostra é fechada um quadro depois, quando chega o custo da thread
+  do jogo do quadro de host que a produziu. Culpa: `guest` (jogo ocupado > orçamento) → `render`
+  (render thread ocupada, sem as esperas) → `gpu` (último resultado da GPU, atrasa 1–3 quadros) →
+  `pacer` (nada estourou: fase/deriva do pacer, acquire, acordar tarde). Orçamento = refreshes
+  esperados (1; 2 num passo do 30 travado ou alvo de 30) × período.
+  Relógio de vsync (`oot3d_vsync_clock.h`, `oot3d_switch_vsync_clock.cpp`): `viInitialize` +
+  `viOpenDefaultDisplay` próprios (o serviço vi é contado por referência; o handle de display da
+  janela padrão é estático na libnx) + `viGetDisplayVsyncEvent`; uma thread de prioridade 0x20
+  espera o evento (`eventWait` 100 ms, `eventClear`) e carimba com `armGetSystemTick` (cntpct_el0;
+  nunca cntvct_el0), convertido para o relógio do `steady_clock`. Modelo: período por mínimos
+  quadrados de t × índice (janela de 1200 vsyncs; vsync perdido só pula índice), fase pela envoltória
+  inferior (o acordar nunca é antes do vsync), recomeça com resíduo > 1/4 de período.
+  `config/pacer_vsync` (padrão **desligado** nesta 1ª versão, para A/B; conteúdo opcional = offset em
+  ms depois do vsync, 0–15, padrão 1): o pacer usa o período medido e encaixa cada prazo na grade
+  `último_vsync + k·período + offset` (`SnapDeadlineToVsync`); sem vsync válido, volta ao relógio
+  da CPU. `frames_in_flight` não muda. Modelo (`oot3d_frame_spike_tests --report`, display 0,2%
+  mais lento, swapchain 3, tudo cabendo): pacer da CPU = 4 (1 em voo) a 35 (2 em voo) refreshes sem
+  imagem nova por minuto e a render thread presa no acquire 29 s/min (swapchain cheia: o display,
+  não o pacer, dita o ritmo); pacer no vsync = 0 e 0, 3592 imagens em 60 s (uma por refresh).
+  Sobra só o descompasso de conteúdo (jogo a 60,00 contra display a 59,88: judder 0,74 ms RMS).
 - Resultado: fps60 com a versão "final 3" = 48,6 fps médios, 46% ≥ 55, velocidade 99,7%
   *(notas de sessão)*. Áreas pesadas ficam limitadas pela lógica no núcleo 0.
 
@@ -893,6 +920,7 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 | `logs/oot3d_native_game.log`, `logs/glthread.txt` | log geral e troca de contexto GL |
 | `logs/guest_profile.txt` | perfil por função (com `config/guest_profile`) |
 | `logs/failed_pica_*.glsl` | fonte de shader PICA que falhou |
+| `logs/spikes.txt` | com `config/frame_spikes` ou `config/gpu_timing`: `session_start vsync_clock= vsync_rc= pacer_vsync= offset_ms=` e uma linha por quadro que perdeu o vsync (4.5): `spike t= host= guest= kind=step\|interp\|hold refreshes= expected= stage=guest\|render\|gpu\|pacer guest_ms= game_ms= render_ms= render_wait_ms= pacer_ms= swap_ms= gpu_ms= top=<etapa glperf> top_ms= ctx=load,tex,shader,program,gl_oom,evict,drs tex_new= prog_new= shader_new=`. `game_ms` = thread do jogo ocupada; `render_wait_ms` = acquire; `top` só com `gpu_timing` (`-` sem); `ctx=load` = troca de cena nos últimos ~2 s; `shader_new` = `glsl_compiles`+`nvc0_translates` do Mesa |
 | `logs/hang.txt` | watchdog de travamento: etapa e PC/LR/pilha de cada thread quando o jogo ou a render thread param > 3 s; "HEAP CORROMPIDO" da varredura do heap |
 
 ### 5.2 Campos importantes do `perf.txt`
@@ -910,6 +938,12 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   nunca abre clkrst/pcv nem altera clock (SwitchWakerHD issue #33).
 - Planos: `plan_worker_ms`, `plan_late_ms`, `plan_late_draws`, `plan_batches_live/queued/allocated`
   (pequenos e constantes), `plan_lock_wait_*`.
+- Picos (com `config/frame_spikes`/`gpu_timing`, por janela): `missed_refresh` (refreshes perdidos
+  = soma de refreshes − esperados), `missed_frames`, `missed_by_stage_{guest,render,gpu,pacer}`
+  (refreshes perdidos por etapa culpada; somam `missed_refresh`), `hold_presents` (apresentações sem
+  amostra nova, `RenderFrameKind::Other`), `spikes_dropped` (anel cheio, acumulado), `vsync_clock`,
+  `vsync_period_us` (período medido do display), `vsync_resets`, `pacer_vsync`,
+  `pacer_vsync_waits`, `pacer_vsync_snap_max_us` (maior correção de fase do pacer, acumulados).
 - `sync:` `guest_wait_frames_ms` (jogo esperando a render thread), `render_idle_ms`,
   `pacer_oversleep_max_ms` (> ~0,5 ms → testar `pacer_spin_us=200`).
 - `threads:` `layout=… <papel>_cpu=% @c0:c1:c2` (CPU por papel via `svcGetInfo(ThreadTickCount)`):
@@ -1182,6 +1216,13 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     `textureSize()`). Aplicar a escala no clear de cor, não no pedido, para nenhum quadro misturar
     escalas. E subir pela **previsão** na escala de cima, não pela folga atual: "abaixo de 85% agora"
     a 2,75 pode ser 95% a 3,0, e o controlador oscila a cada janela.
+
+40. **Dois relógios "de 60 Hz" nunca são o mesmo relógio.** O pacer contava 1/60 s da CPU e o display
+    roda ~0,2% mais devagar: com swapchain FIFO nada "perde o vsync" no swap (a fila absorve), mas a
+    swapchain enche, o acquire passa a ditar o ritmo (render thread presa metade do tempo, latência
+    +2 quadros) e a cada volta da fase sai um refresh sem imagem nova. Quem apresenta deve seguir o
+    relógio de quem exibe (evento de vsync: fase e período medidos), e a medida de fluidez deve
+    contar refresh perdido por quadro (`spikes.txt`), não média de janela.
 
 **Melhor bench até agora (23/10, tour17, pgo5l = 4d512833, padrões do pgo5i + ETC2 desligado, GPU 614, Link andando):** 29 áreas sem crash, média 59,44 (tour14/pgo5i: 59,34), 26 áreas ≥59 (antes 23), hold 41→39 por janela. Pior área: Water Temple 55,1 (mín 51,1).
 

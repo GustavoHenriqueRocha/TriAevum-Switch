@@ -138,11 +138,41 @@ void NativeRealtimeRefreshPacer::WaitForNextRefresh(uint32_t periods,
         return;
     }
 
-    auto period = NextPeriod();
-    for (uint32_t extra = 1U; extra < periods; ++extra) {
-        period += NextPeriod();
+    VsyncClockSnapshot vsync;
+    const bool anchored = mVsyncReader != nullptr &&
+                          mVsyncReader(mVsyncUser, &vsync) && vsync.Valid &&
+                          vsync.PeriodNs > 0.0;
+    std::chrono::nanoseconds period{0};
+    if (anchored) {
+        // The display's period, and the deadline back on its grid: the
+        // CPU clock's 1/60 s drifted against the display (~0.2% slower),
+        // and every lap of the phase put one frame past a vsync.
+        period = std::chrono::nanoseconds(static_cast<int64_t>(
+            std::llround(vsync.PeriodNs * static_cast<double>(std::max(periods, 1U)))));
+        mNextDeadline += period;
+        const int64_t deadlineNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                mNextDeadline.time_since_epoch())
+                .count();
+        const int64_t snappedNs = SnapDeadlineToVsync(
+            deadlineNs, vsync.LastVsyncNs, vsync.PeriodNs,
+            static_cast<double>(mVsyncOffset.count()));
+        mNextDeadline = std::chrono::steady_clock::time_point(
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::nanoseconds(snappedNs)));
+        const uint64_t snap = static_cast<uint64_t>(
+            snappedNs > deadlineNs ? snappedNs - deadlineNs : deadlineNs - snappedNs);
+        AddRelaxed(mVsyncAnchoredWaits, 1U);
+        if (snap > mVsyncMaximumSnapNanoseconds.load(std::memory_order_relaxed)) {
+            mVsyncMaximumSnapNanoseconds.store(snap, std::memory_order_relaxed);
+        }
+    } else {
+        period = NextPeriod();
+        for (uint32_t extra = 1U; extra < periods; ++extra) {
+            period += NextPeriod();
+        }
+        mNextDeadline += period;
     }
-    mNextDeadline += period;
     auto now = std::chrono::steady_clock::now();
     if (now >= mNextDeadline) {
         const auto latenessDuration =
@@ -246,8 +276,20 @@ void NativeRealtimeRefreshPacer::SetMaximumSpin(
     mMaximumSpin = std::max(spin, std::chrono::nanoseconds::zero());
 }
 
+void NativeRealtimeRefreshPacer::SetVsyncAnchor(
+    NativePacerVsyncReader reader, const void* user,
+    std::chrono::nanoseconds offset) noexcept {
+    mVsyncReader = reader;
+    mVsyncUser = user;
+    mVsyncOffset = offset;
+}
+
 NativePacerTailCounters NativeRealtimeRefreshPacer::TailCounters() const noexcept {
     NativePacerTailCounters counters;
+    counters.VsyncAnchoredWaits =
+        mVsyncAnchoredWaits.load(std::memory_order_relaxed);
+    counters.MaximumVsyncSnapNanoseconds =
+        mVsyncMaximumSnapNanoseconds.load(std::memory_order_relaxed);
     counters.Waits = mTailWaits.load(std::memory_order_relaxed);
     counters.SpinNanoseconds = mTailSpinNanoseconds.load(std::memory_order_relaxed);
     counters.OversleepNanoseconds =

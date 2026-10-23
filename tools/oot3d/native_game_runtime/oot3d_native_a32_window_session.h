@@ -68,6 +68,8 @@
 #include "oot3d_native_pica_deferred_plan.h"
 #include "oot3d_native_offload.h"
 #include "oot3d_hitch_recorder.h"
+#include "oot3d_frame_spike_log.h"
+#include "oot3d_vsync_clock.h"
 #include "oot3d_native_player_temporal_bridge.h"
 #include "oot3d_native_scenario_bootstrap.h"
 #include "oot3d_native_temporal_event_ledger.h"
@@ -322,6 +324,14 @@ private:
   // Render thread, right after the swap: the presentation cadence
   // (oot3d_native_cadence_governor.h) of the frame just presented.
   void ObservePresentCadence(uint8_t renderFrameKind);
+  // config/frame_spikes (or gpu_timing): one sample per presented frame
+  // (render thread, after the swap); a frame that lost its vsync goes to
+  // spikeRing (logs/spikes.txt). skipped: a renderer-skipped present (only
+  // keeps the refresh counter's clock).
+  void ObserveFrameSpike(uint8_t renderFrameKind, bool thirtyStep,
+                         double pacerWaitMs, uint64_t guestFrame, bool skipped);
+  // Game thread, perf window: formats the ring's records in one batch.
+  void DrainFrameSpikes();
   void ExecuteVisualSample(const Oot3dNativeGame::Oot3dPicaVisualFrameViewSample &sample, Oot3dNativeGame::Oot3dPicaPresentationExecutionKind kind, bool present, const Fast::Oot3d::NativeFrameTemporalSample& temporalSample, uint64_t renderTargetNamespace = kVisualInterpolationRenderTargetNamespace);
   // Deferred: a host continuation is pending, retry at a later frame boundary. Failed: reported once; the request is
   // dropped because every retry repeats the full GPU drain and readback.
@@ -639,6 +649,31 @@ private:
   double hitchGuestMs = 0.0;
   std::array<std::atomic<uint64_t>, static_cast<size_t>(Oot3dNativeGame::HitchCause::Count)>
       hitchCounts{};
+  // Frame spikes (oot3d_frame_spike_log.h): config/frame_spikes or
+  // config/gpu_timing. Render-thread scratch below is written by
+  // FinishRenderFrameCost and the scene lambda, read at the present.
+  bool frameSpikesEnabled = false;
+  std::optional<Oot3dNativeGame::AsyncLineWriter> spikeWriter;
+  Oot3dNativeGame::FrameSpikeRing<256> spikeRing;
+  Oot3dNativeGame::FrameSpikeTotals spikeTotals;
+  Oot3dNativeGame::SpikeRefreshCounter spikeRefreshCounter;
+  std::atomic<uint64_t> spikeHoldPresents{0U}; // presents without a new sample
+  uint64_t spikePresents = 0U;
+  double spikeRenderBusyMs = 0.0;
+  double spikeRenderWaitMs = 0.0;
+  double spikeGpuMs = 0.0;
+  bool spikeHasPrevious = false;
+  uint64_t spikePrevTextures = 0U, spikePrevPrograms = 0U, spikePrevEvicted = 0U,
+           spikePrevOom = 0U, spikePrevShaders = 0U, spikePrevDrsChanges = 0U;
+  std::optional<uint32_t> spikeLastScene;
+  // The newest present, waiting for its host frame's game-thread cost.
+  std::optional<Oot3dNativeGame::FrameSpikeSample> spikePending;
+  double spikePendingPeriodMs = 1000.0 / 60.0;
+  uint64_t spikeSceneChangePresent = ~uint64_t{0};
+  // Real vsync of the display (config/pacer_vsync, config/frame_spikes).
+  Oot3dNativeGame::SwitchVsyncClock vsyncClock;
+  bool pacerVsyncConfigured = false;
+  double pacerVsyncOffsetMs = 1.0;
   // Game-thread cost of the previous perf.txt window line (format + write
   // or enqueue), ms, and of the PICA capture inside the guest's GX
   // commands (SubmitDrawPacket), cumulative.

@@ -285,6 +285,9 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   const double costCpuMs =
       gCountRenderWait ? cpuMs
                        : Oot3dNativeGame::NativeRenderThreadBusyMs(cpuMs, waitMs);
+  // logs/spikes.txt: this frame's render-thread work and acquire wait.
+  spikeRenderBusyMs = Oot3dNativeGame::NativeRenderThreadBusyMs(cpuMs, waitMs);
+  spikeRenderWaitMs = waitMs;
   const auto observe = [&](uint8_t frameKind, double costMs) {
     switch (static_cast<Oot3dNativeGame::RenderFrameKind>(frameKind)) {
     case Oot3dNativeGame::RenderFrameKind::Step:
@@ -320,6 +323,7 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
 #endif
   timer.Poll([&](const Oot3dNativeGame::NativeGpuFrameTime &result) {
     if (result.Kind >= gpuMs.size()) return;
+    spikeGpuMs = result.Milliseconds; // newest GPU result (logs/spikes.txt)
     gpuMs[result.Kind] += result.Milliseconds;
     ++gpuFrames[result.Kind];
     // Dynamic resolution learns the GPU side only (a smaller image saves
@@ -414,6 +418,129 @@ void NativeA32WindowSession::ObservePresentCadence(uint8_t frameKind) {
   perf.CadenceThirty = cadenceGovernor.DropsInBetween();
   perf.CadenceHoldSeconds = cadenceGovernor.HoldSeconds();
   perf.GamePairP90Ms = cadenceGovernor.GamePairP90Ms();
+}
+
+void NativeA32WindowSession::ObserveFrameSpike(uint8_t frameKind,
+                                               bool thirtyStep,
+                                               double pacerWaitMs,
+                                               uint64_t guestFrame,
+                                               bool skipped) {
+  if (!frameSpikesEnabled)
+    return;
+  using Kind = Oot3dNativeGame::RenderFrameKind;
+  const int64_t nowNs =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count();
+  const auto vsync = vsyncClock.Read();
+  const auto &pacer = *realtimePacerStorage;
+  const uint32_t targetHz =
+      pacer.Enabled() && pacer.TargetRateHz() != 0U ? pacer.TargetRateHz() : 60U;
+  const double displayNs = vsync.Valid ? vsync.PeriodNs : 1.0e9 / 60.0;
+  const uint32_t refreshes = spikeRefreshCounter.Observe(
+      nowNs, vsync.Valid, vsync.LastVsyncNs, vsync.PeriodNs, 1.0e9 / 60.0);
+  ++spikePresents;
+  // The game thread's cost of the host frame that made the previous
+  // present arrives (render stream) just before this one: that sample is
+  // complete now. Classified and recorded one present late.
+  const auto flushPending = [&] {
+    if (!spikePending.has_value())
+      return;
+    spikePending->GuestMs = static_cast<float>(hitchGuestMs);
+    spikePending->GameBusyMs = static_cast<float>(hitchGameBusyMs);
+    (void)Oot3dNativeGame::ObserveFrameSpike(*spikePending, spikePendingPeriodMs,
+                                             spikeTotals, spikeRing);
+    spikePending.reset();
+  };
+  flushPending();
+  if (skipped)
+    return;
+  const auto kind = static_cast<Kind>(frameKind);
+  if (kind == Kind::Other)
+    Oot3dNativeGame::AddOwner(spikeHoldPresents, 1U);
+  // Context: what changed since the previous present (cumulative totals).
+  const auto gpu = apiPointer->GetNativePicaBackendStats();
+  uint64_t shaders = 0U;
+  if (mesa_switch_get_stats != nullptr) {
+    std::array<uint64_t, 9> mesa{};
+    if (mesa_switch_get_stats(mesa.data(), static_cast<unsigned>(mesa.size())) >= 9U)
+      shaders = mesa[0] + mesa[8]; // glsl_compiles + nvc0_translates
+  }
+  const uint64_t drsChanges = dynamicResolution.Stats().Changes;
+  const auto delta = [](uint64_t now, uint64_t before) {
+    return now > before ? now - before : uint64_t{0};
+  };
+  const auto clamp16 = [](uint64_t value) {
+    return static_cast<uint16_t>(std::min<uint64_t>(value, 0xFFFFU));
+  };
+  Oot3dNativeGame::FrameSpikeSample sample;
+  if (spikeHasPrevious) {
+    sample.TexturesNew = clamp16(delta(gpu.TexturesCreated, spikePrevTextures));
+    sample.ProgramsNew = clamp16(delta(gpu.ProgramsLive, spikePrevPrograms));
+    sample.ShadersNew = clamp16(delta(shaders, spikePrevShaders));
+    if (sample.TexturesNew != 0U) sample.Context |= Oot3dNativeGame::kSpikeTexUpload;
+    if (sample.ProgramsNew != 0U) sample.Context |= Oot3dNativeGame::kSpikeProgram;
+    if (sample.ShadersNew != 0U) sample.Context |= Oot3dNativeGame::kSpikeShader;
+    if (delta(gpu.OutOfMemoryEvents, spikePrevOom) != 0U)
+      sample.Context |= Oot3dNativeGame::kSpikeGlOom;
+    if (delta(gpu.TexturesEvicted, spikePrevEvicted) != 0U)
+      sample.Context |= Oot3dNativeGame::kSpikeEvict;
+    if (drsChanges != spikePrevDrsChanges)
+      sample.Context |= Oot3dNativeGame::kSpikeDrs;
+  }
+  // A scene change in the last ~2 s (120 presents): warp/loading.
+  if (spikeSceneChangePresent != ~uint64_t{0} &&
+      spikePresents - spikeSceneChangePresent <= 120U)
+    sample.Context |= Oot3dNativeGame::kSpikeLoad;
+  spikeHasPrevious = true;
+  spikePrevTextures = gpu.TexturesCreated;
+  spikePrevPrograms = gpu.ProgramsLive;
+  spikePrevShaders = shaders;
+  spikePrevOom = gpu.OutOfMemoryEvents;
+  spikePrevEvicted = gpu.TexturesEvicted;
+  spikePrevDrsChanges = drsChanges;
+
+  sample.HostFrame = spikePresents;
+  sample.GuestFrame = guestFrame;
+  sample.TimeSeconds = static_cast<double>(nowNs) / 1.0e9;
+  sample.Kind = kind == Kind::Step ? Oot3dNativeGame::SpikeFrameKind::Step
+                : kind == Kind::Full || kind == Kind::Reduced
+                    ? Oot3dNativeGame::SpikeFrameKind::Interp
+                    : Oot3dNativeGame::SpikeFrameKind::Hold;
+  // 60 Hz display: a 30 Hz target shows each picture two refreshes, and so
+  // does a step of the locked 30.
+  const uint32_t perPicture = std::max<uint32_t>(
+      1U, static_cast<uint32_t>(std::lround(60.0 / static_cast<double>(targetHz))));
+  sample.Expected = static_cast<uint8_t>(std::min<uint32_t>(
+      perPicture * (thirtyStep ? 2U : 1U), 255U));
+  sample.Refreshes = static_cast<uint8_t>(std::min<uint32_t>(refreshes, 255U));
+  sample.RenderBusyMs = static_cast<float>(spikeRenderBusyMs);
+  sample.RenderWaitMs = static_cast<float>(spikeRenderWaitMs);
+  sample.PacerWaitMs = static_cast<float>(pacerWaitMs);
+  sample.GpuMs = static_cast<float>(spikeGpuMs);
+  sample.SwapMs = static_cast<float>(lastSwapMs);
+  float topMs = 0.0F;
+  uint8_t top = 0xFFU;
+  if (Fast::GlPerf::LastFrameTopStage(&top, &topMs)) {
+    sample.TopStage = top;
+    sample.TopStageMs = topMs;
+  }
+  spikePending = sample;
+  spikePendingPeriodMs = displayNs / 1.0e6;
+}
+
+void NativeA32WindowSession::DrainFrameSpikes() {
+  if (!spikeWriter.has_value())
+    return;
+  std::string batch;
+  char line[512];
+  (void)spikeRing.Drain([&](const Oot3dNativeGame::FrameSpikeRecord &record) {
+    const int size = Oot3dNativeGame::FormatFrameSpike(record, line, sizeof(line));
+    if (size > 0)
+      batch.append(line, std::min<size_t>(static_cast<size_t>(size), sizeof(line) - 1U));
+  });
+  if (!batch.empty())
+    (void)spikeWriter->Push(std::move(batch));
 }
 
 bool NativeA32WindowSession::RunFrame() {
@@ -904,6 +1031,7 @@ bool NativeA32WindowSession::RunFrame() {
   presentSteps.Mark("gui_end_draw");
   renderStream.Submit([&, width, height,
                        presentationSerial = presentationFrameCount,
+                       spikeGuestFrame = frameCount,
                        cadenceThirtyPair,
                        forcedScreenshot = std::exchange(pendingForcedScreenshot, {})] {
     if (!forcedScreenshot.empty()) screenshotState.ForcedPath = forcedScreenshot;
@@ -911,6 +1039,7 @@ bool NativeA32WindowSession::RunFrame() {
       capturedTemporalSample.reset();
       window.EndFrame();
       realtimePacer.ResetDeadline();
+      ObserveFrameSpike(0U, false, 0.0, spikeGuestFrame, true);
       return;
     }
     MaybeWriteFramebufferScreenshot(
@@ -935,7 +1064,8 @@ bool NativeA32WindowSession::RunFrame() {
       realtimePacer.WaitForNextRefresh(thirtyStep ? 2U : 1U, thirtyStep);
     }
     cpuPacing.Stop();
-    rendererTiming->PacingWaitSeconds += SecondsSince(waitStart);
+    const double pacerWaitSeconds = SecondsSince(waitStart);
+    rendererTiming->PacingWaitSeconds += pacerWaitSeconds;
     const auto swapStart = std::chrono::steady_clock::now();
     {
       Oot3dNativeGame::HangWatch::StageScope hangSwap(
@@ -947,6 +1077,8 @@ bool NativeA32WindowSession::RunFrame() {
     (void)RenderWaitClock().Take();
     lastSwapMs = SecondsSince(swapStart) * 1000.0;
     ObservePresentCadence(presentedKind);
+    ObserveFrameSpike(presentedKind, thirtyStep, pacerWaitSeconds * 1000.0,
+                      spikeGuestFrame, false);
   }, true);
   presentSteps.Mark("render_end_frame");
   picaSemanticTrace.RecordFrameBoundary(
@@ -1271,6 +1403,38 @@ bool NativeA32WindowSession::RunFrame() {
                << Oot3dNativeGame::HitchCauseName(
                       static_cast<Oot3dNativeGame::HitchCause>(cause))
                << '=' << hitchCounts[cause].load(std::memory_order_relaxed);
+        // Frames that lost their vsync in this window (logs/spikes.txt):
+        // refreshes lost, by the stage that went over budget.
+        if (frameSpikesEnabled) {
+          static Oot3dNativeGame::FrameSpikeTotals::Snapshot previousSpikes;
+          static uint64_t previousHolds = 0U;
+          const auto spikes = spikeTotals.Take();
+          const uint64_t holds = spikeHoldPresents.load(std::memory_order_relaxed);
+          perf << " missed_refresh="
+               << (spikes.MissedRefreshes - previousSpikes.MissedRefreshes)
+               << " missed_frames="
+               << (spikes.MissedFrames - previousSpikes.MissedFrames);
+          for (size_t stage = 0U; stage < Oot3dNativeGame::kSpikeStageCount; ++stage)
+            perf << " missed_by_stage_"
+                 << Oot3dNativeGame::SpikeStageName(
+                        static_cast<Oot3dNativeGame::SpikeStage>(stage))
+                 << '='
+                 << (spikes.MissedByStage[stage] - previousSpikes.MissedByStage[stage]);
+          perf << " hold_presents=" << (holds - previousHolds)
+               << " spikes_dropped=" << spikeRing.Dropped();
+          const auto vsync = vsyncClock.Read();
+          const auto tail = realtimePacer.TailCounters();
+          perf << " vsync_clock=" << (vsync.Valid ? 1 : 0)
+               << " vsync_period_us=" << (vsync.PeriodNs / 1000.0)
+               << " vsync_resets=" << vsync.Resets
+               << " pacer_vsync=" << (pacerVsyncConfigured ? 1 : 0)
+               << " pacer_vsync_waits=" << tail.VsyncAnchoredWaits
+               << " pacer_vsync_snap_max_us="
+               << (tail.MaximumVsyncSnapNanoseconds / 1000U);
+          previousSpikes = spikes;
+          previousHolds = holds;
+          DrainFrameSpikes();
+        }
         // Textures the plan worker decoded ahead (hit) or the render thread
         // still decoded itself (miss), since the start.
         {
@@ -3756,6 +3920,13 @@ void NativeA32WindowSession::PublishNativeSceneView() {
 #endif
   renderStream.Submit([&, snapshot, environmentTime, player, freeCamera] {
   Fast::GlPerf::SectionScope perfScene(Fast::GlPerf::Section::SceneEnv);
+  if (frameSpikesEnabled && snapshot && snapshot->SceneId.has_value()) {
+    // Scene change (warp, door, loading): logs/spikes.txt ctx=load.
+    const uint32_t scene = *snapshot->SceneId;
+    if (spikeLastScene.has_value() && *spikeLastScene != scene)
+      spikeSceneChangePresent = spikePresents;
+    spikeLastScene = scene;
+  }
   sceneEnvironment->ObserveScene(snapshot ? snapshot->SceneId : std::nullopt,
       environmentTime.value_or(Oot3dNativeGame::SceneEnvironmentTime{}), player);
   sceneEnvironment->PollProfileFiles();

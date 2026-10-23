@@ -63,10 +63,24 @@ struct Hooks {
 };
 inline Hooks gHooks{};
 inline std::atomic<bool> gEnabled{false};
+// Último quadro fechado (FrameEnd): etapa mais cara na CPU da render thread
+// (sem pacing/idle) << 24 | microssegundos (até 2^24-1). ~0: nenhum.
+inline std::atomic<uint32_t> gLastFrameTop{0xFFFFFFFFU};
 } // namespace detail
 
 inline bool Enabled() {
     return detail::gEnabled.load(std::memory_order_acquire);
+}
+
+// Etapa mais cara (CPU) do último quadro fechado, para logs/spikes.txt;
+// false com o perfil desligado ou antes do primeiro quadro.
+inline bool LastFrameTopStage(uint8_t* stage, float* milliseconds) {
+    if (!Enabled()) return false;
+    const uint32_t packed = detail::gLastFrameTop.load(std::memory_order_relaxed);
+    if (packed == 0xFFFFFFFFU) return false;
+    *stage = static_cast<uint8_t>(packed >> 24U);
+    *milliseconds = static_cast<float>(packed & 0xFFFFFFU) / 1000.0F;
+    return true;
 }
 
 // Lê a configuração uma vez (contexto GL corrente). Sem o arquivo: nada.

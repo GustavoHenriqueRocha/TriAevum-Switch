@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include "native_presentation_thread_scope.h"
+#include "oot3d_vsync_clock.h"
 
 namespace Oot3dNativeGame {
 
@@ -30,7 +31,16 @@ struct NativePacerTailCounters {
     uint64_t SpinNanoseconds = 0;       // busy-wait before the deadline
     uint64_t OversleepNanoseconds = 0;  // woke after the sleep's target
     uint64_t MaximumOversleepNanoseconds = 0;
+    // config/pacer_vsync: waits whose deadline was snapped to the display's
+    // vsync grid, and the largest snap (phase correction) of any of them.
+    uint64_t VsyncAnchoredWaits = 0;
+    uint64_t MaximumVsyncSnapNanoseconds = 0;
 };
+
+// Reads the display's vsync clock (steady_clock nanoseconds); false or an
+// invalid snapshot leaves the CPU clock in charge.
+using NativePacerVsyncReader = bool (*)(const void* user,
+                                        VsyncClockSnapshot* snapshot);
 
 enum class NativePacerDeadlineAction : uint8_t {
     Wait,
@@ -73,6 +83,15 @@ class NativeRealtimeRefreshPacer final {
     // value (0: svcSleepThread wakes on time and the spin burns the render
     // thread's core).
     void SetMaximumSpin(std::chrono::nanoseconds spin) noexcept;
+    // config/pacer_vsync: anchor the deadlines to the real vsync (measured
+    // phase and period) instead of 1/TargetRateHz of the CPU clock. Each
+    // deadline snaps to the nearest lastVsync + k*period + offset; the
+    // pacer's period becomes the display's (no drift). nullptr: CPU clock.
+    void SetVsyncAnchor(NativePacerVsyncReader reader, const void* user,
+                        std::chrono::nanoseconds offset) noexcept;
+    [[nodiscard]] bool VsyncAnchorConfigured() const noexcept {
+        return mVsyncReader != nullptr;
+    }
     [[nodiscard]] NativePacerTailCounters TailCounters() const noexcept;
     // Largest oversleep since the previous call (perf windows).
     uint64_t TakeMaximumOversleepNanoseconds() noexcept;
@@ -107,6 +126,11 @@ class NativeRealtimeRefreshPacer final {
     std::atomic<uint64_t> mTailSpinNanoseconds{0};
     std::atomic<uint64_t> mTailOversleepNanoseconds{0};
     std::atomic<uint64_t> mTailMaximumOversleepNanoseconds{0};
+    NativePacerVsyncReader mVsyncReader = nullptr;
+    const void* mVsyncUser = nullptr;
+    std::chrono::nanoseconds mVsyncOffset{0};
+    std::atomic<uint64_t> mVsyncAnchoredWaits{0};
+    std::atomic<uint64_t> mVsyncMaximumSnapNanoseconds{0};
 #ifdef _WIN32
     void* mHighResolutionTimer = nullptr;
 #endif

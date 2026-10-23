@@ -103,6 +103,11 @@ struct Params {
   // GPU had not finished the frame's scene when the acquire returned (the
   // wait was the GPU's, not the display's).
   bool SplitWaitByGpu = false;
+  // config/pacer_vsync: the pacer's deadlines on the display's vsync grid
+  // (measured period D, phase VblankPhaseMs) plus PacerVsyncOffsetMs,
+  // instead of the CPU clock's absolute 1/60 s.
+  bool PacerVsync = false;
+  double PacerVsyncOffsetMs = 1.0;
   uint32_t Seed = 12345U;
   Fps60ModeConfig Mode{};
   InterpolationPacingConfig Pacing{};
@@ -127,6 +132,13 @@ struct Result {
   double JudderRmsMs = 0.0;
   double GuestRefreshesPerSecond = 0.0;
   std::vector<double> PictureIntervalsMs; // for tests
+  // Presents shown more refreshes after the previous one than planned (1,
+  // 2 for a step of the locked 30): the logs/spikes.txt measure.
+  uint64_t MissedFrames = 0;
+  uint64_t MissedRefreshes = 0;
+  // Refreshes that showed no new picture: between distinct pictures, the
+  // refreshes beyond one (what the eye sees as a stutter at 60).
+  uint64_t HeldPictureRefreshes = 0;
 };
 
 [[nodiscard]] inline Result Run(const std::vector<Segment> &segments,
@@ -344,13 +356,17 @@ struct Result {
     // Pacer (NativeRealtimeRefreshPacer::WaitForNextRefresh): one period,
     // two for a step of the locked 30 host loop.
     const bool thirtyStep = adaptiveThirty && completed && due == 2U;
-    const double period = thirtyStep ? 2.0 * P : P;
+    const double period = (thirtyStep ? 2.0 : 1.0) * (params.PacerVsync ? D : P);
     double afterPacer = rtEnd;
     if (!pacerStarted) {
       pacerStarted = true;
       deadline = rtEnd;
     } else {
       deadline += period;
+      if (params.PacerVsync) {
+        const double grid = params.VblankPhaseMs + params.PacerVsyncOffsetMs;
+        deadline = grid + std::round((deadline - grid) / D) * D;
+      }
       if (rtEnd >= deadline) {
         if (rtEnd - deadline > 2.0 * period ||
             (thirtyStep && params.ThirtyResyncWhenLate))
@@ -364,6 +380,14 @@ struct Result {
         nextVblank(std::max(afterPacer, gpuEnd) + params.SwapLatencyMs);
     if (display <= lastDisplay + 0.5 * D)
       display = lastDisplay + D;
+    if (result.Presents != 0U) {
+      const long refreshes = std::lround((display - lastDisplay) / D);
+      const long expected = thirtyStep ? 2L : 1L;
+      if (refreshes > expected) {
+        ++result.MissedFrames;
+        result.MissedRefreshes += static_cast<uint64_t>(refreshes - expected);
+      }
+    }
     renderEnd = params.SwapchainBuffers != 0U ? afterPacer + 0.1
                 : params.SwapQueue == 0U
                     ? display + 0.1
@@ -391,6 +415,8 @@ struct Result {
         sumJudder2 += (shown - meant) * (shown - meant);
         ++intervals;
         result.PictureIntervalsMs.push_back(shown);
+        const long held = std::lround(shown / D) - 1L;
+        if (held > 0) result.HeldPictureRefreshes += static_cast<uint64_t>(held);
       }
       hasPicture = true;
       lastPictureDisplay = display;

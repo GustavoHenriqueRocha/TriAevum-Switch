@@ -736,6 +736,18 @@ void FrameEndSlow() {
                 std::max(window.CounterMax[index], gFrameCounters[index]);
         }
     }
+    {
+        size_t top = 0;
+        for (size_t index = 1; index < kStageCount; ++index) {
+            if (index == static_cast<size_t>(Stage::Pacing) ||
+                index == static_cast<size_t>(Stage::Idle)) continue;
+            if (state.FrameCpuNs[index] > state.FrameCpuNs[top]) top = index;
+        }
+        const uint64_t us = std::min<uint64_t>(state.FrameCpuNs[top] / 1000U, 0xFFFFFFU);
+        detail::gLastFrameTop.store((static_cast<uint32_t>(top) << 24U) |
+                                        static_cast<uint32_t>(us),
+                                    std::memory_order_relaxed);
+    }
     state.FrameCpuNs = {};
     gFrameCounters = {};
 }

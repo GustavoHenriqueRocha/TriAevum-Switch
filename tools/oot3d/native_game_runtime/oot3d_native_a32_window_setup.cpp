@@ -1273,6 +1273,54 @@ void NativeA32WindowSession::Setup() {
   // pacer_spin_us=N, or the legacy layout's 500 us, for A/B).
   realtimePacer.SetMaximumSpin(std::chrono::microseconds(
       Oot3dNativeGame::ActiveSwitchThreadLayout().PacerSpinMicroseconds));
+  // config/frame_spikes (or config/gpu_timing): logs/spikes.txt, one line per
+  // frame that lost its vsync, and the missed_* summary in perf.txt.
+  // config/pacer_vsync: the pacer follows the display's real vsync (phase
+  // and period measured from viGetDisplayVsyncEvent) instead of the CPU's
+  // 1/60 s; optional content = offset in ms after the vsync (0-15, default
+  // 1). Off by default in this first version (A/B).
+  {
+    frameSpikesEnabled =
+        std::ifstream("sdmc:/switch/oot3dre/config/frame_spikes").good() ||
+        std::ifstream("sdmc:/switch/oot3dre/config/gpu_timing").good();
+    std::ifstream pacerVsyncFile("sdmc:/switch/oot3dre/config/pacer_vsync");
+    pacerVsyncConfigured = pacerVsyncFile.good();
+    double offsetMs = 1.0;
+    if (pacerVsyncConfigured && (pacerVsyncFile >> offsetMs) &&
+        offsetMs >= 0.0 && offsetMs <= 15.0)
+      pacerVsyncOffsetMs = offsetMs;
+    bool vsyncStarted = false;
+    if (frameSpikesEnabled || pacerVsyncConfigured)
+      vsyncStarted = vsyncClock.Start();
+    if (pacerVsyncConfigured && vsyncStarted) {
+      realtimePacer.SetVsyncAnchor(
+          [](const void *user, Oot3dNativeGame::VsyncClockSnapshot *snapshot) {
+            *snapshot =
+                static_cast<const Oot3dNativeGame::SwitchVsyncClock *>(user)->Read();
+            return snapshot->Valid;
+          },
+          &vsyncClock,
+          std::chrono::nanoseconds(
+              static_cast<int64_t>(pacerVsyncOffsetMs * 1.0e6)));
+    }
+    if (frameSpikesEnabled) {
+      spikeWriter.emplace("sdmc:/switch/oot3dre/logs/spikes.txt", 64U);
+      char header[160];
+      std::snprintf(header, sizeof(header),
+                    "session_start vsync_clock=%d vsync_rc=0x%X pacer_vsync=%d "
+                    "offset_ms=%.2f\n",
+                    vsyncStarted ? 1 : 0, vsyncClock.StartResult(),
+                    pacerVsyncConfigured && vsyncStarted ? 1 : 0,
+                    pacerVsyncOffsetMs);
+      (void)spikeWriter->Push(header);
+    }
+    std::fprintf(stderr,
+                 "TRIAEVUM_FRAME_SPIKES enabled=%d vsync_clock=%d rc=0x%X "
+                 "pacer_vsync=%d offset_ms=%.2f\n",
+                 frameSpikesEnabled ? 1 : 0, vsyncStarted ? 1 : 0,
+                 vsyncClock.StartResult(),
+                 pacerVsyncConfigured && vsyncStarted ? 1 : 0, pacerVsyncOffsetMs);
+  }
 #endif
   visualInterpolationEnabled =
       Oot3dNativeGame::ShouldUseNativeVisualInterpolation(
