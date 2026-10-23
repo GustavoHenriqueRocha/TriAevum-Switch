@@ -34,6 +34,7 @@ UNIT_TESTS=(
     oot3d_native_pica_visual_frame_equivalence_tests
     oot3d_native_render_command_stream_tests
     oot3d_native_render_shutdown_tests
+    oot3d_pica_etc1_transcode_tests
     oot3d_pica_texture_predecode_tests
     oot3d_switch_thread_layout_tests
     oot3d_top_screen_mod_profile_tests

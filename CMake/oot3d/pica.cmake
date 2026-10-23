@@ -298,6 +298,13 @@ target_link_libraries(oot3d_pica_texture_predecode_tests PRIVATE
     oot3d_renderer_texture_decode)
 oot3d_target_defaults(oot3d_pica_texture_predecode_tests FOLDER Tests)
 
+# ETC1 uploaded compressed as ETC2 (pica_etc1_transcode.h).
+add_executable(oot3d_pica_etc1_transcode_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_pica_etc1_transcode_tests.cpp)
+target_link_libraries(oot3d_pica_etc1_transcode_tests PRIVATE
+    oot3d_renderer_texture_decode)
+oot3d_target_defaults(oot3d_pica_etc1_transcode_tests FOLDER Tests)
+
 # Debug menu (L3+R3) of the console build (debug_menu.h).
 add_executable(oot3d_debug_menu_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_debug_menu_tests.cpp)

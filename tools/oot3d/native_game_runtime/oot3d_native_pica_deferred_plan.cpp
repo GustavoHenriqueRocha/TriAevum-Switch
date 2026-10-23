@@ -1,6 +1,7 @@
 #include "oot3d_native_pica_deferred_plan.h"
 #include "oot3d_switch_threads.h"
 
+#include "fast/oot3d/pica_etc1_transcode.h"
 #include "fast/oot3d/pica_texture_predecode.h"
 
 #include <chrono>
@@ -237,6 +238,12 @@ void CollectPredecodeJobs(const Oot3dPicaVulkanDrawPlan& plan,
         if (texture.State.Type == 2U || !texture.NativeContentHashAvailable ||
             !texture.CopyReferences.empty() ||
             texture.SharedNativeBytes == nullptr) {
+            continue;
+        }
+        // ETC1 goes to the GPU compressed (pica_etc1_transcode.h); ETC1A4
+        // mostly carries alpha and still decodes.
+        if (texture.State.Format == 12U &&
+            ::Fast::Oot3d::PicaEtc2UploadEnabled()) {
             continue;
         }
         const uint32_t levels = ::Fast::Oot3d::PicaTextureMipCount(

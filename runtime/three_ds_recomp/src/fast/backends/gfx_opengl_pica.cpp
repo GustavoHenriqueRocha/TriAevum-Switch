@@ -30,6 +30,7 @@
 #include "fast/renderer3ds/pica_gl_shader_dialect.h"
 #include "oot3d/renderer/pica_texture_decode.h"
 #include "fast/oot3d/pica_texture_predecode.h"
+#include "fast/oot3d/pica_etc1_transcode.h"
 
 #include <algorithm>
 #include <array>
@@ -347,6 +348,9 @@ struct PicaGlTarget {
     bool ShadowClearPending = false;
     uint32_t ShadowClearValue = 0U;
 };
+
+// GL 4.3 / ARB_ES3_compatibility; GM20B samples it in hardware (nvc0).
+constexpr GLenum kGlCompressedRgb8Etc2 = 0x9274;
 
 struct PicaGlTexture {
     GLuint Handle = 0U;
@@ -2485,8 +2489,48 @@ PicaGlTexture& GetPicaGlTexture(
             const auto predecoded = Oot3d::SharedPicaPredecodeCache().Take(
                 {contentHash, texture.Width, texture.Height,
                  texture.NativeFormat, static_cast<uint8_t>(mipLevels)});
+            // ETC1 straight to the GPU (pica_etc1_transcode.h): every level
+            // or none, so a refused level falls back to RGBA8 below.
+            bool compressed = false;
+            if ((texture.NativeFormat == 12U || texture.NativeFormat == 13U) &&
+                Oot3d::PicaEtc2UploadEnabled()) {
+                std::vector<std::vector<uint8_t>> blocks(mipLevels);
+                size_t offset = 0U;
+                compressed = true;
+                for (uint32_t level = 0U; level < mipLevels && compressed;
+                     ++level) {
+                    const uint32_t width = std::max(
+                        1U, static_cast<uint32_t>(texture.Width) >> level);
+                    const uint32_t height = std::max(
+                        1U, static_cast<uint32_t>(texture.Height) >> level);
+                    const auto encoded = PicaEncodedMipSize(
+                        texture.NativeFormat, width, height);
+                    compressed =
+                        encoded.has_value() &&
+                        offset + *encoded <= texture.NativeBytes.size() &&
+                        Oot3d::TranscodePicaEtc1ToEtc2(
+                            texture.NativeBytes.subspan(offset, *encoded),
+                            width, height, texture.NativeFormat == 13U,
+                            blocks[level]);
+                    offset += encoded.value_or(0U);
+                }
+                for (uint32_t level = 0U; level < mipLevels && compressed;
+                     ++level) {
+                    glCompressedTexImage2D(
+                        GL_TEXTURE_2D, static_cast<GLint>(level),
+                        kGlCompressedRgb8Etc2,
+                        static_cast<GLsizei>(std::max(
+                            1U, static_cast<uint32_t>(texture.Width) >> level)),
+                        static_cast<GLsizei>(std::max(
+                            1U, static_cast<uint32_t>(texture.Height) >> level)),
+                        0, static_cast<GLsizei>(blocks[level].size()),
+                        blocks[level].data());
+                    result.Bytes += blocks[level].size();
+                }
+            }
             size_t nativeOffset = 0U;
-            for (uint32_t level = 0U; level < mipLevels; ++level) {
+            for (uint32_t level = 0U; level < mipLevels && !compressed;
+                 ++level) {
                 const uint32_t width =
                     std::max(1U, static_cast<uint32_t>(texture.Width) >> level);
                 const uint32_t height =
@@ -2524,7 +2568,7 @@ PicaGlTexture& GetPicaGlTexture(
                 result.Bytes += static_cast<uint64_t>(width) * height * 4U;
                 nativeOffset += *encoded;
             }
-            result.Format = GL_RGBA8;
+            result.Format = compressed ? kGlCompressedRgb8Etc2 : GL_RGBA8;
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
                             PicaGlMinFilter(texture, mipLevels));
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
