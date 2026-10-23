@@ -27,7 +27,7 @@ for kv in wins:
     sec = 150 / fps if fps else 0
     rows.append((g, g + gfps * sec, fps, gfps, float(kv["guest"]), float(kv["total_ms"])))
     g += gfps * sec
-start = {a["id"]: a["frame"] for a in acks}
+start = {a["id"]: a["frame"] for a in acks if "frame" in a}
 out = []
 for i in range(49):
     a, b = start.get(i), start.get(f"m{i}")
