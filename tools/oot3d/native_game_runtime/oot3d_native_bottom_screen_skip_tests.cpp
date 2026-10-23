@@ -219,6 +219,23 @@ void TestLaterTransferOfASkippedTargetIsLeftOut() {
   CHECK(!tracker.Unsafe(kNamespace, kBottomColor));
 }
 
+// Console fps60fix3: unsafe=18036, skipped=793. The lower screen's own copy
+// to its LCD framebuffer (output read by nothing) must not make the target
+// unsafe forever; a transfer feeding something visible still does.
+void TestUnreadLowerTransferKeepsSkipping() {
+  constexpr uint64_t kNamespace = 9U;
+  BottomSkipTracker tracker;
+  tracker.Skipped(kNamespace, kBottomColor);
+  CHECK(tracker.ForTransfer(kNamespace, kBottomColor, false) ==
+        BottomSkipTracker::TransferAction::Skip);
+  CHECK(tracker.ForTransfer(kNamespace, kBottomColor, false) ==
+        BottomSkipTracker::TransferAction::Skip);
+  CHECK(!tracker.Unsafe(kNamespace, kBottomColor));
+  CHECK(tracker.ForTransfer(kNamespace, kBottomColor, true) ==
+        BottomSkipTracker::TransferAction::Skip);
+  CHECK(tracker.Unsafe(kNamespace, kBottomColor));
+}
+
 // Console tour4: pica_bottom stayed at 2.4 ms with the key on. One PICA
 // depth buffer shared by the two screens made every sample look "used
 // outside"; the lower draws are now skipped and the shared clear is kept.
@@ -275,6 +292,7 @@ int main() {
   TestTopTransferReadingTheLowerTargetKeepsIt();
   TestLaterTransferOfASkippedTargetIsLeftOut();
   TestSharedDepthStillSkips();
+  TestUnreadLowerTransferKeepsSkipping();
   TestReasons();
   if (gFailures != 0) {
     std::fprintf(stderr, "%d failure(s)\n", gFailures);

@@ -119,23 +119,15 @@ bool Oot3dPicaPresentationScheduler::RestoreState(
   return true;
 }
 
-void Oot3dPicaPresentationScheduler::PlanBottomSkip(
-    const Oot3dPicaVisualFrameViewSample &sample, uint64_t renderTargetNamespace,
-    bool presentation) {
-  mBottomSkip.Active = false;
-  if (!mSkipBottomScreen || !presentation)
-    return;
+template <typename Plan>
+static BottomSkipDraw BottomSkipDrawOf(const Plan &plan) {
+  const auto &framebuffer = plan.State.Framebuffer;
   const auto colorBytes = [](uint8_t format) -> uint32_t {
     return format == 0U ? 4U : (format == 1U ? 3U : 2U);
   };
   const auto depthBytes = [](uint8_t format) -> uint32_t {
     return format == 0U ? 2U : (format == 2U ? 3U : 4U);
   };
-  mBottomSkipDraws.clear();
-  bool anyBottom = false;
-  for (const auto &view : sample.Draws) {
-    const auto &plan = *view.BasePlan;
-    const auto &framebuffer = plan.State.Framebuffer;
     BottomSkipDraw draw;
     draw.FramebufferWidth = framebuffer.Width;
     draw.FramebufferHeight = framebuffer.Height;
@@ -162,6 +154,44 @@ void Oot3dPicaPresentationScheduler::PlanBottomSkip(
                             : static_cast<uint64_t>(texture.Width) *
                                   texture.Height * 4U)};
     }
+  return draw;
+}
+
+// The transfer's output memory is sampled or rendered into by a draw of the
+// sample (4 bytes per pixel bound, as PlanBottomSkip).
+static bool TransferOutputRead(const Oot3dPicaVisualFrameViewSample &sample,
+                               const Oot3dPicaDisplayTransferSubmission &transfer) {
+  const uint64_t bytes =
+      transfer.Transfer.TextureCopyBytes != 0U
+          ? transfer.Transfer.TextureCopyBytes
+          : static_cast<uint64_t>(transfer.Transfer.OutputSize & 0xFFFFU) *
+                (transfer.Transfer.OutputSize >> 16U) * 4U;
+  const BottomSkipRange out{
+      transfer.OutputPhysicalAddress,
+      BottomSkipEnd(transfer.OutputPhysicalAddress, bytes == 0U ? 1U : bytes)};
+  for (const auto &view : sample.Draws) {
+    const auto draw = BottomSkipDrawOf(*view.BasePlan);
+    if (draw.Color.Overlaps(out) || draw.Depth.Overlaps(out))
+      return true;
+    for (const auto &texture : draw.Textures)
+      if (texture.Overlaps(out))
+        return true;
+  }
+  return false;
+}
+
+void Oot3dPicaPresentationScheduler::PlanBottomSkip(
+    const Oot3dPicaVisualFrameViewSample &sample, uint64_t renderTargetNamespace,
+    bool presentation) {
+  mBottomSkip.Active = false;
+  if (!mSkipBottomScreen || !presentation)
+    return;
+  mBottomSkipDraws.clear();
+  bool anyBottom = false;
+  for (const auto &view : sample.Draws) {
+    const auto &plan = *view.BasePlan;
+    const auto &framebuffer = plan.State.Framebuffer;
+    BottomSkipDraw draw = BottomSkipDrawOf(plan);
     if (IsBottomScreenFramebuffer(draw.FramebufferWidth,
                                   draw.FramebufferHeight)) {
       // Once read without its image (a later transfer out of it): drawn.
@@ -404,8 +434,10 @@ bool Oot3dPicaPresentationScheduler::Execute(
     // copy (the backend threw "source is missing"). Left out, and that
     // target is drawn from now on.
     if (mSkipBottomScreen &&
-        mBottomSkipTracker.ForTransfer(renderTargetNamespace,
-                                       transfer.InputPhysicalAddress) ==
+        mBottomSkipTracker.ForTransfer(
+            renderTargetNamespace, transfer.InputPhysicalAddress,
+            SameTransfer(transfer, sample.TopTransfer) ||
+                TransferOutputRead(sample, transfer)) ==
             BottomSkipTracker::TransferAction::Skip) {
       ++mStats.BottomSkipMissingSources;
       mBottomSkipMissing.fetch_add(1U, std::memory_order_relaxed);

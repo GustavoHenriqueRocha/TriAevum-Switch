@@ -256,12 +256,18 @@ public:
   void Drawn(uint64_t targetNamespace, uint32_t colorAddress) {
     Erase(mSkipped, {targetNamespace, colorAddress});
   }
+  // `outputRead`: the transfer's output feeds something visible (the top
+  // screen, or memory a draw of the sample samples or renders into). A
+  // transfer whose output nobody reads (the lower screen's own copy to its
+  // LCD framebuffer, never presented in the TopScreen profile) is left out
+  // without marking the target unsafe, so it keeps being skipped.
   [[nodiscard]] TransferAction ForTransfer(uint64_t targetNamespace,
-                                           uint32_t inputAddress) {
+                                           uint32_t inputAddress,
+                                           bool outputRead = true) {
     const Key key{targetNamespace, inputAddress};
     if (!Has(mSkipped, key))
       return TransferAction::Submit;
-    if (!Has(mUnsafe, key))
+    if (outputRead && !Has(mUnsafe, key))
       mUnsafe.push_back(key);
     ++mSkippedTransfers;
     return TransferAction::Skip;
