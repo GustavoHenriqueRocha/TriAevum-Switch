@@ -69,6 +69,14 @@ class NativeRenderCommandStream final {
         return mMaxFramesInFlight;
     }
 
+    // True when the next frame-ending submit would wait for the renderer
+    // (all frame slots in flight): work done now fills that wait.
+    [[nodiscard]] bool FrameSlotsFull() const {
+        if (mMode == Mode::Inline) return false;
+        std::lock_guard lock(mMutex);
+        return mFramesQueued >= mMaxFramesInFlight;
+    }
+
     void Submit(Command command, bool endsFrame = false);
     // False when the command was dropped because shutdown has begun.
     bool Run(Command command);

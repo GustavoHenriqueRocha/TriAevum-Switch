@@ -1314,7 +1314,9 @@ com 79% culpa da thread do jogo (2.2, perfil de pico). Correções no pgo5o.
 
 **Melhor fluidez (23/10, tour20, pgo5o = 8f67f53a, config/dynamic_resolution, base 3,0, GPU 614, Link andando):** hold 39→4,6 por janela (tour17 3x) — igual ao 2x fixo (4,4); interp 53→75; refresh perdido 5,7→3,7 por janela (tour19); média 59,60 (3x 59,44, 2x 59,68), 26 áreas ≥59; FPS mínimo Water Temple 51,1→60,0, Desert Colossus 57,3→59,8, Market 59,9. Custo: a escala cai em quase todas as áreas (média 2,25–2,9; Market/Castle Town 2,25). Vsync: evento falha em vi desc 9 na etapa 2 (abrir display), fonte reserva `acquire` válida.
 
-**pacer_vsync rejeitado (23/10, tour22 = tour20 + config/pacer_vsync, fonte `acquire`):** média igual (59,57), mas refresh perdido 4,7→48,2 por janela, quase todo na etapa guest (3,4→47,2), quadros perdidos 1,8→22,4, hold 4+ 0,5→3,3, interp 69→60; Market 60→58,1, Kakariko mín 53,9. Ancorar os prazos no relógio do acquire atrasa o guest e piora a fluidez: fica desligado.
+**pacer_vsync rejeitado (23/10, tour22 = tour20 + config/pacer_vsync, fonte `acquire`):** só a última rodada do perf.txt (o arquivo acumula todas as execuções; a primeira conta misturou o tour21 lento e deu 48 refresh perdidos por janela, errado): refresh perdido 3,66→4,13 por janela, interp 75→69, fps 58,84→58,69. Levemente pior; fica desligado.
+
+**Sempre comparar só a última rodada do perf.txt:** ele é anexado a cada execução; separar pelas janelas em que `host_frames` volta a cair.
 
 **Perfil de picos do guest (tour21, guest_spike_ms 14):** a instrumentação por função levou o guest a 39,5 ms/quadro, então 97% dos quadros viraram "pico" e o resultado é só um perfil geral (áudio reverb+delay ~12%, Player 0x46C204 ~3%). Para isolar picos sob instrumentação, o limite tem que ser relativo à média medida com o próprio perfil ligado, não 14 ms. Todas as threads guest rodam cooperativas num núcleo (NativeA32Process::Run): o áudio disputa o núcleo do jogo.
 

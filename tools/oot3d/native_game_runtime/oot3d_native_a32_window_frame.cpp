@@ -986,6 +986,12 @@ bool NativeA32WindowSession::RunFrame() {
       Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::GuestRefresh);
       RunGuestRefresh();
     }
+    // Deferred DSP frames go into the renderer wait when there is one
+    // (tour24: after the presentation they delayed the next host frame).
+    if (deferredDspAudioFrames != 0U && renderStream.FrameSlotsFull()) {
+      ++dspAudioInRenderWait;
+      DeliverDspAudioFrames(std::exchange(deferredDspAudioFrames, 0U));
+    }
     if (presentHostFrame) {
       Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PresentVisual);
       PresentVisualFrame(presentationElapsedSeconds, visualInterpolationAlpha);
@@ -1485,7 +1491,8 @@ bool NativeA32WindowSession::RunFrame() {
         }
         // Guest time per guest thread in this window: thr_<entry>_us and
         // thr_<entry>_n (dispatches).
-        perf << " audio_deferred=" << (deferDspAudio ? 1 : 0);
+        perf << " audio_deferred=" << (deferDspAudio ? 1 : 0)
+             << " audio_in_render_wait=" << dspAudioInRenderWait;
         if (process.ThreadTimingEnabled()) {
           static std::array<Oot3dNativeGame::NativeA32ThreadTime,
                             Oot3dNativeGame::kNativeA32ThreadTimeSlots>

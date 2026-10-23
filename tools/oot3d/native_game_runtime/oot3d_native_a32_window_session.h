@@ -689,6 +689,7 @@ private:
   // the host frame's refreshes are delivered after its presentation.
   bool deferDspAudio = false;
   uint32_t deferredDspAudioFrames = 0U;
+  uint64_t dspAudioInRenderWait = 0U;
   // Kind of the frame the render thread is drawing (RenderFrameKind) and
   // its render-thread milliseconds so far.
   uint8_t renderFrameKind = 0U;
