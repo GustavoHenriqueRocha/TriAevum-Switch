@@ -798,6 +798,11 @@ void NativeA32WindowSession::Setup() {
   widescreenProjection.WholeAotObservableExitPcs =
       wholeAotObservableExitBlocks;
   process.SetTimingEnabled(launch.ProfileA32Runtime);
+  // Guest time per guest thread in logs/perf.txt (config/gpu_timing or
+  // config/thread_timing): which thread the audio chain runs on and its cost.
+  process.SetThreadTimingEnabled(
+      std::ifstream("sdmc:/switch/oot3dre/config/gpu_timing").good() ||
+      std::ifstream("sdmc:/switch/oot3dre/config/thread_timing").good());
 #if !defined(OOT3D_WHOLE_AOT_PRODUCT_MODE)
   // Native candidates are experimental reconstruction aids.  The product
   // executes the audited whole-AOT graph and never substitutes source-native

@@ -110,6 +110,16 @@ struct NativeA32ProcessTimingStats {
     uint64_t FallbackNanoseconds = 0;
 };
 
+// Guest time per guest thread (dispatch + SVC), accumulated since the start;
+// logs/perf.txt prints the window delta per thread entry (thr_<entry>_us).
+struct NativeA32ThreadTime {
+    uint32_t Id = 0;
+    uint32_t EntryAddress = 0;
+    uint64_t Nanoseconds = 0;
+    uint64_t Dispatches = 0;
+};
+inline constexpr size_t kNativeA32ThreadTimeSlots = 16U;
+
 class NativeA32Process {
   public:
     NativeA32Process(const oot3d::recomp::a32::Registry& registry,
@@ -170,6 +180,12 @@ class NativeA32Process {
         void* user = nullptr);
     void SetTimingEnabled(bool enabled) noexcept;
     NativeA32ProcessTimingStats TimingStats() const noexcept;
+    void SetThreadTimingEnabled(bool enabled) noexcept;
+    bool ThreadTimingEnabled() const noexcept { return mThreadTimingEnabled; }
+    const std::array<NativeA32ThreadTime, kNativeA32ThreadTimeSlots>& ThreadTimes()
+        const noexcept {
+        return mThreadTimes;
+    }
     uint64_t StateFingerprint() const;
     nlohmann::json CaptureState() const;
     bool RestoreState(const nlohmann::json& state,
@@ -214,6 +230,7 @@ class NativeA32Process {
     bool SelectReadyThread();
     bool HasReadyThread() const;
     bool AllThreadsTerminated() const;
+    void AddThreadTime(uint32_t threadId, uint64_t nanoseconds) noexcept;
 
     struct SecondaryThread {
         uint32_t Id = 0;
@@ -249,6 +266,8 @@ class NativeA32Process {
     void* mNativeBlockUser = nullptr;
     bool mTimingEnabled = false;
     NativeA32ProcessTimingStats mTimingStats;
+    bool mThreadTimingEnabled = false;
+    std::array<NativeA32ThreadTime, kNativeA32ThreadTimeSlots> mThreadTimes{};
 };
 
 } // namespace Oot3dNativeGame

@@ -555,9 +555,10 @@ NativeA32ProcessRunResult NativeA32Process::Run(
         mPendingFallback = {};
         auto& state = CurrentThreadState();
         const uint32_t dispatchBudget = DispatchBlockBudget(blockLimitPerDispatch);
-        const auto dispatchStart = mTimingEnabled
-                                       ? TimingClock::now()
-                                       : TimingClock::time_point{};
+        const bool timed = mTimingEnabled || mThreadTimingEnabled;
+        const uint32_t dispatchThreadId = mCurrentThreadId;
+        const auto dispatchStart = timed ? TimingClock::now()
+                                         : TimingClock::time_point{};
         CpuPhaseProbe::Scope cpuDispatch(CpuPhaseProbe::Phase::Aot);
         const auto exit =
 #if defined(OOT3D_WHOLE_AOT_PRODUCT_MODE)
@@ -577,10 +578,13 @@ NativeA32ProcessRunResult NativeA32Process::Run(
             mNativeBlockCallback, mNativeBlockUser);
 #endif
         cpuDispatch.Stop();
-        if (mTimingEnabled) {
-            ++mTimingStats.DispatchCalls;
-            mTimingStats.DispatchNanoseconds +=
-                ElapsedNanoseconds(dispatchStart);
+        if (timed) {
+            const uint64_t nanoseconds = ElapsedNanoseconds(dispatchStart);
+            if (mThreadTimingEnabled) AddThreadTime(dispatchThreadId, nanoseconds);
+            if (mTimingEnabled) {
+                ++mTimingStats.DispatchCalls;
+                mTimingStats.DispatchNanoseconds += nanoseconds;
+            }
         }
 
         if (mPendingFallback.Active) {
@@ -606,16 +610,18 @@ NativeA32ProcessRunResult NativeA32Process::Run(
 
         if (exit.kind == oot3d::recomp::a32::ExitKind::Svc) {
             NativeA32HostContext context{*this, mCurrentThreadId};
-            const auto svcStart = mTimingEnabled
-                                      ? TimingClock::now()
-                                      : TimingClock::time_point{};
+            const auto svcStart = timed ? TimingClock::now()
+                                        : TimingClock::time_point{};
             CpuPhaseProbe::Scope cpuSvc(CpuPhaseProbe::Phase::Svc);
             auto hostResult =
                 mHostServices.HandleSvc(exit.detail, state, mMemory, context);
             cpuSvc.Stop();
+            const uint64_t svcNanoseconds =
+                timed ? ElapsedNanoseconds(svcStart) : 0U;
+            if (mThreadTimingEnabled) AddThreadTime(dispatchThreadId, svcNanoseconds);
             if (mTimingEnabled) {
                 ++mTimingStats.SvcCalls;
-                const uint64_t nanoseconds = ElapsedNanoseconds(svcStart);
+                const uint64_t nanoseconds = svcNanoseconds;
                 mTimingStats.SvcNanoseconds += nanoseconds;
                 if (exit.detail < mTimingStats.SvcCallsByImmediate.size()) {
                     ++mTimingStats.SvcCallsByImmediate[exit.detail];
@@ -896,6 +902,26 @@ void NativeA32Process::SetTimingEnabled(bool enabled) noexcept {
 
 NativeA32ProcessTimingStats NativeA32Process::TimingStats() const noexcept {
     return mTimingStats;
+}
+
+void NativeA32Process::SetThreadTimingEnabled(bool enabled) noexcept {
+    mThreadTimingEnabled = enabled;
+    mThreadTimes = {};
+}
+
+void NativeA32Process::AddThreadTime(uint32_t threadId,
+                                     uint64_t nanoseconds) noexcept {
+    for (auto& slot : mThreadTimes) {
+        if (slot.Dispatches == 0U) {
+            slot.Id = threadId;
+            slot.EntryAddress = ThreadEntryAddress(threadId).value_or(0U);
+        } else if (slot.Id != threadId) {
+            continue;
+        }
+        slot.Nanoseconds += nanoseconds;
+        ++slot.Dispatches;
+        return;
+    }
 }
 
 uint64_t NativeA32Process::StateFingerprint() const {

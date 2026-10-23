@@ -1479,6 +1479,23 @@ bool NativeA32WindowSession::RunFrame() {
           previousHolds = holds;
           DrainFrameSpikes();
         }
+        // Guest time per guest thread in this window: thr_<entry>_us and
+        // thr_<entry>_n (dispatches).
+        if (process.ThreadTimingEnabled()) {
+          static std::array<Oot3dNativeGame::NativeA32ThreadTime,
+                            Oot3dNativeGame::kNativeA32ThreadTimeSlots>
+              previousThreads{};
+          const auto& threads = process.ThreadTimes();
+          for (size_t i = 0U; i < threads.size(); ++i) {
+            if (threads[i].Dispatches == 0U) break;
+            perf << " thr_" << std::hex << threads[i].EntryAddress << std::dec
+                 << "_us="
+                 << (threads[i].Nanoseconds - previousThreads[i].Nanoseconds) / 1000U
+                 << " thr_" << std::hex << threads[i].EntryAddress << std::dec
+                 << "_n=" << (threads[i].Dispatches - previousThreads[i].Dispatches);
+          }
+          previousThreads = threads;
+        }
         // Textures the plan worker decoded ahead (hit) or the render thread
         // still decoded itself (miss), since the start.
         {
