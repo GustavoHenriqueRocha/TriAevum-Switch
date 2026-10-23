@@ -53,6 +53,7 @@ struct Hooks {
     void (*Mark)(Stage) = nullptr;
     void (*MarkPicaDraw)(uint32_t, uint32_t) = nullptr;
     void (*CountPica)(uint32_t) = nullptr;
+    void (*PicaDrawState)(uint64_t) = nullptr;
     void (*FrameBegin)() = nullptr;
     void (*FrameEnd)() = nullptr;
     void (*SampleBegin)(bool, bool) = nullptr;
@@ -81,6 +82,12 @@ inline void MarkPicaDraw(uint32_t framebufferWidth, uint32_t framebufferHeight) 
 // identidade desligados, draws sem efeito pulados, limpezas de depth+stencil.
 inline void CountPica(uint32_t bits) {
     if (bits != 0U && Enabled()) detail::gHooks.CountPica(bits);
+}
+// Assinatura do estado de um draw PICA emitido (hash 64 bits; ver
+// gfx_opengl_pica_merge_stats.h): conta os draws iguais ao anterior
+// (step_mergeable / step_merge_run_max no glperf). Medicao apenas.
+inline void PicaDrawState(uint64_t signature) {
+    if (Enabled()) detail::gHooks.PicaDrawState(signature);
 }
 inline void FrameBegin() {
     if (Enabled()) detail::gHooks.FrameBegin();

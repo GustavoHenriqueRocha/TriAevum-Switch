@@ -18,6 +18,7 @@
 #include "fast/backends/gfx_opengl_pica_residency.h"
 #include "fast/backends/gfx_opengl_pica_scale.h"
 #include "fast/backends/gfx_opengl_pica_state_cache.h"
+#include "fast/backends/gfx_opengl_pica_merge_stats.h"
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
 #include "fast/oot3d/gl_widescreen_policy.h"
 #include "fast/oot3d/pica_geometry_registry.h"
@@ -3845,6 +3846,77 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         }
 
         const GLenum topology = ToPicaGlTopology(draw.Topology);
+        if (GlPerf::Enabled() && !skipDraw) {
+            // Medicao (glperf step_mergeable): assinatura de tudo que o draw
+            // pede ao GL fora os bytes de vertice/indice; draws consecutivos
+            // de assinatura igual poderiam ser um so. Nao muda o desenho.
+            PicaGlMergeStats::Hasher sig;
+            sig.Add(program.Handle);
+            sig.Add(target.Framebuffer);
+            for (const GLuint handle : textures) sig.Add(handle);
+            sig.Add(lighting);
+            sig.Block(draw.VertexUniformBytes.data(),
+                      draw.VertexUniformBytes.size());
+            sig.Block(draw.FragmentUniformBytes.data(),
+                      draw.FragmentUniformBytes.size());
+            for (const auto& attribute : draw.VertexAttributes) {
+                sig.Add(attribute.Location);
+                sig.Add(attribute.Binding);
+                sig.Add(static_cast<uint64_t>(attribute.Format));
+                sig.Add(attribute.ComponentCount);
+                sig.Add(attribute.ByteOffset);
+            }
+            for (const auto& binding : draw.VertexBindings) {
+                sig.Add(binding.Binding);
+                sig.Add(binding.ByteStride);
+                sig.Add(binding.PerInstance ? 1U : 0U);
+            }
+            sig.Add(topology);
+            sig.Add(draw.Indexed ? (draw.IndicesAre16Bit ? 2U : 1U) : 0U);
+            sig.Add(static_cast<uint64_t>(outputMerger));
+            sig.Add(static_cast<uint8_t>(draw.ColorWriteMask & 0xFU));
+            if (outputMerger == PicaGlGpuLean::OutputMerger::Blend) {
+                sig.Add(blendState.EquationRgb);
+                sig.Add(blendState.EquationAlpha);
+                sig.Add(blendState.SourceRgb);
+                sig.Add(blendState.DestRgb);
+                sig.Add(blendState.SourceAlpha);
+                sig.Add(blendState.DestAlpha);
+                for (const float value : draw.Blend.ConstantColor) {
+                    sig.Add(PicaGlStateCache::FloatBits(value));
+                }
+            } else if (outputMerger == PicaGlGpuLean::OutputMerger::LogicOp) {
+                sig.Add(blendState.LogicOp);
+            }
+            sig.Add(draw.DepthTestEnabled ? 1U : 0U);
+            sig.Add(draw.DepthWriteEnabled ? 1U : 0U);
+            if (draw.DepthTestEnabled) {
+                sig.Add(ToPicaGlCompare(draw.DepthCompare));
+            }
+            sig.Add(draw.Stencil.Enabled ? 1U : 0U);
+            if (draw.Stencil.Enabled) {
+                sig.Add(ToPicaGlCompare(draw.Stencil.Compare));
+                sig.Add(static_cast<uint32_t>(draw.Stencil.Reference));
+                sig.Add(static_cast<uint32_t>(draw.Stencil.CompareMask));
+                sig.Add(draw.Stencil.WriteMask);
+                sig.Add(ToPicaGlStencil(draw.Stencil.Fail));
+                sig.Add(ToPicaGlStencil(draw.Stencil.DepthFail));
+                sig.Add(ToPicaGlStencil(draw.Stencil.Pass));
+            }
+            sig.Add(static_cast<uint64_t>(draw.CullMode));
+            sig.Add(draw.FramebufferFlipped ? 1U : 0U);
+            for (const int32_t value : gl.Viewport.Value) {
+                sig.Add(static_cast<uint32_t>(value));
+            }
+            for (const int32_t value : gl.Scissor.Value) {
+                sig.Add(static_cast<uint32_t>(value));
+            }
+            sig.Add(shadowProducer ? 1U : 0U);
+            // Passes de canto do widescreen: varias chamadas, nunca juntavel.
+            static uint64_t unmergeable = 0U;
+            sig.Add(cornerPassCount != 0U ? ++unmergeable : 0U);
+            GlPerf::PicaDrawState(sig.Value);
+        }
         if (skipDraw) {
             // Nothing to draw: the uploads below are skipped as well (each
             // draw writes its own ring range; nothing later reads this one).

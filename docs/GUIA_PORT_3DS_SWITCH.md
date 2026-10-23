@@ -660,6 +660,7 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   `oot3d_native_bottom_screen_skip_tests`.
 - Resolução: `config/resolution_scale` 1/2/2,5/3; FSR 1 (`config/upscaler=fsr`), AA, anisotropia. Em
   3× (720p) a GPU virou gargalo: 23,4 contra 28,5 FPS em 2×. Padrão 2×.
+- Junção de draws (técnica do aurora/Dusklight, **só medição por ora**): o glperf traz `step_mergeable=` (draws PICA por quadro com estado idêntico ao anterior: programa, alvo, texturas, uniforms, formato de vértice, blend/depth/stencil/cull/viewport/scissor, topologia), `step_merge_draws=` (total com assinatura), `step_merge_run_max=` (maior sequência na janela) e `step_merge_run_avg=` (média por quadro da maior sequência); idem `interp_`. Limpeza/transfer quebram a sequência. Fonte: `gfx_opengl_pica_merge_stats.h` (teste `gfx_opengl_pica_merge_stats_tests`).
 
 ### 4.9 Mesa 20.1 contra Mesa 26
 

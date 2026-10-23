@@ -972,3 +972,13 @@ target_include_directories(gfx_opengl_pica_gpu_lean_tests
     PRIVATE ../src ../include)
 target_link_libraries(gfx_opengl_pica_gpu_lean_tests PRIVATE gtest_main)
 gtest_discover_tests(gfx_opengl_pica_gpu_lean_tests DISCOVERY_TIMEOUT 30)
+
+# Contagem de draws PICA juntaveis (medicao glperf step_mergeable).
+add_executable(gfx_opengl_pica_merge_stats_tests
+    gfx_opengl_pica_merge_stats_tests.cpp
+)
+set_property(TARGET gfx_opengl_pica_merge_stats_tests PROPERTY CXX_STANDARD 20)
+target_include_directories(gfx_opengl_pica_merge_stats_tests
+    PRIVATE ../src ../include)
+target_link_libraries(gfx_opengl_pica_merge_stats_tests PRIVATE gtest_main)
+gtest_discover_tests(gfx_opengl_pica_merge_stats_tests DISCOVERY_TIMEOUT 30)

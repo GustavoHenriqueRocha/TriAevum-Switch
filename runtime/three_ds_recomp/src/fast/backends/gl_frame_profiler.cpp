@@ -6,6 +6,7 @@
 #if defined(ENABLE_OPENGL) && !defined(USE_OPENGLES) && !defined(__APPLE__)
 #define TRIAEVUM_GL_PERF_GPU 1
 #include "fast/backends/gfx_opengl.h"
+#include "fast/backends/gfx_opengl_pica_merge_stats.h"
 #endif
 
 #include <algorithm>
@@ -61,6 +62,8 @@ constexpr std::array<const char*, kKindCount> kKindNames{"step", "interp", "hold
 // or the game thread while it runs a synchronous command with the worker
 // idle): plain counters, no atomics in the hooks.
 std::array<uint64_t, kCounterCount> gFrameCounters{};
+// Draws PICA juntaveis (so render thread): ver gfx_opengl_pica_merge_stats.h.
+PicaGlMergeStats::MergeTracker gMerge;
 
 uint64_t NowNs() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -74,6 +77,10 @@ struct KindWindow {
     std::array<uint64_t, kStageCount> CpuNs{};
     std::array<uint64_t, kCounterCount> Counters{};
     std::array<uint64_t, kCounterCount> CounterMax{};
+    uint64_t MergeDraws = 0;      // draws PICA com assinatura (soma)
+    uint64_t Mergeable = 0;       // iguais ao anterior (soma)
+    uint64_t MergeRunMaxSum = 0;  // maior sequencia por quadro (soma)
+    uint64_t MergeRunMax = 0;     // maior sequencia na janela
     uint64_t GpuSamples = 0;
     uint64_t GpuTotalNs = 0;
     uint64_t GpuMaxNs = 0;
@@ -616,6 +623,9 @@ void MarkSlow(Stage stage) {
         (stage >= Stage::Other || stage == state.Gpu)) {
         return;
     }
+    if (stage < Stage::PicaTop || stage > Stage::PicaCanonical) {
+        gMerge.Break(); // limpeza, transfer, pos...: nao ha juncao por cima
+    }
     if (stage != state.Cpu) {
         Charge(state, NowNs());
         state.Cpu = stage;
@@ -638,6 +648,10 @@ void MarkPicaDrawSlow(uint32_t framebufferWidth, uint32_t framebufferHeight) {
         stage = Stage::PicaBottom;
     }
     MarkSlow(stage);
+}
+
+void PicaDrawStateSlow(uint64_t signature) {
+    gMerge.Feed(signature);
 }
 
 void CountPicaSlow(uint32_t bits) {
@@ -686,6 +700,12 @@ void FrameEndSlow() {
         for (size_t index = 0; index < kStageCount; ++index) {
             window.CpuNs[index] += state.FrameCpuNs[index];
         }
+        uint32_t mergeDraws = 0U, mergeable = 0U, runMax = 0U;
+        gMerge.TakeFrame(&mergeDraws, &mergeable, &runMax);
+        window.MergeDraws += mergeDraws;
+        window.Mergeable += mergeable;
+        window.MergeRunMaxSum += runMax;
+        window.MergeRunMax = std::max<uint64_t>(window.MergeRunMax, runMax);
         for (size_t index = 0; index < kCounterCount; ++index) {
             window.Counters[index] += gFrameCounters[index];
             window.CounterMax[index] =
@@ -724,6 +744,7 @@ void Init() {
     hooks.Mark = &MarkSlow;
     hooks.MarkPicaDraw = &MarkPicaDrawSlow;
     hooks.CountPica = &CountPicaSlow;
+    hooks.PicaDrawState = &PicaDrawStateSlow;
     hooks.FrameBegin = &FrameBeginSlow;
     hooks.FrameEnd = &FrameEndSlow;
     hooks.SampleBegin = &SampleBeginSlow;
@@ -778,6 +799,12 @@ std::string TakeReport(uint64_t hostFrames) {
                          static_cast<double>(kind.GpuNs[stage]), samples);
             }
         }
+        // Draws PICA que a tecnica do aurora juntaria (so medicao): por
+        // quadro, os iguais ao draw anterior e a maior sequencia igual.
+        out << ' ' << prefix << "mergeable=" << (kind.Mergeable / count) << ' '
+            << prefix << "merge_draws=" << (kind.MergeDraws / count) << ' '
+            << prefix << "merge_run_max=" << kind.MergeRunMax << ' ' << prefix
+            << "merge_run_avg=" << (kind.MergeRunMaxSum / count);
         if (state.Hooks) {
             for (size_t counter = 0; counter < kCounterCount; ++counter) {
                 const double scale = CounterIsBytes(counter) ? 1024.0 : 1.0;
