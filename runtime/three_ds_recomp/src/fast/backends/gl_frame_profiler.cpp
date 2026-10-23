@@ -18,6 +18,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <string>
 
 namespace Fast::GlPerf {
@@ -81,6 +82,7 @@ struct KindWindow {
     uint64_t Mergeable = 0;       // iguais ao anterior (soma)
     uint64_t MergeRunMaxSum = 0;  // maior sequencia por quadro (soma)
     uint64_t MergeRunMax = 0;     // maior sequencia na janela
+    PicaDrawPhases::WindowTotals Phases;
     uint64_t GpuSamples = 0;
     uint64_t GpuTotalNs = 0;
     uint64_t GpuMaxNs = 0;
@@ -607,6 +609,47 @@ void AppendMs(std::ostringstream& out, const char* prefix, const char* name,
     out << ' ' << prefix << name << '=' << (nanoseconds / count / 1.0e6);
 }
 
+// step_draw_<fase>_ms (media por quadro), step_draw_submit_ms (total dentro
+// do SubmitPicaDraw), step_draw_outside_ms (etapas PICA - submit: o que o
+// chamador faz entre draws), step_draw_us (submit por draw), contadores e
+// secoes da render thread.
+void AppendPhases(std::ostringstream& out, const std::string& prefix,
+                  const KindWindow& kind, double count) {
+    using namespace PicaDrawPhases;
+    const auto& totals = kind.Phases;
+    const double draws = static_cast<double>(totals.Counts[static_cast<size_t>(Count::Draws)]);
+    uint64_t sectionSum = 0U;
+    for (const uint64_t value : totals.SectionNs) sectionSum += value;
+    if (draws <= 0.0 && sectionSum == 0U) return;
+    const std::string draw = prefix + "draw_";
+    for (size_t index = 0; index < kPhaseCount; ++index) {
+        AppendMs(out, draw.c_str(), (std::string(kPhaseNames[index]) + "_ms").c_str(),
+                 static_cast<double>(totals.PhaseNs[index]), count);
+    }
+    out << ' ' << draw << "submit_ms=" << (totals.SubmitNs / count / 1.0e6);
+    const double picaStages = static_cast<double>(
+        kind.CpuNs[static_cast<size_t>(Stage::PicaTop)] +
+        kind.CpuNs[static_cast<size_t>(Stage::PicaBottom)] +
+        kind.CpuNs[static_cast<size_t>(Stage::PicaOffscreen)] +
+        kind.CpuNs[static_cast<size_t>(Stage::PicaCanonical)]);
+    out << ' ' << draw << "outside_ms="
+        << ((picaStages - static_cast<double>(totals.SubmitNs)) / count / 1.0e6);
+    if (draws > 0.0) {
+        out << ' ' << draw << "us=" << (totals.SubmitNs / draws / 1.0e3);
+    }
+    for (size_t index = 0; index < kCountCount; ++index) {
+        const bool bytes = std::string_view(kCountNames[index]).find("bytes") !=
+                           std::string_view::npos;
+        out << ' ' << draw << kCountNames[index] << (bytes ? "_kb=" : "=")
+            << (totals.Counts[index] / (bytes ? 1024.0 : 1.0) / count);
+    }
+    for (size_t index = 0; index < kSectionCount; ++index) {
+        AppendMs(out, (prefix + "sec_").c_str(),
+                 (std::string(kSectionNames[index]) + "_ms").c_str(),
+                 static_cast<double>(totals.SectionNs[index]), count);
+    }
+}
+
 } // namespace
 
 namespace {
@@ -702,6 +745,7 @@ void FrameEndSlow() {
         }
         uint32_t mergeDraws = 0U, mergeable = 0U, runMax = 0U;
         gMerge.TakeFrame(&mergeDraws, &mergeable, &runMax);
+        window.Phases.Accumulate(PicaDrawPhases::gTracker.TakeFrame());
         window.MergeDraws += mergeDraws;
         window.Mergeable += mergeable;
         window.MergeRunMaxSum += runMax;
@@ -805,6 +849,7 @@ std::string TakeReport(uint64_t hostFrames) {
             << prefix << "merge_draws=" << (kind.MergeDraws / count) << ' '
             << prefix << "merge_run_max=" << kind.MergeRunMax << ' ' << prefix
             << "merge_run_avg=" << (kind.MergeRunMaxSum / count);
+        AppendPhases(out, prefix, kind, count);
         if (state.Hooks) {
             for (size_t counter = 0; counter < kCounterCount; ++counter) {
                 const double scale = CounterIsBytes(counter) ? 1024.0 : 1.0;

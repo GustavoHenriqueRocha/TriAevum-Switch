@@ -708,6 +708,7 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 
 ### 5.2 Campos importantes do `perf.txt`
 
+- `glperf` CPU por draw PICA (só com `config/gpu_timing`; `step_`/`interp_`, ms por quadro de host): `draw_<fase>_ms` com fases `validate program target state uniforms vertices tex_hash tex_lookup tex_upload indices perf_sig draw rest` (soma = `draw_submit_ms`, tempo dentro do `SubmitPicaDraw`; `perf_sig` é o custo da própria medição de junção), `draw_outside_ms` (etapas PICA menos submit = trabalho do chamador entre draws), `draw_us` (submit por draw), contadores por quadro `draw_draws`, `draw_tex_lookups`, `draw_tex_hashes`, `draw_tex_hash_bytes_kb`, `draw_tex_uploads`, `draw_tex_upload_bytes_kb`, `draw_uniform_sent[_bytes_kb]`, `draw_uniform_skipped[_bytes_kb]`, `draw_vertex_bytes_kb`, `draw_index_bytes_kb`; e `sec_<resolve_plans|pin_copy|scene_env|execute|visual_sample>_ms` (parede de trechos da render thread, para decompor `cpu_other`; `execute` inclui os draws, `visual_sample` inclui `pin_copy` e `execute`). Fonte: `gl_pica_draw_phases.h` (teste `gl_pica_draw_phases_tests`).
 - Linha principal (ms por quadro de host): `fps`, `guest` (lógica do jogo), `dsp_mix`, `audio_out`,
   `pica_submit`, `pica_plan`, `pica_backend`, `visual_present`, `visual_replay`, `present`,
   `pacing_wait`; memória `heap_arena_mb`, `heap_arena_peak_mb`, `proc_used_mb`/`proc_total_mb`

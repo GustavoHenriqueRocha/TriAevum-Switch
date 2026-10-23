@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <string>
 
+#include "fast/backends/gl_pica_draw_phases.h"
+
 namespace Fast::GlPerf {
 
 enum class Stage : uint8_t {
@@ -95,6 +97,48 @@ inline void FrameBegin() {
 inline void FrameEnd() {
     if (Enabled()) detail::gHooks.FrameEnd();
 }
+
+// Fases de CPU do draw PICA (gl_pica_draw_phases.h); so chamar com Enabled().
+using Phase = PicaDrawPhases::Phase;
+using Section = PicaDrawPhases::Section;
+using DrawCount = PicaDrawPhases::Count;
+inline PicaDrawPhases::Tracker& Phases() {
+    return PicaDrawPhases::gTracker;
+}
+inline void PhaseBegin() {
+    if (Enabled()) Phases().Begin(PicaDrawPhases::Ticks());
+}
+inline void PhaseLap(Phase phase) {
+    if (Enabled()) Phases().Lap(phase, PicaDrawPhases::Ticks());
+}
+inline void PhaseEnd() {
+    if (Enabled()) Phases().End(PicaDrawPhases::Ticks());
+}
+inline void PhaseCount(DrawCount what, uint64_t value = 1U) {
+    if (Enabled()) Phases().Add(what, value);
+}
+
+// Tempo de parede de um trecho da render thread (glperf step_sec_<nome>_ms).
+class SectionScope {
+public:
+    explicit SectionScope(Section section)
+        : mArmed(Enabled()), mSection(section) {
+        if (mArmed) mStart = PicaDrawPhases::Ticks();
+    }
+    ~SectionScope() {
+        if (mArmed) {
+            const uint64_t now = PicaDrawPhases::Ticks();
+            if (now > mStart) Phases().AddSection(mSection, now - mStart);
+        }
+    }
+    SectionScope(const SectionScope&) = delete;
+    SectionScope& operator=(const SectionScope&) = delete;
+
+private:
+    bool mArmed;
+    Section mSection;
+    uint64_t mStart = 0U;
+};
 
 // Etapa aninhada: volta à etapa anterior no fim do escopo.
 class Scope {

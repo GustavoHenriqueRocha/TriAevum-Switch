@@ -2707,6 +2707,8 @@ void NativeA32WindowSession::PresentVisualFrame(
         // Deferred plans of the closed frames are built (or taken from the
         // plan worker) here, on the render thread, before any use.
         if (completedFrame != nullptr) {
+          Fast::GlPerf::SectionScope perfResolve(
+              Fast::GlPerf::Section::ResolvePlans);
           Oot3dNativeGame::HangWatch::StageScope hangResolve(
               Oot3dNativeGame::HangWatch::Stage::RenderResolvePlans);
           if (supersededFrames != nullptr) {
@@ -3603,6 +3605,7 @@ void NativeA32WindowSession::PublishNativeSceneView() {
     devEmitterLog->Observe(++devEmitterFrames, snapshot->PlayStateAddress, snapshot->SceneId, process.Memory());
 #endif
   renderStream.Submit([&, snapshot, environmentTime, player, freeCamera] {
+  Fast::GlPerf::SectionScope perfScene(Fast::GlPerf::Section::SceneEnv);
   sceneEnvironment->ObserveScene(snapshot ? snapshot->SceneId : std::nullopt,
       environmentTime.value_or(Oot3dNativeGame::SceneEnvironmentTime{}), player);
   sceneEnvironment->PollProfileFiles();
@@ -3666,6 +3669,7 @@ std::vector<Fast::Renderer3ds::PicaTextureCopyReference> NativeA32WindowSession:
 }
 
 void NativeA32WindowSession::PinGpuCopyResources(const Oot3dNativeGame::Oot3dPicaVisualFrameViewSample& sample) {
+  Fast::GlPerf::SectionScope perfPin(Fast::GlPerf::Section::PinCopy);
   auto &api = *apiPointer;
   pinnedCopyReferences = guestCopyReferences;
   if (previousVisualFrame) {
@@ -3735,6 +3739,7 @@ void NativeA32WindowSession::ExecuteVisualSample(const Oot3dNativeGame::Oot3dPic
   // interpolated sample, a repeated sample of the previous frame) draws
   // nothing more once the exit has begun.
   if (renderStream.ShutdownRequested()) return;
+  Fast::GlPerf::SectionScope perfVisual(Fast::GlPerf::Section::VisualSample);
   const auto started = std::chrono::steady_clock::now();
   (void)api.PublishPicaFrameTemporalSample(temporalSample);
   // Only displayed samples advance the grass colliders: the authoritative
@@ -3750,9 +3755,13 @@ void NativeA32WindowSession::ExecuteVisualSample(const Oot3dNativeGame::Oot3dPic
   Fast::GlPerf::SampleScope perfSample(
       kind != Oot3dNativeGame::Oot3dPicaPresentationExecutionKind::RepeatedFrame,
       present);
-  if (!picaPresentationScheduler.Execute(
-          api, sample, renderTargetNamespace, kind,
-          present, &renderError)) {
+  bool executed;
+  {
+    Fast::GlPerf::SectionScope perfExecute(Fast::GlPerf::Section::Execute);
+    executed = picaPresentationScheduler.Execute(
+        api, sample, renderTargetNamespace, kind, present, &renderError);
+  }
+  if (!executed) {
     throw std::runtime_error(
         "native PICA scheduled presentation failed: " + renderError);
   }

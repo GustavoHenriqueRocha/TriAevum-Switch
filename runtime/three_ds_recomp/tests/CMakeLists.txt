@@ -982,3 +982,13 @@ target_include_directories(gfx_opengl_pica_merge_stats_tests
     PRIVATE ../src ../include)
 target_link_libraries(gfx_opengl_pica_merge_stats_tests PRIVATE gtest_main)
 gtest_discover_tests(gfx_opengl_pica_merge_stats_tests DISCOVERY_TIMEOUT 30)
+
+# Fases de CPU do draw PICA (glperf step_draw_<fase>_ms).
+add_executable(gl_pica_draw_phases_tests
+    gl_pica_draw_phases_tests.cpp
+)
+set_property(TARGET gl_pica_draw_phases_tests PROPERTY CXX_STANDARD 20)
+target_include_directories(gl_pica_draw_phases_tests
+    PRIVATE ../src ../include)
+target_link_libraries(gl_pica_draw_phases_tests PRIVATE gtest_main)
+gtest_discover_tests(gl_pica_draw_phases_tests DISCOVERY_TIMEOUT 30)

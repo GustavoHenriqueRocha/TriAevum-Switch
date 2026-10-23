@@ -2440,9 +2440,20 @@ GLuint FindLivePicaShadow(
 PicaGlTexture& GetPicaGlTexture(
     GfxRenderingAPIOGL::NativePicaState& state,
     const GfxNativePicaTextureView& texture) {
-    const uint64_t contentHash = texture.NativeContentHashAvailable
-        ? texture.NativeContentHash
-        : HashBytes(texture.NativeBytes);
+    const bool perfOn = GlPerf::Enabled();
+    if (perfOn) {
+        GlPerf::PhaseLap(GlPerf::Phase::TexLookup);
+    }
+    uint64_t contentHash = texture.NativeContentHash;
+    if (!texture.NativeContentHashAvailable) {
+        contentHash = HashBytes(texture.NativeBytes);
+        if (perfOn) {
+            GlPerf::PhaseCount(GlPerf::DrawCount::TexHashes);
+            GlPerf::PhaseCount(GlPerf::DrawCount::TexHashBytes,
+                               texture.NativeBytes.size());
+            GlPerf::PhaseLap(GlPerf::Phase::TexHash);
+        }
+    }
     const PicaGlTextureKey key{
         contentHash, texture.PhysicalAddress, texture.Width, texture.Height,
         texture.NativeFormat, texture.NativeType, texture.NativeWrapS,
@@ -2451,6 +2462,10 @@ PicaGlTexture& GetPicaGlTexture(
         texture.MaxMipLevel,
     };
     auto [found, inserted] = state.Textures.try_emplace(key);
+    if (perfOn) {
+        GlPerf::PhaseCount(GlPerf::DrawCount::TexLookups);
+        GlPerf::PhaseLap(GlPerf::Phase::TexLookup);
+    }
     if (!inserted) {
         found->second.LastUsedFrame = state.Frame;
         return found->second;
@@ -2607,6 +2622,11 @@ PicaGlTexture& GetPicaGlTexture(
     }
     state.TextureBytes += result.Bytes;
     state.Counters.TexturesCreated.fetch_add(1U, std::memory_order_relaxed);
+    if (perfOn) {
+        GlPerf::PhaseCount(GlPerf::DrawCount::TexUploads);
+        GlPerf::PhaseCount(GlPerf::DrawCount::TexUploadBytes, result.Bytes);
+        GlPerf::PhaseLap(GlPerf::Phase::TexUpload);
+    }
     return result;
 }
 
@@ -3038,6 +3058,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
     return false;
 #else
     try {
+        GlPerf::PhaseBegin(); // glperf step_draw_*: CPU por fase do draw
         if (!mNativePica || draw.VertexShaderSource.empty() ||
             draw.FragmentShaderSource.empty() || draw.VertexCount == 0U ||
             draw.VertexBindings.empty() || draw.VertexAttributes.empty()) {
@@ -3072,6 +3093,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         if (PicaGlStateMayBeStale()) {
             gl.Invalidate();
         }
+        GlPerf::PhaseLap(GlPerf::Phase::Validate);
         const uint64_t drawStart =
             mNativePica->Stats ? PicaGlNowNanoseconds() : 0U;
         const size_t programsBefore = mNativePica->Programs.size();
@@ -3082,6 +3104,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         if (mNativePica->Programs.size() != programsBefore) {
             gl.Program.Reset(); // the sampler setup used the new program
         }
+        GlPerf::PhaseLap(GlPerf::Phase::Program);
         auto& target = GetPicaGlTarget(*mNativePica, draw);
         const PicaGlTargetKey targetKey{
             draw.RenderTargetNamespace,
@@ -3106,6 +3129,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         // Every draw may write colour (a producer masks it, but counting it
         // keeps the version a strict upper bound on content changes).
         ++target.Version;
+        GlPerf::PhaseLap(GlPerf::Phase::Target);
 
         if (gl.BindFramebuffer(target.Framebuffer)) {
             glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
@@ -3117,6 +3141,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         if (gl.UseProgram(program.Handle)) {
             glUseProgram(program.Handle);
         }
+        GlPerf::PhaseLap(GlPerf::Phase::State);
 
         // Lean: a block equal to the one the buffer already holds is not
         // sent again. nvc0 pushes a constant-buffer upload through the
@@ -3153,10 +3178,16 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 glBindBufferRange(GL_UNIFORM_BUFFER, binding, uniformRing.Handle,
                                   static_cast<GLintptr>(lastOffset),
                                   static_cast<GLsizeiptr>(bytes.size()));
+                GlPerf::PhaseCount(GlPerf::DrawCount::UniformSkipped);
+                GlPerf::PhaseCount(GlPerf::DrawCount::UniformSkippedBytes,
+                                   bytes.size());
                 return;
             }
             ++mNativePica->UniformUploads;
             mNativePica->UniformUploadBytes += bytes.size();
+            GlPerf::PhaseCount(GlPerf::DrawCount::UniformSent);
+            GlPerf::PhaseCount(GlPerf::DrawCount::UniformSentBytes,
+                               bytes.size());
             last.clear();
             lastGeneration = 0U;
             if (uniformsInRing) {
@@ -3186,6 +3217,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                        mNativePica->LastFragmentUniforms,
                        mNativePica->LastFragmentUniformGeneration,
                        mNativePica->LastFragmentUniformOffset);
+        GlPerf::PhaseLap(GlPerf::Phase::Uniforms);
 
         uint16_t nextAttributeMask = 0U;
         for (const auto& binding : draw.VertexBindings) {
@@ -3305,6 +3337,8 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 ++mNativePica->GeometryPersistentUploads;
                 mNativePica->GeometryPersistentUploadBytes +=
                     preparedGeometry->Payload.size();
+                GlPerf::PhaseCount(GlPerf::DrawCount::VertexBytes,
+                                   preparedGeometry->Payload.size());
             }
             persistentGeometryBuffer = buffer.Handle;
             ++mNativePica->GeometryPersistentDraws;
@@ -3336,6 +3370,8 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 ++mNativePica->GeometryStreamingUploads;
                 mNativePica->GeometryStreamingUploadBytes +=
                     binding.Bytes.size();
+                GlPerf::PhaseCount(GlPerf::DrawCount::VertexBytes,
+                                   binding.Bytes.size());
             }
             ++mNativePica->GeometryStreamingDraws;
         }
@@ -3412,6 +3448,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             }
         }
         mNativePica->EnabledAttributeMask = nextAttributeMask;
+        GlPerf::PhaseLap(GlPerf::Phase::Vertices);
 
         std::array<GLuint, 3> textures{
             mNativePica->FallbackColor,
@@ -3451,6 +3488,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         if (!draw.LightingLut.PackedEntries.empty()) {
             lighting = GetPicaLightingLut(*mNativePica, draw.LightingLut);
         }
+        GlPerf::PhaseLap(GlPerf::Phase::TexLookup);
         // Texture creation/upload above binds on the active unit.
         gl.ForgetActiveTextureBinding();
         const auto bindTexture = [&](uint32_t unit, GLuint handle) {
@@ -3847,6 +3885,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
 
         const GLenum topology = ToPicaGlTopology(draw.Topology);
         if (GlPerf::Enabled() && !skipDraw) {
+            GlPerf::PhaseLap(GlPerf::Phase::State);
             // Medicao (glperf step_mergeable): assinatura de tudo que o draw
             // pede ao GL fora os bytes de vertice/indice; draws consecutivos
             // de assinatura igual poderiam ser um so. Nao muda o desenho.
@@ -3916,6 +3955,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             static uint64_t unmergeable = 0U;
             sig.Add(cornerPassCount != 0U ? ++unmergeable : 0U);
             GlPerf::PicaDrawState(sig.Value);
+            GlPerf::PhaseLap(GlPerf::Phase::PerfSig);
         }
         if (skipDraw) {
             // Nothing to draw: the uploads below are skipped as well (each
@@ -3979,6 +4019,10 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                 ++mNativePica->GeometryStreamingUploads;
                 mNativePica->GeometryStreamingUploadBytes +=
                     draw.IndexBytes.size();
+                GlPerf::PhaseCount(GlPerf::DrawCount::IndexBytes,
+                                   draw.IndexBytes.size());
+                GlPerf::PhaseLap(GlPerf::Phase::Indices);
+
                 const GLenum type = draw.IndicesAre16Bit
                                         ? GL_UNSIGNED_SHORT
                                         : GL_UNSIGNED_BYTE;
@@ -4001,6 +4045,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                              static_cast<GLsizei>(draw.VertexCount));
             });
         }
+        GlPerf::PhaseLap(GlPerf::Phase::Draw);
         for (uint32_t slot = 0U; slot < 3U; ++slot) {
             if ((menuNearestUnits & (1U << slot)) != 0U) {
                 glBindSampler(slot + 1U, 0U);
@@ -4020,8 +4065,10 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         InvalidateLegacyStateAfterPica();
         // Nothing but this draw touched GL since the cache was checked.
         mPicaGlStateForeign = false;
+        GlPerf::PhaseEnd();
         return true;
     } catch (const PicaGlOutOfMemory& exception) {
+        GlPerf::PhaseEnd();
         // Out of memory: release every idle texture and LUT, forget the
         // stream storage and skip this draw instead of failing the frame.
         auto& state = *mNativePica;
@@ -4050,6 +4097,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         InvalidateLegacyStateAfterPica();
         return true;
     } catch (const std::exception& exception) {
+        GlPerf::PhaseEnd();
         InvalidateLegacyStateAfterPica();
         SetPicaGlError(error, exception.what());
         return false;
