@@ -697,7 +697,33 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   identidade estrita (`ComputeOot3dPicaVisualDrawIdentity`) é ~0. Não há correção simples sem
   estado compartilhado novo: o caminho é encolher o plano (estado de uniforms fora do struct do
   shader, ou o uber só quando existe) ou fazer o quadro guardar o plano por ponteiro em vez de
-  movê-lo; os dois mudam o layout usado pelo agendador e pela interpolação. Sem mudança por ora.
+  movê-lo; os dois mudam o layout usado pelo agendador e pela interpolação.
+- **Plano enxuto (23/10): 15.712 → 9.568 bytes (−39%), sem chave.** O `UberFragmentShader` do plano
+  era um `Oot3dPicaGeneratedFragmentShader` inteiro, mas ninguém lia dele além de `StateKey`,
+  `SourceIdentity` e `Hooks` (a fonte vem de `SharedUberFragmentShaderSource`; os 6.112 bytes de
+  `Uniforms` e a `Source` ficavam sempre vazios). Virou `Oot3dPicaPlanUberFragmentShader` com só esses
+  três campos; o compilador prova que nada lia o resto. Ganha em toda cópia/construção de plano:
+  `resolve_plans` (lote → quadro), o `plan = {}` de cada montagem no worker, o placeholder do lado do
+  jogo e a divisão de quadros. Microbench no host (122 movimentos frios): 0,385 → 0,231 ms por
+  quadro; no console, estimativa ~0,6–0,8 ms a menos em `sec_resolve_plans` (de ~2) e menos banda
+  no worker. Sem chave porque é layout, não comportamento: não há o que desligar em tempo de
+  execução. Opções avaliadas e descartadas: **(a)** o quadro guardar índice/ponteiro const no lote
+  do worker (o lote já vive enquanto houver placeholder, via `shared_ptr` aliasado) exigiria trocar
+  os ~113 acessos a `frame.Draws[i]` (matching da interpolação, identidade estrita, composição da
+  tela de cima que muta o quadro, savestate, replay reduzido) por um acessor — um esquecido lê o
+  placeholder vazio sem crash, só imagem errada; **(b)** cache de programas por chave já existe
+  para a fonte (`Shared*Source`); o que pesa são os uniforms por draw (`FragmentShader.Uniforms`
+  6.112, dos quais `ProcTexProgram` 3.616 e `FogLut` 1.024; vértice 1.604), que são o espelho do UBO
+  (contrato de layout com o GLSL, ver 4.7) e não podem sair do plano sem mexer no upload. Também
+  descartado: o worker montar direto no slot do quadro (estado mutável compartilhado) e trocar o
+  vetor inteiro do lote com o do quadro (draws suprimidos e quadros divididos quebram a
+  correspondência 1:1). Testes: `oot3d_native_pica_deferred_plan_tests` ganhou
+  `static_assert(sizeof(Oot3dPicaVulkanDrawPlan) <= 10 KiB)`, a comparação do programa uber e de
+  mais uniforms de fragmento no `RequireSamePlan` (plano do caminho adiado == serial), e
+  `TestResolvedFrameOutlivesItsBatch` (quadro resolvido usado como anterior do intermediário
+  continua idêntico ao serial depois que o lote voltou ao pool e foi reaproveitado pelo quadro
+  seguinte; a vista `BasePlan` aponta para ele). Soaks e testes de plano/interpolação/savestate
+  passam; TSan limpo nos testes de plano adiado e nos dois soaks.
 
 ### 4.9 Mesa 20.1 contra Mesa 26
 
@@ -991,6 +1017,14 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     `gpu_timing`, inflando as conclusões; e antes de otimizar uma seção medida, conferir o que ela
     contém: `sec_resolve_plans` parecia "plano atrasado" mas era cópia de structs de 15,7 KB
     (`plan_late_draws=0` e a seção ainda em 1,7 ms).
+35. **Antes de mudar quem guarda um struct grande, ver quais campos dele alguém lê.** O plano de
+    15,7 KB parecia pedir posse por ponteiro (refatoração de ~113 acessos); 39% dele era um
+    `Oot3dPicaGeneratedFragmentShader` usado só por três campos. Trocar o tipo do membro por um struct
+    só com o que é lido é exato (o compilador recusa qualquer leitura do que saiu) e não precisa de
+    chave. E `step_cpu_clear` alto (8 ms no passo, até 15 no `hold`, que quase não desenha) com GPU
+    de clear ~0,003 ms não é trabalho de clear: é a render thread bloqueada no primeiro `glClear`
+    depois do swap (imagem livre da swapchain / fence do quadro anterior — contrapressão do vsync,
+    que soma com `pacing`). Não otimizar como clear; conferir somando `clear+pacing`.
 
 ---
 

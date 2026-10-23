@@ -149,6 +149,23 @@ void RequireSamePlan(const Oot3dPicaVulkanDrawPlan& expected,
     if (expected.FragmentShader.Uniforms.TevConstants !=
         actual.FragmentShader.Uniforms.TevConstants)
         fail("fragment uniforms");
+    if (expected.UberFragmentShader.StateKey !=
+            actual.UberFragmentShader.StateKey ||
+        expected.UberFragmentShader.SourceIdentity.Id !=
+            actual.UberFragmentShader.SourceIdentity.Id ||
+        (expected.SharedUberFragmentShaderSource == nullptr) !=
+            (actual.SharedUberFragmentShaderSource == nullptr) ||
+        (expected.SharedUberFragmentShaderSource != nullptr &&
+         *expected.SharedUberFragmentShaderSource !=
+             *actual.SharedUberFragmentShaderSource))
+        fail("uber fragment program");
+    if (expected.FragmentShader.Uniforms.FogLut !=
+            actual.FragmentShader.Uniforms.FogLut ||
+        expected.FragmentShader.Uniforms.FragmentControl !=
+            actual.FragmentShader.Uniforms.FragmentControl ||
+        expected.FragmentShader.Uniforms.AlphaReference !=
+            actual.FragmentShader.Uniforms.AlphaReference)
+        fail("fragment uniform state");
     if (expected.GeometryIdentity != actual.GeometryIdentity ||
         expected.GeometryContentVersion != actual.GeometryContentVersion ||
         expected.GeometryIdentityAvailable != actual.GeometryIdentityAvailable)
@@ -197,8 +214,9 @@ std::shared_ptr<Oot3dPicaDeferredPlanBatch> BeginOwned(
 }
 
 std::vector<Oot3dPicaVulkanDrawPlan> SerialPlans(
-    std::vector<Oot3dPicaDrawSubmission> submissions) {
+    std::vector<Oot3dPicaDrawSubmission> submissions, bool uber = false) {
     Oot3dPicaVulkanShaderSourceCache cache;
+    cache.UberFragments = uber;
     Oot3dPicaDeferredPlanBuilder builder(cache);
     std::vector<Oot3dPicaVulkanDrawPlan> plans(submissions.size());
     std::string error;
@@ -401,8 +419,78 @@ void TestPlanBuildAllocations() {
     }
 }
 
+// guia 4.8: the plan is moved once per draw (worker lot -> frame) and its
+// fixed-size arrays are copied by that move. The uber program keeps only its
+// key, identity and hooks; the plan must not grow back toward 15.7 KB.
+static_assert(sizeof(Oot3dPicaVulkanDrawPlan) <= 10U * 1024U,
+              "draw plan grew back: every draw copies it (guia 4.8)");
+
+// A resolved frame kept as the previous frame of the intermediate
+// (interpolation) and of a repeat must not depend on its batch: the batch is
+// recycled and refilled by later frames while the old frame is still read.
+void TestResolvedFrameOutlivesItsBatch(bool worker) {
+    constexpr size_t kDraws = 12U;
+    // Uber preparation on (window setup: alwaysAvailablePrograms).
+    const auto expectedOld = SerialPlans(MakeSubmissions(1U, kDraws), true);
+    const auto expectedNew = SerialPlans(MakeSubmissions(101U, kDraws), true);
+    Oot3dPicaVulkanShaderSourceCache cache;
+    cache.UberFragments = true;
+    Oot3dPicaDeferredPlanBuilder builder(cache);
+    builder.Configure(true, worker);
+    const auto closeFrame = [&](uint64_t firstId) {
+        auto batch = BeginOwned(builder, MakeSubmissions(firstId, kDraws));
+        Oot3dPicaVisualFrameAccumulator accumulator;
+        for (size_t index = 0; index < kDraws; ++index)
+            accumulator.Append(builder.MakeDeferredPlan(batch, index));
+        builder.Publish(std::move(batch));
+        Oot3dPicaDisplayTransferSubmission top;
+        top.CompletionId = firstId;
+        top.AfterDrawSubmissionId = firstId + kDraws;
+        top.InputPhysicalAddress = 0x1F000000U;
+        top.OutputPhysicalAddress = 0x1E000000U;
+        auto frames = accumulator.FinishFrames(top, {});
+        Require(frames.size() == 1U, "frame close");
+        std::string error;
+        Require(ResolveOot3dPicaDeferredVisualFrame(frames[0], &error), error);
+        return std::move(frames[0]);
+    };
+    // The parametric program is part of what the frame must keep.
+    Require(std::ranges::any_of(expectedOld,
+                                [](const auto& plan) {
+                                    return plan.SharedUberFragmentShaderSource != nullptr &&
+                                           plan.UberFragmentShader.StateKey != 0U;
+                                }),
+            "fixture draws carry no uber program");
+    auto previous = closeFrame(1U);
+    // Every placeholder is gone: the batch went back to the pool...
+    for (int wait = 0; wait < 2000 && builder.Stats().LiveBatches != 0U; ++wait)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Require(builder.Stats().LiveBatches == 0U,
+            "a resolved frame still holds its batch");
+    // ...and the next frame reuses (and overwrites) its storage.
+    auto current = closeFrame(101U);
+    Require(builder.Stats().AllocatedBatches == 1U,
+            "the second frame did not reuse the recycled batch");
+    for (size_t index = 0; index < kDraws; ++index) {
+        RequireSamePlan(expectedOld[index], previous.Draws[index],
+                        "previous frame after its batch was reused");
+        RequireSamePlan(expectedNew[index], current.Draws[index],
+                        "current frame");
+    }
+    // The intermediate reads both frames through views of their plans.
+    Oot3dPicaVisualFrameViewSample view;
+    Require(ViewOot3dPicaVisualFrame(previous, view, false) &&
+                view.Draws.size() == kDraws &&
+                view.Draws[0].BasePlan == &previous.Draws[0],
+            "view of the previous frame");
+    RequireSamePlan(expectedOld[kDraws - 1U], *view.Draws[kDraws - 1U].BasePlan,
+                    "view after reuse");
+}
+
 int main() {
     TestPlanBuildAllocations();
+    TestResolvedFrameOutlivesItsBatch(true);
+    TestResolvedFrameOutlivesItsBatch(false);
     TestDeferredMatchesSerial(true);
     TestDeferredMatchesSerial(false);
     TestSkippedAndFailedSlots();

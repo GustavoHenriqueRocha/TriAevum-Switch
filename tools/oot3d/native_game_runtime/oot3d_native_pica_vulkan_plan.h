@@ -90,6 +90,16 @@ struct Oot3dPicaDeferredPlanSlot {
     std::vector<Fast::Renderer3ds::PicaTextureCopyReference> CopyReferences;
 };
 
+// What a plan keeps of its parametric (uber) program: the key, identity and
+// hooks; the source is SharedUberFragmentShaderSource. A whole
+// Oot3dPicaGeneratedFragmentShader here carried a 6,112-byte uniform state
+// nobody read, copied with every move of every plan (guia 4.8).
+struct Oot3dPicaPlanUberFragmentShader {
+    uint64_t StateKey = 0;
+    Oot3d::Renderer::PicaShaderSourceIdentity SourceIdentity;
+    Oot3d::Renderer::PicaShaderHookLayout Hooks;
+};
+
 struct Oot3dPicaVulkanDrawPlan {
     uint64_t SubmissionId = 0;
     uint32_t CommandListAddress = 0;
@@ -106,7 +116,7 @@ struct Oot3dPicaVulkanDrawPlan {
     std::shared_ptr<const std::string> SharedFragmentShaderSource;
     // The parametric program of the same draw (hybrid preparation); no source
     // when the draw has none or the specialized program is already parametric.
-    Oot3dPicaGeneratedFragmentShader UberFragmentShader;
+    Oot3dPicaPlanUberFragmentShader UberFragmentShader;
     std::shared_ptr<const std::string> SharedUberFragmentShaderSource;
     Oot3dPicaDecodedDrawState State;
     std::vector<Oot3dPicaVulkanVertexBinding> VertexBindings;
