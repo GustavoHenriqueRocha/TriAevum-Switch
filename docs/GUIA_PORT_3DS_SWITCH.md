@@ -752,6 +752,9 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   `tools/oot3d/lab_tour_report.py` casa as janelas do `perf.txt` com os acks pelo quadro do guest
   (soma de `guest_fps × 150/fps` por janela) e ordena as áreas por FPS. Rodar **duas vezes**: a
   primeira passada mede compilação de shader, a segunda o peso real.
+  Tour andando: `{"op":"stick","y":1}` segura o circle pad (x/y em -1..1, ±154 no HID; y=1 anda
+  para a frente) até outro `stick`; `{"op":"stick","y":0}` solta. Pôr depois do warp e soltar antes
+  do próximo (no Market, y=-1: para a frente sai da área).
 - `config/gpu_timing` (N, padrão 30): GPU por etapa com `GL_TIMESTAMP` sem bloquear, CPU da render
   thread por etapa, contadores de chamadas GL (ganchos nos ponteiros do glad), separado por tipo de
   quadro (`step`/`interp`/`hold`). `gpu_*` inclui espera da CPU quando a render thread é o gargalo.
