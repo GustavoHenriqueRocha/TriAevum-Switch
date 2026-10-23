@@ -615,6 +615,10 @@ private:
   // Dynamic resolution of the top-screen scene (render thread).
   Oot3dNativeGame::DynamicResolutionController dynamicResolution;
   bool dynamicResolutionActive = false;
+  // Render-thread busy time per frame (no acquire wait), averaged: a
+  // governor that sheds with this above the GPU is CPU-bound and fewer
+  // pixels do not help (dynamic resolution ignores that shedding).
+  double drsRenderBusyAverageMs = 0.0;
   // Presentation cadence (render thread): counters and the locked 30.
   Oot3dNativeGame::NativeCadenceGovernor cadenceGovernor;
   bool cadenceGovernorConfigured = false;

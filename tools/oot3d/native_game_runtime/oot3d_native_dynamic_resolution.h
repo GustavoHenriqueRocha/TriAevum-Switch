@@ -32,6 +32,24 @@
 // cost(s) = cost(c) * (F + (1 - F) * (s / c)^2), F = FixedFraction (the
 // governor's initial guess for the reduced in-between frame, 0.35).
 //
+// tour19 (pgo5n, 2026-10-23): the controller only saw the timer's GPU pair
+// (~26 ms in the Water Temple, under 85% of 33.3) while the governor was
+// already dropping in-between frames there: the timer misses ~2.5-3 ms of
+// GPU per pair (lesson 37; the governor's cost counts the acquire wait,
+// where that hidden work shows). Since then the controller decides on the
+// governor's terms:
+//   - HiddenGpuMs is added to every pair before the comparisons;
+//   - a step result while the governor sheds in-between frames (its level
+//     below the preferred one, or the cadence governor's locked 30) counts
+//     as over budget when the GPU is a real part of the pair (GPU pair at
+//     least GpuBoundFraction of the budget; a CPU-bound pair gains nothing
+//     from fewer pixels);
+//   - no up step while the governor sheds.
+// Calibration (perf.txt of tour17/tour19 at 3x, windows by GPU pair): the
+// governor drops 0-2% of the in-between frames under 24 ms, 3-9% at 24-28,
+// 13-28% at 28-30 and 33-80% above. Down at pair + 3 > 28.3 (pair > 25.3),
+// up when the pair predicted at the scale above + 3 <= 26.7 (pair <= 23.7).
+//
 // Pure logic (no GL, no clock): oot3d_native_dynamic_resolution_tests.cpp.
 
 #include <algorithm>
@@ -58,6 +76,11 @@ struct DynamicResolutionConfig {
   uint32_t BounceWindow = 180U;
   uint32_t MaxBackoff = 8U;
   double FixedFraction = 0.35;
+  // GPU work the timer does not see, per pair (lesson 37; tour17/tour19).
+  double HiddenGpuMs = 3.0;
+  // Governor shedding counts as over only with a GPU pair at least this
+  // fraction of the budget.
+  double GpuBoundFraction = 0.65;
 };
 
 // Default lowest scale: three steps below the configured one (3 -> 2.25).
@@ -106,6 +129,7 @@ struct DynamicResolutionStats {
   uint64_t Downs = 0;
   uint64_t Ups = 0;
   uint64_t Bounces = 0;  // up steps undone within BounceWindow
+  uint64_t Shedding = 0; // results counted over because the governor shed
 };
 
 class DynamicResolutionController {
@@ -165,11 +189,17 @@ public:
     return mAverageMs * CostRatio(Scale(), ScaleOf(mLevel - 1U));
   }
 
-  // One step frame's pair cost at the current scale (ms of GPU). Returns
-  // true when the scale changed.
-  bool ObservePair(double pairMs) noexcept {
+  // One step frame's pair cost at the current scale (ms of GPU, as the
+  // timer measures it; HiddenGpuMs is added here). governorShedding: the
+  // interpolation/cadence governor is dropping in-between frames now.
+  // Returns true when the scale changed.
+  bool ObservePair(double pairMs, bool governorShedding = false) noexcept {
     if (!(pairMs > 0.0) || !std::isfinite(pairMs))
       return false;
+    const bool shedOver =
+        governorShedding &&
+        pairMs >= mConfig.GpuBoundFraction * mBudgetMs;
+    pairMs += std::max(0.0, mConfig.HiddenGpuMs);
     ++mStats.Steps;
     if (mLastWasUp && mSinceUp < mConfig.BounceWindow &&
         ++mSinceUp >= mConfig.BounceWindow) {
@@ -189,7 +219,9 @@ public:
     }
     if (mLevels == 0U)
       return false;
-    if (mAverageMs > mConfig.DownFraction * mBudgetMs) {
+    if (shedOver)
+      ++mStats.Shedding;
+    if (mAverageMs > mConfig.DownFraction * mBudgetMs || shedOver) {
       mUnder = 0U;
       if (mLevel < mLevels && ++mOver >= std::max<uint32_t>(1U, mConfig.DownAfter)) {
         if (mLastWasUp && mSinceUp < mConfig.BounceWindow) {
@@ -211,7 +243,8 @@ public:
       mUnder = 0U;
       return false;
     }
-    if (PredictedUpPairMs() <= mConfig.UpFraction * mBudgetMs) {
+    if (!governorShedding &&
+        PredictedUpPairMs() <= mConfig.UpFraction * mBudgetMs) {
       const uint32_t wait = std::max<uint32_t>(1U, mConfig.UpAfter) *
                             std::max<uint32_t>(1U, mBackoff[mLevel - 1U]);
       if (++mUnder >= wait) {

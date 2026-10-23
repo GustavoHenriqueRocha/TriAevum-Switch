@@ -31,6 +31,7 @@
 //   max_gap_us=200         intervalo maior que isso não é atribuído a bloco
 //                          (o guest saiu para o host: SVC, fim de quadro...)
 
+#include "oot3d_guest_spike_profile.h"
 #include "recomp/a32_runtime.h"
 
 #include <cstddef>
@@ -65,6 +66,18 @@ public:
 
     bool Start(const GuestProfileOptions& options, uint32_t codeBase,
                uint32_t codeSize);
+    ~GuestBlockProfiler();
+
+    // Perfil de pico (config/guest_spike_ms, oot3d_guest_spike_profile.h):
+    // depois de Start; mede todos os quadros (sample_every vira 1) e grava
+    // os picos em `log` (acrescenta) e o resumo em `summary` (reescreve) a
+    // cada `flushFrames` quadros do host e no fim.
+    bool EnableSpikes(const GuestSpikeConfig& config,
+                      const std::filesystem::path& log,
+                      const std::filesystem::path& summary,
+                      uint32_t flushFrames = 150U);
+    [[nodiscard]] bool SpikesEnabled() const noexcept { return mSpikeOn; }
+    void FlushSpikes();
     [[nodiscard]] bool Active() const noexcept { return mActive; }
 
     // Callback original e os PCs em que ele deve continuar sendo chamado.
@@ -133,6 +146,16 @@ private:
     std::vector<std::pair<uint32_t, std::string>> mFunctions;
     bool mFunctionsLoaded = false;
     std::function<void(std::ostream&)> mAppendix;
+
+    GuestSpikeProfile mSpike;
+    bool mSpikeOn = false;
+    std::filesystem::path mSpikeLog;
+    std::filesystem::path mSpikeSummary;
+    uint32_t mSpikeFlushFrames = 150U;
+    uint64_t mSpikeLastFlush = 0U;
+    uint64_t mSpikeEntriesStart = 0U;
+    bool mSpikeFrameSeen = false;
+    std::string mSpikeText;
 };
 
 } // namespace Oot3dNativeGame

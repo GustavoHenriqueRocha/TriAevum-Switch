@@ -338,6 +338,8 @@ struct PicaGlTarget {
     // consumer filters the image through textureSize()).
     bool DynamicEligible = false;
     bool DynamicExempt = false;
+    // FrameSerial the scale was last looked at (gl_pica_dynamic_scale.h).
+    uint32_t ScaleSerial = 0U;
     // Host pixels per native pixel along storage Y (the presented horizontal
     // axis of the rotated top screen). ResolutionScale unless Wide.
     float ScaleY = 1.0F;
@@ -2421,8 +2423,51 @@ void SetPicaGlTargetScale(PicaGlTarget& target, const PicaGlTargetKey& key,
 void RefreshPicaGlTargetScale(PicaGlTarget& target,
                               const PicaGlTargetKey& key) {
     if (target.DynamicEligible) {
-        SetPicaGlTargetScale(target, key, PicaGlDynamicTargetScale(target));
+        PicaGlDynamicScale::TargetPhase phase{target.Scale, target.ScaleSerial};
+        const float scale = PicaGlDynamicScale::ScaleAtColourClear(
+            phase, PicaGlDynamicScale::gState.FrameSerial,
+            PicaGlDynamicTargetScale(target));
+        target.ScaleSerial = phase.Serial;
+        SetPicaGlTargetScale(target, key, scale);
     }
+}
+
+// tour19: the frame's first draw into an eligible target applies the scale
+// its colour clear never did (OoT3D's top scene is not cleared through a
+// covering colour fill). The colour is cleared here (a logical clear): what
+// the frame leaves undrawn is black instead of pixels at the other scale.
+// True when the extent changed (the caller forgets the cached clear state).
+bool ApplyPicaGlTargetScaleAtDraw(PicaGlTarget& target,
+                                  const PicaGlTargetKey& key) {
+    if (!target.DynamicEligible || target.DynamicExempt) {
+        return false;
+    }
+    PicaGlDynamicScale::TargetPhase phase{target.Scale, target.ScaleSerial};
+    const float desired = PicaGlDynamicTargetScale(target);
+    const bool moved = PicaGlDynamicScale::ScaleAtDraw(
+        phase, PicaGlDynamicScale::gState.FrameSerial, desired);
+    target.ScaleSerial = phase.Serial;
+    if (!moved) {
+        return false;
+    }
+    SetPicaGlTargetScale(target, key, desired);
+    glBindFramebuffer(GL_FRAMEBUFFER, target.Framebuffer);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+    glClear(GL_COLOR_BUFFER_BIT);
+    ++target.Version;
+    PicaGlDynamicScale::gState.AppliedAtDraw.fetch_add(
+        1U, std::memory_order_relaxed);
+    return true;
+}
+
+void MarkPicaGlTargetDynamicExempt(PicaGlTarget& target) {
+    if (target.DynamicEligible && !target.DynamicExempt) {
+        PicaGlDynamicScale::gState.ExemptTargets.fetch_add(
+            1U, std::memory_order_relaxed);
+    }
+    target.DynamicExempt = true;
 }
 
 PicaGlTarget& GetPicaGlTarget(
@@ -2603,7 +2648,7 @@ GLuint FindLivePicaShadow(
     }
     // Sampled as Shadow2D (textureSize() of the allocation): no dynamic
     // scale for it from its next clear on.
-    found->DynamicExempt = true;
+    MarkPicaGlTargetDynamicExempt(*found);
     // A consumer samples it: a deferred clear must land first.
     if (ResolvePicaShadow(*found)) {
         *rebind = true;
@@ -3309,9 +3354,14 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             // Its consumer filters the image through textureSize(): the
             // whole allocation from now on (dynamic resolution).
             if (target.DynamicEligible && !target.DynamicExempt) {
-                target.DynamicExempt = true;
+                MarkPicaGlTargetDynamicExempt(target);
                 SetPicaGlTargetScale(target, targetKey, target.AllocScale);
             }
+        }
+        // Dynamic resolution: the frame's first draw applies the scale when
+        // no colour clear did (tour19).
+        if (ApplyPicaGlTargetScaleAtDraw(target, targetKey)) {
+            gl.ForgetClearState();
         }
         // Every draw may write colour (a producer masks it, but counting it
         // keeps the version a strict upper bound on content changes).

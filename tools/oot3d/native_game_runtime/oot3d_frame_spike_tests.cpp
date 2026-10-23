@@ -54,6 +54,60 @@ void TestVsyncModelPeriodAndPhase() {
   Require(snapshot.Resets == 0U, "sem recomeço com jitter normal");
 }
 
+// tour19: sem o evento do display (rc 0x1272), a fonte reserva é o retorno
+// do acquire que bloqueou: vsync + latência de 50-500 us, em 1 de cada 1-3
+// vsyncs (a render thread nem sempre espera), misturado com acquires que
+// não esperaram (voltam a qualquer hora) e que o filtro descarta.
+void TestAcquireFallbackFindsVsync() {
+  std::mt19937 rng(11U);
+  std::uniform_real_distribution<double> latency(50000.0, 500000.0);
+  std::uniform_real_distribution<double> unit(0.0, 1.0);
+  AcquireVsyncFilter filter;
+  const double phase0 = 5.0e9;
+  int index = 0;
+  for (int frame = 0; frame < 4000; ++frame) {
+    index += unit(rng) < 0.6 ? 1 : (unit(rng) < 0.7 ? 2 : 3);
+    if (unit(rng) < 0.35) {
+      // Não bloqueou: volta no meio do quadro, espera curta.
+      const double t = phase0 + index * kDisplayNs + unit(rng) * kDisplayNs;
+      Require(!filter.Observe(static_cast<int64_t>(t), unit(rng) * 1.4),
+              "acquire sem espera fica de fora");
+      continue;
+    }
+    const double t = phase0 + index * kDisplayNs + latency(rng);
+    (void)filter.Observe(static_cast<int64_t>(t), 2.0 + unit(rng) * 10.0);
+  }
+  const auto snapshot = filter.Snapshot();
+  Require(snapshot.Valid, "fonte reserva: modelo válido");
+  Require(std::abs(snapshot.PeriodNs - kDisplayNs) < 50.0,
+          "fonte reserva: período a menos de 50 ns do real");
+  const double since = static_cast<double>(snapshot.LastVsyncNs) - phase0;
+  const double error = since - std::round(since / kDisplayNs) * kDisplayNs;
+  Require(error > -20000.0 && error < 150000.0,
+          "fonte reserva: fase a menos de 150 us do vsync real");
+  Require(snapshot.Resets == 0U, "fonte reserva: sem recomeço");
+  Require(filter.Used() > 2000U && filter.Ignored() > 1000U,
+          "fonte reserva: contagem de usados e ignorados");
+}
+
+// O relógio do Switch no host não abre nada; a reserva liga e publica.
+void TestSwitchClockFallbackOnHost() {
+  SwitchVsyncClock clock;
+  Require(!clock.Start(), "host: sem evento de vsync");
+  Require(clock.Source() == VsyncClockSource::None, "host: sem fonte");
+  clock.ObserveAcquire(1000, 5.0); // antes de ligar: ignorado
+  Require(clock.AcquireSamples() == 0U, "host: reserva desligada ignora");
+  Require(clock.StartAcquireFallback(), "host: reserva liga");
+  Require(clock.Source() == VsyncClockSource::Acquire, "host: fonte acquire");
+  for (int index = 0; index < 100; ++index)
+    clock.ObserveAcquire(static_cast<int64_t>(1.0e9 + index * kDisplayNs + 1.0e5),
+                         4.0);
+  const auto snapshot = clock.Read();
+  Require(snapshot.Valid && std::abs(snapshot.PeriodNs - kDisplayNs) < 5.0,
+          "host: reserva publica o período");
+  gAcquireVsyncClock.store(&clock);
+}
+
 void TestVsyncModelResetsOnModeChange() {
   VsyncClockModel model;
   for (int index = 0; index < 200; ++index)
@@ -290,6 +344,10 @@ int main(int argc, char **argv) {
   const bool report = argc > 1 && std::strcmp(argv[1], "--report") == 0;
   TestVsyncModelPeriodAndPhase();
   TestVsyncModelResetsOnModeChange();
+  TestAcquireFallbackFindsVsync();
+  TestSwitchClockFallbackOnHost();
+  Require(gAcquireVsyncClock.load() == nullptr,
+          "destrutor solta o ponteiro da reserva");
   TestSnap();
   TestRefreshCounterVsync();
   TestRefreshCounterFallback();

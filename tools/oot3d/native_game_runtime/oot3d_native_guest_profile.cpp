@@ -110,6 +110,68 @@ void GuestBlockProfiler::Reset() noexcept {
     mLastSlot = UINT32_MAX;
     mStartTicks = Ticks();
     mLastTicks = mStartTicks;
+    mSpikeEntriesStart = 0U;
+}
+
+GuestBlockProfiler::~GuestBlockProfiler() {
+    if (mSpikeOn) FlushSpikes();
+}
+
+bool GuestBlockProfiler::EnableSpikes(const GuestSpikeConfig& config,
+                                      const std::filesystem::path& log,
+                                      const std::filesystem::path& summary,
+                                      uint32_t flushFrames) {
+    if (!mActive) return false;
+    if (!mFunctionsLoaded) LoadFunctionMap();
+    std::vector<uint32_t> entries;
+    entries.reserve(mFunctions.size());
+    for (const auto& function : mFunctions) entries.push_back(function.first);
+    mSpike.Configure(config, mBase, mSlots,
+                     static_cast<double>(TicksPerSecond()) / 1000.0, entries);
+    mSpikeLog = log;
+    mSpikeSummary = summary;
+    mSpikeFlushFrames = std::max(1U, flushFrames);
+    // Um pico pode cair em qualquer quadro: todos medidos.
+    mOptions.SampleEveryFrames = 1U;
+    mSampling = true;
+    mSpikeOn = mSpike.Enabled();
+    if (mSpikeOn) {
+        if (FILE* file = std::fopen(mSpikeLog.string().c_str(), "a")) {
+            std::fprintf(file,
+                         "session_start limite_ms=%.2f corte_carregamento_ms=%.2f "
+                         "top=%u funcoes_no_mapa=%zu\n",
+                         mSpike.Config().ThresholdMs, mSpike.Config().LoadMs,
+                         mSpike.Config().TopPerSpike, entries.size());
+            std::fclose(file);
+        }
+    }
+    return mSpikeOn;
+}
+
+void GuestBlockProfiler::FlushSpikes() {
+    if (!mSpikeOn) return;
+    const auto nameOf = [this](uint32_t pc) -> const char* {
+        const auto it = std::lower_bound(
+            mFunctions.begin(), mFunctions.end(), pc,
+            [](const auto& item, uint32_t value) { return item.first < value; });
+        return it != mFunctions.end() && it->first == pc ? it->second.c_str() : "";
+    };
+    if (mSpike.Pending() != 0U) {
+        mSpikeText.clear();
+        (void)mSpike.DrainLines(mSpikeText, nameOf);
+        if (FILE* file = std::fopen(mSpikeLog.string().c_str(), "a")) {
+            std::fwrite(mSpikeText.data(), 1U, mSpikeText.size(), file);
+            std::fclose(file);
+        }
+    }
+    if (mSpike.Totals().Spikes != 0U) {
+        mSpikeText.clear();
+        mSpike.FormatSummary(mSpikeText, nameOf);
+        if (FILE* file = std::fopen(mSpikeSummary.string().c_str(), "w")) {
+            std::fwrite(mSpikeText.data(), 1U, mSpikeText.size(), file);
+            std::fclose(file);
+        }
+    }
 }
 
 void GuestBlockProfiler::Chain(oot3d::recomp::a32::BlockEntryCallback callback,
@@ -147,6 +209,7 @@ void GuestBlockProfiler::Note(uint32_t pc, uint64_t now) noexcept {
         const uint64_t delta = now - mLastTicks;
         if (delta <= mMaxGapTicks) {
             mTicks[mLastSlot] += delta;
+            if (mSpikeOn) mSpike.Add(mLastSlot, delta);
         } else {
             ++mGaps;
             mGapTicks += delta;
@@ -204,6 +267,21 @@ void GuestBlockProfiler::OnBlockEntry(uint32_t pc,
 
 bool GuestBlockProfiler::OnHostFrame(uint64_t hostFrame) {
     if (!mActive) return false;
+    if (mSpikeOn) {
+        // O quadro que terminou: pico? O primeiro inclui a carga inicial.
+        if (mSpikeFrameSeen) {
+            (void)mSpike.EndFrame(hostFrame, mTotalEntries - mSpikeEntriesStart);
+        } else {
+            mSpikeFrameSeen = true;
+            mSpikeLastFlush = hostFrame;
+            (void)mSpike.EndFrame(hostFrame, 0U); // a carga inicial (load=1)
+        }
+        mSpikeEntriesStart = mTotalEntries;
+        if (hostFrame - mSpikeLastFlush >= mSpikeFlushFrames) {
+            mSpikeLastFlush = hostFrame;
+            FlushSpikes();
+        }
+    }
     if (mSampling) ++mSampledFrames;
     if (!mFrameSeen) {
         mFrameSeen = true;

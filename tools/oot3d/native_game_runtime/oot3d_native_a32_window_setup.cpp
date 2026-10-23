@@ -288,15 +288,59 @@ void NativeA32WindowSession::Setup() {
           std::string_view(overrides) != "0");
     }
 #endif
+    // Perfil de pico (config/guest_spike_ms; desligado por padrão): liga o
+    // perfil em todos os quadros mesmo sem config/guest_profile (aí sem o
+    // relatório periódico) e grava logs/guest_spikes.txt e
+    // logs/guest_spikes_summary.txt (oot3d_guest_spike_profile.h).
+    std::filesystem::path guestSpikeConfig;
+#if defined(__SWITCH__)
+    guestSpikeConfig = "sdmc:/switch/oot3dre/config/guest_spike_ms";
+    const std::filesystem::path guestSpikeLog =
+        "sdmc:/switch/oot3dre/logs/guest_spikes.txt";
+    const std::filesystem::path guestSpikeSummary =
+        "sdmc:/switch/oot3dre/logs/guest_spikes_summary.txt";
+#else
+    if (const char *path = std::getenv("TRIAEVUM_GUEST_SPIKE_MS"))
+      guestSpikeConfig = path;
+    const std::filesystem::path guestSpikeLog = "guest_spikes.txt";
+    const std::filesystem::path guestSpikeSummary = "guest_spikes_summary.txt";
+#endif
+    std::error_code spikeError;
+    const bool guestSpikes =
+        !guestSpikeConfig.empty() &&
+        std::filesystem::exists(guestSpikeConfig, spikeError);
     Oot3dNativeGame::GuestProfileOptions guestProfileOptions;
-    if (Oot3dNativeGame::GuestBlockProfiler::LoadConfig(
-            guestProfileConfig, guestProfileOutput, guestFunctionMap,
-            &guestProfileOptions)) {
+    bool guestProfileOn = Oot3dNativeGame::GuestBlockProfiler::LoadConfig(
+        guestProfileConfig, guestProfileOutput, guestFunctionMap,
+        &guestProfileOptions);
+    if (!guestProfileOn && guestSpikes) {
+      guestProfileOptions = {};
+      guestProfileOptions.DumpEveryHostFrames = 0U; // só o perfil de pico
+      guestProfileOptions.OutputPath = guestProfileOutput;
+      guestProfileOptions.FunctionMapPath = guestFunctionMap;
+      guestProfileOn = true;
+    }
+    if (guestProfileOn) {
       // Segmento de texto do OoT3D (ExHeader): 0x00100000..0x004CA000.
       guestProfiler.Start(guestProfileOptions, 0x00100000U, 0x003CA000U);
       guestProfiler.SetAppendix([](std::ostream &out) {
         out << Oot3dNativeGame::DescribeOot3dGuestOverrides();
       });
+    }
+    if (guestSpikes && guestProfiler.Active()) {
+      Oot3dNativeGame::GuestSpikeConfig spikeConfig;
+      std::string text;
+      {
+        std::ifstream file(guestSpikeConfig);
+        std::getline(file, text, '\0');
+      }
+      Oot3dNativeGame::ParseGuestSpikeConfig(text, &spikeConfig);
+      const bool on = guestProfiler.EnableSpikes(spikeConfig, guestSpikeLog,
+                                                 guestSpikeSummary);
+      std::fprintf(stderr,
+                   "TRIAEVUM_GUEST_SPIKES enabled=%d threshold_ms=%.2f "
+                   "load_ms=%.2f\n",
+                   on ? 1 : 0, spikeConfig.ThresholdMs, spikeConfig.LoadMs);
     }
   }
   auto &blockTraceWriter = blockTraceWriterStorage.emplace(
@@ -1290,8 +1334,17 @@ void NativeA32WindowSession::Setup() {
         offsetMs >= 0.0 && offsetMs <= 15.0)
       pacerVsyncOffsetMs = offsetMs;
     bool vsyncStarted = false;
-    if (frameSpikesEnabled || pacerVsyncConfigured)
+    if (frameSpikesEnabled || pacerVsyncConfigured) {
       vsyncStarted = vsyncClock.Start();
+      // tour19 (rc 0x1272): no display event -> the window acquire's
+      // returns (oot3d_vsync_clock.h). Valid after ~30 blocked acquires;
+      // until then the pacer keeps the CPU clock.
+      if (!vsyncStarted && vsyncClock.StartAcquireFallback()) {
+        Oot3dNativeGame::gAcquireVsyncClock.store(&vsyncClock,
+                                                   std::memory_order_relaxed);
+        vsyncStarted = true;
+      }
+    }
     if (pacerVsyncConfigured && vsyncStarted) {
       realtimePacer.SetVsyncAnchor(
           [](const void *user, Oot3dNativeGame::VsyncClockSnapshot *snapshot) {
@@ -1305,20 +1358,32 @@ void NativeA32WindowSession::Setup() {
     }
     if (frameSpikesEnabled) {
       spikeWriter.emplace("sdmc:/switch/oot3dre/logs/spikes.txt", 64U);
-      char header[160];
+      char header[256];
       std::snprintf(header, sizeof(header),
-                    "session_start vsync_clock=%d vsync_rc=0x%X pacer_vsync=%d "
-                    "offset_ms=%.2f\n",
-                    vsyncStarted ? 1 : 0, vsyncClock.StartResult(),
+                    "session_start vsync_clock=%d vsync_source=%s vsync_rc=0x%X "
+                    "vsync_rc_module=%u vsync_rc_desc=%u vsync_stage=%u "
+                    "pacer_vsync=%d offset_ms=%.2f\n",
+                    vsyncStarted ? 1 : 0,
+                    vsyncClock.Source() ==
+                            Oot3dNativeGame::VsyncClockSource::DisplayEvent
+                        ? "event"
+                    : vsyncClock.Source() ==
+                            Oot3dNativeGame::VsyncClockSource::Acquire
+                        ? "acquire"
+                        : "none",
+                    vsyncClock.StartResult(), vsyncClock.StartResult() & 0x1FFU,
+                    (vsyncClock.StartResult() >> 9U) & 0x1FFFU,
+                    vsyncClock.StartStage(),
                     pacerVsyncConfigured && vsyncStarted ? 1 : 0,
                     pacerVsyncOffsetMs);
       (void)spikeWriter->Push(header);
     }
     std::fprintf(stderr,
                  "TRIAEVUM_FRAME_SPIKES enabled=%d vsync_clock=%d rc=0x%X "
-                 "pacer_vsync=%d offset_ms=%.2f\n",
+                 "stage=%u source=%u pacer_vsync=%d offset_ms=%.2f\n",
                  frameSpikesEnabled ? 1 : 0, vsyncStarted ? 1 : 0,
-                 vsyncClock.StartResult(),
+                 vsyncClock.StartResult(), vsyncClock.StartStage(),
+                 static_cast<unsigned>(vsyncClock.Source()),
                  pacerVsyncConfigured && vsyncStarted ? 1 : 0, pacerVsyncOffsetMs);
   }
 #endif

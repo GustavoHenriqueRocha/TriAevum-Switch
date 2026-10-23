@@ -19,6 +19,8 @@ UNIT_TESTS=(
     oot3d_graphics_settings_schedule_tests
     oot3d_debug_menu_tests
     oot3d_fps_counter_tests
+    oot3d_frame_spike_tests
+    oot3d_guest_spike_profile_tests
     oot3d_hang_watchdog_tests
     oot3d_hitch_recorder_tests
     oot3d_input_bench_tests

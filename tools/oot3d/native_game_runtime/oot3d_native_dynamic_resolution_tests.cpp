@@ -2,6 +2,7 @@
 // limits, hysteresis, settling after a change, bounce backoff and the
 // config parser.
 #include "oot3d_native_dynamic_resolution.h"
+#include "fast/backends/gl_pica_dynamic_scale.h"
 
 #include <cmath>
 #include <cstdio>
@@ -26,10 +27,14 @@ constexpr double kPair = 2000.0 / 60.0;
 
 bool Near(double a, double b) { return std::fabs(a - b) < 1.0e-4; }
 
-DynamicResolutionController Make(float minScale = 2.25F) {
+// The threshold tests below use the bare timer pair (no hidden GPU); the
+// tour19 tests use the defaults.
+DynamicResolutionController Make(float minScale = 2.25F,
+                                 double hiddenMs = 0.0) {
   DynamicResolutionConfig config;
   config.MaxScale = 3.0F;
   config.MinScale = minScale;
+  config.HiddenGpuMs = hiddenMs;
   DynamicResolutionController controller;
   controller.Configure(config, kPair);
   return controller;
@@ -233,9 +238,111 @@ void TestInvalidSamples() {
   CHECK(c.Stats().Steps == 0U);
 }
 
+// tour19 Water Temple: the timer saw a pair of ~26 ms (under 85%) while the
+// governor dropped in-between frames. With the hidden GPU (3 ms) it is over
+// (29 > 28.3): down to 2.75 (~26.3 with the hidden part), and it stays.
+void TestTour19WaterTempleHiddenGpu() {
+  DynamicResolutionConfig defaults;
+  CHECK(Near(defaults.HiddenGpuMs, 3.0));
+  auto c = Make(2.25F, 3.0);
+  Run(c, 26.0, 3);
+  CHECK(Near(c.Scale(), 2.75));
+  Run(c, 26.0, 2000);
+  CHECK(Near(c.Scale(), 2.75));
+  CHECK(c.Stats().Downs == 1U);
+  CHECK(c.Stats().Ups == 0U);
+  // Without the hidden part the same scene never moved (the tour19 bug).
+  auto old = Make(2.25F, 0.0);
+  Run(old, 26.0, 2000);
+  CHECK(Near(old.Scale(), 3.0));
+}
+
+// Calibration (tour17/tour19 perf.txt): pairs under ~24 ms kept almost
+// every in-between frame at 3x: they stay at the configured scale.
+void TestTour19FittingAreasStay() {
+  auto c = Make(2.25F, 3.0);
+  Run(c, 23.5, 3000);
+  CHECK(Near(c.Scale(), 3.0));
+  CHECK(c.Stats().Changes == 0U);
+}
+
+// The governor shedding in-between frames counts as over budget when the
+// GPU pair is a real part of the budget (>= 65%: 21.7 ms).
+void TestGovernorSheddingGoesDown() {
+  auto c = Make(2.25F, 3.0);
+  for (int i = 0; i < 3; ++i)
+    (void)c.ObservePair(22.0, true);
+  CHECK(Near(c.Scale(), 2.75));
+  CHECK(c.Stats().Shedding == 3U);
+  // A light GPU pair (CPU-bound shedding) never moves the scale.
+  auto light = Make(2.25F, 3.0);
+  for (int i = 0; i < 500; ++i)
+    (void)light.ObservePair(15.0, true);
+  CHECK(Near(light.Scale(), 3.0));
+  CHECK(light.Stats().Shedding == 0U);
+}
+
+// No up step while the governor sheds; up again once it stops.
+void TestNoUpWhileShedding() {
+  auto c = Make(2.25F, 3.0);
+  Run(c, 40.0, 200);
+  CHECK(Near(c.Scale(), 2.25));
+  for (int i = 0; i < 1000; ++i)
+    (void)c.ObservePair(PairAt(c, 12.0), true);
+  CHECK(Near(c.Scale(), 2.25));
+  Run(c, 12.0, 400);
+  CHECK(Near(c.Scale(), 3.0));
+}
+
+// Backend bookkeeping (gl_pica_dynamic_scale.h): the scale moves at a
+// frame's colour clear or, without one, at its first draw (tour19: no
+// colour clear ever reached the top-screen target, drs_applied=0); never
+// twice within one frame.
+void TestBackendAppliesAtFirstDraw() {
+  using Fast::PicaGlDynamicScale::ScaleAtColourClear;
+  using Fast::PicaGlDynamicScale::ScaleAtDraw;
+  using Fast::PicaGlDynamicScale::TargetPhase;
+  TargetPhase target{3.0F, 0U};
+  uint32_t serial = 0U;
+  // Frame 1 asks 2.75; the target is never cleared: first draw applies.
+  ++serial;
+  CHECK(ScaleAtDraw(target, serial, 2.75F));
+  CHECK(Near(target.Scale, 2.75));
+  // Later draws of the same frame do nothing, even if Requested moved.
+  CHECK(!ScaleAtDraw(target, serial, 2.5F));
+  CHECK(Near(target.Scale, 2.75));
+  // The in-between frame (same serial) keeps it.
+  CHECK(!ScaleAtDraw(target, serial, 2.75F));
+  // Frame 2 asks the same scale: nothing to do.
+  ++serial;
+  CHECK(!ScaleAtDraw(target, serial, 2.75F));
+  // Frame 3 clears first: the clear applies, its draws do not move again.
+  ++serial;
+  CHECK(Near(ScaleAtColourClear(target, serial, 2.5F), 2.5));
+  CHECK(!ScaleAtDraw(target, serial, 2.5F));
+  CHECK(Near(target.Scale, 2.5));
+  // Every frame of a long run applies exactly once per change.
+  int applied = 0;
+  float want = 2.5F;
+  for (int frame = 0; frame < 300; ++frame) {
+    ++serial;
+    if (frame % 50 == 0)
+      want = want == 2.5F ? 3.0F : 2.5F;
+    for (int draw = 0; draw < 40; ++draw)
+      applied += ScaleAtDraw(target, serial, want) ? 1 : 0;
+    CHECK(Near(target.Scale, want));
+  }
+  CHECK(applied == 6);
+}
+
 } // namespace
 
 int main() {
+  TestTour19WaterTempleHiddenGpu();
+  TestTour19FittingAreasStay();
+  TestGovernorSheddingGoesDown();
+  TestNoUpWhileShedding();
+  TestBackendAppliesAtFirstDraw();
   TestParser();
   TestLevels();
   TestFitsStaysAtMax();

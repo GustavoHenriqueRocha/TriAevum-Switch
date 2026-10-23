@@ -188,6 +188,22 @@ Dois tipos:
 > para escolher candidatas, inútil para medir o ganho delas). Recusa real é o que passa muito disso
 > (ver 2.6). Os contadores só são gravados com o perfil ligado (lacuna 9).
 
+**Perfil de pico (`config/guest_spike_ms`, pgo5o).** O tour19 mostrou que 79% dos 428 refreshes
+perdidos tinham a thread do jogo como culpada (`stage=guest`), com quadros de 20–26 ms contra 8–11
+de média (Water Temple: 38 numa janela). A média por função do `guest_profile.txt` dilui esses
+quadros; o perfil de pico guarda só eles. Arquivo presente liga (padrão **desligado**: usa o modo
+"todos os blocos", que deixa o jogo mais lento); conteúdo opcional `limite [corte]` em ms (padrão
+`14 50`). Liga o perfil em todos os quadros mesmo sem `config/guest_profile` (aí sem o relatório
+periódico). Funcionamento (`oot3d_guest_spike_profile.h`): cada intervalo que o perfil atribui a um
+bloco também entra num `uint32` por bloco do quadro e numa lista de blocos tocados (alocados uma vez;
+nada aloca por quadro); no fim do quadro do host, se o tempo guest passou do limite, agrega os blocos
+por função (mapa `guest_functions.txt`; sem ele, por bloco), guarda as 10 mais caras num anel de 128 e
+soma todas no resumo (hash fixa); depois zera só os blocos tocados. A cada 150 quadros (e no fim)
+grava `logs/guest_spikes.txt` (acrescenta) e reescreve `logs/guest_spikes_summary.txt`. Quadros
+acima do corte (carregamentos) vão ao log com `load=1` e ficam fora do resumo. Os tempos incluem a
+sobrecarga do perfil (~190 ns por entrada de bloco): desconte com o `entries=` do pico. Formato em
+5.1. Teste: `oot3d_guest_spike_profile_tests`.
+
 ### 2.3 Escrever uma substituição EXATA
 
 Contrato (cabeçalho de `oot3d_native_guest_overrides.h`):
@@ -683,6 +699,21 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   imagem nova por minuto e a render thread presa no acquire 29 s/min (swapchain cheia: o display,
   não o pacer, dita o ritmo); pacer no vsync = 0 e 0, 3592 imagens em 60 s (uma por refresh).
   Sobra só o descompasso de conteúdo (jogo a 60,00 contra display a 59,88: judder 0,74 ms RMS).
+  **tour19 (pgo5n): o relógio não abriu** (`session_start vsync_clock=0 vsync_rc=0x1272`). 0x1272 =
+  módulo 114 (vi), desc 9: não documentado no switchbrew nem nos emuladores (yuzu/citron só têm
+  1 OperationFailed, 5 PermissionDenied, 6 NotSupported, 7 NotFound). A suspeita é a segunda abertura
+  do display "Default" na mesma sessão do `IApplicationDisplayService` (a janela padrão da libnx já o
+  abriu, e o handle dela, `g_viDisplay`, é estático na libnx). Sem o relógio, `pacer_vsync` não teve
+  efeito e o `spikes.txt` contou refreshes pelo relógio de 60,000 Hz. **pgo5o:** o log diz a etapa
+  (`vsync_stage=1` viInitialize, `2` viOpenDefaultDisplay, `3` viGetDisplayVsyncEvent) e decompõe o
+  rc (`vsync_rc_module`, `vsync_rc_desc`); sem o evento entra a **fonte reserva**
+  (`vsync_source=acquire`): o retorno do acquire da janela que bloqueou ≥ 1,5 ms
+  (`AcquireVsyncFilter`). Com a fila cheia o buffer só volta num vsync, então o retorno é vsync + uma
+  latência curta e a envoltória inferior do mesmo modelo acha a fase; acquires que não esperaram
+  ficam de fora. Fica válido depois de ~30 acquires que bloquearam; até lá (e se a fila nunca
+  encher) o pacer segue o relógio da CPU. `config/pacer_vsync` continua **desligado** por padrão.
+  Teste: `TestAcquireFallbackFindsVsync` (latência 50–500 µs, 1 em cada 1–3 vsyncs, 35% de acquires
+  sem espera: período a < 50 ns, fase a < 150 µs).
 - Resultado: fps60 com a versão "final 3" = 48,6 fps médios, 46% ≥ 55, velocidade 99,7%
   *(notas de sessão)*. Áreas pesadas ficam limitadas pela lógica no núcleo 0.
 
@@ -790,7 +821,7 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
     viewport, scissor e os passes de widescreen já saem dessas (`PicaGlScale::DynamicSubRectangle`).
     É viável porque o backend GL nunca lê pixels de volta para a memória do guest: o alvo só é lido
     pelo display transfer e pelo Shadow2D.
-  - **Troca só no clear de cor** (`RefreshPicaGlTargetScale` em `ApplyPicaFill` e
+  - **Troca só no clear de cor** (até o pgo5n; desde o pgo5o também no 1º draw, ver tour19 abaixo) (`RefreshPicaGlTargetScale` em `ApplyPicaFill` e
     `ClearPicaRenderTarget`): um quadro nunca mistura duas escalas, e um quadro que constrói sobre os
     pixels do anterior (fundo congelado) fica na escala em que eles foram desenhados. O quadro pede a
     escala (`Fast::PicaGlDynamicScale::gState.Requested`, `gl_pica_dynamic_scale.h`) só ao montar um
@@ -829,6 +860,33 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
     pico isolado, backoff, parser) e `PicaGlScale.DynamicSubRectangle` em `gfx_opengl_pica_scale_tests`.
     Medir no console antes de pensar em ligar por padrão (A/B: Water Temple e Desert Colossus, e que as
     áreas ≥59 fiquem em 3,0 com `drs_changes=0`).
+  - **tour19 (pgo5n, 3,0, DRS ligada): a DRS não agiu.** O controlador desceu (`drs_scale=2.25` em 76
+    de 166 janelas), mas `drs_applied=0` e `drs_scale_avg=3` o tour inteiro: o alvo da cena nunca
+    passou por `RefreshPicaGlTargetScale` (o caso previsto acima: não recebe clear de cor que o
+    cubra). E o critério estava cego: no Water Temple `drs_pair_ms` ~26 < 28,3 enquanto o governador
+    já descartava intermediários (a GPU oculta de ~2,5–3 ms da lição 37). **Correção (pgo5o):**
+    - **Aplicar também no primeiro draw do quadro.** O quadro incrementa
+      `gState.FrameSerial` junto com `Requested` a cada passo; cada alvo elegível guarda o
+      `ScaleSerial` que já viu. O primeiro evento do serial novo aplica a escala: o clear de cor
+      (como antes) ou, se ele não vier, o primeiro draw no alvo (`ApplyPicaGlTargetScaleAtDraw`, depois
+      dos fills pendentes e antes de viewport/scissor). No draw, a troca faz um **clear lógico** só da
+      cor (o que o quadro não desenhar fica preto, não com pixels da outra escala; a profundidade já
+      foi limpa pelo fill do quadro, com o valor do PICA, e não é tocada). Uma vez por serial e alvo:
+      nenhum quadro mistura escalas (`ScaleAtDraw`/`ScaleAtColourClear` puros em
+      `gl_pica_dynamic_scale.h`, teste `TestBackendAppliesAtFirstDraw`).
+    - **Decidir como o governador.** O par vira `2·GPU_passo + HiddenGpuMs` (3 ms); um passo em que o
+      governador está descartando (nível do intermediário abaixo do preferido, ou o 30 travado do
+      `fps60_mode`) conta como acima do orçamento se o par de GPU for ≥ 65% dele (21,7 ms) **e** a GPU
+      for o lado maior do par (par de GPU + oculta ≥ 2 × média da render thread ocupada sem espera;
+      descarte por CPU não melhora com menos pixels). Não sobe enquanto houver descarte. Calibração
+      (janelas do `perf.txt` de tour17/tour19 a 3x, por par de GPU): descarte 0–2% abaixo de 24 ms,
+      3–9% em 24–28, 13–28% em 28–30, 33–80% acima. Desce com par > 25,3 ms, sobe com par previsto ≤
+      23,7. Modelo: Water Temple do tour19 (26) → 2,75 (~26,3 com a oculta) e para; áreas com 23,5 ficam
+      em 3,0. tour18 (2x fixo) mostra o ganho esperado: Water Temple 55 → 59,9, hold 39 → 4.
+    - `perf.txt` ganhou `drs_applied_draw` (das aplicadas, quantas no primeiro draw), `drs_shed`
+      (resultados contados como acima por descarte do governador) e `drs_exempt` (alvos elegíveis que
+      saíram por Shadow2D, acumulado). Esperado no próximo tour: `drs_applied` > 0 sempre que
+      `drs_changes` > 0; se `drs_exempt` > 0 e `drs_applied` = 0, o alvo da cena virou isento.
 - Junção de draws (técnica do aurora/Dusklight): **medida e descartada, código removido**. A
   assinatura por draw (`step_mergeable=` etc., `gfx_opengl_pica_merge_stats.h`) mostrou no tour11
   (23/10, 15 áreas) 0,7 juntáveis em 74,7 draws por quadro (~1%), maior sequência 1,8: quase todo
@@ -920,7 +978,9 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 | `logs/oot3d_native_game.log`, `logs/glthread.txt` | log geral e troca de contexto GL |
 | `logs/guest_profile.txt` | perfil por função (com `config/guest_profile`) |
 | `logs/failed_pica_*.glsl` | fonte de shader PICA que falhou |
-| `logs/spikes.txt` | com `config/frame_spikes` ou `config/gpu_timing`: `session_start vsync_clock= vsync_rc= pacer_vsync= offset_ms=` e uma linha por quadro que perdeu o vsync (4.5): `spike t= host= guest= kind=step\|interp\|hold refreshes= expected= stage=guest\|render\|gpu\|pacer guest_ms= game_ms= render_ms= render_wait_ms= pacer_ms= swap_ms= gpu_ms= top=<etapa glperf> top_ms= ctx=load,tex,shader,program,gl_oom,evict,drs tex_new= prog_new= shader_new=`. `game_ms` = thread do jogo ocupada; `render_wait_ms` = acquire; `top` só com `gpu_timing` (`-` sem); `ctx=load` = troca de cena nos últimos ~2 s; `shader_new` = `glsl_compiles`+`nvc0_translates` do Mesa |
+| `logs/spikes.txt` | com `config/frame_spikes` ou `config/gpu_timing`: `session_start vsync_clock= vsync_source=event\|acquire\|none vsync_rc= vsync_rc_module= vsync_rc_desc= vsync_stage= pacer_vsync= offset_ms=` e uma linha por quadro que perdeu o vsync (4.5): `spike t= host= guest= kind=step\|interp\|hold refreshes= expected= stage=guest\|render\|gpu\|pacer guest_ms= game_ms= render_ms= render_wait_ms= pacer_ms= swap_ms= gpu_ms= top=<etapa glperf> top_ms= ctx=load,tex,shader,program,gl_oom,evict,drs tex_new= prog_new= shader_new=`. `game_ms` = thread do jogo ocupada; `render_wait_ms` = acquire; `top` só com `gpu_timing` (`-` sem); `ctx=load` = troca de cena nos últimos ~2 s; `shader_new` = `glsl_compiles`+`nvc0_translates` do Mesa |
+| `logs/guest_spikes.txt` | com `config/guest_spike_ms` (2.2): `session_start limite_ms= corte_carregamento_ms= top= funcoes_no_mapa=` e, por quadro do jogo acima do limite, `spike host_frame= guest_ms= entries= blocks= functions= load=0\|1 overflow=0\|1` seguido de até 10 linhas `  fn=0x<entrada> ms= pct= name=` (mais caras primeiro; `pct` = % do quadro; `entries` = entradas de bloco, para descontar a sobrecarga; `overflow=1` = mais de 65536 blocos, os excedentes ficaram fora do top) |
+| `logs/guest_spikes_summary.txt` | reescrito a cada 150 quadros: cabeçalho `# limite_ms= corte_carregamento_ms= quadros= picos= picos_carregamento=`, `# guest_ms_medio= guest_ms_medio_pico= anel_descartados= quadros_overflow= resumo_cheio=` e as 30 funções de maior tempo total nos picos fora de carregamento: `entrada ms_total %tempo_pico quadros ms/quadro ms_max nome` |
 | `logs/hang.txt` | watchdog de travamento: etapa e PC/LR/pilha de cada thread quando o jogo ou a render thread param > 3 s; "HEAP CORROMPIDO" da varredura do heap |
 
 ### 5.2 Campos importantes do `perf.txt`
@@ -952,7 +1012,8 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   concealed_ms`.
 - `interp:` `level step_frames interp_frames interp_dropped reduced_refused gpu_ms_<tipo>
   rt_ms_<tipo> est_*`; resolução dinâmica (4.8): `drs drs_scale drs_min drs_scale_avg drs_pair_ms
-  drs_changes drs_downs drs_ups drs_bounces drs_applied`.
+  drs_changes drs_downs drs_ups drs_bounces drs_applied drs_applied_draw drs_shed drs_exempt`
+  (pgo5o; ver 4.8).
 
 ### 5.3 Ferramentas
 
@@ -1082,7 +1143,9 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
   `oot3d_native_interpolation_pacing_tests`, `triaevum_presentation_clock_tests`,
   `oot3d_native_gpu_frame_timer_tests`, `oot3d_native_bottom_screen_skip_tests`,
   `oot3d_native_cadence_governor_tests` (modelo do pipeline; `--report`),
-  `oot3d_native_dynamic_resolution_tests` (controlador da DRS).
+  `oot3d_native_dynamic_resolution_tests` (controlador da DRS e aplicação no primeiro draw),
+  `oot3d_frame_spike_tests` (picos, relógio de vsync e fonte reserva do acquire),
+  `oot3d_guest_spike_profile_tests` (perfil de pico do guest).
 - Concorrência com ASan/UBSan e TSan: `oot3d_native_render_command_stream_tests`,
   `oot3d_native_render_shutdown_tests`, `oot3d_native_reduced_replay_stress_tests`,
   `oot3d_native_pica_deferred_plan_tests`.
@@ -1223,6 +1286,29 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     +2 quadros) e a cada volta da fase sai um refresh sem imagem nova. Quem apresenta deve seguir o
     relógio de quem exibe (evento de vsync: fase e período medidos), e a medida de fluidez deve
     contar refresh perdido por quadro (`spikes.txt`), não média de janela.
+
+41. **Um efeito que depende de um evento do jogo precisa de prova de que o evento acontece.** A DRS
+    aplicava a escala só no clear de cor do alvo; o OoT3D nunca limpou a cena por esse caminho e o
+    controlador passou um tour inteiro "mudando" uma escala que nunca valeu (`drs_changes` > 0,
+    `drs_applied` = 0). Contar a aplicação (não só a decisão) mostrou na primeira medida; o conserto
+    foi um ponto que sempre ocorre (o primeiro draw do quadro) com o mesmo invariante (uma troca por
+    quadro). Todo "aplica em X" ganha contador de X.
+
+42. **Dois controladores sobre o mesmo recurso decidem com a mesma medida.** O governador da
+    interpolação via a GPU oculta (pela espera do acquire) e descartava intermediários; a DRS via só o
+    timer e achava que cabia. Quem reage depois (a DRS) deve somar o que o outro já sabe ou ler a
+    decisão dele, senão um descarta quadros enquanto o outro diz que está tudo bem.
+
+43. **Serviço do sistema que falha numa 2ª abertura: use o que já está aberto ou uma fonte
+    derivada.** O evento de vsync do vi falhou (desc 9, não documentado) porque a janela padrão já
+    tinha o display. Em vez de depender de um handle estático da libnx, o retorno de uma chamada que
+    bloqueia no vsync (o acquire da swapchain cheia) dá a mesma fase com uma latência curta, e o
+    modelo de envoltória inferior já tolera isso. Registrar a etapa e o rc decomposto evita um tour
+    perdido na próxima vez.
+
+**tour19 (23/10, pgo5n, 3,0, DRS e `gpu_timing` ligados):** 29 áreas, média 59,47, 24 áreas ≥59, Water
+Temple 56,3 (mín 48,6). DRS sem efeito (4.8), relógio de vsync sem abrir (4.5), 428 refreshes perdidos
+com 79% culpa da thread do jogo (2.2, perfil de pico). Correções no pgo5o.
 
 **Melhor bench até agora (23/10, tour17, pgo5l = 4d512833, padrões do pgo5i + ETC2 desligado, GPU 614, Link andando):** 29 áreas sem crash, média 59,44 (tour14/pgo5i: 59,34), 26 áreas ≥59 (antes 23), hold 41→39 por janela. Pior área: Water Temple 55,1 (mín 51,1).
 

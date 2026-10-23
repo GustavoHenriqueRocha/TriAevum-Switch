@@ -20,6 +20,21 @@
 //
 // SwitchVsyncClock (oot3d_switch_vsync_clock.cpp): thread que espera o
 // evento de vsync do display (viGetDisplayVsyncEvent) e publica o modelo.
+//
+// tour19 (pgo5n): o console devolveu rc 0x1272 (módulo 114 = vi, desc 9,
+// não documentado no switchbrew nem nos emuladores) e o relógio nunca
+// existiu (vsync_clock=0; pacer_vsync sem efeito; spikes.txt contou os
+// refreshes pelo relógio de 60,000 Hz). A janela padrão do libnx
+// (nwindowGetDefault, usada pelo SDL/Mesa) já abriu o display "Default" na
+// mesma sessão do IApplicationDisplayService e o handle dela é estático no
+// libnx (g_viDisplay, inacessível). Agora:
+//  1. tenta o evento (vi -> display -> evento) e guarda a etapa que falhou
+//     (StartStage: 1 viInitialize, 2 viOpenDefaultDisplay, 3
+//     viGetDisplayVsyncEvent);
+//  2. se falhar, fonte reserva: o retorno do acquire da janela (dequeue da
+//     swapchain) que bloqueou >= kAcquireVsyncMinWaitMs. Com a fila cheia o
+//     buffer só volta no vsync: o retorno é vsync + latência curta, e a
+//     envoltória inferior do modelo acha a fase (AcquireVsyncFilter).
 // Relógio: armGetSystemTick (cntpct_el0); nunca cntvct_el0 (Data Abort no
 // Horizon).
 
@@ -180,6 +195,37 @@ private:
   std::atomic<uint64_t> mResets{0U};
 };
 
+// Acquire que bloqueou pelo menos isto (ms) voltou num vsync.
+inline constexpr double kAcquireVsyncMinWaitMs = 1.5;
+
+// Fonte reserva: retornos do acquire da janela -> modelo do vsync. Só os
+// que bloquearam (um acquire que não esperou volta a qualquer hora).
+class AcquireVsyncFilter {
+public:
+  explicit AcquireVsyncFilter(double nominalPeriodNs = 1.0e9 / 60.0)
+      : mModel(nominalPeriodNs) {}
+  // true se a amostra entrou no modelo.
+  bool Observe(int64_t returnNs, double waitMs) {
+    if (!(waitMs >= kAcquireVsyncMinWaitMs)) {
+      ++mIgnored;
+      return false;
+    }
+    mModel.Observe(returnNs);
+    ++mUsed;
+    return true;
+  }
+  [[nodiscard]] VsyncClockSnapshot Snapshot() const { return mModel.Snapshot(); }
+  [[nodiscard]] uint64_t Used() const { return mUsed; }
+  [[nodiscard]] uint64_t Ignored() const { return mIgnored; }
+
+private:
+  VsyncClockModel mModel;
+  uint64_t mUsed = 0U;
+  uint64_t mIgnored = 0U;
+};
+
+enum class VsyncClockSource : uint8_t { None = 0, DisplayEvent = 1, Acquire = 2 };
+
 // Thread do vsync no Switch (oot3d_switch_vsync_clock.cpp; no host, Start()
 // devolve false). Tempos no relógio de std::chrono::steady_clock (ns).
 class SwitchVsyncClock {
@@ -195,15 +241,44 @@ public:
   void Stop();
   [[nodiscard]] bool Running() const { return mRunning.load(std::memory_order_acquire); }
   [[nodiscard]] uint32_t StartResult() const { return mStartResult; }
+  // Etapa que falhou (0 nenhuma; 1 vi, 2 display, 3 evento).
+  [[nodiscard]] uint32_t StartStage() const { return mStartStage; }
   [[nodiscard]] VsyncClockSnapshot Read() const { return mPublisher.Read(); }
+
+  // Fonte reserva (tour19): sem o evento, o retorno do acquire da janela.
+  // StartAcquireFallback() liga; ObserveAcquire() vem da render thread
+  // (uma só escritora do publicador, já que a thread do evento não existe).
+  bool StartAcquireFallback() {
+    if (Running()) return false;
+    mSource.store(VsyncClockSource::Acquire, std::memory_order_release);
+    return true;
+  }
+  void ObserveAcquire(int64_t returnNs, double waitMs) {
+    if (mSource.load(std::memory_order_acquire) != VsyncClockSource::Acquire)
+      return;
+    if (mAcquire.Observe(returnNs, waitMs))
+      mPublisher.Publish(mAcquire.Snapshot());
+  }
+  [[nodiscard]] VsyncClockSource Source() const {
+    return Running() ? VsyncClockSource::DisplayEvent
+                     : mSource.load(std::memory_order_acquire);
+  }
+  [[nodiscard]] uint64_t AcquireSamples() const { return mAcquire.Used(); }
 
 private:
   void Loop();
   VsyncClockPublisher mPublisher;
+  AcquireVsyncFilter mAcquire;
+  std::atomic<VsyncClockSource> mSource{VsyncClockSource::None};
+  uint32_t mStartStage = 0U;
   std::atomic<bool> mRunning{false};
   std::atomic<bool> mStop{false};
   uint32_t mStartResult = 0U;
   void *mImpl = nullptr;
 };
+
+// O relógio cuja fonte reserva recebe os acquires (gancho da janela na
+// render thread); nulo sem ela.
+inline std::atomic<SwitchVsyncClock *> gAcquireVsyncClock{nullptr};
 
 } // namespace Oot3dNativeGame

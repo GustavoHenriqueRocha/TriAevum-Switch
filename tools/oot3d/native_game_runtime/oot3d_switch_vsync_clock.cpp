@@ -36,13 +36,18 @@ bool SwitchVsyncClock::Start() {
   // vi já foi aberto pela janela padrão (nwindowGetDefault); o serviço tem
   // contagem de referências, e o display "Default" pode ser aberto de novo
   // (o evento de vsync é por handle de display).
+  // tour19: rc 0x1272 (vi desc 9) aqui; StartStage diz em que etapa, e a
+  // sessão cai para a fonte reserva (StartAcquireFallback).
+  mStartStage = 1U;
   Result rc = viInitialize(ViServiceType_Default);
   if (R_SUCCEEDED(rc)) {
     impl->ViInitialized = true;
+    mStartStage = 2U;
     rc = viOpenDefaultDisplay(&impl->Display);
   }
   if (R_SUCCEEDED(rc)) {
     impl->DisplayOpen = true;
+    mStartStage = 3U;
     rc = viGetDisplayVsyncEvent(&impl->Display, &impl->Vsync);
   }
   if (R_FAILED(rc)) {
@@ -53,6 +58,7 @@ bool SwitchVsyncClock::Start() {
     return false;
   }
   impl->EventOpen = true;
+  mStartStage = 0U;
   mImpl = impl;
   mStop.store(false, std::memory_order_relaxed);
   mRunning.store(true, std::memory_order_release);
@@ -102,6 +108,10 @@ void SwitchVsyncClock::Stop() {}
 
 #endif
 
-SwitchVsyncClock::~SwitchVsyncClock() { Stop(); }
+SwitchVsyncClock::~SwitchVsyncClock() {
+  SwitchVsyncClock *self = this;
+  (void)gAcquireVsyncClock.compare_exchange_strong(self, nullptr);
+  Stop();
+}
 
 } // namespace Oot3dNativeGame

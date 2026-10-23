@@ -145,10 +145,27 @@ bool gFlushBeforePacing = false;
 void MarkGpuFrameAcquire(bool after) {
   GpuFrameTimer().MarkAcquire(after);
   // armGetSystemTick (cntpct_el0); cntvct_el0 faults on Horizon.
-  if (after)
-    RenderWaitClock().End(armGetSystemTick());
-  else
-    RenderWaitClock().Begin(armGetSystemTick());
+  static uint64_t beginTick = 0U;
+  const uint64_t tick = armGetSystemTick();
+  if (after) {
+    RenderWaitClock().End(tick);
+    // tour19: without the display's vsync event, an acquire that blocked
+    // returned at a vsync (oot3d_vsync_clock.h, AcquireVsyncFilter).
+    if (auto *clock =
+            Oot3dNativeGame::gAcquireVsyncClock.load(std::memory_order_relaxed);
+        clock != nullptr && beginTick != 0U && tick > beginTick) {
+      const double waitMs =
+          static_cast<double>(armTicksToNs(tick - beginTick)) / 1.0e6;
+      const int64_t nowNs =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count();
+      clock->ObserveAcquire(nowNs, waitMs);
+    }
+  } else {
+    RenderWaitClock().Begin(tick);
+    beginTick = tick;
+  }
 }
 #endif
 
@@ -288,6 +305,13 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   // logs/spikes.txt: this frame's render-thread work and acquire wait.
   spikeRenderBusyMs = Oot3dNativeGame::NativeRenderThreadBusyMs(cpuMs, waitMs);
   spikeRenderWaitMs = waitMs;
+  if (spikeRenderBusyMs > 0.0 && std::isfinite(spikeRenderBusyMs))
+    drsRenderBusyAverageMs =
+        drsRenderBusyAverageMs > 0.0
+            ? (7.0 * drsRenderBusyAverageMs +
+               std::min(spikeRenderBusyMs, 2.0 * drsRenderBusyAverageMs)) /
+                  8.0
+            : spikeRenderBusyMs;
   const auto observe = [&](uint8_t frameKind, double costMs) {
     switch (static_cast<Oot3dNativeGame::RenderFrameKind>(frameKind)) {
     case Oot3dNativeGame::RenderFrameKind::Step:
@@ -329,12 +353,25 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
     // Dynamic resolution learns the GPU side only (a smaller image saves
     // no render-thread time): the step frame, twice while interpolating
     // (the in-between frame is one more replay of the same scene).
+    // tour19: on the governor's terms (oot3d_native_dynamic_resolution.h):
+    // its shedding of in-between frames counts when the GPU, not the render
+    // thread's own work, is the larger side of the pair.
     if (dynamicResolutionActive &&
         result.Kind ==
-            static_cast<uint8_t>(Oot3dNativeGame::RenderFrameKind::Step))
+            static_cast<uint8_t>(Oot3dNativeGame::RenderFrameKind::Step)) {
+      const double pairMs = visualInterpolationEnabled
+                                ? 2.0 * result.Milliseconds
+                                : result.Milliseconds;
+      const bool shedding =
+          visualInterpolationEnabled &&
+          (interpolationPacing.Level() != interpolationPacing.PreferredLevel() ||
+           cadenceGovernor.DropsInBetween());
+      const double busyPairMs = 2.0 * drsRenderBusyAverageMs;
       (void)dynamicResolution.ObservePair(
-          visualInterpolationEnabled ? 2.0 * result.Milliseconds
-                                     : result.Milliseconds);
+          pairMs, shedding &&
+                      pairMs + dynamicResolution.Config().HiddenGpuMs >=
+                          busyPairMs);
+    }
     // Both sides of a frame overlap the neighbouring frames: the pair fits
     // only if each fits.
     observe(result.Kind, std::max(result.Milliseconds, result.CpuMilliseconds));
@@ -1314,7 +1351,7 @@ bool NativeA32WindowSession::RunFrame() {
         // changes (down/up, ups undone soon) in the window.
         {
           static uint64_t previousPresented = 0U, previousMilli = 0U,
-                          previousApplied = 0U;
+                          previousApplied = 0U, previousAppliedDraw = 0U;
           const auto &backendScale = Fast::PicaGlDynamicScale::gState;
           const uint64_t presented =
               backendScale.PresentedFrames.load(std::memory_order_relaxed);
@@ -1322,6 +1359,8 @@ bool NativeA32WindowSession::RunFrame() {
               backendScale.PresentedScaleMilli.load(std::memory_order_relaxed);
           const uint64_t applied =
               backendScale.Applied.load(std::memory_order_relaxed);
+          const uint64_t appliedDraw =
+              backendScale.AppliedAtDraw.load(std::memory_order_relaxed);
           const uint64_t presentedWindow = presented - previousPresented;
           perf << " drs=" << (current.DrsActive ? 1 : 0)
                << " drs_scale=" << current.DrsScale
@@ -1335,7 +1374,12 @@ bool NativeA32WindowSession::RunFrame() {
                << " drs_downs=" << (current.Drs.Downs - previous.Drs.Downs)
                << " drs_ups=" << (current.Drs.Ups - previous.Drs.Ups)
                << " drs_bounces=" << (current.Drs.Bounces - previous.Drs.Bounces)
-               << " drs_applied=" << (applied - previousApplied);
+               << " drs_applied=" << (applied - previousApplied)
+               << " drs_applied_draw=" << (appliedDraw - previousAppliedDraw)
+               << " drs_shed=" << (current.Drs.Shedding - previous.Drs.Shedding)
+               << " drs_exempt="
+               << backendScale.ExemptTargets.load(std::memory_order_relaxed);
+          previousAppliedDraw = appliedDraw;
           previousPresented = presented;
           previousMilli = milli;
           previousApplied = applied;
@@ -3073,6 +3117,9 @@ void NativeA32WindowSession::PresentVisualFrame(
             // step's), and the in-between frame that follows keeps it.
             Fast::PicaGlDynamicScale::gState.Requested =
                 dynamicResolutionActive ? dynamicResolution.Scale() : 0.0F;
+            // tour19: the scale applies at this frame's colour clear or, if
+            // none comes, at its first draw into the target.
+            ++Fast::PicaGlDynamicScale::gState.FrameSerial;
             auto &sample = visualFrameSampleScratch;
             // Keep the canonical target complete independently of the
             // delayed visual target. Raw-copy prefixes have already
