@@ -28,7 +28,6 @@ enum class Phase : uint8_t {
     TexLookup,  // chave + busca no mapa de texturas (inclui LUT de iluminacao)
     TexUpload,  // criacao de textura nova (decode + glTexImage)
     Indices,    // copia dos indices para o anel
-    PerfSig,    // assinatura de mesclagem (SO MEDICAO: custo da propria medicao)
     Draw,       // glDrawElements/Arrays (incl. passes de canto)
     Rest,       // o que sobrar ate o fim do SubmitPicaDraw
     Count
@@ -37,7 +36,7 @@ inline constexpr size_t kPhaseCount = static_cast<size_t>(Phase::Count);
 
 inline constexpr std::array<const char*, kPhaseCount> kPhaseNames{
     "validate", "program", "target", "state", "uniforms", "vertices",
-    "tex_hash", "tex_lookup", "tex_upload", "indices", "perf_sig", "draw",
+    "tex_hash", "tex_lookup", "tex_upload", "indices", "draw",
     "rest"};
 
 // Trechos da render thread fora do draw (tempo de parede, podem aninhar).

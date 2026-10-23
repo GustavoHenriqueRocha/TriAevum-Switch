@@ -973,15 +973,15 @@ target_include_directories(gfx_opengl_pica_gpu_lean_tests
 target_link_libraries(gfx_opengl_pica_gpu_lean_tests PRIVATE gtest_main)
 gtest_discover_tests(gfx_opengl_pica_gpu_lean_tests DISCOVERY_TIMEOUT 30)
 
-# Contagem de draws PICA juntaveis (medicao glperf step_mergeable).
-add_executable(gfx_opengl_pica_merge_stats_tests
-    gfx_opengl_pica_merge_stats_tests.cpp
+# Uniforms enxutos do caminho PICA (config/gl_uniform_trim).
+add_executable(gfx_opengl_pica_uniform_trim_tests
+    gfx_opengl_pica_uniform_trim_tests.cpp
 )
-set_property(TARGET gfx_opengl_pica_merge_stats_tests PROPERTY CXX_STANDARD 20)
-target_include_directories(gfx_opengl_pica_merge_stats_tests
+set_property(TARGET gfx_opengl_pica_uniform_trim_tests PROPERTY CXX_STANDARD 20)
+target_include_directories(gfx_opengl_pica_uniform_trim_tests
     PRIVATE ../src ../include)
-target_link_libraries(gfx_opengl_pica_merge_stats_tests PRIVATE gtest_main)
-gtest_discover_tests(gfx_opengl_pica_merge_stats_tests DISCOVERY_TIMEOUT 30)
+target_link_libraries(gfx_opengl_pica_uniform_trim_tests PRIVATE gtest_main)
+gtest_discover_tests(gfx_opengl_pica_uniform_trim_tests DISCOVERY_TIMEOUT 30)
 
 # Fases de CPU do draw PICA (glperf step_draw_<fase>_ms).
 add_executable(gl_pica_draw_phases_tests

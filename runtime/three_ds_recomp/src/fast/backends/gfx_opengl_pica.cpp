@@ -17,8 +17,8 @@
 #include "fast/backends/gl_frame_profiler.h"
 #include "fast/backends/gfx_opengl_pica_residency.h"
 #include "fast/backends/gfx_opengl_pica_scale.h"
+#include "fast/backends/gfx_opengl_pica_uniform_trim.h"
 #include "fast/backends/gfx_opengl_pica_state_cache.h"
-#include "fast/backends/gfx_opengl_pica_merge_stats.h"
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
 #include "fast/oot3d/gl_widescreen_policy.h"
 #include "fast/oot3d/pica_geometry_registry.h"
@@ -313,6 +313,10 @@ struct PicaGlProgram {
     GLuint Handle = 0U;
     // PicaGlGpuLean::FragmentFeature bits of the fragment source.
     uint8_t FragmentFeatures = 0U;
+    // Prefix of each uniform block the program can read
+    // (gfx_opengl_pica_uniform_trim.h; kAll: the whole block).
+    size_t VertexUniformUsed = PicaGlUniformTrim::kAll;
+    size_t FragmentUniformUsed = PicaGlUniformTrim::kAll;
 };
 
 struct PicaGlTarget {
@@ -841,7 +845,9 @@ PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {
             state.Ready.erase(found);
             lock.unlock();
             BindPicaGlProgramSamplers(program);
-            return {program, PicaGlGpuLean::ClassifyFragmentSource(fragmentSource)};
+            const auto usage = PicaGlUniformTrim::ProgramUsedBytes(vertexSource, fragmentSource);
+            return {program, PicaGlGpuLean::ClassifyFragmentSource(fragmentSource),
+                    usage.Vertex, usage.Fragment};
         }
     }
 #endif
@@ -850,7 +856,9 @@ PicaGlProgram BuildPicaGlProgram(const GfxNativePicaDrawView& draw) {
 #if defined(__SWITCH__)
     RecordPicaGlProgramSource(cacheKey, vertexSource, fragmentSource);
 #endif
-    return {program, PicaGlGpuLean::ClassifyFragmentSource(fragmentSource)};
+    const auto usage = PicaGlUniformTrim::ProgramUsedBytes(vertexSource, fragmentSource);
+    return {program, PicaGlGpuLean::ClassifyFragmentSource(fragmentSource),
+            usage.Vertex, usage.Fragment};
 }
 
 GLenum ToPicaGlCompare(GfxNativePicaCompareFunction compare) {
@@ -1172,11 +1180,9 @@ struct GfxRenderingAPIOGL::NativePicaState {
     PicaGlStreamBuffer VertexRing;
     PicaGlStreamBuffer IndexRing;
     uint64_t UniformAlignment = 256U;
-    // Lean: where the last uniform blocks went (ring generation, offset).
-    uint64_t LastVertexUniformGeneration = 0U;
-    uint64_t LastVertexUniformOffset = 0U;
-    uint64_t LastFragmentUniformGeneration = 0U;
-    uint64_t LastFragmentUniformOffset = 0U;
+    // config/gl_uniform_trim (gfx_opengl_pica_uniform_trim.h): copy only
+    // the prefix of each uniform block the program reads.
+    bool UniformTrim = true;
     float ResolutionScale = 1.0F;
     // Namespaces drawn at their own scale (a reduced in-between frame).
     std::map<uint64_t, float> NamespaceScales;
@@ -1188,9 +1194,9 @@ struct GfxRenderingAPIOGL::NativePicaState {
     // config/gl_gpu_lean (exact GPU savings; gfx_opengl_pica_gpu_lean.h).
     bool GpuLean = true;
     uint64_t NextTargetId = 1U;
-    // Lean: what the uniform buffers and image unit 5 hold.
-    std::vector<uint8_t> LastVertexUniforms;
-    std::vector<uint8_t> LastFragmentUniforms;
+    // Lean: what the uniform ring holds of the last blocks, and image unit 5.
+    PicaGlUniformTrim::LastUpload LastVertexUniforms;
+    PicaGlUniformTrim::LastUpload LastFragmentUniforms;
     GLuint LastShadowImage = 0U;
     PicaGlPostState Post;
     // config/gl_state_cache: shadow of the draw path's GL state (see
@@ -1725,6 +1731,9 @@ void GfxRenderingAPIOGL::InitNativePica() {
     state.ResolutionScale = ReadPicaGlResolutionScale();
     state.Lean = ReadPicaGlLean();
     state.GpuLean = ReadPicaGlGpuLean();
+    static const bool uniformTrim = ReadPicaGlSwitch(
+        "gl_uniform_trim", "TRIAEVUM_GL_UNIFORM_TRIM", true, true);
+    state.UniformTrim = uniformTrim;
     static const bool stateCache = ReadPicaGlSwitch(
         "gl_state_cache", "TRIAEVUM_GL_STATE_CACHE", true, true);
     static const bool stats =
@@ -2893,11 +2902,16 @@ bool ReservePicaGlStream(GfxRenderingAPIOGL::NativePicaState& state,
 // Copies `bytes` into the next reserved range of a stream ring and returns
 // its offset. Throws PicaGlOutOfMemory when the driver cannot map it.
 uint64_t WritePicaGlStream(PicaGlStreamBuffer& stream,
-                           std::span<const uint8_t> bytes, uint64_t alignment) {
-    const auto allocation = stream.Ring.Allocate(bytes.size(), alignment);
+                           std::span<const uint8_t> bytes, uint64_t alignment,
+                           uint64_t reserved = 0U) {
+    // `reserved` > bytes.size(): the range keeps that many bytes (bound as a
+    // whole) while only `bytes` are written (uniform trim).
+    const auto allocation = stream.Ring.Allocate(
+        std::max<uint64_t>(reserved, bytes.size()), alignment);
     if (!allocation.Valid) {
         throw std::runtime_error("PICA stream range was not reserved");
     }
+    if (bytes.empty()) return allocation.Offset; // nothing to copy (trim)
     // The bind also sets the VAO's element binding for the index ring.
     glBindBuffer(stream.Target, stream.Handle);
     if (stream.Persistent) {
@@ -3159,47 +3173,46 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
                                               uniformAlignment) +
                 PicaGlResidency::StreamRing::Span(
                     draw.FragmentUniformBytes.size(), uniformAlignment));
+        // Uniform trim: only the prefix the program reads is copied (and
+        // compared); the range reserved and bound is still the whole block.
         const auto uploadUniforms = [&](GLuint buffer, GLuint binding,
                                         std::span<const uint8_t> bytes,
-                                        std::vector<uint8_t>& last,
-                                        uint64_t& lastGeneration,
-                                        uint64_t& lastOffset) {
+                                        size_t used,
+                                        PicaGlUniformTrim::LastUpload& last) {
             if (bytes.empty()) {
                 glBindBufferBase(GL_UNIFORM_BUFFER, binding, buffer);
                 return;
             }
-            const bool same = uniformsInRing && mNativePica->Lean &&
-                              last.size() == bytes.size() &&
-                              lastGeneration != 0U &&
-                              lastGeneration == uniformRing.Ring.Generation() &&
-                              std::memcmp(last.data(), bytes.data(),
-                                          bytes.size()) == 0;
-            if (same) {
+            const auto plan = PicaGlUniformTrim::PlanUpload(
+                mNativePica->UniformTrim && uniformsInRing,
+                mNativePica->Lean && uniformsInRing, last,
+                uniformRing.Ring.Generation(), bytes, used);
+            const size_t send = plan.Send;
+            if (plan.Reuse) {
                 glBindBufferRange(GL_UNIFORM_BUFFER, binding, uniformRing.Handle,
-                                  static_cast<GLintptr>(lastOffset),
+                                  static_cast<GLintptr>(last.Offset),
                                   static_cast<GLsizeiptr>(bytes.size()));
                 GlPerf::PhaseCount(GlPerf::DrawCount::UniformSkipped);
                 GlPerf::PhaseCount(GlPerf::DrawCount::UniformSkippedBytes,
-                                   bytes.size());
+                                   send);
                 return;
             }
             ++mNativePica->UniformUploads;
-            mNativePica->UniformUploadBytes += bytes.size();
+            mNativePica->UniformUploadBytes += send;
             GlPerf::PhaseCount(GlPerf::DrawCount::UniformSent);
-            GlPerf::PhaseCount(GlPerf::DrawCount::UniformSentBytes,
-                               bytes.size());
-            last.clear();
-            lastGeneration = 0U;
+            GlPerf::PhaseCount(GlPerf::DrawCount::UniformSentBytes, send);
+            last.Forget();
             if (uniformsInRing) {
-                const uint64_t offset =
-                    WritePicaGlStream(uniformRing, bytes, uniformAlignment);
+                const uint64_t offset = WritePicaGlStream(
+                    uniformRing, bytes.first(send), uniformAlignment,
+                    bytes.size());
                 glBindBufferRange(GL_UNIFORM_BUFFER, binding, uniformRing.Handle,
                                   static_cast<GLintptr>(offset),
                                   static_cast<GLsizeiptr>(bytes.size()));
                 if (mNativePica->Lean) {
-                    last.assign(bytes.begin(), bytes.end());
-                    lastGeneration = uniformRing.Ring.Generation();
-                    lastOffset = offset;
+                    PicaGlUniformTrim::Remember(last, bytes, send,
+                                                uniformRing.Ring.Generation(),
+                                                offset);
                 }
                 return;
             }
@@ -3208,15 +3221,11 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
             glBindBufferBase(GL_UNIFORM_BUFFER, binding, buffer);
         };
         uploadUniforms(mNativePica->VertexUniformBuffer, 0U,
-                       draw.VertexUniformBytes,
-                       mNativePica->LastVertexUniforms,
-                       mNativePica->LastVertexUniformGeneration,
-                       mNativePica->LastVertexUniformOffset);
+                       draw.VertexUniformBytes, program.VertexUniformUsed,
+                       mNativePica->LastVertexUniforms);
         uploadUniforms(mNativePica->FragmentUniformBuffer, 4U,
-                       draw.FragmentUniformBytes,
-                       mNativePica->LastFragmentUniforms,
-                       mNativePica->LastFragmentUniformGeneration,
-                       mNativePica->LastFragmentUniformOffset);
+                       draw.FragmentUniformBytes, program.FragmentUniformUsed,
+                       mNativePica->LastFragmentUniforms);
         GlPerf::PhaseLap(GlPerf::Phase::Uniforms);
 
         uint16_t nextAttributeMask = 0U;
@@ -3886,76 +3895,6 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         const GLenum topology = ToPicaGlTopology(draw.Topology);
         if (GlPerf::Enabled() && !skipDraw) {
             GlPerf::PhaseLap(GlPerf::Phase::State);
-            // Medicao (glperf step_mergeable): assinatura de tudo que o draw
-            // pede ao GL fora os bytes de vertice/indice; draws consecutivos
-            // de assinatura igual poderiam ser um so. Nao muda o desenho.
-            PicaGlMergeStats::Hasher sig;
-            sig.Add(program.Handle);
-            sig.Add(target.Framebuffer);
-            for (const GLuint handle : textures) sig.Add(handle);
-            sig.Add(lighting);
-            sig.Block(draw.VertexUniformBytes.data(),
-                      draw.VertexUniformBytes.size());
-            sig.Block(draw.FragmentUniformBytes.data(),
-                      draw.FragmentUniformBytes.size());
-            for (const auto& attribute : draw.VertexAttributes) {
-                sig.Add(attribute.Location);
-                sig.Add(attribute.Binding);
-                sig.Add(static_cast<uint64_t>(attribute.Format));
-                sig.Add(attribute.ComponentCount);
-                sig.Add(attribute.ByteOffset);
-            }
-            for (const auto& binding : draw.VertexBindings) {
-                sig.Add(binding.Binding);
-                sig.Add(binding.ByteStride);
-                sig.Add(binding.PerInstance ? 1U : 0U);
-            }
-            sig.Add(topology);
-            sig.Add(draw.Indexed ? (draw.IndicesAre16Bit ? 2U : 1U) : 0U);
-            sig.Add(static_cast<uint64_t>(outputMerger));
-            sig.Add(static_cast<uint8_t>(draw.ColorWriteMask & 0xFU));
-            if (outputMerger == PicaGlGpuLean::OutputMerger::Blend) {
-                sig.Add(blendState.EquationRgb);
-                sig.Add(blendState.EquationAlpha);
-                sig.Add(blendState.SourceRgb);
-                sig.Add(blendState.DestRgb);
-                sig.Add(blendState.SourceAlpha);
-                sig.Add(blendState.DestAlpha);
-                for (const float value : draw.Blend.ConstantColor) {
-                    sig.Add(PicaGlStateCache::FloatBits(value));
-                }
-            } else if (outputMerger == PicaGlGpuLean::OutputMerger::LogicOp) {
-                sig.Add(blendState.LogicOp);
-            }
-            sig.Add(draw.DepthTestEnabled ? 1U : 0U);
-            sig.Add(draw.DepthWriteEnabled ? 1U : 0U);
-            if (draw.DepthTestEnabled) {
-                sig.Add(ToPicaGlCompare(draw.DepthCompare));
-            }
-            sig.Add(draw.Stencil.Enabled ? 1U : 0U);
-            if (draw.Stencil.Enabled) {
-                sig.Add(ToPicaGlCompare(draw.Stencil.Compare));
-                sig.Add(static_cast<uint32_t>(draw.Stencil.Reference));
-                sig.Add(static_cast<uint32_t>(draw.Stencil.CompareMask));
-                sig.Add(draw.Stencil.WriteMask);
-                sig.Add(ToPicaGlStencil(draw.Stencil.Fail));
-                sig.Add(ToPicaGlStencil(draw.Stencil.DepthFail));
-                sig.Add(ToPicaGlStencil(draw.Stencil.Pass));
-            }
-            sig.Add(static_cast<uint64_t>(draw.CullMode));
-            sig.Add(draw.FramebufferFlipped ? 1U : 0U);
-            for (const int32_t value : gl.Viewport.Value) {
-                sig.Add(static_cast<uint32_t>(value));
-            }
-            for (const int32_t value : gl.Scissor.Value) {
-                sig.Add(static_cast<uint32_t>(value));
-            }
-            sig.Add(shadowProducer ? 1U : 0U);
-            // Passes de canto do widescreen: varias chamadas, nunca juntavel.
-            static uint64_t unmergeable = 0U;
-            sig.Add(cornerPassCount != 0U ? ++unmergeable : 0U);
-            GlPerf::PicaDrawState(sig.Value);
-            GlPerf::PhaseLap(GlPerf::Phase::PerfSig);
         }
         if (skipDraw) {
             // Nothing to draw: the uploads below are skipped as well (each
@@ -4076,10 +4015,8 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
         state.UniformRing.Ring.Reset();
         state.VertexRing.Ring.Reset();
         state.IndexRing.Ring.Reset();
-        state.LastVertexUniforms.clear();
-        state.LastFragmentUniforms.clear();
-        state.LastVertexUniformGeneration = 0U;
-        state.LastFragmentUniformGeneration = 0U;
+        state.LastVertexUniforms.Forget();
+        state.LastFragmentUniforms.Forget();
         for (auto& attribute : state.AttributeStates) attribute = {};
         PublishPicaGlResidency(state);
         const uint64_t events = state.Counters.OutOfMemoryEvents.fetch_add(

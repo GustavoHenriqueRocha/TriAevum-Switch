@@ -631,6 +631,21 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   memória não é fatal (pula o draw, conta `gl_oom`). Sem isso o console caía após ~8 min com fps60.
 - Uniforms soltos fazem o nvc0 copiar o bloco inteiro pela FIFO (SwitchWakerHD: UBO std140 cortou
   comandos a 1/3); não reenviar blocos iguais.
+- **Uniforms enxutos** (`config/gl_uniform_trim`, padrão ligado; `0` desliga;
+  `gfx_opengl_pica_uniform_trim.h`, teste `gfx_opengl_pica_uniform_trim_tests`): na criação do
+  programa GL o GLSL final é varrido e guarda-se o prefixo `[0, N)` de cada bloco que ele pode ler
+  (membro → fim no layout de `pica_uniform_layout.h`; índice literal `f[12]` → até o registrador;
+  índice não literal → o membro inteiro; endereçamento relativo a0/aL = `get_offset_register()`
+  chamado → `f[]` inteiro, só definido e nunca chamado → não conta; qualquer coisa não entendida →
+  bloco inteiro). O draw copia ao anel só esse prefixo, mas **reserva e liga a faixa do bloco
+  inteiro como antes** (mesmo `glBindBufferRange`; o resto da faixa fica com lixo que ninguém lê),
+  então o estado GL não muda e os bytes lidos são idênticos. O dedup passou a comparar só o
+  prefixo (bloco anterior que difere só na cauda não lida é religado). Corpus do console (271
+  programas do `shadercache`): fragmento 6112 → **1184 bytes em 257** (sem iluminação: para em
+  `texture_lod_bias`) e 2096 nos 14 com iluminação; **vértice fica em 1616 nos 271** (todo programa
+  chama `get_offset_register`, indexação relativa, e lê `f[95]`). `draw_uniform_sent_bytes_kb`
+  passa a contar os bytes copiados. Lição: o tamanho declarado do UBO é contrato do layout, não do
+  que o shader lê; medir no corpus real antes de prometer (o bloco de vértice não encolhe).
 
 ### 4.8 Economias de GPU (exatas)
 
@@ -660,7 +675,28 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   `oot3d_native_bottom_screen_skip_tests`.
 - Resolução: `config/resolution_scale` 1/2/2,5/3; FSR 1 (`config/upscaler=fsr`), AA, anisotropia. Em
   3× (720p) a GPU virou gargalo: 23,4 contra 28,5 FPS em 2×. Padrão 2×.
-- Junção de draws (técnica do aurora/Dusklight, **só medição por ora**): o glperf traz `step_mergeable=` (draws PICA por quadro com estado idêntico ao anterior: programa, alvo, texturas, uniforms, formato de vértice, blend/depth/stencil/cull/viewport/scissor, topologia), `step_merge_draws=` (total com assinatura), `step_merge_run_max=` (maior sequência na janela) e `step_merge_run_avg=` (média por quadro da maior sequência); idem `interp_`. Limpeza/transfer quebram a sequência. Fonte: `gfx_opengl_pica_merge_stats.h` (teste `gfx_opengl_pica_merge_stats_tests`). **Resultado no console (tour11, 23/10, 15 áreas andando): 0,7 juntáveis em 74,7 draws por quadro (~1%), maior sequência 1,8. Não compensa no OoT3D**: provavelmente porque quase todo draw troca textura ou uniform (matriz por objeto), ao contrário do GX do Twilight Princess. A própria assinatura (FNV byte a byte de uniforms e vértices) custa **3–4 ms por quadro** da render thread com `gpu_timing` (`draw_perf_sig_ms`, tour12): tours com essa medição ligada saem pessimistas. Quebra do draw no tour12 (Water Temple, 122 draws, 69 µs/draw com a assinatura): `glDraw*` 1,9 ms, vértices 1,1, uniforms 0,8 (**551 KB de uniforms por quadro**, 181 envios), estado 0,5, upload de textura 0,5, fora do submit 0,9; `sec_resolve_plans` 2,0 ms; hash de textura no draw = 0.
+- Junção de draws (técnica do aurora/Dusklight): **medida e descartada, código removido**. A
+  assinatura por draw (`step_mergeable=` etc., `gfx_opengl_pica_merge_stats.h`) mostrou no tour11
+  (23/10, 15 áreas) 0,7 juntáveis em 74,7 draws por quadro (~1%), maior sequência 1,8: quase todo
+  draw troca textura ou uniform (matriz por objeto), ao contrário do GX do Twilight Princess. A
+  própria assinatura (FNV byte a byte de uniforms e vértices) custava 3–4 ms por quadro da render
+  thread com `gpu_timing` (`draw_perf_sig_ms`, tour12), então foi apagada (fase `perf_sig`, campos
+  `*_merge*` e o teste saíram); tours com `gpu_timing` anteriores saem pessimistas nesse tanto.
+  Quebra do draw no tour12 (Water Temple, 122 draws, 69 µs/draw com a assinatura): `glDraw*` 1,9 ms,
+  vértices 1,1, uniforms 0,8 (**551 KB de uniforms por quadro**, 181 envios), estado 0,5, upload de
+  textura 0,5, fora do submit 0,9; `sec_resolve_plans` 2,0 ms; hash de textura no draw = 0.
+- `sec_resolve_plans` (~2 ms na render thread, Water Temple) **não é plano montado tarde**: no
+  tour12, numa janela da área com `plan_late_draws=0`, `plan_late_ms=0` e `plan_lock_wait_render_ms=0`
+  (o worker montou tudo a tempo) a seção ainda deu 1,73 ms; nas outras janelas o atraso real é
+  0,08–0,19 ms por quadro. O custo é **pegar** o plano pronto: `Oot3dPicaVulkanDrawPlan` tem
+  **15.712 bytes** (dois `Oot3dPicaGeneratedFragmentShader` de 6.272 com o estado de uniforms
+  inteiro, o normal e o uber, mais 1.688 do de vértice), e `plan = std::move(batch.Plans[i])`
+  copia tudo isso por draw: ~1,9 MB por quadro, frio (o lote do worker e o vetor do quadro somam
+  mais que o L2 de 2 MB). Microbench no host (x86, -O2): 0,43 ms por quadro de 122 movimentos; a
+  identidade estrita (`ComputeOot3dPicaVisualDrawIdentity`) é ~0. Não há correção simples sem
+  estado compartilhado novo: o caminho é encolher o plano (estado de uniforms fora do struct do
+  shader, ou o uber só quando existe) ou fazer o quadro guardar o plano por ponteiro em vez de
+  movê-lo; os dois mudam o layout usado pelo agendador e pela interpolação. Sem mudança por ora.
 
 ### 4.9 Mesa 20.1 contra Mesa 26
 
@@ -708,7 +744,7 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 
 ### 5.2 Campos importantes do `perf.txt`
 
-- `glperf` CPU por draw PICA (só com `config/gpu_timing`; `step_`/`interp_`, ms por quadro de host): `draw_<fase>_ms` com fases `validate program target state uniforms vertices tex_hash tex_lookup tex_upload indices perf_sig draw rest` (soma = `draw_submit_ms`, tempo dentro do `SubmitPicaDraw`; `perf_sig` é o custo da própria medição de junção), `draw_outside_ms` (etapas PICA menos submit = trabalho do chamador entre draws), `draw_us` (submit por draw), contadores por quadro `draw_draws`, `draw_tex_lookups`, `draw_tex_hashes`, `draw_tex_hash_bytes_kb`, `draw_tex_uploads`, `draw_tex_upload_bytes_kb`, `draw_uniform_sent[_bytes_kb]`, `draw_uniform_skipped[_bytes_kb]`, `draw_vertex_bytes_kb`, `draw_index_bytes_kb`; e `sec_<resolve_plans|pin_copy|scene_env|execute|visual_sample>_ms` (parede de trechos da render thread, para decompor `cpu_other`; `execute` inclui os draws, `visual_sample` inclui `pin_copy` e `execute`). Fonte: `gl_pica_draw_phases.h` (teste `gl_pica_draw_phases_tests`).
+- `glperf` CPU por draw PICA (só com `config/gpu_timing`; `step_`/`interp_`, ms por quadro de host): `draw_<fase>_ms` com fases `validate program target state uniforms vertices tex_hash tex_lookup tex_upload indices draw rest` (soma = `draw_submit_ms`, tempo dentro do `SubmitPicaDraw`; a fase `perf_sig` da medição de junção foi removida), `draw_outside_ms` (etapas PICA menos submit = trabalho do chamador entre draws), `draw_us` (submit por draw), contadores por quadro `draw_draws`, `draw_tex_lookups`, `draw_tex_hashes`, `draw_tex_hash_bytes_kb`, `draw_tex_uploads`, `draw_tex_upload_bytes_kb`, `draw_uniform_sent[_bytes_kb]`, `draw_uniform_skipped[_bytes_kb]`, `draw_vertex_bytes_kb`, `draw_index_bytes_kb`; e `sec_<resolve_plans|pin_copy|scene_env|execute|visual_sample>_ms` (parede de trechos da render thread, para decompor `cpu_other`; `execute` inclui os draws, `visual_sample` inclui `pin_copy` e `execute`). Fonte: `gl_pica_draw_phases.h` (teste `gl_pica_draw_phases_tests`).
 - Linha principal (ms por quadro de host): `fps`, `guest` (lógica do jogo), `dsp_mix`, `audio_out`,
   `pica_submit`, `pica_plan`, `pica_backend`, `visual_present`, `visual_replay`, `present`,
   `pacing_wait`; memória `heap_arena_mb`, `heap_arena_peak_mb`, `proc_used_mb`/`proc_total_mb`
@@ -949,6 +985,11 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     libera o contador virtual no EL0: `mrs cntvct_el0` dá Data Abort na primeira leitura (pgo5e
     morria na abertura com `config/gpu_timing`, PC exatamente no `mrs`). Guarda em
     `tests/switch/test_bug_guards.py`; conferir no ELF com `objdump -d | grep -c cntvct_el0` = 0.
+34. **Uma medição cara sai do caminho quente assim que responde a pergunta.** A assinatura de
+    junção custava 3–4 ms por quadro (mais que todos os uniforms) e ficou ligada a cada tour com
+    `gpu_timing`, inflando as conclusões; e antes de otimizar uma seção medida, conferir o que ela
+    contém: `sec_resolve_plans` parecia "plano atrasado" mas era cópia de structs de 15,7 KB
+    (`plan_late_draws=0` e a seção ainda em 1,7 ms).
 
 ---
 
