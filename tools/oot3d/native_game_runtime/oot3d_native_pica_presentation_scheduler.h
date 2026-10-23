@@ -211,6 +211,7 @@ private:
   std::vector<BottomSkipRange> mBottomSkipScratch;
   BottomSkipPlan mBottomSkip;
   BottomSkipTracker mBottomSkipTracker;
+  BottomSkipMenuGate mBottomSkipMenuGate;
   std::array<std::atomic<uint64_t>, static_cast<size_t>(BottomSkipReason::Count)>
       mBottomSkipSamples{};
   std::atomic<uint64_t> mBottomSkipDrawCount{0U};

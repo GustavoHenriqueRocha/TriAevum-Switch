@@ -188,6 +188,7 @@ void Oot3dPicaPresentationScheduler::PlanBottomSkip(
     return;
   mBottomSkipDraws.clear();
   bool anyBottom = false;
+  bool anyOther = false;
   for (const auto &view : sample.Draws) {
     const auto &plan = *view.BasePlan;
     const auto &framebuffer = plan.State.Framebuffer;
@@ -201,11 +202,19 @@ void Oot3dPicaPresentationScheduler::PlanBottomSkip(
         return;
       }
       anyBottom = true;
+    } else {
+      anyOther = true;
     }
     mBottomSkipDraws.push_back(draw);
   }
+  const auto gate = mBottomSkipMenuGate.Observe(anyBottom && !anyOther);
   if (!anyBottom) {
     CountBottomSkip(BottomSkipReason::NoBottom);
+    return;
+  }
+  if (gate != BottomSkipReason::Skipped) {
+    ++mStats.BottomSkipRefusedSamples;
+    CountBottomSkip(gate);
     return;
   }
   mBottomSkipFills.clear();
@@ -607,6 +616,7 @@ void Oot3dPicaPresentationScheduler::Reset() {
   mCompositionDrawScratch.clear();
   mSnapshotCompletions.clear();
   mBottomSkipTracker.Reset();
+  mBottomSkipMenuGate.Reset();
   mTimings = {};
   mTimings.Enabled = timingEnabled;
   ++mStats.Resets;

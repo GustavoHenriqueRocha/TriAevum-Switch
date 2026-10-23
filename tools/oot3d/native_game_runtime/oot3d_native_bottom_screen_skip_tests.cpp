@@ -4,6 +4,7 @@
 #include "oot3d_native_bottom_screen_skip.h"
 
 #include <cstdio>
+#include <string>
 
 namespace {
 
@@ -278,9 +279,30 @@ void TestReasons() {
   CHECK(Plan(sample).Reason == BottomSkipReason::TransferInto);
 }
 
+// Console PGO5: the save screen sample held only lower-screen draws; skipping
+// them left the composition empty. The gate keeps them, plus a hold after.
+void TestMenuSampleNeverEmptyAndHeld() {
+  BottomSkipMenuGate gate;
+  CHECK(gate.Observe(false) == BottomSkipReason::Skipped);
+  CHECK(gate.Observe(true) == BottomSkipReason::KeptEmpty);
+  for (uint32_t i = 0; i < BottomSkipMenuGate::kHoldSamples; ++i)
+    CHECK(gate.Observe(false) == BottomSkipReason::KeptMenu);
+  CHECK(gate.Observe(false) == BottomSkipReason::Skipped);
+  // Another menu sample re-arms the hold.
+  CHECK(gate.Observe(true) == BottomSkipReason::KeptEmpty);
+  CHECK(gate.Observe(false) == BottomSkipReason::KeptMenu);
+  gate.Reset();
+  CHECK(gate.Observe(false) == BottomSkipReason::Skipped);
+  CHECK(std::string(BottomSkipReasonName(BottomSkipReason::KeptEmpty)) ==
+        "kept_empty");
+  CHECK(std::string(BottomSkipReasonName(BottomSkipReason::KeptMenu)) ==
+        "kept_menu");
+}
+
 } // namespace
 
 int main() {
+  TestMenuSampleNeverEmptyAndHeld();
   TestSkipsOnlyTheLowerScreen();
   TestNothingWithoutLowerScreen();
   TestKeptWhenTheTopSamplesIt();

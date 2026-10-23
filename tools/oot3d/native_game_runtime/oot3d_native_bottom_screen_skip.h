@@ -77,6 +77,8 @@ enum class BottomSkipReason : uint8_t {
   TransferInto, // a transfer only runs into the lower target
   TransferTop,  // the top-screen transfer reads it
   TransferUsed, // a transfer out of it lands where something reads
+  KeptEmpty,    // only lower-screen draws: skipping would leave nothing
+  KeptMenu,     // shortly after such a sample (menu/save/pause): drawn
   Count,
 };
 
@@ -92,6 +94,8 @@ enum class BottomSkipReason : uint8_t {
   case BottomSkipReason::TransferInto: return "transfer_into";
   case BottomSkipReason::TransferTop: return "transfer_top";
   case BottomSkipReason::TransferUsed: return "transfer_used";
+  case BottomSkipReason::KeptEmpty: return "kept_empty";
+  case BottomSkipReason::KeptMenu: return "kept_menu";
   case BottomSkipReason::Count: break;
   }
   return "?";
@@ -231,6 +235,35 @@ inline void PlanBottomScreenSkip(const std::vector<BottomSkipDraw> &draws,
   plan.Active = true;
   plan.Reason = BottomSkipReason::Skipped;
 }
+
+// Menus (save, pause, file select, items/map) come from the lower screen:
+// their samples hold only lower-screen draws. Skipping those would leave the
+// composition empty ("native PICA composition sequence has no draws", console
+// PGO5), so such a sample is never skipped, and neither are the next
+// kHoldSamples presentation samples (hysteresis: a menu fade or a frame with
+// a few top draws still needs the lower screen). FPS is locked there anyway.
+class BottomSkipMenuGate final {
+public:
+  static constexpr uint32_t kHoldSamples = 60U;
+
+  // One call per presentation sample. `onlyBottom`: every draw of the sample
+  // is a lower-screen one (and there is at least one).
+  [[nodiscard]] BottomSkipReason Observe(bool onlyBottom) noexcept {
+    if (onlyBottom) {
+      mHold = kHoldSamples;
+      return BottomSkipReason::KeptEmpty;
+    }
+    if (mHold != 0U) {
+      --mHold;
+      return BottomSkipReason::KeptMenu;
+    }
+    return BottomSkipReason::Skipped;
+  }
+  void Reset() noexcept { mHold = 0U; }
+
+private:
+  uint32_t mHold = 0U;
+};
 
 // Lower targets whose latest content was skipped, per render-target
 // namespace (render thread only; a handful of entries).

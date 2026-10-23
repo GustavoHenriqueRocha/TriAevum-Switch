@@ -932,6 +932,9 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
 31. Uma otimização "tudo ou nada" precisa de contador de motivo desde a primeira versão: o skip da
     tela de baixo foi ao console, rodou sem erro e não pulou quase nada (tour4), e sem o motivo no
     `perf.txt` só restava adivinhar (depth compartilhado entre as telas era a suspeita).
+32. Um skip nunca pode esvaziar a saída: ao salvar o jogo, todos os draws da amostra eram da tela de
+    baixo e a composição ficou sem draws (crash no PGO5). Amostra só com draws de baixo (menu, salvar,
+    pausa) nunca é pulada (`kept_empty`) e as 60 amostras seguintes também não (`kept_menu`).
 
 ---
 
