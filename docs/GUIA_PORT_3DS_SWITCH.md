@@ -594,6 +594,32 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   `NativeGpuFrameBusyTicks`) tiram o buraco; `config/interp_count_acquire_wait` volta a medida
   antiga. Teste: `oot3d_native_gpu_frame_timer_tests`. Junto, um `glFlush` logo antes do acquire
   entrega a cena já gravada à GPU enquanto a CPU espera (`config/gl_acquire_noflush` tira).
+- **Espera da render thread fora do custo** (2026-10-23, tour14): o custo que o governador aprende
+  por quadro é `max(GPU, render thread)`, e o tempo da render thread (`renderFrameCpuMs`, parede dos
+  comandos do quadro) incluía o acquire bloqueado da janela (glperf `clear`: 3,5 ms em média, 7–14 ms
+  nas janelas pesadas). Nas janelas com `interp_dropped` 60–74 o passo custava 17,6 ms de "render
+  thread" dos quais ~10 eram espera; o par passava de 33,3 e o intermediário caía mesmo com a GPU
+  cabendo. Cadeia: a janela EGL tem 3 buffers e o pacer usa o relógio da CPU, não o vsync; com o
+  display um fio mais lento que o pacer a fila enche (1 na tela, 1 na fila, o 3º só volta quando o
+  próximo chega à tela) e quem dá o ritmo passa a ser o `nwindowDequeueBuffer` no meio do quadro
+  (deferido para o scanout): a folga do quadro aparece em `clear` com `pacing`≈0, ou em `pacing`
+  com `clear`≈0 — a soma é a mesma. Descartar o intermediário não reduz a espera (o quadro barato só
+  espera mais), então o custo inflado se sustentava. Correção: o gancho do acquire
+  (`Fast::SetWindowAcquireHook`) também mede a espera na CPU com `armGetSystemTick`
+  (`NativeRenderWaitClock`) e o governador aprende `NativeRenderThreadBusyMs(parede, espera)`;
+  `config/interp_cpu_count_wait` volta a contar a espera. Junto, dois furos da medida de GPU de
+  10-22: o carimbo "antes do acquire" era emitido **depois** do `glFlush`, então só chegava à GPU com
+  o "depois" (buraco descontado ≈ 0) — agora vai antes do flush; e o carimbo de fim do quadro ficava
+  sem flush até o swap, depois da espera do pacer (a GPU ociosa contava como trabalho) — agora um
+  `glFlush` logo após `FinishRenderFrameCost`, antes do pacer, entrega scanout+UI à GPU enquanto a
+  CPU espera (`config/gl_pacing_noflush` tira). Campos: `perf.txt` `rt_wait_ms_<tipo>` (parte de
+  `rt_ms_` bloqueada no acquire), glperf `<tipo>_sec_acquire_ms` (bind+clear da janela), e
+  `TRIAEVUM_INTERP_PACING ... cpu_count_wait= flush_before_pacing=` no log. Modelo
+  (`oot3d_native_cadence_governor_tests --report`, "tour14": swapchain de 3, display 0,2% mais lento,
+  GPU 12,5–15,5 ms): contando a espera 1281–1471 de 1793 intermediários descartados (36–38 imagens
+  distintas/s); só o ocupado, 0–10 (59,7–59,9/s); GPU de 16,5 ms segue descartando (o par não cabe).
+  Testes: `TestRenderWaitIsNotCost` (cadence), `TestRenderThreadBusyWithoutTheWait` e
+  `TestGovernorKeepsInBetweenWithoutTheRenderWait` (`oot3d_native_gpu_frame_timer_tests`).
 - **Dois quadros em voo** (`config/frames_in_flight`): com 1, o fim de quadro do jogo espera a
   render thread terminar o quadro anterior, que espera o display; um passo longo (16–18 ms) seguido
   de um intermediário curto não se compensa e o passo perde o refresh. O modelo
@@ -1026,6 +1052,14 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
     de clear ~0,003 ms não é trabalho de clear: é a render thread bloqueada no primeiro `glClear`
     depois do swap (imagem livre da swapchain / fence do quadro anterior — contrapressão do vsync,
     que soma com `pacing`). Não otimizar como clear; conferir somando `clear+pacing`.
+
+36. **Custo para decidir é tempo ocupado; espera nunca entra.** Um tempo de parede que inclui um
+    bloqueio (acquire, vsync, fence) cresce justamente quando há folga, e uma política que corta
+    trabalho por esse tempo se trava: cortar não reduz a espera, então a medida inflada se mantém.
+    Medir o bloqueio onde ele acontece (gancho em volta da chamada) e subtrair — dos dois lados (CPU
+    e GPU). E carimbo de GPU só mede o que já foi entregue: um `glQueryCounter` emitido depois do
+    último `glFlush` executa no próximo flush, então carimbos "antes" e "depois" de uma espera, sem
+    flush entre eles, dão o mesmo tempo. Ao instrumentar, conferir em que flush cada carimbo sai.
 
 ---
 

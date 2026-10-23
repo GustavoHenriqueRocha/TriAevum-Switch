@@ -58,6 +58,11 @@ struct Params {
   double StepSubmitMs = 1.5;        // game thread, host frames with a step
   double CloseFraction = 0.5; // guest step work in the refresh that closes it
   double VblankPhaseMs = 5.0;
+  // Display refresh (0: RefreshMs). The pacer's clock and the display's
+  // are not the same: a display a hair slower than the pacer lets the
+  // swapchain fill up, and then the acquire, not the pacer, sets the pace
+  // (console: glperf clear ~9 ms with pacing ~0, or the other way round).
+  double DisplayRefreshMs = 0.0;
   double SwapLatencyMs = 0.3;
   // Locked 30 (adaptive): the game thread runs both refreshes of a step in
   // one host frame and the pacer waits two periods (PlanThirtyRefreshes).
@@ -75,6 +80,21 @@ struct Params {
   // the game thread's end-of-frame command waits until fewer than this many
   // host frames are pending on the renderer.
   uint32_t FramesInFlight = 1U;
+  // Console swapchain (EGL window, NUM_BUFFERS 3): 0 keeps the model above
+  // (the swap returns at the vblank). N > 0: the swap only queues the
+  // picture and returns; the render thread takes the next buffer at the
+  // window acquire (deferred window clear: after the scene is recorded,
+  // AcquireAtFraction of its work) and blocks there until the display has
+  // released the buffer of host frame n - N (when frame n - N + 1 reached
+  // the screen). The scanout part of the GPU work (ScanoutGpuMs) needs that
+  // buffer.
+  uint32_t SwapchainBuffers = 0U;
+  double AcquireAtFraction = 0.8;
+  double ScanoutGpuMs = 1.0;
+  // What the governor learns from the render thread: true = its wall time
+  // including the acquire wait (before config/interp_cpu_count_wait became
+  // the exception, 2026-10-23), false = only its work.
+  bool CountRenderWaits = false;
   uint32_t Seed = 12345U;
   Fps60ModeConfig Mode{};
   InterpolationPacingConfig Pacing{};
@@ -91,6 +111,7 @@ struct Result {
   uint64_t InBetweenDrawn = 0;
   uint64_t InBetweenDropped = 0;
   uint64_t DroppedRefreshes = 0; // guest refreshes lost (game slowed)
+  double AcquireWaitMs = 0.0;    // render thread blocked at the acquire
   // Between consecutive distinct pictures: display interval (mean, std)
   // and judder = RMS of (display interval - content interval), ms.
   double PictureIntervalMeanMs = 0.0;
@@ -153,6 +174,8 @@ struct Result {
   // renderEnd of the last FramesInFlight host frames, oldest first.
   std::vector<double> renderEnds;
   double lastDisplay = -1.0e9;
+  // Display time of the host frames presented, newest last (swapchain).
+  std::vector<double> displays;
   double gpuFree = 0.0;
   bool pacerStarted = false;
   double deadline = 0.0;
@@ -169,9 +192,10 @@ struct Result {
   uint64_t intervals = 0U;
   uint64_t guestRefreshes = 0U;
 
+  const double D = params.DisplayRefreshMs > 0.0 ? params.DisplayRefreshMs : P;
   const auto nextVblank = [&](double t) {
-    const double k = std::ceil((t - params.VblankPhaseMs) / P - 1.0e-9);
-    return params.VblankPhaseMs + k * P;
+    const double k = std::ceil((t - params.VblankPhaseMs) / D - 1.0e-9);
+    return params.VblankPhaseMs + k * D;
   };
 
   while (gameStart < total * 1000.0) {
@@ -272,11 +296,24 @@ struct Result {
       }
     }
     const double gpuStart = std::max(renderStart + 0.2, gpuFree);
-    const double gpuEnd = gpuStart + gpuMs;
+    double gpuEnd = gpuStart + gpuMs;
+    double waitMs = 0.0;
+    if (params.SwapchainBuffers != 0U) {
+      const double acquire =
+          renderStart + params.AcquireAtFraction * rtMs;
+      const size_t buffers = params.SwapchainBuffers;
+      double released = -1.0e9;
+      if (displays.size() + 1U >= buffers)
+        released = displays[displays.size() + 1U - buffers];
+      waitMs = std::max(0.0, released - acquire);
+      result.AcquireWaitMs += waitMs;
+      gpuEnd = std::max(gpuEnd, acquire + waitMs + params.ScanoutGpuMs);
+    }
     gpuFree = gpuEnd;
-    const double rtEnd = renderStart + rtMs;
+    const double rtEnd = renderStart + rtMs + waitMs;
     // Cost the governor learns: max of GPU and render thread.
-    const double cost = std::max(gpuMs, rtMs);
+    const double cost =
+        std::max(gpuMs, params.CountRenderWaits ? rtMs + waitMs : rtMs);
     switch (kind) {
     case RenderFrameKind::Step:
       pacing.ObserveStep(cost);
@@ -311,11 +348,17 @@ struct Result {
     // Swap: shown at the first vblank after the GPU finished.
     double display =
         nextVblank(std::max(afterPacer, gpuEnd) + params.SwapLatencyMs);
-    if (display <= lastDisplay + 0.5 * P)
-      display = lastDisplay + P;
-    renderEnd = params.SwapQueue == 0U
+    if (display <= lastDisplay + 0.5 * D)
+      display = lastDisplay + D;
+    renderEnd = params.SwapchainBuffers != 0U ? afterPacer + 0.1
+                : params.SwapQueue == 0U
                     ? display + 0.1
                     : std::max(afterPacer, lastDisplay) + 0.1;
+    if (params.SwapchainBuffers != 0U) {
+      displays.push_back(display);
+      if (displays.size() > params.SwapchainBuffers)
+        displays.erase(displays.begin());
+    }
     lastDisplay = display;
     ++result.Presents;
     cadence.ObservePresent(

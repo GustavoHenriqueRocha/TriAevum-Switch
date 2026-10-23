@@ -46,12 +46,14 @@ enum class Section : uint8_t {
     SceneEnv,      // ambiente de cena / publicacao de luz
     Execute,       // picaPresentationScheduler.Execute (inclui os draws)
     VisualSample,  // ExecuteVisualSample inteiro (inclui PinCopy e Execute)
+    WindowAcquire, // bind + limpeza da janela: espera bloqueada pelo buffer
+                   // livre da swapchain (nwindowDequeueBuffer), nao trabalho
     Count
 };
 inline constexpr size_t kSectionCount = static_cast<size_t>(Section::Count);
 
 inline constexpr std::array<const char*, kSectionCount> kSectionNames{
-    "resolve_plans", "pin_copy", "scene_env", "execute", "visual_sample"};
+    "resolve_plans", "pin_copy", "scene_env", "execute", "visual_sample", "acquire"};
 
 enum class Count : uint8_t {
     Draws,            // draws medidos

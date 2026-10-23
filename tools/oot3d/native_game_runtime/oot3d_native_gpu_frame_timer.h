@@ -59,6 +59,58 @@ namespace Oot3dNativeGame {
   return busy;
 }
 
+// Render-thread side of the same bug (2026-10-23, tour14): the frame's
+// render-thread time (renderFrameCpuMs, wall clock of its commands) also
+// contains the blocking window acquire (glperf `clear`: 3.5 ms on average,
+// 7-14 ms in Castle Town / the heavy windows). The governor takes, per
+// frame, max(GPU, render thread), so a frame whose GPU fits was costed at
+// 15-17 ms of "render thread" of which only 6-8 were work, and the pair
+// went over 33.3 ms: interp=53 hold=41 per window of 150. The wait is
+// measured around the acquire (cntpct_el0 ticks, never cntvct_el0) and
+// taken out; config/interp_cpu_count_wait keeps it in (the old measure).
+//
+// Busy part of a render-thread frame: wall time minus the waits inside it,
+// never below zero or above the wall time.
+[[nodiscard]] inline double NativeRenderThreadBusyMs(double wallMs,
+                                                     double waitMs) noexcept {
+  if (!(wallMs > 0.0))
+    return 0.0;
+  if (!(waitMs > 0.0))
+    return wallMs;
+  return waitMs >= wallMs ? 0.0 : wallMs - waitMs;
+}
+
+// Blocking waits of the render thread inside one frame (pure: the caller
+// passes its clock's ticks). Only a begin followed by its end counts; a
+// begin without end (an exception, a frame cut short) is forgotten at the
+// next Begin or Take.
+class NativeRenderWaitClock {
+public:
+  void Begin(uint64_t ticks) noexcept {
+    mOpen = true;
+    mBegin = ticks;
+  }
+  void End(uint64_t ticks) noexcept {
+    if (!mOpen)
+      return;
+    mOpen = false;
+    if (ticks > mBegin)
+      mTicks += ticks - mBegin;
+  }
+  // Ticks waited since the last Take; resets.
+  [[nodiscard]] uint64_t Take() noexcept {
+    const uint64_t ticks = mTicks;
+    mTicks = 0U;
+    mOpen = false;
+    return ticks;
+  }
+
+private:
+  bool mOpen = false;
+  uint64_t mBegin = 0U;
+  uint64_t mTicks = 0U;
+};
+
 struct NativeGpuFrameTime {
   uint8_t Kind = 0;
   double Milliseconds = 0.0;

@@ -6,6 +6,7 @@
 #include "oot3d_native_gpu_frame_timer.h"
 #include "oot3d_native_interpolation_pacing.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace {
@@ -68,9 +69,75 @@ void TestGovernorKeepsInBetweenWithoutTheGap() {
   CHECK(decide(12.3, 10.0) == InterpolatedSampleLevel::Full);
 }
 
+// tour14 (2026-10-23): the render-thread side counted the blocking window
+// acquire (glperf clear 7-10 ms in the windows that dropped). Per frame the
+// governor takes max(GPU, render thread).
+void TestRenderThreadBusyWithoutTheWait() {
+  using Oot3dNativeGame::NativeRenderThreadBusyMs;
+  CHECK(NativeRenderThreadBusyMs(17.6, 9.8) > 7.79);
+  CHECK(NativeRenderThreadBusyMs(17.6, 9.8) < 7.81);
+  CHECK(NativeRenderThreadBusyMs(10.0, 0.0) == 10.0);
+  CHECK(NativeRenderThreadBusyMs(10.0, -1.0) == 10.0);
+  CHECK(NativeRenderThreadBusyMs(10.0, 12.0) == 0.0);
+  CHECK(NativeRenderThreadBusyMs(0.0, 1.0) == 0.0);
+
+  Oot3dNativeGame::NativeRenderWaitClock clock;
+  clock.Begin(100U);
+  clock.End(160U);
+  clock.Begin(200U);
+  clock.End(230U);
+  CHECK(clock.Take() == 90U);
+  CHECK(clock.Take() == 0U);
+  // End without begin, begin without end, clock going back: nothing.
+  clock.End(500U);
+  clock.Begin(600U);
+  CHECK(clock.Take() == 0U);
+  clock.End(700U);
+  CHECK(clock.Take() == 0U);
+  clock.Begin(800U);
+  clock.End(790U);
+  CHECK(clock.Take() == 0U);
+}
+
+void TestGovernorKeepsInBetweenWithoutTheRenderWait() {
+  using namespace Oot3dNativeGame;
+  struct Frame {
+    double Gpu, Cpu, Wait;
+  };
+  const auto decide = [](Frame step, Frame full, bool countWait) {
+    const auto cost = [&](const Frame &frame) {
+      return std::max(frame.Gpu, countWait ? frame.Cpu
+                                           : NativeRenderThreadBusyMs(
+                                                 frame.Cpu, frame.Wait));
+    };
+    InterpolationPacingGovernor governor;
+    governor.Configure(InterpolationPacingConfig{}, 2000.0 / 60.0, 2.0F,
+                       false);
+    for (int frame = 0; frame < 240; ++frame) {
+      governor.ObserveStep(cost(step));
+      const auto level = governor.Decide();
+      governor.ObserveInterpolated(
+          level, level == InterpolatedSampleLevel::Full ? cost(full) : 0.5);
+    }
+    return governor.Decide();
+  };
+  // A heavy window of tour14: GPU 14.5 + 14.0, render thread 19.0 and 15.5
+  // ms of wall time of which ~10 and 7 are the acquire.
+  const Frame step{14.5, 19.0, 10.0};
+  const Frame full{14.0, 15.5, 7.0};
+  CHECK(decide(step, full, true) == InterpolatedSampleLevel::Dropped);
+  CHECK(decide(step, full, false) == InterpolatedSampleLevel::Full);
+  // GPU over the pair: dropped either way (the fix only removes waits).
+  const Frame gpuStep{17.5, 19.0, 10.0};
+  const Frame gpuFull{17.0, 15.5, 7.0};
+  CHECK(decide(gpuStep, gpuFull, false) == InterpolatedSampleLevel::Dropped);
+}
+
 } // namespace
 
 int main() {
+  TestRenderThreadBusyWithoutTheWait();
+  TestGovernorKeepsInBetweenWithoutTheRenderWait();
   TestWithoutAcquire();
   TestAcquireGapIsNotGpuWork();
   TestGovernorKeepsInBetweenWithoutTheGap();

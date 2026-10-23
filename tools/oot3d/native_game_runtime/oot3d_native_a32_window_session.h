@@ -651,6 +651,7 @@ private:
     std::array<uint64_t, 5> GpuFrames{};
     std::array<double, 5> GpuMs{};
     std::array<double, 5> CpuMs{};
+    std::array<double, 5> WaitMs{}; // of CpuMs, blocked at the window acquire
     uint64_t NativeReplaysSkipped = 0;
     uint64_t ReducedRefused = 0;
     uint64_t RepeatFallbacks = 0;

@@ -543,6 +543,73 @@ void TestSecondFrameInFlightKeepsSlowAreasAtSixty() {
   }
 }
 
+// tour14 (2026-10-23, pgo5i, GPU 614): a heavy area whose work fits the
+// pair. GPU ~14.5 ms per replay, render thread 6-10 ms of work per step and
+// 5-8 per in-between, game thread ~10 ms per step. The EGL window has 3
+// buffers and the render thread blocks at the window acquire.
+Segment Tour14Heavy(double seconds, double gpuMs) {
+  Segment segment;
+  segment.Seconds = seconds;
+  segment.GameStepMs = 10.0;
+  segment.GameStepSdMs = 1.5;
+  segment.GpuMs = gpuMs;
+  segment.GpuSdMs = 1.2;
+  segment.RtStepMinMs = 6.0;
+  segment.RtStepMaxMs = 10.0;
+  segment.RtFullMinMs = 5.0;
+  segment.RtFullMaxMs = 8.0;
+  segment.SpikeProbability = 0.0;
+  return segment;
+}
+
+Result SimulateSwapchain(const std::vector<Segment> &segments,
+                         bool countWaits) {
+  Params params;
+  params.Mode.Mode = Fps60Mode::Legacy;
+  params.SwapchainBuffers = 3U;
+  params.CountRenderWaits = countWaits;
+  // Display 0.2% slower than the pacer: the swapchain fills within seconds.
+  params.DisplayRefreshMs = 1000.0 / 59.88;
+  return CadenceSim::Run(segments, params);
+}
+
+// Regression (tour14): the render thread's acquire wait counted as its cost
+// dropped in-between frames whose GPU and render-thread work fit the pair.
+void TestRenderWaitIsNotCost() {
+  for (double gpu : {13.5, 14.5}) {
+    const auto before = SimulateSwapchain({Tour14Heavy(60, gpu)}, true);
+    const auto after = SimulateSwapchain({Tour14Heavy(60, gpu)}, false);
+    const double total =
+        static_cast<double>(after.InBetweenDrawn + after.InBetweenDropped);
+    CHECK(after.InBetweenDropped <= before.InBetweenDropped);
+    CHECK(static_cast<double>(after.InBetweenDropped) < 0.05 * total);
+    CHECK(after.Pictures >= before.Pictures);
+    CHECK(after.GuestRefreshesPerSecond > 59.5);
+  }
+  // Over the GPU pair the drops stay (only waits were taken out).
+  const auto over = SimulateSwapchain({Tour14Heavy(30, 18.0)}, false);
+  CHECK(over.InBetweenDropped > over.InBetweenDrawn);
+}
+
+void ReportRenderWaits() {
+  std::printf("\n== tour14: espera do acquire no custo (swapchain de 3) ==\n");
+  for (double gpu : {12.5, 13.5, 14.5, 15.5, 16.5}) {
+    for (bool count : {true, false}) {
+      const auto result = SimulateSwapchain({Tour14Heavy(60, gpu)}, count);
+      char name[32];
+      std::snprintf(name, sizeof(name), "gpu%.1f/%s", gpu,
+                    count ? "conta" : "ocupado");
+      Print(name, Fps60Mode::Legacy, result);
+      std::printf("           intermediarios desenhados=%llu descartados=%llu "
+                  "espera_acquire=%.2f ms/quadro\n",
+                  static_cast<unsigned long long>(result.InBetweenDrawn),
+                  static_cast<unsigned long long>(result.InBetweenDropped),
+                  result.AcquireWaitMs /
+                      static_cast<double>(std::max<uint64_t>(1U, result.HostFrames)));
+    }
+  }
+}
+
 void ReportFramesInFlight() {
   for (uint32_t queue : {0U, 1U}) {
     std::printf("\n== areas lentas (tour2), swap %s ==\n",
@@ -560,6 +627,7 @@ void ReportFramesInFlight() {
 }
 
 void Report() {
+  ReportRenderWaits();
   ReportFramesInFlight();
   struct Scenario {
     const char *Name;
@@ -603,6 +671,7 @@ int main(int argc, char **argv) {
   TestSimulationOverloadedLocksThirty();
   TestSimulationSessionIsMoreRegular();
   TestSecondFrameInFlightKeepsSlowAreasAtSixty();
+  TestRenderWaitIsNotCost();
   if (argc > 1 && std::strcmp(argv[1], "--report") == 0)
     Report();
   if (gFailures != 0) {

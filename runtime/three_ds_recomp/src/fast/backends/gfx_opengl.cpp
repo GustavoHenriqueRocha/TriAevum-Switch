@@ -1624,15 +1624,22 @@ void GfxRenderingAPIOGL::FlushDeferredWindowClear() {
     const std::array<float, 4> clearColor{mClearColor[0], mClearColor[1], mClearColor[2], mClearColor[3]};
     std::copy(std::begin(mWindowClearRgba), std::end(mWindowClearRgba), mClearColor);
     // Binding the window and clearing it dequeues its buffer (blocking).
+    // The hook's "before" GPU timestamp goes ahead of the flush: issued after
+    // it (as until 2026-10-23) it reached the GPU only with the next flush,
+    // after the wait, together with the "after" one, and the idle gap it
+    // should take out of the frame's GPU time was ~0.
+    if (gWindowAcquireHook != nullptr) {
+        gWindowAcquireHook(false);
+    }
     // The scene is recorded by now: hand it to the GPU before waiting.
     if (mFlushBeforeAcquire) {
         glFlush();
     }
-    if (gWindowAcquireHook != nullptr) {
-        gWindowAcquireHook(false);
+    {
+        GlPerf::SectionScope perfAcquire(GlPerf::Section::WindowAcquire);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        ClearFramebufferNow(mWindowClearColor, mWindowClearDepth);
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    ClearFramebufferNow(mWindowClearColor, mWindowClearDepth);
     if (gWindowAcquireHook != nullptr) {
         gWindowAcquireHook(true);
     }

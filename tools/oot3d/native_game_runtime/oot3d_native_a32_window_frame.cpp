@@ -126,8 +126,27 @@ Oot3dNativeGame::NativeGpuFrameTimer &GpuFrameTimer() {
   return timer;
 }
 
+// Blocking window acquire inside the render-thread frame (render thread).
+Oot3dNativeGame::NativeRenderWaitClock &RenderWaitClock() {
+  static Oot3dNativeGame::NativeRenderWaitClock clock;
+  return clock;
+}
+// config/interp_cpu_count_wait: the governor's render-thread cost keeps the
+// acquire wait (the measure before 2026-10-23).
+bool gCountRenderWait = false;
+// config/gl_pacing_noflush: no glFlush between the frame's last command and
+// the pacer's wait (scanout and UI then reach the GPU only at the swap).
+bool gFlushBeforePacing = true;
+
 #if defined(__SWITCH__)
-void MarkGpuFrameAcquire(bool after) { GpuFrameTimer().MarkAcquire(after); }
+void MarkGpuFrameAcquire(bool after) {
+  GpuFrameTimer().MarkAcquire(after);
+  // armGetSystemTick (cntpct_el0); cntvct_el0 faults on Horizon.
+  if (after)
+    RenderWaitClock().End(armGetSystemTick());
+  else
+    RenderWaitClock().Begin(armGetSystemTick());
+}
 #endif
 
 } // namespace
@@ -188,21 +207,28 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
     const bool countAcquireWait =
         std::ifstream("sdmc:/switch/oot3dre/config/interp_count_acquire_wait")
             .good();
+    gCountRenderWait =
+        std::ifstream("sdmc:/switch/oot3dre/config/interp_cpu_count_wait")
+            .good();
+    gFlushBeforePacing =
+        !std::ifstream("sdmc:/switch/oot3dre/config/gl_pacing_noflush").good();
     GpuFrameTimer().SetExcludeAcquireWait(!countAcquireWait);
-    Fast::SetWindowAcquireHook(countAcquireWait ? nullptr
-                                                : &MarkGpuFrameAcquire);
+    // The hook also times the render thread's wait (perf rt_wait_ms_*).
+    Fast::SetWindowAcquireHook(&MarkGpuFrameAcquire);
 #endif
     skipNativeReplay =
         !options.ForceNativeReplay && !api.PicaNativeNamespaceObservable();
     std::fprintf(stderr,
                  "TRIAEVUM_INTERP_PACING keep_speed=%d reduced_scale=%.2f "
                  "reduced_available=%d mode=%s base_scale=%.2f "
-                 "native_replay=%d fps60_mode=%s\n",
+                 "native_replay=%d fps60_mode=%s cpu_count_wait=%d "
+                 "flush_before_pacing=%d\n",
                  config.KeepGameSpeed ? 1 : 0, config.ReducedScale,
                  reducedAvailable ? 1 : 0,
                  options.ReducedAlways ? "always" : "auto", baseScale,
                  skipNativeReplay ? 0 : 1,
-                 Oot3dNativeGame::Fps60ModeName(options.Fps60Mode.Mode).data());
+                 Oot3dNativeGame::Fps60ModeName(options.Fps60Mode.Mode).data(),
+                 gCountRenderWait ? 1 : 0, gFlushBeforePacing ? 1 : 0);
   }
   std::lock_guard lock(interpolationPerfMutex);
   interpolationPerf.ReducedScale = reducedAvailable ? config.ReducedScale : 0.0F;
@@ -214,6 +240,18 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   const double cpuMs = renderFrameCpuMs;
   renderFrameKind = 0U;
   renderFrameCpuMs = 0.0;
+  // Render-thread waits inside the frame (the window acquire) are not its
+  // work: the governor learns the busy part (gpu_frame_timer.h).
+  uint64_t waitTicks = RenderWaitClock().Take();
+#if defined(__SWITCH__)
+  const double waitMs = static_cast<double>(armTicksToNs(waitTicks)) / 1.0e6;
+#else
+  (void)waitTicks;
+  const double waitMs = 0.0;
+#endif
+  const double costCpuMs =
+      gCountRenderWait ? cpuMs
+                       : Oot3dNativeGame::NativeRenderThreadBusyMs(cpuMs, waitMs);
   const auto observe = [&](uint8_t frameKind, double costMs) {
     switch (static_cast<Oot3dNativeGame::RenderFrameKind>(frameKind)) {
     case Oot3dNativeGame::RenderFrameKind::Step:
@@ -238,7 +276,15 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   std::array<double, Oot3dNativeGame::kRenderFrameKindCount> gpuMs{};
   std::array<uint64_t, Oot3dNativeGame::kRenderFrameKindCount> gpuFrames{};
   const bool gpuAvailable = timer.Available();
-  timer.EndFrame(kind, cpuMs);
+  timer.EndFrame(kind, costCpuMs);
+#if defined(__SWITCH__)
+  // The frame's last commands (scanout, UI) and its end timestamp go to the
+  // GPU now, not at the swap after the pacer's wait: the GPU works while the
+  // render thread waits, and the end timestamp no longer lands after the
+  // wait (an idle gap counted as GPU work).
+  if (gFlushBeforePacing)
+    glFlush();
+#endif
   timer.Poll([&](const Oot3dNativeGame::NativeGpuFrameTime &result) {
     if (result.Kind >= gpuMs.size()) return;
     gpuMs[result.Kind] += result.Milliseconds;
@@ -251,13 +297,14 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
     // No GPU clock (yet): render-thread time only. The swap is left out:
     // it includes the vsync wait, which made every pair look over budget
     // in the first seconds and dropped in-between frames that fit.
-    observe(kind, cpuMs);
+    observe(kind, costCpuMs);
   }
   std::lock_guard lock(interpolationPerfMutex);
   auto &perf = interpolationPerf;
   if (kind < perf.Frames.size()) {
     ++perf.Frames[kind];
     perf.CpuMs[kind] += cpuMs;
+    perf.WaitMs[kind] += waitMs;
   }
   for (size_t index = 0U; index < gpuMs.size(); ++index) {
     perf.GpuMs[index] += gpuMs[index];
@@ -849,6 +896,9 @@ bool NativeA32WindowSession::RunFrame() {
           Oot3dNativeGame::HangWatch::Stage::RenderSwap);
       window.EndFrame();
     }
+    // An acquire inside the swap (a frame that never drew to the window) is
+    // not part of the next frame's render-thread time.
+    (void)RenderWaitClock().Take();
     lastSwapMs = SecondsSince(swapStart) * 1000.0;
     ObservePresentCadence(presentedKind);
   }, true);
@@ -1052,7 +1102,11 @@ bool NativeA32WindowSession::RunFrame() {
           }
           if (frames(kind) != 0U) {
             perf << " rt_ms_" << Oot3dNativeGame::kRenderFrameKindNames[kind] << '='
-                 << ((current.CpuMs[kind] - previous.CpuMs[kind]) / frames(kind));
+                 << ((current.CpuMs[kind] - previous.CpuMs[kind]) / frames(kind))
+                 // Part of rt_ms_ blocked at the window acquire (not costed
+                 // unless config/interp_cpu_count_wait).
+                 << " rt_wait_ms_" << Oot3dNativeGame::kRenderFrameKindNames[kind] << '='
+                 << ((current.WaitMs[kind] - previous.WaitMs[kind]) / frames(kind));
           }
         }
         // Visual-frame preparation before the first draw (matching and
