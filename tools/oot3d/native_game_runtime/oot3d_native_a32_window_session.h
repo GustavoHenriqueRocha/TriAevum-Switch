@@ -382,6 +382,7 @@ private:
   bool devLabSawArrival = false;
   int16_t devLabStickX = 0;
   int16_t devLabStickY = 0;
+  uint32_t devLabButtons = 0U;
   void UpdateDevLab(uint64_t guestFrame);
   // TRIAEVUM_DEV_EMITTERS=<file.jsonl>: the native lights per scene/room.
   std::unique_ptr<Oot3dNativeGame::NativeEmitterInventoryLog> devEmitterLog;

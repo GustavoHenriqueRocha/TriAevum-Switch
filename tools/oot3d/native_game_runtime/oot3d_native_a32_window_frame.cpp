@@ -1566,6 +1566,7 @@ bool NativeA32WindowSession::SampleGuestRefreshInput(
     inputFrame.Hid.CirclePadX = devLabStickX;
     inputFrame.Hid.CirclePadY = devLabStickY;
   }
+  inputFrame.Hid.Buttons |= devLabButtons;
 #endif
   inputDiagnostics.Observe(inputFrame);
   if (inputFrame.Exit) {
@@ -3286,7 +3287,18 @@ void NativeA32WindowSession::UpdateDevLab(uint64_t guestFrame) {
         // "stick" (x/y in -1..1; y=1 walks forward, 0/0 releases).
         devLabStickX = static_cast<int16_t>(std::lround(std::clamp(command.value("x", 0.0), -1.0, 1.0) * 154.0));
         devLabStickY = static_cast<int16_t>(std::lround(std::clamp(command.value("y", 0.0), -1.0, 1.0) * 154.0));
-        finish("ok", {{"frame", guestFrame}, {"x", devLabStickX}, {"y", devLabStickY}});
+        // "buttons": 3DS buttons held with it (["R"] raises the shield).
+        devLabButtons = 0U;
+        static constexpr std::pair<const char *, ThreeDsRecomp::Input::Button> kNames[] = {
+            {"A", ThreeDsRecomp::Input::Button::A}, {"B", ThreeDsRecomp::Input::Button::B},
+            {"X", ThreeDsRecomp::Input::Button::X}, {"Y", ThreeDsRecomp::Input::Button::Y},
+            {"L", ThreeDsRecomp::Input::Button::L}, {"R", ThreeDsRecomp::Input::Button::R},
+            {"ZL", ThreeDsRecomp::Input::Button::Zl}, {"ZR", ThreeDsRecomp::Input::Button::Zr}};
+        for (const auto &name : command.value("buttons", Json::array())) {
+          for (const auto &[label, button] : kNames)
+            if (name == label) devLabButtons |= ThreeDsRecomp::Input::ButtonMask(button);
+        }
+        finish("ok", {{"frame", guestFrame}, {"x", devLabStickX}, {"y", devLabStickY}, {"buttons", devLabButtons}});
       } else if (op == "capture") {
         // Written by the render stream with this frame; the file appears shortly after.
         pendingForcedScreenshot = command.at("path").get<std::string>();

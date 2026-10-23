@@ -756,6 +756,8 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   Tour andando: `{"op":"stick","y":1}` segura o circle pad (x/y em -1..1, ±154 no HID; y=1 anda
   para a frente) até outro `stick`; `{"op":"stick","y":0}` solta. Pôr depois do warp e soltar antes
   do próximo (no Market, y=-1: para a frente sai da área).
+  `"buttons":["R"]` no mesmo `stick` segura botões do 3DS (A B X Y L R ZL ZR) até o próximo `stick`;
+  apertar = `stick` com o botão, `wait` de ~6 quadros, `stick` sem ele.
 - `config/gpu_timing` (N, padrão 30): GPU por etapa com `GL_TIMESTAMP` sem bloquear, CPU da render
   thread por etapa, contadores de chamadas GL (ganchos nos ponteiros do glad), separado por tipo de
   quadro (`step`/`interp`/`hold`). `gpu_*` inclui espera da CPU quando a render thread é o gargalo.
