@@ -78,6 +78,13 @@ class NativeRenderCommandStream final {
     }
 
     void Submit(Command command, bool endsFrame = false);
+    // From inside the running frame-ending command (worker mode): its frame
+    // stops counting against MaxFramesInFlight now instead of when it
+    // returns, so the submitter may queue the next frame's end while this
+    // command still waits for the display (config/early_frame_slot: called
+    // when the pacer starts waiting). Commands queued after it still run
+    // after it. No-op elsewhere and when called twice.
+    void ReleaseFrameSlot();
     // False when the command was dropped because shutdown has begun.
     bool Run(Command command);
     void Drain();
@@ -116,6 +123,9 @@ class NativeRenderCommandStream final {
         uint64_t WorkerIdleNanoseconds = 0U;
         // Condition-variable signals skipped because nobody waited.
         uint64_t SkippedNotifies = 0U;
+        // Frame slots handed back by ReleaseFrameSlot before the command
+        // ended.
+        uint64_t EarlyFrameSlotReleases = 0U;
     };
     [[nodiscard]] WaitStats GetWaitStats() const noexcept;
 
@@ -159,6 +169,8 @@ class NativeRenderCommandStream final {
     std::deque<Entry> mQueue;
     size_t mFramesQueued = 0U;
     bool mBusy = false;
+    // The running command ends a frame whose slot is still counted.
+    bool mRunningHoldsFrameSlot = false;
     bool mStop = false;
     std::exception_ptr mFailure;
     uint64_t mExecuted = 0U;

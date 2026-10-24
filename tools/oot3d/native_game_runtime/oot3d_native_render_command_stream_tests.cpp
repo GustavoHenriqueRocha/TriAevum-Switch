@@ -232,6 +232,70 @@ void TestFrameSlotsFull() {
     Require(!stream.FrameSlotsFull(), "slot still full after the frame finished");
 }
 
+// config/early_frame_slot (24/10): the end-of-frame command hands its slot
+// back when its pacer starts waiting; the next frame's end may then be
+// queued while it still runs, and still runs after it. A second release, a
+// release outside a frame-ending command or from a synchronous command
+// changes nothing.
+void TestEarlyFrameSlotRelease() {
+    NativeRenderCommandStream stream(Mode::Worker, 1U);
+    std::atomic<bool> released{false};
+    std::atomic<bool> finish{false};
+    std::atomic<int> order{0};
+    std::atomic<int> firstDone{0};
+    std::atomic<int> secondRan{0};
+    stream.Submit([&] { stream.ReleaseFrameSlot(); }, false);  // not a frame end
+    stream.Submit([&] {
+        stream.ReleaseFrameSlot();
+        stream.ReleaseFrameSlot();  // twice: counted once
+        released = true;
+        while (!finish.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        firstDone = ++order;
+    }, true);
+    while (!released.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Require(!stream.FrameSlotsFull(), "released slot still counted");
+    std::atomic<bool> accepted{false};
+    std::thread producer([&] {
+        stream.Submit([&] { secondRan = ++order; }, true);
+        accepted = true;
+    });
+    for (int i = 0; i < 200 && !accepted.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Require(accepted.load(), "next frame end waited for a released slot");
+    Require(stream.FrameSlotsFull(), "queued frame end does not hold the slot");
+    finish = true;
+    producer.join();
+    stream.Drain();
+    Require(firstDone.load() == 1 && secondRan.load() == 2,
+            "frame ends must still run in order");
+    Require(!stream.FrameSlotsFull(), "slot leaked after an early release");
+    const auto stats = stream.GetWaitStats();
+    Require(stats.EarlyFrameSlotReleases == 1U, "early release not counted once");
+    // From a synchronous command (Run): nothing to release.
+    stream.Run([&] { stream.ReleaseFrameSlot(); });
+    Require(stream.GetWaitStats().EarlyFrameSlotReleases == 1U,
+            "synchronous command released a slot");
+    // The slot bound is intact afterwards.
+    std::atomic<bool> hold{false};
+    stream.Submit([&] {
+        while (!hold.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }, true);
+    std::atomic<bool> passed{false};
+    std::thread waiter([&] {
+        stream.Submit([] {}, true);
+        passed = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    Require(!passed.load(), "without a release the bound of one frame must hold");
+    hold = true;
+    waiter.join();
+    stream.Drain();
+    NativeRenderCommandStream inlineStream(Mode::Inline, 1U);
+    inlineStream.Submit([&] { inlineStream.ReleaseFrameSlot(); }, true);
+    Require(inlineStream.GetWaitStats().EarlyFrameSlotReleases == 0U,
+            "inline stream released a slot");
+}
+
 int main() {
     TestInlineRunsAtSubmission();
     TestWorkerKeepsProgramOrder();
@@ -242,6 +306,7 @@ int main() {
     TestSynchronousCommandsAreDistinguished();
     TestWaitStatsAndSkippedSignals();
     TestFrameSlotsFull();
+    TestEarlyFrameSlotRelease();
     std::cout << "oot3d_native_render_command_stream_tests: ok\n";
     return 0;
 }

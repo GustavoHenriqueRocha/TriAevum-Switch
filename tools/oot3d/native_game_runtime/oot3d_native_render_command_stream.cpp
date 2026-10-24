@@ -151,6 +151,22 @@ void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
     }
 }
 
+void NativeRenderCommandStream::ReleaseFrameSlot() {
+    // Only an asynchronous command on the worker holds a frame slot (inline
+    // and Run commands are synchronous).
+    if (!tInCommand || tSynchronous) return;
+    std::lock_guard lock(mMutex);
+    if (!mRunningHoldsFrameSlot) return;
+    mRunningHoldsFrameSlot = false;
+    if (mFramesQueued != 0U) --mFramesQueued;
+    ++mWaitStats.EarlyFrameSlotReleases;
+    if (mProgressWaiters != 0U) {
+        mProgress.notify_all();
+    } else {
+        ++mWaitStats.SkippedNotifies;
+    }
+}
+
 bool NativeRenderCommandStream::Run(Command command) {
     Drain();
     if (ShutdownRequested()) return false;
@@ -303,6 +319,7 @@ void NativeRenderCommandStream::WorkerLoop() {
             continue;
         }
         mBusy = true;
+        mRunningHoldsFrameSlot = entry.EndsFrame;
         lock.unlock();
         HangWatch::Mark(HangWatch::Stage::RenderCommand);
         // Where the render thread runs, once per frame (perf.txt threads:).
@@ -319,7 +336,8 @@ void NativeRenderCommandStream::WorkerLoop() {
         HangWatch::Advance();
         lock.lock();
         mBusy = false;
-        if (entry.EndsFrame && mFramesQueued != 0U) --mFramesQueued;
+        if (mRunningHoldsFrameSlot && mFramesQueued != 0U) --mFramesQueued;
+        mRunningHoldsFrameSlot = false;
         if (failure != nullptr) {
             mFailure = failure;
             mQueue.clear();
