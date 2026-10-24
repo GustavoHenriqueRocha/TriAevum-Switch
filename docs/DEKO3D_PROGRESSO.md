@@ -19,7 +19,7 @@ no Mesa). Meta: nenhum quadro > 16,7 ms em jogo normal.
 |---|---|---|
 | 1 | Mapa da interface PICA→GL e desenho da abstração | **feito** (este arquivo) |
 | 2 | Init deko3d + swapchain + clear/apresentação atrás de `config/renderer` | **código pronto e compilado** (NRO `deko3d-p2`); falta o teste no Eden (Ryzen caiu durante ele) |
-| 3 | Shaders: GLSL→DKSH (uam), cache em disco, pré-compilação offline | em andamento: formato do pacote + ferramenta + testes; falta o carregador no console |
+| 3 | Shaders: GLSL→DKSH (uam), cache em disco, pré-compilação offline | em andamento: formato do pacote, ferramenta, testes e carregador (`ShaderStore`, só sintaxe checada); falta usar nos draws (com o pacote 4/5) e gerar o `deko3d.pack` |
 | 4 | Anéis de vértice/uniform, texturas (upload, formatos), samplers | a fazer |
 | 5 | Estado de pipeline, alvos, display transfer, DRS, widescreen | a fazer |
 | 6 | UI TopScreen (UiRenderBackend) e ImGui | a fazer |
