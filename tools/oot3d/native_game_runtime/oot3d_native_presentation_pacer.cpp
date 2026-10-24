@@ -129,12 +129,23 @@ void NativeRealtimeRefreshPacer::WaitForNextRefresh() {
 
 void NativeRealtimeRefreshPacer::WaitForNextRefresh(uint32_t periods,
                                                     bool resyncWhenLate) {
+    WaitForNextRefresh(periods, resyncWhenLate, nullptr, nullptr);
+}
+
+void NativeRealtimeRefreshPacer::WaitForNextRefresh(
+    uint32_t periods, bool resyncWhenLate, DeadlineCallback beforeWait,
+    void* user) {
+    const auto announce = [&](std::chrono::steady_clock::time_point deadline) {
+        if (beforeWait != nullptr) beforeWait(user, deadline);
+    };
     if (!mEnabled) {
+        announce(std::chrono::steady_clock::now());
         return;
     }
     if (!mStarted) {
         mStarted = true;
         mNextDeadline = std::chrono::steady_clock::now();
+        announce(mNextDeadline);
         return;
     }
 
@@ -196,8 +207,10 @@ void NativeRealtimeRefreshPacer::WaitForNextRefresh(uint32_t periods,
         } else {
             ++mStats.CarriedDeadlineDebt;
         }
+        announce(now);
         return;
     }
+    announce(mNextDeadline);
 
     const auto spinDuration = std::min(mMaximumSpin, period / 8);
     const auto coarseDeadline = mNextDeadline - spinDuration;

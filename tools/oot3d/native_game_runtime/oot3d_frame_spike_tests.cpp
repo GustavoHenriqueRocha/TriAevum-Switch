@@ -338,6 +338,37 @@ void TestPacerAnchorsToVsyncGrid() {
           "sem leitor não ancora");
 }
 
+// config/early_frame_slot: o pacer anuncia o prazo uma vez por espera, antes
+// de dormir (o slot do quadro é devolvido ali); desligado ou atrasado, o
+// anúncio é "agora" e nunca fica de fora (senão o slot só voltaria no fim).
+void TestPacerAnnouncesDeadlineBeforeWait() {
+  struct Seen {
+    int Calls = 0;
+    std::chrono::steady_clock::time_point Deadline{};
+  } seen;
+  const auto record = [](void *user, std::chrono::steady_clock::time_point deadline) {
+    auto &s = *static_cast<Seen *>(user);
+    ++s.Calls;
+    s.Deadline = deadline;
+  };
+  NativeRealtimeRefreshPacer pacer(true, 60U);
+  pacer.WaitForNextRefresh(1U, false, record, &seen); // primeiro: começa o relógio
+  Require(seen.Calls == 1, "primeira espera anuncia");
+  pacer.WaitForNextRefresh(1U, false, record, &seen);
+  const auto woke = std::chrono::steady_clock::now();
+  Require(seen.Calls == 2, "espera normal anuncia uma vez");
+  Require(seen.Deadline <= woke && woke - seen.Deadline < std::chrono::milliseconds(5),
+          "anúncio é o prazo em que o pacer acorda");
+  std::this_thread::sleep_for(std::chrono::milliseconds(60)); // atrasado
+  const auto beforeLate = std::chrono::steady_clock::now();
+  pacer.WaitForNextRefresh(1U, true, record, &seen);
+  Require(seen.Calls == 3 && seen.Deadline >= beforeLate, "atrasado anuncia agora");
+  NativeRealtimeRefreshPacer off(false, 60U);
+  off.WaitForNextRefresh(1U, false, record, &seen);
+  Require(seen.Calls == 4, "pacer desligado também anuncia");
+  pacer.WaitForNextRefresh(1U, false, nullptr, nullptr); // sem callback não quebra
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -354,6 +385,7 @@ int main(int argc, char **argv) {
   TestClassificationRingAndFormat();
   TestDriftDisappearsWithVsyncPacer(report);
   TestPacerAnchorsToVsyncGrid();
+  TestPacerAnnouncesDeadlineBeforeWait();
   if (gFailures != 0) {
     std::fprintf(stderr, "%d falha(s)\n", gFailures);
     return 1;

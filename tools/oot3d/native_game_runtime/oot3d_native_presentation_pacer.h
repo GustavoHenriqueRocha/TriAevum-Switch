@@ -75,6 +75,14 @@ class NativeRealtimeRefreshPacer final {
     // rebases the clock instead of carrying the debt, so the next picture
     // keeps the full interval (no short hold after a long one).
     void WaitForNextRefresh(uint32_t periods, bool resyncWhenLate);
+    // The same, calling beforeWait(user, deadline) once the deadline of this
+    // presentation is known and before any sleep (config/early_frame_slot
+    // hands the frame slot back there). The deadline is `now` when pacing is
+    // off or the frame is late (a rebased or carried deadline in the past).
+    using DeadlineCallback = void (*)(void* user,
+                                      std::chrono::steady_clock::time_point deadline);
+    void WaitForNextRefresh(uint32_t periods, bool resyncWhenLate,
+                            DeadlineCallback beforeWait, void* user);
     void ObservePresentation(
         std::chrono::steady_clock::time_point presentationTime) noexcept;
     void ResetDeadline() noexcept;
