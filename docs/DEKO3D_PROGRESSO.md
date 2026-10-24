@@ -60,7 +60,7 @@ olhar `deko3d debug:` e `queue in error state` no log.
   ao backend (`pica: first draw / first transfer / first presented transfer / first memory fill /
   first render-target clear / first completion queued / taken`); contadores `pica calls`/`pica` já no
   quadro 300 (e a cada 1800); quadro 300 e 1800 também logados. Texturas pré-decodificadas pelo worker
-  também no deko3d (antes só no GL). NRO `~/oot3d-work/oot3d_native_game.deko3d-p5b.nro`.
+  também no deko3d (antes só no GL). NRO `~/oot3d-work/oot3d_native_game.deko3d-p5b.nro` (md5 `34933b33aece7763bdbbf7ad0eddf41a`, 147 093 055 bytes, build Ryzen -j 3).
 - Ao testar o p5b: se a 2ª linha não for `backend p5b`, o NRO no SD não é o novo. Se for e não houver
   `pica: first draw`, o PICA não está chegando ao backend (procurar no log do jogo
   `native PICA … failed`).
