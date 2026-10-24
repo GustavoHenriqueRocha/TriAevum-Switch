@@ -703,6 +703,85 @@ void ReportFramesInFlight() {
   }
 }
 
+// tour20/tour22 (pgo5o, 24/10): outside loads the missed refreshes are
+// isolated step frames whose game thread ran 20-29 ms (guest 17-24) while the
+// following in-between frame cost ~3: the pair fits 33.3 ms, the step does
+// not. Most of the guest step closes in one refresh.
+Segment Tour20Area(double seconds, double stepMs) {
+  Segment segment;
+  segment.Seconds = seconds;
+  segment.GameStepMs = stepMs;
+  segment.GameStepSdMs = 2.5;
+  segment.GpuMs = 12.5;
+  segment.GpuSdMs = 1.5;
+  segment.RtStepMinMs = 8.0;
+  segment.RtStepMaxMs = 14.0;
+  segment.RtFullMinMs = 5.0;
+  segment.RtFullMaxMs = 8.0;
+  segment.SpikeProbability = 0.03;
+  segment.SpikeMs = 8.0;
+  return segment;
+}
+
+enum class SlotMode { One, Early, EarlyClock, Two };
+
+Result SimulateSlots(const std::vector<Segment> &segments, SlotMode slot) {
+  Params params;
+  params.Mode.Mode = Fps60Mode::Legacy;
+  params.Pacing.MarginMs = 0.0;
+  params.CloseFraction = 0.85;
+  params.FramesInFlight = slot == SlotMode::Two ? 2U : 1U;
+  params.ReleaseSlotAtPacer =
+      slot == SlotMode::Early || slot == SlotMode::EarlyClock;
+  params.RefreshClockFromDeadline = slot == SlotMode::EarlyClock;
+  return CadenceSim::Run(segments, params);
+}
+
+// config/early_frame_slot: handing the frame slot back when the pacer starts
+// waiting absorbs most isolated long steps (the game thread starts the next
+// host frame a pacer wait earlier), without the second frame in flight
+// (which corrupted the heap on the console, tour3b). With the refresh clock
+// on the pacer deadline it keeps the game speed.
+void TestEarlyFrameSlotAbsorbsLongSteps() {
+  for (double step : {16.0, 18.0, 20.0}) {
+    const auto one = SimulateSlots({Tour20Area(60, step)}, SlotMode::One);
+    const auto early =
+        SimulateSlots({Tour20Area(60, step)}, SlotMode::EarlyClock);
+    CHECK(early.MissedFrames < one.MissedFrames);
+    CHECK(early.Pictures >= one.Pictures);
+    CHECK(early.GuestRefreshesPerSecond >= one.GuestRefreshesPerSecond - 0.5);
+  }
+  // Without long steps nothing changes for the worse.
+  const auto oneLight = SimulateSlots({Light(30)}, SlotMode::One);
+  const auto earlyLight = SimulateSlots({Light(30)}, SlotMode::EarlyClock);
+  CHECK(earlyLight.MissedFrames <= oneLight.MissedFrames);
+  CHECK(earlyLight.GuestRefreshesPerSecond >=
+        oneLight.GuestRefreshesPerSecond - 0.5);
+}
+
+void ReportFrameSlots() {
+  std::printf("\n== tour20: passos longos isolados, slot do quadro ==\n");
+  static constexpr const char *kNames[] = {"f1", "cedo", "cedo+rel", "f2"};
+  for (double step : {10.0, 11.0, 12.0, 13.0, 14.0, 16.0, 18.0, 20.0}) {
+    for (auto slot : {SlotMode::One, SlotMode::Early, SlotMode::EarlyClock,
+                      SlotMode::Two}) {
+      const auto result = SimulateSlots({Tour20Area(60, step)}, slot);
+      std::printf("g%.0f %-9s perdidos/min=%6.1f refr_perdidos/min=%6.1f "
+                  "pics/s=%5.1f jogo=%5.1f refr/s interm=%llu/%llu held=%llu\n",
+                  step, kNames[static_cast<int>(slot)],
+                  60.0 * static_cast<double>(result.MissedFrames) /
+                      result.Seconds,
+                  60.0 * static_cast<double>(result.MissedRefreshes) /
+                      result.Seconds,
+                  static_cast<double>(result.Pictures) / result.Seconds,
+                  result.GuestRefreshesPerSecond,
+                  static_cast<unsigned long long>(result.InBetweenDrawn),
+                  static_cast<unsigned long long>(result.InBetweenDropped),
+                  static_cast<unsigned long long>(result.HeldPictureRefreshes));
+    }
+  }
+}
+
 void Report() {
   std::printf("\n== tour15: calibracao do oculto (margem 0) ==\n");
   Calibrate();
@@ -710,6 +789,7 @@ void Report() {
   SweepMargin();
   ReportRenderWaits();
   ReportFramesInFlight();
+  ReportFrameSlots();
   struct Scenario {
     const char *Name;
     std::vector<Segment> Segments;
@@ -754,6 +834,7 @@ int main(int argc, char **argv) {
   TestSecondFrameInFlightKeepsSlowAreasAtSixty();
   TestRenderWaitIsNotCost();
   TestMarginKeepsTheRefresh();
+  TestEarlyFrameSlotAbsorbsLongSteps();
   if (argc > 1 && std::strcmp(argv[1], "--report") == 0)
     Report();
   if (gFailures != 0) {

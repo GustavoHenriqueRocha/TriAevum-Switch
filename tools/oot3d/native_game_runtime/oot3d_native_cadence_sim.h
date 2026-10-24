@@ -84,6 +84,16 @@ struct Params {
   // the game thread's end-of-frame command waits until fewer than this many
   // host frames are pending on the renderer.
   uint32_t FramesInFlight = 1U;
+  // config/early_frame_slot: the end-of-frame command hands its frame slot
+  // back when the pacer starts waiting (the frame's rendering is done; only
+  // the display deadline and the swap remain), not after the swap. The game
+  // thread starts the next host frame up to a pacer wait earlier.
+  bool ReleaseSlotAtPacer = false;
+  // With ReleaseSlotAtPacer: the guest refresh clock of a host frame is the
+  // pacer deadline of the frame whose slot it waited for (when still in the
+  // future), not the wall clock, so starting early does not change how many
+  // refreshes are due (0/2 alternations).
+  bool RefreshClockFromDeadline = false;
   // Console swapchain (EGL window, NUM_BUFFERS 3): 0 keeps the model above
   // (the swap returns at the vblank). N > 0: the swap only queues the
   // picture and returns; the render thread takes the next buffer at the
@@ -170,7 +180,6 @@ struct Result {
 
   // Game thread state.
   double gameStart = 0.0;
-  double previousGameStart = 0.0;
   double phase = 0.0;
   bool started = false;
   uint64_t refreshCounter = 0U;
@@ -191,8 +200,15 @@ struct Result {
 
   // Render thread / GPU state.
   double renderEnd = 0.0; // previous host frame presented (swap returned)
-  // renderEnd of the last FramesInFlight host frames, oldest first.
+  // renderEnd of the last FramesInFlight host frames, oldest first (with
+  // ReleaseSlotAtPacer: when each one's pacer wait started).
   std::vector<double> renderEnds;
+  // Pacer deadline of the same host frames.
+  std::vector<double> slotDeadlines;
+  double gameClock = 0.0;          // refresh clock of this host frame
+  double previousGameClock = 0.0;
+  double nextGameClock = 0.0;
+  bool hasNextGameClock = false;
   double lastDisplay = -1.0e9;
   // Display time of the host frames presented, newest last (swapchain).
   std::vector<double> displays;
@@ -220,7 +236,10 @@ struct Result {
 
   while (gameStart < total * 1000.0) {
     // --- game thread: one host frame ---
-    const double elapsed = started ? gameStart - previousGameStart : 0.0;
+    gameClock = hasNextGameClock ? nextGameClock : gameStart;
+    const double elapsed =
+        started ? std::max(0.0, gameClock - previousGameClock) : 0.0;
+    previousGameClock = gameClock;
     uint32_t due = 1U;
     const bool adaptiveThirty = mode == Fps60Mode::Adaptive &&
                                 cadence.DropsInBetween() &&
@@ -239,7 +258,6 @@ struct Result {
       phase = decision.Phase;
     }
     started = true;
-    previousGameStart = gameStart;
     const auto &segment = segmentAt(gameStart);
     double busy = params.HostFrameOverheadMs;
     double guestMs = 0.0;
@@ -429,12 +447,23 @@ struct Result {
     // one's render start).
     const size_t inFlight = std::max<size_t>(1U, params.FramesInFlight);
     double submitted = commandsReady;
-    if (renderEnds.size() >= inFlight)
+    double waitedDeadline = 0.0;
+    bool waitedForSlot = false;
+    if (renderEnds.size() >= inFlight) {
+      waitedForSlot = true;
       submitted = std::max(submitted, renderEnds[renderEnds.size() - inFlight]);
-    renderEnds.push_back(renderEnd);
-    if (renderEnds.size() > inFlight)
+      waitedDeadline = slotDeadlines[slotDeadlines.size() - inFlight];
+    }
+    renderEnds.push_back(params.ReleaseSlotAtPacer ? rtEnd : renderEnd);
+    slotDeadlines.push_back(afterPacer);
+    if (renderEnds.size() > inFlight) {
       renderEnds.erase(renderEnds.begin());
+      slotDeadlines.erase(slotDeadlines.begin());
+    }
     gameStart = std::max(commandsReady, submitted) + 0.05;
+    hasNextGameClock = params.ReleaseSlotAtPacer &&
+                       params.RefreshClockFromDeadline && waitedForSlot;
+    nextGameClock = waitedDeadline;
   }
   result.Seconds = gameStart / 1000.0;
   result.Cadence = cadence.Stats();
