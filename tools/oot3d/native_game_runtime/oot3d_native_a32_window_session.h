@@ -565,6 +565,19 @@ private:
   Fast::Renderer3ds::PicaFrameCompositionPolicy guestCompositionPolicy{};
   bool guestInterpolationEnabled{};
   std::chrono::steady_clock::time_point lastPresentationTime{};
+  // config/early_frame_slot (opt-in): the end-of-frame command hands the
+  // frame slot back when the pacer starts waiting, so the next game frame
+  // starts during the previous picture's pacer and swap instead of after it;
+  // that frame's refresh clock is then the pacer deadline it waited for (not
+  // the wake-up time), published here per presentation serial.
+  bool earlyFrameSlot{};
+  std::array<std::atomic<uint64_t>, 4> earlySlotDeadlineSerial{};
+  std::array<std::atomic<int64_t>, 4> earlySlotDeadlineNs{};
+  uint64_t earlySlotClockFrames = 0;
+  void PublishPresentationDeadline(uint64_t serial,
+                                   std::chrono::steady_clock::time_point deadline);
+  std::optional<std::chrono::steady_clock::time_point>
+  PublishedPresentationDeadline(uint64_t serial) const;
   NativeAudioOutputDiagnostics audioOutputDiagnostics;
   Oot3dNativeGame::NativePcmContinuityDiagnostics pcmContinuityDiagnostics;
   std::vector<int16_t> pcmDumpSamples;

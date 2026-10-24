@@ -1590,6 +1590,23 @@ void NativeA32WindowSession::Setup() {
       renderStream.SetMaxFramesInFlight(1U);
     }
 #endif
+    // config/early_frame_slot: present = on, content "0" = off (A/B).
+    {
+      std::ifstream earlySlotFile(
+#if defined(__SWITCH__)
+          "sdmc:/switch/oot3dre/config/early_frame_slot"
+#else
+          "config/early_frame_slot"
+#endif
+      );
+      if (earlySlotFile.is_open()) {
+        std::string value;
+        std::getline(earlySlotFile, value);
+        earlyFrameSlot = value.empty() || value[0] != '0';
+      }
+      std::fprintf(stderr, "TRIAEVUM early_frame_slot=%d\n",
+                   earlyFrameSlot ? 1 : 0);
+    }
     // The ImGui overlay (and the display composition it triggers) renders
     // in renderer order, from a copy of each frame's draw data.
     if (fast3dGui != nullptr) {

@@ -1051,6 +1051,28 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
   acontecer. Usa uma varredura limitada dos bins do newlib (`oot3d_heap_bin_check.h`), não o
   `mallinfo()`: este percorre as listas sem limite segurando o lock do malloc e, com uma lista
   corrompida, congela o processo inteiro sem crash (foi o congelamento de 2026-10-17).
+- `python3 tools/oot3d/spike_report.py <pasta> [oot3d_dev_warp_catalog.inc]`: picos do
+  `logs/spikes.txt` **só da última sessão** (o arquivo acumula sessões: no tour20, 428 das 591
+  linhas eram do tour19), sem `ctx=load`, por área (acks do lab) e etapa, isolados contra em
+  sequência e quanto o quadro do jogo teria de encolher para caber.
+- **Análise de picos fora de carregamento (2026-10-24, tour20/pgo5o e tour22)**: tour20 = 164 picos,
+  121 em load, 43 fora (9 no boot; Kakariko 5, Desert Colossus 2, Deku Tree 2; ~22 na cena pesada
+  depois do tour). tour22 = 227, 103 fora (Market 15, Fire Temple 7, Hyrule Castle 5). Quase todos
+  `stage=guest` com guest_ms ~20-21 ms (passo de lógica longo), e a maioria **isolada** (um passo
+  longo seguido de um curto: o par cabe em 33,3 ms). Encolher o quadro do jogo 1,7 ms (som + DSP
+  noutro núcleo) resolveria **3 de 95** picos de guest — **descartado**; 8 ms resolveria ~45%.
+  Daí o `config/early_frame_slot` (abaixo). Artefato de medição: com `config/gpu_timing` a
+  varredura do heap (a cada 20 janelas) custa 16-21 ms na thread do jogo e gera um pico em
+  `host ≡ 150 (mod 3000)`; ignorar esses (ou medir com `heap_check_windows` ausente e sem gpu_timing).
+- `config/early_frame_slot` (opt-in; conteúdo `0` desliga): o comando de fim de quadro devolve o
+  slot do quadro em voo quando o pacer **começa** a esperar (não depois do swap), e a thread do
+  jogo usa como relógio de refresh o prazo do pacer do quadro S-2 (não a hora em que acordou).
+  Continua 1 quadro em voo (`frames_in_flight=2` corrompeu o heap no tour3b): a sobreposição nova é
+  só o início do quadro S do jogo com pacer+swap do quadro S-2. Simulação (`oot3d_native_cadence_
+  governor_tests --report`, área tipo tour20): refreshes perdidos/min 73→32 (passo 12 ms),
+  176→45 (14), 555→84 (16), 970→213 (18); sem o relógio pelo prazo as imagens/s **pioram**
+  (refreshes 0/2 alternados). `perf.txt` `sync:` mostra `early_slot`, `early_slot_releases`,
+  `early_slot_clock_frames`.
 - `config/debug_force_game_over` (exemplo de gatilho de teste específico do jogo): zera a vida após
   N s para testar uma tela rara.
 - Fotos do Status Monitor (overlay) e capturas do álbum (`album_sd:` via FTP) para GPU %/núcleos.

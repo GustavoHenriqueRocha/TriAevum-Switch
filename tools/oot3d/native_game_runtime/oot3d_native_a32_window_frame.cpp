@@ -580,6 +580,37 @@ void NativeA32WindowSession::DrainFrameSpikes() {
     (void)spikeWriter->Push(std::move(batch));
 }
 
+void NativeA32WindowSession::PublishPresentationDeadline(
+    uint64_t serial, std::chrono::steady_clock::time_point deadline) {
+  const size_t index = serial % earlySlotDeadlineSerial.size();
+  // Serial 0 marks an empty entry: store serial + 1.
+  earlySlotDeadlineSerial[index].store(0U, std::memory_order_relaxed);
+  earlySlotDeadlineNs[index].store(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          deadline.time_since_epoch())
+          .count(),
+      std::memory_order_relaxed);
+  earlySlotDeadlineSerial[index].store(serial + 1U, std::memory_order_release);
+}
+
+std::optional<std::chrono::steady_clock::time_point>
+NativeA32WindowSession::PublishedPresentationDeadline(uint64_t serial) const {
+  const size_t index = serial % earlySlotDeadlineSerial.size();
+  if (earlySlotDeadlineSerial[index].load(std::memory_order_acquire) !=
+      serial + 1U) {
+    return std::nullopt;
+  }
+  const int64_t ns = earlySlotDeadlineNs[index].load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (earlySlotDeadlineSerial[index].load(std::memory_order_relaxed) !=
+      serial + 1U) {
+    return std::nullopt;
+  }
+  return std::chrono::steady_clock::time_point(
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::nanoseconds(ns)));
+}
+
 bool NativeA32WindowSession::RunFrame() {
   auto &process = *processStorage;
   auto &uiLifecycleBridge = *uiLifecycleBridgeStorage;
@@ -658,13 +689,26 @@ bool NativeA32WindowSession::RunFrame() {
   renderStream.Submit([&, presentationTime] {
     realtimePacer.ObservePresentation(presentationTime);
   });
+  // config/early_frame_slot: this frame waited (at the previous frame's end
+  // submission) for the slot of picture S-2, released when its pacer began;
+  // its refresh clock is that picture's deadline, so a wake-up before the
+  // swap does not shift the refresh phase. Without a published deadline
+  // (slot free, skipped frame) the clock is `now`.
+  auto refreshClock = presentationTime;
+  if (earlyFrameSlot && presentationFrameCount >= 2U) {
+    if (const auto deadline =
+            PublishedPresentationDeadline(presentationFrameCount - 2U)) {
+      refreshClock = *deadline;
+      ++earlySlotClockFrames;
+    }
+  }
   const double presentationElapsedSeconds =
       hostArgs.FixedDeltaSeconds > 0.0
           ? hostArgs.FixedDeltaSeconds
-          : std::chrono::duration<double>(presentationTime -
-                                          lastPresentationTime)
-                .count();
-  lastPresentationTime = presentationTime;
+          : std::max(0.0, std::chrono::duration<double>(refreshClock -
+                                                        lastPresentationTime)
+                              .count());
+  lastPresentationTime = std::max(lastPresentationTime, refreshClock);
   // Presentation cadence (config/fps60_mode): the previous host frame's
   // game-thread cost (its duration minus the waits for the renderer) goes
   // to the render thread's governor.
@@ -1108,7 +1152,22 @@ bool NativeA32WindowSession::RunFrame() {
     {
       Oot3dNativeGame::HangWatch::StageScope hangPacer(
           Oot3dNativeGame::HangWatch::Stage::RenderPacer);
-      realtimePacer.WaitForNextRefresh(thirtyStep ? 2U : 1U, thirtyStep);
+      if (earlyFrameSlot) {
+        struct EarlySlot {
+          NativeA32WindowSession* Session;
+          uint64_t Serial;
+        } early{this, presentationSerial};
+        realtimePacer.WaitForNextRefresh(
+            thirtyStep ? 2U : 1U, thirtyStep,
+            [](void* user, std::chrono::steady_clock::time_point deadline) {
+              auto& slot = *static_cast<EarlySlot*>(user);
+              slot.Session->PublishPresentationDeadline(slot.Serial, deadline);
+              slot.Session->renderStream.ReleaseFrameSlot();
+            },
+            &early);
+      } else {
+        realtimePacer.WaitForNextRefresh(thirtyStep ? 2U : 1U, thirtyStep);
+      }
     }
     cpuPacing.Stop();
     const double pacerWaitSeconds = SecondsSince(waitStart);
@@ -1282,6 +1341,10 @@ bool NativeA32WindowSession::RunFrame() {
              << perFrameMs(tail.OversleepNanoseconds, previousTail.OversleepNanoseconds)
              << " pacer_oversleep_max_ms="
              << static_cast<double>(realtimePacer.TakeMaximumOversleepNanoseconds()) / 1.0e6
+             << " early_slot=" << (earlyFrameSlot ? 1 : 0)
+             << " early_slot_releases="
+             << (waits.EarlyFrameSlotReleases - previousWaits.EarlyFrameSlotReleases)
+             << " early_slot_clock_frames=" << earlySlotClockFrames
              << ' ' << Oot3dNativeGame::SwitchThreadPerfSummary()
              // Hang watchdog (logs/hang.txt): on, and reports written.
              << " hang_wd=" << (Oot3dNativeGame::HangWatch::Running() ? 1 : 0)
