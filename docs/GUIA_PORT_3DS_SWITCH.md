@@ -1001,6 +1001,39 @@ GLSL no console: os shaders vão prontos (DKSH, do `uam` do devkitPro) num pacot
 - **Carregar:** o DKSH inteiro vai para a memória de código (`DkMemBlockFlags_Code`, alinhamento
   256) e `dkShaderMakerDefaults(&maker, bloco, offset)` sem ponteiro de controle separado.
 
+### 4.12 deko3d: trocar o GL por deko3d sem mudar os shaders (alvos, estado, scanout)
+
+*(2026-10-24, pacote 5 do ramo `deko3d`)* Receita para levar um backend GL de alvos fora da tela a
+deko3d com os **mesmos textos GLSL**:
+
+- **Convenções:** device com `DkDeviceFlags_DepthMinusOneToOne | DkDeviceFlags_OriginUpperLeft`.
+  Fora da tela, a memória fica igual à do GL (NDC y=−1 → linha 0, `gl_FragCoord.y` = índice da
+  linha, textura t=0 = linha 0), então viewport/scissor/blit do GL valem 1:1 e os shaders não mudam.
+  Só o desenho na **imagem da janela** inverte Y: no scanout, `v = 0.5 − y/2` no vertex shader.
+- **Sentido de face:** com a origem em cima, o sentido na janela inverte (como no Vulkan): frente
+  CW para o "CCW" do GL. Deixe uma chave em arquivo (`config/deko3d_cull_invert`) para desfazer
+  sem rebuild se a geometria aparecer do avesso.
+- **Shaders internos (scanout) sem compilador no console:** GLSL em `tools/.../*.glsl`, `uam` no PC
+  e um cabeçalho gerado com o DKSH em `uint8_t[]` (`tools/oot3d/deko3d_scanout/gen.py`); carregado
+  com uma chave fixa no mesmo `ShaderStore`. No uam não há uniform solto: use um bloco std140.
+- **Barreiras que o GL fazia sozinho:** cópia buffer→imagem (motor de cópia) antes do draw que lê:
+  `dkCmdBufBarrier(Full, Image|Descriptors|Shader)` uma vez (e 1×/quadro, que também limpa o cache
+  de uniform sobre a memória de stream reaproveitada); alvo desenhado → blit 2D:
+  `Barrier(Full, 0)` antes e `Barrier(Full, Image)` depois (o scanout amostra a cópia e o próximo
+  quadro volta a escrever o alvo).
+- **Imagens:** alvo de cor `RGBA8` com `UsageRender|Usage2DEngine` (é fonte de blit), depth `Z24S8`
+  com `UsageRender|HwCompression`; imagem de display com `Usage2DEngine` (destino do blit) e um slot
+  de descritor do array global; imagem trocada de tamanho vai para uma lista e só é destruída depois
+  de `kFramesInFlight` quadros.
+- **Atributo de vértice ausente** (GL: array desligado lê (0,0,0,1)): um buffer de 16 bytes em memória
+  **com endereço de CPU** (`CpuUncached`) num slot fixo, por instância. Bug visto aqui: o bloco de
+  imagens (`DkMemBlockFlags_Image` sem `Cpu*`) não tem endereço de CPU; o constante nunca foi escrito.
+- **Operação lógica:** a ordem PICA (Clear, And, AndReverse, Copy, Set, …) não é a do deko3d/GL
+  (… Copy=3, …, Set=15): mapeie caso a caso e teste no host; `logicOp = Copy` desliga.
+- **Widescreen/projeção:** o código do jogo decidia o alargamento do frustum pelo nome da API
+  (`"OpenGL"`); um backend novo com o alvo do GL precisa entrar na mesma regra, senão a cena fica
+  esticada.
+
 ## 5. Medição e diagnóstico
 
 ### 5.1 Arquivos no SD (`sdmc:/switch/oot3dre/`)

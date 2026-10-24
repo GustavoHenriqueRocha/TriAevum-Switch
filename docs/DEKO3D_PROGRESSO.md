@@ -21,7 +21,7 @@ no Mesa). Meta: nenhum quadro > 16,7 ms em jogo normal.
 | 2 | Init deko3d + swapchain + clear/apresentação atrás de `config/renderer` | **código pronto e compilado** (NRO `deko3d-p2`); falta o teste no Eden (Ryzen caiu durante ele) |
 | 3 | Shaders: GLSL→DKSH (uam), cache em disco, pré-compilação offline | **feito e compilado** (NRO `deko3d-p3`): pacote `deko3d.pack` gerado (272 do cache GL + 4 bases uber, 0 falhas), `ShaderStore`, programa por draw (especializado > uber > pula), híbrido ligado |
 | 4 | Anéis de vértice/uniform, texturas (upload, formatos), samplers | **parte 1 no código** (compila; sintaxe checada com o devkitA64): texturas RGBA8/LUT/samplers/descritores/despejo e streams por draw; falta: geometria persistente, ETC1→ETC2, Shadow2D, e medir no console |
-| 5 | Estado de pipeline, alvos, display transfer, DRS, widescreen | a fazer |
+| 5 | Estado de pipeline, alvos, display transfer, DRS, widescreen | **código pronto** (sintaxe e testes de host ok; build na Ryzen: ver abaixo); DRS e pós-processamento ficam para depois |
 | 6 | UI TopScreen (UiRenderBackend) e ImGui | a fazer |
 | 7 | Contadores no perf.txt equivalentes aos do GL (A/B) | a fazer |
 | 8 | Estabilidade/memória | a fazer |
@@ -32,12 +32,55 @@ no Mesa). Meta: nenhum quadro > 16,7 ms em jogo normal.
 (acquire 48,8 ms somados em 60 quadros, 0 overflows); nenhum erro novo no log do jogo. Pacotes 2 e 3
 validados no console.
 
-**Próximo passo:** pacote 5 (alvos `DkImage` cor+depth por `PicaGlTarget`, estado de pipeline,
-viewport/scissor, o draw em si com `PicaDrawResources` + barreira `TakeInvalidate`/`TakeCodeWritten`,
-display transfer e scanout). Teste no console/Eden do NRO `deko3d-p3` (só quando liberado; nada de
-emulador na Ryzen): `logs/deko3d.txt` deve mostrar `shaders: 276 precompiled stages`, e a linha
-`programs (frame)` com `no_vertex=0`, quase tudo `specialized` e o resto `uber`. Para isso copiar
-`~/oot3d-work/deko3d-p3.pack` para `sdmc:/switch/oot3dre/shadercache/deko3d.pack`.
+**NRO p5 (24/10):** `~/oot3d-work/oot3d_native_game.deko3d-p5.nro`, md5
+`411e4d9f6018d8838e77a530ff637a4f` (147 093 055 bytes), compilado na Ryzen do commit `66f9957e`
+(11 passos, `-j 3`, `nice 10`, sem shard). Ainda **não testado no console**.
+
+**Como testar o p5 no Switch:** `config/renderer` = `deko3d` e `shadercache/deko3d.pack` (o p3,
+`~/oot3d-work/deko3d-p3.pack`). O que deve aparecer: a cena do jogo e os menus desenhados pela PICA
+(tela de cima; o que o jogo põe na de baixo também, se apresentado), sem o HUD/UI TopScreen nem o
+contador de FPS/ImGui (pacote 6), sem sombras projetadas (Shadow2D) e sem FXAA/SMAA/EASU. No
+`logs/deko3d.txt`: `targets: ...` com os alvos criados, `pica: scanout shaders ready`, e a cada
+1800 quadros `pica (frame): draws issued=...` (issued alto, `transfers`/`scanouts` > 0).
+Diagnóstico rápido sem rebuild: geometria do avesso (paredes somem, vê-se o interior) →
+`config/deko3d_cull_invert` com `1`; imagem de cabeça para baixo/espelhada → anotar (é o scanout:
+`tools/oot3d/deko3d_scanout/scanout_vsh.glsl`); tela preta com `issued` > 0 e `scanouts` > 0 →
+olhar `deko3d debug:` e `queue in error state` no log.
+
+**Próximo passo:** testar o p5 no console; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
+Shadow2D (programas com imagem no pacote) e medir o `pica_submit` contra o GL (pacote 7).
+
+### Pacote 5 (o que entrou, 24/10, commit `66f9957e`)
+
+- `gfx_deko3d_pica_pipeline.h` (puro, host): enums PICA → valores do deko3d (comparação, stencil,
+  **operação lógica** — a ordem PICA difere —, blend, primitiva), plano de cull, chave/extensão de
+  alvo (escala `config/resolution_scale(_docked)` como o GL, widescreen alarga só o alvo de cima
+  480×400), viewport/scissor com as bordas do `PicaGlScale`, decodificação dos fills, plano do display
+  transfer (mesmas contas e flip do GL, sem DRS) e posição do scanout na janela.
+- `gfx_deko3d_pica_targets.{h,cpp}`: alvo = um memblock com cor RGBA8 (`UsageRender|Usage2DEngine`)
+  + Z24S8 (`HwCompression`), limpo ao nascer (cor 0, depth 1, stencil 0) como o GL; imagem de display
+  RGBA8 com slot de descritor próprio; imagem trocada de tamanho só é destruída 2 quadros depois.
+- `gfx_deko3d_pica_draw.cpp`: `SubmitPicaDraw` (mesmas rejeições do GL; fills pendentes; produtor de
+  Shadow2D pulado e contado; draw sem efeito pulado; shaders, UBO vértice 0 / fragmento 4, texturas
+  1..3 + LUT 13, vértices com o constante (0,0,0,1) no slot 15, blend/logic op/máscara/depth/stencil/
+  cull, sem depth clamp, viewport/scissor e posicionamento widescreen portado do GL sem os cantos),
+  `SubmitPicaDisplayTransfer` (blit 2D com barreiras, cópia idêntica repetida pulada como o `gl_lean`),
+  scanout (DKSH embutido, `tools/oot3d/deko3d_scanout/`; v invertido para a origem em cima; clear da
+  janela fora do viewport; AlphaOverlay com blend), `ClearPicaRenderTarget`, `SubmitPicaMemoryFill`,
+  `ResetPicaState`. Log novo em `logs/deko3d.txt`: `targets: ...` (32 primeiros), `pica (frame|shutdown):
+  draws issued/skipped/shadow_producers/no_effect, transfers, scanouts, fills, clears, targets MiB`.
+- **Bug do pacote 4 achado:** o atributo constante (0,0,0,1) nunca era alocado (`mConstantGpu`
+  inválido) — todo atributo ausente leria endereço 0. Agora num bloco `CpuUncached` próprio (guarda).
+- `oot3d_native_a32_window_setup.cpp`: a projeção widescreen do deko3d segue a regra do GL (antes
+  alargava o frustum para 16:9 como o Vulkan).
+- Decisões/fallbacks: **ETC1 → RGBA8 decodificado** (ETC2 direto fica para depois; o draw não
+  precisa); **Shadow2D**: produtor pulado (nenhum programa do pacote usa imagem), consumidor lê
+  0xFFFFFFFF (sem sombra); **DRS desligado**; **sem FXAA/SMAA/EASU/RCAS**; **sem os cantos do menu
+  widescreen** e sem a amostragem nearest do menu realocado; UI TopScreen/ImGui = pacote 6.
+- Chaves sem rebuild: `config/deko3d_cull_invert` (=1 inverte o sentido de face se a geometria sair
+  do avesso), `config/gl_lean` (=0 recopia o display mesmo idêntico).
+- Testes: `TestPipelineEnums`, `TestCullPlan`, `TestTargetsAndRects`, `TestFills`,
+  `TestTransferAndScanout` + 6 guardas (83/83 ok).
 
 ### Pacote 3 (o que entrou, 24/10)
 
@@ -91,7 +134,11 @@ emulador na Ryzen): `logs/deko3d.txt` deve mostrar `shaders: 276 precompiled sta
   foi compilado no commit `3b12e0e1` (pacote 3, sem o pacote 4 parte 1).
 - A Ryzen parou de responder (~13:51) no meio do `scp` do NRO e não voltou em 30 min (Windows OpenSSH: `scp` padrão dá
   "Connection closed"; `scp -O` funcionou até cair). Sem build nem Eden rodando nessa hora.
-- Regras: nunca build e Eden juntos; `-j 4` com `nice 10`; `.wslconfig` com `memory=6GB`; nada
+- **24/10 (p5):** `build.sh` agora com `ninja -j 3` e recusa se já houver um `ninja` rodando (md5
+  `ac83157e…`, igual à cópia do repo). Fonte sincronizada por tar dos arquivos alterados desde `3b12e0e1`
+  (inclui o pacote 4 parte 1, que nunca tinha ido) com `--touch`; scripts curtos via `scp -O` +
+  `wsl -d Ubuntu -u root -- bash /mnt/c/Users/flavin/x.sh` (variáveis `$A` se perdem no `ssh '…'`).
+- Regras: nunca build e Eden juntos; `-j 3` com `nice 10`; `.wslconfig` com `memory=6GB`; nada
   > 5 GB; Eden só teste curto e nunca por agente sem pedido.
 
 ## Mapa do que o GL faz hoje (pacote 1)

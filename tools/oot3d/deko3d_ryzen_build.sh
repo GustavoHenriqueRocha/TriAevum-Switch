@@ -17,7 +17,7 @@ inner() {
     return
   fi
   echo compilando > $ST
-  nice -n 10 ninja -j4 oot3d_native_game_nro > $A/build.log 2>&1 &
+  nice -n 10 ninja -j 3 oot3d_native_game_nro > $A/build.log 2>&1 &
   pid=$!
   while kill -0 $pid 2>/dev/null; do
     if grep -q 'whole_aot_shard_' $A/build.log; then kill $pid; wait $pid; echo "erro: shard recompilando, abortado" > $ST; grep 'whole_aot_shard_' $A/build.log | head -3 >> $ST; return 1; fi
@@ -32,5 +32,7 @@ inner() {
 export -f inner; export A MODE ST
 # RAM da Ryzen é defeituosa: nunca compilar com o Eden aberto.
 if /mnt/c/Windows/System32/tasklist.exe 2>/dev/null | grep -qi '^eden.exe'; then echo "erro: Eden aberto; build recusado" > $ST; exit 1; fi
+# Nunca dois builds ao mesmo tempo (RAM com defeito; WSL limitado a 6 GB).
+if pgrep -x ninja >/dev/null 2>&1; then echo "erro: outro ninja rodando; build recusado" > $ST; exit 1; fi
 echo iniciado > $ST
 unshare -m bash -c inner
