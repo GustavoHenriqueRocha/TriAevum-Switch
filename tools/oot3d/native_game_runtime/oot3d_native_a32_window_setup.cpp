@@ -1702,6 +1702,24 @@ void NativeA32WindowSession::Setup() {
       options.ReducedAlways = trimmed(*text) == "always";
     if (const auto text = readText("native_replay", "TRIAEVUM_NATIVE_REPLAY"))
       options.ForceNativeReplay = trimmed(*text) == "1";
+    // Draws that exist in only one of two guest frames (culling/LOD while
+    // the camera turns fast; oot3d_native_pica_visual_frame.h): the step
+    // frame shows the previous guest frame itself (config/interp_exact_step)
+    // and the in-between frame moves unpartnered draws with the measured
+    // camera (config/interp_carry_unmatched). Both on; "0" restores the old
+    // sample (A/B of the flicker at 60 FPS). Desktop:
+    // TRIAEVUM_INTERP_EXACT_STEP, TRIAEVUM_INTERP_CARRY_UNMATCHED.
+    {
+      Oot3dNativeGame::Oot3dPicaVisualTransitionOptions transitionOptions;
+      transitionOptions.ExactStep = true;
+      transitionOptions.CarryUnmatched = true;
+      if (const auto text = readText("interp_exact_step", "TRIAEVUM_INTERP_EXACT_STEP"))
+        transitionOptions.ExactStep = trimmed(*text) != "0";
+      if (const auto text =
+              readText("interp_carry_unmatched", "TRIAEVUM_INTERP_CARRY_UNMATCHED"))
+        transitionOptions.CarryUnmatched = trimmed(*text) != "0";
+      preparedVisualTransition.SetOptions(transitionOptions);
+    }
     // config/dynamic_resolution (TRIAEVUM_DYNAMIC_RESOLUTION): present = on;
     // optional text = lowest scale (oot3d_native_dynamic_resolution.h).
     if (const auto text =

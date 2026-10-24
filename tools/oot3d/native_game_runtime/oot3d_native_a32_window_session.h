@@ -715,6 +715,18 @@ private:
       lastPresentedVisual;
   // Cumulative counters for logs/perf.txt (written by the render thread,
   // read by the guest thread under the mutex).
+  struct VisualUnmatchedTotals {
+    uint64_t Transitions = 0;
+    uint64_t WithUnmatched = 0;     // transitions with any unmatched draw
+    uint64_t UnmatchedPrevious = 0;
+    uint64_t UnmatchedCurrent = 0;
+    uint64_t CarriedCurrent = 0;
+    uint64_t InsertedPrevious = 0;
+    uint64_t WithoutCamera = 0;
+    uint64_t CameraMeasured = 0;
+    uint64_t Discontinuities = 0;
+  };
+  VisualUnmatchedTotals visualUnmatchedTotals;
   struct InterpolationPerfCounters {
     std::array<uint64_t, 5> Frames{};
     std::array<uint64_t, 5> GpuFrames{};
@@ -738,6 +750,10 @@ private:
     // Render-thread visual-frame preparation (matching + analysis) and
     // sampling, cumulative (copy of visualInterpolationTiming).
     Oot3dNativeGame::Oot3dPicaVisualInterpolationTiming VisualTiming{};
+    // Draws without a partner between two guest frames (copy of
+    // visualUnmatchedTotals): what config/interp_exact_step and
+    // config/interp_carry_unmatched act on.
+    VisualUnmatchedTotals Unmatched{};
     // Presentation cadence (cadenceGovernor): counters, the lock, the hold
     // and the game-thread step pair p90; guest frames never shown.
     Oot3dNativeGame::CadenceStats Cadence{};

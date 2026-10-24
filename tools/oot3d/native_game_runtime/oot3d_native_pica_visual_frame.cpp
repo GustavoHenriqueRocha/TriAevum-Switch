@@ -2035,6 +2035,315 @@ bool SampleVisualFrameViewWithMatching(const Oot3dPicaVisualFrame& previous, con
     return !output.Draws.empty();
 }
 
+// --- Draws without a partner (Oot3dPicaVisualTransitionOptions) ---------
+//
+// A 3x4 affine matrix in double: rows of [R | t], implicit last row 0 0 0 1.
+using VisualAffine = std::array<std::array<double, 4>, 3>;
+
+VisualAffine MultiplyAffine(const VisualAffine& left, const VisualAffine& right) {
+    VisualAffine out{};
+    for (size_t r = 0; r < 3; ++r)
+        for (size_t c = 0; c < 4; ++c) {
+            double value = c == 3 ? left[r][3] : 0.0;
+            for (size_t j = 0; j < 3; ++j) value += left[r][j] * right[j][c];
+            out[r][c] = value;
+        }
+    return out;
+}
+
+std::optional<VisualAffine> InvertAffine(const VisualAffine& m) {
+    const double a = m[0][0], b = m[0][1], c = m[0][2];
+    const double d = m[1][0], e = m[1][1], f = m[1][2];
+    const double g = m[2][0], h = m[2][1], i = m[2][2];
+    const double det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (!std::isfinite(det) || std::abs(det) < 1.0e-12) return std::nullopt;
+    const double inv = 1.0 / det;
+    VisualAffine out{};
+    out[0] = {(e * i - f * h) * inv, (c * h - b * i) * inv, (b * f - c * e) * inv, 0.0};
+    out[1] = {(f * g - d * i) * inv, (a * i - c * g) * inv, (c * d - a * f) * inv, 0.0};
+    out[2] = {(d * h - e * g) * inv, (b * g - a * h) * inv, (a * e - b * d) * inv, 0.0};
+    for (size_t r = 0; r < 3; ++r)
+        out[r][3] = -(out[r][0] * m[0][3] + out[r][1] * m[1][3] + out[r][2] * m[2][3]);
+    return out;
+}
+
+VisualAffine ReadAffine(const VisualUniformFloats& floats, size_t first) {
+    VisualAffine out{};
+    for (size_t r = 0; r < 3; ++r)
+        for (size_t c = 0; c < 4; ++c) out[r][c] = floats[first + r][c];
+    return out;
+}
+
+bool FiniteAffine(const VisualAffine& m) {
+    for (const auto& row : m)
+        for (const double value : row)
+            if (!std::isfinite(value)) return false;
+    return true;
+}
+
+// The world-to-clip transform without the projection: view rows x model rows.
+VisualAffine ComposedViewModel(const Fast::Renderer3ds::PicaVertexTransformLayout& layout,
+                               const VisualUniformFloats& floats) {
+    return MultiplyAffine(ReadAffine(floats, layout.ViewFirstUniform), ReadAffine(floats, layout.ModelFirstUniform));
+}
+
+bool NearAffine(const VisualAffine& left, const VisualAffine& right) {
+    for (size_t r = 0; r < 3; ++r) {
+        for (size_t c = 0; c < 3; ++c)
+            if (std::abs(left[r][c] - right[r][c]) > 1.0e-3) return false;
+        const double scale = std::max({1.0, std::abs(left[r][3]), std::abs(right[r][3])});
+        if (std::abs(left[r][3] - right[r][3]) > 1.0e-3 * scale) return false;
+    }
+    return true;
+}
+
+const Fast::Renderer3ds::PicaVertexTransformLayout* CarryLayout(const Oot3dPicaVulkanDrawPlan& draw) {
+    const auto& program = draw.VertexShader.TemporalProgram;
+    if (!program || !program->Hooks.Transform.Available()) return nullptr;
+    return &program->Hooks.Transform;
+}
+
+bool CarryWorldLayer(const Oot3dPicaVulkanDrawPlan& draw) {
+    return draw.Composition.Layer == Oot3dPicaCompositionLayer::OpaqueWorld ||
+           draw.Composition.Layer == Oot3dPicaCompositionLayer::TransparentWorld;
+}
+
+bool CarrySkinned(const Oot3dPicaVulkanDrawPlan& draw) {
+    const auto& skeleton = draw.VertexShader.TemporalProgram->Hooks.Skeleton;
+    return skeleton.Available() &&
+           (draw.VertexShader.Uniforms.BooleanMask & (1U << skeleton.EnableBooleanUniform)) != 0;
+}
+
+bool SameCarryTarget(const Oot3dPicaVulkanDrawPlan& left, const Oot3dPicaVulkanDrawPlan& right) {
+    const auto& a = left.State.Framebuffer;
+    const auto& b = right.State.Framebuffer;
+    return a.ColorPhysicalAddress == b.ColorPhysicalAddress && a.DepthPhysicalAddress == b.DepthPhysicalAddress &&
+           a.Width == b.Width && a.Height == b.Height && a.ColorFormat == b.ColorFormat &&
+           a.DepthFormat == b.DepthFormat && a.Flipped == b.Flipped;
+}
+
+using VisualProjectionRows = std::array<std::array<float, 4>, 4>;
+
+VisualProjectionRows ReadProjection(const Fast::Renderer3ds::PicaVertexTransformLayout& layout,
+                                    const VisualUniformFloats& floats) {
+    VisualProjectionRows rows{};
+    for (size_t r = 0; r < 4; ++r) rows[r] = floats[layout.ProjectionFirstUniform + r];
+    return rows;
+}
+
+struct VisualUnmatchedCarry {
+    bool Camera = false;
+    // previous camera = Forward x current camera, for static world geometry
+    // (whether the producer puts the camera in the view or the model rows).
+    VisualAffine Forward{};
+    VisualAffine Backward{};
+    VisualProjectionRows ProjectionPrevious{}, ProjectionCurrent{};
+    std::vector<uint8_t> CarryCurrent;  // per current draw
+    struct Insert {
+        uint32_t AfterCurrent = 0;
+        uint32_t Previous = 0;
+    };
+    std::vector<Insert> Inserts;  // by AfterCurrent, then previous order
+    std::vector<int64_t> CurrentByPrevious;
+    struct Candidate {
+        VisualAffine Delta{};
+        uint32_t Current = 0;
+    };
+    std::vector<Candidate> Candidates;
+    Oot3dPicaVisualUnmatchedStats Stats;
+
+    void Clear() {
+        Camera = false;
+        CarryCurrent.clear();
+        Inserts.clear();
+        Stats = {};
+    }
+};
+
+void BuildVisualUnmatchedCarry(const Oot3dPicaVisualFrame& previous, const Oot3dPicaVisualFrame& current,
+                               const VisualDrawMatching& matching, VisualUnmatchedCarry& carry) {
+    carry.Clear();
+    carry.Stats.UnmatchedPrevious = matching.UnmatchedPrevious;
+    carry.Stats.UnmatchedCurrent = matching.UnmatchedCurrent;
+    if (matching.UnmatchedPrevious == 0U && matching.UnmatchedCurrent == 0U) return;
+    const uint32_t topInput = current.TopTransfer.InputPhysicalAddress;
+    const bool sameTop = previous.TopTransfer.InputPhysicalAddress == topInput;
+
+    // The camera motion: Delta = previous view-model x inverse(current) on
+    // matched static world draws (rigid, unskinned, top target). Static
+    // geometry all gives the same Delta; moving actors disagree and lose
+    // the vote.
+    carry.Candidates.clear();
+    carry.CurrentByPrevious.assign(previous.Draws.size(), -1);
+    for (size_t c = 0; c < current.Draws.size(); ++c) {
+        const auto& match = matching.PreviousByCurrent[c];
+        if (!match) continue;
+        carry.CurrentByPrevious[match->PreviousIndex] = static_cast<int64_t>(c);
+        const auto& cur = current.Draws[c];
+        const auto& prev = previous.Draws[match->PreviousIndex];
+        const auto* layout = CarryLayout(cur);
+        const auto* previousLayout = CarryLayout(prev);
+        if (layout == nullptr || previousLayout == nullptr || !(*layout == *previousLayout) ||
+            cur.Composition.Layer != Oot3dPicaCompositionLayer::OpaqueWorld ||
+            prev.Composition.Layer != Oot3dPicaCompositionLayer::OpaqueWorld || CarrySkinned(cur) ||
+            CarrySkinned(prev) || cur.State.Framebuffer.ColorPhysicalAddress != topInput)
+            continue;
+        const auto now = ComposedViewModel(*layout, cur.VertexShader.Uniforms.Floats);
+        const auto inverse = InvertAffine(now);
+        if (!inverse) continue;
+        const auto delta = MultiplyAffine(ComposedViewModel(*layout, prev.VertexShader.Uniforms.Floats), *inverse);
+        if (!FiniteAffine(delta)) continue;
+        carry.Candidates.push_back({delta, static_cast<uint32_t>(c)});
+    }
+    // Vote over at most 48 evenly spaced candidates.
+    const size_t total = carry.Candidates.size();
+    const size_t step = std::max<size_t>(1U, (total + 47U) / 48U);
+    size_t bestVotes = 0, best = 0, voters = 0;
+    for (size_t i = 0; i < total; i += step) {
+        ++voters;
+        size_t votes = 0;
+        for (size_t j = 0; j < total; j += step)
+            if (NearAffine(carry.Candidates[i].Delta, carry.Candidates[j].Delta)) ++votes;
+        if (votes > bestVotes) {
+            bestVotes = votes;
+            best = i;
+        }
+    }
+    if (bestVotes >= 2U && bestVotes * 3U >= voters) {
+        const auto backward = InvertAffine(carry.Candidates[best].Delta);
+        if (backward) {
+            carry.Camera = true;
+            carry.Forward = carry.Candidates[best].Delta;
+            carry.Backward = *backward;
+            const auto& donor = current.Draws[carry.Candidates[best].Current];
+            const auto& donorPrevious =
+                previous.Draws[matching.PreviousByCurrent[carry.Candidates[best].Current]->PreviousIndex];
+            const auto& layout = *CarryLayout(donor);
+            carry.ProjectionCurrent = ReadProjection(layout, donor.VertexShader.Uniforms.Floats);
+            carry.ProjectionPrevious = ReadProjection(layout, donorPrevious.VertexShader.Uniforms.Floats);
+        }
+    }
+    carry.Stats.CameraMeasured = carry.Camera;
+
+    carry.CarryCurrent.assign(current.Draws.size(), 0U);
+    for (size_t c = 0; c < current.Draws.size(); ++c) {
+        if (matching.PreviousByCurrent[c]) continue;
+        const auto& draw = current.Draws[c];
+        if (CarryLayout(draw) == nullptr || !CarryWorldLayer(draw) ||
+            draw.State.Framebuffer.ColorPhysicalAddress != topInput)
+            continue;
+        if (!carry.Camera) {
+            ++carry.Stats.WithoutCamera;
+            continue;
+        }
+        carry.CarryCurrent[c] = 1U;
+        ++carry.Stats.CarriedCurrent;
+    }
+    // Leading previous-only draws have no previous neighbour: they go after
+    // the partner of the first matched draw instead (never before it: the
+    // target's clear runs at that draw), one draw later than in the game.
+    int64_t firstMatched = -1;
+    for (size_t p = 0; p < previous.Draws.size() && firstMatched < 0; ++p)
+        firstMatched = carry.CurrentByPrevious[p];
+    int64_t anchor = firstMatched;
+    for (size_t p = 0; p < previous.Draws.size(); ++p) {
+        if (carry.CurrentByPrevious[p] >= 0) {
+            anchor = carry.CurrentByPrevious[p];
+            continue;
+        }
+        const auto& draw = previous.Draws[p];
+        if (CarryLayout(draw) == nullptr || !CarryWorldLayer(draw) || !sameTop ||
+            draw.State.Framebuffer.ColorPhysicalAddress != topInput)
+            continue;
+        // After the current partner of its previous neighbour, on the same
+        // target: the target's clear (a fill before the first draw) has run.
+        if (!carry.Camera || anchor < 0 ||
+            !SameCarryTarget(draw, current.Draws[static_cast<size_t>(anchor)])) {
+            ++carry.Stats.WithoutCamera;
+            continue;
+        }
+        carry.Inserts.push_back({static_cast<uint32_t>(anchor), static_cast<uint32_t>(p)});
+        ++carry.Stats.InsertedPrevious;
+    }
+    std::stable_sort(carry.Inserts.begin(), carry.Inserts.end(),
+                     [](const auto& a, const auto& b) { return a.AfterCurrent < b.AfterCurrent; });
+}
+
+// The view rows of `floats` moved by `motion` (applied on the left), then
+// sampled at alpha between `fromMoved` (true: the moved rows are the alpha 0
+// end) and the draw's own rows; the projection follows the measured one when
+// the draw used the same projection.
+void CarryVisualUniforms(const Fast::Renderer3ds::PicaVertexTransformLayout& layout, const VisualAffine& motion,
+                         bool movedIsPrevious, const VisualProjectionRows& ownProjectionMatch,
+                         const VisualProjectionRows& otherProjection, float alpha, VisualUniformFloats& floats) {
+    const auto own = ReadAffine(floats, layout.ViewFirstUniform);
+    const auto moved = MultiplyAffine(motion, own);
+    for (size_t r = 0; r < 3; ++r)
+        for (size_t c = 0; c < 4; ++c) {
+            const float ownValue = floats[layout.ViewFirstUniform + r][c];
+            const float movedValue = static_cast<float>(moved[r][c]);
+            floats[layout.ViewFirstUniform + r][c] = movedIsPrevious
+                ? InterpolateFinite(movedValue, ownValue, alpha)
+                : InterpolateFinite(ownValue, movedValue, alpha);
+        }
+    if (ReadProjection(layout, floats) != ownProjectionMatch) return;
+    for (size_t r = 0; r < 4; ++r)
+        for (size_t c = 0; c < 4; ++c) {
+            const float ownValue = floats[layout.ProjectionFirstUniform + r][c];
+            const float otherValue = otherProjection[r][c];
+            floats[layout.ProjectionFirstUniform + r][c] = movedIsPrevious
+                ? InterpolateFinite(otherValue, ownValue, alpha)
+                : InterpolateFinite(ownValue, otherValue, alpha);
+        }
+}
+
+void ResetVisualDrawView(Oot3dPicaVisualDrawView& view, const Oot3dPicaVulkanDrawPlan* plan) {
+    view.BasePlan = plan;
+    view.VertexUniforms.reset();
+    view.FragmentUniforms.reset();
+    view.Viewport.reset();
+    view.BlendConstantColor.reset();
+    view.LightBinding.reset();
+    view.HasVertexBindingOverrides = false;
+}
+
+// Applies the carry to a sample strictly between the endpoints.
+void ApplyVisualUnmatchedCarry(const Oot3dPicaVisualFrame& previous, const Oot3dPicaVisualFrame& current,
+                               const VisualUnmatchedCarry& carry, float alpha,
+                               Oot3dPicaVisualFrameViewSample& output) {
+    if (!carry.Camera || !(alpha > 0.0F && alpha < 1.0F)) return;
+    for (size_t c = 0; c < carry.CarryCurrent.size() && c < output.Draws.size(); ++c) {
+        if (carry.CarryCurrent[c] == 0U) continue;
+        auto& view = output.Draws[c];
+        if (view.VertexUniforms) continue;  // an actor's carried palette won
+        const auto& draw = current.Draws[c];
+        view.VertexUniforms.emplace(draw.VertexShader.Uniforms);
+        CarryVisualUniforms(*CarryLayout(draw), carry.Forward, true, carry.ProjectionCurrent,
+                            carry.ProjectionPrevious, alpha, view.VertexUniforms->Floats);
+        ++output.InterpolatedDraws;
+    }
+    if (carry.Inserts.empty()) return;
+    // Spread the current views to make room, from the back (swaps keep the
+    // vertex-binding storage of every slot).
+    const size_t count = output.Draws.size();
+    output.Draws.resize(count + carry.Inserts.size());
+    size_t write = output.Draws.size();
+    size_t insert = carry.Inserts.size();
+    for (size_t c = count; c-- > 0U;) {
+        while (insert > 0U && carry.Inserts[insert - 1U].AfterCurrent == c) {
+            const auto& entry = carry.Inserts[--insert];
+            auto& view = output.Draws[--write];
+            const auto& draw = previous.Draws[entry.Previous];
+            ResetVisualDrawView(view, &draw);
+            view.VertexUniforms.emplace(draw.VertexShader.Uniforms);
+            CarryVisualUniforms(*CarryLayout(draw), carry.Backward, false, carry.ProjectionPrevious,
+                                carry.ProjectionCurrent, alpha, view.VertexUniforms->Floats);
+            ++output.InterpolatedDraws;
+        }
+        if (--write != c) std::swap(output.Draws[write], output.Draws[c]);
+    }
+}
+
 } // namespace
 
 struct Oot3dPicaPreparedVisualTransition::Impl {
@@ -2055,6 +2364,8 @@ struct Oot3dPicaPreparedVisualTransition::Impl {
     mutable std::vector<VisualFactoredPalette> Palettes;
     mutable VisualPaletteScratch PaletteScratch;
     mutable bool PalettesReady = false;
+    Oot3dPicaVisualTransitionOptions Options;
+    VisualUnmatchedCarry Carry;
 };
 
 Oot3dPicaPreparedVisualTransition::Oot3dPicaPreparedVisualTransition()
@@ -2097,6 +2408,9 @@ bool Oot3dPicaPreparedVisualTransition::Prepare(
                 .count());
     }
 
+    if (mImpl->Options.CarryUnmatched) {
+        BuildVisualUnmatchedCarry(previous, current, mImpl->Matching, mImpl->Carry);
+    }
     mImpl->PreviousSequence = previous.Sequence;
     mImpl->CurrentSequence = current.Sequence;
     mImpl->PreviousDrawCount = previous.Draws.size();
@@ -2117,6 +2431,10 @@ bool Oot3dPicaPreparedVisualTransition::Sample(
         return false;
     }
 
+    if (mImpl->Options.ExactStep && alpha <= 0.0F) {
+        // The step frame: the previous guest frame as the game drew it.
+        return ViewOot3dPicaVisualFrame(previous, output);
+    }
     const auto samplingStart = std::chrono::steady_clock::now();
     if (alpha > 0.0F && alpha < 1.0F && !mImpl->PalettesReady) {
         ShareVisualPaletteMotions(previous, current, mImpl->Matching.PreviousByCurrent, mImpl->Palettes,
@@ -2126,6 +2444,9 @@ bool Oot3dPicaPreparedVisualTransition::Sample(
     const bool sampled = SampleVisualFrameViewWithMatching(
         previous, current, alpha, mImpl->Matching, output,
         mImpl->DrawDeltas, &mImpl->Palettes);
+    if (sampled && mImpl->Options.CarryUnmatched) {
+        ApplyVisualUnmatchedCarry(previous, current, mImpl->Carry, alpha, output);
+    }
     if (timing != nullptr) {
         const auto finished = std::chrono::steady_clock::now();
         timing->SamplingNanoseconds += static_cast<uint64_t>(
@@ -2152,12 +2473,30 @@ void Oot3dPicaPreparedVisualTransition::Reset() noexcept {
     mImpl->Matching.UnmatchedCurrent = 0;
     mImpl->DrawDeltas.clear();
     mImpl->PalettesReady = false;
+    mImpl->Carry.Clear();
     mImpl->Transition = {};
     mImpl->PreviousSequence = 0U;
     mImpl->CurrentSequence = 0U;
     mImpl->PreviousDrawCount = 0U;
     mImpl->CurrentDrawCount = 0U;
     mImpl->Prepared = false;
+}
+
+void Oot3dPicaPreparedVisualTransition::SetOptions(
+    const Oot3dPicaVisualTransitionOptions& options) noexcept {
+    if (mImpl == nullptr) mImpl = std::make_unique<Impl>();
+    mImpl->Options = options;
+}
+
+Oot3dPicaVisualTransitionOptions
+Oot3dPicaPreparedVisualTransition::Options() const noexcept {
+    return mImpl != nullptr ? mImpl->Options : Oot3dPicaVisualTransitionOptions{};
+}
+
+const Oot3dPicaVisualUnmatchedStats&
+Oot3dPicaPreparedVisualTransition::UnmatchedStats() const noexcept {
+    static const Oot3dPicaVisualUnmatchedStats none;
+    return mImpl != nullptr ? mImpl->Carry.Stats : none;
 }
 
 bool Oot3dPicaPreparedVisualTransition::Ready() const noexcept {

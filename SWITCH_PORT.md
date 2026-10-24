@@ -1043,6 +1043,40 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
 - A/B no console: `native_replay` = `1`; `interp_pacing` = `0`; `interp_scale` = `1.5` (e
   `interp_scale_mode` = `always` para ver o custo/qualidade do reduzido em todo intermediário).
 
+### Piscada de textura/objeto ao girar a câmera rápido (fps60, 2026-10-24)
+- **Sintoma** (pgo5o, `config/fps60`, `dynamic_resolution`, `fps60_mode=adaptive`): ao girar a
+  câmera rápido, uma textura/objeto "pisca" por menos de 1 s. A 30 FPS puro praticamente não acontece.
+- **Causa** (`oot3d_native_pica_visual_frame.cpp`): a apresentação do fps60 fica um passo atrás e,
+  para cada passo do jogo, mostra o quadro de passo (alpha 0, instante do passo anterior) e o
+  intermediário (alpha 1/2). Os dois eram amostrados sobre a **lista de draws do quadro novo**. O jogo
+  faz culling com a câmera de cada passo; girando rápido, cada passo tira peças numa borda da tela e
+  põe peças na outra. Então: (1) peça que o jogo cortou no passo novo sumia nos dois refreshes
+  (~33 ms) — buraco na borda de trás; (2) peça que o jogo acrescentou era desenhada com a câmera do
+  passo novo: um passo inteiro fora do lugar no quadro de passo, meio passo no intermediário. A 30 FPS
+  o quadro do jogo é desenhado como está, por isso não aparece. Draws com par só trocam uniforms e
+  continuam certos.
+- **Correção** (ligada por padrão; `0` no arquivo volta ao antigo para A/B):
+  1. `config/interp_exact_step`: o quadro de passo (alpha 0) é o quadro anterior do jogo exatamente
+     (`ViewOot3dPicaVisualFrame(previous)`: draws, uniforms e texturas dele).
+  2. `config/interp_carry_unmatched`: no intermediário, a câmera é medida nos draws pareados do mundo
+     (estáticos, sem skinning, alvo de cima): Δ = VM_anterior × VM_atual⁻¹, por votação (atores que se
+     movem discordam e perdem). Draw só do quadro novo começa onde a câmera anterior o via (linhas de
+     view × Δ, interpoladas como as dos pareados); draw só do quadro anterior é mantido (logo depois
+     do par do vizinho anterior, mesmo alvo, depois do clear) e anda até a câmera nova (Δ⁻¹). Funciona
+     com a câmera nas linhas de view ou embutida no modelo. Sem medida de câmera: comportamento antigo.
+- **Diagnóstico no perf.txt** (bloco `interp:`, por janela): `exact_step carry_unmatched transitions
+  trans_unmatched unmatched_prev unmatched_cur carried_cur inserted_prev unmatched_no_camera
+  camera_measured discontinuities` (médias por transição). Se `unmatched_no_camera` for alto e
+  `camera_measured` baixo, a câmera não foi medida e a correção do intermediário não agiu.
+- **Descartadas** (guardas `[decisão]`): DRS (o fill de profundidade limpa o anexo inteiro sem
+  scissor; a escala muda no máximo uma vez por FrameSerial, então passo e intermediário usam a mesma);
+  cache de texturas (chave por hash do conteúdo; entrada descartada volta a ser decodificada dos bytes
+  do plano: atraso, nunca pixel errado — e valeria a 30 FPS também); hold (o intermediário descartado
+  reapresenta o último quadro apresentado inteiro).
+- Teste: `oot3d_native_pica_visual_cull_tests` (câmera girando 9°/passo num anel de peças cortadas
+  como no jogo, câmera na view e embutida no modelo): antigo 288 faltando + 144 deslocadas + 144 a
+  mais em 160 amostras; com a correção 0. Câmera parada: amostra igual à antiga.
+
 ### Cadência do fps60: regularidade antes da média, `config/fps60_mode` (2026-10-17)
 - **Diagnóstico** (`switch-logs/integ2b`, CPU 1785, 4,5 min a 60, 52 FPS de média): nos trechos
   pesados (host_frames 9450–14250) a thread do jogo gasta 27–31 ms de cada par de passo de 33,3 ms

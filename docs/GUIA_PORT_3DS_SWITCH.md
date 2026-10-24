@@ -717,6 +717,17 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 - Resultado: fps60 com a versão "final 3" = 48,6 fps médios, 46% ≥ 55, velocidade 99,7%
   *(notas de sessão)*. Áreas pesadas ficam limitadas pela lógica no núcleo 0.
 
+- **Interpolação e culling do jogo** (piscada ao girar a câmera, 24/10): o jogo corta a geometria
+  com a câmera de **cada passo**, então o conjunto de draws muda entre dois passos (bordas da tela,
+  LOD). Regra genérica para qualquer port com quadros intermediários: (1) o quadro do instante de um
+  passo deve ser **aquele passo exatamente** (não a amostra em alpha 0 sobre a lista do passo
+  seguinte); (2) entre dois passos, draw sem par não pode ser desenhado com a câmera de um só
+  passo: meça o movimento de câmera nos draws pareados estáticos (Δ = VM_ant × VM_atual⁻¹, por voto)
+  e aplique-o nos sem par — os só do passo novo saem da câmera anterior, os só do anterior continuam
+  e seguem até a nova. Teste de host com câmera girando sobre peças cortadas por frustum mostra o
+  defeito sem console (`oot3d_native_pica_visual_cull_tests`). A 30 FPS sem interpolação o problema
+  não existe — se um defeito visual some a 30, comece pela interpolação.
+
 ### 4.6 Heap sem fragmentação
 
 - O malloc do newlib tem lock global, compartilhado com o Mesa; o `libdrm_nouveau` aloca cada BO com

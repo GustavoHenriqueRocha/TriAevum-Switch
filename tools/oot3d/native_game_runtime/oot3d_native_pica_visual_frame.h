@@ -219,6 +219,36 @@ void CollectOot3dPicaFrameCopyReferences(
     const Oot3dPicaVisualFrame& frame,
     std::vector<Fast::Renderer3ds::PicaTextureCopyReference>& out);
 
+// Draws that exist in only one of the two guest frames of a transition: the
+// game culled them, swapped a level of detail or spawned/removed them. While
+// the camera turns fast, every step adds and removes many of them at the
+// screen edges.
+struct Oot3dPicaVisualTransitionOptions {
+    // alpha 0 (the step frame of the delayed fps60 presentation) shows the
+    // previous guest frame itself: its draws, uniforms and textures. The
+    // old sample at 0 drew the current frame's draw set with the previous
+    // uniforms: draws the game removed in the current step vanished one step
+    // early (holes at the screen edge) and the ones it added were drawn with
+    // the current step's camera, a whole step away from the rest.
+    bool ExactStep = false;
+    // Strictly between the endpoints, draws without a partner follow the
+    // camera motion measured on the matched static world draws: a draw only
+    // in the current frame starts where the previous camera saw it, a draw
+    // only in the previous frame is kept (after its previous neighbour) and
+    // moves toward the current camera. Without a camera measure both keep
+    // the old behaviour (current-only drawn as is, previous-only absent).
+    bool CarryUnmatched = false;
+};
+
+struct Oot3dPicaVisualUnmatchedStats {
+    size_t UnmatchedPrevious = 0;
+    size_t UnmatchedCurrent = 0;
+    size_t CarriedCurrent = 0;    // current-only draws moved by the camera
+    size_t InsertedPrevious = 0;  // previous-only draws kept in the sample
+    size_t WithoutCamera = 0;     // unmatched world draws left as before
+    bool CameraMeasured = false;
+};
+
 // Draw matching and transition analysis are immutable for a pair of source
 // frames. Prepare once, then sample at 1/2 for 2x or at 1/3 and 2/3 for 3x
 // without repeating the matching work on every host presentation.
@@ -243,6 +273,11 @@ class Oot3dPicaPreparedVisualTransition final {
                 Oot3dPicaVisualFrameViewSample& output,
                 Oot3dPicaVisualInterpolationTiming* timing = nullptr) const;
     void Reset() noexcept;
+    // Kept across Reset(); applies from the next Prepare().
+    void SetOptions(const Oot3dPicaVisualTransitionOptions& options) noexcept;
+    [[nodiscard]] Oot3dPicaVisualTransitionOptions Options() const noexcept;
+    // Of the last Prepare() (zero unless CarryUnmatched).
+    [[nodiscard]] const Oot3dPicaVisualUnmatchedStats& UnmatchedStats() const noexcept;
     [[nodiscard]] bool Ready() const noexcept;
     [[nodiscard]] const Oot3dPicaVisualTransitionStats& Stats() const noexcept;
     // The previous-frame draw paired with a current draw (and how: 0 strict

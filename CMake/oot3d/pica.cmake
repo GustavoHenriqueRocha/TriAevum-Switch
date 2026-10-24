@@ -352,6 +352,15 @@ target_link_libraries(oot3d_native_pica_visual_frame_equivalence_tests PRIVATE
     oot3d_native_pica_vulkan_plan)
 oot3d_target_defaults(oot3d_native_pica_visual_frame_equivalence_tests FOLDER Tests)
 
+# fps60: draws in only one of two guest frames (culling while the camera
+# turns fast) must not flicker in the step or in-between frame.
+add_executable(oot3d_native_pica_visual_cull_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_pica_visual_cull_tests.cpp
+)
+target_link_libraries(oot3d_native_pica_visual_cull_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_pica_visual_cull_tests FOLDER Tests)
+
 add_executable(oot3d_native_pica_vulkan_plan_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_vulkan_plan_tests.cpp
 )

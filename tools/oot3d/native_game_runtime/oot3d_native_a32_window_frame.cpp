@@ -1413,6 +1413,29 @@ bool NativeA32WindowSession::RunFrame() {
              << " rt_sample_ms="
              << visualMs(current.VisualTiming.SamplingNanoseconds,
                          previous.VisualTiming.SamplingNanoseconds);
+        // Draws without a partner (config/interp_exact_step,
+        // config/interp_carry_unmatched): per transition in the window.
+        {
+          const auto &now = current.Unmatched;
+          const auto &before = previous.Unmatched;
+          const auto transitions = now.Transitions - before.Transitions;
+          const auto perTransition = [&](uint64_t a, uint64_t b) {
+            return transitions != 0U ? static_cast<double>(a - b) / transitions
+                                     : 0.0;
+          };
+          const auto options = preparedVisualTransition.Options();
+          perf << " exact_step=" << (options.ExactStep ? 1 : 0)
+               << " carry_unmatched=" << (options.CarryUnmatched ? 1 : 0)
+               << " transitions=" << transitions
+               << " trans_unmatched=" << (now.WithUnmatched - before.WithUnmatched)
+               << " unmatched_prev=" << perTransition(now.UnmatchedPrevious, before.UnmatchedPrevious)
+               << " unmatched_cur=" << perTransition(now.UnmatchedCurrent, before.UnmatchedCurrent)
+               << " carried_cur=" << perTransition(now.CarriedCurrent, before.CarriedCurrent)
+               << " inserted_prev=" << perTransition(now.InsertedPrevious, before.InsertedPrevious)
+               << " unmatched_no_camera=" << perTransition(now.WithoutCamera, before.WithoutCamera)
+               << " camera_measured=" << (now.CameraMeasured - before.CameraMeasured)
+               << " discontinuities=" << (now.Discontinuities - before.Discontinuities);
+        }
         perf << " est_step_ms=" << current.StepCostMs
              << " est_full_ms=" << current.FullEstimateMs
              << " est_reduced_ms=" << current.ReducedEstimateMs
@@ -3338,6 +3361,25 @@ void NativeA32WindowSession::PresentVisualFrame(
                 latestVisualTransitionContinuous = continuousTransition;
                 visualStats.DiscontinuityCount +=
                     continuousTransition ? 0U : 1U;
+                {
+                  const auto &unmatched =
+                      preparedVisualTransition.UnmatchedStats();
+                  auto &totals = visualUnmatchedTotals;
+                  ++totals.Transitions;
+                  totals.WithUnmatched +=
+                      transition.UnmatchedPreviousDraws +
+                                  transition.UnmatchedCurrentDraws !=
+                              0U
+                          ? 1U
+                          : 0U;
+                  totals.UnmatchedPrevious += transition.UnmatchedPreviousDraws;
+                  totals.UnmatchedCurrent += transition.UnmatchedCurrentDraws;
+                  totals.CarriedCurrent += unmatched.CarriedCurrent;
+                  totals.InsertedPrevious += unmatched.InsertedPrevious;
+                  totals.WithoutCamera += unmatched.WithoutCamera;
+                  totals.CameraMeasured += unmatched.CameraMeasured ? 1U : 0U;
+                  totals.Discontinuities += continuousTransition ? 0U : 1U;
+                }
                 if (launch.ExtendedDiagnostics) {
                   if (visualTransitionEvents.size() == 1024U) {
                     visualTransitionEvents.erase(
@@ -3569,6 +3611,7 @@ void NativeA32WindowSession::PresentVisualFrame(
         {
           std::lock_guard lock(interpolationPerfMutex);
           interpolationPerf.VisualTiming = visualInterpolationTiming;
+          interpolationPerf.Unmatched = visualUnmatchedTotals;
         }
         });
       }
