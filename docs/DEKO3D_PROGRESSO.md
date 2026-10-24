@@ -19,33 +19,69 @@ no Mesa). Meta: nenhum quadro > 16,7 ms em jogo normal.
 |---|---|---|
 | 1 | Mapa da interface PICA→GL e desenho da abstração | **feito** (este arquivo) |
 | 2 | Init deko3d + swapchain + clear/apresentação atrás de `config/renderer` | **código pronto e compilado** (NRO `deko3d-p2`); falta o teste no Eden (Ryzen caiu durante ele) |
-| 3 | Shaders: GLSL→DKSH (uam), cache em disco, pré-compilação offline | em andamento: formato do pacote, ferramenta, testes e carregador (`ShaderStore`, só sintaxe checada); falta usar nos draws (com o pacote 4/5) e gerar o `deko3d.pack` |
-| 4 | Anéis de vértice/uniform, texturas (upload, formatos), samplers | a fazer |
+| 3 | Shaders: GLSL→DKSH (uam), cache em disco, pré-compilação offline | **feito e compilado** (NRO `deko3d-p3`): pacote `deko3d.pack` gerado (272 do cache GL + 4 bases uber, 0 falhas), `ShaderStore`, programa por draw (especializado > uber > pula), híbrido ligado |
+| 4 | Anéis de vértice/uniform, texturas (upload, formatos), samplers | **parte 1 no código** (compila; sintaxe checada com o devkitA64): texturas RGBA8/LUT/samplers/descritores/despejo e streams por draw; falta: geometria persistente, ETC1→ETC2, Shadow2D, e medir no console |
 | 5 | Estado de pipeline, alvos, display transfer, DRS, widescreen | a fazer |
 | 6 | UI TopScreen (UiRenderBackend) e ImGui | a fazer |
 | 7 | Contadores no perf.txt equivalentes aos do GL (A/B) | a fazer |
 | 8 | Estabilidade/memória | a fazer |
 
-**Próximo passo:** quando houver máquina liberada, rodar `tests/switch/eden_deko3d.sh` com o
-NRO `~/oot3d-work/oot3d_native_game.deko3d-p2.nro` (md5 `c8d4032d274832e648eca615772affaa`) e
-conferir `logs/deko3d.txt` (`deko3d: ready`, quadros apresentados). Em paralelo (só código):
-pacote 3 — `gfx_deko3d_shaders.cpp` (carrega `shadercache/deko3d.pack`, DKSH inteiro na memória de
-código como no Aurora, `control = NULL`; programa por par de identidades; uber quando falta;
-registra o texto que faltou em `logs/deko3d_shaders/`).
+**Próximo passo:** pacote 5 (alvos `DkImage` cor+depth por `PicaGlTarget`, estado de pipeline,
+viewport/scissor, o draw em si com `PicaDrawResources` + barreira `TakeInvalidate`/`TakeCodeWritten`,
+display transfer e scanout). Teste no console/Eden do NRO `deko3d-p3` (só quando liberado; nada de
+emulador na Ryzen): `logs/deko3d.txt` deve mostrar `shaders: 276 precompiled stages`, e a linha
+`programs (frame)` com `no_vertex=0`, quase tudo `specialized` e o resto `uber`. Para isso copiar
+`~/oot3d-work/deko3d-p3.pack` para `sdmc:/switch/oot3dre/shadercache/deko3d.pack`.
 
-### Pendências na Ryzen (24/10, ela reiniciou duas vezes)
+### Pacote 3 (o que entrou, 24/10)
 
-- 1º crash: rodava só o Eden (tarefa agendada `EdenDeko3d`, teste do NRO p2, ~12:37); o build
-  tinha terminado às 12:33. 2º crash: logo após voltar; do meu lado só havia um `ssh … echo ok`
-  a cada 20 s esperando ela voltar.
-- Limpar ao voltar: apagar a tarefa `EdenDeko3d` (`/SC ONCE /ST 23:59`: rodaria às 23:59!);
-  no SD do Eden apagar `config\renderer` e voltar o `.nro` original de
-  `%USERPROFILE%\eden_deko3d_orig.nro` (o script faz isso no fim, mas não chegou ao fim).
-- Regras novas: nunca build e Eden juntos (o `build.sh` recusa com o Eden aberto e o
-  `eden_deko3d.sh` recusa com `ninja` rodando); `-j 4` com `nice 10`; `.wslconfig` com
-  `memory=6GB` (+ `wsl --shutdown`) antes do próximo build; nada > 5 GB; Eden só teste curto.
-- Validar `/root/agentes/deko3d/build` (o build terminou antes do crash, mas conferir o md5 do
-  NRO de `out/` e, na dúvida, recompilar o runtime).
+- `gfx_deko3d_programs.h` (puro): `PickPicaProgram` (especializado > uber > pula), contadores, e
+  `PicaStageCache` (estágio resolvido uma vez por identidade da fonte canônica; ausência lembrada).
+- `GfxRenderingAPIDeko3d` implementa `PicaProgramPreparationBackend` com
+  `UsesAlwaysAvailablePrograms() = true` (o plano manda o programa paramétrico em todo draw);
+  `PrepareNativePicaPrograms` só registra (nada a compilar). `SubmitPicaDraw` traduz para GL 4.3
+  (mesma função do GL) só na primeira vez de cada texto e procura no pacote; log
+  `programs (frame|shutdown)` a cada 1800 quadros.
+- Pacote: `tools/oot3d/deko3d_shader_pack.py --src <shadercache> --glsl <bases> -o deko3d.pack`;
+  bases uber com `oot3d_deko3d_parametric_glsl_dump <dir>` (alvo de host; sem o CMake, compila com
+  g++ contra `liboot3d_native_pica_frontend.a` + `pica_gl_shader_dialect.cpp`). Gerado no notebook:
+  `~/oot3d-work/deko3d-p3.pack` (md5 `66f481372245ab4a521694e2a7f500d6`, 1,4 MiB, 1 vertex + 275
+  fragment). Chaves das bases: `a64d0c333b2643ec` (sem luz), `891e9717e2716c91` (luz),
+  `e8e1dda8208db28e` (textura0 inteira), `5eff4c88329bdc4b` (luz + textura0 inteira).
+
+### Pacote 4, parte 1 (o que entrou, 24/10)
+
+- `gfx_deko3d_pica_plan.h` (puro, host): wrap/filtro/LOD como o GL (`ToPicaGlWrap`,
+  `PicaGlMinFilter`, BASE_LEVEL = início da view, MAX_LEVEL limitado à cadeia), chave de textura
+  igual à do GL (o estado do sampler faz parte), plano de mips RGBA8, slots de descritor, plano de
+  vértices (todos os bindings num bloco do quadro, alinhados a 16; atributo ausente = buffer
+  constante (0,0,0,1) no slot 15) e tamanho de UBO (múltiplo de 256, até 64 KiB).
+- `gfx_deko3d_pica_resources.{h,cpp}`: arrays de descritores (4096 imagens, 512 samplers; imagem 0
+  = branco 1×1, 1 = R32UI 0xFFFFFFFF), textura = um `DkMemBlock` próprio + `DkImage` RGBA8 com mips
+  (pré-decodificadas pelo worker de planos quando houver, senão `DecodePicaTextureMips`) subidas
+  por stream + `dkCmdBufCopyBufferToImage`; LUT de luz R32UI 256×24; despejo com a política do GL
+  (`gfx_opengl_pica_residency.h`, orçamento `config/gl_texture_budget_mb`, 96 MiB) logo depois da
+  espera do fence do slot; vértices/índices/uniforms por draw na memória de stream (uniform igual ao
+  anterior no mesmo quadro é reaproveitado). Shadow2D → textura inteira de reserva (contado).
+- Pendências do pacote 4: geometria persistente (`PicaGeometryRegistry`), ETC1→ETC2 direto
+  (`config/etc2`), anisotropia, sub-alocador de imagens (hoje um memblock por textura: medir),
+  stream que cresce e nunca encolhe (medir no console).
+
+### Ryzen (24/10)
+
+- Limpeza feita: a tarefa `EdenDeko3d` já não existia; no SD do Eden não havia `config\renderer`
+  e o `.nro` era o original (mesmo md5 do `eden_deko3d_orig.nro`, que foi apagado).
+- Build existente validado: NRO de `out/` com o md5 do p2 (`c8d4032d…`), 30 objetos do dia todos
+  ELF válidos, `.ninja_log/.ninja_deps` íntegros.
+- **Bug achado:** o `/root/agentes/deko3d/build.sh` da Ryzen ainda estava com `ninja -j12` e
+  `nice -n 5` e sem a recusa com o Eden aberto (a cópia do repo já tinha `-j4`/`nice 10`).
+  Substituído pela cópia do repo (`tools/oot3d/deko3d_ryzen_build.sh`, md5 `636b00a1…`). Conferir o
+  md5 dos dois antes de cada build.
+- Build do p3 (17 passos, só runtime, sem shard) ok: NRO md5 `6e31a96d79e229181cf7f4fd43c3edc4`.
+- A Ryzen parou de responder (~13:51) no meio do `scp` do NRO (Windows OpenSSH: `scp` padrão dá
+  "Connection closed"; `scp -O` funcionou até cair). Sem build nem Eden rodando nessa hora.
+- Regras: nunca build e Eden juntos; `-j 4` com `nice 10`; `.wslconfig` com `memory=6GB`; nada
+  > 5 GB; Eden só teste curto e nunca por agente sem pedido.
 
 ## Mapa do que o GL faz hoje (pacote 1)
 
@@ -131,6 +167,12 @@ especializados (~5 KB). Ligações: UBO de vértice `binding=0`, UBO de fragment
   script vigia o log e mata o ninja se um shard começar. Alvo: `oot3d_native_game_nro`.
 - Cópia do script no repo: `tools/oot3d/deko3d_ryzen_build.sh`. Sincronizar fonte: tar dos
   arquivos que diferem do `topscreen-3.0`, extraído com `--touch`.
+- Antes de mandar à Ryzen, checar a sintaxe no notebook (leve, um arquivo por vez): pegar a linha
+  do `gfx_opengl.cpp` em `ninja -t commands` do `~/oot3d-work/build-switch`, trocar o caminho do
+  repo pelo do worktree, `-O3`→`-O0`, tirar `-w` e o `-MD … -o …`, e rodar com `-fsyntax-only` no
+  arquivo deko3d (o `$(…)` precisa de `bash -c` por causa das aspas dos `-D`).
+- Copiar o NRO: `wsl … cp out/oot3d_native_game.nro /mnt/c/Users/flavin/x.nro` e `scp -O ryzen:x.nro`
+  (o `scp` padrão contra o OpenSSH do Windows fecha a conexão).
 - Script `/root/agentes/deko3d/build.sh` grava `/root/agentes/deko3d/status.txt` e o NRO em
   `/root/agentes/deko3d/out/`; aborta se um shard começar a recompilar.
 

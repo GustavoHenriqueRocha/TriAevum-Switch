@@ -978,6 +978,29 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 
 ---
 
+### 4.11 deko3d: shaders DKSH pré-compilados (sem compilar no console)
+
+*(2026-10-24, ramo `deko3d`, ver `docs/DEKO3D_PROGRESSO.md`)* No deko3d não existe compilador de
+GLSL no console: os shaders vão prontos (DKSH, do `uam` do devkitPro) num pacote só,
+`shadercache/deko3d.pack`. A técnica é reaproveitável em qualquer port com backend GL:
+
+- **Mesma fonte do GL.** O backend deko3d traduz a fonte canônica com a mesma função do GL
+  (`TranslatePicaShaderToOpenGl43`) e usa o texto GL 4.3 como chave (FNV-1a 64 do byte do estágio +
+  texto). Assim os `.src` (PGS1) que o GL já grava no SD viram o pacote inteiro offline:
+  `tools/oot3d/deko3d_shader_pack.py --src shadercache -o deko3d.pack` (272 estágios em ~6 s com
+  `-j 2` no notebook; o uam aceita o GL 4.3 do Mesa sem mudança: UBO `binding` = slot do estágio,
+  `sampler` `binding` = slot de textura).
+- **Programas paramétricos (uber) no pacote desde o início:** `oot3d_deko3d_parametric_glsl_dump`
+  escreve as 4 bases (luz × textura0 inteira) como `frag_<chave>.glsl`, e `--glsl <dir>` as compila.
+  O backend implementa `PicaProgramPreparationBackend::UsesAlwaysAvailablePrograms() = true`, então
+  todo draw chega com o especializado **e** o paramétrico: sem o DKSH do especializado, desenha com o
+  uber; sem os dois, pula e conta. Nunca há compilação na thread de render.
+- **O que faltou se grava sozinho:** texto sem DKSH vai para `logs/deko3d_shaders/` e entra no
+  próximo pacote com `--glsl`. Cada identidade de fonte é resolvida uma vez só (ausência também fica
+  lembrada), senão um draw sem DKSH refaria a tradução de ~31 KB a cada quadro.
+- **Carregar:** o DKSH inteiro vai para a memória de código (`DkMemBlockFlags_Code`, alinhamento
+  256) e `dkShaderMakerDefaults(&maker, bloco, offset)` sem ponteiro de controle separado.
+
 ## 5. Medição e diagnóstico
 
 ### 5.1 Arquivos no SD (`sdmc:/switch/oot3dre/`)
