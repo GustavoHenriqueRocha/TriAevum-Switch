@@ -52,6 +52,9 @@ void GfxRenderingAPIDeko3d::Init() {
     if (!mDevice.Create(width, height, &error)) {
         throw std::runtime_error(error);
     }
+    if (!mShaders.Init(mDevice)) {
+        throw std::runtime_error("deko3d: shader code memory");
+    }
     mDeviceReady = true;
     if (mFramebuffers.empty()) {
         mFramebuffers.push_back({width, height, false, true});
@@ -61,6 +64,7 @@ void GfxRenderingAPIDeko3d::Init() {
 void GfxRenderingAPIDeko3d::Shutdown() {
     if (mDeviceReady) {
         mDevice.WaitIdle();
+        mShaders.Shutdown();
         mDevice.Destroy();
         mDeviceReady = false;
     }

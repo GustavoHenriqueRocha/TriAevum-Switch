@@ -7,6 +7,7 @@
 #if defined(__SWITCH__)
 #include "fast/backends/gfx_rendering_api.h"
 #include "gfx_deko3d_device.h"
+#include "gfx_deko3d_shaders.h"
 
 #include <array>
 #include <cstdint>
@@ -119,6 +120,7 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI {
     void BindWindowTarget();
 
     Deko3d::Device mDevice;
+    Deko3d::ShaderStore mShaders;
     bool mDeviceReady = false;
     std::vector<Deko3dFramebuffer> mFramebuffers;
     std::vector<std::unique_ptr<Deko3dShaderProgram>> mShaderPrograms;
