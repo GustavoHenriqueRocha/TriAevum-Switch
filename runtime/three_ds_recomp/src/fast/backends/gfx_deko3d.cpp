@@ -60,6 +60,7 @@ void GfxRenderingAPIDeko3d::Init() {
         throw std::runtime_error("deko3d: descriptor/fallback memory");
     }
     mDeviceReady = true;
+    InitPica();
     if (mFramebuffers.empty()) {
         mFramebuffers.push_back({width, height, false, true});
     }
@@ -71,6 +72,9 @@ void GfxRenderingAPIDeko3d::Shutdown() {
         mDevice.WaitIdle();
         mVertexStages.Clear();
         mFragmentStages.Clear();
+        mTargets.Shutdown();
+        mPendingFills.clear();
+        mBoundTarget = nullptr;
         mResources.Shutdown();
         mResourcesFrame = ~0ULL;
         mShaders.Shutdown();
@@ -96,6 +100,9 @@ void GfxRenderingAPIDeko3d::EnsureFrame() {
         // Right after the slot's fence wait: evictions are safe here.
         mResourcesFrame = mDevice.Frame();
         mResources.BeginFrame(mResourcesFrame);
+        mTargets.BeginFrame(mResourcesFrame);
+        // A new command list: nothing is known to be bound.
+        mBoundTarget = nullptr;
     }
 }
 
@@ -103,21 +110,24 @@ void GfxRenderingAPIDeko3d::BindWindowTarget() {
     if (!mDeviceReady) {
         return;
     }
-    if (!mWindowBound) {
-        const DkImageView& view = mDevice.AcquireWindow(GetWindowAcquireHook());
+    EnsureFrame();
+    // Acquired at its first use (blocking; the work recorded so far goes to
+    // the GPU first), bound whenever a PICA target took its place.
+    const DkImageView& view = mDevice.AcquireWindow(GetWindowAcquireHook());
+    mWindowBound = true;
+    DkCmdBuf cmd = mDevice.Cmd();
+    if (mBoundTarget != &mDevice) {
         const DkImageView* colors[] = {&view};
-        DkCmdBuf cmd = mDevice.Cmd();
         dkCmdBufBindRenderTargets(cmd, colors, 1, nullptr);
         const DkViewport viewport = {0.0F, 0.0F, static_cast<float>(mDevice.Width()),
                                      static_cast<float>(mDevice.Height()), 0.0F, 1.0F};
         dkCmdBufSetViewports(cmd, 0, &viewport, 1);
         const DkScissor scissor = {0, 0, mDevice.Width(), mDevice.Height()};
         dkCmdBufSetScissors(cmd, 0, &scissor, 1);
-        mWindowBound = true;
+        mBoundTarget = &mDevice;
     }
     if (mWindowClearPending) {
         mWindowClearPending = false;
-        DkCmdBuf cmd = mDevice.Cmd();
         const DkScissor scissor = {0, 0, mDevice.Width(), mDevice.Height()};
         dkCmdBufSetScissors(cmd, 0, &scissor, 1);
         if (mWindowClearColor) {
@@ -149,6 +159,7 @@ void GfxRenderingAPIDeko3d::FinishRender() {
     BindWindowTarget();
     mDevice.EndFrame(GetWindowAcquireHook());
     mWindowBound = false;
+    mBoundTarget = nullptr;
     if (mDevice.Frame() % 1800U == 0U) {
         LogPicaProgramCounters("frame");
     }
@@ -332,7 +343,7 @@ void GfxRenderingAPIDeko3d::SetCurrentPrimDepth(float depth) {
     mCurrentPrimDepth = depth;
 }
 
-// ---- native PICA path (packages 3-5): accepted, not drawn yet ----
+// ---- native PICA path (packages 3-4; the draw itself: gfx_deko3d_pica_draw.cpp) ----
 
 GfxNativePicaBackendStats GfxRenderingAPIDeko3d::GetNativePicaBackendStats() const noexcept {
     GfxNativePicaBackendStats stats;
@@ -429,50 +440,24 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(resources.UniformBytes >> 10),
                 static_cast<unsigned long long>(resources.UniformReuses),
                 static_cast<unsigned long long>(resources.StreamFailures));
-}
-
-bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, std::string*) {
-    ++mCounters.PicaDrawsSkipped;
-    if (!mDeviceReady) {
-        return true;
-    }
-    EnsureFrame();
-    // Package 3: the shaders; package 4: what the draw reads. The draw
-    // itself is recorded from package 5 on.
-    const PicaProgram program = ResolvePicaProgram(draw);
-    if (program.Vertex == nullptr || program.Fragment == nullptr) {
-        return true;
-    }
-    std::string error;
-    if (!mResources.Prepare(draw, mDrawResources, &error)) {
-        if (mCounters.PicaDrawsRejected++ < 10U) {
-            Deko3d::Log("draw rejected: %s", error.c_str());
-        }
-        return true;
-    }
-    ++mCounters.PicaDrawsPrepared;
-    return true;
-}
-
-bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplayTransferView& transfer,
-                                                      std::string*) {
-    ++mCounters.PicaTransfersSkipped;
-    if (transfer.Present) {
-        // The scanout draws into the window (package 5): acquire it here,
-        // in the frame's order.
-        BindWindowTarget();
-    }
-    return true;
-}
-
-bool GfxRenderingAPIDeko3d::ClearPicaRenderTarget(uint64_t, uint32_t, std::string*) {
-    ++mCounters.PicaClearsSkipped;
-    return true;
-}
-
-bool GfxRenderingAPIDeko3d::SubmitPicaMemoryFill(const GfxNativePicaMemoryFillView&, std::string*) {
-    ++mCounters.PicaFillsSkipped;
-    return true;
+    const auto& targets = mTargets.Stats();
+    Deko3d::Log("pica (%s): draws issued=%llu skipped=%llu shadow_producers=%llu no_effect=%llu; transfers=%llu "
+                "repeated=%llu rejected=%llu scanouts=%llu fills=%llu clears=%llu; targets=%llu (%llu MiB) "
+                "displays=%llu failures=%llu",
+                when, static_cast<unsigned long long>(mCounters.PicaDrawsIssued),
+                static_cast<unsigned long long>(mCounters.PicaDrawsSkipped),
+                static_cast<unsigned long long>(mCounters.PicaShadowProducersSkipped),
+                static_cast<unsigned long long>(mCounters.PicaNoEffectSkipped),
+                static_cast<unsigned long long>(mCounters.PicaTransfers),
+                static_cast<unsigned long long>(mCounters.PicaTransfersRepeated),
+                static_cast<unsigned long long>(mCounters.PicaTransfersRejected),
+                static_cast<unsigned long long>(mCounters.PicaScanouts),
+                static_cast<unsigned long long>(mCounters.PicaFills),
+                static_cast<unsigned long long>(mCounters.PicaClears),
+                static_cast<unsigned long long>(targets.TargetsCreated),
+                static_cast<unsigned long long>(targets.TargetBytes >> 20),
+                static_cast<unsigned long long>(targets.DisplaysCreated),
+                static_cast<unsigned long long>(targets.Failures));
 }
 
 bool GfxRenderingAPIDeko3d::QueuePicaCompletion(uint64_t completionId, std::string* error) {
@@ -492,10 +477,6 @@ std::vector<uint64_t> GfxRenderingAPIDeko3d::TakePicaCompletions() {
     auto result = std::move(mCompletions);
     mCompletions.clear();
     return result;
-}
-
-bool GfxRenderingAPIDeko3d::ResetPicaState(std::string*) {
-    return true;
 }
 
 } // namespace Fast

@@ -3,9 +3,11 @@
 // device, window image, clears and the present. Package 3: every PICA draw
 // resolves its shaders from deko3d.pack (specialized, else parametric).
 // Package 4: its textures, LUT, vertex/index streams and uniforms are
-// uploaded (gfx_deko3d_pica_resources.h).
-// Drawing, the UI and the rest come in later packages; until then their calls
-// are accepted and counted, so the game runs headless on this backend.
+// uploaded (gfx_deko3d_pica_resources.h). Package 5: render targets, fills,
+// pipeline state, the draw itself, display transfers and the scanout
+// (gfx_deko3d_pica_targets.h, gfx_deko3d_pica_draw.cpp).
+// The UI (TopScreen, ImGui) comes in package 6; until then its calls are
+// accepted and counted.
 
 #if defined(__SWITCH__)
 #include "fast/backends/gfx_deko3d_programs.h"
@@ -13,6 +15,7 @@
 #include "fast/renderer3ds/pica_program_preparation.h"
 #include "gfx_deko3d_device.h"
 #include "gfx_deko3d_pica_resources.h"
+#include "gfx_deko3d_pica_targets.h"
 #include "gfx_deko3d_shaders.h"
 
 #include <array>
@@ -39,12 +42,18 @@ struct Deko3dFramebuffer {
 };
 
 struct Deko3dBackendCounters {
-    uint64_t PicaDrawsSkipped = 0;
-    uint64_t PicaDrawsPrepared = 0; // program + resources ready (drawn from package 5 on)
+    uint64_t PicaDrawsSkipped = 0;  // no program, no target or no effect
+    uint64_t PicaDrawsPrepared = 0; // program + resources ready
+    uint64_t PicaDrawsIssued = 0;   // recorded into the command buffer
     uint64_t PicaDrawsRejected = 0; // what the GL backend rejects too
-    uint64_t PicaTransfersSkipped = 0;
-    uint64_t PicaFillsSkipped = 0;
-    uint64_t PicaClearsSkipped = 0;
+    uint64_t PicaShadowProducersSkipped = 0; // FragmentOperationMode 3 (no image store yet)
+    uint64_t PicaNoEffectSkipped = 0;
+    uint64_t PicaTransfers = 0;
+    uint64_t PicaTransfersRepeated = 0; // identical copy of an unchanged source (GL lean)
+    uint64_t PicaTransfersRejected = 0;
+    uint64_t PicaScanouts = 0;
+    uint64_t PicaFills = 0;
+    uint64_t PicaClears = 0;
     uint64_t UiDrawsSkipped = 0;
     uint64_t WindowClears = 0;
     Deko3d::PicaProgramPickCounters Programs;
@@ -147,6 +156,18 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     const DkShader* ResolvePicaStage(Deko3d::ShaderStage stage, std::string_view canonical,
                                      Renderer3ds::PicaShaderSourceIdentity identity);
     void LogPicaProgramCounters(const char* when);
+    // Package 5 (gfx_deko3d_pica_draw.cpp).
+    void InitPica();
+    void BindPicaTarget(Deko3d::PicaTarget& target);
+    void ApplyPendingPicaFills(const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target);
+    void ApplyPicaFill(const GfxNativePicaMemoryFillView& fill, const Deko3d::PicaTargetKey& key,
+                       Deko3d::PicaTarget& target, Deko3d::PicaFillCoverage coverage);
+    // Barriers before the next draw: uploads/descriptors/shader code.
+    void FlushPicaInvalidations();
+    bool RecordPicaDraw(const GfxNativePicaDrawView& draw, const PicaProgram& program,
+                        const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target);
+    void DrawPicaScanout(const GfxNativePicaDisplayTransferView& transfer, const Deko3d::PicaDisplay& display,
+                         const Deko3d::PicaTransferPlan& plan, float allocScale);
     // Opens the device frame (if needed) and starts the resources' frame
     // once per device frame.
     void EnsureFrame();
@@ -156,6 +177,16 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     Deko3d::PicaResources mResources;
     uint64_t mResourcesFrame = ~0ULL;
     Deko3d::PicaDrawResources mDrawResources;
+    Deko3d::PicaTargets mTargets;
+    std::vector<GfxNativePicaMemoryFillView> mPendingFills;
+    // What dkCmdBufBindRenderTargets holds: a PICA target, the window, or
+    // nothing known (frame start, after a target was created).
+    const void* mBoundTarget = nullptr;
+    const DkShader* mScanoutVertex = nullptr;
+    const DkShader* mScanoutFragment = nullptr;
+    uint32_t mLinearClampSampler = 0;
+    bool mCullInvert = false;    // config/deko3d_cull_invert
+    bool mPicaLean = true;       // config/gl_lean (identical display copies skipped)
     Deko3d::PicaStageCache<DkShader> mVertexStages;
     Deko3d::PicaStageCache<DkShader> mFragmentStages;
     uint64_t mTranslationFailures = 0;

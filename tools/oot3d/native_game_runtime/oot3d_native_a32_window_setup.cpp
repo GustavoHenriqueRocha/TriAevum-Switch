@@ -1805,9 +1805,11 @@ void NativeA32WindowSession::UpdateScenePresentation() {
   const uint32_t sceneHeight = std::max<uint32_t>(1, window.GetHeight());
   // The Vulkan scene target takes the window's shape. The OpenGL one keeps
   // the native 5:3 (letterboxed) unless its widescreen option widens it by
-  // GlWidescreenFactor, so the frustum must widen by exactly that much.
+  // GlWidescreenFactor, so the frustum must widen by exactly that much. The
+  // deko3d targets follow the GL rule (gfx_deko3d_pica_targets.cpp).
   if (apiPointer != nullptr &&
-      std::string_view(apiPointer->GetName()) == "OpenGL") {
+      (std::string_view(apiPointer->GetName()) == "OpenGL" ||
+       std::string_view(apiPointer->GetName()) == "deko3d")) {
     const float factor = Fast::Oot3d::GlWidescreenEnabled()
                              ? Fast::Oot3d::GlWidescreenFactor(sceneWidth, sceneHeight)
                              : 1.0F;

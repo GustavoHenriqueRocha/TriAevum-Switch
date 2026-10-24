@@ -92,6 +92,19 @@ class PicaResources {
     [[nodiscard]] const PicaResourceStats& Stats() const noexcept { return mStats; }
     [[nodiscard]] DkGpuAddr ConstantAttribute() const noexcept { return mConstantGpu; }
 
+    // Image descriptors owned by others (display images of package 5).
+    // Allocate returns kMaxImages when full; Free only once no frame in
+    // flight can read the slot.
+    uint32_t AllocateImageSlot() noexcept { return mImageSlots.Allocate(); }
+    void FreeImageSlot(uint32_t slot) noexcept {
+        if (slot >= kReservedImages && slot < kMaxImages) {
+            mImageSlots.Free(slot);
+        }
+    }
+    void WriteImageDescriptor(uint32_t slot, const DkImage& image);
+    // The descriptor slot of a sampler state (deduplicated).
+    uint32_t SamplerSlot(const PicaSamplerKey& key);
+
   private:
     struct Texture {
         DkMemBlock Memory = nullptr;
@@ -110,11 +123,9 @@ class PicaResources {
 
     DkResHandle TextureHandle(const Renderer3ds::PicaTextureView& texture);
     DkResHandle LightingLutHandle(const Renderer3ds::PicaLightingLutView& lut);
-    uint32_t SamplerSlot(const PicaSamplerKey& key);
     // A sampled 2D image with its own memory block, its descriptor in `slot`.
     bool CreateImage(Texture& texture, DkImageFormat format, uint32_t width, uint32_t height, uint32_t levels);
     void UploadLevel(const Texture& texture, uint32_t level, uint32_t width, uint32_t height, DkGpuAddr source);
-    void WriteImageDescriptor(uint32_t slot, const DkImage& image);
     void Destroy(Texture& texture) noexcept;
     void Evict();
 
@@ -124,9 +135,10 @@ class PicaResources {
     DkSamplerDescriptor* mSamplerDescriptors = nullptr;
     DkGpuAddr mImageDescriptorsGpu = DK_GPU_ADDR_INVALID;
     DkGpuAddr mSamplerDescriptorsGpu = DK_GPU_ADDR_INVALID;
-    DkMemBlock mFixed = nullptr; // fallback images and the constant attribute
+    DkMemBlock mFixed = nullptr; // fallback images
     DkImage mFallbackColor{};
     DkImage mFallbackInteger{};
+    DkMemBlock mConstant = nullptr; // (0, 0, 0, 1) floats, CPU-visible
     DkGpuAddr mConstantGpu = DK_GPU_ADDR_INVALID;
     DescriptorSlots<kMaxImages> mImageSlots{kReservedImages};
     std::unordered_map<PicaSamplerKey, uint32_t, PicaSamplerKeyHash> mSamplers;

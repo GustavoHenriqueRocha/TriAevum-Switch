@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -38,6 +39,9 @@ class ShaderStore {
     const DkShader* Find(ShaderStage stage, std::string_view text);
     // An already computed key (internal shaders embedded in the binary).
     const DkShader* FindKey(ShaderStage stage, uint64_t key, std::string_view textForRecord);
+
+    // A DKSH built into the binary (the scanout), loaded once under `key`.
+    const DkShader* Embedded(uint64_t key, std::span<const uint8_t> dksh);
 
     // True once after new code was written: the caller issues
     // dkCmdBufBarrier(DkBarrier_None, DkInvalidateFlags_Shader) before the

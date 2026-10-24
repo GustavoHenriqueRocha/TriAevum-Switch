@@ -1,7 +1,9 @@
 // Pure parts of the deko3d backend (docs/DEKO3D_PROGRESSO.md): what runs
 // without a GPU is tested here on the host.
 #include "fast/backends/gfx_deko3d.h"
+#include "fast/backends/gfx_deko3d_pica_pipeline.h"
 #include "fast/backends/gfx_deko3d_pica_plan.h"
+#include "fast/oot3d/scene_presentation_policy.h"
 #include "fast/backends/gfx_deko3d_programs.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
 
@@ -220,6 +222,130 @@ namespace Fast {
 bool Deko3dRendererSelected() { return false; }
 } // namespace Fast
 
+// ---- pacote 5: alvos, estado, transfer, scanout ----
+
+void TestPipelineEnums() {
+  using namespace Fast::Deko3d;
+  using C = Fast::Renderer3ds::PicaCompareFunction;
+  // Valores do deko3d.h (DkCompareOp_*): Never=1 ... Always=8.
+  Require(DekoCompareOp(C::Never) == 1 && DekoCompareOp(C::Less) == 2 && DekoCompareOp(C::Equal) == 3 &&
+              DekoCompareOp(C::LessOrEqual) == 4 && DekoCompareOp(C::Greater) == 5 &&
+              DekoCompareOp(C::NotEqual) == 6 && DekoCompareOp(C::GreaterOrEqual) == 7 &&
+              DekoCompareOp(C::Always) == 8,
+          "comparações no valor do DkCompareOp");
+  using L = Fast::Renderer3ds::PicaLogicOperation;
+  // A ordem PICA não é a do GL/deko3d: Set (PICA 4) é DkLogicOp_Set 15.
+  Require(DekoLogicOp(L::Copy) == kDekoLogicOpCopy && DekoLogicOp(L::Set) == 15 && DekoLogicOp(L::Xor) == 6 &&
+              DekoLogicOp(L::Invert) == 10 && DekoLogicOp(L::NoOp) == 5 && DekoLogicOp(L::Nand) == 14 &&
+              DekoLogicOp(L::CopyInverted) == 12 && DekoLogicOp(L::AndInverted) == 4,
+          "operação lógica PICA -> DkLogicOp");
+  using F = Fast::Renderer3ds::NativeBlendFactor;
+  Require(DekoBlendFactor(F::DestColor) == 9 && DekoBlendFactor(F::SourceAlpha) == 5 &&
+              DekoBlendFactor(F::OneMinusConstantAlpha) == (4 | 0x20) && DekoBlendFactor(F::SourceAlphaSaturate) == 11,
+          "fatores de blend no valor do DkBlendFactor");
+  using T = Fast::Renderer3ds::PicaTopology;
+  Require(DekoPrimitive(T::TriangleList) == 4 && DekoPrimitive(T::GeometryShader) == 4 &&
+              DekoPrimitive(T::TriangleStrip) == 5 && DekoPrimitive(T::TriangleFan) == 6,
+          "topologias como no GL");
+}
+
+void TestCullPlan() {
+  using namespace Fast::Deko3d;
+  using M = Fast::Renderer3ds::NativeCullMode;
+  Require(!PlanPicaCull(M::KeepAll, false, false).Enabled, "KeepAll sem cull");
+  // Origem em cima (como o Vulkan): o sentido de face inverte em relação ao GL.
+  const auto ccw = PlanPicaCull(M::KeepCounterClockwise, false, false);
+  Require(ccw.Enabled && !ccw.CullFront && !ccw.FrontCcw, "KeepCCW -> frente CW, cull de trás");
+  const auto cw = PlanPicaCull(M::KeepClockwise, true, false);
+  Require(cw.Enabled && cw.CullFront && cw.FrontCcw, "framebuffer invertido corta a frente");
+  Require(PlanPicaCull(M::KeepCounterClockwise, false, true).FrontCcw, "config/deko3d_cull_invert volta ao GL");
+}
+
+void TestTargetsAndRects() {
+  using namespace Fast::Deko3d;
+  Require(kTopScreenPhysicalWidth == Fast::Oot3d::kNativeTopScreenPhysicalWidth &&
+              kTopScreenPhysicalHeight == Fast::Oot3d::kNativeTopScreenPhysicalHeight,
+          "tela de cima = a do GL");
+  const auto top = PlanPicaTargetExtent(480, 400, 2.0F, 1.0666F, 480, 400);
+  Require(top.Width == 960 && top.Wide && top.Height == 853 && top.ScaleY > 2.13F, "alvo de cima alargado");
+  const auto bottom = PlanPicaTargetExtent(320, 240, 2.0F, 1.0666F, 480, 400);
+  Require(bottom.Width == 640 && bottom.Height == 480 && !bottom.Wide, "outros alvos não alargam");
+  Require(!PlanPicaTargetExtent(480, 400, 3.0F, 1.0F, 480, 400).Wide, "widescreen desligado");
+  Require(ScaledEdge(7, 1.5F) == 11 && ScaledExtent(0, 2.0F) == 0 && ScaledExtent(1, 0.1F) == 1,
+          "bordas iguais às do PicaGlScale");
+  const PicaRect viewport = PlanPicaViewport(10.7F, 0.0F, 240.9F, 400.0F, 2.0F);
+  Require(viewport == PicaRect{20, 0, 480, 800}, "viewport trunca e escala as duas bordas");
+  Require(PlanPicaScissor(3, 5, 6, 14, 6, 2.0F, 960, 800) == PicaRect{10, 12, 20, 2}, "scissor inclusivo");
+  Require(PlanPicaScissor(0, 5, 6, 14, 6, 2.0F, 960, 800) == PicaRect{0, 0, 960, 800}, "sem scissor = alvo");
+  Require(PlanPicaScissor(3, 9, 0, 3, 0, 1.0F, 64, 64).Width == 0, "scissor invertido vazio");
+  Require(ClipPicaRect({-4, 10, 20, 100}, 64, 64) == PicaRect{0, 10, 16, 54}, "recorte ao alvo");
+  Require(ClipPicaRect({70, 0, 5, 5}, 64, 64) == PicaRect{}, "fora do alvo = vazio");
+  PicaTargetKey a{1, 0x18000000, 0x18100000, 240, 400, 0, 3};
+  PicaTargetKey b = a;
+  Require(a == b && PicaTargetKeyHash{}(a) == PicaTargetKeyHash{}(b), "chave igual");
+  b.DepthFormat = 2;
+  Require(!(a == b), "formato de depth diferencia");
+}
+
+void TestFills() {
+  using namespace Fast::Deko3d;
+  Fast::Renderer3ds::PicaMemoryFillView fill;
+  fill.RenderTargetNamespace = 1;
+  fill.StartPhysicalAddress = 0x1000;
+  fill.EndPhysicalAddress = 0x1000 + 240 * 400 * 4;
+  fill.Value = 0x11223344;
+  fill.Control = 1U | (1U << 9U); // 32 bits
+  const PicaTargetKey key{1, 0x1000, 0, 240, 400, 0, 0};
+  const auto coverage = PicaFillCovers(fill, key);
+  Require(coverage.Color && !coverage.Depth, "fill cobre a cor; sem depth (endereço 0)");
+  const auto color = DecodePicaClearColor(fill, 0);
+  Require(color[0] == 0x11 / 255.0F && color[3] == 0x44 / 255.0F, "RGBA8 do fill (byte 3 = R)");
+  PicaTargetKey shortKey = key;
+  shortKey.Height = 401;
+  Require(!PicaFillCovers(fill, shortKey).Color, "fill menor que o alvo não limpa");
+  Fast::Renderer3ds::PicaMemoryFillView depth;
+  depth.Value = 0x00FFFFFF;
+  depth.Control = 1U | (1U << 9U);
+  const auto [d, s] = DecodePicaClearDepthStencil(depth, 3);
+  Require(d == 1.0F && s == 0, "D24S8 1.0 / stencil 0");
+}
+
+void TestTransferAndScanout() {
+  using namespace Fast::Deko3d;
+  Fast::Renderer3ds::PicaDisplayTransferView transfer;
+  transfer.InputPhysicalAddress = 0x1000;
+  transfer.OutputPhysicalAddress = 0x2000;
+  transfer.InputWidth = 240;
+  transfer.InputHeight = 400;
+  transfer.OutputWidth = 240;
+  transfer.OutputHeight = 400;
+  transfer.Flags = 0;
+  auto plan = PlanPicaTransfer(transfer, 240, 400, 2.0F, 2.0F, 480, 800);
+  Require(plan.Valid && !plan.Linear && plan.SourceWidth == 480 && plan.ContentHeight == 800, "cópia 1:1");
+  transfer.Flags = 1U << 24U; // 2:1 horizontal
+  transfer.OutputWidth = 120;
+  plan = PlanPicaTransfer(transfer, 240, 400, 2.0F, 2.0F, 480, 800);
+  Require(plan.Valid && plan.Linear && plan.OutputWidth == 120 && plan.SourceWidth == 480 && plan.AllocWidth == 240,
+          "2:1 linear lê o dobro");
+  transfer.Flags = 8U;
+  Require(!PlanPicaTransfer(transfer, 240, 400, 2.0F, 2.0F, 480, 800).Valid, "modo não suportado rejeita");
+  transfer.Flags = 0;
+  transfer.InputWidth = 300;
+  Require(!PlanPicaTransfer(transfer, 240, 400, 2.0F, 2.0F, 480, 800).Valid, "maior que a fonte rejeita");
+  // Flip: entrada não linear sem dont-swizzle e sem bit 0 = invertido (GL).
+  transfer.InputWidth = 240;
+  transfer.OutputWidth = 240;
+  Require(PlanPicaTransfer(transfer, 240, 400, 1.0F, 1.0F, 240, 400).Flip, "flip padrão como no GL");
+  transfer.Flags = 1U;
+  Require(!PlanPicaTransfer(transfer, 240, 400, 1.0F, 1.0F, 240, 400).Flip, "bit 0 desfaz o flip");
+  // Tela de cima 400x240 apresentada em 1280x720: 5:3 com barras.
+  const auto placement = PlanPicaScanout(240, 400, 800, 2.0F, 1280, 720);
+  Require(placement.Viewport == PicaRect{40, 0, 1200, 720} && !placement.CoversWindow, "5:3 centralizado");
+  // Alargada (16:9): cobre a janela sem barra de 1 pixel.
+  const auto wide = PlanPicaScanout(240, 400, 853, 2.0F, 1280, 720);
+  Require(wide.CoversWindow && wide.Viewport.Width == 1280, "16:9 cobre a janela");
+}
+
 int main() {
   TestRendererConfigSelection();
   TestShaderPack();
@@ -228,6 +354,11 @@ int main() {
   TestSamplerAndTextureKeys();
   TestMipPlanAndSlots();
   TestVertexPlan();
+  TestPipelineEnums();
+  TestCullPlan();
+  TestTargetsAndRects();
+  TestFills();
+  TestTransferAndScanout();
   std::puts("oot3d_deko3d_backend_tests: ok");
   return 0;
 }

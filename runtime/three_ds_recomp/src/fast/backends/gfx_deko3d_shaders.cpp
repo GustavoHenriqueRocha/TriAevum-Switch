@@ -65,6 +65,13 @@ const DkShader* ShaderStore::FindKey(ShaderStage stage, uint64_t key, std::strin
     return Load(key, dksh);
 }
 
+const DkShader* ShaderStore::Embedded(uint64_t key, std::span<const uint8_t> dksh) {
+    if (const auto found = mLoaded.find(key); found != mLoaded.end()) {
+        return found->second.get();
+    }
+    return Load(key, dksh);
+}
+
 // The whole DKSH (control section first) goes to code memory and the maker
 // gets no separate control pointer, as Aurora's renderer loads them.
 const DkShader* ShaderStore::Load(uint64_t key, std::span<const uint8_t> dksh) {

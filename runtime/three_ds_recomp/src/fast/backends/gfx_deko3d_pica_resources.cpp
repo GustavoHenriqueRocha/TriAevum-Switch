@@ -86,6 +86,17 @@ bool PicaResources::Init(Device& device) {
     };
     place(mFallbackColor, DkImageFormat_RGBA8_Unorm);
     place(mFallbackInteger, DkImageFormat_R32_Uint);
+    // The constant attribute every absent vertex attribute reads (GL: a
+    // disabled array reads (0, 0, 0, 1)). CPU-visible: the image block above
+    // has no CPU address.
+    mConstant = device.MakeBlock(DK_MEMBLOCK_ALIGNMENT, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached,
+                                 "constant attribute");
+    if (mConstant == nullptr) {
+        return false;
+    }
+    const float constant[4] = {0.0F, 0.0F, 0.0F, 1.0F};
+    std::memcpy(dkMemBlockGetCpuAddr(mConstant), constant, sizeof(constant));
+    mConstantGpu = dkMemBlockGetGpuAddr(mConstant);
     WriteImageDescriptor(kFallbackColorImage, mFallbackColor);
     WriteImageDescriptor(kFallbackIntegerImage, mFallbackInteger);
     if (SamplerSlot(NearestClampKey()) != kNearestSampler) {
@@ -113,6 +124,11 @@ void PicaResources::Shutdown() noexcept {
     if (mFixed != nullptr) {
         dkMemBlockDestroy(mFixed);
         mFixed = nullptr;
+    }
+    if (mConstant != nullptr) {
+        dkMemBlockDestroy(mConstant);
+        mConstant = nullptr;
+        mConstantGpu = DK_GPU_ADDR_INVALID;
     }
     if (mDescriptors != nullptr) {
         dkMemBlockDestroy(mDescriptors);
