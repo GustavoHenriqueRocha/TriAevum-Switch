@@ -78,7 +78,12 @@ emulador na Ryzen): `logs/deko3d.txt` deve mostrar `shaders: 276 precompiled sta
   Substituído pela cópia do repo (`tools/oot3d/deko3d_ryzen_build.sh`, md5 `636b00a1…`). Conferir o
   md5 dos dois antes de cada build.
 - Build do p3 (17 passos, só runtime, sem shard) ok: NRO md5 `6e31a96d79e229181cf7f4fd43c3edc4`.
-- A Ryzen parou de responder (~13:51) no meio do `scp` do NRO (Windows OpenSSH: `scp` padrão dá
+- **NRO p3 ainda não está no notebook:** ficou em `/root/agentes/deko3d/out/oot3d_native_game.nro`
+  e em `C:\Users\flavin\deko3d-p3.nro` (md5 `6e31a96d…`, 147 015 231 bytes). A cópia parcial está
+  em `~/oot3d-work/oot3d_native_game.deko3d-p3.nro.parcial` (não usar). Quando a Ryzen voltar:
+  `scp -O ryzen:deko3d-p3.nro ~/oot3d-work/oot3d_native_game.deko3d-p3.nro` e conferir o md5. O p3
+  foi compilado no commit `3b12e0e1` (pacote 3, sem o pacote 4 parte 1).
+- A Ryzen parou de responder (~13:51) no meio do `scp` do NRO e não voltou em 30 min (Windows OpenSSH: `scp` padrão dá
   "Connection closed"; `scp -O` funcionou até cair). Sem build nem Eden rodando nessa hora.
 - Regras: nunca build e Eden juntos; `-j 4` com `nice 10`; `.wslconfig` com `memory=6GB`; nada
   > 5 GB; Eden só teste curto e nunca por agente sem pedido.
