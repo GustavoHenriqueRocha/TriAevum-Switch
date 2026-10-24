@@ -1,6 +1,7 @@
 // Pure parts of the deko3d backend (docs/DEKO3D_PROGRESSO.md): what runs
 // without a GPU is tested here on the host.
 #include "fast/backends/gfx_deko3d.h"
+#include "fast/backends/gfx_deko3d_programs.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
 
 #include <cstring>
@@ -76,6 +77,43 @@ void TestShaderPack() {
   Require(!index.Parse({}, &error), "vazio reprova");
 }
 
+void TestProgramPick() {
+  using namespace Fast::Deko3d;
+  Require(PickPicaProgram(true, true, true) == PicaProgramPick::Specialized, "especializado vence o uber");
+  Require(PickPicaProgram(true, true, false) == PicaProgramPick::Specialized, "especializado sem uber");
+  Require(PickPicaProgram(true, false, true) == PicaProgramPick::Uber, "falta o especializado: uber");
+  Require(PickPicaProgram(true, false, false) == PicaProgramPick::NoFragment, "sem nenhum fragment: pula");
+  Require(PickPicaProgram(false, true, true) == PicaProgramPick::NoVertex, "sem vertex: pula mesmo com fragment");
+  PicaProgramPickCounters counters;
+  counters.Count(PicaProgramPick::Uber);
+  counters.Count(PicaProgramPick::Uber);
+  counters.Count(PicaProgramPick::NoVertex);
+  Require(counters.Uber == 2 && counters.NoVertex == 1 && counters.Specialized == 0, "contadores por escolha");
+}
+
+// Regressão de desenho: cada texto é traduzido/procurado no pacote uma vez só
+// por identidade, inclusive quando falta (senão cada draw sem DKSH refaria a
+// tradução de ~31 KB na thread de render).
+void TestStageCacheResolvesOnce() {
+  using namespace Fast::Deko3d;
+  struct FakeShader {
+    int Id;
+  };
+  const FakeShader shader{7};
+  PicaStageCache<FakeShader> cache;
+  const auto present = Fast::Renderer3ds::IdentifyPicaShaderSource("void main() {}");
+  const auto absent = Fast::Renderer3ds::IdentifyPicaShaderSource("void main() { discard; }");
+  int calls = 0;
+  for (int draw = 0; draw < 5; ++draw) {
+    Require(cache.Get(present, [&] { ++calls; return &shader; }) == &shader, "acha o shader");
+    Require(cache.Get(absent, [&]() -> const FakeShader* { ++calls; return nullptr; }) == nullptr,
+            "ausente continua ausente");
+  }
+  Require(calls == 2 && cache.Resolutions() == 2 && cache.Size() == 2, "uma resolução por identidade");
+  cache.Clear();
+  Require(cache.Size() == 0, "Clear esvazia");
+}
+
 } // namespace
 
 // Off the Switch the selection is constant (gfx_deko3d_selection.cpp is not
@@ -87,6 +125,8 @@ bool Deko3dRendererSelected() { return false; }
 int main() {
   TestRendererConfigSelection();
   TestShaderPack();
+  TestProgramPick();
+  TestStageCacheResolvesOnce();
   std::puts("oot3d_deko3d_backend_tests: ok");
   return 0;
 }

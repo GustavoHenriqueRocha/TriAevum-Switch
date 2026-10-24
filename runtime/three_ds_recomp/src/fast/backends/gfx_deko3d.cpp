@@ -4,6 +4,7 @@
 
 #if defined(__SWITCH__)
 #include "gfx_deko3d_api.h"
+#include "fast/renderer3ds/pica_gl_shader_dialect.h"
 
 #include <switch.h>
 
@@ -63,7 +64,10 @@ void GfxRenderingAPIDeko3d::Init() {
 
 void GfxRenderingAPIDeko3d::Shutdown() {
     if (mDeviceReady) {
+        LogPicaProgramCounters("shutdown");
         mDevice.WaitIdle();
+        mVertexStages.Clear();
+        mFragmentStages.Clear();
         mShaders.Shutdown();
         mDevice.Destroy();
         mDeviceReady = false;
@@ -131,6 +135,9 @@ void GfxRenderingAPIDeko3d::FinishRender() {
     BindWindowTarget();
     mDevice.EndFrame(GetWindowAcquireHook());
     mWindowBound = false;
+    if (mDevice.Frame() % 1800U == 0U) {
+        LogPicaProgramCounters("frame");
+    }
 }
 
 int GfxRenderingAPIDeko3d::CreateFramebuffer() {
@@ -325,7 +332,76 @@ void GfxRenderingAPIDeko3d::SetNativePicaGeometryCacheEnabled(bool enabled) noex
     mGeometryCacheEnabled = enabled;
 }
 
-bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView&, std::string*) {
+void GfxRenderingAPIDeko3d::PrepareNativePicaPrograms(std::span<const Renderer3ds::PicaVertexArtifact> vertices) {
+    // Nothing to build ahead: every stage is a precompiled DKSH loaded at its
+    // first draw (a copy into code memory, no compilation).
+    Deko3d::Log("programs: hybrid preparation, %zu vertex artifacts, %llu stages in the pack", vertices.size(),
+                static_cast<unsigned long long>(mShaders.Stats().PackEntries));
+}
+
+const DkShader* GfxRenderingAPIDeko3d::ResolvePicaStage(Deko3d::ShaderStage stage, std::string_view canonical,
+                                                        Renderer3ds::PicaShaderSourceIdentity identity) {
+    if (canonical.empty()) {
+        return nullptr;
+    }
+    if (!identity.Available()) {
+        identity = Renderer3ds::IdentifyPicaShaderSource(canonical);
+    }
+    auto& cache = stage == Deko3d::ShaderStage::Vertex ? mVertexStages : mFragmentStages;
+    return cache.Get(identity, [&]() -> const DkShader* {
+        // Same text as the GL backend's BuildPicaGlProgram, so the pack made
+        // from its shadercache/*.src matches.
+        std::string translated;
+        std::string error;
+        if (!Renderer3ds::TranslatePicaShaderToOpenGl43(canonical, translated, &error)) {
+            if (mTranslationFailures++ < 10U) {
+                Deko3d::Log("programs: %s translation failed: %s",
+                            stage == Deko3d::ShaderStage::Vertex ? "vertex" : "fragment", error.c_str());
+            }
+            return nullptr;
+        }
+        return mShaders.Find(stage, translated);
+    });
+}
+
+GfxRenderingAPIDeko3d::PicaProgram GfxRenderingAPIDeko3d::ResolvePicaProgram(const GfxNativePicaDrawView& draw) {
+    PicaProgram program;
+    program.Vertex = ResolvePicaStage(Deko3d::ShaderStage::Vertex, draw.VertexShaderSource,
+                                      draw.VertexShaderSourceIdentity);
+    const DkShader* specialized = nullptr;
+    const DkShader* uber = nullptr;
+    if (program.Vertex != nullptr) {
+        specialized = ResolvePicaStage(Deko3d::ShaderStage::Fragment, draw.FragmentShaderSource,
+                                       draw.FragmentShaderSourceIdentity);
+        if (specialized == nullptr) {
+            uber = ResolvePicaStage(Deko3d::ShaderStage::Fragment, draw.UberFragmentShaderSource,
+                                    draw.UberFragmentShaderSourceIdentity);
+        }
+    }
+    program.Pick = Deko3d::PickPicaProgram(program.Vertex != nullptr, specialized != nullptr, uber != nullptr);
+    program.Fragment = specialized != nullptr ? specialized : uber;
+    mCounters.Programs.Count(program.Pick);
+    return program;
+}
+
+void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
+    const auto& programs = mCounters.Programs;
+    const auto& shaders = mShaders.Stats();
+    Deko3d::Log("programs (%s): draws specialized=%llu uber=%llu no_vertex=%llu no_fragment=%llu; "
+                "stages vertex=%zu fragment=%zu loaded=%llu missing=%llu code=%llu KiB",
+                when, static_cast<unsigned long long>(programs.Specialized),
+                static_cast<unsigned long long>(programs.Uber), static_cast<unsigned long long>(programs.NoVertex),
+                static_cast<unsigned long long>(programs.NoFragment), mVertexStages.Size(), mFragmentStages.Size(),
+                static_cast<unsigned long long>(shaders.Loaded), static_cast<unsigned long long>(shaders.Missing),
+                static_cast<unsigned long long>(shaders.CodeBytes >> 10));
+}
+
+bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, std::string*) {
+    if (mDeviceReady) {
+        // Package 3: the shaders are resolved (and loaded) here; the draw
+        // itself is recorded from package 4/5 on.
+        (void)ResolvePicaProgram(draw);
+    }
     ++mCounters.PicaDrawsSkipped;
     return true;
 }

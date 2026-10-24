@@ -1,17 +1,22 @@
 #pragma once
 // GfxRenderingAPI on deko3d (Switch). Package 2 (docs/DEKO3D_PROGRESSO.md):
-// device, window image, clears and the present. The PICA path, the UI and
-// shaders come in later packages; until then their calls are accepted and
-// counted (nothing is drawn), so the game runs headless on this backend.
+// device, window image, clears and the present. Package 3: every PICA draw
+// resolves its shaders from deko3d.pack (specialized, else parametric).
+// Drawing, the UI and the rest come in later packages; until then their calls
+// are accepted and counted, so the game runs headless on this backend.
 
 #if defined(__SWITCH__)
+#include "fast/backends/gfx_deko3d_programs.h"
 #include "fast/backends/gfx_rendering_api.h"
+#include "fast/renderer3ds/pica_program_preparation.h"
 #include "gfx_deko3d_device.h"
 #include "gfx_deko3d_shaders.h"
 
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <span>
+#include <string_view>
 #include <vector>
 
 namespace Fast {
@@ -37,10 +42,18 @@ struct Deko3dBackendCounters {
     uint64_t PicaClearsSkipped = 0;
     uint64_t UiDrawsSkipped = 0;
     uint64_t WindowClears = 0;
+    Deko3d::PicaProgramPickCounters Programs;
 };
 
-class GfxRenderingAPIDeko3d final : public GfxRenderingAPI {
+class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::PicaProgramPreparationBackend {
   public:
+    // Hybrid preparation: draws carry their parametric fragment program,
+    // drawn while the specialized one is not in deko3d.pack.
+    void PrepareNativePicaPrograms(std::span<const Renderer3ds::PicaVertexArtifact> vertices) override;
+    [[nodiscard]] bool UsesAlwaysAvailablePrograms() const override {
+        return true;
+    }
+
     GfxRenderingAPIDeko3d();
     ~GfxRenderingAPIDeko3d() override;
 
@@ -119,8 +132,22 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI {
     // the clear left pending by the frame-begin ClearFramebuffer.
     void BindWindowTarget();
 
+    struct PicaProgram {
+        Deko3d::PicaProgramPick Pick = Deko3d::PicaProgramPick::NoVertex;
+        const DkShader* Vertex = nullptr;
+        const DkShader* Fragment = nullptr;
+    };
+    // The shaders of a draw (package 3); no draw ever compiles.
+    PicaProgram ResolvePicaProgram(const GfxNativePicaDrawView& draw);
+    const DkShader* ResolvePicaStage(Deko3d::ShaderStage stage, std::string_view canonical,
+                                     Renderer3ds::PicaShaderSourceIdentity identity);
+    void LogPicaProgramCounters(const char* when);
+
     Deko3d::Device mDevice;
     Deko3d::ShaderStore mShaders;
+    Deko3d::PicaStageCache<DkShader> mVertexStages;
+    Deko3d::PicaStageCache<DkShader> mFragmentStages;
+    uint64_t mTranslationFailures = 0;
     bool mDeviceReady = false;
     std::vector<Deko3dFramebuffer> mFramebuffers;
     std::vector<std::unique_ptr<Deko3dShaderProgram>> mShaderPrograms;
