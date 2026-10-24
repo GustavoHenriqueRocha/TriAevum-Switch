@@ -2,6 +2,7 @@
 // fast/backends/gl_frame_profiler.h.
 
 #include "fast/backends/gl_frame_profiler.h"
+#include "fast/backends/gfx_deko3d.h"
 
 #if defined(ENABLE_OPENGL) && !defined(USE_OPENGLES) && !defined(__APPLE__)
 #define TRIAEVUM_GL_PERF_GPU 1
@@ -769,6 +770,8 @@ void Init() {
     static bool initialized = false;
     if (initialized) return;
     initialized = true;
+    // GL timestamp queries and GL hooks: nothing to measure on deko3d.
+    if (Deko3dRendererSelected()) return;
     const auto config = ReadConfig();
     if (!config.has_value()) return;
     auto& state = S();

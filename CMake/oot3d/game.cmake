@@ -66,6 +66,15 @@ target_include_directories(oot3d_native_dynamic_resolution_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime/three_ds_recomp/include)
 oot3d_target_defaults(oot3d_native_dynamic_resolution_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# deko3d backend, pure parts (config/renderer selection; header-only).
+add_executable(oot3d_deko3d_backend_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_deko3d_backend_tests.cpp
+)
+target_compile_features(oot3d_deko3d_backend_tests PRIVATE cxx_std_20)
+target_include_directories(oot3d_deko3d_backend_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/runtime/three_ds_recomp/include)
+oot3d_target_defaults(oot3d_deko3d_backend_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # On-screen FPS counter (config/fps_counter; header-only).
 add_executable(oot3d_fps_counter_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_fps_counter_tests.cpp

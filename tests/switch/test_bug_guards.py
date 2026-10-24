@@ -28,6 +28,31 @@ class Guard:
 
 
 GUARDS = [
+    # --- 24/10: backend deko3d (branch deko3d, docs/DEKO3D_PROGRESSO.md) ---
+    Guard("[decisão] deko3d só com config/renderer = deko3d; sem o arquivo o GL de sempre",
+          "runtime/three_ds_recomp/src/fast/Fast3dWindow.cpp",
+          r'if \(Deko3dRendererSelected\(\)\) \{\s+mRenderingApi = CreateDeko3dRenderingApi\(\);\s+\}\s+'
+          r'if \(mRenderingApi == nullptr\) \{\s+mRenderingApi = new GfxRenderingAPIOGL\(\);',
+          "oot3d_deko3d_backend_tests (TestRendererConfigSelection)"),
+    Guard("[decisão] deko3d: sem janela SDL (o SDL do Switch põe uma superfície EGL na janela nativa do swapchain)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_sdl2.cpp",
+          r'if \(Deko3dRendererSelected\(\)\) \{.*?mNoWindow = true;.*?return;'),
+    Guard("deko3d: glFlush (config/gl_pacing_flush) sem contexto GL chamaria ponteiro nulo",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(gFlushBeforePacing && !Fast::Deko3dRendererSelected\(\)\)\s+glFlush\(\);'),
+    Guard("deko3d: contexto GL não é movido para a render thread (não existe)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'if \(openGlWorker && !Fast::Deko3dRendererSelected\(\)\) \{'),
+    Guard("deko3d: ImGui sem backend SDL/OpenGL3 (ponteiros GL nulos, ImplSDL2 sem janela)",
+          "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
+          r'void Fast3dGui::ImGuiRenderDrawData\(ImDrawData\* data\) \{\s+if \(Deko3dRendererSelected\(\)\) \{\s+return;'
+          r'.*?void Fast3dGui::ImGuiWMNewFrame|void Fast3dGui::ImGuiWMNewFrame\(\) \{\s+if \(Deko3dRendererSelected\(\)\)'),
+    Guard("deko3d: profiler GL (config/gpu_timing) chamaria glGenQueries nulo",
+          "runtime/three_ds_recomp/src/fast/backends/gl_frame_profiler.cpp",
+          r'if \(Deko3dRendererSelected\(\)\) return;\s+const auto config = ReadConfig\(\);'),
+    Guard("deko3d: dkCmdBufClear volta à memória do quadro anterior: o slot alimenta o próprio pedaço",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'dkCmdBufClear\(mCmd\);\s+dkCmdBufAddMemory\(mCmd, mCommandMemory, mSlot \* kCommandSliceBytes'),
     # --- 24/10: picos fora de carregamento (worktree picos-logica) ---
     Guard("[decisão] som/DSP noutro núcleo descartado: resolveria 3 de 95 picos de guest (tour20+22)",
           "docs/GUIA_PORT_3DS_SWITCH.md",

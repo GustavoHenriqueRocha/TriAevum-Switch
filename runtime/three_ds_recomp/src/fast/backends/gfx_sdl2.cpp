@@ -51,6 +51,7 @@
 #include "ship/window/gui/Gui.h"
 #include "fast/Fast3dGui.h"
 #include "fast/backends/sdl_video_driver_policy.h"
+#include "fast/backends/gfx_deko3d.h"
 
 #ifdef _WIN32
 #include <WTypesbase.h>
@@ -461,6 +462,22 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
     Uint32 flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 #endif
 
+#ifdef __SWITCH__
+    // config/renderer = deko3d: the deko3d backend owns the default native
+    // window (its swapchain); an SDL window would put an EGL surface on it.
+    // SDL video stays initialized for events, touch and the applet loop.
+    if (Deko3dRendererSelected()) {
+        Fast::GuiWindowInitData deko3dImpl;
+        deko3dImpl.Opengl = { nullptr, nullptr };
+        deko3dImpl.Backend = WindowBackend::FAST3D_SDL_OPENGL;
+        mNoWindow = true;
+        std::dynamic_pointer_cast<Fast::Fast3dGui>(Ship::Context::GetRawInstance()->GetWindow()->GetGui())
+            ->Init(deko3dImpl);
+        InitScancodeTables();
+        return;
+    }
+#endif
+
     if (mUsesVulkan) {
 #ifndef _WIN32
         flags |= SDL_WINDOW_VULKAN;
@@ -558,7 +575,10 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
 
     std::dynamic_pointer_cast<Fast::Fast3dGui>(Ship::Context::GetRawInstance()->GetWindow()->GetGui())
         ->Init(window_impl);
+    InitScancodeTables();
+}
 
+void GfxWindowBackendSDL2::InitScancodeTables() {
     for (size_t i = 0; i < std::size(lus_to_sdl_table); i++) {
         mSdlToLusTable[lus_to_sdl_table[i]] = i;
     }
@@ -643,6 +663,13 @@ void GfxWindowBackendSDL2::SetMouseCallbacks(bool (*onMouseButtonDown)(int btn),
 }
 
 void GfxWindowBackendSDL2::GetDimensions(uint32_t* width, uint32_t* height, int32_t* posX, int32_t* posY) {
+    if (mNoWindow) {
+        *width = static_cast<uint32_t>(mWindowWidth);
+        *height = static_cast<uint32_t>(mWindowHeight);
+        *posX = 0;
+        *posY = 0;
+        return;
+    }
 #if defined(__APPLE__) || defined(__SWITCH__)
     SDL_GetWindowSize(mWnd, static_cast<int*>((void*)width), static_cast<int*>((void*)height));
 #else
@@ -895,7 +922,7 @@ void GfxWindowBackendSDL2::SwapBuffersBegin() {
 
     if (mVsyncEnabled != nextVsyncEnabled) {
         mVsyncEnabled = nextVsyncEnabled;
-        if (!mUsesVulkan) {
+        if (!mUsesVulkan && !mNoWindow) {
             SDL_GL_SetSwapInterval(mVsyncEnabled ? 1 : 0);
             if (mRenderer != nullptr) {
                 SDL_RenderSetVSync(mRenderer, mVsyncEnabled ? 1 : 0);
@@ -921,7 +948,9 @@ void GfxWindowBackendSDL2::SwapBuffersBegin() {
             }
         }
 #endif
-        SDL_GL_SwapWindow(mWnd);
+        if (!mNoWindow) {
+            SDL_GL_SwapWindow(mWnd);
+        }
     }
 }
 

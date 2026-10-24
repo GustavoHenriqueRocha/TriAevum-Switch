@@ -10,6 +10,7 @@
 #include "fast/backends/gfx_sdl.h"
 #include "fast/backends/gfx_dxgi.h"
 #include "fast/backends/gfx_opengl.h"
+#include "fast/backends/gfx_deko3d.h"
 #include "fast/backends/gfx_metal.h"
 #include "fast/backends/gfx_direct3d_common.h"
 #include "fast/backends/gfx_direct3d11.h"
@@ -159,7 +160,14 @@ void Fast3dWindow::InitWindowManager() {
 #endif
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
-            mRenderingApi = new GfxRenderingAPIOGL();
+            // Switch, config/renderer = deko3d: the deko3d backend behind the
+            // same SDL window backend (which then creates no GL window).
+            if (Deko3dRendererSelected()) {
+                mRenderingApi = CreateDeko3dRenderingApi();
+            }
+            if (mRenderingApi == nullptr) {
+                mRenderingApi = new GfxRenderingAPIOGL();
+            }
             mWindowManagerApi = new GfxWindowBackendSDL2();
             break;
 #endif

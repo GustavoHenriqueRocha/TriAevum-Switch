@@ -60,12 +60,16 @@ class GfxWindowBackendSDL2 final : public GfxWindowBackend {
     void OnMouseButtonDown(int btn) const;
     void OnMouseButtonUp(int btn) const;
     void SyncFramerateWithTime() const;
+    void InitScancodeTables();
 
     SDL_Window* mWnd = nullptr;
     SDL_Rect mCursorClip;
     SDL_GLContext mCtx = nullptr;
     SDL_Renderer* mRenderer = nullptr;
     bool mUsesVulkan = false;
+    // Switch, config/renderer = deko3d: no SDL window nor GL context (the
+    // deko3d swapchain owns the native window); fixed 1280x720/1920x1080.
+    bool mNoWindow = false;
     int mSdlToLusTable[512];
     float mMouseWheelX = 0.0f;
     float mMouseWheelY = 0.0f;

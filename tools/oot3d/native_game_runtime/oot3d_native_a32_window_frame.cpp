@@ -19,6 +19,7 @@
 #include <imgui.h>
 #include "fast/backends/gl_frame_profiler.h"
 #include "fast/backends/gl_pica_dynamic_scale.h"
+#include "fast/backends/gfx_deko3d.h"
 #if defined(__SWITCH__)
 namespace Fast {
 // gfx_opengl.h (its GL headers stay out).
@@ -342,7 +343,7 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   // GPU now, not at the swap after the pacer's wait: the GPU works while the
   // render thread waits, and the end timestamp no longer lands after the
   // wait (an idle gap counted as GPU work).
-  if (gFlushBeforePacing)
+  if (gFlushBeforePacing && !Fast::Deko3dRendererSelected())
     glFlush();
 #endif
   timer.Poll([&](const Oot3dNativeGame::NativeGpuFrameTime &result) {

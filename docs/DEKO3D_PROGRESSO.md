@@ -18,15 +18,34 @@ no Mesa). Meta: nenhum quadro > 16,7 ms em jogo normal.
 | # | Pacote | Status |
 |---|---|---|
 | 1 | Mapa da interface PICA→GL e desenho da abstração | **feito** (este arquivo) |
-| 2 | Init deko3d + swapchain + clear/apresentação atrás de `config/renderer` | a fazer |
-| 3 | Shaders: GLSL→DKSH (uam), cache em disco, pré-compilação offline | a fazer |
+| 2 | Init deko3d + swapchain + clear/apresentação atrás de `config/renderer` | **código pronto e compilado** (NRO `deko3d-p2`); falta o teste no Eden (Ryzen caiu durante ele) |
+| 3 | Shaders: GLSL→DKSH (uam), cache em disco, pré-compilação offline | em andamento: formato do pacote + ferramenta + testes; falta o carregador no console |
 | 4 | Anéis de vértice/uniform, texturas (upload, formatos), samplers | a fazer |
 | 5 | Estado de pipeline, alvos, display transfer, DRS, widescreen | a fazer |
 | 6 | UI TopScreen (UiRenderBackend) e ImGui | a fazer |
 | 7 | Contadores no perf.txt equivalentes aos do GL (A/B) | a fazer |
 | 8 | Estabilidade/memória | a fazer |
 
-**Próximo passo:** pacote 2.
+**Próximo passo:** quando houver máquina liberada, rodar `tests/switch/eden_deko3d.sh` com o
+NRO `~/oot3d-work/oot3d_native_game.deko3d-p2.nro` (md5 `c8d4032d274832e648eca615772affaa`) e
+conferir `logs/deko3d.txt` (`deko3d: ready`, quadros apresentados). Em paralelo (só código):
+pacote 3 — `gfx_deko3d_shaders.cpp` (carrega `shadercache/deko3d.pack`, DKSH inteiro na memória de
+código como no Aurora, `control = NULL`; programa por par de identidades; uber quando falta;
+registra o texto que faltou em `logs/deko3d_shaders/`).
+
+### Pendências na Ryzen (24/10, ela reiniciou duas vezes)
+
+- 1º crash: rodava só o Eden (tarefa agendada `EdenDeko3d`, teste do NRO p2, ~12:37); o build
+  tinha terminado às 12:33. 2º crash: logo após voltar; do meu lado só havia um `ssh … echo ok`
+  a cada 20 s esperando ela voltar.
+- Limpar ao voltar: apagar a tarefa `EdenDeko3d` (`/SC ONCE /ST 23:59`: rodaria às 23:59!);
+  no SD do Eden apagar `config\renderer` e voltar o `.nro` original de
+  `%USERPROFILE%\eden_deko3d_orig.nro` (o script faz isso no fim, mas não chegou ao fim).
+- Regras novas: nunca build e Eden juntos (o `build.sh` recusa com o Eden aberto e o
+  `eden_deko3d.sh` recusa com `ninja` rodando); `-j 4` com `nice 10`; `.wslconfig` com
+  `memory=6GB` (+ `wsl --shutdown`) antes do próximo build; nada > 5 GB; Eden só teste curto.
+- Validar `/root/agentes/deko3d/build` (o build terminou antes do crash, mas conferir o md5 do
+  NRO de `out/` e, na dúvida, recompilar o runtime).
 
 ## Mapa do que o GL faz hoje (pacote 1)
 
@@ -106,8 +125,31 @@ especializados (~5 KB). Ligações: UBO de vértice `binding=0`, UBO de fragment
   e de `build` em `/home/gustavo/oot3d-work/build-switch` (mesmos caminhos ⇒ mesmas linhas de
   comando ⇒ só o runtime recompila). Os arquivos da fonte mantêm o mtime do checkout principal
   (só os alterados ficam novos).
+- O `gen/cpp-lean` também vai do notebook (`/root/agentes/deko3d/gen`, bind em
+  `/home/gustavo/oot3d-work/gen/cpp-lean`): o da Ryzen difere e fazia os shards recompilarem.
+  `ninja -n` não serve para contar passos (a checagem de globs sempre "reroda o CMake"); o
+  script vigia o log e mata o ninja se um shard começar. Alvo: `oot3d_native_game_nro`.
+- Cópia do script no repo: `tools/oot3d/deko3d_ryzen_build.sh`. Sincronizar fonte: tar dos
+  arquivos que diferem do `topscreen-3.0`, extraído com `--touch`.
 - Script `/root/agentes/deko3d/build.sh` grava `/root/agentes/deko3d/status.txt` e o NRO em
   `/root/agentes/deko3d/out/`; aborta se um shard começar a recompilar.
+
+## Pacote 2 (o que entrou)
+
+- `gfx_deko3d.h` (seleção pura `Deko3dRendererConfigSelects` + `Deko3dRendererSelected`),
+  `gfx_deko3d_device.{h,cpp}` (device `DepthMinusOneToOne|OriginUpperLeft`, fila com zcull
+  desligado, swapchain de 3 imagens RGBA8 1280×720/1920×1080, 2 slots por quadro com fence,
+  memória de comando em fatias de 1 MiB + blocos extras, memória de stream por slot,
+  acquire adiado ao primeiro uso da janela com o mesmo gancho do GL, log em
+  `logs/deko3d.txt`), `gfx_deko3d.cpp`/`gfx_deko3d_api.h` (GfxRenderingAPI: clear da janela
+  adiado, present no `FinishRender` depois do pacing do SDL; PICA/UI aceitos e contados, nada
+  desenhado ainda; completions repassadas como no GL).
+- Ganchos: `Fast3dWindow` (cria o deko3d se selecionado; senão GL), `gfx_sdl2` (sem janela SDL),
+  `Fast3dGui` (sem backends ImGui), setup (não move contexto GL), frame (sem `glFlush`),
+  `gl_frame_profiler` (desligado). `libdeko3d` ligado no CMake do Switch.
+- Testes: `oot3d_deko3d_backend_tests` (seleção, chave e índice do pacote de shaders),
+  guardas novas em `test_bug_guards.py`, `tests/switch/eden_deko3d.sh` (fumaça com
+  `config/renderer` só durante o teste; print da tela).
 
 ## Créditos e licenças
 

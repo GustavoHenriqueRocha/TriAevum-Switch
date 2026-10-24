@@ -76,6 +76,9 @@ find_library(GLAPI_LIBRARY glapi
     HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)
 find_library(DRM_NOUVEAU_LIBRARY drm_nouveau
     HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)
+# deko3d backend (config/renderer = deko3d; docs/DEKO3D_PROGRESSO.md).
+find_library(DEKO3D_LIBRARY deko3d
+    HINTS "${DEVKITPRO}/libnx/lib" REQUIRED)
 
 # ImGui and Fast3D must share the same loader on Horizon OS.
 target_compile_definitions(ImGui PRIVATE

@@ -1615,6 +1615,10 @@ void SetWindowAcquireHook(WindowAcquireHook hook) {
     gWindowAcquireHook = hook;
 }
 
+WindowAcquireHook GetWindowAcquireHook() {
+    return gWindowAcquireHook;
+}
+
 void FlushDeferredWindowClear() {
     if (gWindowClearOwner != nullptr) {
         gWindowClearOwner->FlushDeferredWindowClear();

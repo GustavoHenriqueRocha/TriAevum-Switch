@@ -7,6 +7,7 @@
 #include "fast/backends/gfx_metal.h"
 #include "fast/interpreter.h"
 #include "fast/backends/gfx_rendering_api.h"
+#include "fast/backends/gfx_deko3d.h"
 #ifdef ENABLE_OPENGL
 namespace Fast {
 void FlushDeferredWindowClear(); // gfx_opengl.h (its GL headers stay out)
@@ -303,6 +304,9 @@ void Fast3dGui::Init(GuiWindowInitData windowImpl) {
 }
 
 bool Fast3dGui::SupportsViewports() {
+    if (Deko3dRendererSelected()) {
+        return false;
+    }
 #ifdef ENABLE_OOT3D_VULKAN
     // The Vulkan backend owns one swapchain only. Letting ImGui create SDL
     // platform windows leaves those windows without renderer swapchains and
@@ -329,6 +333,10 @@ void Fast3dGui::HandleWindowEvents(Fast::WindowEvent event) {
     switch (mImpl.Backend) {
         case WindowBackend::FAST3D_SDL_OPENGL:
         case WindowBackend::FAST3D_SDL_METAL:
+            // deko3d (Switch): no ImGui platform backend in the first version.
+            if (Deko3dRendererSelected()) {
+                break;
+            }
             ImGui_ImplSDL2_ProcessEvent(static_cast<const SDL_Event*>(event.Sdl.Event));
 #if defined(__ANDROID__) || defined(__IOS__)
             Ship::Mobile::ImGuiProcessEvent(ImGui::GetIO().WantTextInput);
@@ -451,7 +459,10 @@ void Fast3dGui::ImGuiWMInit() {
             if (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_ALLOW_BACKGROUND_INPUTS, 1)) {
                 SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
             }
-            ImGui_ImplSDL2_InitForOpenGL(static_cast<SDL_Window*>(mImpl.Opengl.Window), mImpl.Opengl.Context);
+            // deko3d (Switch): no SDL window, so no ImGui platform backend.
+            if (!Deko3dRendererSelected()) {
+                ImGui_ImplSDL2_InitForOpenGL(static_cast<SDL_Window*>(mImpl.Opengl.Window), mImpl.Opengl.Context);
+            }
             break;
 #ifdef ENABLE_OOT3D_VULKAN
         case WindowBackend::FAST3D_SDL_OOT3D_VULKAN:
@@ -481,7 +492,9 @@ void Fast3dGui::ImGuiWMShutdown() {
     switch (mImpl.Backend) {
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
-            ImGui_ImplSDL2_Shutdown();
+            if (!Deko3dRendererSelected()) {
+                ImGui_ImplSDL2_Shutdown();
+            }
             break;
 #endif
 #ifdef ENABLE_OOT3D_VULKAN
@@ -510,6 +523,9 @@ void Fast3dGui::ImGuiBackendInit() {
     switch (mImpl.Backend) {
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
+            if (Deko3dRendererSelected()) {
+                break; // no GL context: ImGui is not drawn (docs/DEKO3D_PROGRESSO.md)
+            }
 #ifdef __APPLE__
             ImGui_ImplOpenGL3_Init("#version 410 core");
 #elif USE_OPENGLES
@@ -559,7 +575,9 @@ void Fast3dGui::ImGuiBackendShutdown() {
     switch (mImpl.Backend) {
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
-            ImGui_ImplOpenGL3_Shutdown();
+            if (!Deko3dRendererSelected()) {
+                ImGui_ImplOpenGL3_Shutdown();
+            }
             break;
 #endif
 #if __APPLE__
@@ -678,6 +696,21 @@ void Fast3dGui::SyncOot3dVulkanMousePosition() {
 }
 
 void Fast3dGui::ImGuiWMNewFrame() {
+    if (Deko3dRendererSelected()) {
+        // No platform backend: the frame still needs a display size and a
+        // time step (ImGui::NewFrame).
+        ImGuiIO& io = ImGui::GetIO();
+        uint32_t width = 1280;
+        uint32_t height = 720;
+        if (auto interpreter = mInterpreter.lock()) {
+            width = std::max<uint32_t>(1U, interpreter->mGfxCurrentWindowDimensions.width);
+            height = std::max<uint32_t>(1U, interpreter->mGfxCurrentWindowDimensions.height);
+        }
+        io.DisplaySize = ImVec2(static_cast<float>(width), static_cast<float>(height));
+        io.DisplayFramebufferScale = ImVec2(1.0F, 1.0F);
+        io.DeltaTime = 1.0F / 60.0F;
+        return;
+    }
     switch (mImpl.Backend) {
         case WindowBackend::FAST3D_SDL_OPENGL:
         case WindowBackend::FAST3D_SDL_METAL:
@@ -709,6 +742,9 @@ void Fast3dGui::ImGuiWMNewFrame() {
 }
 
 void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
+    if (Deko3dRendererSelected()) {
+        return; // ImGui is not drawn on deko3d yet (package 6)
+    }
     switch (mImpl.Backend) {
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:

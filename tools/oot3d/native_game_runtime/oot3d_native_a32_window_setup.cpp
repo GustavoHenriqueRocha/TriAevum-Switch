@@ -8,6 +8,7 @@
 #include <glad/glad.h>
 #include <switch.h>
 #include "fast/backends/gfx_sdl.h"
+#include "fast/backends/gfx_deko3d.h"
 #include <algorithm>
 #include <fstream>
 #endif
@@ -1533,7 +1534,9 @@ void NativeA32WindowSession::Setup() {
     rendererTiming = &workerPhaseTiming;
     renderStream.SetMode(
         Oot3dNativeGame::NativeRenderCommandStream::Mode::Worker);
-    if (openGlWorker) {
+    // deko3d (config/renderer): no GL context to move; its objects are not
+    // bound to a thread.
+    if (openGlWorker && !Fast::Deko3dRendererSelected()) {
       // Release the context here and make it current on the render worker,
       // which from now on issues every renderer command.
       SDL_Window* glWindow = SDL_GL_GetCurrentWindow();
