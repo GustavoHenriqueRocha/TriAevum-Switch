@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstring>
+#include <string_view>
 #include <vector>
 
 #include <cstdio>
@@ -346,6 +347,19 @@ void TestTransferAndScanout() {
   Require(wide.CoversWindow && wide.Viewport.Width == 1280, "16:9 cobre a janela");
 }
 
+void TestLogSchedule() {
+  // Linhas que mostram se o p5 chegou ao console (24/10: o log não dizia de
+  // qual NRO vinha nem se o PICA chegava ao backend antes do quadro 1800).
+  Require(std::string_view(Fast::kDeko3dBuildTag) == "p5b", "etiqueta do build no topo do log");
+  Require(Fast::Deko3dFrameLogDue(1) && Fast::Deko3dFrameLogDue(60) && Fast::Deko3dFrameLogDue(300) &&
+              Fast::Deko3dFrameLogDue(1800) && Fast::Deko3dFrameLogDue(7200) && !Fast::Deko3dFrameLogDue(61) &&
+              !Fast::Deko3dFrameLogDue(0),
+          "quadros com log");
+  Require(Fast::Deko3dPicaLogDue(300) && Fast::Deko3dPicaLogDue(1800) && Fast::Deko3dPicaLogDue(3600) &&
+              !Fast::Deko3dPicaLogDue(60) && !Fast::Deko3dPicaLogDue(0),
+          "contadores PICA cedo (300) e a cada 1800");
+}
+
 int main() {
   TestRendererConfigSelection();
   TestShaderPack();
@@ -359,6 +373,7 @@ int main() {
   TestTargetsAndRects();
   TestFills();
   TestTransferAndScanout();
+  TestLogSchedule();
   std::puts("oot3d_deko3d_backend_tests: ok");
   return 0;
 }

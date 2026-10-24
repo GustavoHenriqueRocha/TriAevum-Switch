@@ -47,7 +47,25 @@ Diagnóstico rápido sem rebuild: geometria do avesso (paredes somem, vê-se o i
 `tools/oot3d/deko3d_scanout/scanout_vsh.glsl`); tela preta com `issued` > 0 e `scanouts` > 0 →
 olhar `deko3d debug:` e `queue in error state` no log.
 
-**Próximo passo:** testar o p5 no console; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
+**Teste do p5 no console (24/10): tela preta.** `deko3d.txt` só com `ready`, `276 stages`,
+`programs: hybrid` e quadros 1/60; `boot-status.txt` com `host_frames=1 guest_frames=1`. Análise:
+- `boot-status.txt` só era reescrito no quadro 1 ou quando o cache de geometria aparece (contadores
+  persistentes > 0) — o deko3d não usa esse cache, então o arquivo **congelava em 1/1** mesmo com o
+  jogo rodando. Não prova guest travado. Agora também a cada 600 quadros (guarda).
+- O p5 grava `resources: …` e `targets: resolution scale …` **dentro do `Init`, antes do primeiro
+  quadro** (sem isso não há `frame 1 presented`). O log não tem essas linhas: esse log é de um binário
+  sem o pacote 4/5 (o p3), ou de um SD em que o NRO não foi trocado. Não achei no código um caminho
+  em que o p5 apresente quadros sem gravá-las.
+- **p5b:** etiqueta `backend p5b (built …)` na 2ª linha do log; primeira chamada de cada tipo que chega
+  ao backend (`pica: first draw / first transfer / first presented transfer / first memory fill /
+  first render-target clear / first completion queued / taken`); contadores `pica calls`/`pica` já no
+  quadro 300 (e a cada 1800); quadro 300 e 1800 também logados. Texturas pré-decodificadas pelo worker
+  também no deko3d (antes só no GL). NRO `~/oot3d-work/oot3d_native_game.deko3d-p5b.nro`.
+- Ao testar o p5b: se a 2ª linha não for `backend p5b`, o NRO no SD não é o novo. Se for e não houver
+  `pica: first draw`, o PICA não está chegando ao backend (procurar no log do jogo
+  `native PICA … failed`).
+
+**Próximo passo:** testar o p5b no console; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
 Shadow2D (programas com imagem no pacote) e medir o `pica_submit` contra o GL (pacote 7).
 
 ### Pacote 5 (o que entrou, 24/10, commit `66f9957e`)

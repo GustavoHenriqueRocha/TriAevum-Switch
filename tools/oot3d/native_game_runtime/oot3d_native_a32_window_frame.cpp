@@ -1874,7 +1874,11 @@ bool NativeA32WindowSession::RunFrame() {
         gSwitchPicaGeometryPersistentDraws != 0U &&
         gSwitchPicaGeometryPersistentUploads != 0U &&
         gSwitchPicaGeometryRegistryEntries != 0U;
-    if (runFrameCount == 1U || gSwitchPicaGeometryCacheObserved) {
+    // Also every 600 host frames: without the geometry cache (deko3d) the
+    // file stayed at host_frames=1/guest_frames=1, which read as a stalled
+    // guest (24/10, p5 on the console).
+    if (runFrameCount == 1U || gSwitchPicaGeometryCacheObserved ||
+        runFrameCount % 600U == 0U) {
       WriteSwitchBootStage("runtime_running");
     }
   }

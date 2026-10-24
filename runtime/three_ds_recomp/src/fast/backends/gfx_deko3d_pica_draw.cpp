@@ -255,6 +255,12 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         }
         return false;
     };
+    if (mCalls.Draws++ == 0U) {
+        Deko3d::Log("pica: first draw (ns %llu, framebuffer %ux%u colour %08x depth %08x, %u vertices)",
+                    static_cast<unsigned long long>(draw.RenderTargetNamespace), draw.FramebufferWidth,
+                    draw.FramebufferHeight, draw.FramebufferColorPhysicalAddress,
+                    draw.FramebufferDepthPhysicalAddress, draw.VertexCount);
+    }
     if (!mDeviceReady) {
         return true;
     }
@@ -522,6 +528,17 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
         }
         return false;
     };
+    const uint64_t transferCall = mCalls.Transfers++;
+    if (transfer.Present) {
+        ++mCalls.Presents;
+    }
+    if (transferCall == 0U || (transfer.Present && mCalls.Presents == 1U)) {
+        Deko3d::Log("pica: first %s (ns %llu, %08x %ux%u -> %08x %ux%u, flags %08x, mode %u)",
+                    transfer.Present ? "presented transfer" : "transfer",
+                    static_cast<unsigned long long>(transfer.RenderTargetNamespace), transfer.InputPhysicalAddress,
+                    transfer.InputWidth, transfer.InputHeight, transfer.OutputPhysicalAddress, transfer.OutputWidth,
+                    transfer.OutputHeight, transfer.Flags, static_cast<unsigned>(transfer.PresentationMode));
+    }
     if (!mDeviceReady) {
         return true;
     }
@@ -652,6 +669,10 @@ void GfxRenderingAPIDeko3d::DrawPicaScanout(const GfxNativePicaDisplayTransferVi
 
 bool GfxRenderingAPIDeko3d::ClearPicaRenderTarget(uint64_t renderTargetNamespace, uint32_t colorPhysicalAddress,
                                                   std::string* error) {
+    if (mCalls.Clears++ == 0U) {
+        Deko3d::Log("pica: first render-target clear (ns %llu, colour %08x)",
+                    static_cast<unsigned long long>(renderTargetNamespace), colorPhysicalAddress);
+    }
     if (colorPhysicalAddress == 0U) {
         if (error != nullptr) {
             *error = "PICA render-target clear is incomplete";
@@ -679,6 +700,11 @@ bool GfxRenderingAPIDeko3d::ClearPicaRenderTarget(uint64_t renderTargetNamespace
 }
 
 bool GfxRenderingAPIDeko3d::SubmitPicaMemoryFill(const GfxNativePicaMemoryFillView& fill, std::string* error) {
+    if (mCalls.Fills++ == 0U) {
+        Deko3d::Log("pica: first memory fill (ns %llu, %08x-%08x, control %04x)",
+                    static_cast<unsigned long long>(fill.RenderTargetNamespace), fill.StartPhysicalAddress,
+                    fill.EndPhysicalAddress, fill.Control);
+    }
     if (fill.StartPhysicalAddress == 0U || fill.EndPhysicalAddress <= fill.StartPhysicalAddress ||
         (fill.Control & 1U) == 0U) {
         if (error != nullptr) {
@@ -705,6 +731,7 @@ bool GfxRenderingAPIDeko3d::SubmitPicaMemoryFill(const GfxNativePicaMemoryFillVi
 }
 
 bool GfxRenderingAPIDeko3d::ResetPicaState(std::string*) {
+    Deko3d::Log("pica: reset %llu", static_cast<unsigned long long>(++mCalls.Resets));
     if (!mDeviceReady) {
         return true;
     }

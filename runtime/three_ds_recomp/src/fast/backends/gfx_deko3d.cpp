@@ -53,10 +53,12 @@ void GfxRenderingAPIDeko3d::Init() {
     if (!mDevice.Create(width, height, &error)) {
         throw std::runtime_error(error);
     }
+    Deko3d::Log("backend %s (built %s %s)", kDeko3dBuildTag, __DATE__, __TIME__);
     if (!mShaders.Init(mDevice)) {
         throw std::runtime_error("deko3d: shader code memory");
     }
     if (!mResources.Init(mDevice)) {
+        Deko3d::Log("init failed: descriptor/fallback memory");
         throw std::runtime_error("deko3d: descriptor/fallback memory");
     }
     mDeviceReady = true;
@@ -160,7 +162,7 @@ void GfxRenderingAPIDeko3d::FinishRender() {
     mDevice.EndFrame(GetWindowAcquireHook());
     mWindowBound = false;
     mBoundTarget = nullptr;
-    if (mDevice.Frame() % 1800U == 0U) {
+    if (Deko3dPicaLogDue(mDevice.Frame())) {
         LogPicaProgramCounters("frame");
     }
 }
@@ -441,6 +443,13 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(resources.UniformReuses),
                 static_cast<unsigned long long>(resources.StreamFailures));
     const auto& targets = mTargets.Stats();
+    Deko3d::Log("pica calls (%s): draws=%llu transfers=%llu presents=%llu fills=%llu clears=%llu resets=%llu "
+                "completions queued=%llu taken=%llu",
+                when, static_cast<unsigned long long>(mCalls.Draws), static_cast<unsigned long long>(mCalls.Transfers),
+                static_cast<unsigned long long>(mCalls.Presents), static_cast<unsigned long long>(mCalls.Fills),
+                static_cast<unsigned long long>(mCalls.Clears), static_cast<unsigned long long>(mCalls.Resets),
+                static_cast<unsigned long long>(mCalls.CompletionsQueued),
+                static_cast<unsigned long long>(mCalls.CompletionsTaken));
     Deko3d::Log("pica (%s): draws issued=%llu skipped=%llu shadow_producers=%llu no_effect=%llu; transfers=%llu "
                 "repeated=%llu rejected=%llu scanouts=%llu fills=%llu clears=%llu; targets=%llu (%llu MiB) "
                 "displays=%llu failures=%llu",
@@ -470,12 +479,19 @@ bool GfxRenderingAPIDeko3d::QueuePicaCompletion(uint64_t completionId, std::stri
     // Every guest span a submission reads is copied at submit time (as in
     // the GL backend): the completion acknowledges that copy.
     mCompletions.push_back(completionId);
+    if (mCalls.CompletionsQueued++ == 0U) {
+        Deko3d::Log("pica: first completion queued (%llu)", static_cast<unsigned long long>(completionId));
+    }
     return true;
 }
 
 std::vector<uint64_t> GfxRenderingAPIDeko3d::TakePicaCompletions() {
     auto result = std::move(mCompletions);
     mCompletions.clear();
+    if (!result.empty() && mCalls.CompletionsTaken == 0U) {
+        Deko3d::Log("pica: first completions taken (%zu)", result.size());
+    }
+    mCalls.CompletionsTaken += result.size();
     return result;
 }
 

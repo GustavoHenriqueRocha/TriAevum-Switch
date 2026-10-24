@@ -41,6 +41,19 @@ struct Deko3dFramebuffer {
     bool HasDepth = false;
 };
 
+// Every PICA call that reached the backend (logs/deko3d.txt "pica calls"):
+// tells "nothing was routed here" apart from "routed but not drawn".
+struct Deko3dPicaCalls {
+    uint64_t Draws = 0;
+    uint64_t Transfers = 0;
+    uint64_t Presents = 0;
+    uint64_t Fills = 0;
+    uint64_t Clears = 0;
+    uint64_t Resets = 0;
+    uint64_t CompletionsQueued = 0;
+    uint64_t CompletionsTaken = 0;
+};
+
 struct Deko3dBackendCounters {
     uint64_t PicaDrawsSkipped = 0;  // no program, no target or no effect
     uint64_t PicaDrawsPrepared = 0; // program + resources ready
@@ -204,6 +217,7 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     bool mGeometryCacheEnabled = true;
     std::vector<uint64_t> mCompletions;
     Deko3dBackendCounters mCounters{};
+    Deko3dPicaCalls mCalls{};
 };
 
 } // namespace Fast

@@ -2,6 +2,8 @@
 #if defined(__SWITCH__)
 #include "gfx_deko3d_device.h"
 
+#include "fast/backends/gfx_deko3d.h"
+
 #include <switch.h>
 
 #include <algorithm>
@@ -307,7 +309,7 @@ void Device::EndFrame(AcquireHook hook) {
     mFrameOpen = false;
     ++mFrame;
     ++mStats.Frames;
-    if (mFrame == 1 || mFrame == 60 || mFrame % 3600 == 0) {
+    if (Deko3dFrameLogDue(mFrame)) {
         Log("frame %llu presented (submits %llu, acquire %.2f ms total, command %llu KiB, stream %llu KiB, "
             "overflows %llu)",
             static_cast<unsigned long long>(mFrame), static_cast<unsigned long long>(mStats.Submits),

@@ -1648,10 +1648,11 @@ void NativeA32WindowSession::Setup() {
     }
 #endif
     // Texture decode moved off the render thread (the hitches entering a new
-    // area). Only the OpenGL backend takes the decoded mips. Switch:
+    // area). The OpenGL and deko3d backends take the decoded mips. Switch:
     // config/no_texture_predecode turns it off.
     bool predecodeTextures =
-        std::string_view(apiPointer->GetName()) == "OpenGL";
+        std::string_view(apiPointer->GetName()) == "OpenGL" ||
+        std::string_view(apiPointer->GetName()) == "deko3d";
 #ifdef __SWITCH__
     predecodeTextures = predecodeTextures &&
         !std::filesystem::exists(

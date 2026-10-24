@@ -36,6 +36,19 @@ inline bool Deko3dRendererConfigSelects(std::string_view content) {
     return true;
 }
 
+// Build tag written at the top of logs/deko3d.txt: tells which NRO a log
+// came from (a p3 log and a p5 log looked alike, 24/10).
+inline constexpr const char* kDeko3dBuildTag = "p5b";
+
+// Presented frames logged in logs/deko3d.txt: the first, then 60, 300 and
+// 1800 (the PICA counters go with 300 and every 1800), then every 3600.
+[[nodiscard]] constexpr bool Deko3dFrameLogDue(unsigned long long frame) noexcept {
+    return frame == 1U || frame == 60U || frame == 300U || frame == 1800U || (frame != 0U && frame % 3600U == 0U);
+}
+[[nodiscard]] constexpr bool Deko3dPicaLogDue(unsigned long long frame) noexcept {
+    return frame == 300U || (frame != 0U && frame % 1800U == 0U);
+}
+
 // True on the Switch when config/renderer selects deko3d (read once, at the
 // first call). Always false on other platforms.
 bool Deko3dRendererSelected();
