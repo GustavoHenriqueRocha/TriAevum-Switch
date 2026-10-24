@@ -56,6 +56,9 @@ void GfxRenderingAPIDeko3d::Init() {
     if (!mShaders.Init(mDevice)) {
         throw std::runtime_error("deko3d: shader code memory");
     }
+    if (!mResources.Init(mDevice)) {
+        throw std::runtime_error("deko3d: descriptor/fallback memory");
+    }
     mDeviceReady = true;
     if (mFramebuffers.empty()) {
         mFramebuffers.push_back({width, height, false, true});
@@ -68,6 +71,8 @@ void GfxRenderingAPIDeko3d::Shutdown() {
         mDevice.WaitIdle();
         mVertexStages.Clear();
         mFragmentStages.Clear();
+        mResources.Shutdown();
+        mResourcesFrame = ~0ULL;
         mShaders.Shutdown();
         mDevice.Destroy();
         mDeviceReady = false;
@@ -81,8 +86,17 @@ void GfxRenderingAPIDeko3d::StartFrame() {
     if (!mDeviceReady) {
         return;
     }
-    mDevice.BeginFrame();
+    EnsureFrame();
     mWindowBound = false;
+}
+
+void GfxRenderingAPIDeko3d::EnsureFrame() {
+    mDevice.BeginFrame();
+    if (mResourcesFrame != mDevice.Frame()) {
+        // Right after the slot's fence wait: evictions are safe here.
+        mResourcesFrame = mDevice.Frame();
+        mResources.BeginFrame(mResourcesFrame);
+    }
 }
 
 void GfxRenderingAPIDeko3d::BindWindowTarget() {
@@ -394,15 +408,49 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(programs.NoFragment), mVertexStages.Size(), mFragmentStages.Size(),
                 static_cast<unsigned long long>(shaders.Loaded), static_cast<unsigned long long>(shaders.Missing),
                 static_cast<unsigned long long>(shaders.CodeBytes >> 10));
+    const auto& resources = mResources.Stats();
+    Deko3d::Log("resources (%s): draws prepared=%llu rejected=%llu; textures created=%llu evicted=%llu "
+                "live=%llu MiB predecoded=%llu failures=%llu shadow_fallbacks=%llu unsupported_wraps=%llu "
+                "luts=%llu samplers=%llu; streamed vertex=%llu index=%llu uniform=%llu KiB, uniform reuses=%llu, "
+                "stream failures=%llu",
+                when, static_cast<unsigned long long>(mCounters.PicaDrawsPrepared),
+                static_cast<unsigned long long>(mCounters.PicaDrawsRejected),
+                static_cast<unsigned long long>(resources.TexturesCreated),
+                static_cast<unsigned long long>(resources.TexturesEvicted),
+                static_cast<unsigned long long>(resources.TextureBytes >> 20),
+                static_cast<unsigned long long>(resources.TexturesPredecoded),
+                static_cast<unsigned long long>(resources.TextureFailures),
+                static_cast<unsigned long long>(resources.ShadowFallbacks),
+                static_cast<unsigned long long>(resources.UnsupportedWraps),
+                static_cast<unsigned long long>(resources.LutsCreated),
+                static_cast<unsigned long long>(resources.Samplers),
+                static_cast<unsigned long long>(resources.VertexBytes >> 10),
+                static_cast<unsigned long long>(resources.IndexBytes >> 10),
+                static_cast<unsigned long long>(resources.UniformBytes >> 10),
+                static_cast<unsigned long long>(resources.UniformReuses),
+                static_cast<unsigned long long>(resources.StreamFailures));
 }
 
 bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, std::string*) {
-    if (mDeviceReady) {
-        // Package 3: the shaders are resolved (and loaded) here; the draw
-        // itself is recorded from package 4/5 on.
-        (void)ResolvePicaProgram(draw);
-    }
     ++mCounters.PicaDrawsSkipped;
+    if (!mDeviceReady) {
+        return true;
+    }
+    EnsureFrame();
+    // Package 3: the shaders; package 4: what the draw reads. The draw
+    // itself is recorded from package 5 on.
+    const PicaProgram program = ResolvePicaProgram(draw);
+    if (program.Vertex == nullptr || program.Fragment == nullptr) {
+        return true;
+    }
+    std::string error;
+    if (!mResources.Prepare(draw, mDrawResources, &error)) {
+        if (mCounters.PicaDrawsRejected++ < 10U) {
+            Deko3d::Log("draw rejected: %s", error.c_str());
+        }
+        return true;
+    }
+    ++mCounters.PicaDrawsPrepared;
     return true;
 }
 

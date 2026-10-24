@@ -1,9 +1,11 @@
 // Pure parts of the deko3d backend (docs/DEKO3D_PROGRESSO.md): what runs
 // without a GPU is tested here on the host.
 #include "fast/backends/gfx_deko3d.h"
+#include "fast/backends/gfx_deko3d_pica_plan.h"
 #include "fast/backends/gfx_deko3d_programs.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
 
+#include <array>
 #include <cstring>
 #include <vector>
 
@@ -114,6 +116,102 @@ void TestStageCacheResolvesOnce() {
   Require(cache.Size() == 0, "Clear esvazia");
 }
 
+// Pacote 4: as mesmas regras do backend GL (ToPicaGlWrap, PicaGlMinFilter,
+// faixa de LOD) para o deko3d amostrar igual.
+void TestSamplerAndTextureKeys() {
+  using namespace Fast::Deko3d;
+  Require(MapPicaWrap(0) == PicaWrap::ClampToEdge, "wrap 0 = clamp to edge");
+  Require(MapPicaWrap(2) == PicaWrap::Repeat && MapPicaWrap(6) == PicaWrap::Repeat &&
+              MapPicaWrap(7) == PicaWrap::Repeat, "wrap 2/6/7 = repeat");
+  Require(MapPicaWrap(3) == PicaWrap::MirroredRepeat, "wrap 3 = mirrored");
+  Require(MapPicaWrap(1) == PicaWrap::Unsupported && MapPicaWrap(4) == PicaWrap::Unsupported &&
+              MapPicaWrap(9) == PicaWrap::Unsupported, "borda/assimétrico/inválido = não suportado");
+  Fast::Renderer3ds::PicaTextureView view;
+  view.Width = 128;
+  view.Height = 64;
+  view.MinLinear = true;
+  view.MagLinear = true;
+  view.MipLinear = true;
+  view.MinMipLevel = 9;
+  view.MaxMipLevel = 7;
+  view.NativeWrapS = 2;
+  view.NativeWrapT = 3;
+  view.LodBiasRaw = -128;
+  auto key = MakePicaSamplerKey(view, 4);
+  Require(key.Mip == PicaMipFilter::Linear, "mip linear com cadeia");
+  Require(key.MaxLevel == 3, "MAX_LEVEL limitado à cadeia enviada (min(7, 4-1))");
+  Require(key.MinLevel == 3, "BASE_LEVEL não passa do MAX_LEVEL");
+  Require(key.WrapS == PicaWrap::Repeat && key.WrapT == PicaWrap::MirroredRepeat && key.LodBiasRaw == -128,
+          "wrap e bias");
+  Require(MakePicaSamplerKey(view, 1).Mip == PicaMipFilter::None, "sem mip: filtro de mip desligado");
+  PicaSamplerKeyHash samplerHash;
+  Require(samplerHash(key) == samplerHash(MakePicaSamplerKey(view, 4)), "hash estável");
+  const auto textureKey = MakePicaTextureKey(view, 0x1234);
+  auto other = view;
+  other.NativeWrapS = 0;
+  Require(!(textureKey == MakePicaTextureKey(other, 0x1234)), "estado do sampler entra na chave (como no GL)");
+  PicaTextureKeyHash textureHash;
+  Require(textureHash(textureKey) == textureHash(MakePicaTextureKey(view, 0x1234)), "hash de textura estável");
+  Require(ClassifyPicaTexture(view) == PicaTextureUse::Color, "tipo 0 = cor");
+  view.NativeType = 2;
+  Require(ClassifyPicaTexture(view) == PicaTextureUse::Shadow2D, "tipo 2 no slot 0 = Shadow2D");
+  view.Slot = 1;
+  Require(ClassifyPicaTexture(view) == PicaTextureUse::Unsupported, "tipo 2 fora do slot 0 = rejeitado");
+  view.Slot = 0;
+  view.NativeType = 3;
+  Require(ClassifyPicaTexture(view) == PicaTextureUse::Color, "tipo 3 no slot 0 = cor");
+}
+
+void TestMipPlanAndSlots() {
+  using namespace Fast::Deko3d;
+  std::array<PicaMipPlan, kMaxPicaMipLevels> mips{};
+  const uint32_t total = PlanPicaRgba8Mips(64, 32, 3, 256, mips);
+  Require(mips[0].Bytes == 64 * 32 * 4 && mips[0].Offset == 0, "nível 0");
+  Require(mips[1].Width == 32 && mips[1].Height == 16 && mips[1].Offset == 8192, "nível 1 alinhado");
+  Require(mips[2].Width == 16 && mips[2].Height == 8 && mips[2].Offset == 8192 + 2048, "nível 2");
+  Require(total == 8192 + 2048 + 512, "total da cadeia");
+  Require(PlanPicaRgba8Mips(0, 8, 1, 256, mips) == 0 && PlanPicaRgba8Mips(8, 8, 17, 256, mips) == 0,
+          "cadeia vazia/longa demais = 0");
+  DescriptorSlots<4> slots(2);
+  Require(slots.Allocate() == 2 && slots.Allocate() == 3, "reservados pulados");
+  Require(slots.Allocate() == 4, "cheio devolve a capacidade");
+  slots.Free(2);
+  Require(slots.Live() == 3 && slots.Allocate() == 2, "slot livre reaproveitado");
+  slots.Free(9);
+  Require(slots.Live() == 4, "slot fora da faixa ignorado");
+}
+
+void TestVertexPlan() {
+  using namespace Fast::Deko3d;
+  using Fast::Renderer3ds::PicaVertexAttributeView;
+  using Fast::Renderer3ds::PicaVertexBindingView;
+  using Fast::Renderer3ds::PicaVertexFormat;
+  const std::vector<uint8_t> a(36, 1), b(10, 2);
+  const PicaVertexBindingView bindings[] = {{0, 12, false, a}, {3, 2, false, b}};
+  const PicaVertexAttributeView attributes[] = {{0, 0, PicaVertexFormat::Float, 3, 0},
+                                                {5, 3, PicaVertexFormat::SignedShort, 1, 0}};
+  PicaVertexPlan plan;
+  Require(PlanPicaVertices(bindings, attributes, plan), "plano válido");
+  Require(plan.BindingOffset[0] == 0 && plan.BindingOffset[3] == 48 && plan.StreamBytes == 58,
+          "bindings alinhados a 16 num bloco só");
+  Require(plan.Attributes[0].Kind == PicaAttributeKind::Float && plan.Attributes[0].Components == 3,
+          "posição float x3");
+  Require(plan.Attributes[5].Kind == PicaAttributeKind::SignedShort && plan.Attributes[5].Binding == 3,
+          "atributo 5 no binding 3");
+  // Regressão de desenho: atributo ausente lê (0,0,0,1) como array GL desligado.
+  Require(plan.Attributes[1].Kind == PicaAttributeKind::Constant &&
+              plan.Attributes[1].Binding == kPicaConstantVertexBinding, "ausente = buffer constante");
+  Require(plan.AttributeMask == 0x21 && plan.BindingMask == 0x9, "máscaras");
+  const PicaVertexAttributeView orphan[] = {{2, 7, PicaVertexFormat::Float, 4, 0}};
+  Require(!PlanPicaVertices(bindings, orphan, plan) && plan.Error != nullptr, "atributo sem binding reprova");
+  const PicaVertexBindingView reserved[] = {{15, 4, false, a}};
+  Require(!PlanPicaVertices(reserved, {}, plan), "binding 15 é do buffer constante");
+  const PicaVertexAttributeView five[] = {{0, 0, PicaVertexFormat::Float, 5, 0}};
+  Require(!PlanPicaVertices(bindings, five, plan), "5 componentes reprova");
+  Require(PicaUniformBindBytes(1) == 256 && PicaUniformBindBytes(256) == 256 && PicaUniformBindBytes(6112) == 6144 &&
+              PicaUniformBindBytes(1 << 20) == 0x10000, "tamanho de UBO alinhado e limitado a 64 KiB");
+}
+
 } // namespace
 
 // Off the Switch the selection is constant (gfx_deko3d_selection.cpp is not
@@ -127,6 +225,9 @@ int main() {
   TestShaderPack();
   TestProgramPick();
   TestStageCacheResolvesOnce();
+  TestSamplerAndTextureKeys();
+  TestMipPlanAndSlots();
+  TestVertexPlan();
   std::puts("oot3d_deko3d_backend_tests: ok");
   return 0;
 }

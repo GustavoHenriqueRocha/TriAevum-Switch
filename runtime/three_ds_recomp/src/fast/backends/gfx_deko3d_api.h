@@ -2,6 +2,8 @@
 // GfxRenderingAPI on deko3d (Switch). Package 2 (docs/DEKO3D_PROGRESSO.md):
 // device, window image, clears and the present. Package 3: every PICA draw
 // resolves its shaders from deko3d.pack (specialized, else parametric).
+// Package 4: its textures, LUT, vertex/index streams and uniforms are
+// uploaded (gfx_deko3d_pica_resources.h).
 // Drawing, the UI and the rest come in later packages; until then their calls
 // are accepted and counted, so the game runs headless on this backend.
 
@@ -10,6 +12,7 @@
 #include "fast/backends/gfx_rendering_api.h"
 #include "fast/renderer3ds/pica_program_preparation.h"
 #include "gfx_deko3d_device.h"
+#include "gfx_deko3d_pica_resources.h"
 #include "gfx_deko3d_shaders.h"
 
 #include <array>
@@ -37,6 +40,8 @@ struct Deko3dFramebuffer {
 
 struct Deko3dBackendCounters {
     uint64_t PicaDrawsSkipped = 0;
+    uint64_t PicaDrawsPrepared = 0; // program + resources ready (drawn from package 5 on)
+    uint64_t PicaDrawsRejected = 0; // what the GL backend rejects too
     uint64_t PicaTransfersSkipped = 0;
     uint64_t PicaFillsSkipped = 0;
     uint64_t PicaClearsSkipped = 0;
@@ -142,9 +147,15 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     const DkShader* ResolvePicaStage(Deko3d::ShaderStage stage, std::string_view canonical,
                                      Renderer3ds::PicaShaderSourceIdentity identity);
     void LogPicaProgramCounters(const char* when);
+    // Opens the device frame (if needed) and starts the resources' frame
+    // once per device frame.
+    void EnsureFrame();
 
     Deko3d::Device mDevice;
     Deko3d::ShaderStore mShaders;
+    Deko3d::PicaResources mResources;
+    uint64_t mResourcesFrame = ~0ULL;
+    Deko3d::PicaDrawResources mDrawResources;
     Deko3d::PicaStageCache<DkShader> mVertexStages;
     Deko3d::PicaStageCache<DkShader> mFragmentStages;
     uint64_t mTranslationFailures = 0;
