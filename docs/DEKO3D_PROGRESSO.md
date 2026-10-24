@@ -26,6 +26,12 @@ no Mesa). Meta: nenhum quadro > 16,7 ms em jogo normal.
 | 7 | Contadores no perf.txt equivalentes aos do GL (A/B) | a fazer |
 | 8 | Estabilidade/memória | a fazer |
 
+**Teste no console (24/10, Switch real, NRO p3 md5 `6e31a96d`, `deko3d.pack` em `shadercache/`,
+`config/renderer`=deko3d):** tela preta como esperado; `logs/deko3d.txt`: `ready` (3 imagens de
+3840 KiB, 2 quadros em voo), `276 precompiled stages in the pack`, quadros 1 e 60 apresentados
+(acquire 48,8 ms somados em 60 quadros, 0 overflows); nenhum erro novo no log do jogo. Pacotes 2 e 3
+validados no console.
+
 **Próximo passo:** pacote 5 (alvos `DkImage` cor+depth por `PicaGlTarget`, estado de pipeline,
 viewport/scissor, o draw em si com `PicaDrawResources` + barreira `TakeInvalidate`/`TakeCodeWritten`,
 display transfer e scanout). Teste no console/Eden do NRO `deko3d-p3` (só quando liberado; nada de
