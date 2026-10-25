@@ -9,6 +9,7 @@ no mesmo trecho do jogo e com o deko3d sem config/deko3d_sync_check e sem a
 libdeko3dd (TRIAEVUM_DEKO3D_DEBUG=OFF).
 
 Uso: compare_backends.py mesa/perf.txt deko3d/perf.txt [--skip 4]
+     compare_backends.py perf.txt            # um arquivo: a última sessão GL e a última deko3d
 """
 import argparse
 import re
@@ -17,7 +18,7 @@ import statistics
 KV = re.compile(r'([A-Za-z_][\w]*)=([-\d.]+)')
 
 
-def last_session(path):
+def all_sessions(path):
     sessions, cur, prev = [], None, 1 << 62
     for line in open(path, errors='replace'):
         if line.startswith('host_frames='):
@@ -44,7 +45,16 @@ def last_session(path):
                         n += f
                 gpu = tot / n if n else float('nan')
             cur[-1]['gpu'] = gpu
-    return sessions[-1] if sessions else []
+            cur[-1]['dk'] = line.startswith('dkperf')
+    return sessions
+
+
+def last_session(path, deko3d=None):
+    """A última sessão; com deko3d=True/False, a última com/sem linha dkperf."""
+    for session in reversed(all_sessions(path)):
+        if deko3d is None or any(w.get('dk', False) for w in session) == deko3d:
+            return session
+    return []
 
 
 def summary(wins):
@@ -73,12 +83,13 @@ def summary(wins):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('mesa')
-    ap.add_argument('deko3d')
+    ap.add_argument('deko3d', nargs='?')
     ap.add_argument('--skip', type=int, default=4, help='janelas iniciais ignoradas (carregamento)')
     a = ap.parse_args()
     res = []
-    for path in (a.mesa, a.deko3d):
-        wins = last_session(path)[a.skip:]
+    picks = [(a.mesa, None), (a.deko3d, None)] if a.deko3d else [(a.mesa, False), (a.mesa, True)]
+    for path, kind in picks:
+        wins = last_session(path, kind)[a.skip:]
         s, clocks = summary(wins)
         res.append((len(wins), s, clocks))
     print(f"janelas: mesa {res[0][0]}, deko3d {res[1][0]}")

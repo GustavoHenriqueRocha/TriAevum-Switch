@@ -84,7 +84,7 @@ find_library(DEKO3D_LIBRARY deko3d
 # callback into logs/deko3d.txt. The release one aborts without a word
 # (p6c: "User Break" leaving Link's house). On while the backend is being
 # brought up; off for performance measurements.
-option(TRIAEVUM_DEKO3D_DEBUG "Link the deko3d debug library (libdeko3dd)" ON)
+option(TRIAEVUM_DEKO3D_DEBUG "Link the deko3d debug library (libdeko3dd; diagnosis, slower)" OFF)
 if(TRIAEVUM_DEKO3D_DEBUG)
     find_library(DEKO3D_DEBUG_LIBRARY deko3dd
         HINTS "${DEVKITPRO}/libnx/lib" REQUIRED)
