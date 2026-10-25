@@ -63,7 +63,10 @@ def summary(wins):
     roles = sorted({r for w in wins for r in w['cpu']})
     for r in roles:
         out[f'CPU {r} %'] = col(lambda w, r=r: w['cpu'].get(r))
-    clocks = {(w['main'].get('cpu_mhz'), w['main'].get('gpu_mhz'), w['main'].get('mem_mhz')) for w in wins}
+    # Arredondado a 50 MHz: a leitura oscila alguns MHz entre janelas.
+    r50 = lambda v: int(round(float(v) / 50) * 50) if v not in (None, '-1') else None
+    clocks = {(r50(w['main'].get('cpu_mhz')), r50(w['main'].get('gpu_mhz')), r50(w['main'].get('mem_mhz')))
+              for w in wins}
     return out, clocks
 
 
