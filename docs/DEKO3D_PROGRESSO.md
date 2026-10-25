@@ -91,7 +91,15 @@ NRO `~/oot3d-work/oot3d_native_game.deko3d-p5c.nro` (md5 `4bed0f7bd238baa2299663
   são puladas e contadas. Sem entrada (toque/mouse) no ImGui ainda.
 - Log: linha `ui (...)` com draws, texturas e comandos ImGui.
 
-**Próximo passo:** testar o p6 no console (entrar no jogo, HUD e contador de FPS); depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
+**p6 no console (25/10):** entrou no gameplay, HUD e contador de FPS aparecem (56–60 fps), mas UI de cabeça para
+baixo e cena girada 180°; a cena "arrastava" (rastros: árvores em fatias, logo do título por cima do jogo) e o céu
+não aparecia. Causa: o clip do deko3d tem y para cima (GL) e OriginUpperLeft põe a linha 0 em cima → NDC −1 cai na
+**última** linha, o contrário da memória do GL que o backend todo supõe. **p6b:** viewport com altura negativa em
+todos os desenhos (`MakeViewport`/`FlipViewportRows`, `config/deko3d_flip_y` "0" desliga). Isso também espelha o
+winding na janela: o céu (cúpula vista por dentro) era descartado e, como o OoT3D não limpa a cor da cena de cima
+(o céu cobre tudo), sobravam rastros. Se o céu ainda faltar: `config/deko3d_cull_invert` (A/B sem rebuild).
+
+**Próximo passo:** testar o p6b no console; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
 Shadow2D (programas com imagem no pacote) e medir o `pica_submit` contra o GL (pacote 7).
 
 ### Pacote 5 (o que entrou, 24/10, commit `66f9957e`)

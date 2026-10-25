@@ -170,15 +170,18 @@ void GfxRenderingAPIDeko3d::InitPica() {
     if (const auto invert = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_cull_invert")) {
         mCullInvert = invert->empty() || (*invert)[0] != '0';
     }
+    if (const auto flip = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_flip_y")) {
+        mFlipY = flip->empty() || (*flip)[0] != '0';
+    }
     PicaSamplerKey linear;
     linear.MinLinear = true;
     linear.MagLinear = true;
     mLinearClampSampler = mResources.SamplerSlot(linear);
     mScanoutVertex = mShaders.Embedded(kScanoutVertexKey, std::span<const uint8_t>(kScanoutVertexDksh));
     mScanoutFragment = mShaders.Embedded(kScanoutFragmentKey, std::span<const uint8_t>(kScanoutFragmentDksh));
-    Deko3d::Log("pica: scanout shaders %s, cull invert %d, lean %d",
+    Deko3d::Log("pica: scanout shaders %s, cull invert %d, flip y %d, lean %d",
                 mScanoutVertex != nullptr && mScanoutFragment != nullptr ? "ready" : "MISSING",
-                mCullInvert ? 1 : 0, mPicaLean ? 1 : 0);
+                mCullInvert ? 1 : 0, mFlipY ? 1 : 0, mPicaLean ? 1 : 0);
 }
 
 void GfxRenderingAPIDeko3d::BindPicaTarget(PicaTarget& target) {
@@ -443,6 +446,10 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     DkRasterizerState rasterizer;
     dkRasterizerStateDefaults(&rasterizer);
     rasterizer.depthClampEnable = 0;
+    // p6 on the console (unflipped viewports): the sky dome was culled and the
+    // top scene, which OoT3D never clears, smeared. The flipped viewport
+    // mirrors the window-space winding, which is what fixes the culling;
+    // config/deko3d_cull_invert stays as the A/B switch.
     const PicaCullPlan cull = PlanPicaCull(draw.CullMode, draw.FramebufferFlipped, mCullInvert);
     rasterizer.cullMode = !cull.Enabled ? DkFace_None : (cull.CullFront ? DkFace_Front : DkFace_Back);
     rasterizer.frontFace = cull.FrontCcw ? DkFrontFace_CCW : DkFrontFace_CW;
@@ -489,8 +496,8 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         ++mCounters.PicaNoEffectSkipped;
         return false;
     }
-    const DkViewport dkViewport = {static_cast<float>(viewport.X), static_cast<float>(viewport.Y),
-                                   static_cast<float>(viewport.Width), static_cast<float>(viewport.Height), 0.0F, 1.0F};
+    const DkViewport dkViewport = MakeViewport(static_cast<float>(viewport.X), static_cast<float>(viewport.Y),
+                                               static_cast<float>(viewport.Width), static_cast<float>(viewport.Height));
     dkCmdBufSetViewports(cmd, 0, &dkViewport, 1);
     const DkScissor dkScissor = ToDkScissor(scissor, target.Extent.Width, target.Extent.Height);
     if (dkScissor.width == 0U || dkScissor.height == 0U) {
@@ -641,9 +648,9 @@ void GfxRenderingAPIDeko3d::DrawPicaScanout(const GfxNativePicaDisplayTransferVi
     dkColorWriteStateDefaults(&writeState);
     dkCmdBufBindColorWriteState(cmd, &writeState);
 
-    const DkViewport viewport = {static_cast<float>(placement.Viewport.X), static_cast<float>(placement.Viewport.Y),
-                                 static_cast<float>(placement.Viewport.Width),
-                                 static_cast<float>(placement.Viewport.Height), 0.0F, 1.0F};
+    const DkViewport viewport =
+        MakeViewport(static_cast<float>(placement.Viewport.X), static_cast<float>(placement.Viewport.Y),
+                     static_cast<float>(placement.Viewport.Width), static_cast<float>(placement.Viewport.Height));
     dkCmdBufSetViewports(cmd, 0, &viewport, 1);
 
     const StreamSpan params = mDevice.Stream(DK_UNIFORM_BUF_ALIGNMENT, DK_UNIFORM_BUF_ALIGNMENT);

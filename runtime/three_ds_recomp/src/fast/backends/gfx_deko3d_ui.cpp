@@ -332,9 +332,8 @@ bool GfxRenderingAPIDeko3d::RecordUiDraw(const float* vertices, size_t floats, s
     dkColorWriteStateDefaults(&writeState);
     dkCmdBufBindColorWriteState(cmd, &writeState);
 
-    const DkViewport dkViewport = {static_cast<float>(viewport.X), static_cast<float>(viewport.Y),
-                                   static_cast<float>(viewport.Width), static_cast<float>(viewport.Height),
-                                   0.0F, 1.0F};
+    const DkViewport dkViewport = MakeViewport(static_cast<float>(viewport.X), static_cast<float>(viewport.Y),
+                                               static_cast<float>(viewport.Width), static_cast<float>(viewport.Height));
     dkCmdBufSetViewports(cmd, 0, &dkViewport, 1);
     const DkScissor dkScissor = {scissor.X, scissor.Y, scissor.Width, scissor.Height};
     dkCmdBufSetScissors(cmd, 0, &dkScissor, 1);

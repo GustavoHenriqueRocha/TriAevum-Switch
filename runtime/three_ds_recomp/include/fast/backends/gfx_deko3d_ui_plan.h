@@ -50,6 +50,23 @@ struct UiRect {
     return invertY ? 1.0F : -1.0F;
 }
 
+// deko3d's clip space has y up (GL) while OriginUpperLeft puts image row 0
+// at the top: NDC y = -1 lands on the last row, the opposite of GL memory
+// (row 0 = NDC -1) that the whole backend assumes (p6 on the console: UI
+// upside down, the top screen turned 180 degrees). A negative-height
+// viewport puts NDC -1 on row 0 again, everywhere; it also mirrors the
+// winding in window space, which corrects the culling seen on p6 (sky dome
+// culled, so the uncleared top scene smeared).
+struct ViewportRows {
+    float Y = 0.0F;
+    float Height = 0.0F;
+    bool operator==(const ViewportRows&) const = default;
+};
+
+[[nodiscard]] constexpr ViewportRows FlipViewportRows(float y, float height, bool flip) noexcept {
+    return flip ? ViewportRows{y + height, -height} : ViewportRows{y, height};
+}
+
 // ---- vertices ---------------------------------------------------------------
 
 // The two UI programs (oot3d_legacy_ui_adapters.cpp): solid = shade colour,

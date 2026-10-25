@@ -118,6 +118,11 @@ GUARDS = [
           r'if \(Deko3dRendererSelected\(\)\) \{.*?mRendererRouting\.Deferred\(\s*'
           r'\[copy = CloneImGuiDrawData\(data\)\] \{ Deko3dRenderImGuiDrawData\(copy\.get\(\)\); \}\);',
           forbid=r'ImGui is not drawn on deko3d yet'),
+    Guard("deko3d p6: UI de cabeça para baixo e cena girada 180° (NDC -1 na última linha); céu sumia e a cena arrastava",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'const DkViewport dkViewport = MakeViewport\(.*?const DkViewport viewport =\s+MakeViewport\(',
+          "oot3d_deko3d_backend_tests (TestUiPlan: FlipViewportRows)",
+          forbid=r'const DkViewport \w+ = \{'),
     # --- 24/10: picos fora de carregamento (worktree picos-logica) ---
     Guard("[decisão] som/DSP noutro núcleo descartado: resolveria 3 de 95 picos de guest (tour20+22)",
           "docs/GUIA_PORT_3DS_SWITCH.md",

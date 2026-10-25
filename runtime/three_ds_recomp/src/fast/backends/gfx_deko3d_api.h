@@ -240,6 +240,12 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     const DkShader* mScanoutFragment = nullptr;
     uint32_t mLinearClampSampler = 0;
     bool mCullInvert = false;    // config/deko3d_cull_invert
+    bool mFlipY = true;          // config/deko3d_flip_y ("0": the p6 viewports, upside down)
+    // Every viewport goes through here (FlipViewportRows).
+    [[nodiscard]] DkViewport MakeViewport(float x, float y, float width, float height) const noexcept {
+        const Deko3d::ViewportRows rows = Deko3d::FlipViewportRows(y, height, mFlipY);
+        return {x, rows.Y, width, rows.Height, 0.0F, 1.0F};
+    }
     bool mPicaLean = true;       // config/gl_lean (identical display copies skipped)
     Deko3d::PicaStageCache<DkShader> mVertexStages;
     Deko3d::PicaStageCache<DkShader> mFragmentStages;

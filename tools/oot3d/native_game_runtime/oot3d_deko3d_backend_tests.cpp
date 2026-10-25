@@ -412,6 +412,10 @@ void TestUiPlan() {
   Require(!legacy.MinLinear && legacy.WrapS == PicaWrap::ClampToEdge && legacy.WrapT == PicaWrap::MirroredRepeat,
           "cms/cmt do N64: 2 clamp, 1 espelho");
   Require(UiLegacySamplerKey(true, 0U, 0U).WrapS == PicaWrap::Repeat, "0 = repete");
+  // p6 no console: NDC -1 caía na última linha (UI de cabeça para baixo, cena girada 180°).
+  Require(FlipViewportRows(0.0F, 720.0F, true) == ViewportRows{720.0F, -720.0F}, "viewport invertido cobre 0..720");
+  Require(FlipViewportRows(40.0F, 400.0F, true) == ViewportRows{440.0F, -400.0F}, "viewport parcial invertido");
+  Require(FlipViewportRows(40.0F, 400.0F, false) == ViewportRows{40.0F, 400.0F}, "config/deko3d_flip_y 0");
 }
 
 int main() {
