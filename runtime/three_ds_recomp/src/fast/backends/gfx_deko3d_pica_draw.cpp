@@ -175,6 +175,24 @@ void GfxRenderingAPIDeko3d::InitPica() {
     if (const auto flip = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_flip_y")) {
         mFlipY = flip->empty() || (*flip)[0] != '0';
     }
+    if (const auto barrier = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_barrier")) {
+        mImageBarrierMode = DkBarrier_None;
+        mImageBarrierFlags = 0U;
+        const auto has = [&](const char* word) { return barrier->find(word) != std::string::npos; };
+        if (has("full")) {
+            mImageBarrierMode = DkBarrier_Full;
+        } else if (has("primitives")) {
+            mImageBarrierMode = DkBarrier_Primitives;
+        } else if (has("fragments")) {
+            mImageBarrierMode = DkBarrier_Fragments;
+        }
+        mImageBarrierFlags |= has("image") ? static_cast<uint32_t>(DkInvalidateFlags_Image) : 0U;
+        mImageBarrierFlags |= has("descriptors") ? static_cast<uint32_t>(DkInvalidateFlags_Descriptors) : 0U;
+        mImageBarrierFlags |= has("shader") ? static_cast<uint32_t>(DkInvalidateFlags_Shader) : 0U;
+        mImageBarrierFlags |= has("l2") ? static_cast<uint32_t>(DkInvalidateFlags_L2Cache) : 0U;
+        Deko3d::Log("pica: image barrier \"%s\" (mode %d, flags %x)", barrier->c_str(),
+                    static_cast<int>(mImageBarrierMode), mImageBarrierFlags);
+    }
     PicaSamplerKey linear;
     linear.MinLinear = true;
     linear.MagLinear = true;
@@ -203,14 +221,16 @@ void GfxRenderingAPIDeko3d::FlushPicaInvalidations() {
         // the last draw: wait for them, then drop stale cached lines. Once
         // per frame at least (BeginFrame), which also covers the uniform
         // cache over the reused stream memory.
-        mode = DkBarrier_Full;
-        flags |= DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader;
+        mode = mImageBarrierMode;
+        flags |= mImageBarrierFlags;
     }
     if (mShaders.TakeCodeWritten()) {
         flags |= DkInvalidateFlags_Shader;
     }
-    if (flags != 0U) {
+    if (flags != 0U || mode != DkBarrier_None) {
+        mDevice.Checkpoint("barrier.before", static_cast<uint64_t>(mode), flags);
         dkCmdBufBarrier(mDevice.Cmd(), mode, flags);
+        mDevice.Checkpoint("barrier.after", static_cast<uint64_t>(mode), flags);
     }
 }
 
@@ -301,6 +321,12 @@ void LogFailedPicaDraw(const GfxNativePicaDrawView& draw, const Deko3d::PicaDraw
         static_cast<unsigned long long>(res.FragmentUniforms), res.Textures[0], res.Textures[1], res.Textures[2],
         res.LightingLut, res.Vertices.StreamBytes, static_cast<unsigned long long>(res.VertexStream),
         static_cast<unsigned long long>(res.IndexStream));
+    for (const auto& texture : draw.Textures) {
+        Log("failed draw:   texture slot %u %ux%u format %u type %u mips %u-%u wrap %u/%u @%08x (%zu bytes)",
+            texture.Slot, texture.Width, texture.Height, texture.NativeFormat, texture.NativeType, texture.MinMipLevel,
+            texture.MaxMipLevel, texture.NativeWrapS, texture.NativeWrapT, texture.PhysicalAddress,
+            texture.NativeBytes.size());
+    }
     const Deko3d::PicaVertexPlan& plan = res.Vertices;
     Log("failed draw: vertex bindings %04x attributes %04x (%zu bindings, %zu attributes in the view)",
         plan.BindingMask, plan.AttributeMask, draw.VertexBindings.size(), draw.VertexAttributes.size());

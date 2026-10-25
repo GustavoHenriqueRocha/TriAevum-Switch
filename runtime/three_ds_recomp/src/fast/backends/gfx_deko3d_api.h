@@ -240,6 +240,10 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     const DkShader* mScanoutFragment = nullptr;
     uint32_t mLinearClampSampler = 0;
     bool mCullInvert = false;    // config/deko3d_cull_invert
+    // config/deko3d_barrier (diagnosis): the barrier after new images, as
+    // words "full|primitives|fragments|none image descriptors shader l2".
+    DkBarrier mImageBarrierMode = DkBarrier_Full;
+    uint32_t mImageBarrierFlags = DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader;
     bool mFlipY = true;          // config/deko3d_flip_y ("0": the p6 orientation, upside down)
     // Every viewport goes through here: deko3d 0.5.0 always flips clip-space
     // y in the viewport (y up, like GL) while OriginUpperLeft stores row 0 at
