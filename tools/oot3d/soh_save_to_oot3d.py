@@ -7,7 +7,8 @@ O save00.bin do OoT3D é o SaveContext até o checksum (0x14DC bytes, little-end
 OoT3D Randomizer); o checksum (+0x14D8) é CRC-16/ARC do arquivo inteiro com o campo zerado, o mesmo do
 system.dat (oot3d_native_master_quest_unlock.h). O arquivo base guarda o que só o 3DS tem (opções de
 controle, câmera, estatísticas dos chefes); o resto vem do SoH. Os IDs de item do OoT3D são os do N64.
-Ficam de fora: músicas do espantalho, recordes (pesca, cavalo, Big Poe) e as marcas de item novo do menu.
+Save Master Quest vai num slot do MQ: save03.bin a save05.bin (os slots 0-2 são do modo normal;
+FUN_002e63c8, oot3d_native_master_quest_unlock.h). Ficam de fora: músicas do espantalho, recordes (pesca, cavalo, Big Poe) e as marcas de item novo do menu.
 """
 import json
 import struct
