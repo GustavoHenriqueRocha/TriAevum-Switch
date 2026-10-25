@@ -34,6 +34,35 @@ std::atomic<uint64_t> gPerfWaitNs{0};
 std::atomic<uint64_t> gPerfTailNs{0};
 std::atomic<uint64_t> gPerfBusyMaxNs{0};
 std::atomic<uint64_t> gPerfSplitFrames{0};
+// Render-thread (CPU) waits of the frame: the fence of the frame in flight,
+// the window acquire, the present; slow = over 4 ms (p6n: the swap took
+// 14-18 ms in the frames that missed a refresh).
+struct CpuWait {
+    std::atomic<uint64_t> Ns{0};
+    std::atomic<uint64_t> MaxNs{0};
+    std::atomic<uint64_t> Slow{0};
+    std::atomic<uint64_t> Count{0};
+};
+CpuWait gFenceWait;
+CpuWait gAcquireWait;
+CpuWait gPresentWait;
+std::atomic<uint64_t> gSwapAcquires{0};
+
+void StoreMax(std::atomic<uint64_t>& max, uint64_t value) {
+    uint64_t seen = max.load(std::memory_order_relaxed);
+    while (value > seen && !max.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+    }
+}
+
+void NoteCpuWait(CpuWait& wait, uint64_t ns) {
+    wait.Ns.fetch_add(ns, std::memory_order_relaxed);
+    wait.Count.fetch_add(1, std::memory_order_relaxed);
+    if (ns > 4'000'000U) {
+        wait.Slow.fetch_add(1, std::memory_order_relaxed);
+    }
+    StoreMax(wait.MaxNs, ns);
+}
+
 // Deko3dTagFrame / Deko3dTakeGpuFrame (render thread only).
 FrameTag gPendingTag;
 constexpr size_t kGpuFrameRing = 8U;
@@ -295,6 +324,7 @@ void Device::BeginFrame() {
     mSlot = static_cast<uint32_t>(mFrame % kFramesInFlight);
     FrameSlot& slot = mSlots[mSlot];
     if (slot.Fenced) {
+        const uint64_t fenceBegin = NowNanoseconds();
         for (int waited = 0; waited < 5; ++waited) {
             const DkResult result = dkFenceWait(&slot.Fence, 2'000'000'000LL);
             if (result == DkResult_Success) {
@@ -307,6 +337,7 @@ void Device::BeginFrame() {
                 dkQueueIsInErrorState(mQueue) ? "; queue in error state" : "");
         }
         slot.Fenced = false;
+        NoteCpuWait(gFenceWait, NowNanoseconds() - fenceBegin);
         CollectTimestamps(mSlot);
     }
     slot.StreamBlock = 0;
@@ -357,7 +388,9 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
                                   dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + 2U * kTimestampBytes);
             mSlots[mSlot].Split = true;
         }
-        mStats.AcquireNanoseconds += NowNanoseconds() - begin;
+        const uint64_t acquireNs = NowNanoseconds() - begin;
+        mStats.AcquireNanoseconds += acquireNs;
+        NoteCpuWait(gAcquireWait, acquireNs);
         if (hook != nullptr) {
             hook(true);
         }
@@ -390,7 +423,9 @@ void Device::EndFrame(AcquireHook hook) {
     gPerfFrames.fetch_add(1, std::memory_order_relaxed);
     gPerfSubmits.fetch_add(mStats.Submits - mFrameStartSubmits, std::memory_order_relaxed);
     gPerfCommandBytes.fetch_add(slot.CommandUsed, std::memory_order_relaxed);
+    const uint64_t presentBegin = NowNanoseconds();
     dkQueuePresentImage(mQueue, mSwapchain, mWindowSlot);
+    NoteCpuWait(gPresentWait, NowNanoseconds() - presentBegin);
     if (dkQueueIsInErrorState(mQueue)) {
         static bool reported = false;
         if (!reported) {
@@ -453,10 +488,8 @@ StreamSpan Device::Stream(uint32_t size, uint32_t alignment) {
     }
 }
 
-static void StoreMax(std::atomic<uint64_t>& max, uint64_t value) {
-    uint64_t seen = max.load(std::memory_order_relaxed);
-    while (value > seen && !max.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
-    }
+void Device::CountSwapAcquire() {
+    gSwapAcquires.fetch_add(1, std::memory_order_relaxed);
 }
 
 // After the slot's fence: its frame's timestamps are written.
@@ -539,6 +572,18 @@ bool Device::Checkpoint(const char* what, uint64_t a, uint64_t b) {
 } // namespace Fast::Deko3d
 
 namespace Fast {
+namespace {
+std::string CpuWaitReport(const char* name, Deko3d::CpuWait& wait) {
+    const uint64_t count = wait.Count.exchange(0, std::memory_order_relaxed);
+    const uint64_t ns = wait.Ns.exchange(0, std::memory_order_relaxed);
+    std::ostringstream out;
+    out << ' ' << name << "_cpu_ms=" << (count != 0U ? static_cast<double>(ns) / static_cast<double>(count) / 1.0e6 : 0.0)
+        << ' ' << name << "_cpu_max_ms=" << static_cast<double>(wait.MaxNs.exchange(0, std::memory_order_relaxed)) / 1.0e6
+        << ' ' << name << "_slow=" << wait.Slow.exchange(0, std::memory_order_relaxed);
+    return out.str();
+}
+} // namespace
+
 std::string Deko3dPerfReport(unsigned long long hostFrames) {
     using namespace Deko3d;
     if (!gPerfLive.load(std::memory_order_acquire)) {
@@ -567,6 +612,9 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
         << " tail_ms=" << static_cast<double>(tailNs) / splitCount / 1.0e6
         << " submits_per_frame=" << static_cast<double>(submits) / count
         << " command_kib_per_frame=" << static_cast<double>(commandBytes) / count / 1024.0
+        << CpuWaitReport("fence", gFenceWait) << CpuWaitReport("acquire", gAcquireWait)
+        << CpuWaitReport("present", gPresentWait)
+        << " swap_acquires=" << gSwapAcquires.exchange(0, std::memory_order_relaxed)
         << " sync_check=" << (gPerfSyncCheck.load(std::memory_order_relaxed) ? 1 : 0)
         << " build=" << kDeko3dBuildTag;
     return out.str();

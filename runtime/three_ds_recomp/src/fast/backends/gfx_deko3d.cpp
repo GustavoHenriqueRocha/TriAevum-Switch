@@ -159,6 +159,9 @@ void GfxRenderingAPIDeko3d::FinishRender() {
         mWindowClearDepth = false;
         mWindowClearRgba = {mClearColor[0], mClearColor[1], mClearColor[2], mClearColor[3]};
     }
+    if (!mDevice.WindowAcquired()) {
+        mDevice.CountSwapAcquire();
+    }
     BindWindowTarget();
     mDevice.EndFrame(GetWindowAcquireHook());
     mWindowBound = false;

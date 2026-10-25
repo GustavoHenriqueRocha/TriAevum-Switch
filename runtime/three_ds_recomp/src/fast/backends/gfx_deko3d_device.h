@@ -94,6 +94,8 @@ class Device {
     // so the scene runs while the render thread waits.
     const DkImageView& AcquireWindow(AcquireHook hook);
     [[nodiscard]] bool WindowAcquired() const noexcept { return mWindowSlot >= 0; }
+    // FinishRender acquired it (no draw reached the window before the pacer).
+    void CountSwapAcquire();
 
     // Hands the commands recorded so far to the GPU.
     void Submit();
