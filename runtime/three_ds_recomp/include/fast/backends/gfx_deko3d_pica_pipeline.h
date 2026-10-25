@@ -390,7 +390,8 @@ struct PicaTransferPlan {
 [[nodiscard]] inline PicaTransferPlan PlanPicaTransfer(const Renderer3ds::PicaDisplayTransferView& transfer,
                                                        uint32_t sourceNativeWidth, uint32_t sourceNativeHeight,
                                                        float scale, float scaleY, uint32_t targetWidth,
-                                                       uint32_t targetHeight) noexcept {
+                                                       uint32_t targetHeight, float allocScale = 0.0F,
+                                                       float allocScaleY = 0.0F) noexcept {
     PicaTransferPlan plan;
     const auto fail = [&](const char* why) {
         plan.Error = why;
@@ -425,10 +426,21 @@ struct PicaTransferPlan {
         return static_cast<uint32_t>(std::lround(static_cast<float>(native) * scaleY));
     };
     plan.Linear = scaling != 0U;
-    plan.AllocWidth = ScaledExtent(plan.OutputWidth, scale);
-    plan.AllocHeight = std::max<uint32_t>(1U, scaledY(plan.OutputHeight));
-    plan.ContentWidth = plan.AllocWidth;
-    plan.ContentHeight = plan.AllocHeight;
+    // Dynamic resolution (gl_pica_dynamic_scale.h): the source may be drawn
+    // below its allocation scale. The display image keeps the allocation's
+    // extent (never reallocated as the scale moves) and the copy fills its
+    // bottom-left part, the content the scanout reads.
+    if (!(allocScale > 0.0F)) {
+        allocScale = scale;
+    }
+    if (!(allocScaleY > 0.0F)) {
+        allocScaleY = scaleY;
+    }
+    plan.AllocWidth = ScaledExtent(plan.OutputWidth, allocScale);
+    plan.AllocHeight = std::max<uint32_t>(
+        1U, static_cast<uint32_t>(std::lround(static_cast<float>(plan.OutputHeight) * allocScaleY)));
+    plan.ContentWidth = std::min(plan.AllocWidth, ScaledExtent(plan.OutputWidth, scale));
+    plan.ContentHeight = std::min(plan.AllocHeight, std::max<uint32_t>(1U, scaledY(plan.OutputHeight)));
     plan.SourceWidth = std::min<uint32_t>(ScaledExtent(plan.OutputWidth * horizontalSamples, scale), targetWidth);
     plan.SourceHeight = std::min<uint32_t>(scaledY(plan.OutputHeight * verticalSamples), targetHeight);
     const bool inputLinear = (transfer.Flags & (1U << 1U)) != 0U;

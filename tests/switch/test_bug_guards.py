@@ -149,6 +149,10 @@ GUARDS = [
     Guard("deko3d p6m: governador e DRS sem tempo de GPU no deko3d (só CPU) — Deko3dTagFrame/TakeGpuFrame",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'Fast::Deko3dTagFrame\(kind, costCpuMs\);.*?timer\.Poll\(onGpuResult\);.*?Fast::Deko3dTakeGpuFrame\(frame\)'),
+    Guard("deko3d p6m: DRS — imagem de exibição na escala da alocação, conteúdo na escala desenhada (sem realocar)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'source->Extent\.Height, source->Alloc\.Scale,\s+source->Alloc\.ScaleY\);',
+          "oot3d_deko3d_backend_tests (DRS: conteúdo menor que a alocação)"),
     # --- 24/10: picos fora de carregamento (worktree picos-logica) ---
     Guard("[decisão] som/DSP noutro núcleo descartado: resolveria 3 de 95 picos de guest (tour20+22)",
           "docs/GUIA_PORT_3DS_SWITCH.md",

@@ -371,6 +371,15 @@ void TestTransferAndScanout() {
   Require(PlanPicaTransfer(transfer, 240, 400, 1.0F, 1.0F, 240, 400).Flip, "flip padrão como no GL");
   transfer.Flags = 1U;
   Require(!PlanPicaTransfer(transfer, 240, 400, 1.0F, 1.0F, 240, 400).Flip, "bit 0 desfaz o flip");
+  // Resolução dinâmica (p6m): alvo alocado a 3x desenhado a 2x — a imagem
+  // de exibição fica no tamanho da alocação e o conteúdo é o canto de 2x.
+  transfer.Flags = 0;
+  plan = PlanPicaTransfer(transfer, 240, 400, 2.0F, 2.0F, 480, 800, 3.0F, 3.0F);
+  Require(plan.Valid && plan.AllocWidth == 720 && plan.AllocHeight == 1200 && plan.ContentWidth == 480 &&
+              plan.ContentHeight == 800 && plan.SourceWidth == 480 && plan.SourceHeight == 800,
+          "DRS: conteúdo menor que a alocação");
+  plan = PlanPicaTransfer(transfer, 240, 400, 3.0F, 3.0F, 720, 1200);
+  Require(plan.AllocWidth == plan.ContentWidth && plan.AllocHeight == plan.ContentHeight, "sem DRS: conteúdo = alocação");
   // Tela de cima 400x240 apresentada em 1280x720: 5:3 com barras.
   const auto placement = PlanPicaScanout(240, 400, 800, 2.0F, 1280, 720);
   Require(placement.Viewport == PicaRect{40, 0, 1200, 720} && !placement.CoversWindow, "5:3 centralizado");

@@ -340,6 +340,18 @@ SwitchWaker (centollOS, MIT), cuja camada de plataforma vem do SwitchWakerHD (MP
 código foi copiado até aqui; se for, entra com o cabeçalho e a licença originais.
 deko3d e uam: devkitPro (fincs), zlib.
 
+### p6m (25/10): medição real da GPU e resolução dinâmica
+
+- O `gpu_ms` do p6l (14,5) contava a espera do `dkQueueAcquireImage` (a GPU parada esperando a tela liberar a
+  imagem); o timer do GL já tirava essa espera, por isso o Mesa dava 8,5. Agora 4 carimbos por quadro: `busy_ms`
+  (cena + final), `scene_ms`, `acquire_wait_ms`, `tail_ms`, `busy_max_ms` na linha `dkperf`; o compare usa `busy_ms`.
+- O governador de quadros intermediários e o DRS não tinham tempo de GPU no deko3d (o `NativeGpuFrameTimer` é GL):
+  `Deko3dTagFrame`/`Deko3dTakeGpuFrame` entregam o tempo ocupado de cada quadro com o tipo (step/interp) — também
+  enche os `*_gpu_ms` do glperf no deko3d.
+- DRS (`config/dynamic_resolution`) no deko3d: o alvo da tela de cima desenha no sub-retângulo da mesma imagem
+  (`PicaTarget::Alloc` × `Extent`), troca só no 1º draw do quadro com limpeza lógica (como o GL desde o tour19), a
+  cópia de exibição mantém a alocação e replica 2 texels de borda; o scanout lê só o conteúdo.
+
 ## Comparação Mesa × deko3d p6l (tour27, 2026-10-25)
 
 Mesmo roteiro (132 passos, 44 áreas), clocks 1800/600/1600 MHz, DRS desligado. Mesa = NRO da topscreen-3.0.

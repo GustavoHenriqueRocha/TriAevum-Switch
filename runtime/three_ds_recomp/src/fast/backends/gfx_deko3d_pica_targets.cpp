@@ -3,7 +3,11 @@
 #if defined(__SWITCH__)
 #include "gfx_deko3d_pica_targets.h"
 
+#include "fast/backends/gl_pica_dynamic_scale.h"
+#include "gfx_opengl_pica_scale.h"
+
 #include <algorithm>
+#include <cmath>
 #include <tuple>
 
 namespace Fast::Deko3d {
@@ -52,6 +56,10 @@ bool PicaTargets::Init(Device& device, PicaResources& resources, float scale, fl
     mWidescreenFactor = std::max(widescreenFactor, 1.0F);
     Log("targets: resolution scale %.2f, widescreen factor %.3f", static_cast<double>(mScale),
         static_cast<double>(mWidescreenFactor));
+    // Dynamic resolution lowers the configured scale, never raises it (no
+    // SMAA/FXAA here, whose images would have the source's extent).
+    PicaGlDynamicScale::gState.MaxScale = mScale;
+    PicaGlDynamicScale::gState.Supported = mScale > 1.0F;
     return true;
 }
 
@@ -134,6 +142,8 @@ PicaTarget* PicaTargets::Get(const PicaTargetKey& key, bool* created) {
         }
         return nullptr;
     }
+    target.Alloc = target.Extent;
+    target.DynamicEligible = key.Width == kTopScreenPhysicalWidth && key.Height == kTopScreenPhysicalHeight;
     target.Id = mNextId++;
     mStats.TargetBytes += bytes;
     ++mStats.TargetsCreated;
@@ -183,6 +193,44 @@ std::pair<const PicaTargetKey*, PicaTarget*> PicaTargets::FindColor(uint64_t tar
         }
     }
     return {bestKey, best};
+}
+
+bool PicaTargets::ApplyDynamicScale(const PicaTargetKey& key, PicaTarget& target) {
+    if (!target.DynamicEligible) {
+        return false;
+    }
+    const auto& dynamic = PicaGlDynamicScale::gState;
+    float desired = target.Alloc.Scale;
+    if (dynamic.Supported && dynamic.Requested > 0.0F) {
+        desired = std::clamp(std::round(dynamic.Requested * 4.0F) / 4.0F, 1.0F, target.Alloc.Scale);
+    }
+    PicaGlDynamicScale::TargetPhase phase{target.Extent.Scale, target.ScaleSerial};
+    const bool moved = PicaGlDynamicScale::ScaleAtDraw(phase, dynamic.FrameSerial, desired);
+    target.ScaleSerial = phase.Serial;
+    if (!moved) {
+        return false;
+    }
+    if (desired == target.Alloc.Scale) {
+        target.Extent = target.Alloc;
+    } else {
+        const auto extent = PicaGlScale::DynamicSubRectangle(key.Width, key.Height, desired, target.Alloc.Width,
+                                                             target.Alloc.Height, target.Alloc.Wide,
+                                                             target.Alloc.WideFactor);
+        target.Extent.Width = extent.Width;
+        target.Extent.Height = extent.Height;
+        target.Extent.Scale = desired;
+        target.Extent.ScaleY = static_cast<float>(extent.Height) / static_cast<float>(key.Height);
+    }
+    DkCmdBuf cmd = mDevice->Cmd();
+    const DkImageView* colors[] = {&target.ColorView};
+    dkCmdBufBindRenderTargets(cmd, colors, 1, &target.DepthView);
+    const DkScissor scissor = {0, 0, target.Alloc.Width, target.Alloc.Height};
+    dkCmdBufSetScissors(cmd, 0, &scissor, 1);
+    dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA, 0.0F, 0.0F, 0.0F, 1.0F);
+    ++target.Version;
+    PicaGlDynamicScale::gState.Applied.fetch_add(1U, std::memory_order_relaxed);
+    PicaGlDynamicScale::gState.AppliedAtDraw.fetch_add(1U, std::memory_order_relaxed);
+    return true;
 }
 
 PicaDisplay* PicaTargets::GetDisplay(uint64_t targetNamespace, uint32_t outputAddress, uint32_t width,

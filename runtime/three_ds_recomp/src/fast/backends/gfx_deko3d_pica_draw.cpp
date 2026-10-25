@@ -20,6 +20,7 @@
 #include "gfx_deko3d_api.h"
 #include "gfx_deko3d_scanout_dksh.h"
 #include "gfx_opengl_pica_scale.h"
+#include "fast/backends/gl_pica_dynamic_scale.h"
 
 #include <switch.h>
 
@@ -393,6 +394,9 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         ++mCounters.PicaDrawsSkipped;
         return true;
     }
+    if (mTargets.ApplyDynamicScale(key, *target)) {
+        mBoundTarget = target; // bound by the logical clear
+    }
     ApplyPendingPicaFills(key, *target);
     if (draw.FragmentOperationMode == 3U) {
         // Shadow2D producer: writes an R32UI image through image stores,
@@ -670,7 +674,8 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
     }
     const PicaTransferPlan plan = PlanPicaTransfer(transfer, key->Width, key->Height, source->Extent.Scale,
                                                    source->Extent.ScaleY, source->Extent.Width,
-                                                   source->Extent.Height);
+                                                   source->Extent.Height, source->Alloc.Scale,
+                                                   source->Alloc.ScaleY);
     if (!plan.Valid) {
         if (transfer.Present) {
             BindWindowTarget();
@@ -700,6 +705,28 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
         const DkImageRect destRect = {0, 0, 0, plan.ContentWidth, plan.ContentHeight, 1};
         dkCmdBufBlitImage(cmd, &source->ColorView, &sourceRect, &display->View, &destRect,
                           plan.Linear ? DkBlitFlag_FilterLinear : DkBlitFlag_FilterNearest, 0);
+        if (plan.ContentWidth < plan.AllocWidth || plan.ContentHeight < plan.AllocHeight) {
+            // Dynamic resolution: the bilinear scanout reads up to two texels
+            // past the content, where an older, larger copy may still lie:
+            // replicate the last column, then the last row (with that
+            // border), into a two-texel band (GL does the same).
+            const uint32_t cw = plan.ContentWidth;
+            const uint32_t ch = plan.ContentHeight;
+            const uint32_t bandX = std::min<uint32_t>(2U, plan.AllocWidth - cw);
+            const uint32_t bandY = std::min<uint32_t>(2U, plan.AllocHeight - ch);
+            if (bandX > 0U) {
+                dkCmdBufBarrier(cmd, DkBarrier_Full, 0);
+                const DkImageRect from = {cw - 1U, 0, 0, 1, ch, 1};
+                const DkImageRect to = {cw, 0, 0, bandX, ch, 1};
+                dkCmdBufBlitImage(cmd, &display->View, &from, &display->View, &to, DkBlitFlag_FilterNearest, 0);
+            }
+            if (bandY > 0U) {
+                dkCmdBufBarrier(cmd, DkBarrier_Full, 0);
+                const DkImageRect from = {0, ch - 1U, 0, cw + bandX, 1, 1};
+                const DkImageRect to = {0, ch, 0, cw + bandX, bandY, 1};
+                dkCmdBufBlitImage(cmd, &display->View, &from, &display->View, &to, DkBlitFlag_FilterNearest, 0);
+            }
+        }
         dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image);
         display->LastCopy = copy;
         mDevice.Checkpoint("transfer", plan.SourceWidth, plan.SourceHeight);
@@ -707,8 +734,14 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
     }
     display->ContentWidth = plan.ContentWidth;
     display->ContentHeight = plan.ContentHeight;
+    if (transfer.Present && source->DynamicEligible) {
+        auto& dynamic = PicaGlDynamicScale::gState;
+        dynamic.PresentedFrames.fetch_add(1U, std::memory_order_relaxed);
+        dynamic.PresentedScaleMilli.fetch_add(static_cast<uint64_t>(std::lround(source->Extent.Scale * 1000.0F)),
+                                              std::memory_order_relaxed);
+    }
     if (transfer.Present) {
-        DrawPicaScanout(transfer, *display, plan, source->Extent.Scale);
+        DrawPicaScanout(transfer, *display, plan, source->Alloc.Scale);
         mDevice.Checkpoint("scanout", transfer.OutputPhysicalAddress, 0);
     }
     return true;

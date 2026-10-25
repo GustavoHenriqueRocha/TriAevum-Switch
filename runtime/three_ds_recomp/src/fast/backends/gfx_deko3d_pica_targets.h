@@ -30,7 +30,14 @@ struct PicaTarget {
     DkImage DepthStencil{};
     DkImageView ColorView{};
     DkImageView DepthView{};
+    // Drawn extent; below Alloc while dynamic resolution lowers the scale
+    // (the bottom-left sub-rectangle of the same images).
     PicaTargetExtent Extent;
+    PicaTargetExtent Alloc;
+    // Dynamic resolution: the top-screen scene target; FrameSerial its scale
+    // was last looked at (gl_pica_dynamic_scale.h).
+    bool DynamicEligible = false;
+    uint32_t ScaleSerial = 0;
     // Unique per created target and bumped by every write to Color: the
     // identity of the content a display copy read (GL: Id/Version).
     uint64_t Id = 0;
@@ -92,6 +99,12 @@ class PicaTargets {
             visit(key, target);
         }
     }
+
+    // Dynamic resolution at the frame's first draw into an eligible target
+    // (GL: ApplyPicaGlTargetScaleAtDraw): moves the drawn extent to the
+    // requested scale and clears the colour (what the frame leaves undrawn is
+    // black, not pixels at the other scale). True when the extent changed.
+    bool ApplyDynamicScale(const PicaTargetKey& key, PicaTarget& target);
 
     PicaDisplay* GetDisplay(uint64_t targetNamespace, uint32_t outputAddress, uint32_t width, uint32_t height,
                             uint32_t allocWidth, uint32_t allocHeight);
