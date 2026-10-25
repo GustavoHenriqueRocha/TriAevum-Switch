@@ -353,5 +353,5 @@ Mesmo roteiro (132 passos, 44 áreas), clocks 1800/600/1600 MHz, DRS desligado. 
 | present ms | 6,47 | 6,91 | +7% |
 | GPU ms (medição diferente) | 8,5 (glperf) | 14,5 (timestamps do quadro todo) | — |
 
-Por área: deko3d tem FPS mín ≥ 59,9 em 16 áreas (Mesa: 7). Pior área: Mesa Water Temple 52,9; deko3d Fire Temple 52,2.
+Por área: deko3d tem FPS mín ≥ 59,9 em 12 áreas (Mesa: 3). Pior área: Mesa Water Temple 52,9; deko3d Fire Temple 52,2.
 O GPU ms não é comparável: o glperf soma passes, o dkperf mede do topo ao fim do quadro (inclui espera).
