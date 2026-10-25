@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <cstddef>
 #include <cstring>
 #include <mutex>
 #include <utility>
@@ -48,6 +49,20 @@ CpuWait gAcquireWait;
 CpuWait gPresentWait;
 std::atomic<uint64_t> gSwapAcquires{0};
 CpuWait gSubmitWait;
+// config/deko3d_present_thread: nwindowQueueBuffer on the present thread.
+CpuWait gQueueBufferWait;
+
+// deko3d's internal Fence (source/dk_fence.h, deko3d 0.5): the NvFence that
+// dkQueuePresentImage hands nwindowQueueBuffer, read the same way here.
+struct DkFenceMirror {
+    uint32_t Type; // 1 = Internal
+    uint32_t SemaphoreValue;
+    DkGpuAddr SemaphoreAddr;
+    const volatile uint32_t* SemaphoreCpu;
+    DkDevice Device;
+    NvFence Fence;
+};
+static_assert(sizeof(DkFenceMirror) <= sizeof(DkFence) && offsetof(DkFenceMirror, Fence) == 32U);
 // The last swap's parts (render thread only; Deko3dLastSwapTimes).
 Fast::Deko3dSwapTimes gLastSwap;
 uint64_t gLastFenceNs = 0;
@@ -150,10 +165,19 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
         return fail("dkDeviceCreate");
     }
 
-    // Window images: render target + present, compressed.
+    // Window images: render target + present, compressed (not on the
+    // present thread: dkQueuePresentImage decompresses them, nwindow alone
+    // does not).
+    if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_present_thread", "rb")) {
+        std::fclose(file);
+        mPresentThreaded = true;
+    }
     DkImageLayoutMaker layoutMaker;
     dkImageLayoutMakerDefaults(&layoutMaker, mDevice);
-    layoutMaker.flags = DkImageFlags_UsageRender | DkImageFlags_UsagePresent | DkImageFlags_HwCompression;
+    layoutMaker.flags = DkImageFlags_UsageRender | DkImageFlags_UsagePresent;
+    if (!mPresentThreaded) {
+        layoutMaker.flags |= DkImageFlags_HwCompression;
+    }
     layoutMaker.format = DkImageFormat_RGBA8_Unorm;
     layoutMaker.dimensions[0] = width;
     layoutMaker.dimensions[1] = height;
@@ -228,6 +252,10 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
         Log("sync check on (slow; diagnosis only): %s at%s%s", mSyncNoWait ? "submit only" : "submit and wait",
             points.empty() ? " every operation" : points.c_str(), "");
     }
+    if (mPresentThreaded) {
+        StartPresentThread();
+        Log("present thread on (config/deko3d_present_thread)");
+    }
     gPerfSyncCheck.store(mSyncCheck, std::memory_order_relaxed);
     gPerfLive.store(true, std::memory_order_release);
     Log("deko3d: ready (window image %u KiB x %u, %u frames in flight)", imageSize >> 10, kSwapchainImages,
@@ -236,6 +264,7 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
 }
 
 void Device::Destroy() noexcept {
+    StopPresentThread();
     if (mQueue != nullptr) {
         dkQueueWaitIdle(mQueue);
     }
@@ -387,6 +416,7 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
             hook(false);
         }
         const uint64_t begin = NowNanoseconds();
+        WaitPresent();
         mWindowSlot = dkQueueAcquireImage(mQueue, mSwapchain);
         if (mTimestamps != nullptr) {
             dkCmdBufReportCounter(mCmd, DkCounter_TimestampPipelineTop,
@@ -433,7 +463,11 @@ void Device::EndFrame(AcquireHook hook) {
     gPerfSubmits.fetch_add(mStats.Submits - mFrameStartSubmits, std::memory_order_relaxed);
     gPerfCommandBytes.fetch_add(slot.CommandUsed, std::memory_order_relaxed);
     const uint64_t presentBegin = NowNanoseconds();
-    dkQueuePresentImage(mQueue, mSwapchain, mWindowSlot);
+    if (mPresentThreaded) {
+        QueuePresent(mWindowSlot);
+    } else {
+        dkQueuePresentImage(mQueue, mSwapchain, mWindowSlot);
+    }
     const uint64_t presentNs = NowNanoseconds() - presentBegin;
     NoteCpuWait(gPresentWait, presentNs);
     gLastSwap.PresentMs = static_cast<float>(static_cast<double>(presentNs) / 1.0e6);
@@ -457,6 +491,75 @@ void Device::EndFrame(AcquireHook hook) {
             static_cast<unsigned long long>(mStats.StreamBytes >> 10),
             static_cast<unsigned long long>(mStats.CommandOverflows));
     }
+}
+
+void Device::StartPresentThread() {
+    mPresentStop = false;
+    mPresentThread = std::thread([this] { PresentLoop(); });
+}
+
+void Device::StopPresentThread() noexcept {
+    if (!mPresentThread.joinable()) {
+        return;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(mPresentMutex);
+        mPresentStop = true;
+    }
+    mPresentReady.notify_one();
+    mPresentThread.join();
+}
+
+void Device::PresentLoop() {
+    std::unique_lock<std::mutex> lock(mPresentMutex);
+    for (;;) {
+        mPresentReady.wait(lock, [this] { return mPresentPending || mPresentStop; });
+        if (!mPresentPending) {
+            return;
+        }
+        const int slot = mPresentSlot;
+        const NvMultiFence fence = mPresentFence;
+        lock.unlock();
+        const uint64_t begin = NowNanoseconds();
+        const Result rc = nwindowQueueBuffer(nwindowGetDefault(), slot, &fence);
+        NoteCpuWait(gQueueBufferWait, NowNanoseconds() - begin);
+        if (R_FAILED(rc)) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                Log("present thread: nwindowQueueBuffer(%d) failed 0x%X", slot, rc);
+            }
+        }
+        lock.lock();
+        mPresentPending = false;
+        mPresentDone.notify_all();
+    }
+}
+
+void Device::QueuePresent(int windowSlot) {
+    // dkQueuePresentImage without the queue-buffer IPC: a fence after the
+    // frame's work, flushed, handed to the present thread.
+    DkFence fence{};
+    dkQueueSignalFence(mQueue, &fence, true);
+    DkFenceMirror mirror;
+    std::memcpy(&mirror, &fence, sizeof(mirror));
+    NvMultiFence multi{};
+    nvMultiFenceCreate(&multi, &mirror.Fence);
+    {
+        const std::lock_guard<std::mutex> lock(mPresentMutex);
+        mPresentSlot = windowSlot;
+        mPresentFence = multi;
+        mPresentPending = true;
+    }
+    mPresentReady.notify_one();
+}
+
+void Device::WaitPresent() {
+    if (!mPresentThreaded) {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(mPresentMutex);
+    mPresentDone.wait(lock, [this] { return !mPresentPending; });
 }
 
 void Device::WaitIdle() {
@@ -634,6 +737,7 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
         << " command_kib_per_frame=" << static_cast<double>(commandBytes) / count / 1024.0
         << CpuWaitReport("fence", gFenceWait) << CpuWaitReport("acquire", gAcquireWait)
         << CpuWaitReport("present", gPresentWait) << CpuWaitReport("submit", gSubmitWait)
+        << CpuWaitReport("queue_buffer", gQueueBufferWait)
         << " swap_acquires=" << gSwapAcquires.exchange(0, std::memory_order_relaxed)
         << " sync_check=" << (gPerfSyncCheck.load(std::memory_order_relaxed) ? 1 : 0)
         << " build=" << kDeko3dBuildTag;

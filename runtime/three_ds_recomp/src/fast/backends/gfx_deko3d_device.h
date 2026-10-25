@@ -13,12 +13,16 @@
 
 #if defined(__SWITCH__)
 #include <deko3d.h>
+#include <switch.h>
 
 #include "fast/backends/gfx_deko3d_pica_plan.h"
 
 #include <array>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -155,6 +159,16 @@ class Device {
         FrameTag Tag; // Deko3dTagFrame of the frame
     };
     void CollectTimestamps(uint32_t slot);
+    // config/deko3d_present_thread: nwindowQueueBuffer on its own thread
+    // (p6o: dkQueuePresentImage blocked the render thread 15-21 ms in the
+    // frames that missed a refresh, a whole refresh after the pacer's wait).
+    void StartPresentThread();
+    void StopPresentThread() noexcept;
+    void PresentLoop();
+    void QueuePresent(int windowSlot);
+    // The window can be dequeued again only after the last queue (nwindow's
+    // current slot): the render thread waits here.
+    void WaitPresent();
 
     DkDevice mDevice = nullptr;
     DkQueue mQueue = nullptr;
@@ -183,6 +197,15 @@ class Device {
     // "nowait" only splits the command list there (no wait for the GPU).
     std::vector<std::string> mSyncPoints;
     bool mSyncNoWait = false;
+    bool mPresentThreaded = false;
+    std::thread mPresentThread;
+    std::mutex mPresentMutex;
+    std::condition_variable mPresentReady;
+    std::condition_variable mPresentDone;
+    bool mPresentPending = false;
+    bool mPresentStop = false;
+    int mPresentSlot = -1;
+    NvMultiFence mPresentFence{};
     uint64_t mPreviousGpuEnd = 0; // GPU ticks: the last measured frame's end
     DeviceStats mStats{};
 };

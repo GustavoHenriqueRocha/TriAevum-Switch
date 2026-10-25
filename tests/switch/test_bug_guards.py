@@ -153,6 +153,12 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'source->Extent\.Height, source->Alloc\.Scale,\s+source->Alloc\.ScaleY\);',
           "oot3d_deko3d_backend_tests (DRS: conteúdo menor que a alocação)"),
+    Guard("deko3d p6p: present no fio próprio sem esperar o anterior → nwindow perde o slot atual (dequeue antes do queue)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'WaitPresent\(\);\s+mWindowSlot = dkQueueAcquireImage\(mQueue, mSwapchain\);'),
+    Guard("deko3d p6p: janela comprimida com present no fio próprio (só dkQueuePresentImage descomprime)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'if \(!mPresentThreaded\) \{\s+layoutMaker\.flags \|= DkImageFlags_HwCompression;'),
     # --- 24/10: picos fora de carregamento (worktree picos-logica) ---
     Guard("[decisão] som/DSP noutro núcleo descartado: resolveria 3 de 95 picos de guest (tour20+22)",
           "docs/GUIA_PORT_3DS_SWITCH.md",
