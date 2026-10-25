@@ -474,6 +474,11 @@ void Deko3dRenderImGuiDrawData(const ImDrawData*) {
 std::string Deko3dPerfReport(unsigned long long) {
     return {};
 }
+void Deko3dTagFrame(uint8_t, double) {
+}
+bool Deko3dTakeGpuFrame(Deko3dGpuFrame&) {
+    return false;
+}
 } // namespace Fast
 
 #endif

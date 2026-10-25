@@ -6,6 +6,7 @@
 // docs/DEKO3D_PROGRESSO.md has the design and the package status.
 
 #include <cctype>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -41,7 +42,7 @@ inline bool Deko3dRendererConfigSelects(std::string_view content) {
 
 // Build tag written at the top of logs/deko3d.txt: tells which NRO a log
 // came from (a p3 log and a p5 log looked alike, 24/10).
-inline constexpr const char* kDeko3dBuildTag = "p6l";
+inline constexpr const char* kDeko3dBuildTag = "p6m";
 
 // Presented frames logged in logs/deko3d.txt: the first, then 60, 300 and
 // 1800 (the PICA counters go with 300 and every 1800), then every 3600.
@@ -69,4 +70,18 @@ void Deko3dRenderImGuiDrawData(const ImDrawData* data);
 // last call, from timestamps at the start and the end of each frame. Empty
 // without a deko3d device.
 std::string Deko3dPerfReport(unsigned long long hostFrames);
+
+// GPU busy time of one presented frame (the acquire wait left out), for the
+// pacing governor and dynamic resolution, which on GL get it from
+// NativeGpuFrameTimer. Render thread: Deko3dTagFrame before the frame's
+// present names its kind and render-thread cost; Deko3dTakeGpuFrame returns
+// the measured frames, oldest first, once their fence passed (two frames
+// later). Nothing elsewhere or without a deko3d device.
+struct Deko3dGpuFrame {
+    uint8_t Kind = 0;
+    double Milliseconds = 0.0;
+    double CpuMilliseconds = 0.0;
+};
+void Deko3dTagFrame(uint8_t kind, double cpuMilliseconds);
+bool Deko3dTakeGpuFrame(Deko3dGpuFrame& frame);
 } // namespace Fast

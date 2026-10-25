@@ -142,6 +142,13 @@ GUARDS = [
     Guard("deko3d p6f: shader com mais scratch que a fila é recusado, não derruba a GPU",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
           r'DkshPerWarpScratchBytes\(dksh\);\s+if \(!scratch\.has_value\(\) \|\| \*scratch > kPerWarpScratchBytes\)'),
+    Guard("deko3d p6m: GPU ms incluía a espera do acquire (14,5 ms × 8,5 do GL) — carimbos em volta do acquire",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'kTimestampSlotBytes \+ kTimestampBytes\);\s+\}\s+Submit\(\);.*?'
+          r'dkQueueAcquireImage\(mQueue, mSwapchain\);.*?TimestampPipelineTop.*?2U \* kTimestampBytes\);'),
+    Guard("deko3d p6m: governador e DRS sem tempo de GPU no deko3d (só CPU) — Deko3dTagFrame/TakeGpuFrame",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'Fast::Deko3dTagFrame\(kind, costCpuMs\);.*?timer\.Poll\(onGpuResult\);.*?Fast::Deko3dTakeGpuFrame\(frame\)'),
     # --- 24/10: picos fora de carregamento (worktree picos-logica) ---
     Guard("[decisão] som/DSP noutro núcleo descartado: resolveria 3 de 95 picos de guest (tour20+22)",
           "docs/GUIA_PORT_3DS_SWITCH.md",

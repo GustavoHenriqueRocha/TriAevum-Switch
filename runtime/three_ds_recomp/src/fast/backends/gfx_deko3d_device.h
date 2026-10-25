@@ -25,6 +25,13 @@
 namespace Fast::Deko3d {
 
 constexpr uint32_t kFramesInFlight = 2;
+
+// Fast::Deko3dTagFrame of a frame: its kind and render-thread cost.
+struct FrameTag {
+    bool Set = false;
+    uint8_t Kind = 0;
+    double CpuMilliseconds = 0.0;
+};
 constexpr uint32_t kSwapchainImages = 3;
 constexpr uint32_t kCommandSliceBytes = 1U << 20;   // per slot, fed in chunks
 constexpr uint32_t kCommandChunkBytes = 64U << 10;
@@ -129,7 +136,9 @@ class Device {
         uint32_t StreamUsed = 0;
         DkFence Fence{};
         bool Fenced = false;
-        bool Timed = false; // its two timestamps were recorded
+        bool Timed = false; // its frame top and end timestamps were recorded
+        bool Split = false; // and the two around the acquire
+        FrameTag Tag; // Deko3dTagFrame of the frame
     };
     void CollectTimestamps(uint32_t slot);
 
@@ -160,6 +169,7 @@ class Device {
     // "nowait" only splits the command list there (no wait for the GPU).
     std::vector<std::string> mSyncPoints;
     bool mSyncNoWait = false;
+    uint64_t mPreviousGpuEnd = 0; // GPU ticks: the last measured frame's end
     DeviceStats mStats{};
 };
 

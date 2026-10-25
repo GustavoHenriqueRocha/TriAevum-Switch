@@ -34,7 +34,8 @@ def all_sessions(path):
         elif cur and line.startswith(('glperf ', 'dkperf ')):
             kv = dict(KV.findall(line))
             if line.startswith('dkperf'):
-                gpu = float(kv.get('gpu_ms', 'nan'))
+                # busy_ms (p6m+) tira a espera do acquire; antes só havia gpu_ms com ela.
+                gpu = float(kv.get('busy_ms', kv.get('gpu_ms', 'nan')))
             else:
                 # Média dos tipos de quadro com amostra de GPU, ponderada pelos quadros.
                 tot = n = 0.0

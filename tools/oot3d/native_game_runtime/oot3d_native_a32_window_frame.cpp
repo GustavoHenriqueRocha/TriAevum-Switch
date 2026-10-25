@@ -336,7 +336,16 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   };
   std::array<double, Oot3dNativeGame::kRenderFrameKindCount> gpuMs{};
   std::array<uint64_t, Oot3dNativeGame::kRenderFrameKindCount> gpuFrames{};
-  const bool gpuAvailable = timer.Available();
+#if defined(__SWITCH__)
+  // deko3d: the device times its frames itself (gfx_deko3d_device.cpp, busy
+  // = scene + tail, the acquire wait left out like MarkAcquire does here).
+  const bool deko3dTiming = Fast::Deko3dRendererSelected();
+#else
+  const bool deko3dTiming = false;
+#endif
+  const bool gpuAvailable = timer.Available() || deko3dTiming;
+  if (deko3dTiming)
+    Fast::Deko3dTagFrame(kind, costCpuMs);
   timer.EndFrame(kind, costCpuMs);
 #if defined(__SWITCH__)
   // The frame's last commands (scanout, UI) and its end timestamp go to the
@@ -346,7 +355,7 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   if (gFlushBeforePacing && !Fast::Deko3dRendererSelected())
     glFlush();
 #endif
-  timer.Poll([&](const Oot3dNativeGame::NativeGpuFrameTime &result) {
+  const auto onGpuResult = [&](const Oot3dNativeGame::NativeGpuFrameTime &result) {
     if (result.Kind >= gpuMs.size()) return;
     spikeGpuMs = result.Milliseconds; // newest GPU result (logs/spikes.txt)
     gpuMs[result.Kind] += result.Milliseconds;
@@ -376,7 +385,15 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
     // Both sides of a frame overlap the neighbouring frames: the pair fits
     // only if each fits.
     observe(result.Kind, std::max(result.Milliseconds, result.CpuMilliseconds));
-  });
+  };
+  timer.Poll(onGpuResult);
+  for (Fast::Deko3dGpuFrame frame; deko3dTiming && Fast::Deko3dTakeGpuFrame(frame);) {
+    Oot3dNativeGame::NativeGpuFrameTime result;
+    result.Kind = frame.Kind;
+    result.Milliseconds = frame.Milliseconds;
+    result.CpuMilliseconds = frame.CpuMilliseconds;
+    onGpuResult(result);
+  }
   if (!gpuAvailable) {
     // No GPU clock (yet): render-thread time only. The swap is left out:
     // it includes the vsync wait, which made every pair look over budget
@@ -398,7 +415,7 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   perf.Probes = stats.Probes;
   perf.LevelChanges = stats.LevelChanges;
   perf.Level = static_cast<uint8_t>(interpolationPacing.Level());
-  perf.GpuTimer = timer.Available();
+  perf.GpuTimer = gpuAvailable;
   perf.GpuFactor = timer.NanosecondsPerTick();
   perf.StepCostMs = interpolationPacing.StepCostMs();
   perf.FullEstimateMs = interpolationPacing.Estimate(

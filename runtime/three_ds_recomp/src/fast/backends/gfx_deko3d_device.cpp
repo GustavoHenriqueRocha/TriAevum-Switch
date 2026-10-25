@@ -8,11 +8,13 @@
 #include <switch.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <utility>
 #include <sstream>
 
 namespace Fast::Deko3d {
@@ -27,6 +29,17 @@ std::atomic<bool> gPerfLive{false};
 std::atomic<uint64_t> gPerfFrames{0};
 std::atomic<uint64_t> gPerfGpuNs{0};
 std::atomic<uint64_t> gPerfGpuMaxNs{0};
+std::atomic<uint64_t> gPerfSceneNs{0};
+std::atomic<uint64_t> gPerfWaitNs{0};
+std::atomic<uint64_t> gPerfTailNs{0};
+std::atomic<uint64_t> gPerfBusyMaxNs{0};
+std::atomic<uint64_t> gPerfSplitFrames{0};
+// Deko3dTagFrame / Deko3dTakeGpuFrame (render thread only).
+FrameTag gPendingTag;
+constexpr size_t kGpuFrameRing = 8U;
+std::array<Fast::Deko3dGpuFrame, kGpuFrameRing> gGpuFrames{};
+size_t gGpuFrameHead = 0U;
+size_t gGpuFrameCount = 0U;
 std::atomic<uint64_t> gPerfSubmits{0};
 std::atomic<uint64_t> gPerfCommandBytes{0};
 std::atomic<bool> gPerfSyncCheck{false};
@@ -36,7 +49,11 @@ constexpr uint64_t GpuTicksToNs(uint64_t ticks) {
     return ticks * 625U / 384U;
 }
 constexpr uint32_t kTimestampBytes = 16U; // DkCounter report: value, timestamp
-constexpr uint32_t kTimestampSlotBytes = 2U * kTimestampBytes;
+// Per slot: frame top, scene end (before the acquire), after the acquire, frame end.
+// The acquire makes the GPU wait for the display to release the image; that wait
+// is not GPU work, so busy = scene + tail.
+constexpr uint32_t kTimestampSlotBytes = 4U * kTimestampBytes;
+static_assert(kFramesInFlight * kTimestampSlotBytes <= DK_MEMBLOCK_ALIGNMENT, "timestamps fit one block");
 
 uint64_t NowNanoseconds() {
     return armTicksToNs(armGetSystemTick());
@@ -325,12 +342,21 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
     BeginFrame();
     if (mWindowSlot < 0) {
         // The scene recorded so far goes to the GPU before the wait.
+        if (mTimestamps != nullptr) {
+            dkCmdBufReportCounter(mCmd, DkCounter_Timestamp,
+                                  dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kTimestampBytes);
+        }
         Submit();
         if (hook != nullptr) {
             hook(false);
         }
         const uint64_t begin = NowNanoseconds();
         mWindowSlot = dkQueueAcquireImage(mQueue, mSwapchain);
+        if (mTimestamps != nullptr) {
+            dkCmdBufReportCounter(mCmd, DkCounter_TimestampPipelineTop,
+                                  dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + 2U * kTimestampBytes);
+            mSlots[mSlot].Split = true;
+        }
         mStats.AcquireNanoseconds += NowNanoseconds() - begin;
         if (hook != nullptr) {
             hook(true);
@@ -354,8 +380,9 @@ void Device::EndFrame(AcquireHook hook) {
     FrameSlot& slot = mSlots[mSlot];
     if (mTimestamps != nullptr) {
         dkCmdBufReportCounter(mCmd, DkCounter_Timestamp,
-                              dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kTimestampBytes);
+                              dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + 3U * kTimestampBytes);
         slot.Timed = true;
+        slot.Tag = std::exchange(gPendingTag, FrameTag{});
     }
     dkCmdBufSignalFence(mCmd, &slot.Fence, true);
     Submit();
@@ -426,7 +453,13 @@ StreamSpan Device::Stream(uint32_t size, uint32_t alignment) {
     }
 }
 
-// After the slot's fence: its frame's two timestamps are written.
+static void StoreMax(std::atomic<uint64_t>& max, uint64_t value) {
+    uint64_t seen = max.load(std::memory_order_relaxed);
+    while (value > seen && !max.compare_exchange_weak(seen, value, std::memory_order_relaxed)) {
+    }
+}
+
+// After the slot's fence: its frame's timestamps are written.
 void Device::CollectTimestamps(uint32_t slotIndex) {
     FrameSlot& slot = mSlots[slotIndex];
     if (!slot.Timed || mTimestamps == nullptr) {
@@ -434,17 +467,44 @@ void Device::CollectTimestamps(uint32_t slotIndex) {
     }
     slot.Timed = false;
     const auto* reports = static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(mTimestamps)) + slotIndex * kTimestampSlotBytes;
-    uint64_t begin = 0;
-    uint64_t end = 0;
-    std::memcpy(&begin, reports + 8U, sizeof(begin));
-    std::memcpy(&end, reports + kTimestampBytes + 8U, sizeof(end));
-    if (end <= begin) {
+    uint64_t t[4] = {};
+    for (uint32_t i = 0; i < 4U; ++i) {
+        std::memcpy(&t[i], reports + i * kTimestampBytes + 8U, sizeof(t[i]));
+    }
+    const bool split = slot.Split;
+    slot.Split = false;
+    slot.Tag.Set = slot.Tag.Set && split;
+    if (t[3] <= t[0]) {
         return;
     }
-    const uint64_t ns = GpuTicksToNs(end - begin);
+    const uint64_t ns = GpuTicksToNs(t[3] - t[0]);
     gPerfGpuNs.fetch_add(ns, std::memory_order_relaxed);
-    uint64_t max = gPerfGpuMaxNs.load(std::memory_order_relaxed);
-    while (ns > max && !gPerfGpuMaxNs.compare_exchange_weak(max, ns, std::memory_order_relaxed)) {
+    StoreMax(gPerfGpuMaxNs, ns);
+    if (!split || t[1] < t[0] || t[2] < t[1] || t[3] < t[2]) {
+        return;
+    }
+    const uint64_t scene = GpuTicksToNs(t[1] - t[0]);
+    const uint64_t tail = GpuTicksToNs(t[3] - t[2]);
+    gPerfSceneNs.fetch_add(scene, std::memory_order_relaxed);
+    gPerfWaitNs.fetch_add(GpuTicksToNs(t[2] - t[1]), std::memory_order_relaxed);
+    gPerfTailNs.fetch_add(tail, std::memory_order_relaxed);
+    gPerfSplitFrames.fetch_add(1, std::memory_order_relaxed);
+    StoreMax(gPerfBusyMaxNs, scene + tail);
+    // The scene starts when the previous frame's work ends, if it was queued
+    // behind it (NativeGpuFrameBusyTicks on GL).
+    const uint64_t previousEnd = std::exchange(mPreviousGpuEnd, t[3]);
+    const uint64_t start = previousEnd > t[0] && previousEnd < t[1] ? previousEnd : t[0];
+    if (slot.Tag.Set) {
+        Fast::Deko3dGpuFrame frame;
+        frame.Kind = slot.Tag.Kind;
+        frame.Milliseconds = static_cast<double>(GpuTicksToNs(t[1] - start) + tail) / 1.0e6;
+        frame.CpuMilliseconds = slot.Tag.CpuMilliseconds;
+        gGpuFrames[(gGpuFrameHead + gGpuFrameCount) % kGpuFrameRing] = frame;
+        if (gGpuFrameCount < kGpuFrameRing) {
+            ++gGpuFrameCount;
+        } else {
+            gGpuFrameHead = (gGpuFrameHead + 1U) % kGpuFrameRing;
+        }
     }
 }
 
@@ -489,16 +549,41 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
     const uint64_t gpuMaxNs = gPerfGpuMaxNs.exchange(0, std::memory_order_relaxed);
     const uint64_t submits = gPerfSubmits.exchange(0, std::memory_order_relaxed);
     const uint64_t commandBytes = gPerfCommandBytes.exchange(0, std::memory_order_relaxed);
+    const uint64_t split = gPerfSplitFrames.exchange(0, std::memory_order_relaxed);
+    const uint64_t sceneNs = gPerfSceneNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t waitNs = gPerfWaitNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t tailNs = gPerfTailNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t busyMaxNs = gPerfBusyMaxNs.exchange(0, std::memory_order_relaxed);
     const double count = frames != 0U ? static_cast<double>(frames) : 1.0;
+    const double splitCount = split != 0U ? static_cast<double>(split) : 1.0;
     std::ostringstream out;
     out << "dkperf host_frames=" << hostFrames << " frames=" << frames
         << " gpu_ms=" << static_cast<double>(gpuNs) / count / 1.0e6
         << " gpu_max_ms=" << static_cast<double>(gpuMaxNs) / 1.0e6
+        << " busy_ms=" << static_cast<double>(sceneNs + tailNs) / splitCount / 1.0e6
+        << " busy_max_ms=" << static_cast<double>(busyMaxNs) / 1.0e6
+        << " scene_ms=" << static_cast<double>(sceneNs) / splitCount / 1.0e6
+        << " acquire_wait_ms=" << static_cast<double>(waitNs) / splitCount / 1.0e6
+        << " tail_ms=" << static_cast<double>(tailNs) / splitCount / 1.0e6
         << " submits_per_frame=" << static_cast<double>(submits) / count
         << " command_kib_per_frame=" << static_cast<double>(commandBytes) / count / 1024.0
         << " sync_check=" << (gPerfSyncCheck.load(std::memory_order_relaxed) ? 1 : 0)
         << " build=" << kDeko3dBuildTag;
     return out.str();
+}
+void Deko3dTagFrame(uint8_t kind, double cpuMilliseconds) {
+    Deko3d::gPendingTag = {true, kind, cpuMilliseconds};
+}
+
+bool Deko3dTakeGpuFrame(Deko3dGpuFrame& frame) {
+    using namespace Deko3d;
+    if (gGpuFrameCount == 0U) {
+        return false;
+    }
+    frame = gGpuFrames[gGpuFrameHead];
+    gGpuFrameHead = (gGpuFrameHead + 1U) % kGpuFrameRing;
+    --gGpuFrameCount;
+    return true;
 }
 } // namespace Fast
 #endif
