@@ -436,7 +436,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     }
     dkCmdBufBindTextures(cmd, DkStage_Fragment, 1, res.Textures.data(), static_cast<uint32_t>(res.Textures.size()));
     dkCmdBufBindTexture(cmd, DkStage_Fragment, 13, res.LightingLut);
-    mDevice.Checkpoint("draw.uniforms+textures");
+    mDevice.Checkpoint("draw.uniforms");
 
     // Vertices: every binding in the draw's stream block, absent attributes
     // on the constant (0, 0, 0, 1).
@@ -472,7 +472,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     dkCmdBufBindVtxAttribState(cmd, attributes.data(), static_cast<uint32_t>(attributes.size()));
     dkCmdBufBindVtxBufferState(cmd, buffers.data(), static_cast<uint32_t>(buffers.size()));
     dkCmdBufBindVtxBuffers(cmd, 0, extents.data(), static_cast<uint32_t>(extents.size()));
-    mDevice.Checkpoint("draw.vertex state");
+    mDevice.Checkpoint("draw.vertex");
 
     // Output merger: blend, else the logic op (COPY = off).
     DkColorState colorState;
@@ -498,7 +498,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     dkColorWriteStateDefaults(&writeState);
     dkColorWriteStateSetMask(&writeState, 0, colorMask);
     dkCmdBufBindColorWriteState(cmd, &writeState);
-    mDevice.Checkpoint("draw.blend+color");
+    mDevice.Checkpoint("draw.blend");
 
     DkDepthStencilState depthStencil;
     dkDepthStencilStateDefaults(&depthStencil);
@@ -538,7 +538,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     rasterizer.cullMode = !cull.Enabled ? DkFace_None : (cull.CullFront ? DkFace_Front : DkFace_Back);
     rasterizer.frontFace = cull.FrontCcw ? DkFrontFace_CCW : DkFrontFace_CW;
     dkCmdBufBindRasterizerState(cmd, &rasterizer);
-    mDevice.Checkpoint("draw.depth+raster");
+    mDevice.Checkpoint("draw.raster");
 
     // Viewport and scissor in host pixels of the target.
     const float scale = target.Extent.Scale;
@@ -589,7 +589,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         return false;
     }
     dkCmdBufSetScissors(cmd, 0, &dkScissor, 1);
-    mDevice.Checkpoint("draw.viewport+scissor");
+    mDevice.Checkpoint("draw.viewport");
 
     const auto primitive = static_cast<DkPrimitive>(DekoPrimitive(draw.Topology));
     if (draw.Indexed) {
@@ -676,7 +676,7 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
                           plan.Linear ? DkBlitFlag_FilterLinear : DkBlitFlag_FilterNearest, 0);
         dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image);
         display->LastCopy = copy;
-        mDevice.Checkpoint("transfer blit", plan.SourceWidth, plan.SourceHeight);
+        mDevice.Checkpoint("transfer", plan.SourceWidth, plan.SourceHeight);
         ++mCounters.PicaTransfers;
     }
     display->ContentWidth = plan.ContentWidth;

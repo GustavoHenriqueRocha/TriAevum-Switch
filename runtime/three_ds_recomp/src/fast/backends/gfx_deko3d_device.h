@@ -153,6 +153,10 @@ class Device {
     uint64_t mCheckpoints = 0;
     uint64_t mFrameStartSubmits = 0;
     std::string mLastCheckpoint;
+    // The file's words: the checkpoint names to act on (all when none);
+    // "nowait" only splits the command list there (no wait for the GPU).
+    std::vector<std::string> mSyncPoints;
+    bool mSyncNoWait = false;
     DeviceStats mStats{};
 };
 

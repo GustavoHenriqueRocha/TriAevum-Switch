@@ -160,9 +160,23 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     mTimestamps = MakeBlock(DK_MEMBLOCK_ALIGNMENT, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached,
                             "timestamps");
     if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_sync_check", "rb")) {
+        char word[64];
+        while (std::fscanf(file, "%63s", word) == 1) {
+            if (std::strcmp(word, "nowait") == 0) {
+                mSyncNoWait = true;
+            } else {
+                mSyncPoints.emplace_back(word);
+            }
+        }
         std::fclose(file);
         mSyncCheck = true;
-        Log("sync check on: every operation is waited for (slow; diagnosis only)");
+        std::string points;
+        for (const std::string& point : mSyncPoints) {
+            points += ' ';
+            points += point;
+        }
+        Log("sync check on (slow; diagnosis only): %s at%s%s", mSyncNoWait ? "submit only" : "submit and wait",
+            points.empty() ? " every operation" : points.c_str(), "");
     }
     gPerfSyncCheck.store(mSyncCheck, std::memory_order_relaxed);
     gPerfLive.store(true, std::memory_order_release);
@@ -438,8 +452,14 @@ bool Device::Checkpoint(const char* what, uint64_t a, uint64_t b) {
     if (!mSyncCheck || mSyncFailed || !mFrameOpen || mQueue == nullptr) {
         return false;
     }
+    if (!mSyncPoints.empty() && std::find(mSyncPoints.begin(), mSyncPoints.end(), what) == mSyncPoints.end()) {
+        return false;
+    }
     ++mCheckpoints;
     Submit();
+    if (mSyncNoWait) {
+        return false;
+    }
     dkQueueWaitIdle(mQueue);
     char name[128];
     std::snprintf(name, sizeof(name), "%s(%llu, %llu)", what, static_cast<unsigned long long>(a),
