@@ -374,3 +374,16 @@ O GPU ms não é comparável: o glperf soma passes, o dkperf mede do topo ao fim
 14,5 com a espera). A espera do acquire era 5–6 ms. fps 59,20, render −40% CPU contra o Mesa (igual ao p6l). DRS
 aplicou (escala média 3 em 113 de 171 janelas, desceu até 2,25). **Atenção:** 79 de 171 janelas com GPU a 900 MHz
 (o p6l e o Mesa rodaram tudo a 600): comparação parcial. Pior área: Shadow Temple (mín 47,6, máx 20,99 ms).
+
+## p6o–p6q: espera do present (tour MQ, 25/10)
+
+| build | perdidas/janela | 1 refresh | passos atrasados | picos (pacer) |
+|---|---|---|---|---|
+| p6o | 2,34 | 98,4% | 461 | 455 (296) |
+| p6p `deko3d_present_thread` | 2,19 | 98,5% | 278 | 288 (137) |
+| p6q + `deko3d_swapchain_images` = 4 | **1,32** | **99,1%** | **165** | **183 (53)** |
+
+- p6o: nos picos de pacer, `dkQueuePresentImage` (nwindowQueueBuffer) segurava 15–21 ms.
+- p6p: queue-buffer num fio próprio; a espera migrou para o acquire seguinte (~26 ms).
+- p6q: 4 imagens na janela tiram a fila da tela do limite; melhor resultado até aqui.
+- Pacote de shaders v4 (305): MQ e adulto sem uber. Water Temple adulto ainda 8 perdidas/janela (não é shader).
