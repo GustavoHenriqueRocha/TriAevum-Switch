@@ -65,7 +65,15 @@ olhar `deko3d debug:` e `queue in error state` no log.
   `pica: first draw`, o PICA não está chegando ao backend (procurar no log do jogo
   `native PICA … failed`).
 
-**Próximo passo:** testar o p5b no console; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
+**p5b no console (25/10):** crash Data Abort no 1º draw; simbolizado com o ELF do p5b:
+`BindPicaTarget → dkCmdBufBindRenderTargets → ImageInfo::fromImageView`. Causa: `PicaTargets::Get` montava
+`ColorView/DepthView` na cópia local (pilha) e copiava para o mapa → views apontando para lixo. O p5 (User Break em
+`Queue::checkError`) era o mesmo bug. **p5c** (856abdd7): imagens e views montadas no alvo já guardado; guarda nova.
+NRO `~/oot3d-work/oot3d_native_game.deko3d-p5c.nro` (md5 `4bed0f7bd238baa2299663c44d7ccae8`) + `.elf`, build Ryzen
+-j 3 (16 passos, sem shard). No Switch como `oot3d_deko3d_p5c.nro` (menu "OoT3D [deko3d-p5c]", via
+`tools/oot3d/rotular_nro.py`). Crash report: `atmosphere/crash_reports/*.log` + addr2line no ELF exato.
+
+**Próximo passo:** testar o p5c no console; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
 Shadow2D (programas com imagem no pacote) e medir o `pica_submit` contra o GL (pacote 7).
 
 ### Pacote 5 (o que entrou, 24/10, commit `66f9957e`)
