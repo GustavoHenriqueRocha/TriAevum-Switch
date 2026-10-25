@@ -25,7 +25,8 @@ g, rows = 0.0, []
 for kv in wins:
     fps, gfps = float(kv["fps"]), float(kv["guest_fps"])
     sec = 150 / fps if fps else 0
-    rows.append((g, g + gfps * sec, fps, gfps, float(kv["guest"]), float(kv["total_ms"])))
+    miss = sum(int(kv.get(k, 0)) for k in ("hold_2", "hold_3", "hold_4p"))
+    rows.append((g, g + gfps * sec, fps, gfps, float(kv["guest"]), float(kv["total_ms"]), miss))
     g += gfps * sec
 start = {a["id"]: a["frame"] for a in acks if "frame" in a}
 out = []
@@ -36,8 +37,10 @@ for i in range(49):
     w = [r for r in rows if min(r[1], b) - max(r[0], a) > (r[1] - r[0]) / 2]
     if not w: continue
     lo = min(r[2] for r in w); avg = sum(r[2] for r in w) / len(w)
-    out.append((lo, avg, max(r[5] for r in w), max(r[4] for r in w), sum(r[3] for r in w)/len(w), i))
-print(f"{'área':<34} {'FPS mín':>7} {'FPS méd':>7} {'ms máx':>7} {'guest ms':>8} {'guest fps':>9}")
-for lo, avg, tot, gu, gf, i in sorted(out):
-    print(f"{i:>2} {names[i] if i < len(names) else '?':<31} {lo:7.1f} {avg:7.1f} {tot:7.2f} {gu:8.2f} {gf:9.1f}")
+    # perdidas: imagens que ficaram 2+ refreshes na tela (fluidez), por janela.
+    out.append((lo, avg, max(r[5] for r in w), max(r[4] for r in w), sum(r[3] for r in w)/len(w), i,
+                sum(r[6] for r in w) / len(w)))
+print(f"{'área':<34} {'FPS mín':>7} {'FPS méd':>7} {'ms máx':>7} {'guest ms':>8} {'guest fps':>9} {'perdidas':>8}")
+for lo, avg, tot, gu, gf, i, miss in sorted(out):
+    print(f"{i:>2} {names[i] if i < len(names) else '?':<31} {lo:7.1f} {avg:7.1f} {tot:7.2f} {gu:8.2f} {gf:9.1f} {miss:8.1f}")
 print(f"janelas na sessão: {len(wins)}, guest estimado no fim {g:.0f} vs ack final {acks[-1]['frame']}")
