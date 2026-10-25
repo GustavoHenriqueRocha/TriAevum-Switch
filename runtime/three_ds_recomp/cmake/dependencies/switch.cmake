@@ -79,6 +79,17 @@ find_library(DRM_NOUVEAU_LIBRARY drm_nouveau
 # deko3d backend (config/renderer = deko3d; docs/DEKO3D_PROGRESSO.md).
 find_library(DEKO3D_LIBRARY deko3d
     HINTS "${DEVKITPRO}/libnx/lib" REQUIRED)
+# Debug variant (libdeko3dd): validates every call and reports GPU faults
+# (page fault address, method error, timeout) through the device's debug
+# callback into logs/deko3d.txt. The release one aborts without a word
+# (p6c: "User Break" leaving Link's house). On while the backend is being
+# brought up; off for performance measurements.
+option(TRIAEVUM_DEKO3D_DEBUG "Link the deko3d debug library (libdeko3dd)" ON)
+if(TRIAEVUM_DEKO3D_DEBUG)
+    find_library(DEKO3D_DEBUG_LIBRARY deko3dd
+        HINTS "${DEVKITPRO}/libnx/lib" REQUIRED)
+    set(DEKO3D_LIBRARY "${DEKO3D_DEBUG_LIBRARY}")
+endif()
 
 # ImGui and Fast3D must share the same loader on Horizon OS.
 target_compile_definitions(ImGui PRIVATE

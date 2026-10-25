@@ -105,7 +105,13 @@ fonte: `viewportFlipY()` sempre inverte o y no modo UpperLeft; o master tem `DkD
 0.5.0 não tem. **p6c:** viewport normal + swizzle `DkSwizzle_NegativeY` (`ApplyDkViewport`), que nega o y no clip
 antes do viewport.
 
-**Próximo passo:** testar o p6c no console; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
+**p6c no console (25/10): imagem certa e o jogo roda** (orientação, céu e sem rastros). Crash ao sair da casa do
+Link: "User Break" em `Device::Submit` → `dk::detail::RaiseError` (fila da GPU em erro por um comando gravado antes;
+a lib release não diz qual). **p6d:** linka a `libdeko3dd` (`TRIAEVUM_DEKO3D_DEBUG`, ligado por enquanto; desligar
+para medir desempenho): o callback de debug grava em `logs/deko3d.txt` a causa (page fault + endereço, erro de
+método, timeout) e as chamadas inválidas.
+
+**Próximo passo:** reproduzir o crash com o p6d e ler `deko3d debug:` no log; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
 Shadow2D (programas com imagem no pacote) e medir o `pica_submit` contra o GL (pacote 7).
 
 ### Pacote 5 (o que entrou, 24/10, commit `66f9957e`)
