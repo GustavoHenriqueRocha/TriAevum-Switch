@@ -339,3 +339,19 @@ Referência de desenho: renderizador deko3d do Aurora do "Alek's Ultimate NX Edi
 SwitchWaker (centollOS, MIT), cuja camada de plataforma vem do SwitchWakerHD (MPL-2.0). Nenhum
 código foi copiado até aqui; se for, entra com o cabeçalho e a licença originais.
 deko3d e uam: devkitPro (fincs), zlib.
+
+## Comparação Mesa × deko3d p6l (tour27, 2026-10-25)
+
+Mesmo roteiro (132 passos, 44 áreas), clocks 1800/600/1600 MHz, DRS desligado. Mesa = NRO da topscreen-3.0.
+
+| métrica | Mesa | deko3d | Δ |
+|---|---|---|---|
+| fps médio | 58,89 | 59,23 | +0,6% |
+| quadro ms méd / máx | 17,00 / 19,33 | 16,89 / 19,14 | −0,6% |
+| CPU thread render | 34,3% | 20,5% | −40% |
+| CPU thread game | 59,7% | 57,4% | −4% |
+| present ms | 6,47 | 6,91 | +7% |
+| GPU ms (medição diferente) | 8,5 (glperf) | 14,5 (timestamps do quadro todo) | — |
+
+Por área: deko3d tem FPS mín ≥ 59,9 em 16 áreas (Mesa: 7). Pior área: Mesa Water Temple 52,9; deko3d Fire Temple 52,2.
+O GPU ms não é comparável: o glperf soma passes, o dkperf mede do topo ao fim do quadro (inclui espera).
