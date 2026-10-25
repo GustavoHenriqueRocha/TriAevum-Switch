@@ -26,6 +26,18 @@ namespace Fast::Deko3d {
 
 constexpr uint32_t kFramesInFlight = 2;
 
+// Times one FinishRender (the swap) for Fast::Deko3dLastSwapTimes.
+class SwapClock {
+  public:
+    SwapClock() noexcept;
+    ~SwapClock();
+    SwapClock(const SwapClock&) = delete;
+    SwapClock& operator=(const SwapClock&) = delete;
+
+  private:
+    uint64_t mBegin = 0;
+};
+
 // Fast::Deko3dTagFrame of a frame: its kind and render-thread cost.
 struct FrameTag {
     bool Set = false;

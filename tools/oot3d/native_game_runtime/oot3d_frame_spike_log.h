@@ -88,6 +88,11 @@ struct FrameSpikeSample {
   float GpuMs = 0.0F;         // último resultado da GPU (atrasa 1-3 quadros; 0 = nenhum)
   float TopStageMs = 0.0F;
   float SwapMs = 0.0F;        // swap (eglSwapBuffers)
+  // deko3d (p6o): partes do swap no render thread (Fast::Deko3dLastSwapTimes).
+  float DkFinishMs = 0.0F;
+  float DkFenceMs = 0.0F;
+  float DkSubmitMs = 0.0F;
+  float DkPresentMs = 0.0F;
 };
 
 struct FrameSpikeRecord {
@@ -255,14 +260,15 @@ inline int FormatFrameSpike(const FrameSpikeRecord &record, char *out, size_t si
       "spike t=%.3f host=%llu guest=%llu kind=%s refreshes=%u expected=%u stage=%s "
       "guest_ms=%.2f game_ms=%.2f render_ms=%.2f render_wait_ms=%.2f pacer_ms=%.2f "
       "swap_ms=%.2f gpu_ms=%.2f top=%s top_ms=%.2f ctx=%s tex_new=%u prog_new=%u "
-      "shader_new=%u\n",
+      "shader_new=%u dk_finish_ms=%.2f dk_fence_ms=%.2f dk_submit_ms=%.2f dk_present_ms=%.2f\n",
       s.TimeSeconds, static_cast<unsigned long long>(s.HostFrame),
       static_cast<unsigned long long>(s.GuestFrame), SpikeFrameKindName(s.Kind),
       static_cast<unsigned>(s.Refreshes), static_cast<unsigned>(s.Expected),
       SpikeStageName(record.Stage), s.GuestMs, s.GameBusyMs, s.RenderBusyMs,
       s.RenderWaitMs, s.PacerWaitMs, s.SwapMs, s.GpuMs, SpikeTopStageName(s.TopStage),
       s.TopStageMs, context, static_cast<unsigned>(s.TexturesNew),
-      static_cast<unsigned>(s.ProgramsNew), static_cast<unsigned>(s.ShadersNew));
+      static_cast<unsigned>(s.ProgramsNew), static_cast<unsigned>(s.ShadersNew), s.DkFinishMs, s.DkFenceMs,
+      s.DkSubmitMs, s.DkPresentMs);
 }
 
 } // namespace Oot3dNativeGame

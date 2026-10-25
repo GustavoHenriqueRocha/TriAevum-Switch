@@ -148,6 +148,7 @@ void GfxRenderingAPIDeko3d::FinishRender() {
     if (!mDeviceReady) {
         return;
     }
+    const Deko3d::SwapClock swapClock;
     // After the window backend's pacing (SwapBuffersBegin), like the GL swap.
     if (!mDevice.FrameOpen()) {
         mDevice.BeginFrame();
@@ -481,6 +482,9 @@ void Deko3dTagFrame(uint8_t, double) {
 }
 bool Deko3dTakeGpuFrame(Deko3dGpuFrame&) {
     return false;
+}
+Deko3dSwapTimes Deko3dLastSwapTimes() {
+    return {};
 }
 } // namespace Fast
 

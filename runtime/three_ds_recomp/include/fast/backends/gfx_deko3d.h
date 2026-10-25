@@ -42,7 +42,7 @@ inline bool Deko3dRendererConfigSelects(std::string_view content) {
 
 // Build tag written at the top of logs/deko3d.txt: tells which NRO a log
 // came from (a p3 log and a p5 log looked alike, 24/10).
-inline constexpr const char* kDeko3dBuildTag = "p6n";
+inline constexpr const char* kDeko3dBuildTag = "p6o";
 
 // Presented frames logged in logs/deko3d.txt: the first, then 60, 300 and
 // 1800 (the PICA counters go with 300 and every 1800), then every 3600.
@@ -83,5 +83,16 @@ struct Deko3dGpuFrame {
     double CpuMilliseconds = 0.0;
 };
 void Deko3dTagFrame(uint8_t kind, double cpuMilliseconds);
+
+// Render-thread CPU time of the last swap (FinishRender) and of its parts, for
+// logs/spikes.txt (p6o: the swap took 12.7 ms in the frames that missed a
+// refresh while fence, acquire and present were short). Zero elsewhere.
+struct Deko3dSwapTimes {
+    float FinishMs = 0.0F;  // the whole FinishRender
+    float FenceMs = 0.0F;   // waiting for the frame in flight (BeginFrame)
+    float SubmitMs = 0.0F;  // the frame's last submit (dkQueueSubmitCommands + flush)
+    float PresentMs = 0.0F; // dkQueuePresentImage
+};
+Deko3dSwapTimes Deko3dLastSwapTimes();
 bool Deko3dTakeGpuFrame(Deko3dGpuFrame& frame);
 } // namespace Fast

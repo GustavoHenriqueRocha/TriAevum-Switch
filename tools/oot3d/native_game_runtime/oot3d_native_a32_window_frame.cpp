@@ -574,6 +574,15 @@ void NativeA32WindowSession::ObserveFrameSpike(uint8_t frameKind,
   sample.PacerWaitMs = static_cast<float>(pacerWaitMs);
   sample.GpuMs = static_cast<float>(spikeGpuMs);
   sample.SwapMs = static_cast<float>(lastSwapMs);
+#if defined(__SWITCH__)
+  if (Fast::Deko3dRendererSelected()) {
+    const Fast::Deko3dSwapTimes swap = Fast::Deko3dLastSwapTimes();
+    sample.DkFinishMs = swap.FinishMs;
+    sample.DkFenceMs = swap.FenceMs;
+    sample.DkSubmitMs = swap.SubmitMs;
+    sample.DkPresentMs = swap.PresentMs;
+  }
+#endif
   float topMs = 0.0F;
   uint8_t top = 0xFFU;
   if (Fast::GlPerf::LastFrameTopStage(&top, &topMs)) {

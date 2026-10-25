@@ -47,6 +47,10 @@ CpuWait gFenceWait;
 CpuWait gAcquireWait;
 CpuWait gPresentWait;
 std::atomic<uint64_t> gSwapAcquires{0};
+CpuWait gSubmitWait;
+// The last swap's parts (render thread only; Deko3dLastSwapTimes).
+Fast::Deko3dSwapTimes gLastSwap;
+uint64_t gLastFenceNs = 0;
 
 void StoreMax(std::atomic<uint64_t>& max, uint64_t value) {
     uint64_t seen = max.load(std::memory_order_relaxed);
@@ -337,7 +341,8 @@ void Device::BeginFrame() {
                 dkQueueIsInErrorState(mQueue) ? "; queue in error state" : "");
         }
         slot.Fenced = false;
-        NoteCpuWait(gFenceWait, NowNanoseconds() - fenceBegin);
+        gLastFenceNs = NowNanoseconds() - fenceBegin;
+        NoteCpuWait(gFenceWait, gLastFenceNs);
         CollectTimestamps(mSlot);
     }
     slot.StreamBlock = 0;
@@ -418,14 +423,20 @@ void Device::EndFrame(AcquireHook hook) {
         slot.Tag = std::exchange(gPendingTag, FrameTag{});
     }
     dkCmdBufSignalFence(mCmd, &slot.Fence, true);
+    const uint64_t submitBegin = NowNanoseconds();
     Submit();
+    const uint64_t submitNs = NowNanoseconds() - submitBegin;
+    NoteCpuWait(gSubmitWait, submitNs);
+    gLastSwap.SubmitMs = static_cast<float>(static_cast<double>(submitNs) / 1.0e6);
     slot.Fenced = true;
     gPerfFrames.fetch_add(1, std::memory_order_relaxed);
     gPerfSubmits.fetch_add(mStats.Submits - mFrameStartSubmits, std::memory_order_relaxed);
     gPerfCommandBytes.fetch_add(slot.CommandUsed, std::memory_order_relaxed);
     const uint64_t presentBegin = NowNanoseconds();
     dkQueuePresentImage(mQueue, mSwapchain, mWindowSlot);
-    NoteCpuWait(gPresentWait, NowNanoseconds() - presentBegin);
+    const uint64_t presentNs = NowNanoseconds() - presentBegin;
+    NoteCpuWait(gPresentWait, presentNs);
+    gLastSwap.PresentMs = static_cast<float>(static_cast<double>(presentNs) / 1.0e6);
     if (dkQueueIsInErrorState(mQueue)) {
         static bool reported = false;
         if (!reported) {
@@ -486,6 +497,15 @@ StreamSpan Device::Stream(uint32_t size, uint32_t alignment) {
                 size >> 10);
         }
     }
+}
+
+SwapClock::SwapClock() noexcept : mBegin(NowNanoseconds()) {
+    gLastFenceNs = 0;
+}
+
+SwapClock::~SwapClock() {
+    gLastSwap.FinishMs = static_cast<float>(static_cast<double>(NowNanoseconds() - mBegin) / 1.0e6);
+    gLastSwap.FenceMs = static_cast<float>(static_cast<double>(gLastFenceNs) / 1.0e6);
 }
 
 void Device::CountSwapAcquire() {
@@ -613,7 +633,7 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
         << " submits_per_frame=" << static_cast<double>(submits) / count
         << " command_kib_per_frame=" << static_cast<double>(commandBytes) / count / 1024.0
         << CpuWaitReport("fence", gFenceWait) << CpuWaitReport("acquire", gAcquireWait)
-        << CpuWaitReport("present", gPresentWait)
+        << CpuWaitReport("present", gPresentWait) << CpuWaitReport("submit", gSubmitWait)
         << " swap_acquires=" << gSwapAcquires.exchange(0, std::memory_order_relaxed)
         << " sync_check=" << (gPerfSyncCheck.load(std::memory_order_relaxed) ? 1 : 0)
         << " build=" << kDeko3dBuildTag;
@@ -621,6 +641,10 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
 }
 void Deko3dTagFrame(uint8_t kind, double cpuMilliseconds) {
     Deko3d::gPendingTag = {true, kind, cpuMilliseconds};
+}
+
+Deko3dSwapTimes Deko3dLastSwapTimes() {
+    return Deko3d::gLastSwap;
 }
 
 bool Deko3dTakeGpuFrame(Deko3dGpuFrame& frame) {
