@@ -367,3 +367,10 @@ Mesmo roteiro (132 passos, 44 áreas), clocks 1800/600/1600 MHz, DRS desligado. 
 
 Por área: deko3d tem FPS mín ≥ 59,9 em 12 áreas (Mesa: 3). Pior área: Mesa Water Temple 52,9; deko3d Fire Temple 52,2.
 O GPU ms não é comparável: o glperf soma passes, o dkperf mede do topo ao fim do quadro (inclui espera).
+
+### Tour27 com o p6m (25/10, DRS ligado)
+
+132/132 passos, sem erro de GPU. GPU ocupada de verdade (`busy_ms`): **8,73 ms/quadro** (Mesa 8,52; o p6l marcava
+14,5 com a espera). A espera do acquire era 5–6 ms. fps 59,20, render −40% CPU contra o Mesa (igual ao p6l). DRS
+aplicou (escala média 3 em 113 de 171 janelas, desceu até 2,25). **Atenção:** 79 de 171 janelas com GPU a 900 MHz
+(o p6l e o Mesa rodaram tudo a 600): comparação parcial. Pior área: Shadow Temple (mín 47,6, máx 20,99 ms).
