@@ -105,6 +105,15 @@ void TestDkshScratch() {
   Require(!DkshPerWarpScratchBytes(dksh).has_value(), "sem DKSH reprova");
 }
 
+// p6d-p6j: o bind dos 16 buffers de vértice escrevia além do bloco de comandos
+// (deko3d 0.5.0 reserva 5 palavras por buffer e grava 6) e o bloco seguinte
+// sobrescrevia: "GPU rejected command list" ao sair da casa do Link.
+void TestCommandGuard() {
+  using namespace Fast::Deko3d;
+  Require(DekoBindVtxBuffersOverrunWords(kPicaVertexAttributeCount) == 16U, "16 buffers estouram 16 palavras");
+  Require(kCommandGuardBytes >= 16U * 4U && kCommandGuardBytes % 4U == 0U, "a folga cobre o estouro");
+}
+
 void TestProgramPick() {
   using namespace Fast::Deko3d;
   Require(PickPicaProgram(true, true, true) == PicaProgramPick::Specialized, "especializado vence o uber");
@@ -443,6 +452,7 @@ int main() {
   TestRendererConfigSelection();
   TestShaderPack();
   TestDkshScratch();
+  TestCommandGuard();
   TestProgramPick();
   TestStageCacheResolvesOnce();
   TestSamplerAndTextureKeys();

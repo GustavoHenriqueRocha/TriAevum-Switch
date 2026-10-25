@@ -221,6 +221,22 @@ constexpr uint32_t kPicaVertexAttributeCount = 16U;
 // Vertex buffer slot of the constant (0, 0, 0, 1) every absent attribute
 // reads, like a disabled GL attribute array; PICA bindings stay below it.
 constexpr uint32_t kPicaConstantVertexBinding = 15U;
+
+// Words deko3d 0.5.0's dkCmdBufBindVtxBuffers writes past what it reserved
+// (reserve(5 * n), two 3-word commands per buffer).
+[[nodiscard]] constexpr uint32_t DekoBindVtxBuffersOverrunWords(uint32_t buffers) noexcept {
+    return buffers * 6U - buffers * 5U;
+}
+// Left unused after every piece of command memory fed to the command buffer.
+// deko3d 0.5.0's dkCmdBufBindVtxBuffers reserves 5 words per buffer and writes
+// 6 (two 3-word commands), and a user DkCmdBuf has no reserved words: binding
+// our 16 buffers near the end of a chunk wrote up to 16 words past it, into
+// the start of the next chunk, which later commands then overwrote. The GPU
+// read those (p6d-p6j: "GPU rejected command list", and a method error on
+// VertexArrayLimit[14] whose value was an IndependentBlend header).
+constexpr uint32_t kCommandGuardBytes = 4U << 10;
+static_assert(kCommandGuardBytes >= DekoBindVtxBuffersOverrunWords(kPicaVertexAttributeCount) * 4U);
+
 constexpr uint32_t kPicaVertexStreamAlignment = 16U;
 
 enum class PicaAttributeKind : uint8_t {

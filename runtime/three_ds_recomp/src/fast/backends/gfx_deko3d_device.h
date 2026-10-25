@@ -14,6 +14,8 @@
 #if defined(__SWITCH__)
 #include <deko3d.h>
 
+#include "fast/backends/gfx_deko3d_pica_plan.h"
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -26,6 +28,7 @@ constexpr uint32_t kFramesInFlight = 2;
 constexpr uint32_t kSwapchainImages = 3;
 constexpr uint32_t kCommandSliceBytes = 1U << 20;   // per slot, fed in chunks
 constexpr uint32_t kCommandChunkBytes = 64U << 10;
+// kCommandGuardBytes (gfx_deko3d_pica_plan.h): unused after every piece fed.
 constexpr uint32_t kStreamBlockBytes = 4U << 20;     // per slot, more blocks on demand
 
 constexpr uint32_t AlignUp(uint32_t value, uint32_t alignment) {

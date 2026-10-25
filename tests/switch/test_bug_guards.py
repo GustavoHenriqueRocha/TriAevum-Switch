@@ -133,6 +133,12 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'queueMaker\.perWarpScratchMemorySize = kPerWarpScratchBytes;',
           "oot3d_deko3d_backend_tests (TestDkshScratch)"),
+    Guard("deko3d p6k: crash ao sair da casa do Link — BindVtxBuffers do deko3d escreve além do bloco de comandos",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'slot\.CommandUsed \+ want \+ kCommandGuardBytes <= kCommandSliceBytes\).*?'
+          r'slot\.CommandUsed \+= want \+ kCommandGuardBytes;.*?size - kCommandGuardBytes\);.*?'
+          r'slot\.CommandUsed = kCommandChunkBytes \+ kCommandGuardBytes;',
+          "oot3d_deko3d_backend_tests (TestCommandGuard)"),
     Guard("deko3d p6f: shader com mais scratch que a fila é recusado, não derruba a GPU",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
           r'DkshPerWarpScratchBytes\(dksh\);\s+if \(!scratch\.has_value\(\) \|\| \*scratch > kPerWarpScratchBytes\)'),

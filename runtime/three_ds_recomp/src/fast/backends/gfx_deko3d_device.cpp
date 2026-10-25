@@ -242,9 +242,9 @@ void Device::FeedCommandMemory(size_t minimumSize) {
     FrameSlot& slot = mSlots[mSlot];
     const uint32_t want = AlignUp(static_cast<uint32_t>(std::max<size_t>(minimumSize, kCommandChunkBytes)),
                                   DK_MEMBLOCK_ALIGNMENT);
-    if (slot.CommandUsed + want <= kCommandSliceBytes) {
+    if (slot.CommandUsed + want + kCommandGuardBytes <= kCommandSliceBytes) {
         dkCmdBufAddMemory(mCmd, mCommandMemory, mSlot * kCommandSliceBytes + slot.CommandUsed, want);
-        slot.CommandUsed += want;
+        slot.CommandUsed += want + kCommandGuardBytes;
         mStats.CommandBytes += want;
         return;
     }
@@ -253,13 +253,13 @@ void Device::FeedCommandMemory(size_t minimumSize) {
     }
     while (slot.CommandOverflowUsed < slot.CommandOverflow.size()) {
         auto [block, size] = slot.CommandOverflow[slot.CommandOverflowUsed++];
-        if (size >= want) {
-            dkCmdBufAddMemory(mCmd, block, 0, size);
+        if (size >= want + kCommandGuardBytes) {
+            dkCmdBufAddMemory(mCmd, block, 0, size - kCommandGuardBytes);
             mStats.CommandBytes += size;
             return;
         }
     }
-    const uint32_t size = std::max<uint32_t>(want, 1U << 20);
+    const uint32_t size = std::max<uint32_t>(want + kCommandGuardBytes, 1U << 20);
     DkMemBlock block = MakeBlock(size, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "command overflow");
     if (block == nullptr) {
         Log("command memory exhausted (frame %llu)", static_cast<unsigned long long>(mFrame));
@@ -267,7 +267,7 @@ void Device::FeedCommandMemory(size_t minimumSize) {
     }
     slot.CommandOverflow.emplace_back(block, size);
     slot.CommandOverflowUsed = slot.CommandOverflow.size();
-    dkCmdBufAddMemory(mCmd, block, 0, size);
+    dkCmdBufAddMemory(mCmd, block, 0, size - kCommandGuardBytes);
     mStats.CommandBytes += size;
 }
 
@@ -299,7 +299,7 @@ void Device::BeginFrame() {
     // feed this slot's first chunk explicitly.
     dkCmdBufClear(mCmd);
     dkCmdBufAddMemory(mCmd, mCommandMemory, mSlot * kCommandSliceBytes, kCommandChunkBytes);
-    slot.CommandUsed = kCommandChunkBytes;
+    slot.CommandUsed = kCommandChunkBytes + kCommandGuardBytes;
     mStats.CommandBytes += kCommandChunkBytes;
     if (mTimestamps != nullptr) {
         dkCmdBufReportCounter(mCmd, DkCounter_TimestampPipelineTop,

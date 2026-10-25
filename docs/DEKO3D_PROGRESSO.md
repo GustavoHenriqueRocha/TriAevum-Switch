@@ -120,7 +120,16 @@ iluminação com 105 GPRs e **4096 B de scratch por warp**, e a fila tinha o pad
 **p6g:** `perWarpScratchMemorySize = kPerWarpScratchBytes` (8 KiB) e o `ShaderStore` recusa (com log) shader que
 peça mais (`DkshPerWarpScratchBytes`; teste `TestDkshScratch`, 2 guardas).
 
-**Próximo passo:** confirmar no console que o p6g sai da casa do Link; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
+**p6g não resolveu** (o bind gráfico do deko3d nem usa `per_warp_scratch_sz`; o scratch de 8 KiB fica, inofensivo).
+p6h (espera também dentro do draw) não crashou; p6i/p6j bisseccionaram por `config/deko3d_sync_check` e
+`config/deko3d_barrier` (sem build). **Causa (p6j + `l2`):** "GPU method error" em `VertexArrayLimit[14]` (método
+0x7dc) com valor `0x20060781`, que é um cabeçalho de `IndependentBlend`: a lista estava sobrescrita. O
+`dkCmdBufBindVtxBuffers` do deko3d 0.5.0 faz `reserve(5*n)` e grava 6 palavras por buffer, e um `DkCmdBuf` de
+usuário não tem palavras reservadas: os nossos 16 buffers perto do fim de um bloco de 64 KiB escreviam até 16
+palavras no começo do bloco seguinte, que os comandos seguintes sobrescreviam. **p6k:** `kCommandGuardBytes`
+(4 KiB) livres depois de cada pedaço de memória de comandos entregue (`TestCommandGuard` + guarda).
+
+**Próximo passo:** confirmar no console que o p6k sai da casa do Link; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
 Shadow2D (programas com imagem no pacote) e medir o `pica_submit` contra o GL (pacote 7).
 
 ### Pacote 5 (o que entrou, 24/10, commit `66f9957e`)

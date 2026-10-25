@@ -46,10 +46,10 @@ constexpr uint32_t kShaderPackVersion = 1U;
 constexpr uint32_t kDkshMagic = 0x48534B44U;       // "DKSH"
 
 // Per-warp scratch (local memory) the queue gives every shader
-// (DkQueueMaker::perWarpScratchMemorySize, a multiple of 0x200). p6f on the
-// console: two lighting fragment shaders of the pack need 4096 bytes
-// (105 GPRs, spills) and the queue had deko3d's default 2048; leaving Link's
-// house drew one and the GPU rejected the command list.
+// (DkQueueMaker::perWarpScratchMemorySize, a multiple of 0x200): two
+// lighting fragment shaders of the pack need 4096 bytes (105 GPRs, spills),
+// above deko3d's default 2048. (Not the crash leaving Link's house, p6g:
+// that was the command memory, kCommandGuardBytes.)
 constexpr uint32_t kPerWarpScratchBytes = 8U << 10;
 
 // The per-warp scratch a DKSH's first program needs (DkshHeader: magic,
