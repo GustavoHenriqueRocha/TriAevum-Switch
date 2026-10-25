@@ -98,6 +98,12 @@ class Device {
 
     DkMemBlock MakeBlock(uint32_t size, uint32_t flags, const char* what);
 
+    // config/deko3d_sync_check: after each recorded operation the work goes
+    // to the GPU and is waited for, so the first operation that puts the
+    // queue in error state is named in deko3d.txt (slow; diagnosis only).
+    [[nodiscard]] bool SyncCheck() const noexcept { return mSyncCheck; }
+    void Checkpoint(const char* what, uint64_t a = 0, uint64_t b = 0);
+
   private:
     static void AddCommandMemory(void* user, DkCmdBuf cmd, size_t minimumSize);
     void FeedCommandMemory(size_t minimumSize);
@@ -112,13 +118,16 @@ class Device {
         uint32_t StreamUsed = 0;
         DkFence Fence{};
         bool Fenced = false;
+        bool Timed = false; // its two timestamps were recorded
     };
+    void CollectTimestamps(uint32_t slot);
 
     DkDevice mDevice = nullptr;
     DkQueue mQueue = nullptr;
     DkCmdBuf mCmd = nullptr;
     DkMemBlock mCommandMemory = nullptr;
     DkMemBlock mSwapchainMemory = nullptr;
+    DkMemBlock mTimestamps = nullptr; // two reports per slot
     DkSwapchain mSwapchain = nullptr;
     std::array<DkImage, kSwapchainImages> mSwapchainImages{};
     std::array<DkImageView, kSwapchainImages> mSwapchainViews{};
@@ -130,6 +139,11 @@ class Device {
     int mWindowSlot = -1;
     bool mFrameOpen = false;
     bool mRecorded = false;
+    bool mSyncCheck = false;
+    bool mSyncFailed = false;
+    uint64_t mCheckpoints = 0;
+    uint64_t mFrameStartSubmits = 0;
+    std::string mLastCheckpoint;
     DeviceStats mStats{};
 };
 

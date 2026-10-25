@@ -373,6 +373,7 @@ bool GfxRenderingAPIDeko3d::RecordUiDraw(const float* vertices, size_t floats, s
                             dkMakeTextureHandle(texture->ImageSlot, mResources.SamplerSlot(texture->Sampler)));
     }
     dkCmdBufDraw(cmd, DkPrimitive_Triangles, static_cast<uint32_t>(vertexCount), 1, 0, 0);
+    mDevice.Checkpoint(textured ? "ui draw textured" : "ui draw", vertexCount, textured ? texture->ImageSlot : 0U);
     return true;
 }
 

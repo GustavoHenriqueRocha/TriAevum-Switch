@@ -471,6 +471,9 @@ GfxRenderingAPI* CreateDeko3dRenderingApi() {
 }
 void Deko3dRenderImGuiDrawData(const ImDrawData*) {
 }
+std::string Deko3dPerfReport(unsigned long long) {
+    return {};
+}
 } // namespace Fast
 
 #endif

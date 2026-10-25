@@ -229,6 +229,7 @@ void GfxRenderingAPIDeko3d::ApplyPicaFill(const GfxNativePicaMemoryFillView& fil
                                   stencil);
     }
     ++mCounters.PicaFills;
+    mDevice.Checkpoint("fill", fill.StartPhysicalAddress, fill.EndPhysicalAddress);
 }
 
 void GfxRenderingAPIDeko3d::ApplyPendingPicaFills(const PicaTargetKey& key, PicaTarget& target) {
@@ -318,9 +319,11 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         return true;
     }
     ++mCounters.PicaDrawsPrepared;
+    mDevice.Checkpoint("prepare", mCalls.Draws, draw.VertexCount);
     if (RecordPicaDraw(draw, program, key, *target)) {
         ++mCounters.PicaDrawsIssued;
     }
+    mDevice.Checkpoint("draw", mCalls.Draws, draw.VertexCount);
     return true;
 }
 
@@ -590,12 +593,14 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
                           plan.Linear ? DkBlitFlag_FilterLinear : DkBlitFlag_FilterNearest, 0);
         dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image);
         display->LastCopy = copy;
+        mDevice.Checkpoint("transfer blit", plan.SourceWidth, plan.SourceHeight);
         ++mCounters.PicaTransfers;
     }
     display->ContentWidth = plan.ContentWidth;
     display->ContentHeight = plan.ContentHeight;
     if (transfer.Present) {
         DrawPicaScanout(transfer, *display, plan, source->Extent.Scale);
+        mDevice.Checkpoint("scanout", transfer.OutputPhysicalAddress, 0);
     }
     return true;
 }
@@ -699,6 +704,7 @@ bool GfxRenderingAPIDeko3d::ClearPicaRenderTarget(uint64_t renderTargetNamespace
         dkCmdBufClearDepthStencil(cmd, true, 1.0F, 0xFF, 0);
         ++target.Version;
         ++mCounters.PicaClears;
+        mDevice.Checkpoint("clear", key.ColorAddress, key.DepthAddress);
     });
     return true;
 }

@@ -7,15 +7,35 @@
 #include <switch.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
+#include <sstream>
 
 namespace Fast::Deko3d {
 namespace {
 std::mutex gLogMutex;
 bool gLogTruncated = false;
 constexpr const char* kLogPath = "sdmc:/switch/oot3dre/logs/deko3d.txt";
+
+// dkperf: written by the render thread, taken by the perf window (game
+// thread).
+std::atomic<bool> gPerfLive{false};
+std::atomic<uint64_t> gPerfFrames{0};
+std::atomic<uint64_t> gPerfGpuNs{0};
+std::atomic<uint64_t> gPerfGpuMaxNs{0};
+std::atomic<uint64_t> gPerfSubmits{0};
+std::atomic<uint64_t> gPerfCommandBytes{0};
+std::atomic<bool> gPerfSyncCheck{false};
+
+// Report timestamps count GPU ticks (614.4 MHz on the Tegra X1).
+constexpr uint64_t GpuTicksToNs(uint64_t ticks) {
+    return ticks * 625U / 384U;
+}
+constexpr uint32_t kTimestampBytes = 16U; // DkCounter report: value, timestamp
+constexpr uint32_t kTimestampSlotBytes = 2U * kTimestampBytes;
 
 uint64_t NowNanoseconds() {
     return armTicksToNs(armGetSystemTick());
@@ -133,6 +153,15 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     if (mCmd == nullptr) {
         return fail("dkCmdBufCreate");
     }
+    mTimestamps = MakeBlock(DK_MEMBLOCK_ALIGNMENT, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached,
+                            "timestamps");
+    if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_sync_check", "rb")) {
+        std::fclose(file);
+        mSyncCheck = true;
+        Log("sync check on: every operation is waited for (slow; diagnosis only)");
+    }
+    gPerfSyncCheck.store(mSyncCheck, std::memory_order_relaxed);
+    gPerfLive.store(true, std::memory_order_release);
     Log("deko3d: ready (window image %u KiB x %u, %u frames in flight)", imageSize >> 10, kSwapchainImages,
         kFramesInFlight);
     return true;
@@ -172,6 +201,11 @@ void Device::Destroy() noexcept {
         dkMemBlockDestroy(mCommandMemory);
         mCommandMemory = nullptr;
     }
+    if (mTimestamps != nullptr) {
+        dkMemBlockDestroy(mTimestamps);
+        mTimestamps = nullptr;
+    }
+    gPerfLive.store(false, std::memory_order_release);
     if (mDevice != nullptr) {
         dkDeviceDestroy(mDevice);
         mDevice = nullptr;
@@ -238,6 +272,7 @@ void Device::BeginFrame() {
                 dkQueueIsInErrorState(mQueue) ? "; queue in error state" : "");
         }
         slot.Fenced = false;
+        CollectTimestamps(mSlot);
     }
     slot.StreamBlock = 0;
     slot.StreamUsed = 0;
@@ -248,9 +283,14 @@ void Device::BeginFrame() {
     dkCmdBufAddMemory(mCmd, mCommandMemory, mSlot * kCommandSliceBytes, kCommandChunkBytes);
     slot.CommandUsed = kCommandChunkBytes;
     mStats.CommandBytes += kCommandChunkBytes;
+    if (mTimestamps != nullptr) {
+        dkCmdBufReportCounter(mCmd, DkCounter_TimestampPipelineTop,
+                              dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes);
+    }
     mWindowSlot = -1;
     mRecorded = false;
     mFrameOpen = true;
+    mFrameStartSubmits = mStats.Submits;
 }
 
 void Device::Submit() {
@@ -294,9 +334,17 @@ void Device::EndFrame(AcquireHook hook) {
     }
     AcquireWindow(hook);
     FrameSlot& slot = mSlots[mSlot];
+    if (mTimestamps != nullptr) {
+        dkCmdBufReportCounter(mCmd, DkCounter_Timestamp,
+                              dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kTimestampBytes);
+        slot.Timed = true;
+    }
     dkCmdBufSignalFence(mCmd, &slot.Fence, true);
     Submit();
     slot.Fenced = true;
+    gPerfFrames.fetch_add(1, std::memory_order_relaxed);
+    gPerfSubmits.fetch_add(mStats.Submits - mFrameStartSubmits, std::memory_order_relaxed);
+    gPerfCommandBytes.fetch_add(slot.CommandUsed, std::memory_order_relaxed);
     dkQueuePresentImage(mQueue, mSwapchain, mWindowSlot);
     if (dkQueueIsInErrorState(mQueue)) {
         static bool reported = false;
@@ -360,5 +408,71 @@ StreamSpan Device::Stream(uint32_t size, uint32_t alignment) {
     }
 }
 
+// After the slot's fence: its frame's two timestamps are written.
+void Device::CollectTimestamps(uint32_t slotIndex) {
+    FrameSlot& slot = mSlots[slotIndex];
+    if (!slot.Timed || mTimestamps == nullptr) {
+        return;
+    }
+    slot.Timed = false;
+    const auto* reports = static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(mTimestamps)) + slotIndex * kTimestampSlotBytes;
+    uint64_t begin = 0;
+    uint64_t end = 0;
+    std::memcpy(&begin, reports + 8U, sizeof(begin));
+    std::memcpy(&end, reports + kTimestampBytes + 8U, sizeof(end));
+    if (end <= begin) {
+        return;
+    }
+    const uint64_t ns = GpuTicksToNs(end - begin);
+    gPerfGpuNs.fetch_add(ns, std::memory_order_relaxed);
+    uint64_t max = gPerfGpuMaxNs.load(std::memory_order_relaxed);
+    while (ns > max && !gPerfGpuMaxNs.compare_exchange_weak(max, ns, std::memory_order_relaxed)) {
+    }
+}
+
+void Device::Checkpoint(const char* what, uint64_t a, uint64_t b) {
+    if (!mSyncCheck || mSyncFailed || !mFrameOpen || mQueue == nullptr) {
+        return;
+    }
+    ++mCheckpoints;
+    Submit();
+    dkQueueWaitIdle(mQueue);
+    char name[128];
+    std::snprintf(name, sizeof(name), "%s(%llu, %llu)", what, static_cast<unsigned long long>(a),
+                  static_cast<unsigned long long>(b));
+    if (dkQueueIsInErrorState(mQueue)) {
+        mSyncFailed = true;
+        Log("sync check: the queue failed at %s, checkpoint %llu of frame %llu; the one before was %s", name,
+            static_cast<unsigned long long>(mCheckpoints), static_cast<unsigned long long>(mFrame),
+            mLastCheckpoint.empty() ? "(none)" : mLastCheckpoint.c_str());
+        return;
+    }
+    mLastCheckpoint = name;
+}
+
 } // namespace Fast::Deko3d
+
+namespace Fast {
+std::string Deko3dPerfReport(unsigned long long hostFrames) {
+    using namespace Deko3d;
+    if (!gPerfLive.load(std::memory_order_acquire)) {
+        return {};
+    }
+    const uint64_t frames = gPerfFrames.exchange(0, std::memory_order_relaxed);
+    const uint64_t gpuNs = gPerfGpuNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t gpuMaxNs = gPerfGpuMaxNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t submits = gPerfSubmits.exchange(0, std::memory_order_relaxed);
+    const uint64_t commandBytes = gPerfCommandBytes.exchange(0, std::memory_order_relaxed);
+    const double count = frames != 0U ? static_cast<double>(frames) : 1.0;
+    std::ostringstream out;
+    out << "dkperf host_frames=" << hostFrames << " frames=" << frames
+        << " gpu_ms=" << static_cast<double>(gpuNs) / count / 1.0e6
+        << " gpu_max_ms=" << static_cast<double>(gpuMaxNs) / 1.0e6
+        << " submits_per_frame=" << static_cast<double>(submits) / count
+        << " command_kib_per_frame=" << static_cast<double>(commandBytes) / count / 1024.0
+        << " sync_check=" << (gPerfSyncCheck.load(std::memory_order_relaxed) ? 1 : 0)
+        << " build=" << kDeko3dBuildTag;
+    return out.str();
+}
+} // namespace Fast
 #endif

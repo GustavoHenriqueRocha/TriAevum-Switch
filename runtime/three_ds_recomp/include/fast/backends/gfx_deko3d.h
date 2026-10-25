@@ -6,6 +6,7 @@
 // docs/DEKO3D_PROGRESSO.md has the design and the package status.
 
 #include <cctype>
+#include <string>
 #include <string_view>
 
 struct ImDrawData;
@@ -40,7 +41,7 @@ inline bool Deko3dRendererConfigSelects(std::string_view content) {
 
 // Build tag written at the top of logs/deko3d.txt: tells which NRO a log
 // came from (a p3 log and a p5 log looked alike, 24/10).
-inline constexpr const char* kDeko3dBuildTag = "p6d";
+inline constexpr const char* kDeko3dBuildTag = "p6e";
 
 // Presented frames logged in logs/deko3d.txt: the first, then 60, 300 and
 // 1800 (the PICA counters go with 300 and every 1800), then every 3600.
@@ -62,4 +63,10 @@ GfxRenderingAPI* CreateDeko3dRenderingApi();
 // renderer order: called on the render thread with a copy of the frame's
 // data. Does nothing without an initialized deko3d backend.
 void Deko3dRenderImGuiDrawData(const ImDrawData* data);
+
+// The "dkperf ..." line of logs/perf.txt (the deko3d counterpart of glperf,
+// tools/oot3d/compare_backends.py): GPU time per presented frame since the
+// last call, from timestamps at the start and the end of each frame. Empty
+// without a deko3d device.
+std::string Deko3dPerfReport(unsigned long long hostFrames);
 } // namespace Fast

@@ -218,6 +218,7 @@ void PicaResources::UploadLevel(const Texture& texture, uint32_t level, uint32_t
     const DkCopyBuf copy = {source, 0U, 0U};
     const DkImageRect rect = {0U, 0U, 0U, width, height, 1U};
     dkCmdBufCopyBufferToImage(mDevice->Cmd(), &copy, &view, &rect, 0U);
+    mDevice->Checkpoint("texture upload", (static_cast<uint64_t>(width) << 16U) | height, level);
 }
 
 void PicaResources::Destroy(Texture& texture) noexcept {

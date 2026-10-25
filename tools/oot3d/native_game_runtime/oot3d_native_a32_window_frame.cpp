@@ -1837,6 +1837,10 @@ bool NativeA32WindowSession::RunFrame() {
       if (Fast::GlPerf::Enabled()) {
         perf << Fast::GlPerf::TakeReport(runFrameCount) << '\n';
       }
+      // deko3d: GPU time per frame over the same window (empty with GL).
+      if (const std::string dkperf = Fast::Deko3dPerfReport(runFrameCount); !dkperf.empty()) {
+        perf << dkperf << '\n';
+      }
       if (perfWriter.has_value()) {
         (void)perfWriter->Push(std::move(perf).str());
       } else {
