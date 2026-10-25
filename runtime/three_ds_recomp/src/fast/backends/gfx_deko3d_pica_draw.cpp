@@ -16,6 +16,7 @@
 #include "fast/oot3d/gl_widescreen_policy.h"
 #include "fast/oot3d/pica_uniform_layout.h"
 #include "fast/renderer3ds/pica_draw_coverage.h"
+#include "fast/backends/gfx_deko3d_shader_pack.h"
 #include "gfx_deko3d_api.h"
 #include "gfx_deko3d_scanout_dksh.h"
 #include "gfx_opengl_pica_scale.h"
@@ -23,6 +24,7 @@
 #include <switch.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -255,7 +257,20 @@ namespace {
 void LogFailedPicaDraw(const GfxNativePicaDrawView& draw, const Deko3d::PicaDrawResources& res,
                        const Deko3d::PicaTarget& target, uint64_t shadersLoaded) {
     using Deko3d::Log;
-    Log("failed draw: %llu shader stage(s) loaded by this draw", static_cast<unsigned long long>(shadersLoaded));
+    Log("failed draw: %llu shader stage(s) loaded by this draw; pack keys vs %016llx fs %016llx",
+        static_cast<unsigned long long>(shadersLoaded),
+        static_cast<unsigned long long>(Deko3d::ShaderTextKey(Deko3d::ShaderStage::Vertex, draw.VertexShaderSource)),
+        static_cast<unsigned long long>(
+            Deko3d::ShaderTextKey(Deko3d::ShaderStage::Fragment, draw.FragmentShaderSource)));
+    // The texts, to compile and inspect the shaders offline.
+    const auto save = [](const char* path, std::string_view text) {
+        if (std::FILE* file = std::fopen(path, "wb")) {
+            std::fwrite(text.data(), 1, text.size(), file);
+            std::fclose(file);
+        }
+    };
+    save("sdmc:/switch/oot3dre/logs/deko3d_failed_draw.vert", draw.VertexShaderSource);
+    save("sdmc:/switch/oot3dre/logs/deko3d_failed_draw.frag", draw.FragmentShaderSource);
     Log("failed draw: vs %016llx fs %016llx topology %u indexed %d (16-bit %d, %u index bytes, base %d) vertices %u",
         static_cast<unsigned long long>(draw.VertexShaderKey), static_cast<unsigned long long>(draw.FragmentShaderKey),
         static_cast<unsigned>(draw.Topology), draw.Indexed ? 1 : 0, draw.IndicesAre16Bit ? 1 : 0, res.IndexBytes,
@@ -380,7 +395,8 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
     if (RecordPicaDraw(draw, program, key, *target)) {
         ++mCounters.PicaDrawsIssued;
     }
-    if (mDevice.Checkpoint("draw", mCalls.Draws, draw.VertexCount)) {
+    mDevice.Checkpoint("draw", mCalls.Draws, draw.VertexCount);
+    if (mDevice.TakeSyncFailure()) {
         LogFailedPicaDraw(draw, mDrawResources, *target, mShaders.Stats().Loaded - shadersLoadedBefore);
     }
     return true;
@@ -403,11 +419,14 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
 
     DkCmdBuf cmd = mDevice.Cmd();
     FlushPicaInvalidations();
+    mDevice.Checkpoint("draw.barrier");
     BindPicaTarget(target);
     ++target.Version;
+    mDevice.Checkpoint("draw.target");
 
     const DkShader* shaders[] = {program.Vertex, program.Fragment};
     dkCmdBufBindShaders(cmd, DkStageFlag_Vertex | DkStageFlag_Fragment, shaders, 2);
+    mDevice.Checkpoint("draw.shaders");
     const PicaDrawResources& res = mDrawResources;
     if (res.VertexUniforms != DK_GPU_ADDR_INVALID) {
         dkCmdBufBindUniformBuffer(cmd, DkStage_Vertex, 0, res.VertexUniforms, res.VertexUniformBytes);
@@ -417,6 +436,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     }
     dkCmdBufBindTextures(cmd, DkStage_Fragment, 1, res.Textures.data(), static_cast<uint32_t>(res.Textures.size()));
     dkCmdBufBindTexture(cmd, DkStage_Fragment, 13, res.LightingLut);
+    mDevice.Checkpoint("draw.uniforms+textures");
 
     // Vertices: every binding in the draw's stream block, absent attributes
     // on the constant (0, 0, 0, 1).
@@ -452,6 +472,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     dkCmdBufBindVtxAttribState(cmd, attributes.data(), static_cast<uint32_t>(attributes.size()));
     dkCmdBufBindVtxBufferState(cmd, buffers.data(), static_cast<uint32_t>(buffers.size()));
     dkCmdBufBindVtxBuffers(cmd, 0, extents.data(), static_cast<uint32_t>(extents.size()));
+    mDevice.Checkpoint("draw.vertex state");
 
     // Output merger: blend, else the logic op (COPY = off).
     DkColorState colorState;
@@ -477,6 +498,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     dkColorWriteStateDefaults(&writeState);
     dkColorWriteStateSetMask(&writeState, 0, colorMask);
     dkCmdBufBindColorWriteState(cmd, &writeState);
+    mDevice.Checkpoint("draw.blend+color");
 
     DkDepthStencilState depthStencil;
     dkDepthStencilStateDefaults(&depthStencil);
@@ -516,6 +538,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     rasterizer.cullMode = !cull.Enabled ? DkFace_None : (cull.CullFront ? DkFace_Front : DkFace_Back);
     rasterizer.frontFace = cull.FrontCcw ? DkFrontFace_CCW : DkFrontFace_CW;
     dkCmdBufBindRasterizerState(cmd, &rasterizer);
+    mDevice.Checkpoint("draw.depth+raster");
 
     // Viewport and scissor in host pixels of the target.
     const float scale = target.Extent.Scale;
@@ -566,6 +589,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         return false;
     }
     dkCmdBufSetScissors(cmd, 0, &dkScissor, 1);
+    mDevice.Checkpoint("draw.viewport+scissor");
 
     const auto primitive = static_cast<DkPrimitive>(DekoPrimitive(draw.Topology));
     if (draw.Indexed) {

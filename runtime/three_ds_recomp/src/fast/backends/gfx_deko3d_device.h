@@ -105,6 +105,12 @@ class Device {
     // True only at the checkpoint where the queue failed (the caller can log
     // what it recorded).
     bool Checkpoint(const char* what, uint64_t a = 0, uint64_t b = 0);
+    // True once after the checkpoint that failed.
+    [[nodiscard]] bool TakeSyncFailure() noexcept {
+        const bool failed = mSyncFailurePending;
+        mSyncFailurePending = false;
+        return failed;
+    }
 
   private:
     static void AddCommandMemory(void* user, DkCmdBuf cmd, size_t minimumSize);
@@ -143,6 +149,7 @@ class Device {
     bool mRecorded = false;
     bool mSyncCheck = false;
     bool mSyncFailed = false;
+    bool mSyncFailurePending = false;
     uint64_t mCheckpoints = 0;
     uint64_t mFrameStartSubmits = 0;
     std::string mLastCheckpoint;
