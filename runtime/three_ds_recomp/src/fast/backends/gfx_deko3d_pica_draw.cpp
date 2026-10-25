@@ -249,6 +249,62 @@ void GfxRenderingAPIDeko3d::ApplyPendingPicaFills(const PicaTargetKey& key, Pica
     }
 }
 
+namespace {
+// config/deko3d_sync_check: everything the failing draw recorded, to find
+// which state the GPU rejected.
+void LogFailedPicaDraw(const GfxNativePicaDrawView& draw, const Deko3d::PicaDrawResources& res,
+                       const Deko3d::PicaTarget& target, uint64_t shadersLoaded) {
+    using Deko3d::Log;
+    Log("failed draw: %llu shader stage(s) loaded by this draw", static_cast<unsigned long long>(shadersLoaded));
+    Log("failed draw: vs %016llx fs %016llx topology %u indexed %d (16-bit %d, %u index bytes, base %d) vertices %u",
+        static_cast<unsigned long long>(draw.VertexShaderKey), static_cast<unsigned long long>(draw.FragmentShaderKey),
+        static_cast<unsigned>(draw.Topology), draw.Indexed ? 1 : 0, draw.IndicesAre16Bit ? 1 : 0, res.IndexBytes,
+        static_cast<int>(draw.BaseVertex), draw.VertexCount);
+    Log("failed draw: framebuffer %ux%u colour %08x fmt %u depth %08x fmt %u flipped %d; target %ux%u scale %.2f wide %d",
+        draw.FramebufferWidth, draw.FramebufferHeight, draw.FramebufferColorPhysicalAddress,
+        draw.FramebufferColorFormat, draw.FramebufferDepthPhysicalAddress, draw.FramebufferDepthFormat,
+        draw.FramebufferFlipped ? 1 : 0, target.Extent.Width, target.Extent.Height,
+        static_cast<double>(target.Extent.Scale), target.Extent.Wide ? 1 : 0);
+    Log("failed draw: viewport %.1f %.1f %.1f %.1f scissor mode %u (%u %u %u %u) cull %u mask %x op mode %u logic %u",
+        static_cast<double>(draw.ViewportX), static_cast<double>(draw.ViewportY),
+        static_cast<double>(draw.ViewportWidth), static_cast<double>(draw.ViewportHeight), draw.ScissorMode,
+        draw.ScissorX1, draw.ScissorY1, draw.ScissorX2, draw.ScissorY2, static_cast<unsigned>(draw.CullMode),
+        draw.ColorWriteMask, draw.FragmentOperationMode, static_cast<unsigned>(draw.LogicOperation));
+    Log("failed draw: blend %d eq %u/%u factors %u %u %u %u; depth test %d write %d cmp %u; stencil %d cmp %u ref %u "
+        "masks %x/%x ops %u %u %u; alpha test %d",
+        draw.Blend.Enabled ? 1 : 0, static_cast<unsigned>(draw.Blend.EquationRgb),
+        static_cast<unsigned>(draw.Blend.EquationAlpha), static_cast<unsigned>(draw.Blend.SourceRgb),
+        static_cast<unsigned>(draw.Blend.DestRgb), static_cast<unsigned>(draw.Blend.SourceAlpha),
+        static_cast<unsigned>(draw.Blend.DestAlpha), draw.DepthTestEnabled ? 1 : 0, draw.DepthWriteEnabled ? 1 : 0,
+        static_cast<unsigned>(draw.DepthCompare), draw.Stencil.Enabled ? 1 : 0,
+        static_cast<unsigned>(draw.Stencil.Compare), draw.Stencil.Reference, draw.Stencil.CompareMask,
+        draw.Stencil.WriteMask, static_cast<unsigned>(draw.Stencil.Fail), static_cast<unsigned>(draw.Stencil.DepthFail),
+        static_cast<unsigned>(draw.Stencil.Pass), draw.AlphaTestEnabled ? 1 : 0);
+    Log("failed draw: uniforms vs %u bytes @%010llx fs %u bytes @%010llx; textures %08x %08x %08x lut %08x; "
+        "stream %u bytes @%010llx index @%010llx",
+        res.VertexUniformBytes, static_cast<unsigned long long>(res.VertexUniforms), res.FragmentUniformBytes,
+        static_cast<unsigned long long>(res.FragmentUniforms), res.Textures[0], res.Textures[1], res.Textures[2],
+        res.LightingLut, res.Vertices.StreamBytes, static_cast<unsigned long long>(res.VertexStream),
+        static_cast<unsigned long long>(res.IndexStream));
+    const Deko3d::PicaVertexPlan& plan = res.Vertices;
+    Log("failed draw: vertex bindings %04x attributes %04x (%zu bindings, %zu attributes in the view)",
+        plan.BindingMask, plan.AttributeMask, draw.VertexBindings.size(), draw.VertexAttributes.size());
+    for (uint32_t index = 0U; index < Deko3d::kPicaVertexAttributeCount; ++index) {
+        const bool binding = (plan.BindingMask & (1U << index)) != 0U;
+        const bool attribute = (plan.AttributeMask & (1U << index)) != 0U;
+        if (!binding && !attribute) {
+            continue;
+        }
+        const auto& a = plan.Attributes[index];
+        Log("failed draw:   [%u] binding offset %u stride %u per instance %d | attribute binding %u offset %u kind %u "
+            "components %u",
+            index, plan.BindingOffset[index], plan.BindingStride[index], plan.BindingPerInstance[index] ? 1 : 0,
+            static_cast<unsigned>(a.Binding), static_cast<unsigned>(a.Offset), static_cast<unsigned>(a.Kind),
+            static_cast<unsigned>(a.Components));
+    }
+}
+} // namespace
+
 bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, std::string* error) {
     const auto reject = [&](const char* why) {
         if (mCounters.PicaDrawsRejected++ < 10U) {
@@ -306,6 +362,7 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         return true;
     }
 
+    const uint64_t shadersLoadedBefore = mShaders.Stats().Loaded;
     const PicaProgram program = ResolvePicaProgram(draw);
     if (program.Vertex == nullptr || program.Fragment == nullptr) {
         ++mCounters.PicaDrawsSkipped;
@@ -323,7 +380,9 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
     if (RecordPicaDraw(draw, program, key, *target)) {
         ++mCounters.PicaDrawsIssued;
     }
-    mDevice.Checkpoint("draw", mCalls.Draws, draw.VertexCount);
+    if (mDevice.Checkpoint("draw", mCalls.Draws, draw.VertexCount)) {
+        LogFailedPicaDraw(draw, mDrawResources, *target, mShaders.Stats().Loaded - shadersLoadedBefore);
+    }
     return true;
 }
 

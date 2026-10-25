@@ -102,7 +102,9 @@ class Device {
     // to the GPU and is waited for, so the first operation that puts the
     // queue in error state is named in deko3d.txt (slow; diagnosis only).
     [[nodiscard]] bool SyncCheck() const noexcept { return mSyncCheck; }
-    void Checkpoint(const char* what, uint64_t a = 0, uint64_t b = 0);
+    // True only at the checkpoint where the queue failed (the caller can log
+    // what it recorded).
+    bool Checkpoint(const char* what, uint64_t a = 0, uint64_t b = 0);
 
   private:
     static void AddCommandMemory(void* user, DkCmdBuf cmd, size_t minimumSize);

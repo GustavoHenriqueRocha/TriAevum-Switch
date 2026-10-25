@@ -430,9 +430,9 @@ void Device::CollectTimestamps(uint32_t slotIndex) {
     }
 }
 
-void Device::Checkpoint(const char* what, uint64_t a, uint64_t b) {
+bool Device::Checkpoint(const char* what, uint64_t a, uint64_t b) {
     if (!mSyncCheck || mSyncFailed || !mFrameOpen || mQueue == nullptr) {
-        return;
+        return false;
     }
     ++mCheckpoints;
     Submit();
@@ -445,9 +445,10 @@ void Device::Checkpoint(const char* what, uint64_t a, uint64_t b) {
         Log("sync check: the queue failed at %s, checkpoint %llu of frame %llu; the one before was %s", name,
             static_cast<unsigned long long>(mCheckpoints), static_cast<unsigned long long>(mFrame),
             mLastCheckpoint.empty() ? "(none)" : mLastCheckpoint.c_str());
-        return;
+        return true;
     }
     mLastCheckpoint = name;
+    return false;
 }
 
 } // namespace Fast::Deko3d
