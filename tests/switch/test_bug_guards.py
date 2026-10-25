@@ -102,6 +102,12 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'pica: first draw.*?pica: first %s.*?pica: first render-target clear.*?pica: first memory fill',
           "oot3d_deko3d_backend_tests (TestLogSchedule)"),
+    Guard("deko3d p5/p5b: crash (Data Abort) no 1º draw — views do alvo apontavam para o DkImage da cópia local na pilha",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_targets.cpp",
+          r'auto& stored = mTargets\.emplace\(key, target\)\.first->second;.*?'
+          r'dkImageViewDefaults\(&stored\.ColorView, &stored\.Color\);\s+'
+          r'dkImageViewDefaults\(&stored\.DepthView, &stored\.DepthStencil\);',
+          forbid=r'dkImageViewDefaults\(&target\.(ColorView|DepthView)'),
     # --- 24/10: picos fora de carregamento (worktree picos-logica) ---
     Guard("[decisão] som/DSP noutro núcleo descartado: resolveria 3 de 95 picos de guest (tour20+22)",
           "docs/GUIA_PORT_3DS_SWITCH.md",

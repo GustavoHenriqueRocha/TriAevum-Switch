@@ -134,14 +134,17 @@ PicaTarget* PicaTargets::Get(const PicaTargetKey& key, bool* created) {
         }
         return nullptr;
     }
-    dkImageInitialize(&target.Color, &color.Layout, target.Memory, color.Offset);
-    dkImageInitialize(&target.DepthStencil, &depth.Layout, target.Memory, depth.Offset);
-    dkImageViewDefaults(&target.ColorView, &target.Color);
-    dkImageViewDefaults(&target.DepthView, &target.DepthStencil);
     target.Id = mNextId++;
     mStats.TargetBytes += bytes;
     ++mStats.TargetsCreated;
     auto& stored = mTargets.emplace(key, target).first->second;
+    // Images and views only after the copy into the map: a DkImageView keeps a
+    // pointer to its DkImage, and views built on the local pointed at the stack
+    // (p5/p5b: Data Abort in dkCmdBufBindRenderTargets on the first draw).
+    dkImageInitialize(&stored.Color, &color.Layout, stored.Memory, color.Offset);
+    dkImageInitialize(&stored.DepthStencil, &depth.Layout, stored.Memory, depth.Offset);
+    dkImageViewDefaults(&stored.ColorView, &stored.Color);
+    dkImageViewDefaults(&stored.DepthView, &stored.DepthStencil);
     // GL: a new target starts cleared (colour 0, depth 1, stencil 0).
     DkCmdBuf cmd = mDevice->Cmd();
     const DkImageView* colors[] = {&stored.ColorView};
