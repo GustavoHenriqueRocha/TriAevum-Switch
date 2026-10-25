@@ -38,7 +38,7 @@ inline bool Deko3dRendererConfigSelects(std::string_view content) {
 
 // Build tag written at the top of logs/deko3d.txt: tells which NRO a log
 // came from (a p3 log and a p5 log looked alike, 24/10).
-inline constexpr const char* kDeko3dBuildTag = "p5b";
+inline constexpr const char* kDeko3dBuildTag = "p5c";
 
 // Presented frames logged in logs/deko3d.txt: the first, then 60, 300 and
 // 1800 (the PICA counters go with 300 and every 1800), then every 3600.
