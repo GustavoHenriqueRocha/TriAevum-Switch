@@ -172,6 +172,13 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
         std::fclose(file);
         mPresentThreaded = true;
     }
+    if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_swapchain_images", "rb")) {
+        unsigned count = 0;
+        if (std::fscanf(file, "%u", &count) == 1 && count >= 2U && count <= kMaxSwapchainImages) {
+            mSwapchainCount = count;
+        }
+        std::fclose(file);
+    }
     DkImageLayoutMaker layoutMaker;
     dkImageLayoutMakerDefaults(&layoutMaker, mDevice);
     layoutMaker.flags = DkImageFlags_UsageRender | DkImageFlags_UsagePresent;
@@ -185,19 +192,19 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     dkImageLayoutInitialize(&layout, &layoutMaker);
     const uint32_t imageAlignment = dkImageLayoutGetAlignment(&layout);
     const uint32_t imageSize = AlignUp(static_cast<uint32_t>(dkImageLayoutGetSize(&layout)), imageAlignment);
-    mSwapchainMemory = MakeBlock(imageSize * kSwapchainImages, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image,
+    mSwapchainMemory = MakeBlock(imageSize * mSwapchainCount, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image,
                                  "window images");
     if (mSwapchainMemory == nullptr) {
         return fail("window image memory");
     }
-    std::array<const DkImage*, kSwapchainImages> images{};
-    for (uint32_t index = 0; index < kSwapchainImages; ++index) {
+    std::array<const DkImage*, kMaxSwapchainImages> images{};
+    for (uint32_t index = 0; index < mSwapchainCount; ++index) {
         dkImageInitialize(&mSwapchainImages[index], &layout, mSwapchainMemory, index * imageSize);
         dkImageViewDefaults(&mSwapchainViews[index], &mSwapchainImages[index]);
         images[index] = &mSwapchainImages[index];
     }
     DkSwapchainMaker swapchainMaker;
-    dkSwapchainMakerDefaults(&swapchainMaker, mDevice, nwindowGetDefault(), images.data(), kSwapchainImages);
+    dkSwapchainMakerDefaults(&swapchainMaker, mDevice, nwindowGetDefault(), images.data(), mSwapchainCount);
     mSwapchain = dkSwapchainCreate(&swapchainMaker);
     if (mSwapchain == nullptr) {
         return fail("dkSwapchainCreate");
@@ -258,7 +265,7 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     }
     gPerfSyncCheck.store(mSyncCheck, std::memory_order_relaxed);
     gPerfLive.store(true, std::memory_order_release);
-    Log("deko3d: ready (window image %u KiB x %u, %u frames in flight)", imageSize >> 10, kSwapchainImages,
+    Log("deko3d: ready (window image %u KiB x %u, %u frames in flight)", imageSize >> 10, mSwapchainCount,
         kFramesInFlight);
     return true;
 }
@@ -429,7 +436,7 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
         if (hook != nullptr) {
             hook(true);
         }
-        if (mWindowSlot < 0 || mWindowSlot >= static_cast<int>(kSwapchainImages)) {
+        if (mWindowSlot < 0 || mWindowSlot >= static_cast<int>(mSwapchainCount)) {
             Log("dkQueueAcquireImage returned %d", mWindowSlot);
             mWindowSlot = 0;
         }

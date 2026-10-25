@@ -49,6 +49,10 @@ struct FrameTag {
     double CpuMilliseconds = 0.0;
 };
 constexpr uint32_t kSwapchainImages = 3;
+// config/deko3d_swapchain_images (2-4): more images keep the display queue
+// from being full when a frame is presented (p6p: nwindowQueueBuffer still
+// held the present 17-22 ms).
+constexpr uint32_t kMaxSwapchainImages = 4;
 constexpr uint32_t kCommandSliceBytes = 1U << 20;   // per slot, fed in chunks
 constexpr uint32_t kCommandChunkBytes = 64U << 10;
 // kCommandGuardBytes (gfx_deko3d_pica_plan.h): unused after every piece fed.
@@ -177,8 +181,9 @@ class Device {
     DkMemBlock mSwapchainMemory = nullptr;
     DkMemBlock mTimestamps = nullptr; // two reports per slot
     DkSwapchain mSwapchain = nullptr;
-    std::array<DkImage, kSwapchainImages> mSwapchainImages{};
-    std::array<DkImageView, kSwapchainImages> mSwapchainViews{};
+    std::array<DkImage, kMaxSwapchainImages> mSwapchainImages{};
+    std::array<DkImageView, kMaxSwapchainImages> mSwapchainViews{};
+    uint32_t mSwapchainCount = kSwapchainImages;
     std::array<FrameSlot, kFramesInFlight> mSlots{};
     uint32_t mWidth = 0;
     uint32_t mHeight = 0;

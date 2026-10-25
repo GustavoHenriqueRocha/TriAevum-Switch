@@ -159,6 +159,9 @@ GUARDS = [
     Guard("deko3d p6p: janela comprimida com present no fio próprio (só dkQueuePresentImage descomprime)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'if \(!mPresentThreaded\) \{\s+layoutMaker\.flags \|= DkImageFlags_HwCompression;'),
+    Guard("deko3d p6q: deko3d_swapchain_images fora de 2-4 estouraria os arrays de imagens da janela",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'count >= 2U && count <= kMaxSwapchainImages\)'),
     # --- 24/10: picos fora de carregamento (worktree picos-logica) ---
     Guard("[decisão] som/DSP noutro núcleo descartado: resolveria 3 de 95 picos de guest (tour20+22)",
           "docs/GUIA_PORT_3DS_SWITCH.md",
