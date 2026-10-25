@@ -111,7 +111,16 @@ a lib release não diz qual). **p6d:** linka a `libdeko3dd` (`TRIAEVUM_DEKO3D_DE
 para medir desempenho): o callback de debug grava em `logs/deko3d.txt` a causa (page fault + endereço, erro de
 método, timeout) e as chamadas inválidas.
 
-**Próximo passo:** reproduzir o crash com o p6d e ler `deko3d debug:` no log; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
+**p6d no console:** `PbdmaError` (info32 32, "GPU rejected command list") ao sair da casa do Link. **p6e:**
+`config/deko3d_sync_check` (cada operação é enviada e esperada; o log nomeia a primeira que derruba a fila) e a
+linha `dkperf` (GPU ms/quadro por timestamps) no `perf.txt`, lida por `tools/oot3d/compare_backends.py` (Mesa ×
+deko3d). p6e: a fila cai num draw de 6 vértices com o prepare ok. **p6f** despejou o estado do draw: tudo válido
+(atributos float, uniforms 1792/6144 B, blend comum). **Causa:** o pacote tem dois shaders de fragmento de
+iluminação com 105 GPRs e **4096 B de scratch por warp**, e a fila tinha o padrão do deko3d (2048 B).
+**p6g:** `perWarpScratchMemorySize = kPerWarpScratchBytes` (8 KiB) e o `ShaderStore` recusa (com log) shader que
+peça mais (`DkshPerWarpScratchBytes`; teste `TestDkshScratch`, 2 guardas).
+
+**Próximo passo:** confirmar no console que o p6g sai da casa do Link; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
 Shadow2D (programas com imagem no pacote) e medir o `pica_submit` contra o GL (pacote 7).
 
 ### Pacote 5 (o que entrou, 24/10, commit `66f9957e`)

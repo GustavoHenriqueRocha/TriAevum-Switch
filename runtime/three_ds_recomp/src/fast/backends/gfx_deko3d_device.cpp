@@ -3,6 +3,7 @@
 #include "gfx_deko3d_device.h"
 
 #include "fast/backends/gfx_deko3d.h"
+#include "fast/backends/gfx_deko3d_shader_pack.h"
 
 #include <switch.h>
 
@@ -135,6 +136,9 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     queueMaker.flags = DkQueueFlags_Graphics | DkQueueFlags_MediumPrio | DkQueueFlags_DisableZcull;
     queueMaker.commandMemorySize = 1U << 20;
     queueMaker.flushThreshold = 128U << 10;
+    // Shaders that spill need more than the default 2 KiB per warp
+    // (ShaderStore refuses the ones above it).
+    queueMaker.perWarpScratchMemorySize = kPerWarpScratchBytes;
     mQueue = dkQueueCreate(&queueMaker);
     if (mQueue == nullptr) {
         return fail("dkQueueCreate");

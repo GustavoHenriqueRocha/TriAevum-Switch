@@ -75,6 +75,16 @@ const DkShader* ShaderStore::Embedded(uint64_t key, std::span<const uint8_t> dks
 // The whole DKSH (control section first) goes to code memory and the maker
 // gets no separate control pointer, as Aurora's renderer loads them.
 const DkShader* ShaderStore::Load(uint64_t key, std::span<const uint8_t> dksh) {
+    // A shader using more scratch than the queue has takes the GPU down.
+    const auto scratch = DkshPerWarpScratchBytes(dksh);
+    if (!scratch.has_value() || *scratch > kPerWarpScratchBytes) {
+        if (mStats.LoadFailures++ < 10U) {
+            Log("shaders: %016llx needs %d bytes of scratch per warp (queue has %u): refused",
+                static_cast<unsigned long long>(key), scratch.has_value() ? static_cast<int>(*scratch) : -1,
+                kPerWarpScratchBytes);
+        }
+        return nullptr;
+    }
     const uint32_t at = AlignUp(mCodeUsed, DK_SHADER_CODE_ALIGNMENT);
     if (static_cast<uint64_t>(at) + dksh.size() > kCodeBytes - DK_SHADER_CODE_UNUSABLE_SIZE) {
         if (mStats.LoadFailures++ < 10U) {

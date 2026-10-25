@@ -83,6 +83,28 @@ void TestShaderPack() {
   Require(!index.Parse({}, &error), "vazio reprova");
 }
 
+// p6f no console: shaders de iluminação com 4096 bytes de scratch e a fila com o
+// padrão de 2048 derrubavam a GPU ao sair da casa do Link.
+void TestDkshScratch() {
+  using namespace Fast::Deko3d;
+  std::vector<uint8_t> dksh(0x80, 0);
+  Put32(dksh, 0, kDkshMagic);
+  Put32(dksh, 16, 0x40); // programs_off
+  Put32(dksh, 20, 1);    // num_programs
+  Put32(dksh, 0x40 + 8, 105);
+  Put32(dksh, 0x40 + 20, 4096);
+  Require(DkshPerWarpScratchBytes(dksh) == 4096U, "lê per_warp_scratch_sz");
+  Require(kPerWarpScratchBytes >= 4096U && kPerWarpScratchBytes % 0x200U == 0U,
+          "a fila cobre os shaders do pacote (múltiplo de 0x200)");
+  Put32(dksh, 20, 0);
+  Require(!DkshPerWarpScratchBytes(dksh).has_value(), "sem programas reprova");
+  Put32(dksh, 20, 1);
+  Put32(dksh, 16, 0x7C);
+  Require(!DkshPerWarpScratchBytes(dksh).has_value(), "cabeçalho além do fim reprova");
+  Put32(dksh, 0, 0);
+  Require(!DkshPerWarpScratchBytes(dksh).has_value(), "sem DKSH reprova");
+}
+
 void TestProgramPick() {
   using namespace Fast::Deko3d;
   Require(PickPicaProgram(true, true, true) == PicaProgramPick::Specialized, "especializado vence o uber");
@@ -420,6 +442,7 @@ void TestUiPlan() {
 int main() {
   TestRendererConfigSelection();
   TestShaderPack();
+  TestDkshScratch();
   TestProgramPick();
   TestStageCacheResolvesOnce();
   TestSamplerAndTextureKeys();

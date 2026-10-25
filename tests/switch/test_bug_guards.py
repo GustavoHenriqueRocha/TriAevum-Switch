@@ -129,6 +129,13 @@ GUARDS = [
           r'void ApplyDkViewport\(.*?dkCmdBufSetViewports\(cmd, 0, &viewport, 1\);.*?DkSwizzle_NegativeY.*?'
           r'dkCmdBufSetViewportSwizzles\(cmd, 0, &swizzle, 1\);',
           forbid=r'FlipViewportRows|\{x, y \+ height'),
+    Guard("deko3d p6f: GPU rejeitava a lista ao sair da casa do Link — shaders com 4 KiB de scratch, fila com 2 KiB",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'queueMaker\.perWarpScratchMemorySize = kPerWarpScratchBytes;',
+          "oot3d_deko3d_backend_tests (TestDkshScratch)"),
+    Guard("deko3d p6f: shader com mais scratch que a fila é recusado, não derruba a GPU",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
+          r'DkshPerWarpScratchBytes\(dksh\);\s+if \(!scratch\.has_value\(\) \|\| \*scratch > kPerWarpScratchBytes\)'),
     # --- 24/10: picos fora de carregamento (worktree picos-logica) ---
     Guard("[decisão] som/DSP noutro núcleo descartado: resolveria 3 de 95 picos de guest (tour20+22)",
           "docs/GUIA_PORT_3DS_SWITCH.md",
