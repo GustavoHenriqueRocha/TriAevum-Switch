@@ -99,7 +99,13 @@ todos os desenhos (`MakeViewport`/`FlipViewportRows`, `config/deko3d_flip_y` "0"
 winding na janela: o céu (cúpula vista por dentro) era descartado e, como o OoT3D não limpa a cor da cena de cima
 (o céu cobre tudo), sobravam rastros. Se o céu ainda faltar: `config/deko3d_cull_invert` (A/B sem rebuild).
 
-**Próximo passo:** testar o p6b no console; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
+**p6b no console (25/10): tela preta.** O deko3d 0.5.0 (`dkCmdBufSetViewports`) tira o retângulo de recorte do
+hardware de `ceil(y+h)-y`: com altura negativa ele vira lixo e tudo é recortado (log sem erro, draws emitidos). No
+fonte: `viewportFlipY()` sempre inverte o y no modo UpperLeft; o master tem `DkDeviceFlags_YAxisPointsDown`, que a
+0.5.0 não tem. **p6c:** viewport normal + swizzle `DkSwizzle_NegativeY` (`ApplyDkViewport`), que nega o y no clip
+antes do viewport.
+
+**Próximo passo:** testar o p6c no console; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
 Shadow2D (programas com imagem no pacote) e medir o `pica_submit` contra o GL (pacote 7).
 
 ### Pacote 5 (o que entrou, 24/10, commit `66f9957e`)

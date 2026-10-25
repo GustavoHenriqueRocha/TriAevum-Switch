@@ -496,9 +496,8 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         ++mCounters.PicaNoEffectSkipped;
         return false;
     }
-    const DkViewport dkViewport = MakeViewport(static_cast<float>(viewport.X), static_cast<float>(viewport.Y),
-                                               static_cast<float>(viewport.Width), static_cast<float>(viewport.Height));
-    dkCmdBufSetViewports(cmd, 0, &dkViewport, 1);
+    ApplyDkViewport(cmd, static_cast<float>(viewport.X), static_cast<float>(viewport.Y),
+                    static_cast<float>(viewport.Width), static_cast<float>(viewport.Height));
     const DkScissor dkScissor = ToDkScissor(scissor, target.Extent.Width, target.Extent.Height);
     if (dkScissor.width == 0U || dkScissor.height == 0U) {
         ++mCounters.PicaNoEffectSkipped;
@@ -648,10 +647,8 @@ void GfxRenderingAPIDeko3d::DrawPicaScanout(const GfxNativePicaDisplayTransferVi
     dkColorWriteStateDefaults(&writeState);
     dkCmdBufBindColorWriteState(cmd, &writeState);
 
-    const DkViewport viewport =
-        MakeViewport(static_cast<float>(placement.Viewport.X), static_cast<float>(placement.Viewport.Y),
-                     static_cast<float>(placement.Viewport.Width), static_cast<float>(placement.Viewport.Height));
-    dkCmdBufSetViewports(cmd, 0, &viewport, 1);
+    ApplyDkViewport(cmd, static_cast<float>(placement.Viewport.X), static_cast<float>(placement.Viewport.Y),
+                    static_cast<float>(placement.Viewport.Width), static_cast<float>(placement.Viewport.Height));
 
     const StreamSpan params = mDevice.Stream(DK_UNIFORM_BUF_ALIGNMENT, DK_UNIFORM_BUF_ALIGNMENT);
     if (params.Cpu == nullptr) {

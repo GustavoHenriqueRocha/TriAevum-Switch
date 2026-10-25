@@ -120,9 +120,15 @@ GUARDS = [
           forbid=r'ImGui is not drawn on deko3d yet'),
     Guard("deko3d p6: UI de cabeça para baixo e cena girada 180° (NDC -1 na última linha); céu sumia e a cena arrastava",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
-          r'const DkViewport dkViewport = MakeViewport\(.*?const DkViewport viewport =\s+MakeViewport\(',
-          "oot3d_deko3d_backend_tests (TestUiPlan: FlipViewportRows)",
+          r'ApplyDkViewport\(cmd, static_cast<float>\(viewport\.X\).*?'
+          r'ApplyDkViewport\(cmd, static_cast<float>\(placement\.Viewport\.X\)',
+          "oot3d_deko3d_backend_tests (TestUiPlan: ClipYSwizzleNegates)",
           forbid=r'const DkViewport \w+ = \{'),
+    Guard("deko3d p6b: tela preta — viewport de altura negativa vira retângulo de recorte inválido no deko3d 0.5.0",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_api.h",
+          r'void ApplyDkViewport\(.*?dkCmdBufSetViewports\(cmd, 0, &viewport, 1\);.*?DkSwizzle_NegativeY.*?'
+          r'dkCmdBufSetViewportSwizzles\(cmd, 0, &swizzle, 1\);',
+          forbid=r'FlipViewportRows|\{x, y \+ height'),
     # --- 24/10: picos fora de carregamento (worktree picos-logica) ---
     Guard("[decisão] som/DSP noutro núcleo descartado: resolveria 3 de 95 picos de guest (tour20+22)",
           "docs/GUIA_PORT_3DS_SWITCH.md",

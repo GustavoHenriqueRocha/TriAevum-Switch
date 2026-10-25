@@ -240,11 +240,20 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     const DkShader* mScanoutFragment = nullptr;
     uint32_t mLinearClampSampler = 0;
     bool mCullInvert = false;    // config/deko3d_cull_invert
-    bool mFlipY = true;          // config/deko3d_flip_y ("0": the p6 viewports, upside down)
-    // Every viewport goes through here (FlipViewportRows).
-    [[nodiscard]] DkViewport MakeViewport(float x, float y, float width, float height) const noexcept {
-        const Deko3d::ViewportRows rows = Deko3d::FlipViewportRows(y, height, mFlipY);
-        return {x, rows.Y, width, rows.Height, 0.0F, 1.0F};
+    bool mFlipY = true;          // config/deko3d_flip_y ("0": the p6 orientation, upside down)
+    // Every viewport goes through here: deko3d 0.5.0 always flips clip-space
+    // y in the viewport (y up, like GL) while OriginUpperLeft stores row 0 at
+    // the top, so NDC -1 landed on the last row. A NegativeY viewport swizzle
+    // undoes it before the viewport (p6b's negative-height viewport made the
+    // hardware viewport clip rect garbage: black screen).
+    void ApplyDkViewport(DkCmdBuf cmd, float x, float y, float width, float height) const noexcept {
+        const DkViewport viewport = {x, y, width, height, 0.0F, 1.0F};
+        dkCmdBufSetViewports(cmd, 0, &viewport, 1);
+        const DkViewportSwizzle swizzle = {DkSwizzle_PositiveX, Deko3d::ClipYSwizzleNegates(mFlipY)
+                                                                    ? DkSwizzle_NegativeY
+                                                                    : DkSwizzle_PositiveY,
+                                           DkSwizzle_PositiveZ, DkSwizzle_PositiveW};
+        dkCmdBufSetViewportSwizzles(cmd, 0, &swizzle, 1);
     }
     bool mPicaLean = true;       // config/gl_lean (identical display copies skipped)
     Deko3d::PicaStageCache<DkShader> mVertexStages;

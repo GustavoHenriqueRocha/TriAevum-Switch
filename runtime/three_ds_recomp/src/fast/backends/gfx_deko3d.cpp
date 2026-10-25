@@ -124,9 +124,7 @@ void GfxRenderingAPIDeko3d::BindWindowTarget() {
     if (mBoundTarget != &mDevice) {
         const DkImageView* colors[] = {&view};
         dkCmdBufBindRenderTargets(cmd, colors, 1, nullptr);
-        const DkViewport viewport =
-            MakeViewport(0.0F, 0.0F, static_cast<float>(mDevice.Width()), static_cast<float>(mDevice.Height()));
-        dkCmdBufSetViewports(cmd, 0, &viewport, 1);
+        ApplyDkViewport(cmd, 0.0F, 0.0F, static_cast<float>(mDevice.Width()), static_cast<float>(mDevice.Height()));
         const DkScissor scissor = {0, 0, mDevice.Width(), mDevice.Height()};
         dkCmdBufSetScissors(cmd, 0, &scissor, 1);
         mBoundTarget = &mDevice;
