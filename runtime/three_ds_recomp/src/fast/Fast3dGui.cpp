@@ -743,7 +743,13 @@ void Fast3dGui::ImGuiWMNewFrame() {
 
 void Fast3dGui::ImGuiRenderDrawData(ImDrawData* data) {
     if (Deko3dRendererSelected()) {
-        return; // ImGui is not drawn on deko3d yet (package 6)
+        // deko3d (package 6): a copy drawn on the render thread, in renderer
+        // order, like the GL render worker below.
+        if (mRendererRouting.Deferred && data != nullptr && data->TotalVtxCount > 0) {
+            mRendererRouting.Deferred(
+                [copy = CloneImGuiDrawData(data)] { Deko3dRenderImGuiDrawData(copy.get()); });
+        }
+        return;
     }
     switch (mImpl.Backend) {
 #ifdef ENABLE_OPENGL

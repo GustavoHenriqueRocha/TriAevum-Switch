@@ -22,7 +22,7 @@ no Mesa). Meta: nenhum quadro > 16,7 ms em jogo normal.
 | 3 | Shaders: GLSL→DKSH (uam), cache em disco, pré-compilação offline | **feito e compilado** (NRO `deko3d-p3`): pacote `deko3d.pack` gerado (272 do cache GL + 4 bases uber, 0 falhas), `ShaderStore`, programa por draw (especializado > uber > pula), híbrido ligado |
 | 4 | Anéis de vértice/uniform, texturas (upload, formatos), samplers | **parte 1 no código** (compila; sintaxe checada com o devkitA64): texturas RGBA8/LUT/samplers/descritores/despejo e streams por draw; falta: geometria persistente, ETC1→ETC2, Shadow2D, e medir no console |
 | 5 | Estado de pipeline, alvos, display transfer, DRS, widescreen | **código pronto** (sintaxe e testes de host ok; build na Ryzen: ver abaixo); DRS e pós-processamento ficam para depois |
-| 6 | UI TopScreen (UiRenderBackend) e ImGui | a fazer |
+| 6 | UI TopScreen (UiRenderBackend) e ImGui | **p6 no código** (sintaxe devkitA64 e testes de host ok): contrato de sampler, texturas RGBA8, 2 programas DKSH, ImGui (contador de FPS) |
 | 7 | Contadores no perf.txt equivalentes aos do GL (A/B) | a fazer |
 | 8 | Estabilidade/memória | a fazer |
 
@@ -73,7 +73,25 @@ NRO `~/oot3d-work/oot3d_native_game.deko3d-p5c.nro` (md5 `4bed0f7bd238baa2299663
 -j 3 (16 passos, sem shard). No Switch como `oot3d_deko3d_p5c.nro` (menu "OoT3D [deko3d-p5c]", via
 `tools/oot3d/rotular_nro.py`). Crash report: `atmosphere/crash_reports/*.log` + addr2line no ELF exato.
 
-**Próximo passo:** testar o p5c no console; depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
+**p5c no console (25/10):** tela título com imagem (116 mil draws, sem crash). Defeitos: geometria esticada/listrada
+(borda do campo, árvores) e logo "ZELDA" escuro/avermelhado (a investigar). Ao entrar no jogo fechava com
+`integrated N64 UI presentation failed: renderer does not support the native UI sampler contract`.
+
+### Pacote 6 (p6, 25/10)
+
+- `gfx_deko3d_ui.cpp`: `SetNativeSamplerParameters` (o contrato que fechava o jogo), texturas RGBA8 da UI
+  (`NewTexture/SelectTexture/UploadTexture/DeleteTexture`; staging próprio e memória retirada depois dos quadros em
+  voo), `SetViewport/SetScissor/SetUseAlpha/SetOot3dNativeTransform` e `DrawTriangles` na janela com os 2 programas
+  da UI (sólido = shade; texturizado = TEXEL0 × shade), classificados pelo layout (8 ou 10 floats por vértice).
+- Shaders em `tools/oot3d/deko3d_ui/*.glsl` → `gfx_deko3d_ui_dksh.h` (`gen.py`, uam). Matriz row-major: `pos * M`.
+- Conversões puras em `gfx_deko3d_ui_plan.h` (rect GL → origem em cima, y negado na janela, ImGui → clip GL,
+  samplers), testadas em `TestUiPlan`.
+- ImGui: `Fast3dGui::ImGuiRenderDrawData` manda uma cópia para `Deko3dRenderImGuiDrawData` na thread de render;
+  só o atlas de fontes (TexID 0) é amostrado → aparece o `config/fps_counter`. Imagens de outras texturas do ImGui
+  são puladas e contadas. Sem entrada (toque/mouse) no ImGui ainda.
+- Log: linha `ui (...)` com draws, texturas e comandos ImGui.
+
+**Próximo passo:** testar o p6 no console (entrar no jogo, HUD e contador de FPS); depois pacote 6 (UI TopScreen + ImGui no deko3d), DRS,
 Shadow2D (programas com imagem no pacote) e medir o `pica_submit` contra o GL (pacote 7).
 
 ### Pacote 5 (o que entrou, 24/10, commit `66f9957e`)

@@ -63,6 +63,7 @@ void GfxRenderingAPIDeko3d::Init() {
     }
     mDeviceReady = true;
     InitPica();
+    InitUi();
     if (mFramebuffers.empty()) {
         mFramebuffers.push_back({width, height, false, true});
     }
@@ -72,6 +73,7 @@ void GfxRenderingAPIDeko3d::Shutdown() {
     if (mDeviceReady) {
         LogPicaProgramCounters("shutdown");
         mDevice.WaitIdle();
+        ShutdownUi();
         mVertexStages.Clear();
         mFragmentStages.Clear();
         mTargets.Shutdown();
@@ -103,6 +105,7 @@ void GfxRenderingAPIDeko3d::EnsureFrame() {
         mResourcesFrame = mDevice.Frame();
         mResources.BeginFrame(mResourcesFrame);
         mTargets.BeginFrame(mResourcesFrame);
+        CollectUiRetired();
         // A new command list: nothing is known to be bound.
         mBoundTarget = nullptr;
     }
@@ -244,19 +247,6 @@ void GfxRenderingAPIDeko3d::ShaderGetInfo(ShaderProgram* prg, uint8_t* numInputs
     usedTextures[1] = program != nullptr && program->UsedTextures[1];
 }
 
-uint32_t GfxRenderingAPIDeko3d::NewTexture() {
-    return mNextTextureId++;
-}
-
-void GfxRenderingAPIDeko3d::SelectTexture(int, uint32_t) {
-}
-
-void GfxRenderingAPIDeko3d::UploadTexture(const uint8_t*, uint32_t, uint32_t) {
-}
-
-void GfxRenderingAPIDeko3d::SetSamplerParameters(int, bool, uint32_t, uint32_t) {
-}
-
 void GfxRenderingAPIDeko3d::SetDepthTestAndMask(bool depth_test, bool z_upd) {
     mCurrentDepthTest = depth_test;
     mCurrentDepthMask = z_upd;
@@ -266,32 +256,12 @@ void GfxRenderingAPIDeko3d::SetZmodeDecal(bool decal) {
     mCurrentZmodeDecal = decal;
 }
 
-void GfxRenderingAPIDeko3d::SetViewport(int, int, int, int) {
-}
-
-void GfxRenderingAPIDeko3d::SetScissor(int, int, int, int) {
-}
-
-void GfxRenderingAPIDeko3d::SetUseAlpha(bool) {
-}
-
 bool GfxRenderingAPIDeko3d::SetNativeBlendState(const GfxNativeBlendState&) {
     return true;
 }
 
 bool GfxRenderingAPIDeko3d::SetNativeCullMode(GfxNativeCullMode) {
     return true;
-}
-
-bool GfxRenderingAPIDeko3d::SetOot3dNativeTransform(const float*) {
-    return true;
-}
-
-void GfxRenderingAPIDeko3d::DrawTriangles(float[], size_t, size_t) {
-    if (mCurrentFramebuffer == 0) {
-        BindWindowTarget();
-    }
-    ++mCounters.UiDrawsSkipped;
 }
 
 void GfxRenderingAPIDeko3d::CopyFramebuffer(int, int, int, int, int, int, int, int, int, int) {
@@ -320,9 +290,6 @@ void* GfxRenderingAPIDeko3d::GetFramebufferTextureId(int) {
 }
 
 void GfxRenderingAPIDeko3d::SelectTextureFb(int) {
-}
-
-void GfxRenderingAPIDeko3d::DeleteTexture(uint32_t) {
 }
 
 void GfxRenderingAPIDeko3d::SetTextureFilter(FilteringMode mode) {
@@ -467,6 +434,7 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(targets.TargetBytes >> 20),
                 static_cast<unsigned long long>(targets.DisplaysCreated),
                 static_cast<unsigned long long>(targets.Failures));
+    LogUiCounters(when);
 }
 
 bool GfxRenderingAPIDeko3d::QueuePicaCompletion(uint64_t completionId, std::string* error) {
@@ -502,6 +470,8 @@ std::vector<uint64_t> GfxRenderingAPIDeko3d::TakePicaCompletions() {
 namespace Fast {
 GfxRenderingAPI* CreateDeko3dRenderingApi() {
     return nullptr;
+}
+void Deko3dRenderImGuiDrawData(const ImDrawData*) {
 }
 } // namespace Fast
 

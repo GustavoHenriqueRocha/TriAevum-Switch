@@ -6,6 +6,7 @@
 #include "fast/oot3d/scene_presentation_policy.h"
 #include "fast/backends/gfx_deko3d_programs.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
+#include "fast/backends/gfx_deko3d_ui_plan.h"
 
 #include <array>
 #include <cstring>
@@ -350,7 +351,10 @@ void TestTransferAndScanout() {
 void TestLogSchedule() {
   // Linhas que mostram se o p5 chegou ao console (24/10: o log não dizia de
   // qual NRO vinha nem se o PICA chegava ao backend antes do quadro 1800).
-  Require(std::string_view(Fast::kDeko3dBuildTag) == "p5b", "etiqueta do build no topo do log");
+  // 25/10: a etiqueta mudou para p5c sem atualizar este teste. Só a forma é
+  // conferida (pN...), não o valor de cada build.
+  const std::string_view tag(Fast::kDeko3dBuildTag);
+  Require(tag.size() >= 2U && tag[0] == 'p' && tag[1] >= '0' && tag[1] <= '9', "etiqueta do build no topo do log");
   Require(Fast::Deko3dFrameLogDue(1) && Fast::Deko3dFrameLogDue(60) && Fast::Deko3dFrameLogDue(300) &&
               Fast::Deko3dFrameLogDue(1800) && Fast::Deko3dFrameLogDue(7200) && !Fast::Deko3dFrameLogDue(61) &&
               !Fast::Deko3dFrameLogDue(0),
@@ -358,6 +362,56 @@ void TestLogSchedule() {
   Require(Fast::Deko3dPicaLogDue(300) && Fast::Deko3dPicaLogDue(1800) && Fast::Deko3dPicaLogDue(3600) &&
               !Fast::Deko3dPicaLogDue(60) && !Fast::Deko3dPicaLogDue(0),
           "contadores PICA cedo (300) e a cada 1800");
+}
+
+void TestUiPlan() {
+  using namespace Fast::Deko3d;
+  // Pacote 6: a UI e o ImGui na janela (origem em cima, NDC y = -1 no topo).
+  // glViewport da janela GL (origem embaixo) vira retângulo com origem em cima.
+  Require(GlRectToUpperLeft(160, 0, 960, 720, 1280, 720, false) == UiRect{160, 0, 960, 720}, "viewport cheio");
+  Require(GlRectToUpperLeft(0, 600, 100, 120, 1280, 720, false) == UiRect{0, 0, 100, 120},
+          "retângulo do alto (GL y=600) vai para a linha 0");
+  Require(GlRectToUpperLeft(0, 600, 100, 120, 1280, 720, true) == UiRect{0, 600, 100, 120},
+          "framebuffer invertido mantém y");
+  Require(GlRectToUpperLeft(-50, -10, 100, 40, 1280, 720, false) == UiRect{0, 690, 50, 30},
+          "recorta nas bordas");
+  Require(UiClipYScale(false) == -1.0F && UiClipYScale(true) == 1.0F, "y da UI negado na janela");
+  // Layouts dos dois programas da UI (oot3d_legacy_ui_adapters.cpp).
+  Require(ClassifyUiVertices(2U * 3U * 8U, 2U) == UiVertexLayout::Solid, "sólido: xyzw + rgba");
+  Require(ClassifyUiVertices(2U * 3U * 10U, 2U) == UiVertexLayout::Textured, "texturizado: xyzw + uv + rgba");
+  Require(ClassifyUiVertices(2U * 3U * 9U, 2U) == UiVertexLayout::Unsupported, "outro layout é recusado");
+  Require(ClassifyUiVertices(0U, 0U) == UiVertexLayout::Unsupported, "lista vazia é recusada");
+  Require(ClassifyUiVertices(25U, 1U) == UiVertexLayout::Unsupported, "tamanho quebrado é recusado");
+  // ImGui: pixels (origem em cima) para o clip GL; com UiClipYScale(false) o topo vira -1.
+  const auto topLeft = ImGuiVertexToUi(0.0F, 0.0F, 0.25F, 0.5F, 0xFF3366FFU, 0.0F, 0.0F, 1280.0F, 720.0F);
+  Require(topLeft[0] == -1.0F && topLeft[1] == 1.0F && topLeft[3] == 1.0F, "canto de cima à esquerda");
+  Require(topLeft[1] * UiClipYScale(false) == -1.0F, "topo da tela = NDC -1 no deko3d");
+  Require(topLeft[4] == 0.25F && topLeft[5] == 0.5F, "uv");
+  Require(topLeft[6] == 1.0F && topLeft[7] == 0x66 / 255.0F && topLeft[8] == 0x33 / 255.0F && topLeft[9] == 1.0F,
+          "IM_COL32 é ABGR: vermelho no byte baixo");
+  const auto bottomRight = ImGuiVertexToUi(1280.0F, 720.0F, 0.0F, 0.0F, 0U, 0.0F, 0.0F, 1280.0F, 720.0F);
+  Require(bottomRight[0] == 1.0F && bottomRight[1] == -1.0F, "canto de baixo à direita");
+  Require(ImGuiClipToScissor(10.0F, 20.0F, 110.0F, 70.0F, 0.0F, 0.0F, 1280U, 720U) == UiRect{10, 20, 100, 50},
+          "clip do ImGui vira scissor direto");
+  Require(ImGuiClipToScissor(-5.0F, 700.0F, 2000.0F, 900.0F, 0.0F, 0.0F, 1280U, 720U) == UiRect{0, 700, 1280, 20},
+          "clip recortado na janela");
+  Require(ImGuiClipToScissor(50.0F, 50.0F, 40.0F, 60.0F, 0.0F, 0.0F, 1280U, 720U).Width == 0U, "clip vazio");
+  // Samplers: o contrato da UI (linear + clamp) que o p5c não aceitava.
+  Fast::Renderer3ds::NativeSamplerState ui;
+  ui.MinFilter = Fast::Renderer3ds::NativeTextureFilter::Linear;
+  ui.MagFilter = Fast::Renderer3ds::NativeTextureFilter::Linear;
+  ui.WrapS = Fast::Renderer3ds::NativeTextureWrap::ClampToEdge;
+  ui.WrapT = Fast::Renderer3ds::NativeTextureWrap::ClampToEdge;
+  const PicaSamplerKey key = UiSamplerKey(ui);
+  Require(key.MinLinear && key.MagLinear && key.WrapS == PicaWrap::ClampToEdge &&
+              key.WrapT == PicaWrap::ClampToEdge && key.Mip == PicaMipFilter::None,
+          "sampler da UI: linear, clamp, sem mips");
+  ui.WrapS = Fast::Renderer3ds::NativeTextureWrap::MirroredRepeat;
+  Require(UiSamplerKey(ui).WrapS == PicaWrap::MirroredRepeat, "espelhado");
+  const PicaSamplerKey legacy = UiLegacySamplerKey(false, 2U, 1U);
+  Require(!legacy.MinLinear && legacy.WrapS == PicaWrap::ClampToEdge && legacy.WrapT == PicaWrap::MirroredRepeat,
+          "cms/cmt do N64: 2 clamp, 1 espelho");
+  Require(UiLegacySamplerKey(true, 0U, 0U).WrapS == PicaWrap::Repeat, "0 = repete");
 }
 
 int main() {
@@ -374,6 +428,7 @@ int main() {
   TestFills();
   TestTransferAndScanout();
   TestLogSchedule();
+  TestUiPlan();
   std::puts("oot3d_deko3d_backend_tests: ok");
   return 0;
 }

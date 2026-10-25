@@ -6,8 +6,8 @@
 // uploaded (gfx_deko3d_pica_resources.h). Package 5: render targets, fills,
 // pipeline state, the draw itself, display transfers and the scanout
 // (gfx_deko3d_pica_targets.h, gfx_deko3d_pica_draw.cpp).
-// The UI (TopScreen, ImGui) comes in package 6; until then its calls are
-// accepted and counted.
+// Package 6: the TopScreen UI (its two Fast3D programs, RGBA8 textures) and
+// ImGui (the FPS counter) drawn on the window (gfx_deko3d_ui.cpp).
 
 #if defined(__SWITCH__)
 #include "fast/backends/gfx_deko3d_programs.h"
@@ -17,13 +17,17 @@
 #include "gfx_deko3d_pica_resources.h"
 #include "gfx_deko3d_pica_targets.h"
 #include "gfx_deko3d_shaders.h"
+#include "fast/backends/gfx_deko3d_ui_plan.h"
 
 #include <array>
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
+
+struct ImDrawData;
 
 namespace Fast {
 
@@ -67,7 +71,13 @@ struct Deko3dBackendCounters {
     uint64_t PicaScanouts = 0;
     uint64_t PicaFills = 0;
     uint64_t PicaClears = 0;
-    uint64_t UiDrawsSkipped = 0;
+    uint64_t UiDraws = 0;           // TopScreen UI triangles lists drawn
+    uint64_t UiDrawsSkipped = 0;    // not on the window, unknown layout, no texture
+    uint64_t UiTexturesCreated = 0;
+    uint64_t UiTextureFailures = 0;
+    uint64_t ImGuiFrames = 0;       // draw data with vertices (FPS counter, windows)
+    uint64_t ImGuiCommands = 0;
+    uint64_t ImGuiCommandsSkipped = 0; // texture other than the font atlas
     uint64_t WindowClears = 0;
     Deko3d::PicaProgramPickCounters Programs;
 };
@@ -104,6 +114,7 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     void SetUseAlpha(bool useAlpha) override;
     bool SetNativeBlendState(const GfxNativeBlendState& state) override;
     bool SetNativeCullMode(GfxNativeCullMode mode) override;
+    bool SetNativeSamplerParameters(int sampler, const GfxNativeSamplerState& state) override;
     bool SetOot3dNativeTransform(const float* row_major_matrix) override;
     void DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) override;
     void Init() override;
@@ -150,6 +161,10 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     ImTextureID GetTextureById(int id) override;
     void SetCurrentPrimDepth(float depth) override;
 
+    // ImGui draw data on the window, in renderer order (Fast3dGui routes a
+    // copy here on the render thread). Only the font atlas is sampled.
+    void RenderImGui(const ImDrawData* data);
+
     [[nodiscard]] const Deko3dBackendCounters& Counters() const noexcept {
         return mCounters;
     }
@@ -184,6 +199,32 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     // Opens the device frame (if needed) and starts the resources' frame
     // once per device frame.
     void EnsureFrame();
+    // Package 6 (gfx_deko3d_ui.cpp).
+    struct UiTexture {
+        DkMemBlock Memory = nullptr;
+        DkImage Image{};
+        uint32_t ImageSlot = Deko3d::PicaResources::kMaxImages;
+        uint32_t Width = 0;
+        uint32_t Height = 0;
+        Deko3d::PicaSamplerKey Sampler{};
+    };
+    struct UiRetired {
+        DkMemBlock Memory = nullptr;
+        uint32_t ImageSlot = Deko3d::PicaResources::kMaxImages;
+        uint64_t Frame = 0;
+    };
+    void InitUi();
+    void ShutdownUi();
+    // Frees what the GPU can no longer read (BeginFrame of a device frame).
+    void CollectUiRetired();
+    void RetireUi(DkMemBlock memory, uint32_t imageSlot);
+    UiTexture* SelectedUiTexture();
+    bool UploadUiTexture(UiTexture& texture, const uint8_t* rgba8, uint32_t width, uint32_t height);
+    // Records one triangle list on the window (vertices in the UI layout).
+    bool RecordUiDraw(const float* vertices, size_t floats, size_t vertexCount, Deko3d::UiVertexLayout layout,
+                      const UiTexture* texture, const Deko3d::UiRect& viewport, const Deko3d::UiRect& scissor,
+                      float clipYScale, bool blend, const float* transform);
+    void LogUiCounters(const char* when);
 
     Deko3d::Device mDevice;
     Deko3d::ShaderStore mShaders;
@@ -207,6 +248,22 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     std::vector<Deko3dFramebuffer> mFramebuffers;
     std::vector<std::unique_ptr<Deko3dShaderProgram>> mShaderPrograms;
     uint32_t mNextTextureId = 1;
+    std::unordered_map<uint32_t, UiTexture> mUiTextures;
+    std::vector<UiRetired> mUiRetired;
+    std::array<uint32_t, 2> mUiSelected{};
+    int mUiActiveTile = 0;
+    std::array<float, 16> mUiTransform{1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                       0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    std::array<int, 4> mUiViewport{};
+    std::array<int, 4> mUiScissor{};
+    bool mUiViewportSet = false;
+    bool mUiScissorSet = false;
+    bool mUiUseAlpha = false;
+    const DkShader* mUiSolidVertex = nullptr;
+    const DkShader* mUiSolidFragment = nullptr;
+    const DkShader* mUiTexturedVertex = nullptr;
+    const DkShader* mUiTexturedFragment = nullptr;
+    uint32_t mImGuiFontTexture = 0;
     int mCurrentFramebuffer = 0;
     bool mWindowBound = false;
     bool mWindowClearPending = false;

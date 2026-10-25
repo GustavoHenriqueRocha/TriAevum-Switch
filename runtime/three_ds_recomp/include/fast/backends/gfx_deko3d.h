@@ -8,6 +8,8 @@
 #include <cctype>
 #include <string_view>
 
+struct ImDrawData;
+
 namespace Fast {
 class GfxRenderingAPI;
 
@@ -38,7 +40,7 @@ inline bool Deko3dRendererConfigSelects(std::string_view content) {
 
 // Build tag written at the top of logs/deko3d.txt: tells which NRO a log
 // came from (a p3 log and a p5 log looked alike, 24/10).
-inline constexpr const char* kDeko3dBuildTag = "p5c";
+inline constexpr const char* kDeko3dBuildTag = "p6";
 
 // Presented frames logged in logs/deko3d.txt: the first, then 60, 300 and
 // 1800 (the PICA counters go with 300 and every 1800), then every 3600.
@@ -55,4 +57,9 @@ bool Deko3dRendererSelected();
 
 // The deko3d GfxRenderingAPI (Switch only; nullptr elsewhere).
 GfxRenderingAPI* CreateDeko3dRenderingApi();
+
+// Draws ImGui's draw data on the deko3d window (FPS counter, windows), in
+// renderer order: called on the render thread with a copy of the frame's
+// data. Does nothing without an initialized deko3d backend.
+void Deko3dRenderImGuiDrawData(const ImDrawData* data);
 } // namespace Fast

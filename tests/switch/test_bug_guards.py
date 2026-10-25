@@ -108,6 +108,16 @@ GUARDS = [
           r'dkImageViewDefaults\(&stored\.ColorView, &stored\.Color\);\s+'
           r'dkImageViewDefaults\(&stored\.DepthView, &stored\.DepthStencil\);',
           forbid=r'dkImageViewDefaults\(&target\.(ColorView|DepthView)'),
+    Guard("deko3d p5c: jogo fechava ao entrar no gameplay ('renderer does not support the native UI sampler contract')",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_ui.cpp",
+          r'bool GfxRenderingAPIDeko3d::SetNativeSamplerParameters\(int sampler, const GfxNativeSamplerState& state\) \{'
+          r'.*?found->second\.Sampler = UiSamplerKey\(state\);\s+\}\s+return true;',
+          "oot3d_deko3d_backend_tests (TestUiPlan)"),
+    Guard("deko3d: sem ImGui na janela não havia medidor de FPS (config/fps_counter) — cópia desenhada na thread de render",
+          "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
+          r'if \(Deko3dRendererSelected\(\)\) \{.*?mRendererRouting\.Deferred\(\s*'
+          r'\[copy = CloneImGuiDrawData\(data\)\] \{ Deko3dRenderImGuiDrawData\(copy\.get\(\)\); \}\);',
+          forbid=r'ImGui is not drawn on deko3d yet'),
     # --- 24/10: picos fora de carregamento (worktree picos-logica) ---
     Guard("[decisão] som/DSP noutro núcleo descartado: resolveria 3 de 95 picos de guest (tour20+22)",
           "docs/GUIA_PORT_3DS_SWITCH.md",
