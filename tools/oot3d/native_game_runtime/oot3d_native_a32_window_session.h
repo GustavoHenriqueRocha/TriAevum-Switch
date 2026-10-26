@@ -47,6 +47,7 @@
 #include "oot3d_native_controls_settings_panel.h"
 #include "oot3d_native_frame_rate.h"
 #include "oot3d_native_cadence_governor.h"
+#include "oot3d_switch_clocks.h"
 #include "oot3d_native_dynamic_resolution.h"
 #include "oot3d_native_interpolation_pacing.h"
 #include "oot3d_native_reduced_replay.h"
@@ -619,6 +620,9 @@ private:
     // config/fps60_mode (oot3d_native_cadence_governor.h): adaptive
     // (default), strict60 or legacy, then options.
     Oot3dNativeGame::Fps60ModeConfig Fps60Mode{};
+    // config/fps60_clock (oot3d_switch_clocks.h): 30 while the clocks are
+    // below the gate.
+    Oot3dNativeGame::Fps60ClockGate Fps60Clock{};
     // config/dynamic_resolution (oot3d_native_dynamic_resolution.h): the
     // file turns it on (off by default); its text, if any, is the lowest
     // scale ("2.25").

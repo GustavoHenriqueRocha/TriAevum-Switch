@@ -42,6 +42,9 @@ void FlushDeferredWindowClear(); // gfx_opengl.h (its GL headers stay out)
 #include <SDL2/SDL_syswm.h>
 #endif
 #include <SDL2/SDL_video.h>
+#if defined(__SWITCH__)
+#include <SDL2/SDL_gamecontroller.h>
+#endif
 #endif
 
 #if defined(__ANDROID__) || defined(__IOS__)
@@ -152,6 +155,7 @@ class Oot3dHostNoticeWindow final : public Ship::GuiWindow {
     void DrawElement() override {}
 };
 
+
 struct Oot3dMousePosition {
     float X = 0.0F;
     float Y = 0.0F;
@@ -225,6 +229,63 @@ int Oot3dMouseButtonIndex(uint8_t button) {
 ImGuiMouseSource Oot3dMouseSource(uint32_t which) {
     return which == SDL_TOUCH_MOUSEID ? ImGuiMouseSource_TouchScreen
                                       : ImGuiMouseSource_Mouse;
+}
+#endif
+#if defined(__SWITCH__)
+// deko3d has no SDL window, so no ImGui platform backend and no SDL events
+// for ImGui: the debug menu opened (L3+R3) but took no buttons. The pad is
+// read here each frame with the mapping of imgui_impl_sdl2 (the GL build).
+void FeedDeko3dGamepad(ImGuiIO& io) {
+    static SDL_GameController* pad = nullptr;
+    if (pad != nullptr && !SDL_GameControllerGetAttached(pad)) {
+        SDL_GameControllerClose(pad);
+        pad = nullptr;
+    }
+    if (pad == nullptr) {
+        for (int index = 0; index < SDL_NumJoysticks() && pad == nullptr; ++index) {
+            if (SDL_IsGameController(index)) {
+                pad = SDL_GameControllerOpen(index);
+            }
+        }
+    }
+    io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+    if (pad == nullptr) {
+        return;
+    }
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    const auto button = [&](ImGuiKey key, SDL_GameControllerButton sdlButton) {
+        io.AddKeyEvent(key, SDL_GameControllerGetButton(pad, sdlButton) != 0);
+    };
+    const auto analog = [&](ImGuiKey key, SDL_GameControllerAxis axis, float from, float to) {
+        const float value = (static_cast<float>(SDL_GameControllerGetAxis(pad, axis)) - from) / (to - from);
+        const float clamped = std::clamp(value, 0.0F, 1.0F);
+        io.AddKeyAnalogEvent(key, clamped > 0.1F, clamped);
+    };
+    constexpr float kDeadZone = 8000.0F;
+    button(ImGuiKey_GamepadStart, SDL_CONTROLLER_BUTTON_START);
+    button(ImGuiKey_GamepadBack, SDL_CONTROLLER_BUTTON_BACK);
+    button(ImGuiKey_GamepadFaceLeft, SDL_CONTROLLER_BUTTON_X);
+    button(ImGuiKey_GamepadFaceRight, SDL_CONTROLLER_BUTTON_B);
+    button(ImGuiKey_GamepadFaceUp, SDL_CONTROLLER_BUTTON_Y);
+    button(ImGuiKey_GamepadFaceDown, SDL_CONTROLLER_BUTTON_A);
+    button(ImGuiKey_GamepadDpadLeft, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+    button(ImGuiKey_GamepadDpadRight, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+    button(ImGuiKey_GamepadDpadUp, SDL_CONTROLLER_BUTTON_DPAD_UP);
+    button(ImGuiKey_GamepadDpadDown, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+    button(ImGuiKey_GamepadL1, SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
+    button(ImGuiKey_GamepadR1, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
+    analog(ImGuiKey_GamepadL2, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 0.0F, 32767.0F);
+    analog(ImGuiKey_GamepadR2, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 0.0F, 32767.0F);
+    button(ImGuiKey_GamepadL3, SDL_CONTROLLER_BUTTON_LEFTSTICK);
+    button(ImGuiKey_GamepadR3, SDL_CONTROLLER_BUTTON_RIGHTSTICK);
+    analog(ImGuiKey_GamepadLStickLeft, SDL_CONTROLLER_AXIS_LEFTX, -kDeadZone, -32768.0F);
+    analog(ImGuiKey_GamepadLStickRight, SDL_CONTROLLER_AXIS_LEFTX, kDeadZone, 32767.0F);
+    analog(ImGuiKey_GamepadLStickUp, SDL_CONTROLLER_AXIS_LEFTY, -kDeadZone, -32768.0F);
+    analog(ImGuiKey_GamepadLStickDown, SDL_CONTROLLER_AXIS_LEFTY, kDeadZone, 32767.0F);
+    analog(ImGuiKey_GamepadRStickLeft, SDL_CONTROLLER_AXIS_RIGHTX, -kDeadZone, -32768.0F);
+    analog(ImGuiKey_GamepadRStickRight, SDL_CONTROLLER_AXIS_RIGHTX, kDeadZone, 32767.0F);
+    analog(ImGuiKey_GamepadRStickUp, SDL_CONTROLLER_AXIS_RIGHTY, -kDeadZone, -32768.0F);
+    analog(ImGuiKey_GamepadRStickDown, SDL_CONTROLLER_AXIS_RIGHTY, kDeadZone, 32767.0F);
 }
 #endif
 } // namespace
@@ -709,6 +770,9 @@ void Fast3dGui::ImGuiWMNewFrame() {
         io.DisplaySize = ImVec2(static_cast<float>(width), static_cast<float>(height));
         io.DisplayFramebufferScale = ImVec2(1.0F, 1.0F);
         io.DeltaTime = 1.0F / 60.0F;
+#if defined(__SWITCH__)
+        FeedDeko3dGamepad(io);
+#endif
         return;
     }
     switch (mImpl.Backend) {

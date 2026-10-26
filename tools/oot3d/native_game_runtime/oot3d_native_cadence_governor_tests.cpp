@@ -8,6 +8,7 @@
 #include "oot3d_native_cadence_governor.h"
 #include "oot3d_native_cadence_sim.h"
 #include "oot3d_native_interpolation_pacing.h"
+#include "oot3d_switch_clocks.h"
 
 #include <cmath>
 #include <cstdio>
@@ -322,6 +323,42 @@ void TestStrictAndLegacyNeverLock() {
       presenter.Present(PresentedPicture::Step, 2);
     CHECK(governor.Cadence() == PresentCadence::Sixty);
     CHECK(governor.PerFrameDropAllowed() == (mode == Fps60Mode::Legacy));
+  }
+}
+
+// config/fps60_clock: sem overclock a cadência fica em 30 em qualquer modo
+// e volta a 60 quando o clock volta (pedido de 26/10).
+void TestClockForcesThirty() {
+  const Fps60ClockGate gate;
+  CHECK(ClocksForceThirty(gate, 1020, 384));   // sem overclock, portátil
+  CHECK(ClocksForceThirty(gate, 1785, 384));   // GPU baixa
+  CHECK(!ClocksForceThirty(gate, 1785, 614));  // overclock de sempre
+  CHECK(!ClocksForceThirty(gate, -1, -1));     // sem sys-clk: como antes
+  CHECK(!ClocksForceThirty(ParseFps60ClockGate("off"), 1020, 384));
+  const Fps60ClockGate custom = ParseFps60ClockGate("cpu=1200 gpu=300\n");
+  CHECK(custom.Enabled && custom.CpuMinMhz == 1200 && custom.GpuMinMhz == 300);
+  CHECK(!ClocksForceThirty(custom, 1224, 307));
+  for (auto mode : {Fps60Mode::Adaptive, Fps60Mode::Strict60, Fps60Mode::Legacy}) {
+    NativeCadenceGovernor governor;
+    Fps60ModeConfig config;
+    config.Mode = mode;
+    governor.Configure(config, kRefreshMs);
+    Presenter presenter{governor};
+    presenter.Present(PresentedPicture::Step, 1);
+    governor.SetClockThirty(true);
+    CHECK(governor.DropsInBetween());
+    for (int pair = 0; pair < 120; ++pair) {
+      presenter.Present(PresentedPicture::Repeat, 1);
+      presenter.Present(PresentedPicture::Step, 1);
+    }
+    CHECK(governor.Stats().LateSteps == 0U);
+    CHECK(governor.Stats().ClockThirtySeconds > 3.0);
+    // Configure (troca de taxa) não solta a trava do clock.
+    governor.Configure(config, kRefreshMs);
+    CHECK(governor.DropsInBetween());
+    governor.SetClockThirty(false);
+    CHECK(!governor.DropsInBetween());
+    CHECK(governor.Cadence() == PresentCadence::Sixty);
   }
 }
 
@@ -826,6 +863,7 @@ int main(int argc, char **argv) {
   TestRelapseDoublesTheHold();
   TestStrictAndLegacyNeverLock();
   TestGamePairEstimate();
+  TestClockForcesThirty();
   TestPerFrameGovernorWithoutDrop();
   TestSimulationLightStaysAtSixty();
   TestSimulationNearTheLimitKeepsTheAverage();

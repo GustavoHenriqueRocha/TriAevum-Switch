@@ -449,6 +449,16 @@ void NativeA32WindowSession::ObservePresentCadence(uint8_t frameKind) {
           ? stepMs + interpolationPacing.Estimate(
                          Oot3dNativeGame::InterpolatedSampleLevel::Full)
           : 0.0;
+  // config/fps60_clock: below the gate (no overclock) 60 is not attempted.
+  {
+    int cpuMhz = -1;
+    int gpuMhz = -1;
+    Oot3dNativeGame::SwitchClocksMhz(cpuMhz, gpuMhz);
+    cadenceGovernor.SetClockThirty(
+        visualInterpolationEnabled &&
+        Oot3dNativeGame::ClocksForceThirty(interpolationPacingOptions.Fps60Clock,
+                                           cpuMhz, gpuMhz));
+  }
   cadenceGovernor.ObservePresent(picture, now, gpuPairMs);
   if (hitchWriter.has_value()) {
     const auto gpu = apiPointer->GetNativePicaBackendStats();
@@ -1575,6 +1585,10 @@ bool NativeA32WindowSession::RunFrame() {
              << delta(cadence.LockChanges, previousCadence.LockChanges)
              << " lock30_ms="
              << (cadence.ThirtySeconds - previousCadence.ThirtySeconds) * 1000.0
+             << " clock30_ms="
+             << (cadence.ClockThirtySeconds -
+                 previousCadence.ClockThirtySeconds) *
+                    1000.0
              << " hold_s=" << holdSeconds << " game_pair_ms="
              << (pairs != 0U ? (cadence.GamePairMsSum -
                                 previousCadence.GamePairMsSum) /

@@ -8,6 +8,7 @@
 #if defined(__SWITCH__)
 #include <switch.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -122,6 +123,9 @@ struct SysClkClient {
 };
 
 SysClkClient gSysClk;
+// MHz da última leitura (config/fps60_clock); -1 desconhecido.
+std::atomic<int> gCpuMhz{-1};
+std::atomic<int> gGpuMhz{-1};
 
 int Mhz(uint32_t hz) {
     return hz == 0U ? -1 : static_cast<int>((hz + 500000U) / 1000000U);
@@ -158,6 +162,8 @@ std::string ReadClocks() {
             gSysClk.Close(); // sys-clk saiu: reabre mais tarde
         }
     }
+    gCpuMhz.store(cpu, std::memory_order_relaxed);
+    gGpuMhz.store(gpu, std::memory_order_relaxed);
     // Valores guardados pela libnx a partir das mensagens do applet: sem IPC.
     const char* operation = "-1";
     switch (appletGetOperationMode()) {
@@ -208,9 +214,7 @@ struct ClockReader {
     }
 };
 
-} // namespace
-
-std::string SwitchClockPerfSummary() {
+ClockReader* Reader() {
     static ClockReader* reader = [] {
         // Nunca destruído (a thread vive até o fim do processo). Sem detach():
         // pthread_detach não existe na newlib do devkitA64 e o std::system_error
@@ -219,6 +223,30 @@ std::string SwitchClockPerfSummary() {
         created->Thread = std::thread([created] { created->Loop(); });
         return created;
     }();
+    return reader;
+}
+
+} // namespace
+
+void SwitchClocksMhz(int& cpuMhz, int& gpuMhz) {
+    static std::atomic<uint64_t> lastRequest{0};
+    const uint64_t now = armGetSystemTick();
+    const uint64_t last = lastRequest.load(std::memory_order_relaxed);
+    if (last == 0U || armTicksToNs(now - last) >= 2'000'000'000ULL) {
+        lastRequest.store(now, std::memory_order_relaxed);
+        ClockReader* reader = Reader();
+        {
+            const std::lock_guard<std::mutex> lock(reader->Mutex);
+            reader->Requested = true;
+        }
+        reader->Wake.notify_one();
+    }
+    cpuMhz = gCpuMhz.load(std::memory_order_relaxed);
+    gpuMhz = gGpuMhz.load(std::memory_order_relaxed);
+}
+
+std::string SwitchClockPerfSummary() {
+    ClockReader* reader = Reader();
     std::string text;
     bool busy = false;
     {
