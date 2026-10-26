@@ -204,6 +204,22 @@ e o boot acabou sem memória (`boot-status.txt`: `status=failed detail=Not enoug
 report do Atmosphère = User Break no hbl). Correção: liga só na sessão, 2 páginas em vez de 3 (sem
 página de guarda para estouro: a corrupção é de uso após o free) e o teto de vivos.
 
+*p6s, 2ª rodada (26/10)*: com a quarentena em 32768 o jogo caiu no primeiro quadro da sessão dentro
+do `SWITCHAUDIO_PlayDevice` (thread de áudio do SDL), e o handler nem gravou o `hang.txt`: cada
+página fechada divide um bloco de memória do kernel e dezenas de milhares esgotam o processo. A 1ª
+rodada (quarentena 4096) fez o tour inteiro: 1,1 milhão de blocos com guarda, nenhuma falha, mas o
+jogo libera ~2900 blocos de 57-72 bytes por segundo, então 4096 vigia só ~1,4 s.
+
+**Modo canário (padrão desde o p6t).** O arquivo ganhou o 5º campo `canario|pagina`; vazio =
+`57 72 131072 32768 canario`. No canário o bloco é o objeto com um cabeçalho de 256 bytes antes
+(alocação comum, nenhuma chamada ao kernel). No free o objeto vira 0xFD e fica numa quarentena de
+131072 blocos (~45 MiB, ~45 s); quando sai dela, os bytes são conferidos e, se algum mudou, o
+`hang.txt` ganha "USO APÓS FREE (canário)" com serial, tamanho, quanto viveu, há quanto foi
+liberado, os trechos mudados com os bytes, e as pilhas de alocação e de free. Free duplo vira
+"FREE DUPLO (canário)" (o segundo free não devolve nada). Não dá o PC da escrita, mas dá o dono do
+objeto; depois o modo página pode mirar só nele. O modo página fica limitado a 4096 na quarentena.
+`perf.txt`: `guard_canary=1 guard_canary_hits guard_double_frees`.
+
 O handler de exceção da libnx (sempre ligado, grava e devolve, então o crash report do Atmosphère
 continua saindo) escreve "EXCEÇÃO" no `hang.txt`: `far`, PC/LR/cadeia da thread que falhou, `USO
 APÓS FREE` com serial, tamanho, deslocamento no objeto, há quanto tempo foi liberado e as pilhas de

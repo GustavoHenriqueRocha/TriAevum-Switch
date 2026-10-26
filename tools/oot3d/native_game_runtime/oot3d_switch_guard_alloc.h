@@ -8,7 +8,23 @@
 // objeto de 57 a 72 bytes que já tinha sido liberado (uso após o free), e
 // determinística.
 //
-// Com config/guard_alloc no SD, a partir do início da sessão de jogo (Arm, no
+// Dois modos (5º campo de config/guard_alloc):
+//
+// "canario" (padrão): o bloco é o objeto com um cabeçalho de 256 bytes antes
+// (alocação comum, sem chamada ao kernel). No free o objeto é preenchido com
+// 0xFD e fica numa quarentena FIFO longa (131072 blocos, ~45 MiB); quando sai
+// dela os bytes são conferidos: se algum mudou, logs/hang.txt ganha "USO APÓS
+// FREE (canário)" com quem alocou, quem liberou, quais bytes mudaram e para
+// que valor. Não dá o PC da escrita, mas dá o dono do objeto. Free duplo vira
+// "FREE DUPLO" no mesmo arquivo.
+//
+// "pagina": o modo abaixo, com o PC exato, mas cada bloco liberado fecha uma
+// página e divide um bloco de memória do kernel. Com 32768 na quarentena
+// (26/10) o kernel do processo ficou sem esses blocos e o áudio do SDL (e o
+// FS) falharam no primeiro quadro; a quarentena do modo página fica limitada
+// a kMaxPageQuarantine.
+//
+// Modo página: com config/guard_alloc no SD, a partir do início da sessão de jogo (Arm, no
 // HangWatch::Start; o boot fica de fora: com guarda desde o construtor o boot
 // ficou sem memória, "Not enough space", em 26/10), todo pedido ao malloc com
 // tamanho na faixa configurada (padrão 57..72) ganha páginas próprias:
@@ -35,11 +51,12 @@
 // Custo: 8 KiB por bloco na faixa e uma chamada ao kernel no free; só para
 // diagnóstico.
 //
-// config/guard_alloc: "min max quarentena vivos" (bytes, bytes, blocos,
-// blocos); vazio = 57 72 4096 32768. A quarentena segura blocos liberados sem
-// acesso (4096 = 32 MiB): quanto maior, mais tarde um uso após o free ainda é
-// pego. Com `vivos` blocos com guarda vivos (32768 = 256 MiB), os pedidos
-// seguintes vão para o malloc normal até algum ser liberado.
+// config/guard_alloc: "min max quarentena vivos modo" (bytes, bytes, blocos,
+// blocos, canario|pagina); vazio = 57 72 131072 32768 canario. A quarentena
+// segura blocos liberados: quanto maior, mais tarde um uso após o free ainda é
+// pego (o jogo libera ~2900 blocos de 57-72 bytes por segundo). Com `vivos`
+// blocos com guarda vivos, os pedidos seguintes vão para o malloc normal até
+// algum ser liberado.
 
 #include <cstddef>
 #include <cstdint>
@@ -54,15 +71,24 @@ inline constexpr size_t kStackDepth = 12U;
 // Alinhamento do objeto: o do malloc() do devkitA64 (_memalign_r(32, n)).
 inline constexpr size_t kAlignment = 32U;
 
+enum class Mode : uint8_t { Canary, Page };
+
+// Modo página: blocos liberados com a página fechada ao mesmo tempo (cada um
+// divide um bloco de memória do kernel; 32768 esgotou o processo).
+inline constexpr size_t kMaxPageQuarantine = 4096U;
+
 struct Config {
     size_t MinSize = 57U;
     size_t MaxSize = 72U;
-    size_t QuarantineBlocks = 4096U;
+    size_t QuarantineBlocks = 131072U;
     size_t MaxLive = 32768U;
+    Mode GuardMode = Mode::Canary;
 };
 
-// "min max quarentena vivos"; o que faltar fica no padrão. Falso = texto inválido
-// (número ruim, min > max, min 0 ou max que não cabe na página 0).
+// "min max quarentena vivos modo"; o que faltar fica no padrão. Falso = texto
+// inválido (número ruim, modo desconhecido, min > max, min 0 ou max que não
+// cabe na página 0). No modo página a quarentena é limitada a
+// kMaxPageQuarantine.
 bool ParseConfig(const char* text, Config& config) noexcept;
 
 // Cabeçalho no início da página 0 (lido de volta pelo free e pelo handler).
@@ -104,6 +130,75 @@ struct QuarantineEntry {
 };
 
 // FIFO de capacidade fixa sobre memória do chamador (sem alocar).
+// Modo canário: cabeçalho logo antes do objeto (alocação comum).
+inline constexpr uint64_t kCanaryMagic = 0x5952414e41434c47ULL;       // "GLCANARY"
+inline constexpr uint64_t kCanaryFreedMagic = 0x4545524659524143ULL;  // "CARYFREE"
+inline constexpr uint8_t kCanaryFill = 0xFDU;
+
+struct CanaryHeader {
+    BlockHeader Block;
+    uint64_t FreeTicks;
+    uint64_t FreeThread;
+    uint64_t FreeStack[kStackDepth];
+    uint64_t Padding[2];
+};
+static_assert(sizeof(CanaryHeader) % 32U == 0U, "objeto alinhado a 32");
+
+// Trechos do objeto liberado que não são mais kCanaryFill: até `capacity`
+// pares [início, fim). Devolve quantos achou (e conta todos em `changedBytes`).
+struct ChangedRange {
+    size_t Begin;
+    size_t End;
+};
+inline size_t FindCanaryChanges(const uint8_t* object, size_t size, ChangedRange* ranges,
+                                size_t capacity, size_t& changedBytes) noexcept {
+    size_t count = 0;
+    changedBytes = 0;
+    for (size_t index = 0; index < size; ++index) {
+        if (object[index] == kCanaryFill) continue;
+        ++changedBytes;
+        if (count > 0U && ranges[count - 1U].End == index) {
+            ranges[count - 1U].End = index + 1U;
+        } else if (count < capacity) {
+            ranges[count++] = {index, index + 1U};
+        }
+    }
+    return count;
+}
+
+// FIFO de ponteiros (quarentena do modo canário: o resto mora no cabeçalho).
+class PointerRing {
+  public:
+    PointerRing() noexcept = default;
+    PointerRing(uintptr_t* storage, size_t capacity) noexcept
+        : mEntries(storage), mCapacity(capacity) {}
+
+    // Guarda `value`; se estava cheio, devolve o mais antigo em `evicted`.
+    bool Push(uintptr_t value, uintptr_t& evicted) noexcept {
+        if (mCapacity == 0U) {
+            evicted = value;
+            return true;
+        }
+        const bool full = mCount == mCapacity;
+        if (full) {
+            evicted = mEntries[mHead];
+            mHead = (mHead + 1U) % mCapacity;
+            --mCount;
+        }
+        mEntries[(mHead + mCount) % mCapacity] = value;
+        ++mCount;
+        return full;
+    }
+
+    [[nodiscard]] size_t Count() const noexcept { return mCount; }
+
+  private:
+    uintptr_t* mEntries = nullptr;
+    size_t mCapacity = 0U;
+    size_t mHead = 0U;
+    size_t mCount = 0U;
+};
+
 class QuarantineRing {
   public:
     QuarantineRing() noexcept = default;
@@ -152,6 +247,9 @@ struct Stats {
     uint64_t Quarantined = 0;
     uint64_t Fallbacks = 0;  // memalign ou svc falhou: foi para o malloc normal
     uint64_t Skipped = 0;    // teto de vivos: foi para o malloc normal
+    uint64_t CanaryHits = 0; // blocos liberados que foram escritos (modo canário)
+    uint64_t DoubleFrees = 0;
+    bool Canary = false;
 };
 
 // Lê config/guard_alloc (Switch; construtor, antes do jogo). Não liga.

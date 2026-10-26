@@ -2,6 +2,7 @@
 #include "oot3d_switch_guard_alloc.h"
 
 #include <cstdlib>
+#include <cstring>
 
 namespace Oot3dNativeGame::GuardAlloc {
 
@@ -12,7 +13,7 @@ namespace {
 bool NextNumber(const char*& text, size_t& value, bool& found) noexcept {
     while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') ++text;
     found = false;
-    if (*text == '\0') return true;
+    if (*text == '\0' || (*text >= 'a' && *text <= 'z')) return true;  // fim ou o modo
     if (*text < '0' || *text > '9') return false;
     size_t parsed = 0;
     while (*text >= '0' && *text <= '9') {
@@ -39,7 +40,21 @@ bool ParseConfig(const char* text, Config& config) noexcept {
             if (!found) break;
         }
         while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') ++text;
+        const char* word = text;
+        while (*text >= 'a' && *text <= 'z') ++text;
+        const size_t length = static_cast<size_t>(text - word);
+        if (length == 7U && std::strncmp(word, "canario", 7) == 0) {
+            parsed.GuardMode = Mode::Canary;
+        } else if (length == 6U && std::strncmp(word, "pagina", 6) == 0) {
+            parsed.GuardMode = Mode::Page;
+        } else if (length != 0U) {
+            return false;
+        }
+        while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') ++text;
         if (*text != '\0') return false;
+    }
+    if (parsed.GuardMode == Mode::Page && parsed.QuarantineBlocks > kMaxPageQuarantine) {
+        parsed.QuarantineBlocks = kMaxPageQuarantine;
     }
     if (parsed.MinSize == 0U || parsed.MinSize > parsed.MaxSize ||
         !InRange(parsed, parsed.MaxSize)) {
@@ -69,6 +84,8 @@ void* __real__realloc_r(struct _reent* reent, void* pointer, size_t size);
 void* __real__calloc_r(struct _reent* reent, size_t count, size_t size);
 size_t __real__malloc_usable_size_r(struct _reent* reent, void* pointer);
 void* __real__memalign_r(struct _reent* reent, size_t alignment, size_t size);
+extern char* fake_heap_start;
+extern char* fake_heap_end;
 }
 
 namespace Oot3dNativeGame::GuardAlloc {
@@ -85,8 +102,13 @@ std::atomic<uint64_t> gGuarded{0};
 std::atomic<uint64_t> gLive{0};
 std::atomic<uint64_t> gFallbacks{0};
 std::atomic<uint64_t> gSkipped{0};
+std::atomic<uint64_t> gCanaryHits{0};
+std::atomic<uint64_t> gDoubleFrees{0};
+std::atomic<uint32_t> gCanaryReports{0};
+constexpr uint32_t kMaximumCanaryReports = 4U;
 Mutex gRingMutex;
-QuarantineRing gRing;
+QuarantineRing gRing;        // modo página
+PointerRing gCanaryRing;     // modo canário
 
 // Chamadas ao newlib que, por dentro, chamam o _malloc_r embrulhado: o
 // calloc/realloc reais leem o cabeçalho do chunk que o malloc devolveu, que
@@ -128,11 +150,132 @@ BlockHeader* HeaderOf(void* pointer) noexcept {
     return header;
 }
 
+// ---- modo canário ------------------------------------------------------------
+
+CanaryHeader* CanaryOf(void* pointer) noexcept {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+    if ((address & (kAlignment - 1U)) != 0U ||
+        address < reinterpret_cast<uintptr_t>(fake_heap_start) + sizeof(CanaryHeader) ||
+        address >= reinterpret_cast<uintptr_t>(fake_heap_end)) {
+        return nullptr;
+    }
+    auto* header = reinterpret_cast<CanaryHeader*>(address - sizeof(CanaryHeader));
+    const uint64_t magic = header->Block.Magic;
+    if ((magic != kCanaryMagic && magic != kCanaryFreedMagic) ||
+        header->Block.Size < gConfig.MinSize || header->Block.Size > gConfig.MaxSize) {
+        return nullptr;
+    }
+    return header;
+}
+
+void* CanaryAlloc(struct _reent* reent, size_t size) noexcept {
+    // O malloc que o memalign real faz por dentro (256+ bytes) fica fora da faixa.
+    void* const base = __real__memalign_r(reent, kAlignment, sizeof(CanaryHeader) + size);
+    if (base == nullptr) {
+        gFallbacks.fetch_add(1U, std::memory_order_relaxed);
+        return nullptr;
+    }
+    auto* const header = static_cast<CanaryHeader*>(base);
+    header->Block.Magic = kCanaryMagic;
+    header->Block.Size = size;
+    header->Block.Serial = gSerial.fetch_add(1U, std::memory_order_relaxed) + 1U;
+    header->Block.AllocTicks = armGetSystemTick();
+    CaptureStack(header->Block.AllocStack);
+    gUsed.store(true, std::memory_order_relaxed);
+    gGuarded.fetch_add(1U, std::memory_order_relaxed);
+    gLive.fetch_add(1U, std::memory_order_relaxed);
+    return header + 1;
+}
+
+void AppendStack(HangWatch::Text& text, const char* label, const uint64_t (&stack)[kStackDepth]);
+
+// Um relatório de canário por vez; outro ao mesmo tempo é só contado.
+std::atomic<bool> gCanaryWriting{false};
+char gCanaryDetails[8 * 1024];
+
+void AppendBlockLine(HangWatch::Text& text, const CanaryHeader& header) {
+    const uint64_t now = armGetSystemTick();
+    text.Str("bloco serial=").Dec(header.Block.Serial).Str(" tamanho=").Dec(header.Block.Size)
+        .Str(" objeto=").Hex(reinterpret_cast<uintptr_t>(&header + 1))
+        .Str(" vida_ms=").Dec(armTicksToNs(header.FreeTicks - header.Block.AllocTicks) / 1000000U)
+        .Str(" liberado_ha_ms=").Dec(armTicksToNs(now - header.FreeTicks) / 1000000U)
+        .Str(" thread_do_free=").Hex(header.FreeThread).Char('\n');
+}
+
+void ReportCanary(const char* title, const CanaryHeader& header, const ChangedRange* ranges,
+                  size_t rangeCount, size_t changedBytes, bool withCurrentStack) {
+    if (gCanaryReports.load(std::memory_order_relaxed) >= kMaximumCanaryReports) return;
+    bool expected = false;
+    if (!gCanaryWriting.compare_exchange_strong(expected, true, std::memory_order_acquire)) return;
+    gCanaryReports.fetch_add(1U, std::memory_order_relaxed);
+    HangWatch::Text text(gCanaryDetails, sizeof(gCanaryDetails));
+    AppendBlockLine(text, header);
+    if (rangeCount > 0U) {
+        const auto* object = reinterpret_cast<const uint8_t*>(&header + 1);
+        text.Str("mudou: bytes=").Dec(changedBytes);
+        for (size_t index = 0; index < rangeCount; ++index) {
+            text.Str(" [").Dec(ranges[index].Begin).Char(',').Dec(ranges[index].End).Str("):");
+            for (size_t byte = ranges[index].Begin;
+                 byte < ranges[index].End && byte < ranges[index].Begin + 16U; ++byte) {
+                text.Char(' ').Hex(object[byte]);
+            }
+        }
+        text.Char('\n');
+    }
+    AppendStack(text, "pilha_alloc:", header.Block.AllocStack);
+    AppendStack(text, "pilha_free:", header.FreeStack);
+    if (withCurrentStack) {
+        uint64_t current[kStackDepth];
+        CaptureStack(current);
+        AppendStack(text, "pilha_free_de_novo:", current);
+    }
+    HangWatch::ReportEvent(title, text.Data());
+    gCanaryWriting.store(false, std::memory_order_release);
+}
+
+// Sai da quarentena: confere o preenchimento e devolve ao malloc de verdade.
+void CanaryRelease(struct _reent* reent, CanaryHeader* header) noexcept {
+    ChangedRange ranges[8];
+    size_t changedBytes = 0;
+    const size_t rangeCount = FindCanaryChanges(reinterpret_cast<const uint8_t*>(header + 1),
+                                                header->Block.Size, ranges, 8U, changedBytes);
+    if (changedBytes != 0U) {
+        gCanaryHits.fetch_add(1U, std::memory_order_relaxed);
+        ReportCanary("USO APÓS FREE (canário)", *header, ranges, rangeCount, changedBytes, false);
+    }
+    header->Block.Magic = 0;
+    __real__free_r(reent, header);
+}
+
+void CanaryFree(struct _reent* reent, CanaryHeader* header) noexcept {
+    if (header->Block.Magic == kCanaryFreedMagic) {
+        // Já está na quarentena: o segundo free não devolve nada.
+        gDoubleFrees.fetch_add(1U, std::memory_order_relaxed);
+        ReportCanary("FREE DUPLO (canário)", *header, nullptr, 0U, 0U, true);
+        return;
+    }
+    header->Block.Magic = kCanaryFreedMagic;
+    header->FreeTicks = armGetSystemTick();
+    header->FreeThread = threadGetCurHandle();
+    CaptureStack(header->FreeStack);
+    std::memset(header + 1, kCanaryFill, header->Block.Size);
+    gLive.fetch_sub(1U, std::memory_order_relaxed);
+    uintptr_t evicted = 0;
+    mutexLock(&gRingMutex);
+    const bool full = gCanaryRing.Push(reinterpret_cast<uintptr_t>(header), evicted);
+    mutexUnlock(&gRingMutex);
+    // Fora do lock: o free real pega o lock do malloc.
+    if (full) CanaryRelease(reent, reinterpret_cast<CanaryHeader*>(evicted));
+}
+
+// ---- modo página -------------------------------------------------------------
+
 void* GuardedAlloc(struct _reent* reent, size_t size) noexcept {
     if (gLive.load(std::memory_order_relaxed) >= gConfig.MaxLive) {
         gSkipped.fetch_add(1U, std::memory_order_relaxed);
         return nullptr;
     }
+    if (gConfig.GuardMode == Mode::Canary) return CanaryAlloc(reent, size);
     // O malloc que o memalign real faz por dentro (12 KiB+) fica fora da faixa.
     void* const base = __real__memalign_r(reent, kPageSize, kBlockBytes);
     if (base == nullptr) {
@@ -218,7 +361,7 @@ void HandleException(ThreadExceptionDump* context) {
     HangWatch::Text text(gFaultDetails, sizeof(gFaultDetails));
     text.Str("tipo=").Hex(context->error_desc).Str(" far=").Hex(context->far.x)
         .Str(" esr=").Hex(context->esr).Char('\n');
-    if (gUsed.load(std::memory_order_relaxed)) {
+    if (gUsed.load(std::memory_order_relaxed) && gConfig.GuardMode == Mode::Page) {
         AppendGuardVerdict(text, context->far.x);
     }
     const Stats stats = CurrentStats();
@@ -255,14 +398,21 @@ void Start() noexcept {
     text[read] = '\0';
     Config config;
     if (!ParseConfig(text, config)) return;
-    auto* storage = static_cast<QuarantineEntry*>(
-        __real__malloc_r(_REENT, sizeof(QuarantineEntry) * config.QuarantineBlocks));
-    if (storage == nullptr && config.QuarantineBlocks != 0U) return;
-    for (size_t index = 0; index < config.QuarantineBlocks; ++index) {
-        new (&storage[index]) QuarantineEntry();
-    }
     mutexInit(&gRingMutex);
-    gRing = QuarantineRing(storage, config.QuarantineBlocks);
+    if (config.GuardMode == Mode::Canary) {
+        auto* storage = static_cast<uintptr_t*>(
+            __real__malloc_r(_REENT, sizeof(uintptr_t) * config.QuarantineBlocks));
+        if (storage == nullptr && config.QuarantineBlocks != 0U) return;
+        gCanaryRing = PointerRing(storage, config.QuarantineBlocks);
+    } else {
+        auto* storage = static_cast<QuarantineEntry*>(
+            __real__malloc_r(_REENT, sizeof(QuarantineEntry) * config.QuarantineBlocks));
+        if (storage == nullptr && config.QuarantineBlocks != 0U) return;
+        for (size_t index = 0; index < config.QuarantineBlocks; ++index) {
+            new (&storage[index]) QuarantineEntry();
+        }
+        gRing = QuarantineRing(storage, config.QuarantineBlocks);
+    }
     gConfig = config;
     gConfigured.store(true, std::memory_order_release);
 }
@@ -278,7 +428,10 @@ Stats CurrentStats() noexcept {
     stats.Enabled = gEnabled.load(std::memory_order_relaxed);
     stats.Guarded = gGuarded.load(std::memory_order_relaxed);
     stats.Live = gLive.load(std::memory_order_relaxed);
-    stats.Quarantined = gRing.Count();
+    stats.Canary = gConfig.GuardMode == Mode::Canary;
+    stats.Quarantined = stats.Canary ? gCanaryRing.Count() : gRing.Count();
+    stats.CanaryHits = gCanaryHits.load(std::memory_order_relaxed);
+    stats.DoubleFrees = gDoubleFrees.load(std::memory_order_relaxed);
     stats.Fallbacks = gFallbacks.load(std::memory_order_relaxed);
     stats.Skipped = gSkipped.load(std::memory_order_relaxed);
     return stats;
@@ -309,7 +462,12 @@ void* __wrap__memalign_r(struct _reent* reent, size_t alignment, size_t size) {
 
 void __wrap__free_r(struct _reent* reent, void* pointer) {
     if (pointer != nullptr && gUsed.load(std::memory_order_relaxed)) {
-        if (BlockHeader* header = HeaderOf(pointer)) {
+        if (gConfig.GuardMode == Mode::Canary) {
+            if (CanaryHeader* header = CanaryOf(pointer)) {
+                CanaryFree(reent, header);
+                return;
+            }
+        } else if (BlockHeader* header = HeaderOf(pointer)) {
             GuardedFree(reent, header);
             return;
         }
@@ -337,8 +495,14 @@ void* __wrap__realloc_r(struct _reent* reent, void* pointer, size_t size) {
     if (!gUsed.load(std::memory_order_relaxed) && !gEnabled.load(std::memory_order_relaxed)) {
         return __real__realloc_r(reent, pointer, size);
     }
-    BlockHeader* const header = gUsed.load(std::memory_order_relaxed) ? HeaderOf(pointer)
-                                                                       : nullptr;
+    const BlockHeader* header = nullptr;
+    if (gUsed.load(std::memory_order_relaxed)) {
+        if (gConfig.GuardMode == Mode::Canary) {
+            if (const CanaryHeader* canary = CanaryOf(pointer)) header = &canary->Block;
+        } else {
+            header = HeaderOf(pointer);
+        }
+    }
     const bool guardNew = gEnabled.load(std::memory_order_relaxed) && InRange(gConfig, size);
     if (header == nullptr && !guardNew) {
         tBypass = true;
@@ -357,7 +521,11 @@ void* __wrap__realloc_r(struct _reent* reent, void* pointer, size_t size) {
 
 size_t __wrap__malloc_usable_size_r(struct _reent* reent, void* pointer) {
     if (pointer != nullptr && gUsed.load(std::memory_order_relaxed)) {
-        if (const BlockHeader* header = HeaderOf(pointer)) return UsableSize(header->Size);
+        if (gConfig.GuardMode == Mode::Canary) {
+            if (const CanaryHeader* header = CanaryOf(pointer)) return header->Block.Size;
+        } else if (const BlockHeader* header = HeaderOf(pointer)) {
+            return UsableSize(header->Size);
+        }
     }
     return __real__malloc_usable_size_r(reent, pointer);
 }

@@ -1384,7 +1384,10 @@ bool NativeA32WindowSession::RunFrame() {
                << " guard_live=" << guard.Live
                << " guard_quarantine=" << guard.Quarantined
                << " guard_fallbacks=" << guard.Fallbacks
-               << " guard_skipped=" << guard.Skipped;
+               << " guard_skipped=" << guard.Skipped
+               << " guard_canary=" << (guard.Canary ? 1 : 0)
+               << " guard_canary_hits=" << guard.CanaryHits
+               << " guard_double_frees=" << guard.DoubleFrees;
         }
 #endif
         previousWaits = waits;

@@ -20,14 +20,25 @@ void Require(bool condition, const char* message) {
 void TestParse() {
     Config config;
     Require(ParseConfig("", config) && config.MinSize == 57U && config.MaxSize == 72U &&
-                config.QuarantineBlocks == 4096U && config.MaxLive == 32768U,
-            "empty file must be the default 57..72 / 4096 / 32768");
+                config.QuarantineBlocks == 131072U && config.MaxLive == 32768U &&
+                config.GuardMode == Mode::Canary,
+            "empty file must be the default 57..72 / 131072 / 32768 canario");
     Require(ParseConfig("57 72 100 2000", config) && config.QuarantineBlocks == 100U &&
                 config.MaxLive == 2000U,
             "quarantine and live cap");
     Require(ParseConfig("40 96\r\n", config) && config.MinSize == 40U && config.MaxSize == 96U &&
-                config.QuarantineBlocks == 4096U,
+                config.QuarantineBlocks == 131072U,
             "range only keeps the default quarantine");
+    Require(ParseConfig("57 72 32768 32768 pagina", config) && config.GuardMode == Mode::Page &&
+                config.QuarantineBlocks == kMaxPageQuarantine,
+            "page mode must clamp the quarantine (32768 closed pages broke audio and FS)");
+    Require(ParseConfig("57 72 2000 100 pagina", config) && config.QuarantineBlocks == 2000U,
+            "page mode below the clamp is kept");
+    Require(ParseConfig("57 72 canario", config) && config.GuardMode == Mode::Canary &&
+                config.QuarantineBlocks == 131072U,
+            "mode right after the range");
+    Require(ParseConfig("57 72 1 1 pagin", config) == false, "unknown mode");
+    Require(ParseConfig("57 72 1 1 canario 5", config) == false, "number after the mode");
     Require(ParseConfig("1 3969 0", config) == false, "max past the header must be rejected");
     Require(ParseConfig("1 3968 0", config), "max right after the header is fine");
     Require(ParseConfig("72 57", config) == false, "min > max must be rejected");
@@ -55,6 +66,34 @@ void TestLayout() {
                 "usable size must reach the guard page");
     }
     Require(!InRange(config, 0U), "size 0 is never guarded");
+}
+
+void TestCanary() {
+    uint8_t object[72];
+    for (uint8_t& byte : object) byte = kCanaryFill;
+    ChangedRange ranges[2];
+    size_t changed = 99;
+    Require(FindCanaryChanges(object, sizeof(object), ranges, 2U, changed) == 0U && changed == 0U,
+            "untouched object");
+    // A escrita dos tours 16-20: 0x00ed5391'0000001a no byte 8.
+    const uint8_t write[8] = {0x1a, 0, 0, 0, 0x91, 0x53, 0xed, 0};
+    for (size_t index = 0; index < 8U; ++index) object[8U + index] = write[index];
+    object[70] = 0;
+    object[0] = 1;
+    const size_t count = FindCanaryChanges(object, sizeof(object), ranges, 2U, changed);
+    Require(count == 2U && ranges[0].Begin == 0U && ranges[0].End == 1U && ranges[1].Begin == 8U &&
+                ranges[1].End == 16U && changed == 10U,
+            "ranges are merged and capped; every changed byte is counted");
+    Require(sizeof(CanaryHeader) == 256U, "canary header is 256 bytes");
+
+    uintptr_t storage[2];
+    PointerRing ring(storage, 2U);
+    uintptr_t evicted = 0;
+    Require(!ring.Push(10U, evicted) && !ring.Push(20U, evicted), "fill");
+    Require(ring.Push(30U, evicted) && evicted == 10U && ring.Count() == 2U, "fifo");
+    Require(ring.Push(40U, evicted) && evicted == 20U, "fifo again");
+    PointerRing none(nullptr, 0U);
+    Require(none.Push(5U, evicted) && evicted == 5U, "zero capacity");
 }
 
 void TestQuarantine() {
@@ -89,6 +128,7 @@ int main() {
     TestParse();
     TestLayout();
     TestQuarantine();
+    TestCanary();
     std::cout << "oot3d_switch_guard_alloc_tests: ok\n";
     return 0;
 }
