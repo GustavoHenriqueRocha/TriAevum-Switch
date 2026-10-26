@@ -182,10 +182,13 @@ no layout do newlib: soma igual à do `mallinfo`, double free, auto-laço, ciclo
 heap/desalinhados, tamanhos absurdos e 3000 heaps com elos aleatórios — sempre termina e nunca
 lê fora do heap, ASan/UBSan). A corrupção em si continua: o relatório traz o chunk e as threads.
 
-**A corrupção é sempre a mesma (26/10).** Nos tours 16 a 20 o relatório traz o mesmo chunk:
-`bin=10 chunk=0x27fe173a0 size=0x51 fd=0x2805553e0 bk=0xed53910000001a`. Chunk livre de 0x50 bytes
-(pedidos de 57 a 72), `fd` intacto e só o `bk` (byte 8 do bloco do usuário) trocado por dois u32,
-`0x1a` e `0x00ed5391`: escrita de 8 bytes num objeto já liberado (uso após o free), determinística.
+**A corrupção foi um evento só (corrigido em 26/10).** O relatório (`bin=10 chunk=0x27fe173a0
+size=0x51 fd=0x2805553e0 bk=0xed53910000001a`: chunk livre de 0x50, pedidos de 57 a 72, `fd` intacto e
+só o `bk` trocado, cara de escrita depois do free) aparece nas pastas dos tours 16 a 27, mas o
+`perf.txt` do Switch acumula as sessões: é a mesma linha (10887, sessão 96 = tour16, pgo5o/Mesa)
+copiada junto. Nas 17 sessões seguintes com a varredura ligada e nas 4 do guarda (p6r-p6u) ela não
+voltou. Antes de concluir que algo "se repete", conferir em que sessão do arquivo acumulado a linha
+está.
 
 **Páginas de guarda (`config/guard_alloc`, `oot3d_switch_guard_alloc.h/.cpp`).** O link embrulha
 `_malloc_r`, `_memalign_r`, `_free_r`, `_realloc_r`, `_calloc_r` e `_malloc_usable_size_r` do newlib (cada um
@@ -228,6 +231,11 @@ tamanho do chunk do newlib, sempre legível) antes de ler o resto do cabeçalho,
 **cópia** do objeto (cabeçalho de 384 bytes, faixa até 128) em vez de encher com 0xFD: leituras
 depois do free continuam vendo os dados antigos, como sem o guarda, e só escritas são acusadas
 (relatório com os bytes de/para).
+
+*p6u (26/10)*: tour inteiro (44 warps, 32400 quadros) com o canário: 1,55 milhão de blocos de 57-72
+bytes, cada um conferido ~45 s depois do free, nenhuma escrita depois do free, nenhum free duplo e
+244 varreduras do heap sem corrupção. `config/guard_alloc` saiu do SD; o handler de exceção fica
+(sempre ligado) e a varredura (`config/heap_check_windows`) também, para pegar a próxima ocorrência.
 
 O handler de exceção da libnx (sempre ligado, grava e devolve, então o crash report do Atmosphère
 continua saindo) escreve "EXCEÇÃO" no `hang.txt`: `far`, PC/LR/cadeia da thread que falhou, `USO
