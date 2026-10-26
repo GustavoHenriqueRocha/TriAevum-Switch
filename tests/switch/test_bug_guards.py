@@ -160,6 +160,17 @@ GUARDS = [
     Guard("deko3d p6p: janela comprimida com present no fio próprio (só dkQueuePresentImage descomprime)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'if \(!mPresentThreaded\) \{\s+layoutMaker\.flags \|= DkImageFlags_HwCompression;'),
+    Guard("deko3d p6w: mailbox — o render não pode reusar a imagem que espera cópia ou está sendo copiada",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'while \(image == mMailboxPending \|\| image == mMailboxCopying\)'),
+    Guard("deko3d p6w: mailbox — dequeue e queue da janela só na thread de present (nwindow empresta 1 imagem por vez)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'void Device::MailboxLoop\(\).*?dkSwapchainAcquireImage\(mSwapchain, &slot, &dequeued\);'
+          r'.*?dkQueueWaitFence\(mPresentQueue, &dequeued\);.*?dkQueueWaitFence\(mPresentQueue, &drawn\);'
+          r'.*?dkQueuePresentImage\(mPresentQueue, mSwapchain, slot\);'),
+    Guard("deko3d p6w: mailbox — a GPU do render espera a cópia anterior sair da imagem antes de desenhar",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'if \(wait\) \{\s+dkQueueWaitFence\(mQueue, &copied\);'),
     Guard("deko3d p6q: deko3d_swapchain_images fora de 2-4 estouraria os arrays de imagens da janela",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'count >= 2U && count <= kMaxSwapchainImages\)'),

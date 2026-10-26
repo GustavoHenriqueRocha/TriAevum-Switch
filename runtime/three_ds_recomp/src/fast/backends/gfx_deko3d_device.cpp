@@ -94,6 +94,9 @@ CpuWait gFenceWait;
 CpuWait gAcquireWait;
 CpuWait gPresentWait;
 std::atomic<uint64_t> gSwapAcquires{0};
+// config/deko3d_present_mailbox: frames replaced before the present thread copied them.
+std::atomic<uint64_t> gMailboxDropped{0};
+std::atomic<uint64_t> gMailboxCopies{0};
 CpuWait gSubmitWait;
 // config/deko3d_present_thread: nwindowQueueBuffer on the present thread.
 CpuWait gQueueBufferWait;
@@ -232,6 +235,10 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_present_thread", "rb")) {
         std::fclose(file);
         mPresentThreaded = true;
+        if (std::FILE* mailbox = std::fopen("sdmc:/switch/oot3dre/config/deko3d_present_mailbox", "rb")) {
+            std::fclose(mailbox);
+            mMailbox = true;
+        }
     }
     if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_swapchain_images", "rb")) {
         unsigned count = 0;
@@ -245,6 +252,9 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     layoutMaker.flags = DkImageFlags_UsageRender | DkImageFlags_UsagePresent;
     if (!mPresentThreaded) {
         layoutMaker.flags |= DkImageFlags_HwCompression;
+    }
+    if (mMailbox) {
+        layoutMaker.flags |= DkImageFlags_Usage2DEngine; // the copy into it
     }
     layoutMaker.format = DkImageFormat_RGBA8_Unorm;
     layoutMaker.dimensions[0] = width;
@@ -320,9 +330,13 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
         Log("sync check on (slow; diagnosis only): %s at%s%s", mSyncNoWait ? "submit only" : "submit and wait",
             points.empty() ? " every operation" : points.c_str(), "");
     }
+    if (mMailbox && !CreateMailbox(layoutMaker)) {
+        return fail("present mailbox");
+    }
     if (mPresentThreaded) {
         StartPresentThread();
-        Log("present thread on (config/deko3d_present_thread)");
+        Log("present thread on (config/deko3d_present_thread)%s",
+            mMailbox ? ", mailbox (config/deko3d_present_mailbox)" : "");
     }
     gPerfSyncCheck.store(mSyncCheck, std::memory_order_relaxed);
     gPerfLive.store(true, std::memory_order_release);
@@ -337,6 +351,7 @@ void Device::Destroy() noexcept {
     if (mQueue != nullptr) {
         dkQueueWaitIdle(mQueue);
     }
+    DestroyMailbox();
     if (mCmd != nullptr) {
         dkCmdBufDestroy(mCmd);
         mCmd = nullptr;
@@ -485,6 +500,13 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
             hook(false);
         }
         const uint64_t begin = NowNanoseconds();
+        if (mMailbox) {
+            mWindowSlot = AcquireMailbox();
+            gLastSwap.WaitPresentMs = 0.0F;
+            gLastSwap.QueueBufferMs = static_cast<float>(
+                static_cast<double>(gLastQueueBufferNs.load(std::memory_order_relaxed)) / 1.0e6);
+            gLastSwap.AcquireMs = static_cast<float>(static_cast<double>(NowNanoseconds() - begin) / 1.0e6);
+        } else {
         WaitPresent();
         // spikes.txt: o render parado esperando o present thread devolver o
         // nwindowQueueBuffer do quadro anterior (p6q: ~24 ms, quase toda janela).
@@ -494,6 +516,7 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
             static_cast<double>(gLastQueueBufferNs.load(std::memory_order_relaxed)) / 1.0e6);
         mWindowSlot = dkQueueAcquireImage(mQueue, mSwapchain);
         gLastSwap.AcquireMs = static_cast<float>(static_cast<double>(NowNanoseconds() - presentDone) / 1.0e6);
+        }
         if (mTimestamps != nullptr) {
             dkCmdBufReportCounter(mCmd, DkCounter_TimestampPipelineTop,
                                   dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + 2U * kTimestampBytes);
@@ -505,10 +528,13 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
         if (hook != nullptr) {
             hook(true);
         }
-        if (mWindowSlot < 0 || mWindowSlot >= static_cast<int>(mSwapchainCount)) {
+        if (!mMailbox && (mWindowSlot < 0 || mWindowSlot >= static_cast<int>(mSwapchainCount))) {
             Log("dkQueueAcquireImage returned %d", mWindowSlot);
             mWindowSlot = 0;
         }
+    }
+    if (mMailbox) {
+        return mMailboxViews[static_cast<size_t>(mWindowSlot)];
     }
     return mSwapchainViews[static_cast<size_t>(mWindowSlot)];
 }
@@ -539,7 +565,9 @@ void Device::EndFrame(AcquireHook hook) {
     gPerfSubmits.fetch_add(mStats.Submits - mFrameStartSubmits, std::memory_order_relaxed);
     gPerfCommandBytes.fetch_add(slot.CommandUsed, std::memory_order_relaxed);
     const uint64_t presentBegin = NowNanoseconds();
-    if (mPresentThreaded) {
+    if (mMailbox) {
+        QueueMailbox();
+    } else if (mPresentThreaded) {
         QueuePresent(mWindowSlot);
     } else {
         dkQueuePresentImage(mQueue, mSwapchain, mWindowSlot);
@@ -571,7 +599,13 @@ void Device::EndFrame(AcquireHook hook) {
 
 void Device::StartPresentThread() {
     mPresentStop = false;
-    mPresentThread = std::thread([this] { PresentLoop(); });
+    mPresentThread = std::thread([this] {
+        if (mMailbox) {
+            MailboxLoop();
+        } else {
+            PresentLoop();
+        }
+    });
 }
 
 void Device::StopPresentThread() noexcept {
@@ -630,6 +664,161 @@ void Device::QueuePresent(int windowSlot) {
         mPresentPending = true;
     }
     mPresentReady.notify_one();
+}
+
+bool Device::CreateMailbox(const DkImageLayoutMaker& windowLayout) {
+    DkImageLayoutMaker maker = windowLayout;
+    maker.flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
+    DkImageLayout layout;
+    dkImageLayoutInitialize(&layout, &maker);
+    const uint32_t alignment = dkImageLayoutGetAlignment(&layout);
+    const uint32_t size = AlignUp(static_cast<uint32_t>(dkImageLayoutGetSize(&layout)), alignment);
+    mMailboxMemory = MakeBlock(size * kMailboxImages, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image,
+                               "mailbox images");
+    if (mMailboxMemory == nullptr) {
+        return false;
+    }
+    for (uint32_t index = 0; index < kMailboxImages; ++index) {
+        dkImageInitialize(&mMailboxImages[index], &layout, mMailboxMemory, index * size);
+        dkImageViewDefaults(&mMailboxViews[index], &mMailboxImages[index]);
+    }
+    // The copy and the queue-buffer on a queue of their own: the present
+    // thread never touches the render thread's queue.
+    DkQueueMaker queueMaker;
+    dkQueueMakerDefaults(&queueMaker, mDevice);
+    queueMaker.flags = DkQueueFlags_Graphics | DkQueueFlags_HighPrio;
+    queueMaker.commandMemorySize = 64U << 10;
+    mPresentQueue = dkQueueCreate(&queueMaker);
+    if (mPresentQueue == nullptr) {
+        return false;
+    }
+    mPresentCommandMemory = MakeBlock(2U * kPresentCommandBytes, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached,
+                                      "present commands");
+    if (mPresentCommandMemory == nullptr) {
+        return false;
+    }
+    DkCmdBufMaker cmdMaker;
+    dkCmdBufMakerDefaults(&cmdMaker, mDevice);
+    mPresentCmd = dkCmdBufCreate(&cmdMaker);
+    Log("mailbox: %u images of %u KiB", kMailboxImages, size >> 10);
+    return mPresentCmd != nullptr;
+}
+
+void Device::DestroyMailbox() noexcept {
+    if (mPresentQueue != nullptr) {
+        dkQueueWaitIdle(mPresentQueue);
+    }
+    if (mPresentCmd != nullptr) {
+        dkCmdBufDestroy(mPresentCmd);
+        mPresentCmd = nullptr;
+    }
+    if (mPresentQueue != nullptr) {
+        dkQueueDestroy(mPresentQueue);
+        mPresentQueue = nullptr;
+    }
+    if (mPresentCommandMemory != nullptr) {
+        dkMemBlockDestroy(mPresentCommandMemory);
+        mPresentCommandMemory = nullptr;
+    }
+    if (mMailboxMemory != nullptr) {
+        dkMemBlockDestroy(mMailboxMemory);
+        mMailboxMemory = nullptr;
+    }
+    mMailboxCopiedSet = {};
+    mPresentCmdFenceSet = {};
+    mMailboxPending = -1;
+    mMailboxCopying = -1;
+}
+
+// Render thread: an image neither waiting nor being copied (three, so never a wait
+// on the CPU); the GPU waits for its last copy out.
+int Device::AcquireMailbox() {
+    int image = 0;
+    DkFence copied{};
+    bool wait = false;
+    {
+        const std::lock_guard<std::mutex> lock(mPresentMutex);
+        while (image == mMailboxPending || image == mMailboxCopying) {
+            ++image;
+        }
+        wait = mMailboxCopiedSet[static_cast<size_t>(image)];
+        copied = mMailboxCopied[static_cast<size_t>(image)];
+    }
+    if (wait) {
+        dkQueueWaitFence(mQueue, &copied);
+    }
+    return image;
+}
+
+// Render thread: the frame drawn into mWindowSlot becomes the newest one; the
+// one still waiting (if any) is dropped and its image is free again.
+void Device::QueueMailbox() {
+    DkFence drawn{};
+    dkQueueSignalFence(mQueue, &drawn, true);
+    {
+        const std::lock_guard<std::mutex> lock(mPresentMutex);
+        if (mMailboxPending >= 0) {
+            gMailboxDropped.fetch_add(1, std::memory_order_relaxed);
+        }
+        mMailboxPending = mWindowSlot;
+        mMailboxPendingFence = drawn;
+    }
+    mPresentReady.notify_one();
+}
+
+// Present thread: dequeue, copy the newest frame, queue. nwindow is used by
+// this thread alone (it lends one image at a time).
+void Device::MailboxLoop() {
+    std::unique_lock<std::mutex> lock(mPresentMutex);
+    for (;;) {
+        mPresentReady.wait(lock, [this] { return mMailboxPending >= 0 || mPresentStop; });
+        if (mPresentStop) {
+            return;
+        }
+        const int image = std::exchange(mMailboxPending, -1);
+        DkFence drawn = mMailboxPendingFence;
+        mMailboxCopying = image;
+        lock.unlock();
+
+        int slot = -1;
+        DkFence dequeued{};
+        dkSwapchainAcquireImage(mSwapchain, &slot, &dequeued);
+        if (slot < 0 || slot >= static_cast<int>(mSwapchainCount)) {
+            Log("mailbox: dkSwapchainAcquireImage returned %d", slot);
+            lock.lock();
+            mMailboxCopying = -1;
+            continue;
+        }
+        const uint32_t half = mPresentCmdHalf;
+        mPresentCmdHalf ^= 1U;
+        if (mPresentCmdFenceSet[half]) {
+            dkFenceWait(&mPresentCmdFence[half], -1);
+        }
+        dkCmdBufClear(mPresentCmd);
+        dkCmdBufAddMemory(mPresentCmd, mPresentCommandMemory, half * kPresentCommandBytes, kPresentCommandBytes);
+        dkQueueWaitFence(mPresentQueue, &dequeued);
+        dkQueueWaitFence(mPresentQueue, &drawn);
+        const DkImageRect rect{0, 0, 0, mWidth, mHeight, 1};
+        dkCmdBufCopyImage(mPresentCmd, &mMailboxViews[static_cast<size_t>(image)], &rect,
+                          &mSwapchainViews[static_cast<size_t>(slot)], &rect, 0);
+        dkQueueSubmitCommands(mPresentQueue, dkCmdBufFinishList(mPresentCmd));
+        DkFence copied{};
+        dkQueueSignalFence(mPresentQueue, &copied, true);
+        mPresentCmdFence[half] = copied;
+        mPresentCmdFenceSet[half] = true;
+        gMailboxCopies.fetch_add(1, std::memory_order_relaxed);
+
+        const uint64_t begin = NowNanoseconds();
+        dkQueuePresentImage(mPresentQueue, mSwapchain, slot);
+        const uint64_t queueNs = NowNanoseconds() - begin;
+        NoteCpuWait(gQueueBufferWait, queueNs);
+        gLastQueueBufferNs.store(queueNs, std::memory_order_relaxed);
+
+        lock.lock();
+        mMailboxCopied[static_cast<size_t>(image)] = copied;
+        mMailboxCopiedSet[static_cast<size_t>(image)] = true;
+        mMailboxCopying = -1;
+    }
 }
 
 void Device::WaitPresent() {
@@ -817,6 +1006,8 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
         << CpuWaitReport("present", gPresentWait) << CpuWaitReport("submit", gSubmitWait)
         << CpuWaitReport("queue_buffer", gQueueBufferWait)
         << " swap_acquires=" << gSwapAcquires.exchange(0, std::memory_order_relaxed)
+        << " mailbox_copies=" << gMailboxCopies.exchange(0, std::memory_order_relaxed)
+        << " mailbox_dropped=" << gMailboxDropped.exchange(0, std::memory_order_relaxed)
         << " sync_check=" << (gPerfSyncCheck.load(std::memory_order_relaxed) ? 1 : 0)
         << " build=" << kDeko3dBuildTag;
     return out.str();

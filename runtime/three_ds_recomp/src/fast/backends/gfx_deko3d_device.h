@@ -53,6 +53,10 @@ constexpr uint32_t kSwapchainImages = 3;
 // from being full when a frame is presented (p6p: nwindowQueueBuffer still
 // held the present 17-22 ms).
 constexpr uint32_t kMaxSwapchainImages = 4;
+// config/deko3d_present_mailbox: images the frame is drawn into (one drawn,
+// one waiting, one being copied into the window).
+constexpr uint32_t kMailboxImages = 3;
+constexpr uint32_t kPresentCommandBytes = 32U << 10; // per half
 constexpr uint32_t kCommandSliceBytes = 1U << 20;   // per slot, fed in chunks
 constexpr uint32_t kCommandChunkBytes = 64U << 10;
 // kCommandGuardBytes (gfx_deko3d_pica_plan.h): unused after every piece fed.
@@ -116,6 +120,7 @@ class Device {
     // so the scene runs while the render thread waits.
     const DkImageView& AcquireWindow(AcquireHook hook);
     [[nodiscard]] bool WindowAcquired() const noexcept { return mWindowSlot >= 0; }
+    [[nodiscard]] bool Mailbox() const noexcept { return mMailbox; }
     // FinishRender acquired it (no draw reached the window before the pacer).
     void CountSwapAcquire();
 
@@ -175,6 +180,16 @@ class Device {
     // The window can be dequeued again only after the last queue (nwindow's
     // current slot): the render thread waits here.
     void WaitPresent();
+    // config/deko3d_present_mailbox (with the present thread): the frame is
+    // drawn into an image of its own and the present thread copies the
+    // newest one into the window; a frame not copied yet is dropped (p6v:
+    // the render waited ~25 ms on nwindowQueueBuffer, and nwindow lends one
+    // window image at a time, so the next one cannot be taken ahead).
+    bool CreateMailbox(const DkImageLayoutMaker& windowLayout);
+    void DestroyMailbox() noexcept;
+    void MailboxLoop();
+    int AcquireMailbox();
+    void QueueMailbox();
 
     DkDevice mDevice = nullptr;
     DkQueue mQueue = nullptr;
@@ -213,6 +228,22 @@ class Device {
     bool mPresentStop = false;
     int mPresentSlot = -1;
     NvMultiFence mPresentFence{};
+    bool mMailbox = false;
+    DkMemBlock mMailboxMemory = nullptr;
+    std::array<DkImage, kMailboxImages> mMailboxImages{};
+    std::array<DkImageView, kMailboxImages> mMailboxViews{};
+    // Present queue's copy out of each image (the render waits on it on the GPU).
+    std::array<DkFence, kMailboxImages> mMailboxCopied{};
+    std::array<bool, kMailboxImages> mMailboxCopiedSet{};
+    int mMailboxPending = -1; // newest frame, not copied yet
+    DkFence mMailboxPendingFence{};
+    int mMailboxCopying = -1;
+    DkQueue mPresentQueue = nullptr;
+    DkCmdBuf mPresentCmd = nullptr;
+    DkMemBlock mPresentCommandMemory = nullptr;
+    std::array<DkFence, 2> mPresentCmdFence{};
+    std::array<bool, 2> mPresentCmdFenceSet{};
+    uint32_t mPresentCmdHalf = 0;
     uint64_t mPreviousGpuEnd = 0; // GPU ticks: the last measured frame's end
     DeviceStats mStats{};
 };
