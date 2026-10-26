@@ -1116,8 +1116,9 @@ deko3d com os **mesmos textos GLSL**:
 - `config/gl_stats`: draws, chamadas de estado emitidas/puladas, binds, `gl_us_per_draw`.
 - **Páginas de guarda para uso após o free** (`oot3d_switch_guard_alloc`): se a varredura acusa
   sempre o mesmo chunk, a faixa de tamanho sai do `size` dele (0x50 = pedidos de 57 a 72).
-  `-Wl,--wrap=_malloc_r` (e `_free_r`, `_realloc_r`, `_calloc_r`, `_malloc_usable_size_r`) pega o
-  processo inteiro no newlib do devkitA64; o bloco vai para `_memalign_r(0x1000, 3 páginas)`, com o
+  `-Wl,--wrap=_malloc_r` (e `_memalign_r`, `_free_r`, `_realloc_r`, `_calloc_r`, `_malloc_usable_size_r`)
+  pega o processo inteiro no newlib do devkitA64 — o `malloc()` dele manda n >= 32 para
+  `_memalign_r(32, n)`, então embrulhar só o `_malloc_r` não pega quase nada; o bloco vai para `_memalign_r(0x1000, 3 páginas)`, com o
   objeto colado na página 1 (`svcSetMemoryPermission(Perm_None)`) e a página 2 de folga para o
   cabeçalho do chunk vizinho. No free a página 0 também fecha e entra em quarentena. Cuidados: o
   `calloc`/`realloc` reais leem o cabeçalho do chunk devolvido pelo malloc (desvie o malloc deles),

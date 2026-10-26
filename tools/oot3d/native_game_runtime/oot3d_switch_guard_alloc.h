@@ -11,8 +11,8 @@
 // Com config/guard_alloc no SD, todo pedido ao malloc com tamanho na faixa
 // configurada (padrão 57..72) ganha páginas próprias:
 //   [página 0: cabeçalho ... objeto no fim][página 1: guarda][página 2: folga]
-// O objeto termina colado na página de guarda (sem acesso), então um estouro
-// para a frente falha na hora. No free a página 0 também perde o acesso e o
+// O objeto termina a menos de 32 bytes da página de guarda (sem acesso), então
+// um estouro para a frente falha logo. No free a página 0 também perde o acesso e o
 // bloco entra numa quarentena FIFO; só volta ao malloc de verdade quando sai
 // dela. Uma escrita (ou leitura) num bloco liberado vira exceção no PC exato;
 // o handler de exceção grava em logs/hang.txt o PC, o endereço da falha, as
@@ -24,9 +24,12 @@
 // Ideia das páginas de guarda: TheMoonPeople/Chronicle PR #205 (arenas do port
 // de Switch com páginas de guarda via svcSetMemoryPermission).
 //
-// Ligado com -Wl,--wrap=_malloc_r (e _free_r, _realloc_r, _calloc_r,
-// _malloc_usable_size_r): no newlib do devkitA64 cada um mora num objeto
-// próprio, então malloc/free/new/delete do processo inteiro passam por aqui.
+// Ligado com -Wl,--wrap=_malloc_r (e _memalign_r, _free_r, _realloc_r,
+// _calloc_r, _malloc_usable_size_r): no newlib do devkitA64 cada um mora num
+// objeto próprio, então malloc/free/new/delete do processo inteiro passam por
+// aqui. O malloc() do devkitA64 manda todo pedido de 32 bytes ou mais para
+// _memalign_r(32, n), por isso o objeto fica alinhado a 32 e o _memalign_r
+// (alinhamento até 32) também ganha guarda.
 // Custo: 12 KiB e uma chamada ao kernel por bloco na faixa, mais uma no free;
 // só para diagnóstico.
 //
@@ -44,6 +47,8 @@ inline constexpr size_t kBlockPages = 3U;
 inline constexpr size_t kBlockBytes = kBlockPages * kPageSize;
 inline constexpr uint64_t kMagic = 0x434c414452415547ULL;  // "GUARDALC"
 inline constexpr size_t kStackDepth = 12U;
+// Alinhamento do objeto: o do malloc() do devkitA64 (_memalign_r(32, n)).
+inline constexpr size_t kAlignment = 32U;
 
 struct Config {
     size_t MinSize = 57U;
@@ -64,18 +69,20 @@ struct BlockHeader {
     uint64_t AllocStack[kStackDepth];
 };
 
-constexpr size_t RoundedSize(size_t size) noexcept {
-    return (size + 15U) & ~static_cast<size_t>(15U);
-}
-
 constexpr bool InRange(const Config& config, size_t size) noexcept {
     return size >= config.MinSize && size <= config.MaxSize &&
-           RoundedSize(size) <= kPageSize - sizeof(BlockHeader);
+           size <= kPageSize - sizeof(BlockHeader);
 }
 
-// Deslocamento do objeto na página 0: termina no limite da página de guarda.
+// Deslocamento do objeto na página 0: o mais perto da página de guarda que o
+// alinhamento de 32 deixa.
 constexpr size_t ObjectOffset(size_t size) noexcept {
-    return kPageSize - RoundedSize(size);
+    return (kPageSize - size) & ~(kAlignment - 1U);
+}
+
+// Bytes utilizáveis (malloc_usable_size): até a página de guarda.
+constexpr size_t UsableSize(size_t size) noexcept {
+    return kPageSize - ObjectOffset(size);
 }
 
 // Bloco na quarentena: o que o handler precisa para dizer quem alocou e

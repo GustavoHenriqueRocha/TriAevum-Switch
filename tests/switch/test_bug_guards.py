@@ -396,8 +396,8 @@ GUARDS = [
     # --- 26/10: heap corrompido (tours 16-20: chunk 0x50 com bk trocado = uso após free) ---
     Guard("heap corrompido: alocador com páginas de guarda precisa embrulhar todo o malloc do newlib",
           "CMake/oot3d/game.cmake",
-          r'oot3d_switch_guard_alloc\.cpp.*?-Wl,--wrap=_malloc_r -Wl,--wrap=_free_r -Wl,--wrap=_realloc_r '
-          r'-Wl,--wrap=_calloc_r\s+-Wl,--wrap=_malloc_usable_size_r',
+          r'oot3d_switch_guard_alloc\.cpp.*?-Wl,--wrap=_malloc_r -Wl,--wrap=_memalign_r -Wl,--wrap=_free_r '
+          r'-Wl,--wrap=_realloc_r\s+-Wl,--wrap=_calloc_r -Wl,--wrap=_malloc_usable_size_r',
           "oot3d_switch_guard_alloc_tests"),
     Guard("guard_alloc: calloc/realloc reais leem o cabeçalho do chunk; com bloco de guarda seria lixo",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
@@ -406,6 +406,11 @@ GUARDS = [
     Guard("guard_alloc: TLS só depois de ligado (a libnx chama o malloc antes de tudo)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'if \(gEnabled\.load\(std::memory_order_relaxed\) && InRange\(gConfig, size\) && !tBypass\)'),
+    Guard("guard_alloc: malloc() do devkitA64 manda n >= 32 para _memalign_r(32, n); sem ele nada ganha guarda",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
+          r'void\* __wrap__memalign_r\(struct _reent\* reent, size_t alignment, size_t size\) \{\s+'
+          r'if \(gEnabled\.load\(std::memory_order_relaxed\) && alignment <= kAlignment',
+          "oot3d_switch_guard_alloc_tests (TestLayout)"),
     Guard("guard_alloc: página de folga depois da guarda (cabeçalho do chunk seguinte do newlib)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.h",
           r'kBlockPages = 3U;'),

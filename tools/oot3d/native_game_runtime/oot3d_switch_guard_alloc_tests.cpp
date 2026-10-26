@@ -25,7 +25,8 @@ void TestParse() {
     Require(ParseConfig("40 96\r\n", config) && config.MinSize == 40U && config.MaxSize == 96U &&
                 config.QuarantineBlocks == 4096U,
             "range only keeps the default quarantine");
-    Require(ParseConfig("1 4000 0", config) == false, "max past the header must be rejected");
+    Require(ParseConfig("1 3969 0", config) == false, "max past the header must be rejected");
+    Require(ParseConfig("1 3968 0", config), "max right after the header is fine");
     Require(ParseConfig("72 57", config) == false, "min > max must be rejected");
     Require(ParseConfig("0 72", config) == false, "min 0 must be rejected");
     Require(ParseConfig("57 72 x", config) == false, "garbage must be rejected");
@@ -40,13 +41,17 @@ void TestLayout() {
     Require(!InRange(config, 56U) && InRange(config, 57U) && InRange(config, 72U) &&
                 !InRange(config, 73U),
             "default range must be exactly the 0x50 chunk class");
-    for (size_t size = 1; size <= 3968U; ++size) {
+    for (size_t size = 1; size <= kPageSize - sizeof(BlockHeader); ++size) {
         const size_t offset = ObjectOffset(size);
-        Require(offset % 16U == 0U, "object must stay 16-byte aligned");
-        Require(offset + RoundedSize(size) == kPageSize, "object must end at the guard page");
+        // devkitA64: malloc(n >= 32) = _memalign_r(32, n).
+        Require(offset % kAlignment == 0U, "object must stay 32-byte aligned");
+        Require(offset + size <= kPageSize && kPageSize - (offset + size) < kAlignment,
+                "object must end less than 32 bytes before the guard page");
         Require(offset >= sizeof(BlockHeader), "object must not overlap the header");
+        Require(UsableSize(size) >= size && offset + UsableSize(size) == kPageSize,
+                "usable size must reach the guard page");
     }
-    Require(sizeof(BlockHeader) % 16U == 0U, "header keeps the object alignment");
+    Require(!InRange(config, 0U), "size 0 is never guarded");
 }
 
 void TestQuarantine() {

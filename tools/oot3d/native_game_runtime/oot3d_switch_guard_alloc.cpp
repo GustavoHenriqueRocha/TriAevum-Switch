@@ -67,7 +67,7 @@ void __real__free_r(struct _reent* reent, void* pointer);
 void* __real__realloc_r(struct _reent* reent, void* pointer, size_t size);
 void* __real__calloc_r(struct _reent* reent, size_t count, size_t size);
 size_t __real__malloc_usable_size_r(struct _reent* reent, void* pointer);
-void* _memalign_r(struct _reent* reent, size_t alignment, size_t size);
+void* __real__memalign_r(struct _reent* reent, size_t alignment, size_t size);
 }
 
 namespace Oot3dNativeGame::GuardAlloc {
@@ -119,16 +119,15 @@ thread_local uintptr_t tStackEnd = 0;
 BlockHeader* HeaderOf(void* pointer) noexcept {
     const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
     const uintptr_t offset = address & (kPageSize - 1U);
-    if ((offset & 15U) != 0U || offset < sizeof(BlockHeader)) return nullptr;
+    if ((offset & (kAlignment - 1U)) != 0U || offset < sizeof(BlockHeader)) return nullptr;
     auto* header = reinterpret_cast<BlockHeader*>(address - offset);
     if (header->Magic != kMagic || ObjectOffset(header->Size) != offset) return nullptr;
     return header;
 }
 
 void* GuardedAlloc(struct _reent* reent, size_t size) noexcept {
-    // _memalign_r não é embrulhado; o malloc que ele faz por dentro (12 KiB+)
-    // fica fora da faixa e vai direto ao real.
-    void* const base = _memalign_r(reent, kPageSize, kBlockBytes);
+    // O malloc que o memalign real faz por dentro (12 KiB+) fica fora da faixa.
+    void* const base = __real__memalign_r(reent, kPageSize, kBlockBytes);
     if (base == nullptr) {
         gFallbacks.fetch_add(1U, std::memory_order_relaxed);
         return nullptr;
@@ -308,6 +307,15 @@ void* __wrap__malloc_r(struct _reent* reent, size_t size) {
     return __real__malloc_r(reent, size);
 }
 
+// malloc() do devkitA64: pedidos de 32 bytes ou mais chegam aqui com alinhamento 32.
+void* __wrap__memalign_r(struct _reent* reent, size_t alignment, size_t size) {
+    if (gEnabled.load(std::memory_order_relaxed) && alignment <= kAlignment &&
+        InRange(gConfig, size) && !tBypass) {
+        if (void* pointer = GuardedAlloc(reent, size)) return pointer;
+    }
+    return __real__memalign_r(reent, alignment, size);
+}
+
 void __wrap__free_r(struct _reent* reent, void* pointer) {
     if (pointer != nullptr && gUsed.load(std::memory_order_relaxed)) {
         if (BlockHeader* header = HeaderOf(pointer)) {
@@ -358,7 +366,7 @@ void* __wrap__realloc_r(struct _reent* reent, void* pointer, size_t size) {
 
 size_t __wrap__malloc_usable_size_r(struct _reent* reent, void* pointer) {
     if (pointer != nullptr && gUsed.load(std::memory_order_relaxed)) {
-        if (const BlockHeader* header = HeaderOf(pointer)) return RoundedSize(header->Size);
+        if (const BlockHeader* header = HeaderOf(pointer)) return UsableSize(header->Size);
     }
     return __real__malloc_usable_size_r(reent, pointer);
 }

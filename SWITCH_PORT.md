@@ -188,10 +188,12 @@ lê fora do heap, ASan/UBSan). A corrupção em si continua: o relatório traz o
 `0x1a` e `0x00ed5391`: escrita de 8 bytes num objeto já liberado (uso após o free), determinística.
 
 **Páginas de guarda (`config/guard_alloc`, `oot3d_switch_guard_alloc.h/.cpp`).** O link embrulha
-`_malloc_r`, `_free_r`, `_realloc_r`, `_calloc_r` e `_malloc_usable_size_r` do newlib (cada um num
-objeto próprio, então pega malloc/new/delete do processo inteiro). Com o arquivo no SD, pedidos na
+`_malloc_r`, `_memalign_r`, `_free_r`, `_realloc_r`, `_calloc_r` e `_malloc_usable_size_r` do newlib (cada um
+num objeto próprio, então pega malloc/new/delete do processo inteiro). O `malloc()` do devkitA64 manda
+todo pedido de 32 bytes ou mais para `_memalign_r(32, n)`: sem embrulhar esse, nada ganharia guarda;
+por isso o objeto fica alinhado a 32 (termina a menos de 32 bytes da guarda). Com o arquivo no SD, pedidos na
 faixa (padrão `57 72`, quarentena de 4096 blocos; o arquivo aceita `min max quarentena`) ganham 3
-páginas: cabeçalho e objeto no fim da página 0, página 1 sem acesso, página 2 de folga (o cabeçalho
+páginas: cabeçalho e objeto perto do fim da página 0, página 1 sem acesso, página 2 de folga (o cabeçalho
 do chunk seguinte do newlib fica 16 bytes antes do ponteiro alinhado dele). No free a página 0
 também perde o acesso e o bloco fica numa quarentena FIFO antes de voltar ao malloc. Um acesso a
 bloco liberado ou um estouro para a frente vira exceção na hora. O handler de exceção da libnx
