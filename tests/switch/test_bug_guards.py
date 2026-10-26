@@ -28,14 +28,10 @@ class Guard:
 
 
 GUARDS = [
-    # --- 26/10: menu de dev sem botões no deko3d; 60 sem overclock ---
+    # --- 26/10: menu de dev sem botões no deko3d ---
     Guard("menu de dev (L3+R3) abria no deko3d mas não recebia o controle (sem backend SDL do ImGui)",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
           r'void Fast3dGui::ImGuiWMNewFrame\(\) \{\s+if \(Deko3dRendererSelected\(\)\) \{.*?FeedDeko3dGamepad\(io\);.*?return;'),
-    Guard("sem overclock o fps60 tentava 60 e tremia: clock abaixo do portão trava a cadência em 30",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
-          r'SwitchClocksMhz\(cpuMhz, gpuMhz\);\s+cadenceGovernor\.SetClockThirty\(.*?ClocksForceThirty\(.*?cadenceGovernor\.ObservePresent',
-          test="tools/oot3d/native_game_runtime/oot3d_native_cadence_governor_tests.cpp (TestClockForcesThirty)"),
     # --- 24/10: backend deko3d (branch deko3d, docs/DEKO3D_PROGRESSO.md) ---
     Guard("[decisão] deko3d só com config/renderer = deko3d; sem o arquivo o GL de sempre",
           "runtime/three_ds_recomp/src/fast/Fast3dWindow.cpp",

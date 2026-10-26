@@ -1740,9 +1740,6 @@ void NativeA32WindowSession::Setup() {
     } else if (!options.KeepGameSpeed) {
       options.Fps60Mode.Mode = Oot3dNativeGame::Fps60Mode::Strict60;
     }
-    // config/fps60_clock: "cpu=1500 gpu=550" or "off" (oot3d_switch_clocks.h).
-    if (const auto text = readText("fps60_clock", "TRIAEVUM_FPS60_CLOCK"))
-      options.Fps60Clock = Oot3dNativeGame::ParseFps60ClockGate(trimmed(*text));
   }
 
 #if defined(__SWITCH__)

@@ -279,8 +279,6 @@ struct CadenceStats {
   uint64_t LateSteps = 0;
   uint64_t LockChanges = 0;
   double ThirtySeconds = 0.0;
-  // Part of ThirtySeconds forced by low clocks (SetClockThirty).
-  double ClockThirtySeconds = 0.0;
   // Game-thread busy ms of each step pair (step host frame + in-between).
   double GamePairMsSum = 0.0;
   uint64_t GamePairs = 0;
@@ -316,16 +314,10 @@ public:
     return mConfig;
   }
   [[nodiscard]] PresentCadence Cadence() const noexcept { return mCadence; }
-  // Every in-between frame dropped (the cadence is locked at 30, by the
-  // adaptive governor or by low clocks).
+  // Every in-between frame dropped (the cadence is locked at 30).
   [[nodiscard]] bool DropsInBetween() const noexcept {
-    return mClockThirty || mCadence == PresentCadence::Thirty;
+    return mCadence == PresentCadence::Thirty;
   }
-  // config/fps60_clock (oot3d_switch_clocks.h): the console runs below the
-  // clocks 60 needs, so the cadence stays at 30 in any fps60_mode until the
-  // clocks come back. Kept across Configure (it is the console's state).
-  void SetClockThirty(bool thirty) noexcept { mClockThirty = thirty; }
-  [[nodiscard]] bool ClockThirty() const noexcept { return mClockThirty; }
   // The per-frame governor may drop single in-between frames (legacy only).
   [[nodiscard]] bool PerFrameDropAllowed() const noexcept {
     return mConfig.Mode == Fps60Mode::Legacy;
@@ -420,10 +412,8 @@ public:
     const uint32_t refreshes = std::max<uint32_t>(
         1U, static_cast<uint32_t>(std::lround(dt * 1000.0 / mRefreshMs)));
     ++mStats.Intervals[std::min<size_t>(refreshes, 4U) - 1U];
-    if (DropsInBetween())
+    if (mCadence == PresentCadence::Thirty)
       mStats.ThirtySeconds += dt;
-    if (mClockThirty)
-      mStats.ClockThirtySeconds += dt;
     mPictureRefreshes += refreshes;
     if (picture == PresentedPicture::Repeat) {
       ++mStats.Repeats;
@@ -441,7 +431,7 @@ public:
     mPictureRefreshes = 0U;
 
     bool late = false;
-    if (!DropsInBetween()) {
+    if (mCadence == PresentCadence::Sixty) {
       late = refreshes >= 2U;
     } else if (picture == PresentedPicture::Step) {
       const double sinceStep = std::max(0.0, nowSeconds - mLastStepPresent);
@@ -453,9 +443,7 @@ public:
       ++mStats.LateSteps;
       mLastLate = nowSeconds;
     }
-    // Forced by the clocks: the adaptive lock waits (its misses at 30 mean
-    // nothing) and resumes at 60 when the clocks come back.
-    if (mConfig.Mode != Fps60Mode::Adaptive || mClockThirty)
+    if (mConfig.Mode != Fps60Mode::Adaptive)
       return;
 
     if (mCadence == PresentCadence::Sixty) {
@@ -513,7 +501,6 @@ private:
   Fps60ModeConfig mConfig{};
   double mRefreshMs = 1000.0 / 60.0;
   PresentCadence mCadence = PresentCadence::Sixty;
-  bool mClockThirty = false;
   std::array<bool, kMaxMissWindow> mMissRing{};
   size_t mMissIndex = 0U;
   uint32_t mMissCount = 0U;
