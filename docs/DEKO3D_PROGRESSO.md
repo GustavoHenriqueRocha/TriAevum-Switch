@@ -402,3 +402,12 @@ jogo esperando o render), 12 com `dk_finish_ms` 14-18 exatamente nos quadros 300
   `queue_buffer` de 23-27 ms (e alguns de 36-44). Hipótese: esse bloqueio passa para o render e
   dele para o jogo. O `spikes.txt` ganhou `dk_wait_present_ms`, `dk_acquire_ms` e `dk_qb_ms` (no fim
   da linha) para confirmar no próximo tour.
+
+### Resultado do tour p6v (26/10)
+
+- Os picos de `dk_finish` a cada 1800 quadros sumiram: o maior `dk_finish` da sessão foi 0,26 ms. O log assíncrono resolveu.
+- Fora de load: 27 picos, contra 56 na p6q (guest 16, pacer 10, render 1, gpu 0).
+- Nos picos de render_wait, `render_wait_ms` ≈ `dk_wait_present_ms` quase sempre, e `dk_qb_ms` fica em 24–26 ms (às vezes 35–60 ms logo depois de quadros de load de 100–190 ms).
+  Ou seja: o render espera a thread de present, que fica presa ~1,5 vblank dentro de `nwindowQueueBuffer`.
+  O `dkQueueAcquireImage` só demora (18–41 ms) quando não houve WaitPresent.
+- Próximo passo: o render não deve esperar o queueBuffer anterior. Opções: mover o acquire para a thread de present, deixando a próxima imagem pronta, ou descartar o present quando a thread estiver ocupada.
