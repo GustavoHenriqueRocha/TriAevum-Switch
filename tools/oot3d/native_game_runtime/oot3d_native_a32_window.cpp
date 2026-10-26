@@ -4,6 +4,7 @@
 #include "oot3d_native_a32_window_summary.h"
 #include "oot3d_hang_watchdog.h"
 #include "oot3d_switch_guard_alloc.h"
+#include "fast/backends/gfx_deko3d.h"
 
 namespace Oot3dA32Window {
 
@@ -158,6 +159,14 @@ void NativeA32WindowSession::Run() {
   // Guard pages (config/guard_alloc) from here on: the boot is left out (it
   // ran out of memory with every small block guarded).
   Oot3dNativeGame::GuardAlloc::Arm();
+  // config/grass (mod): the grass source rules of the product preset (the
+  // PC's default Grass object) for the deko3d backend; off without the file.
+  if (Fast::Deko3dRendererSelected()) {
+    static constexpr std::string_view kProductGraphics =
+#include "triaevum_product_graphics.inc"
+        ;
+    Fast::Deko3dConfigureGrass(kProductGraphics);
+  }
   // Hang watchdog (oot3d_hang_watchdog.h): logs/hang.txt when the game or
   // the render thread stops for > 3 s. The extra section reads the stream's
   // sync state with try_lock only (it runs while something may be stuck).

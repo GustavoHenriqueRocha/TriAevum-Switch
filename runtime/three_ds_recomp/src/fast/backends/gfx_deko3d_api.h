@@ -296,5 +296,12 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     Deko3dPicaCalls mCalls{};
 };
 
+namespace Deko3d {
+// gfx_deko3d_grass.cpp: a scene draw of the frame (opaque world draws become
+// grass sources) and the end of the frame (placements).
+void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame);
+void GrassEndFrame(uint64_t frame);
+} // namespace Deko3d
+
 } // namespace Fast
 #endif

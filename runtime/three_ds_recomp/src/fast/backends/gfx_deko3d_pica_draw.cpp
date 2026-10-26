@@ -383,6 +383,7 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         return reject("PICA framebuffer has zero extent");
     }
     EnsureFrame();
+    Deko3d::GrassObserveDraw(draw, mDevice.Frame()); // config/grass
 
     const PicaTargetKey key = MakePicaTargetKey(draw);
     bool created = false;

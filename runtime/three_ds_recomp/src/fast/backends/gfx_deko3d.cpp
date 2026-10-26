@@ -149,6 +149,7 @@ void GfxRenderingAPIDeko3d::FinishRender() {
         return;
     }
     const Deko3d::SwapClock swapClock;
+    Deko3d::GrassEndFrame(mDevice.Frame()); // config/grass: this frame's placements
     // After the window backend's pacing (SwapBuffersBegin), like the GL swap.
     if (!mDevice.FrameOpen()) {
         mDevice.BeginFrame();

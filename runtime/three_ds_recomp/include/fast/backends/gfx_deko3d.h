@@ -42,7 +42,7 @@ inline bool Deko3dRendererConfigSelects(std::string_view content) {
 
 // Build tag written at the top of logs/deko3d.txt: tells which NRO a log
 // came from (a p3 log and a p5 log looked alike, 24/10).
-inline constexpr const char* kDeko3dBuildTag = "p6y";
+inline constexpr const char* kDeko3dBuildTag = "p6z";
 
 // Presented frames logged in logs/deko3d.txt: the first, then 60, 300 and
 // 1800 (the PICA counters go with 300 and every 1800), then every 3600.
@@ -100,5 +100,11 @@ struct Deko3dSwapTimes {
     float QueueBufferMs = 0.0F;
 };
 Deko3dSwapTimes Deko3dLastSwapTimes();
+
+// config/grass (mod, off without the file): grass sources and placements on
+// the Switch from the Graphics JSON the game hands at start (the product
+// preset, triaevum_product_graphics.inc). p6z: CPU side only, logged to
+// logs/deko3d.txt; nothing is drawn yet.
+void Deko3dConfigureGrass(std::string_view graphicsJson);
 bool Deko3dTakeGpuFrame(Deko3dGpuFrame& frame);
 } // namespace Fast
