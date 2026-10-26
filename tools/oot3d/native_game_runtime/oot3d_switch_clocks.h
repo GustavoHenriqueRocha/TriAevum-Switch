@@ -17,8 +17,9 @@ namespace Oot3dNativeGame {
 #if defined(__SWITCH__)
 // " clocks: cpu_mhz=1785 gpu_mhz=768 mem_mhz=1600 clk_src=sysclk_real
 // op_mode=handheld perf_mode=normal sysclk_profile=handheld sysclk_enabled=1
-// sysclk_api=4 clk_ipc_us=40" para a linha da janela. Uma chamada IPC por
-// chamada desta função (uma por janela de 150 quadros); a sessão com o
+// sysclk_api=4 clk_ipc_us=40 clk_busy=0" para a linha da janela. Devolve a
+// leitura anterior e pede a próxima a uma thread própria (o IPC nunca roda na
+// thread do jogo; clk_busy=1 se a anterior ainda não voltou); a sessão com o
 // sys-clk é aberta na primeira vez e mantida. Campo que não deu para ler
 // fica -1 (clk_src=none quando o sys-clk não está rodando).
 std::string SwitchClockPerfSummary();

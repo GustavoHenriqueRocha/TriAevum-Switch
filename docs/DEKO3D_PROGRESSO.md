@@ -411,3 +411,19 @@ jogo esperando o render), 12 com `dk_finish_ms` 14-18 exatamente nos quadros 300
   Ou seja: o render espera a thread de present, que fica presa ~1,5 vblank dentro de `nwindowQueueBuffer`.
   O `dkQueueAcquireImage` só demora (18–41 ms) quando não houve WaitPresent.
 - Próximo passo: o render não deve esperar o queueBuffer anterior. Opções: mover o acquire para a thread de present, deixando a próxima imagem pronta, ou descartar o present quando a thread estiver ocupada.
+
+### p6w: present mailbox (`config/deko3d_present_mailbox`)
+
+A libnx empresta só uma imagem da janela por vez (`cur_slot`), então não dá para pegar a próxima adiantado.
+Na p6w o render desenha em 3 imagens próprias. Uma fila deko3d separada, na thread de present, faz dequeue, copia o quadro mais novo e faz queue. Quadro que não foi copiado a tempo é descartado.
+
+| tour20 (Water/MQ) | janelas | perdas | perdas/janela | janelas sem perda | picos fora de load |
+|---|---|---|---|---|---|
+| tour20 (pgo5o, Mesa) | 166 | 151 | 0,91 | 66% | — |
+| p6q | 168 | 177 | 1,05 | 64% | 56 |
+| p6v | 175 | 257 | 1,47 | 73% | 27 |
+| **p6w** | 198 | **105** | **0,53** | **78%** | **18** |
+
+- O acquire do render caiu para 0,004 ms no pior caso (na p6v chegava a 61 ms) e a GPU ficou igual (13,9 ms).
+- 266 quadros descartados. 150 deles numa única janela: a thread do jogo ficou 4,4 s parada no IPC `sys:clk GetCurrentContext` (hang.txt, uptime 312 s), e a tela parou junto.
+- p6x: a leitura do sys-clk foi para uma thread própria; a linha de perf usa o resultado anterior (`clk_busy`).

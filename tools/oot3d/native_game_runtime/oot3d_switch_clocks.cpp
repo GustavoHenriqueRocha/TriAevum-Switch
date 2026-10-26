@@ -8,9 +8,12 @@
 #if defined(__SWITCH__)
 #include <switch.h>
 
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include "oot3d_switch_clocks.h"
 #include "oot3d_hang_watchdog.h"
@@ -124,9 +127,7 @@ int Mhz(uint32_t hz) {
     return hz == 0U ? -1 : static_cast<int>((hz + 500000U) / 1000000U);
 }
 
-} // namespace
-
-std::string SwitchClockPerfSummary() {
+std::string ReadClocks() {
     int cpu = -1;
     int gpu = -1;
     int mem = -1;
@@ -179,6 +180,54 @@ std::string SwitchClockPerfSummary() {
          << " sysclk_api=" << (gSysClk.Open ? static_cast<int>(gSysClk.ApiVersion) : -1)
          << " clk_ipc_us=" << ipcMicroseconds;
     return text.str();
+}
+
+// O IPC do sys-clk numa thread própria: p6w (26/10) ficou 3,4 s parado em
+// GetCurrentContext na thread do jogo (travou 4,4 s). O jogo só lê o último
+// resultado e pede o próximo; nunca espera o sys-clk.
+struct ClockReader {
+    std::mutex Mutex;
+    std::condition_variable Wake;
+    std::string Last = "clocks: clk_src=none";
+    bool Requested = false;
+    bool Busy = false;
+    std::thread Thread;
+
+    void Loop() {
+        std::unique_lock<std::mutex> lock(Mutex);
+        for (;;) {
+            Wake.wait(lock, [this] { return Requested; });
+            Requested = false;
+            Busy = true;
+            lock.unlock();
+            std::string text = ReadClocks();
+            lock.lock();
+            Last = std::move(text);
+            Busy = false;
+        }
+    }
+};
+
+} // namespace
+
+std::string SwitchClockPerfSummary() {
+    static ClockReader* reader = [] {
+        auto* created = new ClockReader(); // nunca destruído: a thread vive até o fim do processo
+        created->Thread = std::thread([created] { created->Loop(); });
+        created->Thread.detach();
+        return created;
+    }();
+    std::string text;
+    bool busy = false;
+    {
+        const std::lock_guard<std::mutex> lock(reader->Mutex);
+        text = reader->Last;
+        busy = reader->Busy;
+        reader->Requested = true;
+    }
+    reader->Wake.notify_one();
+    // clk_busy=1: a leitura anterior ainda não voltou (sys-clk demorando).
+    return text + (busy ? " clk_busy=1" : " clk_busy=0");
 }
 
 } // namespace Oot3dNativeGame
