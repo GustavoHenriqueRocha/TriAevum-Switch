@@ -8,18 +8,20 @@
 // objeto de 57 a 72 bytes que já tinha sido liberado (uso após o free), e
 // determinística.
 //
-// Com config/guard_alloc no SD, todo pedido ao malloc com tamanho na faixa
-// configurada (padrão 57..72) ganha páginas próprias:
-//   [página 0: cabeçalho ... objeto no fim][página 1: guarda][página 2: folga]
-// O objeto termina a menos de 32 bytes da página de guarda (sem acesso), então
-// um estouro para a frente falha logo. No free a página 0 também perde o acesso e o
-// bloco entra numa quarentena FIFO; só volta ao malloc de verdade quando sai
-// dela. Uma escrita (ou leitura) num bloco liberado vira exceção no PC exato;
-// o handler de exceção grava em logs/hang.txt o PC, o endereço da falha, as
-// pilhas de alocação e de free do bloco atingido e o estado das threads
-// (oot3d_hang_watchdog). A página 2 existe porque o cabeçalho do chunk
+// Com config/guard_alloc no SD, a partir do início da sessão de jogo (Arm, no
+// HangWatch::Start; o boot fica de fora: com guarda desde o construtor o boot
+// ficou sem memória, "Not enough space", em 26/10), todo pedido ao malloc com
+// tamanho na faixa configurada (padrão 57..72) ganha páginas próprias:
+//   [página 0: cabeçalho ... objeto no fim][página 1: folga]
+// No free a página 0 perde o acesso (svcSetMemoryPermission) e o bloco entra
+// numa quarentena FIFO; só volta ao malloc de verdade quando sai dela. Uma
+// escrita (ou leitura) num bloco liberado vira exceção no PC exato; o handler
+// de exceção grava em logs/hang.txt o PC, o endereço da falha, as pilhas de
+// alocação e de free do bloco atingido e o estado das threads
+// (oot3d_hang_watchdog). A página 1 existe porque o cabeçalho do chunk
 // seguinte do newlib fica 16 bytes antes do ponteiro alinhado dele: sem ela
-// cairia na página de guarda do bloco anterior.
+// cairia na página 0 (sem acesso) do bloco anterior. Não há página de guarda
+// para estouro: a corrupção vista é de uso após o free (fd intacto).
 //
 // Ideia das páginas de guarda: TheMoonPeople/Chronicle PR #205 (arenas do port
 // de Switch com páginas de guarda via svcSetMemoryPermission).
@@ -30,12 +32,14 @@
 // aqui. O malloc() do devkitA64 manda todo pedido de 32 bytes ou mais para
 // _memalign_r(32, n), por isso o objeto fica alinhado a 32 e o _memalign_r
 // (alinhamento até 32) também ganha guarda.
-// Custo: 12 KiB e uma chamada ao kernel por bloco na faixa, mais uma no free;
-// só para diagnóstico.
+// Custo: 8 KiB por bloco na faixa e uma chamada ao kernel no free; só para
+// diagnóstico.
 //
-// config/guard_alloc: "min max quarentena" (bytes, bytes, blocos); vazio =
-// 57 72 4096. A quarentena segura blocos liberados sem acesso: quanto maior,
-// mais tarde um uso após o free ainda é pego (4096 blocos = 48 MiB).
+// config/guard_alloc: "min max quarentena vivos" (bytes, bytes, blocos,
+// blocos); vazio = 57 72 4096 32768. A quarentena segura blocos liberados sem
+// acesso (4096 = 32 MiB): quanto maior, mais tarde um uso após o free ainda é
+// pego. Com `vivos` blocos com guarda vivos (32768 = 256 MiB), os pedidos
+// seguintes vão para o malloc normal até algum ser liberado.
 
 #include <cstddef>
 #include <cstdint>
@@ -43,7 +47,7 @@
 namespace Oot3dNativeGame::GuardAlloc {
 
 inline constexpr size_t kPageSize = 0x1000U;
-inline constexpr size_t kBlockPages = 3U;
+inline constexpr size_t kBlockPages = 2U;
 inline constexpr size_t kBlockBytes = kBlockPages * kPageSize;
 inline constexpr uint64_t kMagic = 0x434c414452415547ULL;  // "GUARDALC"
 inline constexpr size_t kStackDepth = 12U;
@@ -54,9 +58,10 @@ struct Config {
     size_t MinSize = 57U;
     size_t MaxSize = 72U;
     size_t QuarantineBlocks = 4096U;
+    size_t MaxLive = 32768U;
 };
 
-// "min max quarentena"; o que faltar fica no padrão. Falso = texto inválido
+// "min max quarentena vivos"; o que faltar fica no padrão. Falso = texto inválido
 // (número ruim, min > max, min 0 ou max que não cabe na página 0).
 bool ParseConfig(const char* text, Config& config) noexcept;
 
@@ -74,13 +79,13 @@ constexpr bool InRange(const Config& config, size_t size) noexcept {
            size <= kPageSize - sizeof(BlockHeader);
 }
 
-// Deslocamento do objeto na página 0: o mais perto da página de guarda que o
-// alinhamento de 32 deixa.
+// Deslocamento do objeto na página 0: o mais perto do fim que o alinhamento
+// de 32 deixa (longe do cabeçalho).
 constexpr size_t ObjectOffset(size_t size) noexcept {
     return (kPageSize - size) & ~(kAlignment - 1U);
 }
 
-// Bytes utilizáveis (malloc_usable_size): até a página de guarda.
+// Bytes utilizáveis (malloc_usable_size): até o fim da página 0.
 constexpr size_t UsableSize(size_t size) noexcept {
     return kPageSize - ObjectOffset(size);
 }
@@ -146,10 +151,13 @@ struct Stats {
     uint64_t Live = 0;       // vivos agora
     uint64_t Quarantined = 0;
     uint64_t Fallbacks = 0;  // memalign ou svc falhou: foi para o malloc normal
+    uint64_t Skipped = 0;    // teto de vivos: foi para o malloc normal
 };
 
-// Lê config/guard_alloc e liga (Switch; chamado por um construtor bem cedo).
+// Lê config/guard_alloc (Switch; construtor, antes do jogo). Não liga.
 void Start() noexcept;
+// Liga, se o arquivo existia (início da sessão de jogo, depois do boot).
+void Arm() noexcept;
 [[nodiscard]] Stats CurrentStats() noexcept;
 
 } // namespace Oot3dNativeGame::GuardAlloc

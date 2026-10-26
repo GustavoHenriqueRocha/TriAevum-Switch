@@ -191,20 +191,26 @@ lê fora do heap, ASan/UBSan). A corrupção em si continua: o relatório traz o
 `_malloc_r`, `_memalign_r`, `_free_r`, `_realloc_r`, `_calloc_r` e `_malloc_usable_size_r` do newlib (cada um
 num objeto próprio, então pega malloc/new/delete do processo inteiro). O `malloc()` do devkitA64 manda
 todo pedido de 32 bytes ou mais para `_memalign_r(32, n)`: sem embrulhar esse, nada ganharia guarda;
-por isso o objeto fica alinhado a 32 (termina a menos de 32 bytes da guarda). Com o arquivo no SD, pedidos na
-faixa (padrão `57 72`, quarentena de 4096 blocos; o arquivo aceita `min max quarentena`) ganham 3
-páginas: cabeçalho e objeto perto do fim da página 0, página 1 sem acesso, página 2 de folga (o cabeçalho
-do chunk seguinte do newlib fica 16 bytes antes do ponteiro alinhado dele). No free a página 0
-também perde o acesso e o bloco fica numa quarentena FIFO antes de voltar ao malloc. Um acesso a
-bloco liberado ou um estouro para a frente vira exceção na hora. O handler de exceção da libnx
-(sempre ligado, grava e devolve, então o crash report do Atmosphère continua saindo) escreve
-"EXCEÇÃO" no `hang.txt`: `far`, PC/LR/cadeia da thread que falhou, `USO APÓS FREE` ou `ESTOURO` com
-serial, tamanho, deslocamento no objeto, há quanto tempo foi liberado e as pilhas de alocação e de
-free (`addr2line` nos offsets), mais as outras threads. `perf.txt` ganha `guard_alloc=1 guard_made
-guard_live guard_quarantine guard_fallbacks` (fallback = memalign ou `svcSetMemoryPermission`
-falhou e o bloco foi para o malloc normal). Custo: 12 KiB e uma chamada ao kernel por bloco na
-faixa, mais uma no free; só para diagnóstico. Teste: `oot3d_switch_guard_alloc_tests`. Ideia das
-páginas de guarda: Chronicle PR #205.
+por isso o objeto fica alinhado a 32. Com o arquivo no SD e a partir do início da sessão de jogo
+(`GuardAlloc::Arm()` junto do `HangWatch::Start`), pedidos na faixa ganham 2 páginas: cabeçalho e
+objeto no fim da página 0 e a página 1 de folga (o cabeçalho do chunk seguinte do newlib fica 16
+bytes antes do ponteiro alinhado dele e não pode cair numa página fechada). No free a página 0 perde
+o acesso e o bloco fica numa quarentena FIFO antes de voltar ao malloc. Um acesso a bloco liberado
+vira exceção na hora. Arquivo: `min max quarentena vivos`, vazio = `57 72 4096 32768` (quarentena de
+32 MiB; acima de 32768 blocos vivos, 256 MiB, os pedidos vão para o malloc normal).
+
+*p6r (26/10) não abriu*: com guarda desde o construtor, todo objeto pequeno do boot custava 12 KiB
+e o boot acabou sem memória (`boot-status.txt`: `status=failed detail=Not enough space`; crash
+report do Atmosphère = User Break no hbl). Correção: liga só na sessão, 2 páginas em vez de 3 (sem
+página de guarda para estouro: a corrupção é de uso após o free) e o teto de vivos.
+
+O handler de exceção da libnx (sempre ligado, grava e devolve, então o crash report do Atmosphère
+continua saindo) escreve "EXCEÇÃO" no `hang.txt`: `far`, PC/LR/cadeia da thread que falhou, `USO
+APÓS FREE` com serial, tamanho, deslocamento no objeto, há quanto tempo foi liberado e as pilhas de
+alocação e de free (`addr2line` nos offsets), mais as outras threads. `perf.txt` ganha `guard_alloc=1
+guard_made guard_live guard_quarantine guard_fallbacks guard_skipped`. Custo: 8 KiB por bloco na
+faixa e uma chamada ao kernel no free; só para diagnóstico. Teste: `oot3d_switch_guard_alloc_tests`.
+Ideia das páginas de guarda: Chronicle PR #205.
 
 **Watchdog de travamento** (`oot3d_hang_watchdog.h/.cpp`, ligado por padrão no Switch,
 `config/no_hang_watchdog` desliga):

@@ -1118,11 +1118,13 @@ deko3d com os **mesmos textos GLSL**:
   sempre o mesmo chunk, a faixa de tamanho sai do `size` dele (0x50 = pedidos de 57 a 72).
   `-Wl,--wrap=_malloc_r` (e `_memalign_r`, `_free_r`, `_realloc_r`, `_calloc_r`, `_malloc_usable_size_r`)
   pega o processo inteiro no newlib do devkitA64 — o `malloc()` dele manda n >= 32 para
-  `_memalign_r(32, n)`, então embrulhar só o `_malloc_r` não pega quase nada; o bloco vai para `_memalign_r(0x1000, 3 páginas)`, com o
-  objeto colado na página 1 (`svcSetMemoryPermission(Perm_None)`) e a página 2 de folga para o
-  cabeçalho do chunk vizinho. No free a página 0 também fecha e entra em quarentena. Cuidados: o
-  `calloc`/`realloc` reais leem o cabeçalho do chunk devolvido pelo malloc (desvie o malloc deles),
-  não toque em TLS antes de ligar (a libnx chama o malloc cedo) e o handler de exceção
+  `_memalign_r(32, n)`, então embrulhar só o `_malloc_r` não pega quase nada. O bloco vai para
+  `_memalign_r(0x1000, 2 páginas)`; no free a página do objeto fecha
+  (`svcSetMemoryPermission(Perm_None)`) e entra em quarentena; a segunda página é folga para o
+  cabeçalho do chunk vizinho. Cuidados: **não ligue no boot** (milhares de objetos pequenos × 8-12 KiB
+  esgotam o heap: o boot falha com "Not enough space") e ponha teto de blocos vivos; o
+  `calloc`/`realloc` reais leem o cabeçalho do chunk devolvido pelo malloc (desvie o malloc deles);
+  não toque em TLS antes de ligar (a libnx chama o malloc cedo); o handler de exceção
   (`__libnx_exception_handler` + `__nx_exception_stack`) não pode alocar. Ideia: Chronicle PR #205.
 - `config/heap_stats`, `config/heap_check_windows=1`: acha corrupção de heap ~5 s depois de ela
   acontecer. Usa uma varredura limitada dos bins do newlib (`oot3d_heap_bin_check.h`), não o

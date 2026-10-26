@@ -31,7 +31,8 @@ bool NextNumber(const char*& text, size_t& value, bool& found) noexcept {
 bool ParseConfig(const char* text, Config& config) noexcept {
     Config parsed;
     if (text != nullptr) {
-        size_t* const fields[] = {&parsed.MinSize, &parsed.MaxSize, &parsed.QuarantineBlocks};
+        size_t* const fields[] = {&parsed.MinSize, &parsed.MaxSize, &parsed.QuarantineBlocks,
+                                  &parsed.MaxLive};
         for (size_t* field : fields) {
             bool found = false;
             if (!NextNumber(text, *field, found)) return false;
@@ -76,12 +77,14 @@ namespace {
 constexpr const char* kConfigPath = "sdmc:/switch/oot3dre/config/guard_alloc";
 
 Config gConfig;
+std::atomic<bool> gConfigured{false};  // config/guard_alloc lido
 std::atomic<bool> gEnabled{false};
 std::atomic<bool> gUsed{false};  // já existe algum bloco com guarda
 std::atomic<uint64_t> gSerial{0};
 std::atomic<uint64_t> gGuarded{0};
 std::atomic<uint64_t> gLive{0};
 std::atomic<uint64_t> gFallbacks{0};
+std::atomic<uint64_t> gSkipped{0};
 Mutex gRingMutex;
 QuarantineRing gRing;
 
@@ -126,6 +129,10 @@ BlockHeader* HeaderOf(void* pointer) noexcept {
 }
 
 void* GuardedAlloc(struct _reent* reent, size_t size) noexcept {
+    if (gLive.load(std::memory_order_relaxed) >= gConfig.MaxLive) {
+        gSkipped.fetch_add(1U, std::memory_order_relaxed);
+        return nullptr;
+    }
     // O malloc que o memalign real faz por dentro (12 KiB+) fica fora da faixa.
     void* const base = __real__memalign_r(reent, kPageSize, kBlockBytes);
     if (base == nullptr) {
@@ -138,14 +145,6 @@ void* GuardedAlloc(struct _reent* reent, size_t size) noexcept {
     header->Serial = gSerial.fetch_add(1U, std::memory_order_relaxed) + 1U;
     header->AllocTicks = armGetSystemTick();
     CaptureStack(header->AllocStack);
-    if (R_FAILED(svcSetMemoryPermission(static_cast<u8*>(base) + kPageSize, kPageSize,
-                                        Perm_None))) {
-        // Sem blocos de memória livres no kernel, por exemplo.
-        header->Magic = 0;
-        __real__free_r(reent, base);
-        gFallbacks.fetch_add(1U, std::memory_order_relaxed);
-        return nullptr;
-    }
     gUsed.store(true, std::memory_order_relaxed);
     gGuarded.fetch_add(1U, std::memory_order_relaxed);
     gLive.fetch_add(1U, std::memory_order_relaxed);
@@ -154,7 +153,7 @@ void* GuardedAlloc(struct _reent* reent, size_t size) noexcept {
 
 // Devolve as páginas ao malloc de verdade.
 void Release(struct _reent* reent, uintptr_t page) noexcept {
-    svcSetMemoryPermission(reinterpret_cast<void*>(page), 2U * kPageSize, Perm_Rw);
+    svcSetMemoryPermission(reinterpret_cast<void*>(page), kPageSize, Perm_Rw);
     reinterpret_cast<BlockHeader*>(page)->Magic = 0;
     __real__free_r(reent, reinterpret_cast<void*>(page));
 }
@@ -171,6 +170,8 @@ void GuardedFree(struct _reent* reent, BlockHeader* header) noexcept {
     CaptureStack(entry.FreeStack);
     gLive.fetch_sub(1U, std::memory_order_relaxed);
     if (R_FAILED(svcSetMemoryPermission(header, kPageSize, Perm_None))) {
+        // Sem blocos de memória livres no kernel, por exemplo.
+        gFallbacks.fetch_add(1U, std::memory_order_relaxed);
         Release(reent, entry.Page);
         return;
     }
@@ -208,23 +209,6 @@ void AppendGuardVerdict(HangWatch::Text& text, uintptr_t address) {
         AppendStack(text, "pilha_free:", entry->FreeStack);
         return;
     }
-    // Página de guarda de um bloco vivo: o cabeçalho está uma página antes.
-    const uintptr_t page = address & ~(kPageSize - 1U);
-    MemoryInfo info{};
-    u32 pageInfo = 0;
-    if (page >= kPageSize && R_SUCCEEDED(svcQueryMemory(&info, &pageInfo, page - kPageSize)) &&
-        (info.perm & Perm_R) != 0) {
-        const auto* header = reinterpret_cast<const BlockHeader*>(page - kPageSize);
-        if (header->Magic == kMagic) {
-            const uintptr_t object = page - kPageSize + ObjectOffset(header->Size);
-            text.Str("ESTOURO: bloco vivo serial=").Dec(header->Serial).Str(" tamanho=")
-                .Dec(header->Size).Str(" objeto=").Hex(object).Str(" deslocamento=")
-                .SignedDec(static_cast<int64_t>(address) - static_cast<int64_t>(object))
-                .Char('\n');
-            AppendStack(text, "pilha_alloc:", header->AllocStack);
-            return;
-        }
-    }
     text.Str("fora dos blocos com guarda\n");
 }
 
@@ -241,7 +225,7 @@ void HandleException(ThreadExceptionDump* context) {
     text.Str("guard_alloc=").Dec(stats.Enabled ? 1U : 0U).Str(" faixa=").Dec(gConfig.MinSize)
         .Char('-').Dec(gConfig.MaxSize).Str(" criados=").Dec(stats.Guarded)
         .Str(" vivos=").Dec(stats.Live).Str(" quarentena=").Dec(stats.Quarantined)
-        .Str(" falhas=").Dec(stats.Fallbacks);
+        .Str(" falhas=").Dec(stats.Fallbacks).Str(" teto=").Dec(stats.Skipped);
     HangWatch::FaultFrame frame;
     frame.Pc = context->pc.x;
     frame.Lr = context->lr.x;
@@ -262,7 +246,7 @@ void HandleException(ThreadExceptionDump* context) {
 } // namespace
 
 void Start() noexcept {
-    if (gEnabled.load(std::memory_order_acquire)) return;
+    if (gConfigured.load(std::memory_order_acquire)) return;
     std::FILE* file = std::fopen(kConfigPath, "rb");
     if (file == nullptr) return;
     char text[128] = {};
@@ -280,7 +264,13 @@ void Start() noexcept {
     mutexInit(&gRingMutex);
     gRing = QuarantineRing(storage, config.QuarantineBlocks);
     gConfig = config;
-    gEnabled.store(true, std::memory_order_release);
+    gConfigured.store(true, std::memory_order_release);
+}
+
+void Arm() noexcept {
+    if (gConfigured.load(std::memory_order_acquire)) {
+        gEnabled.store(true, std::memory_order_release);
+    }
 }
 
 Stats CurrentStats() noexcept {
@@ -290,6 +280,7 @@ Stats CurrentStats() noexcept {
     stats.Live = gLive.load(std::memory_order_relaxed);
     stats.Quarantined = gRing.Count();
     stats.Fallbacks = gFallbacks.load(std::memory_order_relaxed);
+    stats.Skipped = gSkipped.load(std::memory_order_relaxed);
     return stats;
 }
 

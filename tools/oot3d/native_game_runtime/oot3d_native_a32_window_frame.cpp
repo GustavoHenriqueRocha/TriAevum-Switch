@@ -1383,7 +1383,8 @@ bool NativeA32WindowSession::RunFrame() {
           perf << " guard_alloc=1 guard_made=" << guard.Guarded
                << " guard_live=" << guard.Live
                << " guard_quarantine=" << guard.Quarantined
-               << " guard_fallbacks=" << guard.Fallbacks;
+               << " guard_fallbacks=" << guard.Fallbacks
+               << " guard_skipped=" << guard.Skipped;
         }
 #endif
         previousWaits = waits;

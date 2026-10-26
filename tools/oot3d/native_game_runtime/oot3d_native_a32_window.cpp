@@ -3,6 +3,7 @@
 #include "oot3d_native_a32_window_session.h"
 #include "oot3d_native_a32_window_summary.h"
 #include "oot3d_hang_watchdog.h"
+#include "oot3d_switch_guard_alloc.h"
 
 namespace Oot3dA32Window {
 
@@ -154,6 +155,9 @@ void NativeA32WindowSession::Run() {
   }
   auto &window = *windowPointer;
 #if defined(__SWITCH__)
+  // Guard pages (config/guard_alloc) from here on: the boot is left out (it
+  // ran out of memory with every small block guarded).
+  Oot3dNativeGame::GuardAlloc::Arm();
   // Hang watchdog (oot3d_hang_watchdog.h): logs/hang.txt when the game or
   // the render thread stops for > 3 s. The extra section reads the stream's
   // sync state with try_lock only (it runs while something may be stuck).

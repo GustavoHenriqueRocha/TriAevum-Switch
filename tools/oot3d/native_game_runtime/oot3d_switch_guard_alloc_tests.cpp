@@ -20,8 +20,11 @@ void Require(bool condition, const char* message) {
 void TestParse() {
     Config config;
     Require(ParseConfig("", config) && config.MinSize == 57U && config.MaxSize == 72U &&
-                config.QuarantineBlocks == 4096U,
-            "empty file must be the default 57..72 / 4096");
+                config.QuarantineBlocks == 4096U && config.MaxLive == 32768U,
+            "empty file must be the default 57..72 / 4096 / 32768");
+    Require(ParseConfig("57 72 100 2000", config) && config.QuarantineBlocks == 100U &&
+                config.MaxLive == 2000U,
+            "quarantine and live cap");
     Require(ParseConfig("40 96\r\n", config) && config.MinSize == 40U && config.MaxSize == 96U &&
                 config.QuarantineBlocks == 4096U,
             "range only keeps the default quarantine");
@@ -30,7 +33,7 @@ void TestParse() {
     Require(ParseConfig("72 57", config) == false, "min > max must be rejected");
     Require(ParseConfig("0 72", config) == false, "min 0 must be rejected");
     Require(ParseConfig("57 72 x", config) == false, "garbage must be rejected");
-    Require(ParseConfig("57 72 16 9", config) == false, "a fourth field must be rejected");
+    Require(ParseConfig("57 72 16 9 1", config) == false, "a fifth field must be rejected");
     Require(ParseConfig("99999999999999999999999 72", config) == false, "overflow");
     Require(ParseConfig("8 16 0", config) && config.QuarantineBlocks == 0U, "no quarantine");
 }
@@ -71,7 +74,7 @@ void TestQuarantine() {
     Require(ring.Push(fourth, evicted) && evicted.Serial == 1U, "oldest leaves first");
     Require(ring.Find(0x10000U) == nullptr, "evicted block is no longer found");
     const QuarantineEntry* hit = ring.Find(0x20000U + kPageSize + 8U);
-    Require(hit != nullptr && hit->Serial == 2U, "address in the guard page finds its block");
+    Require(hit != nullptr && hit->Serial == 2U, "address in the slack page finds its block");
     Require(ring.Find(0x40000U + kBlockBytes) == nullptr, "end is exclusive");
     Require(ring.Find(0x40000U + kBlockBytes - 1U) != nullptr, "last byte is inside");
 
