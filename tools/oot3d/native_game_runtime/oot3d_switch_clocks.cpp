@@ -212,9 +212,11 @@ struct ClockReader {
 
 std::string SwitchClockPerfSummary() {
     static ClockReader* reader = [] {
-        auto* created = new ClockReader(); // nunca destruído: a thread vive até o fim do processo
+        // Nunca destruído (a thread vive até o fim do processo). Sem detach():
+        // pthread_detach não existe na newlib do devkitA64 e o std::system_error
+        // ("Function not implemented") derrubou a p6x no primeiro perf.
+        auto* created = new ClockReader();
         created->Thread = std::thread([created] { created->Loop(); });
-        created->Thread.detach();
         return created;
     }();
     std::string text;

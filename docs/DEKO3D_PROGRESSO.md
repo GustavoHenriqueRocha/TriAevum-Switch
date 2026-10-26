@@ -427,3 +427,4 @@ Na p6w o render desenha em 3 imagens próprias. Uma fila deko3d separada, na thr
 - O acquire do render caiu para 0,004 ms no pior caso (na p6v chegava a 61 ms) e a GPU ficou igual (13,9 ms).
 - 266 quadros descartados. 150 deles numa única janela: a thread do jogo ficou 4,4 s parada no IPC `sys:clk GetCurrentContext` (hang.txt, uptime 312 s), e a tela parou junto.
 - p6x: a leitura do sys-clk foi para uma thread própria; a linha de perf usa o resultado anterior (`clk_busy`).
+- p6x: crash no primeiro perf. `std::thread::detach()` lança std::system_error ("Function not implemented"), porque não há pthread_detach na newlib do devkitA64. p6y: a thread fica guardada num objeto que nunca é destruído.
