@@ -56,6 +56,7 @@ bool ParseConfig(const char* text, Config& config) noexcept {
     if (parsed.GuardMode == Mode::Page && parsed.QuarantineBlocks > kMaxPageQuarantine) {
         parsed.QuarantineBlocks = kMaxPageQuarantine;
     }
+    if (parsed.GuardMode == Mode::Canary && parsed.MaxSize > kCanarySnapshotBytes) return false;
     if (parsed.MinSize == 0U || parsed.MinSize > parsed.MaxSize ||
         !InRange(parsed, parsed.MaxSize)) {
         return false;
@@ -159,6 +160,8 @@ CanaryHeader* CanaryOf(void* pointer) noexcept {
         address >= reinterpret_cast<uintptr_t>(fake_heap_end)) {
         return nullptr;
     }
+    // ptr - 8 é do próprio chunk (tamanho do newlib num bloco comum): legível.
+    if (reinterpret_cast<const uint64_t*>(address)[-1] != kCanaryTailMagic) return nullptr;
     auto* header = reinterpret_cast<CanaryHeader*>(address - sizeof(CanaryHeader));
     const uint64_t magic = header->Block.Magic;
     if ((magic != kCanaryMagic && magic != kCanaryFreedMagic) ||
@@ -177,6 +180,7 @@ void* CanaryAlloc(struct _reent* reent, size_t size) noexcept {
     }
     auto* const header = static_cast<CanaryHeader*>(base);
     header->Block.Magic = kCanaryMagic;
+    header->TailMagic = kCanaryTailMagic;
     header->Block.Size = size;
     header->Block.Serial = gSerial.fetch_add(1U, std::memory_order_relaxed) + 1U;
     header->Block.AllocTicks = armGetSystemTick();
@@ -217,7 +221,7 @@ void ReportCanary(const char* title, const CanaryHeader& header, const ChangedRa
             text.Str(" [").Dec(ranges[index].Begin).Char(',').Dec(ranges[index].End).Str("):");
             for (size_t byte = ranges[index].Begin;
                  byte < ranges[index].End && byte < ranges[index].Begin + 16U; ++byte) {
-                text.Char(' ').Hex(object[byte]);
+                text.Char(' ').Hex(header.Snapshot[byte]).Str("->").Hex(object[byte]);
             }
         }
         text.Char('\n');
@@ -237,13 +241,15 @@ void ReportCanary(const char* title, const CanaryHeader& header, const ChangedRa
 void CanaryRelease(struct _reent* reent, CanaryHeader* header) noexcept {
     ChangedRange ranges[8];
     size_t changedBytes = 0;
-    const size_t rangeCount = FindCanaryChanges(reinterpret_cast<const uint8_t*>(header + 1),
-                                                header->Block.Size, ranges, 8U, changedBytes);
+    const size_t rangeCount =
+        FindCanaryChanges(reinterpret_cast<const uint8_t*>(header + 1), header->Snapshot,
+                          header->Block.Size, ranges, 8U, changedBytes);
     if (changedBytes != 0U) {
         gCanaryHits.fetch_add(1U, std::memory_order_relaxed);
         ReportCanary("USO APÓS FREE (canário)", *header, ranges, rangeCount, changedBytes, false);
     }
     header->Block.Magic = 0;
+    header->TailMagic = 0;
     __real__free_r(reent, header);
 }
 
@@ -258,7 +264,9 @@ void CanaryFree(struct _reent* reent, CanaryHeader* header) noexcept {
     header->FreeTicks = armGetSystemTick();
     header->FreeThread = threadGetCurHandle();
     CaptureStack(header->FreeStack);
-    std::memset(header + 1, kCanaryFill, header->Block.Size);
+    // Cópia, não preenchimento: leituras depois do free continuam vendo os
+    // dados antigos (com 0xFD o console inteiro travou).
+    std::memcpy(header->Snapshot, header + 1, header->Block.Size);
     gLive.fetch_sub(1U, std::memory_order_relaxed);
     uintptr_t evicted = 0;
     mutexLock(&gRingMutex);

@@ -39,8 +39,8 @@ void TestParse() {
             "mode right after the range");
     Require(ParseConfig("57 72 1 1 pagin", config) == false, "unknown mode");
     Require(ParseConfig("57 72 1 1 canario 5", config) == false, "number after the mode");
-    Require(ParseConfig("1 3969 0", config) == false, "max past the header must be rejected");
-    Require(ParseConfig("1 3968 0", config), "max right after the header is fine");
+    Require(ParseConfig("1 3969 0 1 pagina", config) == false, "max past the header must be rejected");
+    Require(ParseConfig("1 3968 0 1 pagina", config), "max right after the header is fine");
     Require(ParseConfig("72 57", config) == false, "min > max must be rejected");
     Require(ParseConfig("0 72", config) == false, "min 0 must be rejected");
     Require(ParseConfig("57 72 x", config) == false, "garbage must be rejected");
@@ -70,21 +70,29 @@ void TestLayout() {
 
 void TestCanary() {
     uint8_t object[72];
-    for (uint8_t& byte : object) byte = kCanaryFill;
+    uint8_t snapshot[72];
+    for (size_t index = 0; index < sizeof(object); ++index) {
+        object[index] = snapshot[index] = static_cast<uint8_t>(index * 7U);
+    }
     ChangedRange ranges[2];
     size_t changed = 99;
-    Require(FindCanaryChanges(object, sizeof(object), ranges, 2U, changed) == 0U && changed == 0U,
+    Require(FindCanaryChanges(object, snapshot, sizeof(object), ranges, 2U, changed) == 0U &&
+                changed == 0U,
             "untouched object");
     // A escrita dos tours 16-20: 0x00ed5391'0000001a no byte 8.
     const uint8_t write[8] = {0x1a, 0, 0, 0, 0x91, 0x53, 0xed, 0};
     for (size_t index = 0; index < 8U; ++index) object[8U + index] = write[index];
-    object[70] = 0;
-    object[0] = 1;
-    const size_t count = FindCanaryChanges(object, sizeof(object), ranges, 2U, changed);
+    object[70] = static_cast<uint8_t>(snapshot[70] + 1U);
+    object[0] = static_cast<uint8_t>(snapshot[0] + 1U);
+    const size_t count = FindCanaryChanges(object, snapshot, sizeof(object), ranges, 2U, changed);
     Require(count == 2U && ranges[0].Begin == 0U && ranges[0].End == 1U && ranges[1].Begin == 8U &&
                 ranges[1].End == 16U && changed == 10U,
             "ranges are merged and capped; every changed byte is counted");
-    Require(sizeof(CanaryHeader) == 256U, "canary header is 256 bytes");
+    Require(sizeof(CanaryHeader) == 384U, "canary header is 384 bytes");
+    Config config;
+    Require(ParseConfig("57 129 1 1 canario", config) == false,
+            "canary range must fit the snapshot");
+    Require(ParseConfig("57 129 1 1 pagina", config), "page mode has no snapshot limit");
 
     uintptr_t storage[2];
     PointerRing ring(storage, 2U);

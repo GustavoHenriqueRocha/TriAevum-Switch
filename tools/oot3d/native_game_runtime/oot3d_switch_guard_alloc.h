@@ -10,13 +10,17 @@
 //
 // Dois modos (5º campo de config/guard_alloc):
 //
-// "canario" (padrão): o bloco é o objeto com um cabeçalho de 256 bytes antes
-// (alocação comum, sem chamada ao kernel). No free o objeto é preenchido com
-// 0xFD e fica numa quarentena FIFO longa (131072 blocos, ~45 MiB); quando sai
-// dela os bytes são conferidos: se algum mudou, logs/hang.txt ganha "USO APÓS
-// FREE (canário)" com quem alocou, quem liberou, quais bytes mudaram e para
-// que valor. Não dá o PC da escrita, mas dá o dono do objeto. Free duplo vira
-// "FREE DUPLO" no mesmo arquivo.
+// "canario" (padrão): o bloco é o objeto com um cabeçalho de 384 bytes antes
+// (alocação comum, sem chamada ao kernel). No free o cabeçalho guarda uma
+// cópia dos bytes do objeto (o objeto fica como estava) e o bloco entra numa
+// quarentena FIFO longa (131072 blocos, ~60 MiB); quando sai dela, o objeto é
+// comparado com a cópia: se algum byte mudou, logs/hang.txt ganha "USO APÓS
+// FREE (canário)" com quem alocou, quem liberou, quais bytes mudaram (de/para).
+// Não dá o PC da escrita, mas dá o dono do objeto. Free duplo vira "FREE
+// DUPLO" no mesmo arquivo. A 1ª versão (p6t) enchia o objeto com 0xFD no free:
+// uma leitura depois do free, que antes via os dados antigos e seguia, passou
+// a ler lixo e o console inteiro travou (26/10). A cópia mantém as leituras
+// como sem o guarda e só acusa escritas; o canário exige max <= 128.
 //
 // "pagina": o modo abaixo, com o PC exato, mas cada bloco liberado fecha uma
 // página e divide um bloco de memória do kernel. Com 32768 na quarentena
@@ -133,29 +137,36 @@ struct QuarantineEntry {
 // Modo canário: cabeçalho logo antes do objeto (alocação comum).
 inline constexpr uint64_t kCanaryMagic = 0x5952414e41434c47ULL;       // "GLCANARY"
 inline constexpr uint64_t kCanaryFreedMagic = 0x4545524659524143ULL;  // "CARYFREE"
-inline constexpr uint8_t kCanaryFill = 0xFDU;
+inline constexpr uint64_t kCanaryTailMagic = 0x4c494154594e4143ULL;   // "CANYTAIL"
+inline constexpr size_t kCanarySnapshotBytes = 128U;
 
 struct CanaryHeader {
     BlockHeader Block;
     uint64_t FreeTicks;
     uint64_t FreeThread;
     uint64_t FreeStack[kStackDepth];
-    uint64_t Padding[2];
+    uint8_t Snapshot[kCanarySnapshotBytes];  // o objeto no momento do free
+    uint64_t Padding;
+    // Logo antes do objeto (ptr - 8): num bloco comum ali mora o tamanho do
+    // chunk do newlib, sempre legível. Só com esta marca o free lê o resto do
+    // cabeçalho em ptr - 384: ler lá direto caiu numa página não mapeada (p6t).
+    uint64_t TailMagic;
 };
 static_assert(sizeof(CanaryHeader) % 32U == 0U, "objeto alinhado a 32");
 
-// Trechos do objeto liberado que não são mais kCanaryFill: até `capacity`
+// Trechos do objeto liberado que diferem da cópia do free: até `capacity`
 // pares [início, fim). Devolve quantos achou (e conta todos em `changedBytes`).
 struct ChangedRange {
     size_t Begin;
     size_t End;
 };
-inline size_t FindCanaryChanges(const uint8_t* object, size_t size, ChangedRange* ranges,
-                                size_t capacity, size_t& changedBytes) noexcept {
+inline size_t FindCanaryChanges(const uint8_t* object, const uint8_t* snapshot, size_t size,
+                                ChangedRange* ranges, size_t capacity,
+                                size_t& changedBytes) noexcept {
     size_t count = 0;
     changedBytes = 0;
     for (size_t index = 0; index < size; ++index) {
-        if (object[index] == kCanaryFill) continue;
+        if (object[index] == snapshot[index]) continue;
         ++changedBytes;
         if (count > 0U && ranges[count - 1U].End == index) {
             ranges[count - 1U].End = index + 1U;

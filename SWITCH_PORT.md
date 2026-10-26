@@ -220,6 +220,15 @@ liberado, os trechos mudados com os bytes, e as pilhas de alocação e de free. 
 objeto; depois o modo página pode mirar só nele. O modo página fica limitado a 4096 na quarentena.
 `perf.txt`: `guard_canary=1 guard_canary_hits guard_double_frees`.
 
+*p6t (26/10) travou o console inteiro*: o canário enchia o objeto com 0xFD no free. O
+`hang.txt` mostrou "EXCEÇÃO" no `__wrap__free_r` (thread do jogo, `vector<Oot3dPicaDrawSubmission>`
+realocando): o free lia `ptr - 256` para achar o cabeçalho e o endereço não estava mapeado (`far`
+= ptr − 0x100, `esr=0x92000007`). Correções no p6u: uma marca em `ptr - 8` (num bloco comum ali é o
+tamanho do chunk do newlib, sempre legível) antes de ler o resto do cabeçalho, e o free guarda uma
+**cópia** do objeto (cabeçalho de 384 bytes, faixa até 128) em vez de encher com 0xFD: leituras
+depois do free continuam vendo os dados antigos, como sem o guarda, e só escritas são acusadas
+(relatório com os bytes de/para).
+
 O handler de exceção da libnx (sempre ligado, grava e devolve, então o crash report do Atmosphère
 continua saindo) escreve "EXCEÇÃO" no `hang.txt`: `far`, PC/LR/cadeia da thread que falhou, `USO
 APÓS FREE` com serial, tamanho, deslocamento no objeto, há quanto tempo foi liberado e as pilhas de
