@@ -419,7 +419,7 @@ Na p6w o render desenha em 3 imagens próprias. Uma fila deko3d separada, na thr
 
 | tour20 (Water/MQ) | janelas | perdas | perdas/janela | janelas sem perda | picos fora de load |
 |---|---|---|---|---|---|
-| tour20 (pgo5o, Mesa) | 166 | 151 | 0,91 | 66% | — |
+| tour20 (pgo5o, Mesa) | 166 | 151 | 0,91 | 66% | 43 |
 | p6q | 168 | 177 | 1,05 | 64% | 56 |
 | p6v | 175 | 257 | 1,47 | 73% | 27 |
 | **p6w** | 198 | **105** | **0,53** | **78%** | **18** |
