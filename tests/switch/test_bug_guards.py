@@ -155,7 +155,8 @@ GUARDS = [
           "oot3d_deko3d_backend_tests (DRS: conteúdo menor que a alocação)"),
     Guard("deko3d p6p: present no fio próprio sem esperar o anterior → nwindow perde o slot atual (dequeue antes do queue)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
-          r'WaitPresent\(\);\s+mWindowSlot = dkQueueAcquireImage\(mQueue, mSwapchain\);'),
+          r'WaitPresent\(\);(?:(?!dkQueueAcquireImage|QueuePresent).){0,800}?'
+          r'mWindowSlot = dkQueueAcquireImage\(mQueue, mSwapchain\);'),
     Guard("deko3d p6p: janela comprimida com present no fio próprio (só dkQueuePresentImage descomprime)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
           r'if \(!mPresentThreaded\) \{\s+layoutMaker\.flags \|= DkImageFlags_HwCompression;'),
