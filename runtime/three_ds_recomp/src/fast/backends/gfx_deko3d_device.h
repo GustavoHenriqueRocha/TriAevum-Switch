@@ -64,6 +64,8 @@ constexpr uint32_t AlignUp(uint32_t value, uint32_t alignment) {
 
 // sdmc:/switch/oot3dre/logs/deko3d.txt (truncated by Device::Create).
 void Log(const char* format, ...) __attribute__((format(printf, 1, 2)));
+// Writes the queued log lines and stops the writer thread (Device::Destroy).
+void FlushLog();
 
 struct StreamSpan {
     void* Cpu = nullptr;

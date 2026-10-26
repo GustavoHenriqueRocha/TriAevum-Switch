@@ -42,7 +42,7 @@ inline bool Deko3dRendererConfigSelects(std::string_view content) {
 
 // Build tag written at the top of logs/deko3d.txt: tells which NRO a log
 // came from (a p3 log and a p5 log looked alike, 24/10).
-inline constexpr const char* kDeko3dBuildTag = "p6q";
+inline constexpr const char* kDeko3dBuildTag = "p6v";
 
 // Presented frames logged in logs/deko3d.txt: the first, then 60, 300 and
 // 1800 (the PICA counters go with 300 and every 1800), then every 3600.
@@ -92,6 +92,12 @@ struct Deko3dSwapTimes {
     float FenceMs = 0.0F;   // waiting for the frame in flight (BeginFrame)
     float SubmitMs = 0.0F;  // the frame's last submit (dkQueueSubmitCommands + flush)
     float PresentMs = 0.0F; // dkQueuePresentImage
+    // Antes do acquire da janela: espera pelo present thread (o
+    // nwindowQueueBuffer do quadro anterior), o acquire em si e quanto aquele
+    // nwindowQueueBuffer levou (p6v: picos de render_wait).
+    float WaitPresentMs = 0.0F;
+    float AcquireMs = 0.0F;
+    float QueueBufferMs = 0.0F;
 };
 Deko3dSwapTimes Deko3dLastSwapTimes();
 bool Deko3dTakeGpuFrame(Deko3dGpuFrame& frame);

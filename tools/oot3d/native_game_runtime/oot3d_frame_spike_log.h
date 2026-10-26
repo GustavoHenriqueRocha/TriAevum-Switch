@@ -93,6 +93,10 @@ struct FrameSpikeSample {
   float DkFenceMs = 0.0F;
   float DkSubmitMs = 0.0F;
   float DkPresentMs = 0.0F;
+  // p6v: espera pelo present thread, acquire e o último nwindowQueueBuffer.
+  float DkWaitPresentMs = 0.0F;
+  float DkAcquireMs = 0.0F;
+  float DkQueueBufferMs = 0.0F;
 };
 
 struct FrameSpikeRecord {
@@ -260,7 +264,8 @@ inline int FormatFrameSpike(const FrameSpikeRecord &record, char *out, size_t si
       "spike t=%.3f host=%llu guest=%llu kind=%s refreshes=%u expected=%u stage=%s "
       "guest_ms=%.2f game_ms=%.2f render_ms=%.2f render_wait_ms=%.2f pacer_ms=%.2f "
       "swap_ms=%.2f gpu_ms=%.2f top=%s top_ms=%.2f ctx=%s tex_new=%u prog_new=%u "
-      "shader_new=%u dk_finish_ms=%.2f dk_fence_ms=%.2f dk_submit_ms=%.2f dk_present_ms=%.2f\n",
+      "shader_new=%u dk_finish_ms=%.2f dk_fence_ms=%.2f dk_submit_ms=%.2f dk_present_ms=%.2f "
+      "dk_wait_present_ms=%.2f dk_acquire_ms=%.2f dk_qb_ms=%.2f\n",
       s.TimeSeconds, static_cast<unsigned long long>(s.HostFrame),
       static_cast<unsigned long long>(s.GuestFrame), SpikeFrameKindName(s.Kind),
       static_cast<unsigned>(s.Refreshes), static_cast<unsigned>(s.Expected),
@@ -268,7 +273,7 @@ inline int FormatFrameSpike(const FrameSpikeRecord &record, char *out, size_t si
       s.RenderWaitMs, s.PacerWaitMs, s.SwapMs, s.GpuMs, SpikeTopStageName(s.TopStage),
       s.TopStageMs, context, static_cast<unsigned>(s.TexturesNew),
       static_cast<unsigned>(s.ProgramsNew), static_cast<unsigned>(s.ShadersNew), s.DkFinishMs, s.DkFenceMs,
-      s.DkSubmitMs, s.DkPresentMs);
+      s.DkSubmitMs, s.DkPresentMs, s.DkWaitPresentMs, s.DkAcquireMs, s.DkQueueBufferMs);
 }
 
 } // namespace Oot3dNativeGame

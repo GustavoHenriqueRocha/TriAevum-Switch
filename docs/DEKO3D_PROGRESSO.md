@@ -387,3 +387,18 @@ aplicou (escala média 3 em 113 de 171 janelas, desceu até 2,25). **Atenção:*
 - p6p: queue-buffer num fio próprio; a espera migrou para o acquire seguinte (~26 ms).
 - p6q: 4 imagens na janela tiram a fila da tela do limite; melhor resultado até aqui.
 - Pacote de shaders v4 (305): MQ e adulto sem uber. Water Temple adulto ainda 8 perdidas/janela (não é shader).
+
+## p6v (26/10): picos fora de carregamento do tour p6q (56)
+
+Classificação do `spikes.txt` (última sessão, sem `ctx=load`): 29 com `render_wait_ms` 20-38 (o
+jogo esperando o render), 12 com `dk_finish_ms` 14-18 exatamente nos quadros 300, 3600, 5400…
+(múltiplos de 1800), 10 de lógica do jogo, 4 de GPU.
+
+- **Os 12 de 1800 quadros eram nossos:** `Deko3d::Log` abria/escrevia/fechava `logs/deko3d.txt`
+  no render thread, e a cada 1800 quadros saem a linha do quadro e os contadores PICA. Agora o
+  `Log` só põe a linha numa fila e uma thread de serviço grava; `Device::Destroy` chama `FlushLog`.
+- **Os 29 de render_wait:** o acquire da janela chama `WaitPresent`, que espera o present thread
+  terminar o `nwindowQueueBuffer` do quadro anterior; no `dkperf` do p6u quase toda janela tem 1-8
+  `queue_buffer` de 23-27 ms (e alguns de 36-44). Hipótese: esse bloqueio passa para o render e
+  dele para o jogo. O `spikes.txt` ganhou `dk_wait_present_ms`, `dk_acquire_ms` e `dk_qb_ms` (no fim
+  da linha) para confirmar no próximo tour.

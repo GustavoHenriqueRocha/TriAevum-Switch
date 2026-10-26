@@ -14,15 +14,61 @@
 #include <cstdio>
 #include <cstddef>
 #include <cstring>
+#include <condition_variable>
+#include <deque>
 #include <mutex>
+#include <string>
+#include <thread>
 #include <utility>
 #include <sstream>
 
 namespace Fast::Deko3d {
 namespace {
+// logs/deko3d.txt: Log() only queues the line; a writer thread (service
+// priority, oot3d_switch_threads.cpp) does the fopen/write/fclose. Written on
+// the render thread it cost 14-18 ms every 1800 frames (the PICA counters and
+// the frame line at 300, 1800, 3600...: 12 of the 56 spikes out of loading in
+// the p6q tour, all with dk_finish_ms 14-18).
 std::mutex gLogMutex;
-bool gLogTruncated = false;
+std::condition_variable gLogReady;
+std::deque<std::string> gLogQueue;
+std::thread gLogThread;
+bool gLogStop = false;
+bool gLogTruncated = false;  // writer thread (or FlushLog with it stopped)
 constexpr const char* kLogPath = "sdmc:/switch/oot3dre/logs/deko3d.txt";
+
+void WriteLogLines(std::deque<std::string>& lines) {
+    FILE* file = std::fopen(kLogPath, gLogTruncated ? "a" : "w");
+    gLogTruncated = true;
+    if (file == nullptr) {
+        lines.clear();
+        return;
+    }
+    for (const std::string& line : lines) {
+        std::fputs(line.c_str(), file);
+        std::fputc('\n', file);
+    }
+    std::fclose(file);
+    lines.clear();
+}
+
+void LogWriterLoop() {
+    std::deque<std::string> batch;
+    std::unique_lock lock(gLogMutex);
+    for (;;) {
+        gLogReady.wait(lock, [] { return gLogStop || !gLogQueue.empty(); });
+        if (gLogQueue.empty()) {
+            return;
+        }
+        batch.swap(gLogQueue);
+        lock.unlock();
+        WriteLogLines(batch);
+        lock.lock();
+    }
+}
+
+// Quanto o present thread levou no último nwindowQueueBuffer (spikes.txt).
+std::atomic<uint64_t> gLastQueueBufferNs{0};
 
 // dkperf: written by the render thread, taken by the perf window (game
 // thread).
@@ -114,18 +160,33 @@ void DebugCallback(void*, const char* context, DkResult result, const char* mess
 } // namespace
 
 void Log(const char* format, ...) {
-    std::lock_guard lock(gLogMutex);
-    FILE* file = std::fopen(kLogPath, gLogTruncated ? "a" : "w");
-    gLogTruncated = true;
-    if (file == nullptr) {
-        return;
-    }
+    char line[512];
     va_list args;
     va_start(args, format);
-    std::vfprintf(file, format, args);
+    std::vsnprintf(line, sizeof(line), format, args);
     va_end(args);
-    std::fputc('\n', file);
-    std::fclose(file);
+    {
+        const std::lock_guard lock(gLogMutex);
+        gLogQueue.emplace_back(line);
+        if (!gLogThread.joinable() && !gLogStop) {
+            gLogThread = std::thread(LogWriterLoop);
+        }
+    }
+    gLogReady.notify_one();
+}
+
+void FlushLog() {
+    {
+        const std::lock_guard lock(gLogMutex);
+        gLogStop = true;
+    }
+    gLogReady.notify_one();
+    if (gLogThread.joinable()) {
+        gLogThread.join();
+    }
+    // Lines queued after the writer left (or with no writer at all).
+    const std::lock_guard lock(gLogMutex);
+    WriteLogLines(gLogQueue);
 }
 
 Device::~Device() {
@@ -272,6 +333,7 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
 
 void Device::Destroy() noexcept {
     StopPresentThread();
+    FlushLog();
     if (mQueue != nullptr) {
         dkQueueWaitIdle(mQueue);
     }
@@ -424,7 +486,14 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
         }
         const uint64_t begin = NowNanoseconds();
         WaitPresent();
+        // spikes.txt: o render parado esperando o present thread devolver o
+        // nwindowQueueBuffer do quadro anterior (p6q: ~24 ms, quase toda janela).
+        const uint64_t presentDone = NowNanoseconds();
+        gLastSwap.WaitPresentMs = static_cast<float>(static_cast<double>(presentDone - begin) / 1.0e6);
+        gLastSwap.QueueBufferMs = static_cast<float>(
+            static_cast<double>(gLastQueueBufferNs.load(std::memory_order_relaxed)) / 1.0e6);
         mWindowSlot = dkQueueAcquireImage(mQueue, mSwapchain);
+        gLastSwap.AcquireMs = static_cast<float>(static_cast<double>(NowNanoseconds() - presentDone) / 1.0e6);
         if (mTimestamps != nullptr) {
             dkCmdBufReportCounter(mCmd, DkCounter_TimestampPipelineTop,
                                   dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + 2U * kTimestampBytes);
@@ -529,7 +598,9 @@ void Device::PresentLoop() {
         lock.unlock();
         const uint64_t begin = NowNanoseconds();
         const Result rc = nwindowQueueBuffer(nwindowGetDefault(), slot, &fence);
-        NoteCpuWait(gQueueBufferWait, NowNanoseconds() - begin);
+        const uint64_t queueNs = NowNanoseconds() - begin;
+        NoteCpuWait(gQueueBufferWait, queueNs);
+        gLastQueueBufferNs.store(queueNs, std::memory_order_relaxed);
         if (R_FAILED(rc)) {
             static bool reported = false;
             if (!reported) {

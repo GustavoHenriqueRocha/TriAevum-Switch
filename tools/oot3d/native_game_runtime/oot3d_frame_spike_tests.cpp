@@ -371,6 +371,23 @@ void TestPacerAnnouncesDeadlineBeforeWait() {
 
 } // namespace
 
+// p6v: espera pelo present thread, acquire e nwindowQueueBuffer no fim da
+// linha (as colunas antigas seguem no mesmo lugar para o spike_report.py).
+void TestDeko3dPresentFieldsAtTheEnd() {
+  FrameSpikeRecord record;
+  record.Sample.DkPresentMs = 0.01F;
+  record.Sample.DkWaitPresentMs = 23.5F;
+  record.Sample.DkAcquireMs = 0.25F;
+  record.Sample.DkQueueBufferMs = 24.0F;
+  char line[1024];
+  const int size = FormatFrameSpike(record, line, sizeof(line));
+  Require(size > 0 && static_cast<size_t>(size) < sizeof(line), "linha cabe");
+  const std::string text(line);
+  Require(text.find(" dk_present_ms=0.01 dk_wait_present_ms=23.50 dk_acquire_ms=0.25 dk_qb_ms=24.00\n") !=
+              std::string::npos,
+          "campos do present no fim, na ordem");
+}
+
 int main(int argc, char **argv) {
   const bool report = argc > 1 && std::strcmp(argv[1], "--report") == 0;
   TestVsyncModelPeriodAndPhase();
@@ -386,6 +403,7 @@ int main(int argc, char **argv) {
   TestDriftDisappearsWithVsyncPacer(report);
   TestPacerAnchorsToVsyncGrid();
   TestPacerAnnouncesDeadlineBeforeWait();
+  TestDeko3dPresentFieldsAtTheEnd();
   if (gFailures != 0) {
     std::fprintf(stderr, "%d falha(s)\n", gFailures);
     return 1;

@@ -582,6 +582,9 @@ void NativeA32WindowSession::ObserveFrameSpike(uint8_t frameKind,
     sample.DkFenceMs = swap.FenceMs;
     sample.DkSubmitMs = swap.SubmitMs;
     sample.DkPresentMs = swap.PresentMs;
+    sample.DkWaitPresentMs = swap.WaitPresentMs;
+    sample.DkAcquireMs = swap.AcquireMs;
+    sample.DkQueueBufferMs = swap.QueueBufferMs;
   }
 #endif
   float topMs = 0.0F;

@@ -393,6 +393,12 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_top_screen_pause_transaction.cpp",
           r'.',
           "oot3d_top_screen_pause_transaction_tests"),
+    # --- 26/10: picos de 14-18 ms a cada 1800 quadros (log do deko3d no render thread) ---
+    Guard("deko3d: Log() gravava logs/deko3d.txt (fopen/fclose no SD) no render thread a cada 1800 quadros",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'void Log\(const char\* format, \.\.\.\) \{.*?gLogQueue\.emplace_back\(line\);',
+          "oot3d_frame_spike_tests (TestDeko3dPresentFieldsAtTheEnd)",
+          forbid=r'void Log\(const char\* format, \.\.\.\) \{\s+std::lock_guard lock\(gLogMutex\);\s+FILE\*'),
     # --- 26/10: heap corrompido (tours 16-20: chunk 0x50 com bk trocado = uso após free) ---
     Guard("heap corrompido: alocador com páginas de guarda precisa embrulhar todo o malloc do newlib",
           "CMake/oot3d/game.cmake",
