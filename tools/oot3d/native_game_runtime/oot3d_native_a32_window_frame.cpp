@@ -11,6 +11,7 @@
 #include "oot3d_switch_clocks.h"
 #include "oot3d_hang_watchdog.h"
 #include "oot3d_heap_bin_check.h"
+#include "oot3d_switch_guard_alloc.h"
 #include "oot3d_fps_counter.h"
 #if defined(__SWITCH__)
 #include "fast/oot3d/debug_menu.h"
@@ -1376,6 +1377,15 @@ bool NativeA32WindowSession::RunFrame() {
              // Hang watchdog (logs/hang.txt): on, and reports written.
              << " hang_wd=" << (Oot3dNativeGame::HangWatch::Running() ? 1 : 0)
              << " hang_reports=" << Oot3dNativeGame::HangWatch::ReportsWritten();
+#if defined(__SWITCH__)
+        // Guard pages (config/guard_alloc): blocks made, live, quarantined.
+        if (const auto guard = Oot3dNativeGame::GuardAlloc::CurrentStats(); guard.Enabled) {
+          perf << " guard_alloc=1 guard_made=" << guard.Guarded
+               << " guard_live=" << guard.Live
+               << " guard_quarantine=" << guard.Quarantined
+               << " guard_fallbacks=" << guard.Fallbacks;
+        }
+#endif
         previousWaits = waits;
         previousTail = tail;
       }

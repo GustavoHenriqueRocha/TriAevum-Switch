@@ -393,6 +393,25 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_top_screen_pause_transaction.cpp",
           r'.',
           "oot3d_top_screen_pause_transaction_tests"),
+    # --- 26/10: heap corrompido (tours 16-20: chunk 0x50 com bk trocado = uso após free) ---
+    Guard("heap corrompido: alocador com páginas de guarda precisa embrulhar todo o malloc do newlib",
+          "CMake/oot3d/game.cmake",
+          r'oot3d_switch_guard_alloc\.cpp.*?-Wl,--wrap=_malloc_r -Wl,--wrap=_free_r -Wl,--wrap=_realloc_r '
+          r'-Wl,--wrap=_calloc_r\s+-Wl,--wrap=_malloc_usable_size_r',
+          "oot3d_switch_guard_alloc_tests"),
+    Guard("guard_alloc: calloc/realloc reais leem o cabeçalho do chunk; com bloco de guarda seria lixo",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
+          r'tBypass = true;\s+void\* const pointer = __real__calloc_r.*?'
+          r'tBypass = true;\s+void\* const moved = __real__realloc_r'),
+    Guard("guard_alloc: TLS só depois de ligado (a libnx chama o malloc antes de tudo)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
+          r'if \(gEnabled\.load\(std::memory_order_relaxed\) && InRange\(gConfig, size\) && !tBypass\)'),
+    Guard("guard_alloc: página de folga depois da guarda (cabeçalho do chunk seguinte do newlib)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.h",
+          r'kBlockPages = 3U;'),
+    Guard("handler de exceção grava logs/hang.txt sem alocar e devolve (crash report do Atmosphère continua)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
+          r'void __libnx_exception_handler\(ThreadExceptionDump\* context\) \{\s+HandleException\(context\);\s+\}'),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

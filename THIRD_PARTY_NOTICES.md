@@ -378,6 +378,32 @@ retained in source and the license is copied at
 `ports/switch_vulkan_probe/COPYING`. The probe is isolated from current product
 targets.
 
+## Nintendo Switch homebrew toolchain and services
+
+The Switch build links [switchbrew/libnx](https://github.com/switchbrew/libnx)
+(ISC License, copyright the libnx Authors) and, for the `config/renderer`
+deko3d backend, [devkitPro/deko3d](https://github.com/devkitPro/deko3d) (zlib
+License), both obtained through devkitPro (devkitA64). Their notices must
+accompany binary distributions of the Switch build.
+
+`tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp` reads clocks through
+the IPC interface of [retronx-team/sys-clk](https://github.com/retronx-team/sys-clk)
+(Beer-Ware License, Revision 42, the sys-clk authors). Only the command numbers
+and the `SysClkContext` layout are reproduced, from
+`common/include/sysclk/clock_manager.h`; no sys-clk code is linked.
+
+## Techniques adopted from other Switch ports
+
+- [centollOS/SwitchWaker](https://github.com/centollOS/SwitchWaker) and
+  [SwitchWakerHD](https://github.com/centollOS/SwitchWakerHD) (MPL-2.0): the
+  pthread wrapping approach of `oot3d_switch_threads.cpp`, Mesa cache patches,
+  thread placement and the Switch performance study behind several changes.
+- [TheMoonPeople/Chronicle](https://github.com/TheMoonPeople/Chronicle), pull
+  request [#205](https://github.com/TheMoonPeople/Chronicle/pull/205) (Switch
+  port by columna1): guard pages placed with `svcSetMemoryPermission`, the idea
+  behind the diagnostic allocator `oot3d_switch_guard_alloc.cpp`. No code was
+  copied; the allocator is an independent implementation.
+
 ## Other dependencies
 
 Dependencies obtained through CMake, vcpkg or platform SDKs retain their own

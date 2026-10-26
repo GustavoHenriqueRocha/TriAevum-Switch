@@ -259,4 +259,22 @@ void Stop() noexcept;
 // chamado de qualquer thread; a que chama não é pausada.
 void ReportEvent(const char* title, const char* details) noexcept;
 
+// Registradores da thread que falhou (handler de exceção da libnx).
+struct FaultFrame {
+    uint64_t Pc = 0;
+    uint64_t Lr = 0;
+    uint64_t Sp = 0;
+    uint64_t Fp = 0;
+    uint64_t X0 = 0;
+    uint64_t X1 = 0;
+    uint64_t X2 = 0;
+    uint64_t X19 = 0;
+};
+// Relatório de exceção: `details`, PC/LR e a cadeia de frames da thread que
+// falhou (chamada nela mesma, na pilha de exceção) e o estado das outras.
+// Não aloca; funciona com o watchdog desligado (config/no_hang_watchdog).
+void ReportFault(const char* title, const char* details, const FaultFrame& frame) noexcept;
+// Endereço de código como nos relatórios: 0x... e o offset no NRO (+0x...).
+void AppendCodeAddress(Text& text, uint64_t address) noexcept;
+
 } // namespace Oot3dNativeGame::HangWatch

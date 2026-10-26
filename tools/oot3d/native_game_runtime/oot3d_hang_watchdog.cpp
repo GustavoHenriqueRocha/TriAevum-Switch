@@ -231,6 +231,54 @@ void AppendCode(Text& text, uint64_t address) {
 
 // ---- estado de uma thread ------------------------------------------------------
 
+// Cadeia de frame pointers e varredura da pilha atrás de endereços de código.
+struct FrameTrace {
+    uint64_t Chain[16] = {};
+    size_t ChainCount = 0U;
+    uint64_t Scan[16] = {};
+    size_t ScanCount = 0U;
+
+    void Collect(uint64_t fp, uint64_t sp) noexcept {
+        MemoryReader reader;
+        uint64_t frame = fp;
+        for (size_t depth = 0; depth < 16U; ++depth) {
+            uint64_t next = 0;
+            uint64_t ret = 0;
+            if (!reader.Read(frame, next) || !reader.Read(frame + 8U, ret)) break;
+            Chain[ChainCount++] = ret;
+            if (next <= frame) break;
+            frame = next;
+        }
+        for (uint64_t offset = 0; offset < 8192U && ScanCount < 16U; offset += 8U) {
+            uint64_t value = 0;
+            if (!reader.Read(sp + offset, value)) break;
+            if (InText(value)) Scan[ScanCount++] = value;
+        }
+    }
+};
+
+void AppendFrame(Text& text, const FaultFrame& frame, const FrameTrace& trace) {
+    text.Str("  pc=");
+    AppendCode(text, frame.Pc);
+    text.Str(" lr=");
+    AppendCode(text, frame.Lr);
+    text.Str(" sp=").Hex(frame.Sp).Str(" fp=").Hex(frame.Fp);
+    text.Str("\n  x0=").Hex(frame.X0).Str(" x1=").Hex(frame.X1);
+    text.Str(" x2=").Hex(frame.X2).Str(" x19=").Hex(frame.X19);
+    text.Str("\n  fp_chain:");
+    for (size_t index = 0; index < trace.ChainCount; ++index) {
+        text.Char(' ');
+        AppendCode(text, trace.Chain[index]);
+    }
+    text.Str("\n  stack_scan:");
+    for (size_t index = 0; index < trace.ScanCount; ++index) {
+        text.Char(' ');
+        AppendCode(text, trace.Scan[index]);
+    }
+    text.Char('\n');
+}
+
+
 void AppendThreadContext(Text& text, Handle handle) {
     const Handle self = threadGetCurHandle();
     if (handle == self) {
@@ -249,50 +297,23 @@ void AppendThreadContext(Text& text, Handle handle) {
     ThreadContext context{};
     result = svcGetThreadContext3(&context, handle);
     // Lido com a thread parada; ela volta a rodar logo depois.
-    uint64_t chain[16] = {};
-    size_t chainCount = 0U;
-    uint64_t scan[16] = {};
-    size_t scanCount = 0U;
-    if (R_SUCCEEDED(result)) {
-        MemoryReader reader;
-        uint64_t frame = context.fp;
-        for (size_t depth = 0; depth < 16U; ++depth) {
-            uint64_t next = 0;
-            uint64_t ret = 0;
-            if (!reader.Read(frame, next) || !reader.Read(frame + 8U, ret)) break;
-            chain[chainCount++] = ret;
-            if (next <= frame) break;
-            frame = next;
-        }
-        for (uint64_t offset = 0; offset < 8192U && scanCount < 16U; offset += 8U) {
-            uint64_t value = 0;
-            if (!reader.Read(context.sp + offset, value)) break;
-            if (InText(value)) scan[scanCount++] = value;
-        }
-    }
+    FrameTrace trace;
+    if (R_SUCCEEDED(result)) trace.Collect(context.fp, context.sp);
     svcSetThreadActivity(handle, ThreadActivity_Runnable);
     if (R_FAILED(result)) {
         text.Str("  ctx: svcGetThreadContext3 rc=").Hex(result).Char('\n');
         return;
     }
-    text.Str("  pc=");
-    AppendCode(text, context.pc.x);
-    text.Str(" lr=");
-    AppendCode(text, context.lr);
-    text.Str(" sp=").Hex(context.sp).Str(" fp=").Hex(context.fp);
-    text.Str("\n  x0=").Hex(context.cpu_gprs[0].x).Str(" x1=").Hex(context.cpu_gprs[1].x);
-    text.Str(" x2=").Hex(context.cpu_gprs[2].x).Str(" x19=").Hex(context.cpu_gprs[19].x);
-    text.Str("\n  fp_chain:");
-    for (size_t index = 0; index < chainCount; ++index) {
-        text.Char(' ');
-        AppendCode(text, chain[index]);
-    }
-    text.Str("\n  stack_scan:");
-    for (size_t index = 0; index < scanCount; ++index) {
-        text.Char(' ');
-        AppendCode(text, scan[index]);
-    }
-    text.Char('\n');
+    FaultFrame frame;
+    frame.Pc = context.pc.x;
+    frame.Lr = context.lr;
+    frame.Sp = context.sp;
+    frame.Fp = context.fp;
+    frame.X0 = context.cpu_gprs[0].x;
+    frame.X1 = context.cpu_gprs[1].x;
+    frame.X2 = context.cpu_gprs[2].x;
+    frame.X19 = context.cpu_gprs[19].x;
+    AppendFrame(text, frame, trace);
 }
 
 const char* SlotNameForHandle(Handle handle) noexcept {
@@ -535,6 +556,36 @@ void ReportEvent(const char* title, const char* details) noexcept {
         gReports.store(gReports.load(std::memory_order_relaxed) + 1U, std::memory_order_relaxed);
     }
     ReleaseWriter();
+}
+
+void ReportFault(const char* title, const char* details, const FaultFrame& frame) noexcept {
+    if (gSdmc == nullptr) gSdmc = fsdevGetDeviceFileSystem("sdmc");
+    if (gTextBegin == 0U) FindText();
+    if (gSdmc == nullptr || gReports.load(std::memory_order_relaxed) >= kMaximumReports ||
+        !AcquireWriter()) {
+        return;
+    }
+    Text text(gReportBuffer, sizeof(gReportBuffer));
+    AppendHeader(text, title);
+    text.Str(details).Char('\n');
+    text.Str("thread_que_falhou=").Hex(threadGetCurHandle());
+    if (const char* name = SlotNameForHandle(threadGetCurHandle())) text.Char(' ').Str(name);
+    text.Char('\n');
+    FrameTrace trace;
+    trace.Collect(frame.Fp, frame.Sp);
+    AppendFrame(text, frame, trace);
+    AppendCommon(text);
+    AppendThreads(text, nullptr);
+    text.Char('\n');
+    if (AppendToFile(text.Data(), text.Size())) {
+        gReports.store(gReports.load(std::memory_order_relaxed) + 1U, std::memory_order_relaxed);
+    }
+    ReleaseWriter();
+}
+
+void AppendCodeAddress(Text& text, uint64_t address) noexcept {
+    if (gTextBegin == 0U) FindText();
+    AppendCode(text, address);
 }
 
 #endif

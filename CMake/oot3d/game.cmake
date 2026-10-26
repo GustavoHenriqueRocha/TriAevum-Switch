@@ -511,9 +511,14 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         # Clocks for logs/perf.txt (sys-clk IPC, read only).
         tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp
         # Display vsync clock (config/pacer_vsync, config/frame_spikes).
-        tools/oot3d/native_game_runtime/oot3d_switch_vsync_clock.cpp)
+        tools/oot3d/native_game_runtime/oot3d_switch_vsync_clock.cpp
+        # Guard pages for one malloc size range (config/guard_alloc) and the
+        # libnx exception handler that reports faults to logs/hang.txt.
+        tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp)
     target_link_options(oot3d_native_game PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=threadCreate
-        -Wl,--wrap=SDL_SetThreadPriority)
+        -Wl,--wrap=SDL_SetThreadPriority
+        -Wl,--wrap=_malloc_r -Wl,--wrap=_free_r -Wl,--wrap=_realloc_r -Wl,--wrap=_calloc_r
+        -Wl,--wrap=_malloc_usable_size_r)
     nx_generate_nacp(oot3d_native_game.nacp
         NAME "The Legend of Zelda: Ocarina of Time 3D Recompiled"
         AUTHOR "OoT3D Recompiled contributors"

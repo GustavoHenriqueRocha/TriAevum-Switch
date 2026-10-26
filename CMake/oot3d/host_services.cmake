@@ -264,6 +264,14 @@ add_executable(oot3d_hang_watchdog_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_hang_watchdog_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_hang_watchdog_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Guard-page allocator policy (config/guard_alloc): parsing, layout, quarantine.
+add_executable(oot3d_switch_guard_alloc_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc_tests.cpp
+    tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp
+)
+target_compile_features(oot3d_switch_guard_alloc_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_switch_guard_alloc_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Switch thread layout policy (config/thread_layout): pure, host-testable.
 add_executable(oot3d_switch_thread_layout_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_switch_thread_layout_tests.cpp

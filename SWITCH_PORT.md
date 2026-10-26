@@ -182,6 +182,28 @@ no layout do newlib: soma igual à do `mallinfo`, double free, auto-laço, ciclo
 heap/desalinhados, tamanhos absurdos e 3000 heaps com elos aleatórios — sempre termina e nunca
 lê fora do heap, ASan/UBSan). A corrupção em si continua: o relatório traz o chunk e as threads.
 
+**A corrupção é sempre a mesma (26/10).** Nos tours 16 a 20 o relatório traz o mesmo chunk:
+`bin=10 chunk=0x27fe173a0 size=0x51 fd=0x2805553e0 bk=0xed53910000001a`. Chunk livre de 0x50 bytes
+(pedidos de 57 a 72), `fd` intacto e só o `bk` (byte 8 do bloco do usuário) trocado por dois u32,
+`0x1a` e `0x00ed5391`: escrita de 8 bytes num objeto já liberado (uso após o free), determinística.
+
+**Páginas de guarda (`config/guard_alloc`, `oot3d_switch_guard_alloc.h/.cpp`).** O link embrulha
+`_malloc_r`, `_free_r`, `_realloc_r`, `_calloc_r` e `_malloc_usable_size_r` do newlib (cada um num
+objeto próprio, então pega malloc/new/delete do processo inteiro). Com o arquivo no SD, pedidos na
+faixa (padrão `57 72`, quarentena de 4096 blocos; o arquivo aceita `min max quarentena`) ganham 3
+páginas: cabeçalho e objeto no fim da página 0, página 1 sem acesso, página 2 de folga (o cabeçalho
+do chunk seguinte do newlib fica 16 bytes antes do ponteiro alinhado dele). No free a página 0
+também perde o acesso e o bloco fica numa quarentena FIFO antes de voltar ao malloc. Um acesso a
+bloco liberado ou um estouro para a frente vira exceção na hora. O handler de exceção da libnx
+(sempre ligado, grava e devolve, então o crash report do Atmosphère continua saindo) escreve
+"EXCEÇÃO" no `hang.txt`: `far`, PC/LR/cadeia da thread que falhou, `USO APÓS FREE` ou `ESTOURO` com
+serial, tamanho, deslocamento no objeto, há quanto tempo foi liberado e as pilhas de alocação e de
+free (`addr2line` nos offsets), mais as outras threads. `perf.txt` ganha `guard_alloc=1 guard_made
+guard_live guard_quarantine guard_fallbacks` (fallback = memalign ou `svcSetMemoryPermission`
+falhou e o bloco foi para o malloc normal). Custo: 12 KiB e uma chamada ao kernel por bloco na
+faixa, mais uma no free; só para diagnóstico. Teste: `oot3d_switch_guard_alloc_tests`. Ideia das
+páginas de guarda: Chronicle PR #205.
+
 **Watchdog de travamento** (`oot3d_hang_watchdog.h/.cpp`, ligado por padrão no Switch,
 `config/no_hang_watchdog` desliga):
 - Marcadores baratos: cada thread com papel (jogo, render, planos, áudio do host, áudio do SDL)
@@ -1295,4 +1317,8 @@ Ferramentas e distribuição:
   [SwitchWakerHD](https://github.com/centollOS/SwitchWakerHD) — patches de cache do Mesa,
   placement de threads e o estudo de desempenho no Switch que guiou várias mudanças.
 - [fearkov/3dsrecomp](https://github.com/fearkov/3dsrecomp) — referência de técnicas de recompilação de 3DS.
+- [TheMoonPeople/Chronicle PR #205](https://github.com/TheMoonPeople/Chronicle/pull/205) — páginas de
+  guarda com `svcSetMemoryPermission` (ideia do `config/guard_alloc`).
+- devkitPro/libnx (ISC), deko3d (zlib) e o IPC do sys-clk (Beer-Ware): ver
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 - Zelda3drecomp, Azahar, Ship of Harkinian / libultraship, NVIDIA NRI, devkitPro/libnx — via o projeto original.
