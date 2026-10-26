@@ -3,6 +3,7 @@
 #include <SDL2/SDL.h>
 
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace Ship {
@@ -71,6 +72,9 @@ class SDLAudioPlayer final : public AudioPlayer {
     uint64_t mOutputUnderruns = 0; ///< Queue underruns recovered by re-priming (Switch).
     bool mCaptureActive = false;
     std::string mCapturePath;
+    // Writes the full capture off the game thread; joined in the destructor
+    // (no detach(): devkitA64 has no pthread_detach, it throws on the Switch).
+    std::thread mCaptureWriter;
     size_t mCaptureLimitSamples = 0;
     std::vector<int16_t> mCapture;
 };

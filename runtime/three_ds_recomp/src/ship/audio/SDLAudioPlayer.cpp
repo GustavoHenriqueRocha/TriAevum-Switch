@@ -73,6 +73,9 @@ SDLAudioPlayer::~SDLAudioPlayer() {
         // Session ended before the capture filled: write what was recorded.
         WritePcmWave(mCapturePath, mCapture, GetSampleRate(), mNumChannels);
     }
+    if (mCaptureWriter.joinable()) {
+        mCaptureWriter.join();
+    }
 }
 
 void SDLAudioPlayer::DoClose() {
@@ -159,9 +162,11 @@ void SDLAudioPlayer::CapturePcm(const uint8_t* buf, size_t len) {
     }
     // Full: the file is written off the game thread.
     mCaptureActive = false;
-    std::thread([path = mCapturePath, samples = std::move(mCapture), rate = GetSampleRate(),
-                 channels = mNumChannels]() { WritePcmWave(path, samples, rate, channels); })
-        .detach();
+    if (mCaptureWriter.joinable()) {
+        mCaptureWriter.join();
+    }
+    mCaptureWriter = std::thread([path = mCapturePath, samples = std::move(mCapture), rate = GetSampleRate(),
+                                  channels = mNumChannels]() { WritePcmWave(path, samples, rate, channels); });
     mCapture = {};
 }
 
