@@ -428,3 +428,5 @@ Na p6w o render desenha em 3 imagens próprias. Uma fila deko3d separada, na thr
 - 266 quadros descartados. 150 deles numa única janela: a thread do jogo ficou 4,4 s parada no IPC `sys:clk GetCurrentContext` (hang.txt, uptime 312 s), e a tela parou junto.
 - p6x: a leitura do sys-clk foi para uma thread própria; a linha de perf usa o resultado anterior (`clk_busy`).
 - p6x: crash no primeiro perf. `std::thread::detach()` lança std::system_error ("Function not implemented"), porque não há pthread_detach na newlib do devkitA64. p6y: a thread fica guardada num objeto que nunca é destruído.
+- p6y (tour20 limpo, sem trava): 125 perdas (0,63/janela), 74% das janelas sem perda, 19 picos fora de load, 126 quadros descartados pelo mailbox (até 7 por janela; nenhuma parada longa) e `clk_busy` nunca 1.
+  Os descartes também são imperfeição visual (um quadro pulado), e 42 das 49 janelas da p6w que tiveram descarte também tiveram perda: o descarte costuma ser a cauda da mesma travada.
