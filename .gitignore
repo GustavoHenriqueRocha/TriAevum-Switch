@@ -471,3 +471,4 @@ _packages
 /clang-format
 /clang-format.exe
 *.o2r
+/stream_stress_tsan
