@@ -125,10 +125,10 @@ bool PicaResources::Init(Device& device) {
         while (!folder.empty() && (folder.back() == '\r' || folder.back() == ' ')) {
             folder.pop_back();
         }
-        Oot3d::Renderer::AzaharTexturePackConfiguration configuration;
+        ::Oot3d::Renderer::AzaharTexturePackConfiguration configuration;
         configuration.LoadCustomTextures = true;
         configuration.LoadDirectory = folder.empty() ? kTexturePackDefaultFolder : folder;
-        Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Configure(configuration);
+        ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Configure(configuration);
         mTexturePack = true;
         Log("resources: texture pack from %s", configuration.LoadDirectory.string().c_str());
     }
@@ -330,13 +330,13 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
         native.LastUsedFrame = mFrame;
         if (native.PackPending) {
             // The pack worker was still decoding the image when the native texture was made.
-            const auto polled = Oot3d::Renderer::AzaharTexturePackRuntime::Instance().PollQueued(native.PackHash);
-            if (polled.State == Oot3d::Renderer::AzaharTextureResolveState::Ready && polled.Replacement != nullptr) {
+            const auto polled = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().PollQueued(native.PackHash);
+            if (polled.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready && polled.Replacement != nullptr) {
                 if (const DkResHandle handle = UploadReplacement(view, replacementKey, *polled.Replacement)) {
                     native.PackPending = false; // emplace may rehash: the reference stays valid, `found` not
                     return handle;
                 }
-            } else if (polled.State != Oot3d::Renderer::AzaharTextureResolveState::Pending) {
+            } else if (polled.State != ::Oot3d::Renderer::AzaharTextureResolveState::Pending) {
                 native.PackPending = false;
             }
         }
@@ -373,11 +373,11 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
         }
         return rememberFallback();
     }
-    Oot3d::Renderer::AzaharTextureResolveResult pack;
+    ::Oot3d::Renderer::AzaharTextureResolveResult pack;
     if (mTexturePack && ClassifyPicaTexture(view) == PicaTextureUse::Color) {
         const size_t baseBytes = PicaBaseLevelBytes(view.NativeFormat, view.Width, view.Height);
         if (baseBytes != 0U && baseBytes <= view.NativeBytes.size()) {
-            pack = Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ResolveOrQueue({
+            pack = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ResolveOrQueue({
                 .Width = static_cast<uint16_t>(view.Width),
                 .Height = static_cast<uint16_t>(view.Height),
                 .NativeFormat = view.NativeFormat,
@@ -385,7 +385,7 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
                 .NativeBytes = view.NativeBytes.first(baseBytes),
                 .NativeRgba8 = std::span<const uint8_t>(decoded->Mips[0]),
             });
-            if (pack.State == Oot3d::Renderer::AzaharTextureResolveState::Ready && pack.Replacement != nullptr) {
+            if (pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready && pack.Replacement != nullptr) {
                 if (const DkResHandle handle = UploadReplacement(view, replacementKey, *pack.Replacement)) {
                     return handle;
                 }
@@ -399,8 +399,8 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
     }
     Texture texture;
     texture.PackHash = pack.NativeHash;
-    texture.PackPending = pack.State == Oot3d::Renderer::AzaharTextureResolveState::Pending ||
-                          pack.State == Oot3d::Renderer::AzaharTextureResolveState::Ready;
+    texture.PackPending = pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Pending ||
+                          pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready;
     if (!CreateImage(texture, DkImageFormat_RGBA8_Unorm, view.Width, view.Height, levels)) {
         if (mStats.TextureFailures++ < 10U) {
             Log("resources: no memory/slot for a %ux%u texture (%llu MiB live)", view.Width, view.Height,
@@ -439,7 +439,7 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
 }
 
 DkResHandle PicaResources::UploadReplacement(const Renderer3ds::PicaTextureView& view, const PicaTextureKey& key,
-                                             const Oot3d::Renderer::AzaharTextureReplacement& replacement) {
+                                             const ::Oot3d::Renderer::AzaharTextureReplacement& replacement) {
     const auto& rgba = replacement.Rgba8;
     const uint64_t bytes = static_cast<uint64_t>(replacement.Width) * replacement.Height * 4U;
     if (rgba == nullptr || rgba->size() < bytes || bytes > UINT32_MAX) {

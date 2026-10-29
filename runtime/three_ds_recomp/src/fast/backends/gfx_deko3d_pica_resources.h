@@ -134,7 +134,7 @@ class PicaResources {
     void Destroy(Texture& texture) noexcept;
     // The texture pack image (larger than the native one) under the replacement key; 0 when not now.
     DkResHandle UploadReplacement(const Renderer3ds::PicaTextureView& view, const PicaTextureKey& key,
-                                  const Oot3d::Renderer::AzaharTextureReplacement& replacement);
+                                  const ::Oot3d::Renderer::AzaharTextureReplacement& replacement);
     void Evict();
 
     Device* mDevice = nullptr;
