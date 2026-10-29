@@ -32,6 +32,8 @@ def decodificar(data):
     w, h, fmt = cabecalho(data); p = data[CTXB_HEADER_SIZE:]
     if fmt == 4: rgba = decode_rgba4_tiled(p, w, h)
     elif fmt == 13: rgba = decode_etc1a4(p, w, h)
+    elif fmt == 12:   # ETC1 sem alfa: mesmos blocos do ETC1A4 sem os 8 bytes de alfa (opaco)
+        rgba = decode_etc1a4(b''.join(b'\xff' * 8 + p[i:i + 8] for i in range(0, w * h // 2, 8)), w, h)
     elif fmt == 0: rgba = _tiled(p, w, h, 4, lambda b: bytes((b[3], b[2], b[1], b[0])))
     elif fmt == 5: rgba = _tiled(p, w, h, 2, lambda b: bytes((b[1], b[1], b[1], b[0])))   # LA8: byte 0 = alfa
     elif fmt == 3:

@@ -16,6 +16,7 @@
 #include "fast/backends/gfx_deko3d_pica_plan.h"
 #include "fast/backends/gfx_rendering_api.h"
 #include "gfx_deko3d_device.h"
+#include "oot3d/renderer/azahar_texture_pack.h"
 
 #include <array>
 #include <cstdint>
@@ -42,6 +43,8 @@ struct PicaResourceStats {
     uint64_t UniformBytes = 0;
     uint64_t UniformReuses = 0;
     uint64_t StreamFailures = 0;
+    uint64_t TextureReplacements = 0;    // texture pack images uploaded at their own size
+    uint64_t TextureReplacementBytes = 0;
 };
 
 // What one draw binds: texture handles for bindings 1..3 and 13, the vertex
@@ -113,6 +116,8 @@ class PicaResources {
         uint32_t SamplerSlot = 0;
         uint64_t Bytes = 0;
         uint64_t LastUsedFrame = 0;
+        uint64_t PackHash = 0;          // texture pack identity while its image is still being decoded
+        bool PackPending = false;
     };
 
     struct LastUniforms {
@@ -127,6 +132,9 @@ class PicaResources {
     bool CreateImage(Texture& texture, DkImageFormat format, uint32_t width, uint32_t height, uint32_t levels);
     void UploadLevel(const Texture& texture, uint32_t level, uint32_t width, uint32_t height, DkGpuAddr source);
     void Destroy(Texture& texture) noexcept;
+    // The texture pack image (larger than the native one) under the replacement key; 0 when not now.
+    DkResHandle UploadReplacement(const Renderer3ds::PicaTextureView& view, const PicaTextureKey& key,
+                                  const Oot3d::Renderer::AzaharTextureReplacement& replacement);
     void Evict();
 
     Device* mDevice = nullptr;
@@ -142,6 +150,8 @@ class PicaResources {
     DkGpuAddr mConstantGpu = DK_GPU_ADDR_INVALID;
     DescriptorSlots<kMaxImages> mImageSlots{kReservedImages};
     std::unordered_map<PicaSamplerKey, uint32_t, PicaSamplerKeyHash> mSamplers;
+    bool mTexturePack = false;                 // config/texture_pack present
+    uint64_t mReplacementBytesThisFrame = 0;   // pack uploads are spread over frames
     std::unordered_map<PicaTextureKey, Texture, PicaTextureKeyHash> mTextures;
     std::unordered_map<uint64_t, Texture> mLuts;
     std::vector<PicaTextureKey> mTextureEvictions;
