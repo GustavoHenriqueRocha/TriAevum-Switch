@@ -1034,6 +1034,33 @@ deko3d com os **mesmos textos GLSL**:
   (`"OpenGL"`); um backend novo com o alvo do GL precisa entrar na mesma regra, senão a cena fica
   esticada.
 
+### 4.13 deko3d: pack de texturas (formato Azahar) e upscale de menus/mapas
+
+*(2026-10-29, p7c do ramo `deko3d`)* Troca de texturas por arquivos em alta resolução sem mexer na
+romfs, reaproveitando o `AzaharTexturePackRuntime` que já existia para o Vulkan:
+
+- **Nome = hash do conteúdo nativo:** `tex1_{L}x{A}_{HASH}_{fmt}_mip0.png`, com `HASH` = CityHash64
+  (`Fast::Renderer::ContentHash64`, só cabeçalho) dos bytes do **nível base** no formato PICA
+  (bits por texel: RGBA8 32, RGB8 24, 5551/565/RGBA4/LA8 16, L8/A8/LA4 8, L4/A4/ETC1 4, ETC1A4 8).
+  Ferramenta de host: `tools/oot3d/ptbr/hash_textura.cpp` (vetor de teste: "hello" →
+  `B48BE5A931380CE8`). Mudou a textura na romfs (tradução), mudou o hash: refazer o pack.
+- **Liga por arquivo:** `config/texture_pack` existe → `Configure` com `LoadCustomTextures`; a
+  primeira linha é a pasta (padrão `sdmc:/switch/oot3dre/textures`). A varredura é **recursiva**:
+  subpasta opcional (ícones de itens) liga/desliga movendo a pasta por FTP (`RNFR`/`RNTO`).
+- **Sem travar o quadro:** na falta do cache, só texturas de cor chamam `ResolveOrQueue`; se o PNG
+  ainda não carregou, sobe a nativa com `PackPending` e, nos acertos seguintes, `PollQueued` troca
+  quando ficar pronta. Teto de **16 MiB de substituição por quadro** (zerado no `BeginFrame`). A
+  substituta tem chave própria (sal fixo) e sampler `MakePicaSamplerKey(view, 1)` (um nível só, RGBA8).
+- **Armadilhas:** referência ao `Texture` nativo, não ao iterador (o `emplace` da substituta pode
+  rehash); dentro de `namespace Fast` o nome `Oot3d::Renderer` resolve para `Fast::Oot3d` — use
+  `::Oot3d::Renderer::`. A thread de carga é `join()`, nunca `detach()`.
+- **Gerar o pack:** `pacote_texturas.py exportar` (menus 06/07, `menu/map/*`, títulos de área) →
+  Real-ESRGAN `realesrgan-x4plus-anime` 4x (Vulkan, roda sem GPU NVIDIA) → `montar` reduz para 2x
+  com Lanczos e **devolve o alfa da nativa** (bicúbico): o upscaler borra bordas transparentes.
+  OoT3D EU: 384 texturas, ~15 MB.
+- **Fonte HD** não precisa do pack: `config/font_coverage.zip` já é neutro de backend; gerar a
+  cobertura para a região da ROM (`message/eu/` na EU; o zip pronto cobria só `message/us`).
+
 ## 5. Medição e diagnóstico
 
 ### 5.1 Arquivos no SD (`sdmc:/switch/oot3dre/`)

@@ -1,8 +1,11 @@
-"""Pack de texturas em alta resolução (formato Azahar: tex1_LxA_HASH_fmt_mip0.png) dos menus e títulos de área.
+"""Pack de texturas em alta resolução (formato Azahar: tex1_LxA_HASH_fmt_mip0.png) dos menus, mapas e títulos de área.
 
     python -I pacote_texturas.py exportar          # texturas nativas da romfs PT-BR -> TRABALHO/pack/nativas
     (ampliar nativas/*.png em 4x, ex.: realesrgan-ncnn-vulkan, para TRABALHO/pack/ampliadas, mesmo nome)
     python -I pacote_texturas.py montar [fator]    # -> TRABALHO/pack/textures (fator 2 por padrão)
+
+Os ícones de itens vão à parte, em TRABALHO/pack/textures_itens, para comparar com e sem: a varredura do
+runtime é recursiva, então basta mover a pasta para dentro de textures/ (itens/) para ligar.
 
 O nome leva o hash dos bytes nativos (CityHash64, ferramenta hash_textura.cpp), então o pack vale só para
 esta romfs: refazer depois de mudar menus ou títulos.
@@ -36,12 +39,19 @@ def texturas():
             partes = cam.split('/')
             if len(partes) == 3 and partes[0] == 'menu' and partes[1] in IDIOMAS and cam.endswith('.ctxb'):
                 yield f'{partes[1][:2]}_{partes[2][:-5]}', _ler(f, *localizar(ROMFS_PTBR, cam))
+            elif cam.startswith('menu/map/') and cam.endswith('.ctxb'):
+                yield 'mapa_' + cam[9:-5].replace('/', '_'), _ler(f, *localizar(ROMFS_PTBR, cam))
             elif cam.startswith('scene/') and cam.endswith('.zar'):
                 z = _ler(f, *localizar(ROMFS_PTBR, cam))
                 for nome, oz, tz in entradas_zar(z):
                     base = nome.split('\\')[-1][:-5]
                     if base.endswith(('_eusp', '_ussp')):
                         yield f'titulo_{base}', z[oz:oz + tz]
+
+
+def pasta(nome):
+    """Pasta de destino no pack: ícones de itens ficam separados (opcionais)."""
+    return 'textures_itens' if 'icon_item' in nome else 'textures'
 
 
 def exportar():
@@ -67,7 +77,6 @@ def exportar():
 def montar(fator=2):
     from PIL import Image
     mapa = json.loads((PACK / 'mapa.json').read_text())
-    destino = PACK / 'textures'; destino.mkdir(exist_ok=True)
     for nome, arquivo in mapa.items():
         nativa = Image.open(PACK / 'nativas' / f'{nome}.png').convert('RGBA')
         grande = Image.open(PACK / 'ampliadas' / f'{nome}.png').convert('RGBA')
@@ -75,8 +84,9 @@ def montar(fator=2):
         im = grande.resize(alvo, Image.LANCZOS) if grande.size != alvo else grande
         # Alfa da nativa ampliada: o upscaler borra bordas transparentes de rótulos e ícones.
         im.putalpha(nativa.getchannel('A').resize(alvo, Image.BICUBIC))
+        destino = PACK / pasta(nome); destino.mkdir(exist_ok=True)
         im.save(destino / arquivo, optimize=True)
-    print(len(mapa), 'texturas em', destino)
+    print(len(mapa), 'texturas em', PACK / 'textures', 'e', PACK / 'textures_itens')
 
 
 if __name__ == '__main__':
