@@ -25,3 +25,26 @@ def localizar(caminho, alvo):
         if cam == alvo: return data + u64(files,p+8), u64(files,p+16)
         p += (32+n+3)&~3
     raise FileNotFoundError(alvo)
+
+
+def listar(caminho):
+    """→ caminhos de todos os arquivos da romfs."""
+    with open(caminho,'rb') as f:
+        base = 0x1000 if f.read(4) == b'IVFC' else 0
+        f.seek(base); h = f.read(40)
+        f.seek(base+u32(h,12)); dirs = f.read(u32(h,16))
+        f.seek(base+u32(h,28)); files = f.read(u32(h,32))
+    nome = lambda b,p,n: b[p:p+n].decode('utf-16le')
+    pastas = {}; p = 0
+    while p < len(dirs):
+        n = u32(dirs,p+20); pastas[p] = (u32(dirs,p), nome(dirs,p+24,n)); p += (24+n+3)&~3
+    def caminho_de(d):
+        partes = []
+        while d in pastas and d != 0:
+            partes.append(pastas[d][1]); d = pastas[d][0]
+        return '/'.join(reversed(partes))
+    p = 0; out = []
+    while p < len(files):
+        n = u32(files,p+28); out.append((caminho_de(u32(files,p)) + '/' + nome(files,p+32,n)).lstrip('/'))
+        p += (32+n+3)&~3
+    return out

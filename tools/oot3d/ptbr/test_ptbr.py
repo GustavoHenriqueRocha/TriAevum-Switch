@@ -30,5 +30,17 @@ class IdaEVolta(unittest.TestCase):
         self.assertEqual(para_bytes(s), b)
 
 
+class TexturaLA8(unittest.TestCase):
+    def test_ida_e_volta(self):
+        import struct
+        from PIL import Image
+        from ctxb import codificar_ctxb, decodificar
+        cab = bytearray(0x48); struct.pack_into('<HHHH', cab, 0x2C, 16, 8, 26456, 5121)   # LA8 16x8
+        im = Image.new('LA', (16, 8))
+        im.putdata([((x * 16) % 256, (y * 32) % 256) for y in range(8) for x in range(16)])
+        ctxb = codificar_ctxb(bytes(cab) + bytes(16 * 8 * 2), im.convert('RGBA'))
+        self.assertEqual(decodificar(ctxb).convert('LA').tobytes(), im.tobytes())
+
+
 if __name__ == '__main__':
     unittest.main()

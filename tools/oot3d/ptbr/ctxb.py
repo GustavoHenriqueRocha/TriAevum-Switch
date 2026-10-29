@@ -33,6 +33,7 @@ def decodificar(data):
     if fmt == 4: rgba = decode_rgba4_tiled(p, w, h)
     elif fmt == 13: rgba = decode_etc1a4(p, w, h)
     elif fmt == 0: rgba = _tiled(p, w, h, 4, lambda b: bytes((b[3], b[2], b[1], b[0])))
+    elif fmt == 5: rgba = _tiled(p, w, h, 2, lambda b: bytes((b[1], b[1], b[1], b[0])))   # LA8: byte 0 = alfa
     elif fmt == 3:
         def px(b):
             v = b[0] | b[1] << 8
@@ -93,6 +94,13 @@ def codificar_ctxb(original, im):
     if fmt == 4: p = encode_rgba4_tiled(rgba, w, h)
     elif fmt == 13: p = encode_etc1a4(rgba, w, h)
     elif fmt == 0: p = encode_rgba8_tiled(rgba, w, h)
+    elif fmt == 5:
+        la = im.convert('LA').tobytes(); p = bytearray(w * h * 2)
+        for y in range(h):
+            for x in range(w):
+                i = _tiled_pixel(x, y, w); j = (y * w + x) * 2
+                p[i * 2], p[i * 2 + 1] = la[j + 1], la[j]
+        p = bytes(p)
     else: raise ValueError(f'codificação do formato {fmt} não feita')
     assert len(p) == len(original) - CTXB_HEADER_SIZE
     return original[:CTXB_HEADER_SIZE] + p

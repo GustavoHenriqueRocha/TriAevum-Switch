@@ -14,9 +14,10 @@ original vem de `TRIAEVUM_ROMFS` (veja `caminhos.py`).
 ## Passos
 1. `exportar.py` → mensagens pendentes + glossário; traduzir em `traducao.json`.
 2. `python -I montar.py` → `romfs-ptbr.bin` (o eu.qm novo cabe no espaço do original; a romfs é corrigida no lugar)
-   e redesenha os menus (`lote_menus.py`, `menus_ptbr.py`, `trocar.py`, `rotulos.py`, `ctxb.py`).
+   e redesenha os menus (`lote_menus.py`, `menus_ptbr.py`, `trocar.py`, `rotulos.py`, `ctxb.py`) e os títulos de
+   área de cada `scene/*.zar` (`titulos.py`, texturas LA8 `name/*_eusp`/`_ussp`).
 3. Enviar `romfs-ptbr.bin` para `/switch/oot3dre/game/romfs.bin` (com o jogo fechado).
 
-Dependências: `mpyq`, `Pillow`, `etcpak`; fonte M PLUS Rounded 1c (OFL) em `$TRIAEVUM_PTBR/fontes`.
+Dependências: `mpyq`, `Pillow`, `etcpak`; fontes M PLUS Rounded 1c e Belleza (OFL) em `$TRIAEVUM_PTBR/fontes`.
 
 Teste: `python -I test_ptbr.py`.

@@ -66,6 +66,8 @@ def main():
         gravar_na_romfs(ROMFS_PTBR, n, codificar_ctxb(ler('06_EU_SPANISH', n), im))
         im.save(TRABALHO / 'menus-pt' / f'{n}.png')
     print(len(imagens), 'texturas de menu')
+    from titulos import gravar as gravar_titulos
+    print(gravar_titulos(ROMFS_PTBR, TRABALHO / 'menus-pt'), 'títulos de área')
 
 
 if __name__ == '__main__':
