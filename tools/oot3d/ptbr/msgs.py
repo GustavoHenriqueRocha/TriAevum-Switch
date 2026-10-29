@@ -1,0 +1,46 @@
+import struct
+from pathlib import Path
+from caminhos import SOH_TEXTO as SOH, QM_ORIGINAL as QM
+
+# argumentos (bytes) de cada código do N64 (z64message.h)
+N64_ARGS = {0x05:1,0x06:1,0x07:2,0x0C:1,0x0E:1,0x11:2,0x12:2,0x13:1,0x14:1,0x15:3,0x1E:1}
+
+def soh():
+    d = SOH.read_bytes(); n = struct.unpack_from('<I', d, 0x40)[0]; p = 0x44; out = {}
+    for _ in range(n):
+        mid, tt, yp = struct.unpack_from('<HBB', d, p); ln = struct.unpack_from('<I', d, p+4)[0]
+        out[mid] = (tt, yp, d[p+8:p+8+ln]); p += 8+ln
+    return out
+
+def qm():
+    d = QM.read_bytes(); n = struct.unpack_from('<I', d, 8)[0]; out = {}
+    for i in range(n):
+        w = struct.unpack_from('<24I', d, 0x10+i*96)
+        out[w[0]] = (w, [d[w[8+2*s]:w[8+2*s]+w[9+2*s]] for s in range(8)])
+    return d, out
+
+def n64_tokens(b):
+    i, t = 0, []
+    while i < len(b):
+        c = b[i]
+        if c < 0x20 and c not in (0x00,):
+            n = N64_ARGS.get(c, 0); t.append(('c', c, b[i+1:i+1+n])); i += 1+n
+        else:
+            t.append(('t', c)); i += 1
+    return t
+
+N2T = {0x01:0x1c,0x02:0x00,0x04:0x01,0x05:0x1d,0x06:0x1e,0x07:0x03,0x08:0x04,0x09:0x05,0x0a:0x06,0x0b:0x07,
+       0x0c:0x08,0x0d:0x09,0x0e:0x0a,0x0f:0x0b,0x10:0x0c,0x11:0x0d,0x12:0x0e,0x13:0x0f,0x14:0x10,0x15:0x11,
+       0x16:0x12,0x17:0x13,0x18:0x14,0x19:0x15,0x1a:0x19,0x1b:0x1a,0x1c:0x1b,0x1d:0x16,0x1e:0x18,0x1f:0x17}
+# argumentos dos códigos do 3DS (deduzidos do eu.qm)
+T_ARGS = {0x02:1,0x03:2,0x06:1,0x08:1,0x0a:1,0x0e:6,0x0f:1,0x10:1,0x11:3,0x18:1,0x1a:4,0x1b:6,0x1d:1,0x23:1,0x24:1,
+          0x25:3,0x26:1}
+
+def t_tokens(b):
+    i, t = 0, []
+    while i < len(b):
+        if b[i] == 0x7f and i+1 < len(b):
+            c = b[i+1]; n = T_ARGS.get(c, 0); t.append(('c', c, b[i+2:i+2+n])); i += 2+n
+        else:
+            t.append(('t', b[i])); i += 1
+    return t
