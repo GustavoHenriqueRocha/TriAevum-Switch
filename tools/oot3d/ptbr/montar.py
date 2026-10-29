@@ -55,11 +55,12 @@ def main():
     print('eu.qm PT-BR:', len(q), 'bytes')
     from ctxb import ler, codificar_ctxb
     from lote_menus import BOTOES_MAPAS, LOTE, MAPAS
-    from menus_ptbr import gravar_na_romfs, hud
+    from menus_ptbr import gravar_na_romfs, hud, selos
     from trocar import trocar
     imagens = {'hud_all00': hud()}
     for n, (rot, op) in LOTE.items():
         imagens[n] = trocar(n, rot, **op)[0]
+    imagens['menu_hint_movie_parts00'] = selos(imagens['menu_hint_movie_parts00'])
     for n, (rot, op) in MAPAS.items():
         imagens[n] = trocar(n, BOTOES_MAPAS[n], inicial=trocar(n, rot, **op)[0])[0]
     for n, im in imagens.items():

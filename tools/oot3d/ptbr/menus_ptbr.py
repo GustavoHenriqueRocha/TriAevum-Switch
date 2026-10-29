@@ -46,3 +46,29 @@ def gravar_na_romfs(romfs, nome, ctxb_bytes):
         assert tam == len(ctxb_bytes), (nome, tam, len(ctxb_bytes))
         with open(romfs, 'r+b') as f:
             f.seek(o); f.write(ctxb_bytes)
+
+
+SANS_NEGRITO = '/usr/share/fonts/liberation/LiberationSans-Bold.ttf'
+# selos girados de menu_hint_movie_parts00: caixa no original, texto, cor
+SELOS = [((393, 0, 447, 39), 'Completo', (32, 166, 32, 255), 9), ((458, 4, 501, 37), 'Novo', (255, 0, 0, 255), 12)]
+
+
+def selos(im, angulo=33, E=4):
+    """Redesenha os selos "Completado"/"Nuevo": texto colorido, contorno branco, girado como o original."""
+    from PIL import Image, ImageDraw, ImageFont
+    im = im.copy()
+    for (x0, y0, x1, y1), texto, cor, altura in SELOS:
+        im.paste((0, 0, 0, 0), (x0, y0, x1, y1))
+        f = ImageFont.truetype(SANS_NEGRITO, int(altura * E / 0.72))
+        l, t, r, b = f.getbbox(texto, stroke_width=int(1.6 * E))
+        camada = Image.new('RGBA', (r - l + 4 * E, b - t + 4 * E), (0, 0, 0, 0))
+        d = ImageDraw.Draw(camada)
+        d.text((2 * E - l, 2 * E - t), texto, font=f, fill=(255, 255, 255, 255), stroke_width=int(1.6 * E),
+               stroke_fill=(255, 255, 255, 255))
+        d.text((2 * E - l, 2 * E - t), texto, font=f, fill=cor)
+        camada = camada.rotate(angulo, resample=Image.BICUBIC, expand=True)
+        camada = camada.resize((max(1, camada.width // E), max(1, camada.height // E)), Image.LANCZOS)
+        camada = camada.crop(camada.getbbox())
+        cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+        im.alpha_composite(camada, (cx - camada.width // 2, max(0, cy - camada.height // 2)))
+    return im
