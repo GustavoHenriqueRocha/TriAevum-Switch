@@ -64,6 +64,9 @@ result test_bug_guards "$code"
 python3 "$here/test_perf_tools.py" > /tmp/switch-perf-tools.$$ 2>&1; code=$?
 grep -E '^FAIL' /tmp/switch-perf-tools.$$ | sed 's/^/  /'; rm -f /tmp/switch-perf-tools.$$
 result test_perf_tools "$code"
+(cd "$here/../.." && python3 -m unittest tools.triaevum_release.test_topscreen_30_pack) > /tmp/switch-topscreen.$$ 2>&1; code=$?
+grep -E '^(FAIL|ERROR)' /tmp/switch-topscreen.$$ | sed 's/^/  /'; rm -f /tmp/switch-topscreen.$$
+result test_topscreen_30_pack "$code"
 [[ "${1:-}" == "--quick" ]] && { echo "passaram $pass, falharam $fail"; exit $((fail > 0)); }
 
 echo "== testes de unidade (host: $HOST_BUILD)"
