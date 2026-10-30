@@ -433,7 +433,8 @@ def build_texture_pack(*, archive: Path | None = None,
                        mod_romfs: Path | None = None,
                        original_romfs: Path | None = None,
                        original_romfs_image: Path | None = None,
-                       region: str | None = None) -> bytes:
+                       region: str | None = None,
+                       extra_romfs_images: tuple[Path, ...] = ()) -> bytes:
     if (archive is None) == (mod_romfs is None):
         raise ValueError("provide exactly one replacement source")
     if (original_romfs is None) == (original_romfs_image is None):
@@ -446,7 +447,10 @@ def build_texture_pack(*, archive: Path | None = None,
                 original_romfs_image=original_romfs_image)
         return build_topscreen_30_pack(
             archive=archive, region=region, original_romfs=original_romfs,
-            original_romfs_image=original_romfs_image)
+            original_romfs_image=original_romfs_image,
+            extra_romfs_images=extra_romfs_images)
+    if extra_romfs_images:
+        raise ValueError("--extra-romfs-image only applies to TopScreen 3.0")
     entries_by_original: dict[int, tuple[int, bytes, str]] = {}
     profile_textures: list[tuple[str, int, int, int, bytes]] = []
 
@@ -656,7 +660,8 @@ def build_topscreen_30_native_entries(
 
 def build_topscreen_30_pack(*, archive: Path, region: str,
                             original_romfs: Path | None = None,
-                            original_romfs_image: Path | None = None) -> bytes:
+                            original_romfs_image: Path | None = None,
+                            extra_romfs_images: tuple[Path, ...] = ()) -> bytes:
     """Build an O3TU v2 pack from the TopScreen 3.0 archive.
 
     3.0 ships no localized CTXB replacements; the hash-matched entries are
@@ -704,6 +709,18 @@ def build_topscreen_30_pack(*, archive: Path, region: str,
     entries = build_topscreen_30_native_entries(
         ui_rgba, width, height, original_romfs=original_romfs,
         original_romfs_image=original_romfs_image)
+    # Uma romfs modificada (ex.: patch PT-BR no slot espanhol) muda o payload
+    # de menu_top_parts00: sem entrada para o hash dela o override não casa e
+    # o HUD perde molduras/rótulos dos botões X/Y/I/II e a cruz do D-pad.
+    known = {original for original, _, _ in entries}
+    for image in extra_romfs_images:
+        for entry in build_topscreen_30_native_entries(
+                ui_rgba, width, height,
+                original_romfs=image if image.is_dir() else None,
+                original_romfs_image=None if image.is_dir() else image):
+            if entry[0] not in known:
+                known.add(entry[0])
+                entries.append(entry)
     return serialize_pack(entries, [
         (TOPSCREEN_211_MENU_ATLAS_SEMANTIC, menu_width, menu_height,
          PICA_FORMAT_RGBA8, menu_payload),
@@ -722,6 +739,10 @@ def main() -> int:
     originals = parser.add_mutually_exclusive_group(required=True)
     originals.add_argument("--original-romfs", type=Path)
     originals.add_argument("--original-romfs-image", type=Path)
+    parser.add_argument(
+        "--extra-romfs-image", type=Path, action="append", default=[],
+        help="RomFS modificada (ex.: romfs-ptbr.bin) cujas texturas "
+             "localizadas também recebem os sprites do 3.0; repetível")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument(
         "--region", choices=sorted(TOPSCREEN_30_TITLE_IDS),
@@ -731,7 +752,8 @@ def main() -> int:
         archive=args.archive, mod_romfs=args.mod_romfs,
         original_romfs=args.original_romfs,
         original_romfs_image=args.original_romfs_image,
-        region=args.region)
+        region=args.region,
+        extra_romfs_images=tuple(args.extra_romfs_image))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(output)
     print(f"wrote {len(output)} bytes: {args.output}")
