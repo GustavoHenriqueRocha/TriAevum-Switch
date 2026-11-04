@@ -406,7 +406,6 @@ void NativeA32WindowSession::Setup() {
         kPauseTouchButtonsDrawCall,
         kPauseTouchButtonsTouchBranch,
         kPauseLowerScreenBlock,
-        kPauseDungeonMapCursorInput,
         kPauseUiNativeUpdateCall,
         kPauseProjectionPrepareCall,
         kPauseAlternateViewportDrawCall,
@@ -584,8 +583,8 @@ void NativeA32WindowSession::Setup() {
     topScreenSourcePortBlocks = {
         kPauseTouchButtonsDrawCall,       kPauseTouchButtonsTouchBranch,
         kPauseTouchButtonsHeldDownQuery,
-        kPauseLowerScreenBlock,           kPauseDungeonMapCursorInput,
-        kPauseUiNativeUpdateCall,         kPauseProjectionPrepareCall,
+        kPauseLowerScreenBlock,           kPauseUiNativeUpdateCall,
+        kPauseProjectionPrepareCall,
         kPauseAlternateViewportDrawCall,  kPauseConditionalDrawCall,
         kPauseRoutedCommandCallA,         kPauseRoutedCommandCallB,
         kPauseOverlayViewportDrawCall,    kPauseAlternateRendererUpdateCall,

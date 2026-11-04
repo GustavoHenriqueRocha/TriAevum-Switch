@@ -28,6 +28,18 @@ class Guard:
 
 
 GUARDS = [
+    # --- 04/11: mapa da dungeon (pausa, TopScreen) preso no andar em que abre ---
+    # 0x00442F38 (PauseDungeonMap_HandleCursorInput) é o cursor de andares por
+    # D-pad/analógico (Cima/Baixo mudam o andar via SetSelectedFloor); o toque é
+    # 0x004435B0. O port do TopScreen fazia o 0x00442F38 retornar na hora.
+    Guard("mapa da dungeon na pausa não trocava de andar com o analógico (TopScreen pulava 0x00442F38)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_candidate_dispatch.cpp",
+          r'PauseDungeonMap_HandleCursorInput \(0x00442F38\) is not intercepted',
+          forbid=r'kPauseDungeonMapCursorInput|0x00442F38U'),
+    Guard("mapa da dungeon: 0x00442F38 não pode voltar às listas de blocos do TopScreen",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'kPauseLowerScreenBlock,\s+kPauseUiNativeUpdateCall,',
+          forbid=r'kPauseDungeonMapCursorInput|0x00442F38'),
     # --- 04/11: "cannot replace native control config" ao salvar controle no menu de dev ---
     # O FS do Horizon não renomeia por cima de arquivo existente (EEXIST): apaga o
     # destino e renomeia de novo (como o Ship::WriteConfigFileAtomically já fazia).

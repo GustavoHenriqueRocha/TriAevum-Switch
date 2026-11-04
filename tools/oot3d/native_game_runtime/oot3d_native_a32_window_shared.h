@@ -204,7 +204,6 @@ inline constexpr uint32_t kPauseTouchButtonsHeldDownQuery = 0x0042E644U;
 inline constexpr uint32_t kPauseTouchButtonsHeldDownTest = 0x0042E648U;
 inline constexpr uint32_t kPauseLowerScreenBlock = 0x0041DDC8U;
 inline constexpr uint32_t kPauseLowerScreenBlockEnd = 0x0041DEC8U;
-inline constexpr uint32_t kPauseDungeonMapCursorInput = 0x00442F38U;
 inline constexpr uint32_t kPauseUiNativeUpdateCall = 0x0041EAE0U;
 inline constexpr uint32_t kPauseProjectionPrepareCall = 0x0041EB28U;
 inline constexpr uint32_t kPauseProjectionPrepare = 0x002FBC50U;

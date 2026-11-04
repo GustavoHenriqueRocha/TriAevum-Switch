@@ -824,9 +824,11 @@ bool ExecuteTopScreenUiSourcePortBlock(
   case kPauseLowerScreenBlock:
     nextPc = kPauseLowerScreenBlockEnd;
     break;
-  case kPauseDungeonMapCursorInput:
-    nextPc = state.r[14];
-    break;
+  // PauseDungeonMap_HandleCursorInput (0x00442F38) is not intercepted: it is
+  // the native D-pad/Circle Pad floor cursor (Up/Down at +0x30 and
+  // PauseDungeonMap_SetSelectedFloor), which PauseMapPage_Update calls at
+  // 0x0042D248 only when there is no touch; touch selection is 0x004435B0.
+  // Returning from it at once froze the dungeon Map on its opening floor.
   default:
     return false;
   }
