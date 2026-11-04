@@ -28,6 +28,23 @@ class Guard:
 
 
 GUARDS = [
+    # --- 04/11: "cannot replace native control config" ao salvar controle no menu de dev ---
+    # O FS do Horizon não renomeia por cima de arquivo existente (EEXIST): apaga o
+    # destino e renomeia de novo (como o Ship::WriteConfigFileAtomically já fazia).
+    Guard("salvar controle no menu de dev falhava no Switch (rename por cima de oot3d_controls.json dá EEXIST)",
+          "tools/oot3d/native_game_runtime/oot3d_native_control_config.cpp",
+          r'#if defined\(__SWITCH__\).*?replaceError == std::errc::file_exists.*?std::filesystem::remove\(path'),
+    Guard("warp de dev não salvava developer-tools.json no Switch (sobrava o .tmp)",
+          "tools/oot3d/native_game_runtime/oot3d_dev_warp.cpp",
+          r'Ship::WriteConfigFileAtomically\(mStorage,',
+          forbid=r'std::filesystem::rename\(temporary, mStorage'),
+    Guard("preferências dos savestates não salvavam no Switch (rename por cima dá EEXIST)",
+          "tools/oot3d/native_game_runtime/oot3d_savestate_library.cpp",
+          r'Ship::WriteConfigFileAtomically\(mPreferencesPath,',
+          forbid=r'std::filesystem::rename\('),
+    Guard("savestate não sobrescrevia o arquivo existente no Switch (EEXIST)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_savestate.cpp",
+          r'#if defined\(__SWITCH__\).*?renameError == std::errc::file_exists.*?std::filesystem::remove\(destination'),
     # --- 26/10: menu de dev sem botões no deko3d ---
     Guard("menu de dev (L3+R3) abria no deko3d mas não recebia o controle (sem backend SDL do ImGui)",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",

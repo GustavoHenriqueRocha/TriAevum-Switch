@@ -760,6 +760,15 @@ bool SaveNativeControlConfig(const std::filesystem::path& path,
 #else
   std::error_code replaceError;
   std::filesystem::rename(temporary, path, replaceError);
+#if defined(__SWITCH__)
+  // Horizon's FS cannot rename over an existing file (EEXIST).
+  if (replaceError == std::errc::file_exists) {
+    std::error_code removeError;
+    std::filesystem::remove(path, removeError);
+    replaceError.clear();
+    std::filesystem::rename(temporary, path, replaceError);
+  }
+#endif
   if (replaceError) {
     std::error_code ignored;
     std::filesystem::remove(temporary, ignored);

@@ -257,6 +257,15 @@ bool ReplaceStateFile(const std::filesystem::path& temporary,
 #else
     std::error_code renameError;
     std::filesystem::rename(temporary, destination, renameError);
+#if defined(__SWITCH__)
+    // Horizon's FS cannot rename over an existing file (EEXIST).
+    if (renameError == std::errc::file_exists) {
+        std::error_code removeError;
+        std::filesystem::remove(destination, removeError);
+        renameError.clear();
+        std::filesystem::rename(temporary, destination, renameError);
+    }
+#endif
     if (renameError) {
         SetError(error, "could not atomically replace savestate file: " +
                             renameError.message());

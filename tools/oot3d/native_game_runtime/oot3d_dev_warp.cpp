@@ -1,4 +1,5 @@
 #include "oot3d_dev_warp.h"
+#include "ship/config/ConfigPersistence.h"
 
 #include "oot3d/actor_spawn.h"
 
@@ -516,18 +517,8 @@ void DevWarpRuntime::SaveLocked() {
         {"BetterEntrance", mOptions.BetterEntrance},
         {"LinkAge", static_cast<int>(mOptions.Age)},
         {"Night", mOptions.Night}}}};
-  const auto temporary = mStorage.string() + ".tmp";
-  {
-    std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
-    stream << document.dump(2) << '\n';
-    if (!stream) {
-      mStorageError = "Cannot write " + temporary;
-      return;
-    }
-  }
-  std::error_code renamed;
-  std::filesystem::rename(temporary, mStorage, renamed);
-  mStorageError = renamed ? "Cannot replace " + mStorage.string() + ": " + renamed.message() : std::string{};
+  const auto saved = Ship::WriteConfigFileAtomically(mStorage, document.dump(2) + "\n");
+  mStorageError = saved.Success ? std::string{} : "Cannot replace " + mStorage.string() + ": " + saved.Error;
 }
 
 } // namespace Oot3dNativeGame

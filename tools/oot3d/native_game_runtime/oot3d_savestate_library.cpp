@@ -1,4 +1,5 @@
 #include "oot3d_savestate_library.h"
+#include "ship/config/ConfigPersistence.h"
 
 #include <algorithm>
 #include <ctime>
@@ -79,19 +80,9 @@ void SavestateLibrary::SavePreferencesLocked() {
   };
   std::error_code error;
   std::filesystem::create_directories(mPreferencesPath.parent_path(), error);
-  const auto temporary = std::filesystem::path(mPreferencesPath).concat(".tmp");
-  {
-    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-    output << document.dump(4) << '\n';
-    if (!output) {
-      mPreferencesError = "could not write " + PathToUtf8(temporary);
-      return;
-    }
-  }
-  std::filesystem::rename(temporary, mPreferencesPath, error);
-  mPreferencesError = error ? "could not write " + PathToUtf8(mPreferencesPath) +
-                                  ": " + error.message()
-                            : std::string{};
+  const auto saved = Ship::WriteConfigFileAtomically(mPreferencesPath, document.dump(4) + "\n");
+  mPreferencesError = saved.Success ? std::string{}
+                               : "could not write " + PathToUtf8(mPreferencesPath) + ": " + saved.Error;
 }
 
 std::filesystem::path SavestateLibrary::DirectoryLocked() const {
