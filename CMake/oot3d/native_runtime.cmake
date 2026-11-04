@@ -73,33 +73,33 @@ set(OOT3D_WHOLE_AOT_MAX_PARALLEL_COMPILES "2" CACHE STRING
     "Maximum concurrent whole-AOT shard compilations")
 set(OOT3D_WHOLE_AOT_SHARD_COUNT "256" CACHE STRING
     "Generated whole-AOT C++ shard count")
-# affinity: distribuição por afinidade de chamadas, recalculada do zero a cada
-# geração (uma função a mais ou a menos na seleção remaneja ~30% dos shards).
-# affinity-incremental: mesma distribuição na primeira geração; depois
-# preserva o shard de cada função existente (ver _affinity_incremental_buckets),
-# para o ccache acertar os shards não tocados. Os .gcda do PGO casam com o
-# C++ gerado, então só troque a estratégia antes de um treino de perfil.
+# affinity: distribution by call affinity, recomputed from scratch on every
+# generation (one function more or less in the selection reshuffles ~30% of the shards).
+# affinity-incremental: same distribution on the first generation; afterwards
+# keeps the shard of each existing function (see _affinity_incremental_buckets),
+# so ccache hits the untouched shards. The PGO .gcda files match the
+# generated C++, so only switch the strategy before a profile training run.
 set(OOT3D_WHOLE_AOT_SHARD_STRATEGY "affinity" CACHE STRING
     "Whole-AOT C++ shard strategy (affinity or affinity-incremental)")
 set_property(CACHE OOT3D_WHOLE_AOT_SHARD_STRATEGY PROPERTY STRINGS
     affinity affinity-incremental)
-# Tempo de compilação dos shards (medições no commit que criou estas opções): as funções
-# guest gigantes gastam 50-65% do tempo no sched1 e 15-45% no PRE/gcse do RTL.
-# 0 / vazio = comportamento anterior (C++ e flags idênticos).
-# PGO (GCC): o atributo não muda o profile_id (nome mangled), o checksum de
-# linhas nem o de CFG de nenhuma função (comparado nos .gcno/__gcov* dos
-# shards 003 e 007), então os .gcda valem com ou sem ele. No build
-# "generate" pode marcar todas as gigantes (não afeta o binário final). No
-# "use", -fprofile-partial-training otimiza para velocidade as funções que a
-# coleta não executou, então marque só as frias da coleta: gere a lista com
-# whole_aot_hot_from_gcda.py a partir dos .gcda e passe-a em
-# OOT3D_WHOLE_AOT_HOT_FUNCTIONS (as funções executadas saem byte a byte iguais).
+# Shard compile time (measurements at the commit that created these options): the giant
+# guest functions spend 50-65% of the time in sched1 and 15-45% in the RTL PRE/gcse.
+# 0 / empty = previous behavior (identical C++ and flags).
+# PGO (GCC): the attribute changes neither the profile_id (mangled name), nor the
+# line checksum nor the CFG one of any function (compared in the .gcno/__gcov* of
+# shards 003 and 007), so the .gcda files are valid with or without it. In the
+# "generate" build all the giants may be marked (doesn't affect the final binary). In
+# "use", -fprofile-partial-training optimizes for speed the functions the
+# collection didn't execute, so mark only the collection's cold ones: generate the list with
+# whole_aot_hot_from_gcda.py from the .gcda files and pass it in
+# OOT3D_WHOLE_AOT_HOT_FUNCTIONS (the executed functions come out byte-for-byte identical).
 set(OOT3D_WHOLE_AOT_GIANT_FUNCTION_INSTRUCTIONS "0" CACHE STRING
-    "Marca funções com >= N instruções guest (exceto as quentes) sem sched1/gcse-after-reload; 0 desliga")
+    "Marks functions with >= N guest instructions (except the hot ones) without sched1/gcse-after-reload; 0 turns it off")
 set(OOT3D_WHOLE_AOT_HOT_FUNCTIONS "" CACHE FILEPATH
-    "Lista de funções quentes (whole_aot_hot_functions.py ou whole_aot_hot_from_gcda.py) que nunca perdem otimizações")
+    "List of hot functions (whole_aot_hot_functions.py or whole_aot_hot_from_gcda.py) that never lose optimizations")
 set(OOT3D_WHOLE_AOT_GCSE_MEMORY_KB "" CACHE STRING
-    "--param=max-gcse-memory para os shards (GCC); só funções gigantes pulam o PRE do RTL; vazio = padrão do GCC")
+    "--param=max-gcse-memory for the shards (GCC); only giant functions skip the RTL PRE; empty = GCC default")
 option(OOT3D_WHOLE_AOT_THINLTO
     "Compile and link the whole-AOT archive with LLVM ThinLTO" OFF)
 set(OOT3D_WHOLE_AOT_PROFILE_MODE "none" CACHE STRING
@@ -391,9 +391,9 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
     if (OOT3D_REBUILD_WHOLE_AOT)
         file(GLOB _oot3d_whole_aot_generated_shards CONFIGURE_DEPENDS
             "${OOT3D_WHOLE_AOT_GENERATED_DIR}/oot3d_whole_aot_shard_*.cpp")
-        # As substituições nativas escritas à mão (guest_overrides.json,
-        # ligadas nos shards por apply_guest_overrides.py) ficam no mesmo
-        # arquivo que os shards que as chamam.
+        # The hand-written native overrides (guest_overrides.json,
+        # linked into the shards by apply_guest_overrides.py) stay in the same
+        # file as the shards that call them.
         add_library(oot3d_native_whole_aot STATIC EXCLUDE_FROM_ALL
             ${_oot3d_whole_aot_generated_header}
             ${_oot3d_whole_aot_generated_source}
@@ -430,9 +430,9 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
         endif()
         if (OOT3D_WHOLE_AOT_GCSE_MEMORY_KB AND
             CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-            # Funções cujo PRE/cprop/gcse-after-reload do RTL excederia esse
-            # orçamento (blocos x pseudos) pulam essas passagens; as quentes são
-            # pequenas e saem byte a byte iguais (medido com 32768).
+            # Functions whose RTL PRE/cprop/gcse-after-reload would exceed this
+            # budget (blocks x pseudos) skip those passes; the hot ones are
+            # small and come out byte-for-byte identical (measured with 32768).
             target_compile_options(oot3d_native_whole_aot PRIVATE
                 "--param=max-gcse-memory=${OOT3D_WHOLE_AOT_GCSE_MEMORY_KB}")
         endif()

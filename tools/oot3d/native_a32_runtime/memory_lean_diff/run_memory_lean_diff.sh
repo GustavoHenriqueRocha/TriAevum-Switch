@@ -1,12 +1,12 @@
 #!/bin/bash
-# Teste diferencial de NativeA32Memory: árvore atual contra uma revisão base
-# (padrão 4fc0472, antes do modo enxuto). A implementação base é extraída do
-# git, renomeada para o namespace OldMem e ligada no mesmo executável.
+# NativeA32Memory differential test: current tree against a base revision
+# (default 4fc0472, before lean mode). The base implementation is extracted from
+# git, renamed to the OldMem namespace and linked into the same executable.
 #
-# uso: run_memory_lean_diff.sh <saida> [revisao-base] [operacoes] [semente] [episodios]
-#   NLOHMANN=<include do nlohmann_json> (padrão: _deps do build-switch)
+# usage: run_memory_lean_diff.sh <output> [base-revision] [operations] [seed] [episodes]
+#   NLOHMANN=<nlohmann_json include> (default: build-switch _deps)
 set -e
-OUT=${1:?pasta de saída}
+OUT=${1:?output folder}
 BASE=${2:-4fc0472}
 OPS=${3:-2000000}
 SEED=${4:-7}

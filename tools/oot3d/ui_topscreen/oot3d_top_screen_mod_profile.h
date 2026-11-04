@@ -835,35 +835,35 @@ bool PrepareTopScreenGameOverDraw(
     NativeA32Memory &memory, std::uint32_t controller,
     const TopScreenPauseDrawInputs &inputs, bool runtimeSceneLatch,
     TopScreenRendererVisibilityRouteState *state, std::string *error = nullptr);
-// Quem cuida do Game Over (cena 3) na chamada nativa 0x00300544.
-// No produto o gancho da entrada 0x00427A3C (PrepareTopScreenGameOverDraw +
-// composição viewport 0,40,480,320 / PauseUi_Draw / desenho nativo) já faz o
-// atraso, o fade e a migração das escolhas, com o MESMO estado. Se a chamada
-// também rodasse ResolveTopScreenRendererVisibilityRoute, o atraso/fade
-// andariam duas vezes por quadro e, ao fim do fade, a chamada suprimiria o
-// desenho nativo: a entrada 0x00427A3C nunca mais rodaria e o prompt
-// "Continuar?/Salvar?" não apareceria (no máximo um quadro). Com o gancho
-// ativo a chamada só desvia para o desenho nativo; a cena 7 e os builds de
-// desenvolvimento (sem o gancho) continuam no caminho do mod.
+// Who handles Game Over (scene 3) in the native call 0x00300544.
+// In the product the hook at entry 0x00427A3C (PrepareTopScreenGameOverDraw +
+// viewport composition 0,40,480,320 / PauseUi_Draw / native draw) already does the
+// delay, the fade and the migration of the choices, with the SAME state. If the call
+// also ran ResolveTopScreenRendererVisibilityRoute, the delay/fade
+// would advance twice per frame and, at the end of the fade, the call would suppress the
+// native draw: entry 0x00427A3C would never run again and the
+// "Continuar?/Salvar?" prompt would not appear (at most one frame). With the hook
+// active the call only diverts to the native draw; scene 7 and the
+// development builds (without the hook) stay on the mod path.
 bool TopScreenRendererVisibilityCallDefersToGameOverDraw(
     bool gameOverDrawHookActive,
     const TopScreenRendererVisibilityInputs &inputs) noexcept;
 
-// Depuração (config/debug_force_game_over no SD; fora do Switch a variável
-// TRIAEVUM_DEBUG_FORCE_GAME_OVER): zera a vida uma vez depois de N segundos
-// de jogo normal (cena 3, variante 2, sem Game Over, transição ou demo do
-// título), para chegar à tela de Game Over sem procurar um inimigo.
+// Debugging (config/debug_force_game_over on the SD; outside the Switch the
+// TRIAEVUM_DEBUG_FORCE_GAME_OVER variable): zeroes health once after N seconds
+// of normal play (scene 3, variant 2, no Game Over, transition or title
+// demo), to reach the Game Over screen without looking for an enemy.
 struct TopScreenDebugGameOverState {
-  std::uint32_t RequiredCalls = 0; // 0 = desligado
+  std::uint32_t RequiredCalls = 0; // 0 = disabled
   std::uint32_t EligibleCalls = 0;
   bool Fired = false;
 };
-// Texto do arquivo: vazio = 10 s; número inteiro 1..3600 = segundos;
-// "0", "off" ou inválido = desligado. Devolve as chamadas por quadro nativo
-// (30 por segundo) ou 0.
+// File text: empty = 10 s; integer 1..3600 = seconds;
+// "0", "off" or invalid = disabled. Returns the calls per native frame
+// (30 per second) or 0.
 std::uint32_t ParseTopScreenDebugGameOverCalls(std::string_view text) noexcept;
-// Uma chamada por desenho nativo (0x00300544). Devolve true no único quadro
-// em que a vida deve ser zerada.
+// One call per native draw (0x00300544). Returns true on the single frame
+// in which health must be zeroed.
 bool AdvanceTopScreenDebugGameOver(const TopScreenPauseDrawInputs &inputs,
                                    std::int16_t health,
                                    TopScreenDebugGameOverState *state) noexcept;

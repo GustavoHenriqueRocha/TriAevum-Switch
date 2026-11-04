@@ -1,9 +1,9 @@
-"""Onde ficam os arquivos do patch PT-BR (nada disso vai para o repositório: são dados do jogo e do mod).
+"""Where the PT-BR patch files live (none of this goes into the repository: it is game and mod data).
 
-TRIAEVUM_PTBR      pasta de trabalho (padrão ~/oot3d-work/ptbr): eu-original.qm, traducao.json, glossario.json,
+TRIAEVUM_PTBR      working folder (default ~/oot3d-work/ptbr): eu-original.qm, traducao.json, glossario.json,
                    fontes/ (M PLUS Rounded 1c, OFL), menus-pt/, romfs-ptbr.bin
-TRIAEVUM_ROMFS     romfs.bin ORIGINAL do jogo (só leitura)
-TRIAEVUM_SOH_TEXTO recurso text/nes_message_data_static extraído do mod PT-BR do Ship of Harkinian (otr.py extrai)
+TRIAEVUM_ROMFS     romfs.bin the game's ORIGINAL (read-only)
+TRIAEVUM_SOH_TEXTO text/nes_message_data_static resource extracted from the Ship of Harkinian PT-BR mod (otr.py extracts it)
 """
 import os
 from pathlib import Path

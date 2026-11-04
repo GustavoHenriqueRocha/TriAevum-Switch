@@ -1,38 +1,38 @@
 #pragma once
 
-// Perfil de pico do código guest (config/guest_spike_ms).
+// Guest code spike profile (config/guest_spike_ms).
 //
-// tour19 (pgo5n, 2026-10-23): 79% dos 428 refreshes perdidos tiveram a
-// thread do jogo como culpada (stage=guest em logs/spikes.txt); fora dos
-// carregamentos foram 1-10 por janela, e o Water Temple teve 38 numa janela
-// (guest_ms 20-26 contra 8-11 de média). spikes.txt diz QUANDO; este perfil
-// diz QUAL código do jogo pesou naqueles quadros.
+// tour19 (pgo5n, 2026-10-23): 79% of the 428 missed refreshes had the
+// game thread as the culprit (stage=guest in logs/spikes.txt); outside of
+// loads there were 1-10 per window, and the Water Temple had 38 in one window
+// (guest_ms 20-26 vs 8-11 on average). spikes.txt says WHEN; this profile
+// says WHICH game code was heavy in those frames.
 //
-// Em cima do GuestBlockProfiler (oot3d_native_guest_profile.h, modo "todos
-// os blocos", relógio cntpct_el0): cada intervalo atribuído a um bloco
-// também entra no acumulador do quadro (Add, caminho quente: um uint32 por
-// bloco do texto e uma lista de blocos tocados, ambos alocados uma vez). No
-// fim do quadro do host (EndFrame):
-//  - quadro com tempo guest > limite: agrega os blocos tocados por função
-//    (mapa config/guest_functions.txt; sem ele, por bloco), guarda as N
-//    mais caras num anel fixo e soma todas no resumo (tabela hash fixa);
-//  - sempre: zera só os blocos tocados.
-// Formatação e escrita ficam fora do quadro (DrainLines/FormatSummary, na
-// janela do perf.txt): logs/guest_spikes.txt (um bloco por pico) e
-// logs/guest_spikes_summary.txt (top 30 por tempo total nos quadros com
-// pico, reescrito a cada janela: vale "ao fim" mesmo se o jogo for fechado
-// pelo HOME).
+// On top of GuestBlockProfiler (oot3d_native_guest_profile.h, "all
+// blocks" mode, cntpct_el0 clock): each interval attributed to a block
+// also goes into the frame accumulator (Add, hot path: one uint32 per
+// text block and a list of touched blocks, both allocated once). At the
+// end of the host frame (EndFrame):
+//  - frame with guest time > threshold: aggregates touched blocks per function
+//    (config/guest_functions.txt map; without it, per block), keeps the N
+//    most expensive in a fixed ring and adds all to the summary (fixed hash table);
+//  - always: zeroes only the touched blocks.
+// Formatting and writing happen outside the frame (DrainLines/FormatSummary, in the
+// perf.txt window): logs/guest_spikes.txt (one block per spike) and
+// logs/guest_spikes_summary.txt (top 30 by total time in frames with a
+// spike, rewritten every window: valid "at the end" even if the game is closed
+// via HOME).
 //
-// Custo: o modo todos os blocos chama o callback em cada entrada de bloco
-// (o jogo fica mais lento enquanto ligado; os tempos incluem essa
-// sobrecarga, ~constante por entrada: as "entries" de cada pico permitem
-// descontá-la). Por isso fica atrás da chave, desligado por padrão.
+// Cost: all-blocks mode calls the callback on every block entry
+// (the game runs slower while enabled; times include that
+// overhead, ~constant per entry: each spike's "entries" allow
+// subtracting it). That's why it's behind the switch, off by default.
 //
-// config/guest_spike_ms: presente liga. Conteúdo opcional "limite [corte]":
-// limite em ms (padrão 14) e corte de carregamento em ms (padrão 50; quadros
-// acima dele vão para o log com load=1 mas não para o resumo).
+// config/guest_spike_ms: present enables it. Optional content "threshold [cutoff]":
+// threshold in ms (default 14) and load cutoff in ms (default 50; frames
+// above it go to the log with load=1 but not to the summary).
 //
-// Lógica pura (sem arquivo, sem relógio): oot3d_guest_spike_profile_tests.cpp.
+// Pure logic (no file, no clock): oot3d_guest_spike_profile_tests.cpp.
 
 #include <algorithm>
 #include <array>
@@ -56,12 +56,12 @@ struct GuestSpikeConfig {
   uint32_t TopPerSpike = 10U;      // <= kGuestSpikeMaxTop
   uint32_t TouchedCapacity = 65536U;
   uint32_t RingCapacity = 128U;
-  uint32_t SummaryCapacity = 16384U; // potência de 2
+  uint32_t SummaryCapacity = 16384U; // power of 2
   uint32_t SummaryTop = 30U;
 };
 
-// "14", "12,5", "14 60": limite (1-200 ms) e corte de carregamento
-// (> limite, até 5000). Vazio ou inválido: os padrões.
+// "14", "12,5", "14 60": threshold (1-200 ms) and load cutoff
+// (> threshold, up to 5000). Empty or invalid: the defaults.
 inline void ParseGuestSpikeConfig(std::string_view text,
                                   GuestSpikeConfig *config) noexcept {
   const auto number = [&](double *out) {
@@ -101,18 +101,18 @@ inline void ParseGuestSpikeConfig(std::string_view text,
 }
 
 struct GuestSpikeEntry {
-  uint32_t Pc = 0U; // entrada da função (ou o bloco, sem mapa)
+  uint32_t Pc = 0U; // function entry (or the block, without a map)
   uint32_t Ticks = 0U;
 };
 
 struct GuestSpikeRecord {
   uint64_t HostFrame = 0U;
   uint64_t FrameTicks = 0U;
-  uint64_t Entries = 0U;  // entradas de bloco no quadro
-  uint32_t Blocks = 0U;   // blocos distintos
+  uint64_t Entries = 0U;  // block entries in the frame
+  uint32_t Blocks = 0U;   // distinct blocks
   uint32_t Functions = 0U;
-  bool Overflow = false;  // mais blocos que TouchedCapacity
-  bool Load = false;      // acima do corte de carregamento
+  bool Overflow = false;  // more blocks than TouchedCapacity
+  bool Load = false;      // above the load cutoff
   uint32_t Count = 0U;
   std::array<GuestSpikeEntry, kGuestSpikeMaxTop> Top{};
 };
@@ -122,7 +122,7 @@ struct GuestSpikeTotals {
   uint64_t Spikes = 0U;
   uint64_t LoadSpikes = 0U;
   uint64_t FrameTicks = 0U;
-  uint64_t SpikeTicks = 0U; // quadros com pico fora de carregamento
+  uint64_t SpikeTicks = 0U; // spike frames outside of loads
   uint64_t RingDropped = 0U;
   uint64_t OverflowFrames = 0U;
   uint64_t SummaryFull = 0U;
@@ -130,7 +130,7 @@ struct GuestSpikeTotals {
 
 class GuestSpikeProfile {
 public:
-  // functionEntries: entradas de função em ordem crescente (pode ser vazio).
+  // functionEntries: function entries in ascending order (may be empty).
   void Configure(const GuestSpikeConfig &config, uint32_t base, uint32_t slots,
                  double ticksPerMs, std::span<const uint32_t> functionEntries) {
     mConfig = config;
@@ -164,7 +164,7 @@ public:
   [[nodiscard]] const GuestSpikeTotals &Totals() const noexcept { return mTotals; }
   [[nodiscard]] double TicksPerMs() const noexcept { return mTicksPerMs; }
 
-  // Caminho quente: `ticks` atribuídos ao bloco `slot` neste quadro.
+  // Hot path: `ticks` attributed to block `slot` in this frame.
   void Add(uint32_t slot, uint64_t ticks) noexcept {
     mFrameTotal += ticks;
     if (slot >= mFrameTicks.size() || ticks == 0U)
@@ -181,7 +181,7 @@ public:
     frame = sum > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(sum);
   }
 
-  // Fim do quadro do host. true: o quadro foi um pico (registrado).
+  // End of the host frame. true: the frame was a spike (recorded).
   bool EndFrame(uint64_t hostFrame, uint64_t blockEntries) {
     if (!mEnabled)
       return false;
@@ -200,8 +200,8 @@ public:
 
   [[nodiscard]] size_t Pending() const noexcept { return mRingSize; }
 
-  // Picos guardados -> texto (fora do quadro). nameOf(pc) -> const char*
-  // ("" sem nome). Esvazia o anel.
+  // Stored spikes -> text (outside the frame). nameOf(pc) -> const char*
+  // ("" if unnamed). Empties the ring.
   template <typename NameOf>
   size_t DrainLines(std::string &out, NameOf &&nameOf) {
     size_t drained = 0U;
@@ -230,8 +230,8 @@ public:
     return drained;
   }
 
-  // Resumo agregado: as SummaryTop funções de maior tempo total nos quadros
-  // com pico (fora de carregamento).
+  // Aggregated summary: the SummaryTop functions with the highest total time in
+  // spike frames (outside of loads).
   template <typename NameOf>
   void FormatSummary(std::string &out, NameOf &&nameOf) const {
     std::vector<SummarySlot> rows;
@@ -305,7 +305,7 @@ private:
       mTotals.SpikeTicks += mFrameTotal;
     if (mOverflow)
       ++mTotals.OverflowFrames;
-    // Blocos -> funções: ordena por chave e soma (scratch pré-alocado).
+    // Blocks -> functions: sort by key and sum (preallocated scratch).
     for (uint32_t i = 0; i < mTouchedCount; ++i)
       mScratch[i] = {KeyOf(mTouched[i]), mFrameTicks[mTouched[i]]};
     auto *begin = mScratch.data();
@@ -329,7 +329,7 @@ private:
       return a.Ticks != b.Ticks ? a.Ticks > b.Ticks : a.Pc < b.Pc;
     });
     if (mRingSize == mRing.size()) {
-      ++mTotals.RingDropped; // o mais antigo sai
+      ++mTotals.RingDropped; // the oldest goes out
       --mRingSize;
     }
     auto &record = mRing[mRingHead];

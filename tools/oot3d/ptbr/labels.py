@@ -1,9 +1,9 @@
-"""Redesenha rótulos de menu em PT-BR dentro das texturas CTXB."""
+"""Redraws PT-BR menu labels inside the CTXB textures."""
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from pathlib import Path
 
-from caminhos import FONTES
-ESCALA = 4   # desenha 4x maior e reduz: bordas suaves como as do original
+from paths import FONTES
+ESCALA = 4   # draws 4x larger and downscales: smooth edges like the original
 
 
 SERIFA = '/usr/share/fonts/liberation/LiberationSerif-Bold.ttf'
@@ -17,10 +17,10 @@ def fonte(px, peso='ExtraBold'):
 
 def rotulo(img, caixa, texto, altura_maiuscula=12, cor=(255, 255, 255, 255), contorno=(0, 0, 0, 255),
            espessura=1.5, limpar=True, peso='ExtraBold', alinhar='centro', topo=None, sombra=0):
-    """Escreve `texto` em `caixa` (x0, y0, x1, y1), apagando o que havia antes.
+    """Writes `texto` into `caixa` (x0, y0, x1, y1), erasing what was there before.
 
-    Com `topo`, o alto das maiúsculas fica nessa linha (as descendentes podem passar da caixa,
-    como no original); sem ele, o texto é centralizado na vertical."""
+    With `topo`, the top of the capitals sits on that line (descenders may extend past the box,
+    as in the original); without it, the text is centered vertically."""
     x0, y0, x1, y1 = caixa
     w, h = x1 - x0, y1 - y0
     if limpar:
@@ -28,7 +28,7 @@ def rotulo(img, caixa, texto, altura_maiuscula=12, cor=(255, 255, 255, 255), con
     E = ESCALA
     f = fonte(int(altura_maiuscula * E / (0.66 if peso == 'serifa' else 0.72)), peso)
     l, t, r, b = f.getbbox(texto)
-    cap_t = f.getbbox('H')[1]                                # topo das maiúsculas, para alinhar a base
+    cap_t = f.getbbox('H')[1]                                # top of the capitals, to align the baseline
     tw, th = r - l, b - t
     margem = int(espessura * E) + 2
     camada = Image.new('RGBA', (tw + 2 * margem, th + 2 * margem), (0, 0, 0, 0))
@@ -41,7 +41,7 @@ def rotulo(img, caixa, texto, altura_maiuscula=12, cor=(255, 255, 255, 255), con
     camada = camada.crop((0, 0, camada.width + sombra * E, camada.height + sombra * E)) if sombra else camada
     alvo_h = round(camada.height / E)
     alvo_w = round(camada.width / E)
-    if alvo_w > w:                                          # não cabe: comprime só na horizontal
+    if alvo_w > w:                                          # doesn't fit: compress horizontally only
         alvo_w = w
     if alvo_h > h and topo is None:
         alvo_h = h

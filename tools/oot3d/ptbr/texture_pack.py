@@ -1,22 +1,22 @@
-"""Pack de texturas em alta resolução (formato Azahar: tex1_LxA_HASH_fmt_mip0.png) dos menus, mapas e títulos de área.
+"""High-resolution texture pack (Azahar format: tex1_WxH_HASH_fmt_mip0.png) for the menus, maps and area titles.
 
-    python -I pacote_texturas.py exportar          # texturas nativas da romfs PT-BR -> TRABALHO/pack/nativas
-    (ampliar nativas/*.png em 4x, ex.: realesrgan-ncnn-vulkan, para TRABALHO/pack/ampliadas, mesmo nome)
-    python -I pacote_texturas.py montar [fator]    # -> TRABALHO/pack/textures (fator 2 por padrão)
+    python -I texture_pack.py exportar          # native textures from the PT-BR romfs -> TRABALHO/pack/nativas
+    (upscale nativas/*.png 4x, e.g. realesrgan-ncnn-vulkan, into TRABALHO/pack/ampliadas, same name)
+    python -I texture_pack.py montar [fator]    # -> TRABALHO/pack/textures (fator 2 by default)
 
-Os ícones de itens vão à parte, em TRABALHO/pack/textures_itens, para comparar com e sem: a varredura do
-runtime é recursiva, então basta mover a pasta para dentro de textures/ (itens/) para ligar.
+Item icons go separately, in TRABALHO/pack/textures_itens, to compare with and without: the runtime's
+scan is recursive, so just move the folder into textures/ (itens/) to enable them.
 
-O nome leva o hash dos bytes nativos (CityHash64, ferramenta hash_textura.cpp), então o pack vale só para
-esta romfs: refazer depois de mudar menus ou títulos.
+The name carries the hash of the native bytes (CityHash64, tool texture_hash.cpp), so the pack only applies to
+this romfs: rebuild after changing menus or titles.
 """
 import json, struct, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from caminhos import ROMFS_PTBR, TRABALHO
+from paths import ROMFS_PTBR, TRABALHO
 from ctxb import CTXB_HEADER_SIZE, cabecalho, decodificar
 from romfs import listar, localizar
-from titulos import entradas_zar
+from titles import entradas_zar
 
 PACK = TRABALHO / 'pack'
 HASH = PACK / 'hash_textura'
@@ -33,7 +33,7 @@ def _ler(f, o, t):
 
 
 def texturas():
-    """(nome legível, ctxb) dos menus em espanhol (onde está o PT-BR) e dos títulos de área eusp/ussp."""
+    """(readable name, ctxb) of the Spanish menus (where the PT-BR is) and of the eusp/ussp area titles."""
     with open(ROMFS_PTBR, 'rb') as f:
         for cam in listar(ROMFS_PTBR):
             partes = cam.split('/')
@@ -50,14 +50,14 @@ def texturas():
 
 
 def pasta(nome):
-    """Pasta de destino no pack: ícones de itens ficam separados (opcionais)."""
+    """Destination folder in the pack: item icons are kept separate (optional)."""
     return 'textures_itens' if 'icon_item' in nome else 'textures'
 
 
 def exportar():
     if not HASH.exists():
-        raise SystemExit(f'compile antes: g++ -std=c++20 -O2 -I runtime/three_ds_recomp/include '
-                         f'tools/oot3d/ptbr/hash_textura.cpp -o {HASH}')
+        raise SystemExit(f'compile first: g++ -std=c++20 -O2 -I runtime/three_ds_recomp/include '
+                         f'tools/oot3d/ptbr/texture_hash.cpp -o {HASH}')
     (PACK / 'nativas').mkdir(parents=True, exist_ok=True)
     mapa = {}
     for nome, ctxb in texturas():
@@ -66,12 +66,12 @@ def exportar():
         base = ctxb[CTXB_HEADER_SIZE:CTXB_HEADER_SIZE + w * h * bits // 8]
         arquivo = f'tex1_{w}x{h}_{_hash(base)}_{fmt}_mip0.png'
         if arquivo in mapa.values():
-            continue                                   # mesma textura em outro idioma/cena
+            continue                                   # same texture in another language/scene
         decodificar(ctxb).save(PACK / 'nativas' / f'{nome}.png')
         mapa[nome] = arquivo
     (PACK / 'tmp.bin').unlink(missing_ok=True)
     (PACK / 'mapa.json').write_text(json.dumps(mapa, indent=1))
-    print(len(mapa), 'texturas em', PACK / 'nativas')
+    print(len(mapa), 'textures in', PACK / 'nativas')
 
 
 def montar(fator=2):
@@ -82,11 +82,11 @@ def montar(fator=2):
         grande = Image.open(PACK / 'ampliadas' / f'{nome}.png').convert('RGBA')
         alvo = (nativa.width * fator, nativa.height * fator)
         im = grande.resize(alvo, Image.LANCZOS) if grande.size != alvo else grande
-        # Alfa da nativa ampliada: o upscaler borra bordas transparentes de rótulos e ícones.
+        # Alpha from the upscaled native: the upscaler blurs transparent edges of labels and icons.
         im.putalpha(nativa.getchannel('A').resize(alvo, Image.BICUBIC))
         destino = PACK / pasta(nome); destino.mkdir(exist_ok=True)
         im.save(destino / arquivo, optimize=True)
-    print(len(mapa), 'texturas em', PACK / 'textures', 'e', PACK / 'textures_itens')
+    print(len(mapa), 'textures in', PACK / 'textures', 'and', PACK / 'textures_itens')
 
 
 if __name__ == '__main__':

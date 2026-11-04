@@ -1,16 +1,16 @@
 #!/bin/bash
-# Diferencial de sequências inlinadas de acessos guest (memória atual x
-# revisão base). As mesmas funções geradas (gen_store_sequences.py) são
-# compiladas contra as duas memórias em -O3 e executadas com estados e modos
-# aleatórios (rastreio, observador de escrita, vigia de faixa).
+# Differential of inlined guest access sequences (current memory vs
+# base revision). The same generated functions (gen_store_sequences.py) are
+# compiled against both memories at -O3 and run with random states and modes
+# (trace, write observer, range watch).
 #
-# uso: run_store_sequence_diff.sh <saida> [revisao-base] [tentativas] [semente] [funcoes] [operacoes]
-#   ALVO=host (g++ nativo, padrão) ou ALVO=switch (devkitA64 com as flags dos
-#   shards, executado no qemu-aarch64)
-#   EXTRA=<flags adicionais para os dois lados>
-#   GIT_ROOT=<repositório de onde sai a revisão base> (padrão: esta árvore)
+# usage: run_store_sequence_diff.sh <output> [base-revision] [trials] [seed] [functions] [operations]
+#   ALVO=host (native g++, default) or ALVO=switch (devkitA64 with the shard
+#   flags, run under qemu-aarch64)
+#   EXTRA=<additional flags for both sides>
+#   GIT_ROOT=<repository the base revision comes from> (default: this tree)
 set -e
-OUT=${1:?pasta de saída}
+OUT=${1:?output folder}
 BASE=${2:-topscreen-3.0}
 TRIALS=${3:-200}
 SEED=${4:-1}

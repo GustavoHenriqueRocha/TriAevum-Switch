@@ -1,12 +1,12 @@
-"""Exporta as mensagens do 3DS sem PT-BR, com os códigos como ⟦hex⟧, e um glossário EN→PT."""
+"""Exports the 3DS messages without PT-BR, with codes as ⟦hex⟧, and an EN→PT glossary."""
 import json, re
 from collections import Counter, defaultdict
 from msgs import soh, qm, t_tokens
 from conv import converter
-from caminhos import TRABALHO
+from paths import TRABALHO
 
 def texto(b):
-    """payload do 3DS → texto legível; \\n = 7f1c; outros códigos = ⟦7fXX..⟧."""
+    """3DS payload → readable text; \\n = 7f1c; other codes = ⟦7fXX..⟧."""
     out, buf = [], bytearray()
     def solta():
         if buf: out.append(buf.decode('utf-8', 'replace')); buf.clear()
@@ -37,4 +37,4 @@ if __name__ == '__main__':
     S = str(TRABALHO) + '/'
     json.dump(pend, open(S + 'pendentes.json', 'w'), ensure_ascii=False, indent=1)
     json.dump(glossario, open(S + 'glossario.json', 'w'), ensure_ascii=False, indent=1)
-    print(len(pend), 'pendentes;', len(glossario), 'termos no glossário;', sum(len(p['en']) for p in pend), 'caracteres')
+    print(len(pend), 'pending;', len(glossario), 'glossary terms;', sum(len(p['en']) for p in pend), 'characters')

@@ -138,8 +138,8 @@ void RegisterCurrentThread(SwitchThreadRole role) {
     if (tRecord != nullptr) {
         tRecord->Role = role;
     }
-    // Slot do watchdog de travamento (oot3d_hang_watchdog.h) para os papéis
-    // que ele acompanha.
+    // Hang watchdog slot (oot3d_hang_watchdog.h) for the roles
+    // it tracks.
     switch (role) {
     case SwitchThreadRole::Game: HangWatch::Bind(HangWatch::Thread::Game, self); break;
     case SwitchThreadRole::Render: HangWatch::Bind(HangWatch::Thread::Render, self); break;

@@ -80,22 +80,22 @@ _FOLDED_LITERALS: set[int] = set()
 # default; the emitted code still compiles to the software operations on
 # other hosts.
 _NATIVE_VFP_AARCH64 = False
-# Promoção de registradores (generate(promote_registers=True)): GPRs, NZCV e
-# o orçamento de blocos ficam em variáveis locais em todas as funções comuns,
-# sincronizados com o estado arquitetural só onde ele é observável (ver
-# _promote_function_body). Desligado por padrão: o C++ gerado é o mesmo de antes.
+# Register promotion (generate(promote_registers=True)): GPRs, NZCV and
+# the block budget live in local variables in every ordinary function,
+# synchronized with the architectural state only where it is observable (see
+# _promote_function_body). Off by default: the generated C++ is the same as before.
 #
-# Medido (2026-10-17, GCC 16.1 devkitA64 -O3, flags dos shards do Switch):
-# piora. Shard 243: 114,2 mil -> 154,8 mil instruções, loads +77%, stores
-# +89% (pilha 13,5/15,8 mil -> 33,3/32,7 mil); FUN_0046c204: 81 mil -> 119 mil.
-# Com referências o próprio state é a "casa" de cada registrador: o GCC
-# guarda na escrita e recarrega só o que usa depois de uma chamada (inclusive
-# os caminhos lentos frios de memória). Com locais, (1) cada valor vivo através
-# de uma chamada fria (ReadFastSlow/WriteFastSlow) precisa de registrador
-# callee-saved ou derrame na pilha; (2) a entrada carrega todos os registros
-# promovidos de uma vez, porque as saídas gravam o conjunto "talvez sujo"
-# (estático); (3) o prólogo salva x19-x28. Sem os caminhos lentos
-# (experimento, não exato) ainda fica 19% pior. Por isso continua desligado.
+# Measured (2026-10-17, GCC 16.1 devkitA64 -O3, Switch shard flags):
+# worse. Shard 243: 114.2k -> 154.8k instructions, loads +77%, stores
+# +89% (stack 13.5k/15.8k -> 33.3k/32.7k); FUN_0046c204: 81k -> 119k.
+# With references, state itself is the "home" of each register: GCC
+# stores on write and reloads only what it uses after a call (including
+# the cold memory slow paths). With locals, (1) every value live across
+# a cold call (ReadFastSlow/WriteFastSlow) needs a callee-saved register
+# or a stack spill; (2) the entry loads all promoted registers at once,
+# because the exits store the "maybe dirty" set (static);
+# (3) the prologue saves x19-x28. Without the slow paths
+# (experiment, not exact) it is still 19% worse. Hence it stays off.
 _PROMOTE_REGISTERS = False
 # Set by generate() (--vfp-zero-aware, only with the native VFP): arithmetic
 # goes through Oot3dVfpZeroAware*, which keep exact zero results (x * 0,
@@ -109,16 +109,16 @@ _VFP_ZERO_AWARE = False
 # spanWords array of the single-page path never has its address taken and is
 # kept in registers. Same values, faults and order.
 _LEAN_STACK = False
-# Funções gigantes e frias marcadas com GIANT_COLD_ATTRIBUTE (ver generate).
+# Giant cold functions marked with GIANT_COLD_ATTRIBUTE (see generate).
 _GIANT_COLD_ENTRIES: frozenset[int] = frozenset()
-# O escalonador pré-alocação (sched1, que no AArch64 o GCC só liga em -O3) e
-# o load CSE após a alocação (-fgcse-after-reload, só em -O3) custam 50-65% do
-# tempo de compilação das funções gigantes (milhares de instruções guest). O
-# atributo os desliga só nelas e mantém o inline forçado dos helpers quentes
-# (medido: mesmos símbolos externos, .text +0,02%). Vai na mesma linha da
-# assinatura, sem macro nem linhas novas: os números de linha do shard (e com
-# eles os checksums dos .gcda do PGO) não mudam. Outros compiladores ignoram
-# um atributo gnu:: desconhecido (só um aviso, e os shards usam -w).
+# The pre-allocation scheduler (sched1, which on AArch64 GCC enables only at -O3)
+# and post-allocation load CSE (-fgcse-after-reload, only at -O3) cost 50-65% of
+# the compile time of giant functions (thousands of guest instructions). The
+# attribute disables them only there and keeps forced inlining of the hot helpers
+# (measured: same external symbols, .text +0.02%). It goes on the same line as
+# the signature, with no macro or new lines: the shard line numbers (and with
+# them the PGO .gcda checksums) do not change. Other compilers ignore
+# an unknown gnu:: attribute (just a warning, and the shards use -w).
 GIANT_COLD_ATTRIBUTE = (
     '[[gnu::optimize("no-schedule-insns", "no-gcse-after-reload")]] '
 )
@@ -1921,7 +1921,7 @@ def _emit_terminal(
                 call_prefix = ["commitState();"]
                 call_suffix = ["reloadState();"]
             elif target in external_entries and promote:
-                # Sem lambdas como argumento: os locais não podem escapar.
+                # No lambdas as arguments: the locals cannot escape.
                 call = (
                     f"Oot3dAotCallExternal(context, 0x{target:08X}U, frame, state)"
                 )
@@ -2141,8 +2141,8 @@ def _render_function(
     # Broad residency regressed the matched full-title workload. Keep local
     # state only at the existing explicitly selected callback-free boundaries.
     local_state = local_state or callback_free or memory_view
-    # Promoção ampla (ver _promote_function_body); as regiões e cópias acima
-    # mantêm o mecanismo próprio delas.
+    # Broad promotion (see _promote_function_body); the regions and copies above
+    # keep their own mechanism.
     promote = (_PROMOTE_REGISTERS and not local_state and not memory_copy)
     lines = [
         f"Oot3dWholeAotFlow Execute_{symbol}(",
@@ -2231,15 +2231,15 @@ def _render_function(
             f"Oot3dAotEnterBlock(context, frame, state, 0x{block.pc:08X}U, commitState, reloadState)"
         )
         if promote:
-            # Orçamento local; o gancho (raro) sincroniza tudo em volta da
-            # metade fria, que não recebe nenhum local.
+            # Local budget; the (rare) hook synchronizes everything around the
+            # cold half, which receives no locals.
             lines.extend([
                 "        if (blocksRemaining == 0U) [[unlikely]] {",
                 f"            return Oot3dAotBlockLimit(context, 0x{block.pc:08X}U);",
                 "        }",
                 "        --blocksRemaining;",
                 f"        if (context.BlockEntryGate->MayContain(0x{block.pc:08X}U)) [[unlikely]] {{",
-                # Vira as gravações do conjunto sujo (_promote_function_body).
+                # Becomes the dirty-set stores (_promote_function_body).
                 "            commitState();",
                 f"            Oot3dAotRunBlockEntryHook(context, frame, state, 0x{block.pc:08X}U);",
                 "            reloadState();",
@@ -2328,10 +2328,10 @@ def _render_function(
 
 
 def _promoted_prologue(registers: tuple[int, ...], has_flags: bool) -> list[str]:
-    """Locais e sincronizações completas de uma função promovida.
+    """Locals and full synchronizations of a promoted function.
 
-    As lambdas são always_inline e só são chamadas diretamente: um local cujo
-    endereço escapasse para uma função não inline teria de morar na pilha.
+    The lambdas are always_inline and only called directly: a local whose
+    address escaped into a non-inline function would have to live on the stack.
     """
     attribute = "__attribute__((always_inline))"
     lines = [f"    uint32_t r{index} = state.R[{index}];" for index in registers]
@@ -2345,7 +2345,7 @@ def _promoted_prologue(registers: tuple[int, ...], has_flags: bool) -> list[str]
         *(["        state.Flags = flags;"] if has_flags else []),
         "        context.BlocksRemaining = blocksRemaining;",
         "    };",
-        # Nome usado pelos prólogos das substituições nativas.
+        # Name used by the native override prologues.
         f"    const auto commitState = [&]() noexcept {attribute} {{",
         "        commitAllState();",
         "    };",
@@ -2364,9 +2364,9 @@ _REGISTER_WRITE = re.compile(
     r"(?<![\w.>])r(\d+)\s*(?:<<|>>|[-+*/%&|^])?=(?!=)"
     r"|(?:\+\+|--)\s*r(\d+)\b|(?<![\w.>])r(\d+)\s*(?:\+\+|--)")
 
-# Helpers que recebem registradores só por valor (oot3d_native_whole_aot_runtime.h,
-# oot3d_aot_architectural_state.h); qualquer outro recebendo um local promovido
-# é recusado por _promote_function_body.
+# Helpers that take registers only by value (oot3d_native_whole_aot_runtime.h,
+# oot3d_aot_architectural_state.h); any other one receiving a promoted local
+# is rejected by _promote_function_body.
 _BY_VALUE_REGISTER_CALLEES = frozenset({
     "static_cast", "Oot3dAotLsl", "Oot3dAotLsr", "Oot3dAotAsr", "Oot3dAotRor",
     "Oot3dAotShiftRegister", "Oot3dAotShiftImmediate", "Oot3dAotReturned",
@@ -2380,7 +2380,7 @@ _REGISTER_TOKEN = re.compile(r"(?<![\w.\[])r\d+\b")
 
 
 def _calls_with_register_argument(line: str) -> set[str]:
-    """Funções (e métodos) cujo parêntese de argumentos contém um rN na linha."""
+    """Functions (and methods) whose argument parentheses contain an rN on the line."""
     found: set[str] = set()
     stack: list[str | None] = []
     position = 0
@@ -2411,7 +2411,7 @@ _FLAGS_READ = re.compile(r"\bflags\.(?:N|Z|C|V)\(\)|\bflags\.Materialize\(")
 
 
 def _flags_written(line: str) -> bool:
-    """Conservador: qualquer uso de flags que não seja uma leitura conhecida."""
+    """Conservative: any use of flags that is not a known read."""
     stripped = _FLAGS_READ.sub("", line)
     return re.search(r"(?<![\w.])flags\b", stripped) is not None
 
@@ -2432,21 +2432,21 @@ def _promote_function_body(
     body_start: int,
     flag_helpers: tuple[str, ...],
 ) -> list[str]:
-    """Sincroniza os locais promovidos só onde o estado é observável.
+    """Synchronizes the promoted locals only where the state is observable.
 
-    Invariante: fora do conjunto "sujo" estático, cada local é igual ao
-    campo de state (carregado na entrada e recarregado depois de cada
-    chamada, gancho ou substituição). Chamadas e o gancho de bloco gravam só
-    o conjunto sujo do bloco; retornos e saídas (falta de memória, orçamento,
-    SVC, fluxo não retornado) vão para um rótulo compartilhado por conjunto,
-    que grava esse conjunto e o orçamento e retorna. Os conjuntos são
-    superconjuntos seguros: gravar um local limpo regrava o mesmo valor.
+    Invariant: outside the static "dirty" set, each local equals its
+    state field (loaded at entry and reloaded after every
+    call, hook or override). Calls and the block hook store only
+    the block's dirty set; returns and exits (memory fault, budget,
+    SVC, non-returned flow) go to a label shared per set,
+    which stores that set and the budget and returns. The sets are
+    safe supersets: storing a clean local rewrites the same value.
 
-    Escritas e usos vêm do próprio C++ emitido (exatos), não da análise do
-    IR, que é conservadora em várias codificações. Para que a varredura seja
-    completa, um local só pode ser escrito por atribuição, atribuição
-    composta ou ++/--: endereço tomado ou passagem para uma função fora da
-    lista de helpers por valor é recusada (LoweringError).
+    Writes and uses come from the emitted C++ itself (exact), not from the
+    IR analysis, which is conservative for several encodings. For the scan to be
+    complete, a local may only be written by assignment, compound
+    assignment or ++/--: taking its address or passing it to a function outside
+    the by-value helper list is rejected (LoweringError).
     """
     body = lines[body_start:]
     text = "\n".join(body)
@@ -2462,7 +2462,7 @@ def _promote_function_body(
         body[index] = line
     register_mask = sum(1 << index for index in registers)
     for line in body:
-        # & unário (endereço): depois de início, '(', ',', '=', '{', '?' ou ':'.
+        # Unary & (address): after start, '(', ',', '=', '{', '?' or ':'.
         if re.search(r"(?:^|[(,={?:])\s*&\s*r\d+\b", line.strip()):
             raise LoweringError(
                 f"function 0x{function.entry:08X}: address of a promoted register: {line.strip()}")
@@ -2472,7 +2472,7 @@ def _promote_function_body(
                     f"function 0x{function.entry:08X}: promoted register passed to {callee}")
     lines = [*lines[:body_start], *body]
     blocks_by_pc = {block.pc: block for block in function.blocks}
-    # Linhas de cada bloco (o trecho antes do primeiro rótulo é o despacho).
+    # Lines of each block (the stretch before the first label is the dispatch).
     owner: list[int | None] = []
     current: int | None = None
     for line in body:
@@ -2519,7 +2519,7 @@ def _promote_function_body(
                         merged = (dirty_in[target][0] | outgoing[0],
                                   dirty_in[target][1] or outgoing[1])
                         dirty_in[target] = merged
-    # Conjunto usado em todo o bloco: entrada mais tudo que o bloco escreve.
+    # Set used across the whole block: entry plus everything the block writes.
     block_sets = {
         pc: (dirty_in[pc][0] | writes[pc], dirty_in[pc][1] or flag_writes[pc])
         for pc in blocks_by_pc
@@ -2542,8 +2542,8 @@ def _promote_function_body(
     output = [*lines[:body_start], *_promoted_prologue(registers, has_flags)]
     pending_exit: str | None = None
     depth = 0
-    # Depois de chamada + recarga, state é a verdade: a saída por fluxo não
-    # retornado não precisa gravar nada (a não ser o orçamento).
+    # After call + reload, state is the truth: the non-returned flow exit
+    # need not store anything (except the budget).
     after_call: int | None = None
     for line, pc in zip(lines[body_start:], owner):
         if pc != after_call:
@@ -2581,8 +2581,8 @@ def _promote_function_body(
                 f"function 0x{function.entry:08X}: return must be standalone: {stripped}"
             )
         if stripped == "commitState();":
-            # Antes de uma chamada ou do gancho de bloco: só o que pode estar
-            # sujo neste bloco (os locais limpos já são iguais a state).
+            # Before a call or the block hook: only what may be
+            # dirty in this block (clean locals already equal state).
             output.extend(stores(dirty, indent))
             continue
         output.append(line)
@@ -3324,9 +3324,9 @@ def _shard_buckets(
     return buckets
 
 
-# Teto de peso (instruções) de um shard ao receber uma função nova no modo
-# affinity-incremental, relativo à média: evita que um shard cresça sem
-# limite por acumular vizinhos novos (a cauda do build paralelo).
+# Weight cap (instructions) of a shard when receiving a new function in
+# affinity-incremental mode, relative to the mean: keeps a shard from growing
+# without bound by accumulating new neighbors (the parallel build tail).
 AFFINITY_INCREMENTAL_WEIGHT_CAP = 1.25
 
 
@@ -3334,16 +3334,16 @@ def _affinity_incremental_buckets(
     functions: tuple[Function, ...], shard_count: int,
     existing_assignments: dict[int, int],
 ) -> list[list[Function]]:
-    """Afinidade estável: preserva a distribuição anterior.
+    """Stable affinity: preserves the previous distribution.
 
-    Sem distribuição anterior (primeira geração, outra contagem de shards),
-    o resultado é idêntico ao de ``affinity``. Com ela, cada função que já
-    existia fica no mesmo shard, de modo que uma mudança pequena na seleção
-    (uma função nova, removida ou que mudou de tamanho) só altera os shards
-    que de fato a contêm ou a chamam, e o ccache acerta os demais. Funções
-    novas vão para o shard com o qual têm mais chamadas diretas (para manter
-    o inline entre chamador e chamado), desde que caibam no teto de peso;
-    sem vizinhos colocados, vão para o shard mais leve.
+    Without a previous distribution (first generation, different shard count),
+    the result is identical to ``affinity``. With one, each function that already
+    existed stays in the same shard, so a small change in the selection
+    (a function that is new, removed or changed size) only alters the shards
+    that actually contain or call it, and ccache hits the rest. New
+    functions go to the shard with which they have the most direct calls (to keep
+    inlining between caller and callee), as long as they fit under the weight cap;
+    with no placed neighbors, they go to the lightest shard.
     """
     if not existing_assignments:
         return _shard_buckets(functions, shard_count, "affinity")
@@ -3409,7 +3409,7 @@ def _affinity_incremental_buckets(
 def _manifest_shard_assignments(
     output: Path, shard_count: int
 ) -> dict[int, int]:
-    """Distribuição anterior lida só do manifesto e só com a mesma contagem."""
+    """Previous distribution read only from the manifest and only with the same count."""
     manifest_path = output / MANIFEST_NAME
     if not manifest_path.is_file():
         return {}
@@ -3605,9 +3605,9 @@ def generate(
     vfp_zero_aware: bool = False,
     lean_stack: bool = False,
 ) -> dict[str, object]:
-    """``giant_function_instructions`` > 0 marca as funções com pelo menos
-    tantas instruções guest, exceto as de ``hot_entries`` (perfil), com
-    GIANT_COLD_ATTRIBUTE. 0 (padrão) gera exatamente o mesmo C++ de antes."""
+    """``giant_function_instructions`` > 0 marks the functions with at least
+    that many guest instructions, except those in ``hot_entries`` (profile), with
+    GIANT_COLD_ATTRIBUTE. 0 (default) generates exactly the same C++ as before."""
     global _LITERAL_IMAGE, _NATIVE_VFP_AARCH64, _GIANT_COLD_ENTRIES
     global _VFP_ZERO_AWARE, _LEAN_STACK, _PROMOTE_REGISTERS
     if vfp_zero_aware and not native_vfp_aarch64:

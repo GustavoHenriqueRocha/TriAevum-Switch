@@ -1,5 +1,5 @@
-// Política de threads do Switch (oot3d_switch_thread_layout.h): papel ->
-// prioridade/núcleos por layout, leitura de config/thread_layout.
+// Switch thread policy (oot3d_switch_thread_layout.h): role ->
+// priority/cores per layout, parsing of config/thread_layout.
 #include "oot3d_switch_thread_layout.h"
 
 #include <cstdlib>
@@ -56,9 +56,9 @@ void TestParse() {
             "spin above 4 ms is refused");
 }
 
-// O que nunca pode acontecer em layout nenhum: thread de serviço no núcleo
-// do jogo ou com prioridade capaz de interromper render/planos/áudio;
-// render/planos acima do jogo; áudio abaixo da render thread.
+// What must never happen in any layout: a service thread on the game's
+// core or with a priority able to preempt render/plans/audio;
+// render/plans above the game; audio below the render thread.
 void TestInvariants() {
     for (const auto layout : {SwitchThreadLayout::Fixed, SwitchThreadLayout::Float,
                               SwitchThreadLayout::Legacy}) {

@@ -568,8 +568,8 @@ void Benchmark() {
     };
     double best = 1e9;
     for (unsigned round = 0; round < 7; ++round) best = std::min(best, run());
-    std::printf("bench dsp mix (18 vozes ativas, aux 0): %.4f ms por quadro DSP, %.3f ms por passo de 33,3 ms "
-                "(6,82 quadros)\n",
+    std::printf("bench dsp mix (18 active voices, aux 0): %.4f ms per DSP frame, %.3f ms per 33.3 ms step "
+                "(6.82 frames)\n",
                 best, best * 6.82);
 }
 #endif

@@ -1,3 +1,5 @@
+English: [DEKO3D_PROGRESS.md](DEKO3D_PROGRESS.md)
+
 # Backend deko3d — progresso e como retomar
 
 Branch `deko3d` (worktree `~/projetos/TriAevum/.claude/worktrees/deko3d`, remote `gustavo`).

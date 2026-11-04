@@ -818,8 +818,8 @@ bool NativeA32WindowSession::RunFrame() {
   hostStartSteps.Mark("mouse");
   gui->StartDraw();
   hostStartSteps.Mark("gui_start_draw");
-  // config/fps_counter: FPS dos quadros apresentados (com os interpolados do
-  // fps60) e o pior intervalo da última meia janela, no canto da tela.
+  // config/fps_counter: FPS of the presented frames (including the fps60
+  // interpolated ones) and the worst interval of the last half window, in the screen corner.
   static const bool fpsCounterEnabled =
       std::ifstream("sdmc:/switch/oot3dre/config/fps_counter").good();
   if (fpsCounterEnabled) {
@@ -1226,9 +1226,9 @@ bool NativeA32WindowSession::RunFrame() {
   ++runFrameCount;
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameEnd);
   if (guestProfiler.Active()) {
-    // Perfil guest por amostragem de quadros: nos quadros medidos o perfil
-    // recebe todos os blocos; nos outros volta o callback original com o
-    // filtro de ganchos, e o jogo roda na velocidade normal.
+    // Guest profile by frame sampling: on measured frames the profile
+    // receives every block; on the others the original callback returns with the
+    // hook filter, and the game runs at normal speed.
     const bool sample = guestProfiler.OnHostFrame(runFrameCount);
     if (sample != guestProfilerInstalled && processStorage) {
       guestProfilerInstalled = sample;

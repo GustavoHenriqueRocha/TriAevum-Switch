@@ -1,5 +1,5 @@
-// Hash do pack de texturas (Azahar "new hash"): CityHash64 dos bytes nativos do nível base.
-// Uso: hash_textura arquivo [offset tamanho]... -> imprime o hash em hexadecimal maiúsculo, 16 dígitos.
+// Texture pack hash (Azahar "new hash"): CityHash64 of the base level's native bytes.
+// Usage: texture_hash file [offset size]... -> prints the hash in uppercase hexadecimal, 16 digits.
 #include "fast/renderer/content_hash.h"
 
 #include <cstdio>
@@ -10,7 +10,7 @@
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "uso: %s arquivo [offset tamanho]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s file [offset size]\n", argv[0]);
         return 2;
     }
     std::ifstream in(argv[1], std::ios::binary);
@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
     size_t offset = argc > 2 ? std::strtoull(argv[2], nullptr, 0) : 0U;
     size_t tamanho = argc > 3 ? std::strtoull(argv[3], nullptr, 0) : dados.size() - offset;
     if (offset + tamanho > dados.size()) {
-        std::fprintf(stderr, "fora do arquivo\n");
+        std::fprintf(stderr, "out of file bounds\n");
         return 1;
     }
     const auto hash = Fast::Renderer::ContentHash64(std::span<const uint8_t>(dados).subspan(offset, tamanho));

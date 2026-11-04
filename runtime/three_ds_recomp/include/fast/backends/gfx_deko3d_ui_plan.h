@@ -1,6 +1,6 @@
 #pragma once
 
-// Pure parts of the deko3d UI path (package 6, docs/DEKO3D_PROGRESSO.md):
+// Pure parts of the deko3d UI path (package 6, docs/DEKO3D_PROGRESS.md):
 // the TopScreen UI (Fast3dUiRenderBackend) and ImGui drawn on the window.
 // No deko3d types here, so the host tests cover them.
 

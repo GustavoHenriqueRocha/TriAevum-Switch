@@ -1,7 +1,7 @@
 #pragma once
 
 // Program choice of the deko3d backend for a PICA draw (package 3,
-// docs/DEKO3D_PROGRESSO.md). Pure code, tested on the host
+// docs/DEKO3D_PROGRESS.md). Pure code, tested on the host
 // (oot3d_deko3d_backend_tests).
 //
 // Each stage is resolved once per canonical source identity: the canonical

@@ -1,5 +1,5 @@
-# Teste de fumaça do oot3dre no Eden (Windows). Roda na sessão interativa
-# (tarefa agendada com /IT), abre o .nro, espera N s, fecha e junta os logs.
+# oot3dre smoke test on Eden (Windows). Runs in the interactive session
+# (scheduled task with /IT), opens the .nro, waits N s, closes it and collects the logs.
 param([int]$Seconds = 180, [switch]$Screenshot)
 $eden = "D:\Emuladores\Eden-Windows-v0.2.1-amd64-msvc-standard\eden.exe"
 $sd = "$env:APPDATA\eden\sdmc\switch\oot3dre"
@@ -7,7 +7,7 @@ $out = "$env:USERPROFILE\eden-smoke"
 Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $out | Out-Null
 Remove-Item -Recurse -Force "$sd\logs", "$sd\boot-status.txt" -ErrorAction SilentlyContinue
-# O jogo só grava logs/perf.txt se a pasta existir.
+# The game only writes logs/perf.txt if the folder exists.
 New-Item -ItemType Directory "$sd\logs" | Out-Null
 $p = Start-Process $eden -ArgumentList "-g `"$sd\oot3d_native_game.nro`"" -PassThru
 $t0 = Get-Date
@@ -22,7 +22,7 @@ while (((Get-Date) - $t0).TotalSeconds -lt $Seconds -and -not $p.HasExited) {
 $alive = -not $p.HasExited
 "alive_at_end=$alive seconds=$([int]((Get-Date) - $t0).TotalSeconds) exit=$(if (-not $alive) { $p.ExitCode })" |
   Out-File "$out\result.txt"
-# -Screenshot: a print of the session's screen (Eden's window) before closing.
+# -Screenshot: a screenshot of the session's screen (Eden's window) before closing.
 if ($alive -and $Screenshot) {
   try {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing

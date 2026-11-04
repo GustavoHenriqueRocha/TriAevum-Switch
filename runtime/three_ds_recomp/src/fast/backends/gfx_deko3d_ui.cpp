@@ -1,4 +1,4 @@
-// deko3d UI path, package 6 (docs/DEKO3D_PROGRESSO.md): what the window gets
+// deko3d UI path, package 6 (docs/DEKO3D_PROGRESS.md): what the window gets
 // on top of the PICA scanout.
 // - TopScreen UI (oot3d_legacy_ui_adapters.cpp): RGBA8 textures with their
 //   sampler, and triangle lists in the layout of its two Fast3D programs

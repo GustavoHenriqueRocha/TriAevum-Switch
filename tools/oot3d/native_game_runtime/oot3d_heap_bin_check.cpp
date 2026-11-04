@@ -1,4 +1,4 @@
-// Varredura limitada dos bins do malloc do newlib: ver oot3d_heap_bin_check.h.
+// Bounded walk of newlib's malloc bins: see oot3d_heap_bin_check.h.
 #include "oot3d_heap_bin_check.h"
 
 #if defined(__SWITCH__)
@@ -25,14 +25,14 @@ class Walker {
            HeapBinCheckResult& result) noexcept
         : mAv(av), mBegin(begin), mEnd(end), mMaxSteps(maxSteps), mResult(result) {}
 
-    // O cabeçalho do bin `bin` (fica dentro do av, não do heap).
+    // The header of bin `bin` (lives inside av, not the heap).
     [[nodiscard]] const Chunk* Header(size_t bin) const noexcept {
         return reinterpret_cast<const Chunk*>(reinterpret_cast<const char*>(&mAv[2U * bin + 2U]) -
                                               2U * sizeof(size_t));
     }
 
-    // Um chunk que se pode ler: dentro do heap, alinhado e com os 32 bytes
-    // do cabeçalho dentro do heap.
+    // A readable chunk: inside the heap, aligned and with the header's 32 bytes
+    // inside the heap.
     [[nodiscard]] bool Readable(const Chunk* chunk) const noexcept {
         const auto address = reinterpret_cast<uintptr_t>(chunk);
         return address >= mBegin && address <= mEnd && mEnd - address >= kMinimumChunk &&
@@ -52,7 +52,7 @@ class Walker {
         return false;
     }
 
-    // Um elo: `next` (= p->bk) é o cabeçalho ou um chunk legível com
+    // A link: `next` (= p->bk) is the header or a readable chunk with
     // next->fd == p.
     [[nodiscard]] bool Linked(const Chunk* header, const Chunk* p, const Chunk* next) const noexcept {
         if (next == header) return header->Fd == p || p == header;
@@ -64,8 +64,8 @@ class Walker {
         const Chunk* p = header->Bk;
         if (p != header && !Readable(p)) return Fail("bin_last_out_of_heap", bin, p);
         if (p != header && p->Fd != header) return Fail("bin_last_fd_not_header", bin, p);
-        // Brent: `tortoise` salta para `p` a cada potência de 2 passos; um
-        // ciclo que não passa pelo cabeçalho reencontra a tartaruga.
+        // Brent: `tortoise` jumps to `p` at every power of 2 steps; a
+        // cycle that doesn't go through the header meets the tortoise again.
         const Chunk* tortoise = p;
         uint64_t power = 1U;
         uint64_t length = 0U;
@@ -116,9 +116,9 @@ HeapBinCheckResult CheckNewlibMallocBins(void* const* av, size_t bins, uintptr_t
         return result;
     }
     Walker walker(av, heapBegin, heapEnd, maxSteps, result);
-    // top (av[2]): conta como livre, como no mallinfo.
+    // top (av[2]): counts as free, as in mallinfo.
     const auto* top = static_cast<const Chunk*>(av[2]);
-    // initial_top (o próprio cabeçalho do bin 0): nada foi alocado ainda.
+    // initial_top (bin 0's own header): nothing allocated yet.
     if (top != walker.Header(0U)) {
         if (!walker.Readable(top)) {
             walker.Fail("top_out_of_heap", 0U, top);
@@ -146,8 +146,8 @@ extern struct mallinfo __malloc_current_mallinfo;
 }
 
 HeapBinCheckResult CheckSwitchMallocHeap(uint64_t* usedBytes) noexcept {
-    // Teto: mais chunks livres do que cabem no heap é impossível sem ciclo
-    // (o Brent já pega ciclos; isto só limita o pior caso).
+    // Cap: more free chunks than fit in the heap is impossible without a cycle
+    // (Brent already catches cycles; this only bounds the worst case).
     const uintptr_t begin = reinterpret_cast<uintptr_t>(fake_heap_start);
     const uintptr_t end = reinterpret_cast<uintptr_t>(fake_heap_end);
     const uint64_t maxSteps = end > begin ? (end - begin) / 32U + 1U : 1U;

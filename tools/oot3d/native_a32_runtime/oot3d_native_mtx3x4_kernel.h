@@ -1,29 +1,29 @@
 #pragma once
 
-// Mtx3x4_Multiply (0x0036C174), a multiplicação de matrizes 3x4 mais chamada
-// do jogo (~440 vezes por quadro na floresta Kokiri, sempre pela chamada
-// externa de ExecuteMtx3x4Multiply em oot3d_native_compiled_functions.cpp).
+// Mtx3x4_Multiply (0x0036C174), the most-called 3x4 matrix multiplication
+// in the game (~440 times per frame in Kokiri Forest, always through the
+// external call of ExecuteMtx3x4Multiply in oot3d_native_compiled_functions.cpp).
 //
-// Semântica (a sequência do guest, VMUL/VMLA não fundidos): para cada linha r
-// e coluna c de out = right x left (layout do guest, 3 linhas de 4 floats),
-//   out[4r + c] = ((right[c] * left[4r] (+ left[4r + 3] se c == 3))
+// Semantics (the guest sequence, unfused VMUL/VMLA): for each row r
+// and column c of out = right x left (guest layout, 3 rows of 4 floats),
+//   out[4r + c] = ((right[c] * left[4r] (+ left[4r + 3] if c == 3))
 //                  + right[4 + c] * left[4r + 1]) + right[8 + c] * left[4r + 2]
-// com cada produto arredondado antes da soma, e as flags acumuladas de todas
-// as operações. A referência é Mtx3x4MultiplySoftware (VfpBinary32*, a
-// implementação autoritativa); Mtx3x4MultiplyFast devolve exatamente o mesmo
-// valor e as mesmas flags (oot3d_native_mtx3x4_kernel_tests.cpp, em x86 e sob
+// with each product rounded before the sum, and the flags accumulated from all
+// operations. The reference is Mtx3x4MultiplySoftware (VfpBinary32*, the
+// authoritative implementation); Mtx3x4MultiplyFast returns exactly the same
+// value and the same flags (oot3d_native_mtx3x4_kernel_tests.cpp, on x86 and under
 // qemu-aarch64):
-//   - AArch64 com FPSCR.FZ = 1 (o modo do jogo): as instruções nativas de
-//     oot3d_native_a32_vfp_aarch64.h (as mesmas do código gerado com
-//     --native-vfp-aarch64) com o FPCR carregado localmente do FPSCR guest e
-//     a mesma regra de volta ao software (resultado zero ou NaN), exceto os
-//     zeros exatos nos dois modelos (ExactZeroProduct, cancelamento exato),
-//     que em matrizes esparsas são a maioria das voltas ao software;
-//   - senão, em arredondamento ao mais próximo: os caminhos rápidos de
-//     oot3d_native_a32_vfp_fast.h (float do host + termo de erro exato);
-//   - senão: o software.
-// Só vale para FPSCR sem LEN/STRIDE e sem armadilhas habilitadas (o chamador
-// usa o software nesses casos, como antes).
+//   - AArch64 with FPSCR.FZ = 1 (the game's mode): the native instructions of
+//     oot3d_native_a32_vfp_aarch64.h (the same as generated code with
+//     --native-vfp-aarch64) with the FPCR loaded locally from the guest FPSCR and
+//     the same fall-back-to-software rule (zero or NaN result), except for
+//     zeros that are exact in both models (ExactZeroProduct, exact cancellation),
+//     which in sparse matrices are most of the fallbacks to software;
+//   - otherwise, in round-to-nearest: the fast paths of
+//     oot3d_native_a32_vfp_fast.h (host float + exact error term);
+//   - otherwise: software.
+// Only valid for FPSCR without LEN/STRIDE and without enabled traps (the caller
+// uses software in those cases, as before).
 
 #include "oot3d_native_a32_vfp_aarch64.h"
 #include "oot3d_native_a32_vfp_fast.h"
@@ -67,16 +67,16 @@ inline constexpr std::uint32_t kFlushToZero = 1U << 24U;
 inline constexpr std::uint32_t kRoundingMode = 3U << 22U;
 
 #if OOT3D_GUEST_FP_AARCH64
-// Zeros exatos: NativeVfpDetail::ExactZero, FiniteNotDenormal e
-// ExactZeroProduct (oot3d_native_a32_vfp_aarch64.h, onde está a explicação):
-// o produto nativo deu zero sem arredondamento nem descarte para zero quando
-// um fator é zero e o outro é finito e não subnormal.
+// Exact zeros: NativeVfpDetail::ExactZero, FiniteNotDenormal and
+// ExactZeroProduct (oot3d_native_a32_vfp_aarch64.h, where the explanation is):
+// the native product gave zero without rounding or flush-to-zero when
+// one factor is zero and the other is finite and not subnormal.
 using NativeVfpDetail::ExactZero;
 using NativeVfpDetail::ExactZeroProduct;
 using NativeVfpDetail::FiniteNotDenormal;
 
-// VMUL nativo como Oot3dVfpNativeMultiply (FZ = 1), mas um zero exato
-// (ExactZeroProduct) fica com o resultado nativo em vez de ir ao software.
+// Native VMUL like Oot3dVfpNativeMultiply (FZ = 1), but an exact zero
+// (ExactZeroProduct) keeps the native result instead of going to software.
 inline void Multiply(std::uint32_t& destination, std::uint32_t left, std::uint32_t right,
                      std::uint32_t& fpscr) noexcept {
     const std::uint32_t value = NativeVfpDetail::Multiply(left, right);
@@ -89,15 +89,15 @@ inline void Multiply(std::uint32_t& destination, std::uint32_t left, std::uint32
                             oot3d::recomp::a32::VfpBinary32Multiply(left, right, fpscr));
 }
 
-// VMLA nativo como Oot3dVfpNativeMultiplyAccumulate (FZ = 1). Uma soma zero
-// também fica com o resultado nativo quando é exata nos dois modelos: o
-// acumulador não é subnormal e (a) o produto é não nulo (então normal: com
-// FZ o produto nativo não é subnormal, e coincide com o do software) e é
-// exatamente o oposto do acumulador, ou seja, cancelamento exato (uma soma
-// de normais que só dá um subnormal descartado NÃO conta: aí o ARMv8 mantém
-// o sinal e o software dá +0); ou (b) o produto é um zero exato
-// (ExactZeroProduct) e o acumulador é zero. O sinal do zero segue a regra
-// IEEE do modo de arredondamento nos dois modelos.
+// Native VMLA like Oot3dVfpNativeMultiplyAccumulate (FZ = 1). A zero sum
+// also keeps the native result when it is exact in both models: the
+// accumulator is not subnormal and (a) the product is nonzero (hence normal: with
+// FZ the native product is not subnormal, and matches the software one) and is
+// exactly the negation of the accumulator, i.e. exact cancellation (a sum
+// of normals that only yields a flushed subnormal does NOT count: there ARMv8 keeps
+// the sign and software gives +0); or (b) the product is an exact zero
+// (ExactZeroProduct) and the accumulator is zero. The sign of the zero follows the
+// IEEE rule for the rounding mode in both models.
 inline void MultiplyAccumulate(std::uint32_t& destination, std::uint32_t accumulator,
                                std::uint32_t left, std::uint32_t right,
                                std::uint32_t& fpscr) noexcept {
@@ -118,17 +118,17 @@ inline void MultiplyAccumulate(std::uint32_t& destination, std::uint32_t accumul
                                 accumulator, left, right, fpscr));
 }
 
-// Ordem das operações livre entre saídas (cada saída é uma cadeia
-// independente e as flags são acumuladas por OU), fixa dentro de cada
-// cadeia; as operações nativas são asm volatile, então o compilador não as
-// funde nem as tira de dentro do escopo do FPCR guest.
+// Operation order is free across outputs (each output is an independent
+// chain and the flags are accumulated by OR), fixed within each
+// chain; the native operations are asm volatile, so the compiler neither fuses
+// them nor moves them out of the guest FPCR scope.
 inline void Native(const std::uint32_t* left, const std::uint32_t* right,
                    std::uint32_t fpscr, std::uint32_t* out, std::uint32_t& flags) noexcept {
     std::uint32_t work = fpscr & ~kMtx3x4FpscrFlagMask;
-    // O que Oot3dGuestFpScope faz, sem o estado por thread (nada aqui chama
-    // código que consulte gOot3dGuestFp): FPCR com o modo guest, FPSR zerado
-    // para coletar as flags, e os dois do chamador restaurados no fim (se o
-    // chamador já estava no modo guest, o FPSR dele volta intacto).
+    // What Oot3dGuestFpScope does, without the per-thread state (nothing here calls
+    // code that consults gOot3dGuestFp): FPCR with the guest mode, FPSR zeroed
+    // to collect the flags, and both of the caller's restored at the end (if the
+    // caller was already in guest mode, its FPSR comes back intact).
     const std::uint64_t callerFpcr = Oot3dReadFpcr();
     const std::uint64_t callerFpsr = Oot3dReadFpsr();
     const std::uint64_t guestFpcr = Oot3dGuestFpcr(callerFpcr, fpscr);
@@ -185,12 +185,12 @@ inline void HostFloat(const std::uint32_t* left, const std::uint32_t* right,
 
 } // namespace Mtx3x4Detail
 
-// Oot3dVfpZeroAwareMultiply / Oot3dVfpZeroAwareMultiplyAccumulate (o VMUL
-// e o VMLA isolados, com o mesmo critério de zero exato) ficam em
-// oot3d_native_a32_vfp_aarch64.h, junto das outras operações.
+// Oot3dVfpZeroAwareMultiply / Oot3dVfpZeroAwareMultiplyAccumulate (standalone
+// VMUL and VMLA, with the same exact-zero criterion) live in
+// oot3d_native_a32_vfp_aarch64.h, alongside the other operations.
 
-// O mesmo resultado (out e flags) que Mtx3x4MultiplySoftware, mais rápido.
-// out não pode se sobrepor a left nem a right (o chamador usa cópias locais).
+// The same result (out and flags) as Mtx3x4MultiplySoftware, faster.
+// out must not overlap left or right (the caller uses local copies).
 inline void Mtx3x4MultiplyFast(const std::uint32_t* left, const std::uint32_t* right,
                                std::uint32_t fpscr, std::uint32_t* out,
                                std::uint32_t& flags) noexcept {

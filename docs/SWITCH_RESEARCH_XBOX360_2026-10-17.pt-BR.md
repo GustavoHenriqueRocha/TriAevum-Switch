@@ -1,3 +1,5 @@
+English: [SWITCH_RESEARCH_XBOX360_2026-10-17.md](SWITCH_RESEARCH_XBOX360_2026-10-17.md)
+
 # Pesquisa: ports de Xbox 360/PC para Switch homebrew (2026-10-17)
 
 Referência principal: **StevensND/nfsmw-nx** (NFS Most Wanted 2005 X360, recompilação estática PPC→C++ via ReXGlue, renderer Vulkan sobre NVK/mesa-switch Mesa 26; pasta docs/ com medições). Outros: Kaays/nfscarbon-nx, UnleashedRecomp-NX, MarathonRecomp-NX, autorun (Wine+FEX/Box64).

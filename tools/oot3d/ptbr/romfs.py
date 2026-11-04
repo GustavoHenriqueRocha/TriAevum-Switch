@@ -2,7 +2,7 @@ import struct
 def u32(b,p): return struct.unpack_from('<I',b,p)[0]
 def u64(b,p): return struct.unpack_from('<Q',b,p)[0]
 def localizar(caminho, alvo):
-    """→ (offset absoluto, tamanho) de um arquivo numa romfs Level-3 (com ou sem IVFC)."""
+    """→ (absolute offset, size) of a file in a Level-3 romfs (with or without IVFC)."""
     with open(caminho,'rb') as f:
         base = 0x1000 if f.read(4) == b'IVFC' else 0
         f.seek(base); h = f.read(40)
@@ -28,7 +28,7 @@ def localizar(caminho, alvo):
 
 
 def listar(caminho):
-    """→ caminhos de todos os arquivos da romfs."""
+    """→ paths of every file in the romfs."""
     with open(caminho,'rb') as f:
         base = 0x1000 if f.read(4) == b'IVFC' else 0
         f.seek(base); h = f.read(40)

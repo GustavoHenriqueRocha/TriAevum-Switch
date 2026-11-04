@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Fumaça do backend deko3d no Eden da Ryzen: como eden_smoke.sh, com
-# config/renderer = deko3d no SD do Eden só durante o teste (removido ao fim,
-# e o .nro original do SD volta). Reprova se o jogo não passar de MIN_FRAMES
-# quadros, se o Eden fechar, se o boot falhar ou se logs/deko3d.txt não mostrar
-# o device criado. Grava um print da tela em $OUT/screen.png.
-#   tests/switch/eden_deko3d.sh caminho/do.nro [segundos]
-#   REMOTE_NRO=C:/Users/flavin/x.nro tests/switch/eden_deko3d.sh - [segundos]  (já na Ryzen)
+# deko3d backend smoke test on Eden on the Ryzen: like eden_smoke.sh, with
+# config/renderer = deko3d on Eden's SD only during the test (removed at the end,
+# and the SD's original .nro comes back). Fails if the game doesn't get past MIN_FRAMES
+# frames, if Eden closes, if boot fails or if logs/deko3d.txt doesn't show
+# the device created. Saves a screenshot to $OUT/screen.png.
+#   tests/switch/eden_deko3d.sh path/to.nro [seconds]
+#   REMOTE_NRO=C:/Users/flavin/x.nro tests/switch/eden_deko3d.sh - [seconds]  (already on the Ryzen)
 set -euo pipefail
-nro="${1:?caminho do .nro (ou - com REMOTE_NRO)}"; seconds="${2:-150}"
+nro="${1:?path to the .nro (or - with REMOTE_NRO)}"; seconds="${2:-150}"
 host="${EDEN_HOST:-ryzen}"; MIN_FRAMES="${MIN_FRAMES:-300}"
 OUT="${OUT:-$(mktemp -d)}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ssh_() { ssh "$host" "$@" 2> >(grep -v -E 'WARNING|quantum|upgraded|store now' >&2); }
-# A RAM da Ryzen é defeituosa: Eden e build juntos a reiniciaram (24/10).
+# The Ryzen's RAM is faulty: Eden and a build together rebooted it (24/10).
 if ssh_ "wsl -d Ubuntu -u root -- pgrep -x ninja" 2>/dev/null | grep -q '[0-9]'; then
-    echo "  FALHA: há um build (ninja) rodando na Ryzen; Eden não abre junto"; exit 1
+    echo "  FAIL: a build (ninja) is running on the Ryzen; Eden doesn't open alongside it"; exit 1
 fi
 if [ "$nro" != "-" ]; then
     scp -q -l 40000 "$nro" "$host:eden_deko3d.nro"; remote='$env:USERPROFILE\eden_deko3d.nro'
@@ -44,11 +44,11 @@ for f in result.txt progress.txt boot-status.txt logs/deko3d.txt logs/perf.txt s
 done
 sed 's/^/  /' "$OUT/result.txt" "$OUT/progress.txt" 2>/dev/null | tr -d '\r' | tail -6
 failed=0
-grep -q '^status=failed' "$OUT/boot-status.txt" 2>/dev/null && { echo "  FALHA: boot-status status=failed: $(grep '^detail=' "$OUT/boot-status.txt" | cut -c8-)"; failed=1; }
-grep -q 'alive_at_end=True' "$OUT/result.txt" 2>/dev/null || { echo "  FALHA: o Eden fechou antes do tempo"; failed=1; }
-grep -q 'deko3d: ready' "$OUT/deko3d.txt" 2>/dev/null || { echo "  FALHA: logs/deko3d.txt sem 'deko3d: ready'"; failed=1; }
+grep -q '^status=failed' "$OUT/boot-status.txt" 2>/dev/null && { echo "  FAIL: boot-status status=failed: $(grep '^detail=' "$OUT/boot-status.txt" | cut -c8-)"; failed=1; }
+grep -q 'alive_at_end=True' "$OUT/result.txt" 2>/dev/null || { echo "  FAIL: Eden closed early"; failed=1; }
+grep -q 'deko3d: ready' "$OUT/deko3d.txt" 2>/dev/null || { echo "  FAIL: logs/deko3d.txt without 'deko3d: ready'"; failed=1; }
 frames="$(tr -d '\r' < "$OUT/progress.txt" 2>/dev/null | grep -oE 'host_frames=[0-9]+' | tail -1 | cut -d= -f2)"
-(( ${frames:-0} >= MIN_FRAMES )) || { echo "  FALHA: só ${frames:-0} quadros (mínimo $MIN_FRAMES)"; failed=1; }
-echo "  saída em $OUT"
+(( ${frames:-0} >= MIN_FRAMES )) || { echo "  FAIL: only ${frames:-0} frames (minimum $MIN_FRAMES)"; failed=1; }
+echo "  output in $OUT"
 ((failed)) && exit 1
-echo "  ok: ${frames} quadros em ${seconds} s no deko3d"
+echo "  ok: ${frames} frames in ${seconds} s on deko3d"

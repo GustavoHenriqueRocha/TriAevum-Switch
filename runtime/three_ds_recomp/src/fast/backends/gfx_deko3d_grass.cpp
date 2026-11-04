@@ -1,4 +1,4 @@
-// config/grass on the deko3d backend (docs/DEKO3D_PROGRESSO.md, grama leve).
+// config/grass on the deko3d backend (docs/DEKO3D_PROGRESS.md, light grass).
 // p6z: the CPU side only. Opaque world draws of the scene whose texture has a
 // rule of the product preset become grass sources (pica_grass_source.h), the
 // placements are built by one worker, and every few seconds deko3d.txt gets

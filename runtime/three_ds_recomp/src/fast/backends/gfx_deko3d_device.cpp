@@ -67,7 +67,7 @@ void LogWriterLoop() {
     }
 }
 
-// Quanto o present thread levou no último nwindowQueueBuffer (spikes.txt).
+// How long the present thread took in the last nwindowQueueBuffer (spikes.txt).
 std::atomic<uint64_t> gLastQueueBufferNs{0};
 
 // dkperf: written by the render thread, taken by the perf window (game
@@ -508,8 +508,8 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
             gLastSwap.AcquireMs = static_cast<float>(static_cast<double>(NowNanoseconds() - begin) / 1.0e6);
         } else {
         WaitPresent();
-        // spikes.txt: o render parado esperando o present thread devolver o
-        // nwindowQueueBuffer do quadro anterior (p6q: ~24 ms, quase toda janela).
+        // spikes.txt: the render stalled waiting for the present thread to return the
+        // previous frame's nwindowQueueBuffer (p6q: ~24 ms, almost the whole window).
         const uint64_t presentDone = NowNanoseconds();
         gLastSwap.WaitPresentMs = static_cast<float>(static_cast<double>(presentDone - begin) / 1.0e6);
         gLastSwap.QueueBufferMs = static_cast<float>(

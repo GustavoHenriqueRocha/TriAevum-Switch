@@ -11,20 +11,20 @@
 
 namespace Fast::Oot3d {
 
-// Widescreen do backend OpenGL (Switch e GL de desktop).
+// Widescreen for the OpenGL backend (Switch and desktop GL).
 //
-// O Vulkan do PC já renderiza o alvo da tela de cima no formato da janela e o
-// hook de projeção (ResolveScenePresentationPolicy) alarga o frustum na mesma
-// proporção. O GL renderiza o alvo nativo 400x240 (x escala N) e apresenta em
-// 5:3 com faixas; com esta opção ligada ele alarga só o eixo apresentado
-// horizontalmente do alvo da tela de cima (480x400 guardado girado), na
-// proporção da janela, e o hook alarga o FOV na mesma razão. Com ela
-// desligada, o hook precisa usar o aspecto nativo, senão a cena sai espremida
-// dentro do 5:3.
+// PC Vulkan already renders the top-screen target in the window's shape and the
+// projection hook (ResolveScenePresentationPolicy) widens the frustum in the same
+// proportion. GL renders the native 400x240 target (x scale N) and presents in
+// 5:3 with bars; with this option on it widens only the horizontally presented
+// axis of the top-screen target (480x400 stored rotated), to the
+// window's proportion, and the hook widens the FOV by the same ratio. With it
+// off, the hook must use the native aspect, otherwise the scene comes out squeezed
+// inside the 5:3.
 //
-// Lido uma vez: no Switch de sdmc:/switch/oot3dre/config/widescreen ("1" liga,
-// "0" desliga; sem o arquivo vale o padrão do console, ligado); fora dele da
-// variável TRIAEVUM_GL_WIDESCREEN (sem ela, desligado).
+// Read once: on the Switch from sdmc:/switch/oot3dre/config/widescreen ("1" on,
+// "0" off; without the file the console default applies, on); elsewhere from the
+// TRIAEVUM_GL_WIDESCREEN variable (without it, off).
 [[nodiscard]] inline bool ParseGlWidescreenSetting(const std::string& text,
                                                    bool fallback) noexcept {
     for (const char c : text) {
@@ -55,10 +55,10 @@ namespace Fast::Oot3d {
     return enabled;
 }
 
-// Quanto o eixo horizontal apresentado da tela de cima cresce em relação ao
-// 400 nativo para preencher uma saída `width`x`height` (1 = sem alargar).
-// Só alarga (saídas mais estreitas que 5:3 continuam com faixas), e no máximo
-// até 21:9 para não estourar o alvo.
+// How much the top screen's presented horizontal axis grows relative to the
+// native 400 to fill a `width`x`height` output (1 = no widening).
+// Only widens (outputs narrower than 5:3 keep bars), and at most
+// up to 21:9 so as not to overflow the target.
 [[nodiscard]] inline float GlWidescreenFactor(std::uint32_t width,
                                               std::uint32_t height) noexcept {
     if (width == 0U || height == 0U)

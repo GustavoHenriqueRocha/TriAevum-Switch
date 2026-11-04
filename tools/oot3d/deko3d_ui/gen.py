@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Compila os shaders da UI do deko3d (TopScreen e ImGui, pacote 6) com o uam e gera
+"""Compiles the deko3d UI shaders (TopScreen and ImGui, package 6) with uam and generates
 runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_ui_dksh.h.
 
-Uso: python3 tools/oot3d/deko3d_ui/gen.py [--uam /opt/devkitpro/tools/bin/uam]
+Usage: python3 tools/oot3d/deko3d_ui/gen.py [--uam /opt/devkitpro/tools/bin/uam]
 """
 import argparse
 import sys
@@ -42,7 +42,7 @@ def main():
         "} // namespace Fast::Deko3d",
         "",
     ]))
-    print(f"{OUT}: {len(STAGES)} estágios")
+    print(f"{OUT}: {len(STAGES)} stages")
 
 
 if __name__ == "__main__":

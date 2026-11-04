@@ -1,11 +1,11 @@
-// deko3d PICA path, package 5 (docs/DEKO3D_PROGRESSO.md): render targets,
+// deko3d PICA path, package 5 (docs/DEKO3D_PROGRESS.md): render targets,
 // fills and clears, pipeline state, the draw, display transfers and the
 // scanout. Behaviour follows the GL backend (gfx_opengl_pica.cpp,
 // SubmitPicaDraw / SubmitPicaDisplayTransfer / ClearPicaRenderTarget /
 // SubmitPicaMemoryFill); the pure decisions are in
 // fast/backends/gfx_deko3d_pica_pipeline.h.
 //
-// Not here yet (documented in DEKO3D_PROGRESSO.md): Shadow2D producers
+// Not here yet (documented in DEKO3D_PROGRESS.md): Shadow2D producers
 // (skipped, counted), dynamic resolution, the post-processing chain
 // (FXAA/SMAA/EASU/RCAS), the widescreen menu corner passes and the
 // relocated-menu nearest sampling.

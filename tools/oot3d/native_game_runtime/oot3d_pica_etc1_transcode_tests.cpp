@@ -99,43 +99,43 @@ int main() {
       const auto pica = RandomPica(rng, width, height, alpha, true);
       std::vector<uint8_t> blocks;
       Require(TranscodePicaEtc1ToEtc2(pica, width, height, alpha, blocks),
-              "transcodifica bloco válido");
-      Require(blocks.size() == width * height / 2U, "4 bits por texel");
+              "transcodes valid block");
+      Require(blocks.size() == width * height / 2U, "4 bits per texel");
       std::vector<uint8_t> expected;
       std::string error;
       Require(DecodePicaTextureRgba8(alpha ? 13U : 12U,
                                      static_cast<uint16_t>(width),
                                      static_cast<uint16_t>(height), pica,
                                      expected, &error),
-              "decodificador PICA");
+              "PICA decoder");
       Require(DecodeStandardEtc1(blocks, width, height) == expected,
-              "ETC2 na GPU == decodificação PICA em RGBA8");
+              "ETC2 on the GPU == PICA decoding in RGBA8");
     }
   }
   {
-    // Overflow diferencial: ETC2 leria um bloco T/H/planar.
+    // Differential overflow: ETC2 would read a T/H/planar block.
     auto pica = RandomPica(rng, 8, 8, false, true);
-    pica[4] |= 0x02U; // bit 33 (diferencial)
+    pica[4] |= 0x02U; // bit 33 (differential)
     pica[7] = 0x04U; // R base 0, delta -4
     std::vector<uint8_t> blocks;
     Require(!TranscodePicaEtc1ToEtc2(pica, 8, 8, false, blocks),
-            "recusa overflow diferencial");
+            "rejects differential overflow");
   }
   {
     auto pica = RandomPica(rng, 8, 8, true, true);
     pica[16 + 3] = 0xEFU;
     std::vector<uint8_t> blocks;
     Require(!TranscodePicaEtc1ToEtc2(pica, 8, 8, true, blocks),
-            "recusa ETC1A4 com alpha < 15");
+            "rejects ETC1A4 with alpha < 15");
   }
   {
     const auto pica = RandomPica(rng, 16, 16, false, true);
     std::vector<uint8_t> blocks;
     Require(!TranscodePicaEtc1ToEtc2(pica, 12, 16, false, blocks),
-            "recusa lado que não é múltiplo de 8");
+            "rejects side that is not a multiple of 8");
     Require(!TranscodePicaEtc1ToEtc2(std::span(pica).first(100), 16, 16,
                                      false, blocks),
-            "recusa dados truncados");
+            "rejects truncated data");
   }
   std::puts("oot3d_pica_etc1_transcode_tests: ok");
   return 0;

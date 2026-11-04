@@ -72,9 +72,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--promote-registers", action="store_true",
-        help="GPRs, NZCV e orçamento de blocos em variáveis locais em todas as "
-             "funções comuns, gravados no estado só nas chamadas (conjunto "
-             "sujo), saídas e ganchos (exato; muda o C++ e invalida o PGO)",
+        help="GPRs, NZCV and block budget in local variables in all ordinary "
+             "functions, written to the state only at calls (dirty set), "
+             "exits and hooks (exact; changes the C++ and invalidates PGO)",
     )
     parser.add_argument(
         "--no-literal-folding", action="store_true",
@@ -84,8 +84,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--guest-overrides", type=Path, nargs="?", const=Path(__file__).resolve().with_name("guest_overrides.json"),
         default=None,
-        help="liga as substituições nativas listadas (padrão: guest_overrides.json) "
-             "nos shards gerados; ver apply_guest_overrides.py",
+        help="enables the listed native overrides (default: guest_overrides.json) "
+             "in the generated shards; see apply_guest_overrides.py",
     )
     parser.add_argument(
         "--native-vfp-aarch64", action="store_true",
@@ -95,27 +95,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--vfp-zero-aware", action="store_true",
-        help="com --native-vfp-aarch64: as operações aritméticas usam "
-             "Oot3dVfpZeroAware*, que mantêm no caminho nativo os zeros "
-             "exatos (x*0, x-x, cancelamento exato) em vez de recalculá-los "
-             "no software (mesmo valor e mesmas flags)",
+        help="with --native-vfp-aarch64: arithmetic operations use "
+             "Oot3dVfpZeroAware*, which keep exact zeros (x*0, x-x, exact "
+             "cancellation) on the native path instead of recomputing them "
+             "in software (same value and same flags)",
     )
     parser.add_argument(
         "--lean-stack", action="store_true",
-        help="leituras guest sem inicializar o destino e LDM sem o endereço "
-             "do array spanWords no caminho rápido: tira da pilha o caminho "
-             "quente de cada load (mesmo efeito)",
+        help="guest reads without initializing the destination and LDM without the "
+             "address of the spanWords array on the fast path: takes each "
+             "load's hot path off the stack (same effect)",
     )
     parser.add_argument(
         "--giant-function-instructions", type=int, default=0,
-        help="marca funções com pelo menos N instruções guest com "
-             "[[gnu::optimize]] sem sched1 nem gcse-after-reload (GCC); "
-             "0 desliga (padrão)",
+        help="marks functions with at least N guest instructions with "
+             "[[gnu::optimize]] without sched1 or gcse-after-reload (GCC); "
+             "0 disables (default)",
     )
     parser.add_argument(
         "--hot-functions", type=Path, default=None,
-        help="funções quentes que nunca recebem esse atributo: uma "
-             "entrada hex por linha (o resto da linha e '#...' é ignorado)",
+        help="hot functions that never get that attribute: one "
+             "hex entry per line (the rest of the line and '#...' is ignored)",
     )
     args = parser.parse_args(argv)
     if args.shards <= 0:
@@ -147,7 +147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         located = apply_overrides(
             args.output,
             [item["entry"] for item in load_manifest(args.guest_overrides)])
-        print(f"Substituições nativas ligadas: {len(located)} função(ões)")
+        print(f"Native overrides enabled: {len(located)} function(s)")
     functions = manifest["functions"]
     print(
         f"Whole-function C++ AOT: {len(functions)} function(s), "

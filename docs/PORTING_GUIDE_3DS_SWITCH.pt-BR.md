@@ -1,3 +1,5 @@
+> English version: [PORTING_GUIDE_3DS_SWITCH.md](PORTING_GUIDE_3DS_SWITCH.md)
+
 # Guia de port 3DS → Switch (receita reutilizável)
 
 Receita e checklist para portar o **próximo** jogo de 3DS para o Nintendo Switch homebrew
@@ -14,8 +16,8 @@ console.)
 
 Fontes deste guia: [SWITCH_PORT.md](../SWITCH_PORT.md) (fonte principal),
 [OOT3D_SWITCH_WHOLE_AOT_PORT.md](OOT3D_SWITCH_WHOLE_AOT_PORT.md),
-[SWITCH_PESQUISA_2026-10-17.md](SWITCH_PESQUISA_2026-10-17.md),
-[SWITCH_PESQUISA_XBOX360_2026-10-17.md](SWITCH_PESQUISA_XBOX360_2026-10-17.md),
+[SWITCH_RESEARCH_2026-10-17.md](SWITCH_RESEARCH_2026-10-17.md),
+[SWITCH_RESEARCH_XBOX360_2026-10-17.md](SWITCH_RESEARCH_XBOX360_2026-10-17.md),
 [TRIAEVUM_AOT_LEVERS_RESULTS.md](TRIAEVUM_AOT_LEVERS_RESULTS.md),
 [TRIAEVUM_NATIVE_CPU_COSTS.md](TRIAEVUM_NATIVE_CPU_COSTS.md), o código e as mensagens de commit
 do branch `switch-port` (a partir de `eba0b4b7`, 2026-10-16). Números sem fonte no repositório estão
@@ -501,7 +503,7 @@ substituições + fps60).
 > Contexto já documentado: no Windows, `--local-state` em todas as funções + PGO não ganhou nada
 > (1,000, módulo de 318 MB, TRIAEVUM_AOT_LEVERS_RESULTS.md). No Switch o nfsmw-nx mediu o
 > salvar/restaurar de registradores guest em ~14% da thread principal
-> (SWITCH_PESQUISA_XBOX360_2026-10-17.md), e a lógica do OoT3D é o gargalo na floresta Kokiri com
+> (SWITCH_RESEARCH_XBOX360_2026-10-17.md), e a lógica do OoT3D é o gargalo na floresta Kokiri com
 > fps60.
 
 ---
@@ -980,7 +982,7 @@ Layout `fixed` (padrão, `oot3d_switch_thread_layout.h`, aplicado por `--wrap=pt
 
 ### 4.11 deko3d: shaders DKSH pré-compilados (sem compilar no console)
 
-*(2026-10-24, ramo `deko3d`, ver `docs/DEKO3D_PROGRESSO.md`)* No deko3d não existe compilador de
+*(2026-10-24, ramo `deko3d`, ver `docs/DEKO3D_PROGRESS.md`)* No deko3d não existe compilador de
 GLSL no console: os shaders vão prontos (DKSH, do `uam` do devkitPro) num pacote só,
 `shadercache/deko3d.pack`. A técnica é reaproveitável em qualquer port com backend GL:
 
@@ -1042,7 +1044,7 @@ romfs, reaproveitando o `AzaharTexturePackRuntime` que já existia para o Vulkan
 - **Nome = hash do conteúdo nativo:** `tex1_{L}x{A}_{HASH}_{fmt}_mip0.png`, com `HASH` = CityHash64
   (`Fast::Renderer::ContentHash64`, só cabeçalho) dos bytes do **nível base** no formato PICA
   (bits por texel: RGBA8 32, RGB8 24, 5551/565/RGBA4/LA8 16, L8/A8/LA4 8, L4/A4/ETC1 4, ETC1A4 8).
-  Ferramenta de host: `tools/oot3d/ptbr/hash_textura.cpp` (vetor de teste: "hello" →
+  Ferramenta de host: `tools/oot3d/ptbr/texture_hash.cpp` (vetor de teste: "hello" →
   `B48BE5A931380CE8`). Mudou a textura na romfs (tradução), mudou o hash: refazer o pack.
 - **Liga por arquivo:** `config/texture_pack` existe → `Configure` com `LoadCustomTextures`; a
   primeira linha é a pasta (padrão `sdmc:/switch/oot3dre/textures`). A varredura é **recursiva**:
@@ -1054,7 +1056,7 @@ romfs, reaproveitando o `AzaharTexturePackRuntime` que já existia para o Vulkan
 - **Armadilhas:** referência ao `Texture` nativo, não ao iterador (o `emplace` da substituta pode
   rehash); dentro de `namespace Fast` o nome `Oot3d::Renderer` resolve para `Fast::Oot3d` — use
   `::Oot3d::Renderer::`. A thread de carga é `join()`, nunca `detach()`.
-- **Gerar o pack:** `pacote_texturas.py exportar` (menus 06/07, `menu/map/*`, títulos de área) →
+- **Gerar o pack:** `texture_pack.py exportar` (menus 06/07, `menu/map/*`, títulos de área) →
   Real-ESRGAN `realesrgan-x4plus-anime` 4x (Vulkan, roda sem GPU NVIDIA) → `montar` reduz para 2x
   com Lanczos e **devolve o alfa da nativa** (bicúbico): o upscaler borra bordas transparentes.
   OoT3D EU: 384 texturas, ~15 MB.

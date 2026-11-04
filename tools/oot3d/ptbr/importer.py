@@ -1,12 +1,12 @@
-"""Traz traducao.json de volta para payloads do 3DS, conferindo códigos e fonte."""
+"""Brings traducao.json back into 3DS payloads, checking codes and font."""
 import json, re, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from msgs import soh, qm
-from exportar import texto
+from export import texto
 from conv import converter
 
-from caminhos import TRABALHO as S, ROMFS_PTBR
+from paths import TRABALHO as S, ROMFS_PTBR
 COD = re.compile(r'⟦([0-9a-f]+)⟧')
 
 
@@ -32,14 +32,14 @@ def carregar():
     pront, prob = {}, []
     for k, pt in trad.items():
         mid = int(k, 16)
-        if mid not in q: prob.append((k, 'id não existe')); continue
+        if mid not in q: prob.append((k, 'id does not exist')); continue
         en = texto(q[mid][1][0])
-        if COD.findall(en) != COD.findall(pt): prob.append((k, 'códigos diferentes')); continue
+        if COD.findall(en) != COD.findall(pt): prob.append((k, 'codes differ')); continue
         fora = {c for c in COD.sub('', pt) if c != '\n' and ord(c) not in fonte}
-        if fora: prob.append((k, 'sem glifo: ' + ''.join(sorted(fora)))); continue
+        if fora: prob.append((k, 'no glyph: ' + ''.join(sorted(fora)))); continue
         pront[mid] = para_bytes(pt)
     return pront, prob
 
 
 if __name__ == '__main__':
-    p, prob = carregar(); print(len(p), 'prontas;', len(prob), 'problemas', prob[:10])
+    p, prob = carregar(); print(len(p), 'ready;', len(prob), 'problems', prob[:10])

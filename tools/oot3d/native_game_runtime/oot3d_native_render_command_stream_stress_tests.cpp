@@ -1,13 +1,13 @@
-// Estresse do NativeRenderCommandStream contra lost wakeup e deadlock
-// (otimização "só sinaliza a condvar com alguém esperando", commit 9b45d8e6).
-// Rode com TSan: milhões de comandos, frames em voo 1 e 2, Run/Drain
-// misturados, comandos de duração aleatória (vazios, yield, sleep curto),
-// um terceiro thread lendo as estatísticas e o estado com try_lock (como o
-// watchdog de travamento) e paradas pedidas de dentro de um comando. Um
-// vigia aborta se nada andar por 20 s: um sinal perdido aparece como espera
-// eterna, não como corrida.
+// Stress test of NativeRenderCommandStream against lost wakeup and deadlock
+// (optimization "only signal the condvar when someone is waiting", commit 9b45d8e6).
+// Run with TSan: millions of commands, frames in flight 1 and 2, Run/Drain
+// mixed, commands of random duration (empty, yield, short sleep),
+// a third thread reading the stats and the state with try_lock (like the
+// hang watchdog) and stops requested from inside a command. A
+// vigil aborts if nothing moves for 20 s: a lost signal shows up as an eternal
+// wait, not as a race.
 //
-// Uso: oot3d_native_render_command_stream_stress_tests [comandos_por_config]
+// Usage: oot3d_native_render_command_stream_stress_tests [commands_per_config]
 #include "oot3d_hang_watchdog.h"
 #include "oot3d_native_render_command_stream.h"
 
@@ -35,7 +35,7 @@ void Require(bool condition, const char* message) {
 
 std::atomic<uint64_t> gProgress{0};
 
-// Aborta se gProgress parar de andar (deadlock / sinal perdido).
+// Aborts if gProgress stops advancing (deadlock / lost signal).
 class Vigil {
   public:
     explicit Vigil(const char* phase) : mPhase(phase) {
@@ -70,8 +70,8 @@ class Vigil {
     std::thread mThread;
 };
 
-// Duração aleatória: a maioria vazia (o caso que mais exercita a corrida
-// entre o push e a espera do worker), alguns yields, raros sleeps.
+// Random duration: mostly empty (the case that most exercises the race
+// between the push and the worker's wait), some yields, rare sleeps.
 void Jitter(uint32_t roll) {
     if (roll % 64U == 0U) {
         std::this_thread::sleep_for(std::chrono::microseconds(roll % 50U));
@@ -84,12 +84,12 @@ void StressOrderAndWakeups(size_t framesInFlight, uint64_t commands, uint32_t se
     Vigil vigil("order/wakeups");
     NativeRenderCommandStream stream(Mode::Worker, framesInFlight);
     std::mt19937 random(seed);
-    // Sequência: cada comando confere que é o próximo (ordem de programa).
-    uint64_t executed = 0;  // só os comandos tocam (ou depois de Drain/Run)
+    // Sequence: each command checks that it is the next one (program order).
+    uint64_t executed = 0;  // only the commands touch it (or after Drain/Run)
     std::atomic<bool> stopMonitor{false};
     std::atomic<uint64_t> snapshots{0};
     std::atomic<uint64_t> busySnapshots{0};
-    // Leitor concorrente, como o watchdog: try_lock e contadores.
+    // Concurrent reader, like the watchdog: try_lock and counters.
     std::thread monitor([&] {
         while (!stopMonitor.load(std::memory_order_relaxed)) {
             NativeRenderCommandStream::SyncSnapshot sync;
@@ -103,8 +103,8 @@ void StressOrderAndWakeups(size_t framesInFlight, uint64_t commands, uint32_t se
             (void)stream.GetWaitStats();
             (void)HangWatch::gSlots[0].Progress.load(std::memory_order_relaxed);
             (void)HangWatch::gSlots[0].CurrentStage.load(std::memory_order_relaxed);
-            // Como o watchdog, de tempos em tempos (sob TSan, girar no
-            // try_lock só serializa tudo).
+            // Like the watchdog, from time to time (under TSan, spinning on
+            // try_lock just serializes everything).
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     });
@@ -139,7 +139,7 @@ void StressOrderAndWakeups(size_t framesInFlight, uint64_t commands, uint32_t se
             });
         }
         if (random() % 4096U == 0U) {
-            // Submissor mais lento que a render thread: o worker dorme.
+            // Submitter slower than the render thread: the worker sleeps.
             std::this_thread::sleep_for(std::chrono::microseconds(random() % 200U));
         }
     }
@@ -161,8 +161,8 @@ void StressOrderAndWakeups(size_t framesInFlight, uint64_t commands, uint32_t se
             "stress did not exercise both the sleeping and the skipped-signal paths");
 }
 
-// Parada pedida de dentro de um comando (HOME > Fechar) com o submissor
-// bloqueado em frames em voo, em Drain ou em Run.
+// Stop requested from inside a command (HOME > Close) with the submitter
+// blocked on frames in flight, in Drain or in Run.
 void StressShutdownFromCommand(uint32_t rounds, uint32_t seed) {
     Vigil vigil("shutdown");
     std::mt19937 random(seed);

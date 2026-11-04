@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Compila os shaders do scanout do deko3d com o uam e gera o cabeçalho
+"""Compiles the deko3d scanout shaders with uam and generates the header
 runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_scanout_dksh.h.
 
-Uso: python3 tools/oot3d/deko3d_scanout/gen.py [--uam /opt/devkitpro/tools/bin/uam]
+Usage: python3 tools/oot3d/deko3d_scanout/gen.py [--uam /opt/devkitpro/tools/bin/uam]
 """
 import argparse
 import subprocess

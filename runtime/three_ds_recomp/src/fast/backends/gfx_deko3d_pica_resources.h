@@ -1,5 +1,5 @@
 #pragma once
-// deko3d PICA resources (Switch), package 4 (docs/DEKO3D_PROGRESSO.md):
+// deko3d PICA resources (Switch), package 4 (docs/DEKO3D_PROGRESS.md):
 // textures (RGBA8 images from the decoded PICA mips, uploaded through stream
 // memory with dkCmdBufCopyBufferToImage), the lighting LUT (R32UI 256x24),
 // samplers deduplicated by state, one image + one sampler descriptor array

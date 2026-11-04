@@ -1,5 +1,5 @@
 // GfxRenderingAPI on deko3d (Switch). See gfx_deko3d_api.h and
-// docs/DEKO3D_PROGRESSO.md.
+// docs/DEKO3D_PROGRESS.md.
 #include "fast/backends/gfx_deko3d.h"
 
 #if defined(__SWITCH__)

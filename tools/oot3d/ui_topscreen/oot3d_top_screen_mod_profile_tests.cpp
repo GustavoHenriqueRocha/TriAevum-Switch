@@ -3220,10 +3220,10 @@ int main() {
               visibilityState.DelayCalls == 60,
           "resumed choices must use the centered draw on their first frame");
 
-  // Produto: a chamada 0x00300544 e o gancho de 0x00427A3C dividiam o mesmo
-  // estado de atraso/fade. Simula um quadro (chamada, depois o desenho nativo
-  // se ela não suprimir) e conta os quadros em que o gancho compõe as
-  // escolhas (FadeStep == 24 na entrada nativa).
+  // Product: the call 0x00300544 and the hook at 0x00427A3C shared the same
+  // delay/fade state. Simulates a frame (call, then the native draw
+  // if it does not suppress) and counts the frames in which the hook composes the
+  // choices (FadeStep == 24 at the native entry).
   {
     TopScreenRendererVisibilityInputs callsite;
     callsite.ControllerAddress = visibilityController;
@@ -3273,10 +3273,10 @@ int main() {
       return composed;
     };
     unsigned first = 0U;
-    // Antes da correção: atraso/fade em dobro e, depois, desenho suprimido.
+    // Before the fix: double delay/fade and, afterwards, suppressed draw.
     Require(simulate(false, 300U, &first) <= 1U,
             "regression model: shared route must starve the native-draw hook");
-    // Com a correção: 60 quadros de atraso, 24 de fade, depois todo quadro.
+    // With the fix: 60 frames of delay, 24 of fade, then every frame.
     Require(simulate(true, 300U, &first) == 300U - 83U && first == 83U,
             "GameOver choices must be composed on every frame after the fade");
   }

@@ -56,7 +56,7 @@ Oot3dWholeAotFlow Execute_Straight_00100100(
 
 def _record(tag: int, words: list[int] | None = None, zero_counts: int = 0) -> bytes:
     if zero_counts:
-        # Contadores todos zero: comprimento negativo e nenhum dado.
+        # All counters zero: negative length and no data.
         return struct.pack("<Ii", tag, -8 * zero_counts)
     payload = b"".join(struct.pack("<q" if tag != TAG_FUNCTION else "<I", w) for w in words or [])
     return struct.pack("<Ii", tag, len(payload)) + payload
@@ -72,7 +72,7 @@ def _function(ident: int, arcs: list[int] | None, arc_zero: int, first_run: int)
 
 class HotFromGcdaTests(unittest.TestCase):
     def test_profile_id_matches_gcc_16(self) -> None:
-        # idents gravados pelo aarch64-none-elf-g++ 16.1 nos .gcno dos shards 007 e 091.
+        # idents written by aarch64-none-elf-g++ 16.1 in the .gcno of shards 007 and 091.
         self.assertEqual(
             gcc_profile_id(mangle("Execute_EnHorse_Update_0014A5A8", SIGNATURE)),
             924984334)
@@ -92,10 +92,10 @@ class HotFromGcdaTests(unittest.TestCase):
             gcda = struct.pack("<4I", 0x67636461, 0x4236312A, 1, 2)
             gcda += struct.pack("<Ii", 0xA1000000, 8) + struct.pack("<II", 1, 0)
             gcda += _function(ident["Execute_Hot_00100000"], [5, 9], 0, 1)
-            # Sem desvios: nenhum contador de arco; só o time_profiler diz que rodou.
+            # No branches: no arc counter; only the time_profiler says it ran.
             gcda += _function(ident["Execute_Straight_00100100"], None, 1, 2)
             gcda += _function(ident["Execute_Cold_00100200"], None, 2, 0)
-            gcda += _function(987654, [77], 0, 3)  # helper inline do runtime
+            gcda += _function(987654, [77], 0, 3)  # inline runtime helper
             profiles = root / "pgo"
             profiles.mkdir()
             name = ("CMakeFiles#oot3d_native_whole_aot.dir#home#x#gen#"

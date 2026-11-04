@@ -1,17 +1,17 @@
-// Teste diferencial de Mtx3x4MultiplyFast (oot3d_native_mtx3x4_kernel.h)
-// contra Mtx3x4MultiplySoftware (VfpBinary32*, a semântica autoritativa):
-// as 12 saídas e as flags acumuladas precisam ser iguais bit a bit, nos 16
-// modos de arredondamento x FZ x DN, com matrizes de jogo, esparsas (zeros
-// exatos, o caso que força o software no caminho nativo), com valores
-// minúsculos (subnormais e produtos que estouram para baixo), enormes
-// (estouro), infinitos e NaNs.
+// Differential test of Mtx3x4MultiplyFast (oot3d_native_mtx3x4_kernel.h)
+// against Mtx3x4MultiplySoftware (VfpBinary32*, the authoritative semantics):
+// the 12 outputs and the accumulated flags must be bit-identical, across the 16
+// rounding mode x FZ x DN modes, with game matrices, sparse ones (exact
+// zeros, the case that forces software on the native path), with tiny
+// values (subnormals and products that underflow), huge ones
+// (overflow), infinities and NaNs.
 //
-// No x86 exercita os caminhos de float do host (oot3d_native_a32_vfp_fast.h);
-// em AArch64 (nativo ou qemu-aarch64, ver run_vfp_aarch64_tests_qemu.sh) o
-// caminho nativo com o FPCR do guest.
+// On x86 it exercises the host float paths (oot3d_native_a32_vfp_fast.h);
+// on AArch64 (native or qemu-aarch64, see run_vfp_aarch64_tests_qemu.sh) the
+// native path with the guest FPCR.
 //
-// Matrizes por modo: OOT3D_MTX3X4_TRIALS (padrão 400000; o runtime mínimo do
-// qemu não passa argumentos).
+// Matrices per mode: OOT3D_MTX3X4_TRIALS (default 400000; the minimal qemu
+// runtime passes no arguments).
 
 #include "oot3d_native_mtx3x4_kernel.h"
 
@@ -38,7 +38,7 @@ struct Rng {
         return bits;
     }
 
-    // Um elemento conforme o "estilo" da matriz.
+    // One element according to the matrix "style".
     std::uint32_t Element(std::uint32_t style) {
         static constexpr std::uint32_t kSpecial[] = {
             0x00000000U, 0x80000000U, 0x3F800000U, 0xBF800000U, 0x7F800000U, 0xFF800000U,
@@ -47,7 +47,7 @@ struct Rng {
             0x9F800000U, 0x5F800000U, 0x20000000U, 0x1FFFFFFFU,
         };
         switch (style) {
-        case 0: { // matriz de jogo: rotação/escala/translação
+        case 0: { // game matrix: rotation/scale/translation
             const std::uint32_t kind = Below(10U);
             if (kind < 2U) return Chance(50) ? 0x00000000U : 0x80000000U;
             if (kind < 3U) return Chance(50) ? 0x3F800000U : 0xBF800000U;
@@ -58,22 +58,22 @@ struct Rng {
             const float value = static_cast<float>(static_cast<int>(Below(200001U)) - 100000) * 0.05F;
             return FromFloat(value);
         }
-        case 1: // esparsa: muitos zeros exatos
+        case 1: // sparse: many exact zeros
             if (Chance(55)) return Chance(70) ? 0x00000000U : 0x80000000U;
             return Element(0U);
-        case 2: { // magnitudes perto do limite inferior (subnormais, estouro para baixo)
+        case 2: { // magnitudes near the lower limit (subnormals, underflow)
             const std::uint32_t exponent = Below(70U);
             const std::uint32_t sign = Chance(50) ? 0x80000000U : 0U;
             return sign | (exponent << 23U) | (U32() & 0x007FFFFFU);
         }
-        case 3: { // magnitudes perto do estouro
+        case 3: { // magnitudes near overflow
             const std::uint32_t exponent = 190U + Below(65U);
             const std::uint32_t sign = Chance(50) ? 0x80000000U : 0U;
             return sign | (exponent << 23U) | (U32() & 0x007FFFFFU);
         }
-        case 4: // especiais
+        case 4: // specials
             return kSpecial[Below(sizeof(kSpecial) / sizeof(kSpecial[0]))];
-        case 5: { // somas que se cancelam / diferença de expoentes grande
+        case 5: { // cancelling sums / large exponent difference
             const std::uint32_t exponent = 60U + Below(140U);
             const std::uint32_t sign = Chance(50) ? 0x80000000U : 0U;
             return sign | (exponent << 23U) | (Chance(30) ? 0U : (U32() & 0x007FFFFFU));
@@ -91,21 +91,21 @@ void Report(const char* why, std::uint32_t fpscr, const std::uint32_t* left,
             const std::uint32_t* right, const std::uint32_t* a, std::uint32_t fa,
             const std::uint32_t* b, std::uint32_t fb) {
     if (++gFailures > 10) return;
-    std::printf("FALHA %s fpscr=%08X\n  esquerda:", why, fpscr);
+    std::printf("FAIL %s fpscr=%08X\n  left:    ", why, fpscr);
     for (int i = 0; i < 12; ++i) std::printf(" %08X", left[i]);
-    std::printf("\n  direita: ");
+    std::printf("\n  right:   ");
     for (int i = 0; i < 12; ++i) std::printf(" %08X", right[i]);
-    std::printf("\n  rapida:  ");
+    std::printf("\n  fast:    ");
     for (int i = 0; i < 12; ++i) std::printf(" %08X", a[i]);
     std::printf(" flags=%02X\n  software:", fa);
     for (int i = 0; i < 12; ++i) std::printf(" %08X", b[i]);
     std::printf(" flags=%02X\n", fb);
 }
 
-// VMUL/VMLA isolados (Oot3dVfpZeroAwareMultiply/MultiplyAccumulate) no modo
-// em que o código gerado roda: FPCR com o modo guest, flags no FPSR mais as
-// das voltas ao software. Acumuladores escolhidos para cancelar o produto e
-// zeros forçados em parte dos casos.
+// Standalone VMUL/VMLA (Oot3dVfpZeroAwareMultiply/MultiplyAccumulate) in the mode
+// generated code runs in: FPCR with the guest mode, flags in FPSR plus those
+// from fallbacks to software. Accumulators chosen to cancel the product and
+// zeros forced in some of the cases.
 std::uint64_t gOpChecks = 0;
 
 void OperationTests(Rng& rng, std::uint64_t perMode) {
@@ -120,9 +120,9 @@ void OperationTests(Rng& rng, std::uint64_t perMode) {
             const auto product = a32::VfpBinary32Multiply(left, right, control);
             std::uint32_t accumulator = rng.Element(rng.Below(7U));
             switch (rng.Below(5U)) {
-            case 0: accumulator = product.value ^ 0x80000000U; break;        // cancela
+            case 0: accumulator = product.value ^ 0x80000000U; break;        // cancels
             case 1: accumulator = rng.Chance(50) ? 0x00000000U : 0x80000000U; break;
-            case 2: accumulator = product.value ^ 0x80000000U ^ (rng.Below(3U)); break; // quase cancela
+            case 2: accumulator = product.value ^ 0x80000000U ^ (rng.Below(3U)); break; // almost cancels
             default: break;
             }
             std::uint32_t mulValue = 0U, macValue = 0U;
@@ -152,8 +152,8 @@ void OperationTests(Rng& rng, std::uint64_t perMode) {
                 ((macFlags | macHardware) & kMtx3x4FpscrFlagMask) ==
                     (mac.exception_flags & kMtx3x4FpscrFlagMask);
             if ((!mulOk || !macOk) && ++gFailures <= 10) {
-                std::printf("FALHA operacao %s fpscr=%08X acc=%08X l=%08X r=%08X: "
-                            "rapida %08X/%08X flags %02X/%02X, software %08X/%08X flags %02X/%02X\n",
+                std::printf("FAIL operation %s fpscr=%08X acc=%08X l=%08X r=%08X: "
+                            "fast %08X/%08X flags %02X/%02X, software %08X/%08X flags %02X/%02X\n",
                             mulOk ? "vmla" : "vmul", control, accumulator, left, right, mulValue,
                             macValue, (mulFlags | mulHardware) & 0x9FU, (macFlags | macHardware) & 0x9FU,
                             product.value, mac.value, product.exception_flags & 0x9FU,
@@ -179,33 +179,33 @@ int main() {
             std::uint32_t left[12], right[12], fast[12], soft[12];
             const std::uint32_t styleLeft = rng.Below(8U), styleRight = rng.Below(8U);
             for (int i = 0; i < 12; ++i) {
-                // Às vezes um elemento de outro estilo no meio.
+                // Sometimes an element of another style mixed in.
                 left[i] = rng.Element(rng.Chance(90) ? styleLeft : rng.Below(7U));
                 right[i] = rng.Element(rng.Chance(90) ? styleRight : rng.Below(7U));
             }
-            if (rng.Chance(10)) { // somas que se anulam exatamente
+            if (rng.Chance(10)) { // sums that cancel exactly
                 const int i = static_cast<int>(rng.Below(3U)) * 4;
                 left[i + 3] = rng.Element(0U);
                 right[3] = left[i + 3] ^ 0x80000000U;
                 left[i] = 0x3F800000U;
             }
             std::uint32_t fpscr = control;
-            if (rng.Chance(30)) fpscr |= rng.U32() & 0x9FU;       // flags já acumuladas
+            if (rng.Chance(30)) fpscr |= rng.U32() & 0x9FU;       // already-accumulated flags
             if (rng.Chance(30)) fpscr |= rng.U32() & 0xF0000000U; // NZCV
             std::uint32_t fastFlags = 0xFFFFFFFFU, softFlags = 0xFFFFFFFFU;
             Mtx3x4MultiplyFast(left, right, fpscr, fast, fastFlags);
             Mtx3x4MultiplySoftware(left, right, fpscr, soft, softFlags);
             ++gChecks;
             if (std::memcmp(fast, soft, sizeof(fast)) != 0) {
-                Report("valor", fpscr, left, right, fast, fastFlags, soft, softFlags);
+                Report("value", fpscr, left, right, fast, fastFlags, soft, softFlags);
             } else if ((fastFlags & kMtx3x4FpscrFlagMask) != (softFlags & kMtx3x4FpscrFlagMask)) {
                 Report("flags", fpscr, left, right, fast, fastFlags, soft, softFlags);
             }
         }
     }
     OperationTests(rng, perMode * 4U);
-    std::printf("%s mtx3x4: %llu matrizes (%llu operações) + %llu operações isoladas, %d falhas\n",
-                gFailures == 0 ? "OK" : "FALHOU", static_cast<unsigned long long>(gChecks),
+    std::printf("%s mtx3x4: %llu matrices (%llu operations) + %llu standalone operations, %d failures\n",
+                gFailures == 0 ? "OK" : "FAILED", static_cast<unsigned long long>(gChecks),
                 static_cast<unsigned long long>(gChecks * 36U),
                 static_cast<unsigned long long>(gOpChecks), gFailures);
     return gFailures == 0 ? 0 : 1;

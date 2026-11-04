@@ -266,8 +266,8 @@ void NativeA32WindowSession::Setup() {
   widescreenProjection.ProfileA32Blocks = launch.ProfileA32Blocks;
   widescreenProjection.TraceA32Blocks = !launch.A32BlockTracePath.empty();
   {
-    // Perfil por função do código guest e chave das substituições nativas.
-    // Os dois só leem arquivos de configuração; sem eles nada muda.
+    // Per-function profile of the guest code and switch for the native overrides.
+    // Both only read config files; without them nothing changes.
     std::filesystem::path guestProfileConfig;
 #if defined(__SWITCH__)
     guestProfileConfig = "sdmc:/switch/oot3dre/config/guest_profile";
@@ -289,9 +289,9 @@ void NativeA32WindowSession::Setup() {
           std::string_view(overrides) != "0");
     }
 #endif
-    // Perfil de pico (config/guest_spike_ms; desligado por padrão): liga o
-    // perfil em todos os quadros mesmo sem config/guest_profile (aí sem o
-    // relatório periódico) e grava logs/guest_spikes.txt e
+    // Spike profile (config/guest_spike_ms; off by default): turns the
+    // profile on for every frame even without config/guest_profile (then without the
+    // periodic report) and writes logs/guest_spikes.txt and
     // logs/guest_spikes_summary.txt (oot3d_guest_spike_profile.h).
     std::filesystem::path guestSpikeConfig;
 #if defined(__SWITCH__)
@@ -316,13 +316,13 @@ void NativeA32WindowSession::Setup() {
         &guestProfileOptions);
     if (!guestProfileOn && guestSpikes) {
       guestProfileOptions = {};
-      guestProfileOptions.DumpEveryHostFrames = 0U; // só o perfil de pico
+      guestProfileOptions.DumpEveryHostFrames = 0U; // spike profile only
       guestProfileOptions.OutputPath = guestProfileOutput;
       guestProfileOptions.FunctionMapPath = guestFunctionMap;
       guestProfileOn = true;
     }
     if (guestProfileOn) {
-      // Segmento de texto do OoT3D (ExHeader): 0x00100000..0x004CA000.
+      // OoT3D text segment (ExHeader): 0x00100000..0x004CA000.
       guestProfiler.Start(guestProfileOptions, 0x00100000U, 0x003CA000U);
       guestProfiler.SetAppendix([](std::ostream &out) {
         out << Oot3dNativeGame::DescribeOot3dGuestOverrides();
@@ -719,7 +719,7 @@ void NativeA32WindowSession::Setup() {
   const bool blockEntryForAll =
       launch.ProfileA32Blocks || widescreenProjection.TraceA32Blocks;
   if (guestProfiler.Active()) {
-    // O perfil vê todos os blocos e repassa à política só os ganchos dela.
+    // The profile sees every block and forwards to the policy only its hooks.
     guestProfiler.Chain(&ApplyNativeWidescreenProjectionPolicy,
                         &widescreenProjection, blockEntryHooks,
                         blockEntryForAll);
@@ -754,8 +754,8 @@ void NativeA32WindowSession::Setup() {
   // After the rebuild above, which would discard an earlier assignment.
   nativeCandidateDispatch.ProductTopScreenBlocks = std::move(productTopScreenBlocks);
   if (nativeCandidateDispatch.TopScreenUiProfile) {
-    // Depuração: força o Game Over depois de N segundos de jogo (o texto do
-    // arquivo é N; vazio = 10). Sem o arquivo/variável, nada muda.
+    // Debugging: forces Game Over after N seconds of gameplay (the file's
+    // text is N; empty = 10). Without the file/variable, nothing changes.
 #if defined(__SWITCH__)
     std::ifstream debugGameOver("sdmc:/switch/oot3dre/config/debug_force_game_over");
     if (debugGameOver) {
@@ -1587,7 +1587,7 @@ void NativeA32WindowSession::Setup() {
       std::error_code framesInFlightError;
       if (std::filesystem::exists("sdmc:/switch/oot3dre/config/frames_in_flight",
                                   framesInFlightError)) {
-        std::fprintf(stderr, "TRIAEVUM frames_in_flight ignorado (1 quadro em voo)\n");
+        std::fprintf(stderr, "TRIAEVUM frames_in_flight ignored (1 frame in flight)\n");
       }
       renderStream.SetMaxFramesInFlight(1U);
     }

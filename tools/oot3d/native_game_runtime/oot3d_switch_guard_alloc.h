@@ -1,66 +1,66 @@
 #pragma once
 
-// Alocador com páginas de guarda (diagnóstico de corrupção de heap; Switch).
+// Guard-page allocator (heap corruption diagnostics; Switch).
 //
-// O heap corrompido dos tours 16 a 20 é sempre o mesmo: o chunk livre de
-// 0x50 bytes (bin 10) em 0x27fe173a0 com o bk (byte 8 do bloco do usuário)
-// trocado por 0x00ed5391'0000001a e o fd intacto. Escrita de 8 bytes num
-// objeto de 57 a 72 bytes que já tinha sido liberado (uso após o free), e
-// determinística.
+// The corrupted heap in tours 16 to 20 is always the same: the free 0x50-byte
+// chunk (bin 10) at 0x27fe173a0 with its bk (byte 8 of the user block)
+// replaced by 0x00ed5391'0000001a and the fd intact. An 8-byte write into a
+// 57-to-72-byte object that had already been freed (use after free), and
+// deterministic.
 //
-// Dois modos (5º campo de config/guard_alloc):
+// Two modes (5th field of config/guard_alloc):
 //
-// "canario" (padrão): o bloco é o objeto com um cabeçalho de 384 bytes antes
-// (alocação comum, sem chamada ao kernel). No free o cabeçalho guarda uma
-// cópia dos bytes do objeto (o objeto fica como estava) e o bloco entra numa
-// quarentena FIFO longa (131072 blocos, ~60 MiB); quando sai dela, o objeto é
-// comparado com a cópia: se algum byte mudou, logs/hang.txt ganha "USO APÓS
-// FREE (canário)" com quem alocou, quem liberou, quais bytes mudaram (de/para).
-// Não dá o PC da escrita, mas dá o dono do objeto. Free duplo vira "FREE
-// DUPLO" no mesmo arquivo. A 1ª versão (p6t) enchia o objeto com 0xFD no free:
-// uma leitura depois do free, que antes via os dados antigos e seguia, passou
-// a ler lixo e o console inteiro travou (26/10). A cópia mantém as leituras
-// como sem o guarda e só acusa escritas; o canário exige max <= 128.
+// "canario" (default): the block is the object with a 384-byte header before
+// it (ordinary allocation, no kernel call). On free the header keeps a copy
+// of the object's bytes (the object stays as it was) and the block enters a
+// long FIFO quarantine (131072 blocks, ~60 MiB); when it leaves, the object is
+// compared with the copy: if any byte changed, logs/hang.txt gets "USO APÓS
+// FREE (canário)" with who allocated, who freed, which bytes changed (from/to).
+// It does not give the PC of the write, but gives the object's owner. A double
+// free becomes "FREE DUPLO" in the same file. The 1st version (p6t) filled the
+// object with 0xFD on free: a read after the free, which previously saw the old
+// data and carried on, began reading garbage and the whole console hung (26/10).
+// The copy keeps reads as they are without the guard and only flags writes;
+// the canary requires max <= 128.
 //
-// "pagina": o modo abaixo, com o PC exato, mas cada bloco liberado fecha uma
-// página e divide um bloco de memória do kernel. Com 32768 na quarentena
-// (26/10) o kernel do processo ficou sem esses blocos e o áudio do SDL (e o
-// FS) falharam no primeiro quadro; a quarentena do modo página fica limitada
-// a kMaxPageQuarantine.
+// "pagina": the mode below, with the exact PC, but each freed block closes a
+// page and splits a kernel memory block. With 32768 in quarantine (26/10) the
+// process's kernel ran out of those blocks and SDL audio (and FS) failed on
+// the first frame; the page-mode quarantine is capped at kMaxPageQuarantine.
 //
-// Modo página: com config/guard_alloc no SD, a partir do início da sessão de jogo (Arm, no
-// HangWatch::Start; o boot fica de fora: com guarda desde o construtor o boot
-// ficou sem memória, "Not enough space", em 26/10), todo pedido ao malloc com
-// tamanho na faixa configurada (padrão 57..72) ganha páginas próprias:
-//   [página 0: cabeçalho ... objeto no fim][página 1: folga]
-// No free a página 0 perde o acesso (svcSetMemoryPermission) e o bloco entra
-// numa quarentena FIFO; só volta ao malloc de verdade quando sai dela. Uma
-// escrita (ou leitura) num bloco liberado vira exceção no PC exato; o handler
-// de exceção grava em logs/hang.txt o PC, o endereço da falha, as pilhas de
-// alocação e de free do bloco atingido e o estado das threads
-// (oot3d_hang_watchdog). A página 1 existe porque o cabeçalho do chunk
-// seguinte do newlib fica 16 bytes antes do ponteiro alinhado dele: sem ela
-// cairia na página 0 (sem acesso) do bloco anterior. Não há página de guarda
-// para estouro: a corrupção vista é de uso após o free (fd intacto).
+// Page mode: with config/guard_alloc on the SD, from the start of the game session (Arm, in
+// HangWatch::Start; boot is excluded: with the guard active from the constructor,
+// boot ran out of memory, "Not enough space", on 26/10), every malloc request
+// with size in the configured range (default 57..72) gets its own pages:
+//   [page 0: header ... object at the end][page 1: slack]
+// On free page 0 loses access (svcSetMemoryPermission) and the block enters
+// a FIFO quarantine; it only returns to the real malloc when it leaves. A
+// write (or read) into a freed block becomes an exception at the exact PC; the
+// exception handler writes to logs/hang.txt the PC, the fault address, the
+// allocation and free stacks of the hit block and the thread state
+// (oot3d_hang_watchdog). Page 1 exists because the header of newlib's next
+// chunk sits 16 bytes before its aligned pointer: without it, it would land
+// in page 0 (no access) of the previous block. There is no guard page for
+// overflow: the corruption seen is use after free (fd intact).
 //
-// Ideia das páginas de guarda: TheMoonPeople/Chronicle PR #205 (arenas do port
-// de Switch com páginas de guarda via svcSetMemoryPermission).
+// Guard-page idea: TheMoonPeople/Chronicle PR #205 (Switch port arenas with
+// guard pages via svcSetMemoryPermission).
 //
-// Ligado com -Wl,--wrap=_malloc_r (e _memalign_r, _free_r, _realloc_r,
-// _calloc_r, _malloc_usable_size_r): no newlib do devkitA64 cada um mora num
-// objeto próprio, então malloc/free/new/delete do processo inteiro passam por
-// aqui. O malloc() do devkitA64 manda todo pedido de 32 bytes ou mais para
-// _memalign_r(32, n), por isso o objeto fica alinhado a 32 e o _memalign_r
-// (alinhamento até 32) também ganha guarda.
-// Custo: 8 KiB por bloco na faixa e uma chamada ao kernel no free; só para
-// diagnóstico.
+// Linked with -Wl,--wrap=_malloc_r (and _memalign_r, _free_r, _realloc_r,
+// _calloc_r, _malloc_usable_size_r): in devkitA64's newlib each lives in its
+// own object, so malloc/free/new/delete of the whole process go through
+// here. devkitA64's malloc() sends every request of 32 bytes or more to
+// _memalign_r(32, n), so the object is 32-aligned and _memalign_r
+// (alignment up to 32) also gets a guard.
+// Cost: 8 KiB per block in range and a kernel call on free; diagnostics
+// only.
 //
-// config/guard_alloc: "min max quarentena vivos modo" (bytes, bytes, blocos,
-// blocos, canario|pagina); vazio = 57 72 131072 32768 canario. A quarentena
-// segura blocos liberados: quanto maior, mais tarde um uso após o free ainda é
-// pego (o jogo libera ~2900 blocos de 57-72 bytes por segundo). Com `vivos`
-// blocos com guarda vivos, os pedidos seguintes vão para o malloc normal até
-// algum ser liberado.
+// config/guard_alloc: "min max quarantine live mode" (bytes, bytes, blocks,
+// blocks, canario|pagina); empty = 57 72 131072 32768 canario. The quarantine
+// holds freed blocks: the larger it is, the later a use after free is still
+// caught (the game frees ~2900 blocks of 57-72 bytes per second). With `live`
+// guarded blocks alive, subsequent requests go to normal malloc until
+// one is freed.
 
 #include <cstddef>
 #include <cstdint>
@@ -72,13 +72,13 @@ inline constexpr size_t kBlockPages = 2U;
 inline constexpr size_t kBlockBytes = kBlockPages * kPageSize;
 inline constexpr uint64_t kMagic = 0x434c414452415547ULL;  // "GUARDALC"
 inline constexpr size_t kStackDepth = 12U;
-// Alinhamento do objeto: o do malloc() do devkitA64 (_memalign_r(32, n)).
+// Object alignment: that of devkitA64's malloc() (_memalign_r(32, n)).
 inline constexpr size_t kAlignment = 32U;
 
 enum class Mode : uint8_t { Canary, Page };
 
-// Modo página: blocos liberados com a página fechada ao mesmo tempo (cada um
-// divide um bloco de memória do kernel; 32768 esgotou o processo).
+// Page mode: freed blocks with the page closed at the same time (each one
+// splits a kernel memory block; 32768 exhausted the process).
 inline constexpr size_t kMaxPageQuarantine = 4096U;
 
 struct Config {
@@ -89,13 +89,13 @@ struct Config {
     Mode GuardMode = Mode::Canary;
 };
 
-// "min max quarentena vivos modo"; o que faltar fica no padrão. Falso = texto
-// inválido (número ruim, modo desconhecido, min > max, min 0 ou max que não
-// cabe na página 0). No modo página a quarentena é limitada a
+// "min max quarantine live mode"; missing fields keep the default. False = invalid
+// text (bad number, unknown mode, min > max, min 0 or max that does not
+// fit in page 0). In page mode the quarantine is capped at
 // kMaxPageQuarantine.
 bool ParseConfig(const char* text, Config& config) noexcept;
 
-// Cabeçalho no início da página 0 (lido de volta pelo free e pelo handler).
+// Header at the start of page 0 (read back by free and by the handler).
 struct BlockHeader {
     uint64_t Magic;
     uint64_t Size;
@@ -109,21 +109,21 @@ constexpr bool InRange(const Config& config, size_t size) noexcept {
            size <= kPageSize - sizeof(BlockHeader);
 }
 
-// Deslocamento do objeto na página 0: o mais perto do fim que o alinhamento
-// de 32 deixa (longe do cabeçalho).
+// Object offset in page 0: as close to the end as 32-alignment
+// allows (far from the header).
 constexpr size_t ObjectOffset(size_t size) noexcept {
     return (kPageSize - size) & ~(kAlignment - 1U);
 }
 
-// Bytes utilizáveis (malloc_usable_size): até o fim da página 0.
+// Usable bytes (malloc_usable_size): up to the end of page 0.
 constexpr size_t UsableSize(size_t size) noexcept {
     return kPageSize - ObjectOffset(size);
 }
 
-// Bloco na quarentena: o que o handler precisa para dizer quem alocou e
-// quem liberou o endereço atingido.
+// Quarantined block: what the handler needs to tell who allocated and
+// who freed the hit address.
 struct QuarantineEntry {
-    uintptr_t Page = 0;  // início da página 0 (= ponteiro do memalign)
+    uintptr_t Page = 0;  // start of page 0 (= memalign pointer)
     uint64_t Size = 0;
     uint64_t Serial = 0;
     uint64_t AllocTicks = 0;
@@ -133,8 +133,8 @@ struct QuarantineEntry {
     uint64_t FreeStack[kStackDepth] = {};
 };
 
-// FIFO de capacidade fixa sobre memória do chamador (sem alocar).
-// Modo canário: cabeçalho logo antes do objeto (alocação comum).
+// Fixed-capacity FIFO over caller memory (no allocation).
+// Canary mode: header right before the object (ordinary allocation).
 inline constexpr uint64_t kCanaryMagic = 0x5952414e41434c47ULL;       // "GLCANARY"
 inline constexpr uint64_t kCanaryFreedMagic = 0x4545524659524143ULL;  // "CARYFREE"
 inline constexpr uint64_t kCanaryTailMagic = 0x4c494154594e4143ULL;   // "CANYTAIL"
@@ -145,17 +145,17 @@ struct CanaryHeader {
     uint64_t FreeTicks;
     uint64_t FreeThread;
     uint64_t FreeStack[kStackDepth];
-    uint8_t Snapshot[kCanarySnapshotBytes];  // o objeto no momento do free
+    uint8_t Snapshot[kCanarySnapshotBytes];  // the object at free time
     uint64_t Padding;
-    // Logo antes do objeto (ptr - 8): num bloco comum ali mora o tamanho do
-    // chunk do newlib, sempre legível. Só com esta marca o free lê o resto do
-    // cabeçalho em ptr - 384: ler lá direto caiu numa página não mapeada (p6t).
+    // Right before the object (ptr - 8): in an ordinary block this holds newlib's
+    // chunk size, always readable. Only with this mark does free read the rest of
+    // the header at ptr - 384: reading there directly hit an unmapped page (p6t).
     uint64_t TailMagic;
 };
-static_assert(sizeof(CanaryHeader) % 32U == 0U, "objeto alinhado a 32");
+static_assert(sizeof(CanaryHeader) % 32U == 0U, "object aligned to 32");
 
-// Trechos do objeto liberado que diferem da cópia do free: até `capacity`
-// pares [início, fim). Devolve quantos achou (e conta todos em `changedBytes`).
+// Spans of the freed object that differ from the free-time copy: up to `capacity`
+// [begin, end) pairs. Returns how many it found (and counts all in `changedBytes`).
 struct ChangedRange {
     size_t Begin;
     size_t End;
@@ -177,14 +177,14 @@ inline size_t FindCanaryChanges(const uint8_t* object, const uint8_t* snapshot, 
     return count;
 }
 
-// FIFO de ponteiros (quarentena do modo canário: o resto mora no cabeçalho).
+// Pointer FIFO (canary-mode quarantine: the rest lives in the header).
 class PointerRing {
   public:
     PointerRing() noexcept = default;
     PointerRing(uintptr_t* storage, size_t capacity) noexcept
         : mEntries(storage), mCapacity(capacity) {}
 
-    // Guarda `value`; se estava cheio, devolve o mais antigo em `evicted`.
+    // Stores `value`; if it was full, returns the oldest in `evicted`.
     bool Push(uintptr_t value, uintptr_t& evicted) noexcept {
         if (mCapacity == 0U) {
             evicted = value;
@@ -216,7 +216,7 @@ class QuarantineRing {
     QuarantineRing(QuarantineEntry* storage, size_t capacity) noexcept
         : mEntries(storage), mCapacity(capacity) {}
 
-    // Guarda `entry`; se estava cheio, devolve o mais antigo em `evicted`.
+    // Stores `entry`; if it was full, returns the oldest in `evicted`.
     bool Push(const QuarantineEntry& entry, QuarantineEntry& evicted) noexcept {
         if (mCapacity == 0U) {
             evicted = entry;
@@ -233,7 +233,7 @@ class QuarantineRing {
         return full;
     }
 
-    // Bloco cujas páginas contêm `address` (busca linear; só no handler).
+    // Block whose pages contain `address` (linear search; handler only).
     const QuarantineEntry* Find(uintptr_t address) const noexcept {
         for (size_t index = 0; index < mCount; ++index) {
             const QuarantineEntry& entry = mEntries[(mHead + index) % mCapacity];
@@ -253,19 +253,19 @@ class QuarantineRing {
 
 struct Stats {
     bool Enabled = false;
-    uint64_t Guarded = 0;    // blocos com guarda criados
-    uint64_t Live = 0;       // vivos agora
+    uint64_t Guarded = 0;    // guarded blocks created
+    uint64_t Live = 0;       // alive now
     uint64_t Quarantined = 0;
-    uint64_t Fallbacks = 0;  // memalign ou svc falhou: foi para o malloc normal
-    uint64_t Skipped = 0;    // teto de vivos: foi para o malloc normal
-    uint64_t CanaryHits = 0; // blocos liberados que foram escritos (modo canário)
+    uint64_t Fallbacks = 0;  // memalign or svc failed: went to normal malloc
+    uint64_t Skipped = 0;    // live cap: went to normal malloc
+    uint64_t CanaryHits = 0; // freed blocks that were written (canary mode)
     uint64_t DoubleFrees = 0;
     bool Canary = false;
 };
 
-// Lê config/guard_alloc (Switch; construtor, antes do jogo). Não liga.
+// Reads config/guard_alloc (Switch; constructor, before the game). Does not enable.
 void Start() noexcept;
-// Liga, se o arquivo existia (início da sessão de jogo, depois do boot).
+// Enables, if the file existed (start of the game session, after boot).
 void Arm() noexcept;
 [[nodiscard]] Stats CurrentStats() noexcept;
 

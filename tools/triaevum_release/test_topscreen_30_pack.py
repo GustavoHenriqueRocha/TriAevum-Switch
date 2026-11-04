@@ -298,13 +298,13 @@ class TopScreen30PackTests(unittest.TestCase):
         self.assertEqual((top_alpha(440, 201), top_alpha(456, 211)), (0, 255))
 
     def test_extra_romfs_covers_patched_spanish_menu_top_parts(self):
-        """Regressão: com o patch PT-BR (slot espanhol), menu_top_parts00
-        muda e o override não casava: o HUD perdia molduras/rótulos de
-        X/Y/I/II e a cruz do D-pad (itens soltos na tela de cima)."""
+        """Regression: with the PT-BR patch (Spanish slot), menu_top_parts00
+        changes and the override did not match: the HUD lost the frames/labels of
+        X/Y/I/II and the D-pad cross (loose items on the top screen)."""
         patched = self.root / "romfs-ptbr"
         write_original_menus(patched)
         top = bytearray(original_menu_ctxb(512, 256))
-        # Texto PT-BR redesenhado fora dos retângulos do 2.1.1 (texel 1).
+        # PT-BR text redrawn outside the 2.1.1 rectangles (texel 1).
         struct.pack_into("<H", top, builder.CTXB_HEADER_SIZE + 2, 0xF00F)
         for language in ("06_EU_SPANISH", "07_US_SPANISH"):
             (patched / "menu" / language /
@@ -324,8 +324,8 @@ class TopScreen30PackTests(unittest.TestCase):
         alpha = lambda x, y: rgba[(y * 512 + x) * 4 + 3]
         self.assertTrue(all(alpha(432 + c, 218 + r) == 255
                             for c in range(30) for r in range(30)))
-        self.assertEqual(alpha(441, 190), 255)  # rótulo ZR do item I
-        self.assertEqual(rgba[4:8], bytes((255, 0, 0, 255)))  # PT-BR mantido
+        self.assertEqual(alpha(441, 190), 255)  # ZR label of item I
+        self.assertEqual(rgba[4:8], bytes((255, 0, 0, 255)))  # PT-BR kept
 
     def test_original_romfs_without_menu_textures_is_rejected(self):
         archive = self.write_archive()

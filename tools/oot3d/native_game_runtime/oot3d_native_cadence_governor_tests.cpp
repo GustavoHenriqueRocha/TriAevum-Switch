@@ -612,7 +612,7 @@ Segment Tour15(double seconds, double gpuMs, double hiddenMs) {
 
 void SweepMargin() {
   for (bool split : {false, true}) {
-  std::printf("margem (split %d) | por GPU medida/replay: fps pics\n", split ? 1 : 0);
+  std::printf("margin (split %d) | per GPU measured/replay: fps pics\n", split ? 1 : 0);
   for (double margin : {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0}) {
     std::printf("%4.1f ms:", margin);
     double fps = 0.0, pics = 0.0;
@@ -624,10 +624,10 @@ void SweepMargin() {
       pics += r.Pictures / r.Seconds;
       ++n;
     }
-    std::printf("  | media %.2f/%.1f\n", fps / n, pics / n);
+    std::printf("  | average %.2f/%.1f\n", fps / n, pics / n);
   }
   }
-  std::printf("conta espera, margem 0 (pgo5i):");
+  std::printf("counts wait, margin 0 (pgo5i):");
   for (double gpu : {11.0, 12.0, 12.5, 13.15, 13.6, 14.0, 14.5, 14.95, 15.25, 16.4}) {
     const auto r = SimulateSwapchain({Tour15(60, gpu, 2.75)}, true, 0.0);
     std::printf(" %.2f:%.1f/%.1f", gpu, r.Presents / r.Seconds, r.Pictures / r.Seconds);
@@ -639,11 +639,11 @@ void SweepMargin() {
 // 14.95 ms per replay (Kakariko) and 59+ at 13.15-13.6.
 void Calibrate() {
   for (double hidden : {0.0, 1.0, 1.5, 2.0, 2.5, 3.0}) {
-    std::printf("oculto %.1f:", hidden);
+    std::printf("hidden %.1f:", hidden);
     for (double gpu : {13.15, 13.6, 14.95, 15.25, 16.4}) {
       const auto r = SimulateSwapchain({Tour15(60, gpu, hidden)}, false, 0.0);
       const auto w = SimulateSwapchain({Tour15(60, gpu, hidden)}, true, 0.0);
-      std::printf("  g%.2f fps %.1f pics %.1f | conta %.1f/%.1f", gpu,
+      std::printf("  g%.2f fps %.1f pics %.1f | counts %.1f/%.1f", gpu,
                   r.Presents / r.Seconds, r.Pictures / r.Seconds,
                   w.Presents / w.Seconds, w.Pictures / w.Seconds);
     }
@@ -669,13 +669,13 @@ void TestMarginKeepsTheRefresh() {
 }
 
 void ReportRenderWaits() {
-  std::printf("\n== tour14: espera do acquire no custo (swapchain de 3) ==\n");
+  std::printf("\n== tour14: acquire wait in the cost (swapchain of 3) ==\n");
   for (double gpu : {12.5, 13.5, 14.5, 15.5, 16.5}) {
     for (bool count : {true, false}) {
       const auto result = SimulateSwapchain({Tour14Heavy(60, gpu)}, count);
       char name[32];
       std::snprintf(name, sizeof(name), "gpu%.1f/%s", gpu,
-                    count ? "conta" : "ocupado");
+                    count ? "counts" : "busy");
       Print(name, Fps60Mode::Legacy, result);
       std::printf("           intermediarios desenhados=%llu descartados=%llu "
                   "espera_acquire=%.2f ms/quadro\n",
@@ -689,8 +689,8 @@ void ReportRenderWaits() {
 
 void ReportFramesInFlight() {
   for (uint32_t queue : {0U, 1U}) {
-    std::printf("\n== areas lentas (tour2), swap %s ==\n",
-                queue == 0U ? "bloqueante" : "com fila de 1 quadro");
+    std::printf("\n== slow areas (tour2), swap %s ==\n",
+                queue == 0U ? "blocking" : "with a 1-frame queue");
     for (double step : {12.0, 15.0, 18.0, 21.0, 24.0}) {
       for (uint32_t inFlight : {1U, 2U}) {
         char name[32];
@@ -760,8 +760,8 @@ void TestEarlyFrameSlotAbsorbsLongSteps() {
 }
 
 void ReportFrameSlots() {
-  std::printf("\n== tour20: passos longos isolados, slot do quadro ==\n");
-  static constexpr const char *kNames[] = {"f1", "cedo", "cedo+rel", "f2"};
+  std::printf("\n== tour20: isolated long steps, frame slot ==\n");
+  static constexpr const char *kNames[] = {"f1", "early", "early+clk", "f2"};
   for (double step : {10.0, 11.0, 12.0, 13.0, 14.0, 16.0, 18.0, 20.0}) {
     for (auto slot : {SlotMode::One, SlotMode::Early, SlotMode::EarlyClock,
                       SlotMode::Two}) {
@@ -783,9 +783,9 @@ void ReportFrameSlots() {
 }
 
 void Report() {
-  std::printf("\n== tour15: calibracao do oculto (margem 0) ==\n");
+  std::printf("\n== tour15: calibration of the hidden time (margin 0) ==\n");
   Calibrate();
-  std::printf("\n== tour15: margem do par (oculto 2,75 ms) ==\n");
+  std::printf("\n== tour15: pair margin (hidden 2.75 ms) ==\n");
   SweepMargin();
   ReportRenderWaits();
   ReportFramesInFlight();
@@ -795,15 +795,15 @@ void Report() {
     std::vector<Segment> Segments;
   };
   const std::vector<Scenario> scenarios{
-      {"leve", {Light(60)}},          {"normal", {Normal(60)}},
-      {"pesado", {Heavy(60)}},        {"m.pesado", {VeryHeavy(60)}},
-      {"integ4", {Integ4(60)}},       {"sobrecarga", {Overloaded(60)}},
-      {"sessao", Session()},
+      {"light", {Light(60)}},          {"normal", {Normal(60)}},
+      {"heavy", {Heavy(60)}},        {"v.heavy", {VeryHeavy(60)}},
+      {"integ4", {Integ4(60)}},       {"overload", {Overloaded(60)}},
+      {"session", Session()},
   };
   for (uint32_t queue : {0U, 1U}) {
     std::printf("\n== swap %s ==\n",
-                queue == 0U ? "bloqueante (volta no vblank que mostra)"
-                            : "com fila de 1 quadro");
+                queue == 0U ? "blocking (returns on the vblank that shows it)"
+                            : "with a 1-frame queue");
     for (const auto &scenario : scenarios) {
       for (auto mode :
            {Fps60Mode::Legacy, Fps60Mode::Strict60, Fps60Mode::Adaptive})

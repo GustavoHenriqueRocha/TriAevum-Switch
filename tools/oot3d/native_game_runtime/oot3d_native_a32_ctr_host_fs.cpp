@@ -183,7 +183,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
             file.FileOffset > maximum - offset) {
             return fail(kFsOutOfRange, "offset-overflow", offset, length);
         }
-        // config/unlock_master_quest age só em /system.dat do arquivo de save
+        // config/unlock_master_quest acts only on /system.dat of the save archive
         // (oot3d_native_master_quest_unlock.h).
         const bool masterQuestUnlock = !romfs &&
                                        *sessionType == "client_session:file:savedata" &&
@@ -195,7 +195,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
                 return fail(kInvalidBufferDescriptor, "source-read-failed", offset, length);
             }
             if (masterQuestUnlock) {
-                // config/unlock_master_quest: o 0xBE da RAM não vai para o disco.
+                // config/unlock_master_quest: the 0xBE in RAM does not go to disk.
                 std::optional<uint8_t> diskFirstByte;
                 std::array<uint8_t, 1> first{};
                 uint32_t firstCount = 0U;

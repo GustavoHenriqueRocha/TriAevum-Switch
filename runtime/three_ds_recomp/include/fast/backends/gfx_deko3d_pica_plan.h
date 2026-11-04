@@ -1,6 +1,6 @@
 #pragma once
 
-// Package 4 of the deko3d backend (docs/DEKO3D_PROGRESSO.md): what a PICA
+// Package 4 of the deko3d backend (docs/DEKO3D_PROGRESS.md): what a PICA
 // draw uploads, as plain decisions free of deko3d so the host checks them
 // (oot3d_deko3d_backend_tests). The console side (gfx_deko3d_pica_resources.cpp)
 // turns them into DkImage/DkSampler descriptors, stream memory and vertex

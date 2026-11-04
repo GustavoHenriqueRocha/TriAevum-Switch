@@ -91,10 +91,10 @@ class WholeAotCppTests(unittest.TestCase):
             caller = caller[:caller.index("\n}\n")]
             self.assertIn("uint32_t r4 = state.R[4];", caller)
             self.assertIn("uint32_t blocksRemaining = context.BlocksRemaining;", caller)
-            # Nenhuma lambda passada adiante: os locais não escapam.
+            # No lambda passed along: the locals do not escape.
             self.assertNotIn("commitState, reloadState", caller)
             self.assertIn("Oot3dAotRunBlockEntryHook(context, frame, state, 0x00001000U);", caller)
-            # Antes da chamada, só o conjunto sujo (r4 e lr) e o orçamento.
+            # Before the call, only the dirty set (r4 and lr) and the budget.
             call = caller.index("Execute_Callee_00001010(frame, context, state")
             before = caller[caller.rindex("OOT3D_AOT_STAT(context.Stats.DirectCalls);", 0, call):call]
             self.assertIn("state.R[4] = r4;", before)
@@ -102,11 +102,11 @@ class WholeAotCppTests(unittest.TestCase):
             self.assertNotIn("state.R[0] = r0;", before)
             self.assertIn("context.BlocksRemaining = blocksRemaining;", before)
             self.assertIn("reloadState();", caller[call:])
-            # Retornos e saídas por rótulos compartilhados que gravam o estado.
+            # Returns and exits via shared labels that write back the state.
             self.assertIn("{ exitFlow = Oot3dAotReturned(r14); goto exit_", caller)
             self.assertRegex(caller, r"exit_\d+:\n    state\.R\[0\] = r0;")
             self.assertNotIn("\n        return ", caller)
-            # Desligado de novo: o C++ volta a ser exatamente o de antes.
+            # Turned off again: the C++ is exactly the same as before.
             generate(*inputs, output)
             self.assertEqual(reference, (output / SOURCE_NAME).read_text(encoding="utf-8"))
 
@@ -1339,7 +1339,7 @@ class WholeAotCppTests(unittest.TestCase):
 
 
 class AffinityIncrementalShardingTests(unittest.TestCase):
-    """Distribuição estável: só os shards tocados mudam (acertos de ccache)."""
+    """Stable distribution: only the touched shards change (ccache hits)."""
 
     @staticmethod
     def chain(count: int, size: int = 4) -> tuple:
@@ -1401,7 +1401,7 @@ class AffinityIncrementalShardingTests(unittest.TestCase):
             if old - {victim.entry} != new
         ]
         self.assertEqual(changed, [])
-        # Recolocar a função removida: volta para junto de um vizinho.
+        # Re-adding the removed function: it goes back next to a neighbor.
         reduced_assignment = {
             entry: index for entry, index in assignment.items()
             if entry != victim.entry

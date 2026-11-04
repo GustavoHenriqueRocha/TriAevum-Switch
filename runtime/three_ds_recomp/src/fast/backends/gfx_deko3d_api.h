@@ -1,5 +1,5 @@
 #pragma once
-// GfxRenderingAPI on deko3d (Switch). Package 2 (docs/DEKO3D_PROGRESSO.md):
+// GfxRenderingAPI on deko3d (Switch). Package 2 (docs/DEKO3D_PROGRESS.md):
 // device, window image, clears and the present. Package 3: every PICA draw
 // resolves its shaders from deko3d.pack (specialized, else parametric).
 // Package 4: its textures, LUT, vertex/index streams and uniforms are

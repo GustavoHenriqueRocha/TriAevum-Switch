@@ -1,30 +1,30 @@
-"""Lista as funções guest quentes a partir de uma coleta PGO do GCC (.gcda).
+"""Lists the hot guest functions from a GCC PGO collection (.gcda).
 
-Saída: uma entrada hex por linha (com nome e contagem como comentário), no
-formato que generate_whole_aot_cpp.py --hot-functions lê. Quente = função
-``Execute_<nome>_<ENTRADA>`` executada pelo menos ``--min-count`` vezes na
-coleta (padrão 1: toda função que rodou).
+Output: one hex entry per line (with name and count as a comment), in the
+format that generate_whole_aot_cpp.py --hot-functions reads. Hot = function
+``Execute_<name>_<ENTRY>`` executed at least ``--min-count`` times in the
+collection (default 1: every function that ran).
 
-Dois modos (``--mode auto`` escolhe ``gcov`` se houver .gcno para os .gcda):
+Two modes (``--mode auto`` picks ``gcov`` if there are .gcno for the .gcda):
 
-gcov  Usa aarch64-none-elf-gcov -j -t com os .gcno do build instrumentado
-      (só existem se ele foi compilado com -ftest-coverage, o que
-      -fprofile-generate sozinho NÃO faz). A contagem é a exata de entradas
-      na função (``execution_count``).
+gcov  Uses aarch64-none-elf-gcov -j -t with the .gcno of the instrumented build
+      (they only exist if it was compiled with -ftest-coverage, which
+      -fprofile-generate alone does NOT do). The count is the exact number of
+      entries into the function (``execution_count``).
 
-gcda  Lê os .gcda direto, sem .gcno. Cada função do .gcda é identificada pelo
-      ``profile_id`` que o GCC calcula (coverage_compute_profile_id): para um
-      símbolo externo é crc32(nome mangled) & 0x7fffffff. As funções Execute_
-      são externas (namespace Oot3dNativeGame::GeneratedWholeAot), então o
-      script recalcula esse id a partir dos nomes do C++ gerado e casa com o
-      .gcda. A contagem usada é o maior contador de arco da função; uma função
-      sem desvios não tem contador de arco, e aí vale o time_profiler (ordem da
-      primeira execução, > 0 se ela rodou). Para o critério "rodou ou não" os
-      dois modos concordam; a contagem do modo gcda é só para ordenar.
+gcda  Reads the .gcda directly, without .gcno. Each function in the .gcda is
+      identified by the ``profile_id`` GCC computes (coverage_compute_profile_id):
+      for an external symbol it is crc32(mangled name) & 0x7fffffff. The Execute_
+      functions are external (namespace Oot3dNativeGame::GeneratedWholeAot), so the
+      script recomputes that id from the names in the generated C++ and matches it
+      against the .gcda. The count used is the function's largest arc counter; a
+      function without branches has no arc counter, and then the time_profiler
+      counts (order of first execution, > 0 if it ran). For the "ran or not"
+      criterion both modes agree; the gcda-mode count is only for ordering.
 
-Os .gcda têm o nome achatado com '#' (-fprofile-prefix-path), por exemplo
+The .gcda files have names flattened with '#' (-fprofile-prefix-path), for example
 CMakeFiles#oot3d_native_whole_aot.dir#home#gustavo#oot3d-work#gen#cpp-lean#oot3d_whole_aot_shard_000.gcda;
-o shard é deduzido do sufixo ``oot3d_whole_aot_shard_NNN``.
+the shard is deduced from the ``oot3d_whole_aot_shard_NNN`` suffix.
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ from typing import Iterable, Sequence
 
 DEFAULT_GCOV = "/opt/devkitpro/devkitA64/bin/aarch64-none-elf-gcov"
 SHARD_RE = re.compile(r"(oot3d_whole_aot_shard_\d+)\.gcda$")
-# Definições no C++ gerado (o atributo de função gigante, se houver, vem
-# antes na mesma linha); as declarações terminam em ");" e ficam de fora.
+# Definitions in the generated C++ (the giant-function attribute, if any, comes
+# earlier on the same line); declarations end in ");" and are left out.
 DEFINITION_RE = re.compile(
     r"^(?:\[\[[^\]]*\]\] )*Oot3dWholeAotFlow (Execute_\w+)\(\n((?:.*\n){0,3}?.*\)) \{$",
     re.MULTILINE,
@@ -62,10 +62,10 @@ TAG_ARCS = 0x01A10000
 TAG_TIME_PROFILER = 0x01AF0000
 
 
-# --- profile_id do GCC (coverage.cc / tree.cc) -----------------------------
+# --- GCC profile_id (coverage.cc / tree.cc) --------------------------------
 
 def _crc32_byte_slow(chksum: int, byte: int) -> int:
-    """crc32_unsigned_n(chksum, byte, 1) do GCC: CRC-32 0x04C11DB7, MSB primeiro."""
+    """GCC's crc32_unsigned_n(chksum, byte, 1): CRC-32 0x04C11DB7, MSB first."""
     value = (byte & 0xFF) << 24
     for _ in range(8):
         feedback = 0x04C11DB7 if (value ^ chksum) & 0x80000000 else 0
@@ -82,9 +82,9 @@ def _crc32_byte(chksum: int, byte: int) -> int:
 
 
 def gcc_profile_id(assembler_name: str) -> int:
-    """coverage_compute_profile_id para um símbolo TREE_PUBLIC."""
+    """coverage_compute_profile_id for a TREE_PUBLIC symbol."""
     chksum = 0
-    # crc32_string inclui o NUL final.
+    # crc32_string includes the trailing NUL.
     for byte in assembler_name.encode() + b"\0":
         chksum = _crc32_byte(chksum, byte)
     chksum &= 0x7FFFFFFF
@@ -101,12 +101,12 @@ def mangle(symbol: str, parameters: str) -> str | None:
         if mangled is None:
             return None
         types.append(mangled)
-    # Depois do primeiro uso, Oot3dNativeGame é a substituição S_ (NS_).
+    # After its first use, Oot3dNativeGame is the substitution S_ (NS_).
     return f"{NAMESPACE}{len(symbol)}{symbol}E{''.join(types)}"
 
 
 def generated_functions(generated_dir: Path) -> dict[str, dict[int, tuple[int, str]]]:
-    """Por shard: profile_id -> (entrada guest, símbolo)."""
+    """Per shard: profile_id -> (guest entry, symbol)."""
     result: dict[str, dict[int, tuple[int, str]]] = {}
     for path in sorted(generated_dir.glob("oot3d_whole_aot_shard_*.cpp")):
         table: dict[int, tuple[int, str]] = {}
@@ -121,21 +121,21 @@ def generated_functions(generated_dir: Path) -> dict[str, dict[int, tuple[int, s
     return result
 
 
-# --- leitura direta do .gcda ------------------------------------------------
+# --- direct .gcda reading --------------------------------------------------
 
 def read_gcda(path: Path) -> list[tuple[int, int, int]]:
-    """[(profile_id, maior contador de arco, time_profiler)] de um .gcda."""
+    """[(profile_id, largest arc counter, time_profiler)] of a .gcda."""
     data = path.read_bytes()
     magic, = struct.unpack_from("<I", data, 0)
     if magic != GCOV_MAGIC:
-        raise ValueError(f"{path}: não é um .gcda little-endian")
-    # magic, versão, stamp e (GCC >= 12) checksum.
+        raise ValueError(f"{path}: not a little-endian .gcda")
+    # magic, version, stamp and (GCC >= 12) checksum.
     offset = 16
     functions: list[list[int]] = []
     while offset + 8 <= len(data):
         tag, length = struct.unpack_from("<Ii", data, offset)
         offset += 8
-        # Comprimento negativo = contadores todos zero, sem dados gravados.
+        # Negative length = all counters zero, no data written.
         payload = data[offset:offset + max(length, 0)]
         offset += max(length, 0)
         if tag == TAG_FUNCTION:
@@ -155,7 +155,7 @@ def counts_from_gcda(
 ) -> tuple[dict[int, tuple[str, int]], list[str]]:
     tables = generated_functions(generated_dir)
     if not tables:
-        raise SystemExit(f"nenhum shard gerado em {generated_dir}")
+        raise SystemExit(f"no generated shard in {generated_dir}")
     counts: dict[int, tuple[str, int]] = {}
     notes: list[str] = []
     for path in gcda_files:
@@ -164,28 +164,28 @@ def counts_from_gcda(
             continue
         table = tables.get(shard.group(1))
         if table is None:
-            notes.append(f"{path.name}: shard ausente no C++ gerado")
+            notes.append(f"{path.name}: shard missing from the generated C++")
             continue
         matched = 0
         for ident, arcs, first_run in read_gcda(path):
             item = table.get(ident)
             if item is None:
-                continue  # helper inline do runtime, não é função guest
+                continue  # inline runtime helper, not a guest function
             matched += 1
             entry, symbol = item
             count = arcs if arcs > 0 else (1 if first_run > 0 else 0)
             old = counts.get(entry, (symbol, 0))[1]
             counts[entry] = (symbol, max(old, count))
         if matched < len(table):
-            # Uma função guest de um shard que foi compilado sempre aparece no
-            # .gcda; se não casou, o .gcda é de outro C++ (outro shard/geração).
+            # A guest function of a shard that was compiled always appears in the
+            # .gcda; if it did not match, the .gcda is from other C++ (other shard/generation).
             notes.append(
-                f"{path.name}: {len(table) - matched} de {len(table)} "
-                "função(ões) do shard sem registro no .gcda")
+                f"{path.name}: {len(table) - matched} of {len(table)} "
+                "shard function(s) without a record in the .gcda")
     return counts, notes
 
 
-# --- modo gcov (.gcno + .gcda) ----------------------------------------------
+# --- gcov mode (.gcno + .gcda) ----------------------------------------------
 
 def gcno_for(gcda: Path, build_dir: Path) -> Path:
     return build_dir / (gcda.name.replace("#", "/")[:-len(".gcda")] + ".gcno")
@@ -201,7 +201,7 @@ def counts_from_gcov(
             continue
         gcno = gcno_for(gcda, build_dir)
         if not gcno.is_file():
-            notes.append(f"{gcda.name}: sem {gcno}")
+            notes.append(f"{gcda.name}: missing {gcno}")
             continue
         with tempfile.TemporaryDirectory() as temp:
             stem = Path(temp) / "shard"
@@ -212,7 +212,7 @@ def counts_from_gcov(
                  str(stem) + ".cpp"],
                 capture_output=True, text=True, cwd=temp)
         if process.returncode != 0:
-            notes.append(f"{gcda.name}: gcov falhou: {process.stderr.strip()}")
+            notes.append(f"{gcda.name}: gcov failed: {process.stderr.strip()}")
             continue
         report = json.loads(process.stdout)
         for source in report.get("files", []):
@@ -232,21 +232,21 @@ def counts_from_gcov(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--gcda-dir", type=Path, required=True,
-                        help="diretório com os .gcda da coleta (nomes com '#')")
+                        help="directory with the collection's .gcda files (names with '#')")
     parser.add_argument("--generated-dir", type=Path,
-                        help="C++ gerado que foi compilado na coleta (modo gcda)")
+                        help="generated C++ that was compiled for the collection (gcda mode)")
     parser.add_argument("--build-dir", type=Path,
-                        help="build instrumentado, com os .gcno (modo gcov)")
+                        help="instrumented build, with the .gcno files (gcov mode)")
     parser.add_argument("--mode", choices=("auto", "gcov", "gcda"), default="auto")
     parser.add_argument("--gcov", default=DEFAULT_GCOV)
     parser.add_argument("--min-count", type=int, default=1,
-                        help="contagem mínima para ser quente (padrão 1)")
+                        help="minimum count to be hot (default 1)")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
 
     gcda_files = sorted(args.gcda_dir.glob("*.gcda"))
     if not any(SHARD_RE.search(path.name) for path in gcda_files):
-        parser.error(f"nenhum .gcda de shard em {args.gcda_dir}")
+        parser.error(f"no shard .gcda in {args.gcda_dir}")
     mode = args.mode
     if mode == "auto":
         has_notes = args.build_dir is not None and any(
@@ -255,16 +255,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         mode = "gcov" if has_notes else "gcda"
     if mode == "gcov":
         if args.build_dir is None:
-            parser.error("--mode gcov precisa de --build-dir")
+            parser.error("--mode gcov requires --build-dir")
         counts, notes = counts_from_gcov(gcda_files, args.build_dir, args.gcov)
     else:
         if args.generated_dir is None:
-            parser.error("sem .gcno: o modo gcda precisa de --generated-dir")
+            parser.error("no .gcno: gcda mode requires --generated-dir")
         counts, notes = counts_from_gcda(gcda_files, args.generated_dir)
     for note in notes:
-        print("aviso:", note, file=sys.stderr)
+        print("warning:", note, file=sys.stderr)
     if not counts:
-        raise SystemExit("nenhuma função guest casou com a coleta")
+        raise SystemExit("no guest function matched the collection")
     hot = sorted(
         (entry for entry, (_, count) in counts.items() if count >= args.min_count),
         key=lambda entry: (-counts[entry][1], entry),
@@ -274,8 +274,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for entry in hot),
         encoding="utf-8",
     )
-    print(f"modo {mode}: {len(counts)} função(ões) guest na coleta, "
-          f"{len(hot)} quente(s) (contagem >= {args.min_count})")
+    print(f"mode {mode}: {len(counts)} guest function(s) in the collection, "
+          f"{len(hot)} hot (count >= {args.min_count})")
     return 0
 
 

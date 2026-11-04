@@ -129,8 +129,8 @@ class NativeRenderCommandStream final {
     };
     [[nodiscard]] WaitStats GetWaitStats() const noexcept;
 
-    // Estado interno para o watchdog de travamento (oot3d_hang_watchdog.h):
-    // só com try_lock (false se o mutex estiver ocupado; o relatório diz isso).
+    // Internal state for the hang watchdog (oot3d_hang_watchdog.h):
+    // try_lock only (false if the mutex is busy; the report says so).
     struct SyncSnapshot {
         size_t Queued = 0U;
         size_t FramesQueued = 0U;

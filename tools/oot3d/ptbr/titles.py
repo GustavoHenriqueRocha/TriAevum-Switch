@@ -1,12 +1,12 @@
-"""Títulos de área (o nome que aparece ao entrar num lugar): texturas LA8 dentro de cada scene/*.zar,
-uma por idioma (`name/<cena>_eusp.ctxb`, `_ussp.ctxb`). Redesenha as do espanhol em PT-BR."""
+"""Area titles (the name shown when entering a place): LA8 textures inside each scene/*.zar,
+one per language (`name/<cena>_eusp.ctxb`, `_ussp.ctxb`). Redraws the Spanish ones in PT-BR."""
 import struct
 from PIL import Image, ImageDraw, ImageFont
-from caminhos import FONTES, ROMFS_ORIGINAL
+from paths import FONTES, ROMFS_ORIGINAL
 from ctxb import codificar_ctxb, cabecalho
 from romfs import localizar, listar
 
-FONTE = 'Belleza-Regular.ttf'          # OFL, parecida com a dos títulos originais
+FONTE = 'Belleza-Regular.ttf'          # OFL, similar to the original titles' font
 NOMES = {
     'dg_dark': 'Templo da Sombra', 'dg_deku': 'Dentro da Árvore Deku', 'dg_dod': 'Caverna dos Dodongos',
     'dg_fire': 'Templo do Fogo', 'dg_forest': 'Templo da Floresta', 'dg_ganon': 'Dentro do Castelo de Ganon',
@@ -30,8 +30,8 @@ NOMES = {
 
 
 def titulo(texto, w=256, h=32, cap=17, E=4):
-    """Branco acinzentado, contorno preto e sombra, como os originais; encolhe até caber em 250 px.
-    Nas texturas de 64 px de altura (nomes longos no espanhol) vai em duas linhas."""
+    """Grayish white, black outline and shadow, like the originals; shrinks until it fits in 250 px.
+    In 64 px tall textures (long names in Spanish) it goes on two lines."""
     if h >= 64 and ' ' in texto:
         p = texto.split(' '); meio = min(range(1, len(p)), key=lambda i: abs(len(' '.join(p[:i])) - len(' '.join(p[i:]))))
         img = Image.new('RGBA', (w, h), (0, 0, 0, 0))
@@ -56,7 +56,7 @@ def titulo(texto, w=256, h=32, cap=17, E=4):
 
 
 def entradas_zar(z):
-    """→ [(nome, offset, tamanho)] de um arquivo ZAR."""
+    """→ [(name, offset, size)] of a ZAR file."""
     assert z[:4] == b'ZAR\x01'
     n = struct.unpack_from('<H', z, 10)[0]; meta, dados = struct.unpack_from('<II', z, 16)
     out = []
@@ -67,7 +67,7 @@ def entradas_zar(z):
 
 
 def gravar(romfs, destino_png=None):
-    """Troca os títulos espanhóis de todas as cenas em `romfs` (corrige no lugar). → quantas texturas."""
+    """Replaces the Spanish titles of every scene in `romfs` (patched in place). → how many textures."""
     feitas = {}; total = 0
     with open(ROMFS_ORIGINAL, 'rb') as orig, open(romfs, 'r+b') as f:
         for cam in listar(ROMFS_ORIGINAL):

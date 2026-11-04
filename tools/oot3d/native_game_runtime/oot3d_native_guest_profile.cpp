@@ -131,7 +131,7 @@ bool GuestBlockProfiler::EnableSpikes(const GuestSpikeConfig& config,
     mSpikeLog = log;
     mSpikeSummary = summary;
     mSpikeFlushFrames = std::max(1U, flushFrames);
-    // Um pico pode cair em qualquer quadro: todos medidos.
+    // A spike can land on any frame: measure all of them.
     mOptions.SampleEveryFrames = 1U;
     mSampling = true;
     mSpikeOn = mSpike.Enabled();
@@ -228,8 +228,8 @@ void GuestBlockProfiler::Note(uint32_t pc, uint64_t now) noexcept {
 
 namespace {
 
-// Registro para as substituições nativas (oot3d_native_guest_overrides.h):
-// elas consultam o filtro de repasse e marcam a própria entrada.
+// Registration for the native overrides (oot3d_native_guest_overrides.h):
+// they query the forwarding filter and mark their own entry.
 bool OverrideForwards(const void* user, uint32_t first, uint32_t last) noexcept {
     return static_cast<const GuestBlockProfiler*>(user)->ForwardsRange(first, last);
 }
@@ -258,7 +258,7 @@ void GuestBlockProfiler::OnBlockEntry(uint32_t pc,
     self.Note(pc, Ticks());
     if (self.mCallback != nullptr && self.IsHook(pc)) {
         self.mCallback(pc, state, memory, self.mCallbackUser);
-        // O tempo do gancho (política do host) não é do bloco guest.
+        // Hook time (host policy) does not belong to the guest block.
         self.mLastTicks = Ticks();
         return;
     }
@@ -268,13 +268,13 @@ void GuestBlockProfiler::OnBlockEntry(uint32_t pc,
 bool GuestBlockProfiler::OnHostFrame(uint64_t hostFrame) {
     if (!mActive) return false;
     if (mSpikeOn) {
-        // O quadro que terminou: pico? O primeiro inclui a carga inicial.
+        // The frame that just ended: spike? The first includes the initial load.
         if (mSpikeFrameSeen) {
             (void)mSpike.EndFrame(hostFrame, mTotalEntries - mSpikeEntriesStart);
         } else {
             mSpikeFrameSeen = true;
             mSpikeLastFlush = hostFrame;
-            (void)mSpike.EndFrame(hostFrame, 0U); // a carga inicial (load=1)
+            (void)mSpike.EndFrame(hostFrame, 0U); // the initial load (load=1)
         }
         mSpikeEntriesStart = mTotalEntries;
         if (hostFrame - mSpikeLastFlush >= mSpikeFlushFrames) {
@@ -324,7 +324,7 @@ bool GuestBlockProfiler::WriteReport(uint64_t hostFrame) {
     if (!mFunctionsLoaded) LoadFunctionMap();
     const double ticksPerMs = static_cast<double>(TicksPerSecond()) / 1000.0;
     const uint64_t elapsed = Ticks() - mStartTicks;
-    const uint64_t frames = mSampledFrames; // quadros medidos
+    const uint64_t frames = mSampledFrames; // measured frames
 
     struct Row {
         uint32_t Pc = 0U;
@@ -339,7 +339,7 @@ bool GuestBlockProfiler::WriteReport(uint64_t hostFrame) {
         blocks.push_back({mBase + slot * 4U, mCounts[slot], mTicks[slot], 1U});
         attributed += mTicks[slot];
     }
-    // Agrega por função: maior entrada do mapa <= pc.
+    // Aggregate by function: greatest map entry <= pc.
     std::vector<Row> functions;
     if (!mFunctions.empty()) {
         std::vector<Row> byIndex(mFunctions.size());
@@ -380,12 +380,12 @@ bool GuestBlockProfiler::WriteReport(uint64_t hostFrame) {
     const double attributedMs = static_cast<double>(attributed) / ticksPerMs;
     std::snprintf(line, sizeof(line),
                   "# triaevum guest_profile v1\n"
-                  "# quadros_medidos=%" PRIu64 " (1 a cada %u) janela_ms=%.1f entradas_de_bloco=%" PRIu64
+                  "# quadros_medidos=%" PRIu64 " (1 of every %u) janela_ms=%.1f entradas_de_bloco=%" PRIu64
                   " fora_do_codigo=%" PRIu64 "\n"
-                  "# tempo_atribuido_ms=%.1f (%.2f ms/quadro) intervalos_descartados=%" PRIu64
-                  " (%.1f ms, guest fora: SVC/host)\n"
-                  "# tempo por bloco = desde a entrada do bloco ate a proxima entrada,\n"
-                  "# inclui a sobrecarga do proprio perfil (~constante por entrada).\n",
+                  "# tempo_atribuido_ms=%.1f (%.2f ms/frame) intervalos_descartados=%" PRIu64
+                  " (%.1f ms, guest away: SVC/host)\n"
+                  "# time per block = from the block's entry to the next entry,\n"
+                  "# includes the profiler's own overhead (~constant per entry).\n",
                   frames, mOptions.SampleEveryFrames, static_cast<double>(elapsed) / ticksPerMs,
                   mTotalEntries,
                   mOutside, attributedMs,

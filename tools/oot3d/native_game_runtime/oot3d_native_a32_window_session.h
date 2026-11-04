@@ -435,7 +435,7 @@ private:
   Oot3dNativeGame::NativeA32PlayerTemporalBridge playerTemporalBridge;
   NativeWidescreenProjectionState widescreenProjection;
   std::optional<ScopedA32BlockTraceWriter> blockTraceWriterStorage;
-  // Perfil por função do código guest (config/guest_profile); inativo por padrão.
+  // Per-function profile of the guest code (config/guest_profile); inactive by default.
   Oot3dNativeGame::GuestBlockProfiler guestProfiler;
   bool guestProfilerInstalled = true;
   std::vector<uint32_t> blockEntryHooks{};

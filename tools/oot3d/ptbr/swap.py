@@ -1,15 +1,15 @@
-"""Troca rótulos em botões: reconstrói o fundo e escreve o PT-BR com as cores do original."""
+"""Swaps labels on buttons: rebuilds the background and writes the PT-BR with the original's colors."""
 import sys; sys.path.insert(0, '.')
 from PIL import Image
 from ctxb import decodificar, ler
-from regioes import regioes
-from rotulos import rotulo
+from regions import regioes
+from labels import rotulo
 
 
 def _fundo(im, caixa, folga=2, placa=False):
-    """Apaga o texto repetindo, em cada linha, a cor logo à esquerda (os botões têm degradê vertical).
+    """Erases the text by repeating, on each row, the color just to the left (the buttons have a vertical gradient).
 
-    Com `placa`, a caixa é a própria placa do título: mantém as pontas e refaz só o miolo."""
+    With `placa`, the box is the title plate itself: keeps the ends and redraws only the middle."""
     x0, y0, x1, y1 = caixa; px = im.load(); w, h = im.size
     if placa:
         refs = {}
@@ -47,7 +47,7 @@ def _estilo(orig, fundo, caixa):
 
 
 def caixa_do_texto(im, area, limiar=235):
-    """Caixa dos pixels claros e opacos dentro de `area` (para rótulos iguais em inglês e espanhol)."""
+    """Box of the light, opaque pixels inside `area` (for labels identical in English and Spanish)."""
     px = im.load(); x0, y0, x1, y1 = area; pts = [(x, y) for y in range(y0, y1) for x in range(x0, x1)
                                               if px[x, y][3] > 200 and min(px[x, y][:3]) > limiar]
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
@@ -56,7 +56,7 @@ def caixa_do_texto(im, area, limiar=235):
 
 def trocar(nome, rotulos, base='06_EU_SPANISH', altura=None, peso='ExtraBold', fator=0.8, placa=False, alinhar='centro',
            transparente=False, cores=None, inicial=None):
-    """rotulos: {índice da região | ('area', x0, y0, x1, y1) | ('caixa', x0, y0, x1, y1): 'texto PT'}."""
+    """rotulos: {region index | ('area', x0, y0, x1, y1) | ('caixa', x0, y0, x1, y1): 'PT text'}."""
     orig = decodificar(ler(base, nome)); im = (inicial or orig).copy(); caixas = regioes(nome)
     for i, txt in rotulos.items():
         if isinstance(i, tuple):

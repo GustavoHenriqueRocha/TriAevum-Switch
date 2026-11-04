@@ -1,6 +1,6 @@
 #pragma once
 // deko3d PICA render targets and display images (Switch), package 5
-// (docs/DEKO3D_PROGRESSO.md). A target is the GL backend's PicaGlTarget: a
+// (docs/DEKO3D_PROGRESS.md). A target is the GL backend's PicaGlTarget: a
 // colour image (RGBA8) and a depth/stencil image (Z24S8) per PICA target key,
 // at the resolution scale (a top-screen target widened by widescreen). A
 // display image is PicaGlDisplay: the RGBA8 destination of a display

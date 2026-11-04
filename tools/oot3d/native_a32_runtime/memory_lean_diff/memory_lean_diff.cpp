@@ -1,10 +1,10 @@
-// Teste diferencial de memória (run_memory_lean_diff.sh): NativeA32Memory atual contra a
-// implementação anterior (HEAD, renomeada para OldMem). Sequências aleatórias
-// de operações aplicadas às duas; depois de cada uma compara retorno, valores
-// lidos, endereço de falha, geração arquitetural, gerações por página
-// (RangeWriteGeneration), impressão digital de conteúdo/estado/rastreio,
-// contadores de vigia, divergências de leitura rápida, eventos do observador,
-// exclusivos, spans rápidos, CaptureState e cópias/movimentos/restauração.
+// Memory differential test (run_memory_lean_diff.sh): current NativeA32Memory against the
+// previous implementation (HEAD, renamed to OldMem). Random sequences
+// of operations applied to both; after each one compares return value, values
+// read, fault address, architectural generation, per-page generations
+// (RangeWriteGeneration), content/state/trace fingerprint,
+// watch counters, fast-read mismatches, observer events,
+// exclusives, fast spans, CaptureState and copies/moves/restore.
 #include "oot3d_native_a32_memory.h"
 #include "old_memory.h"
 
@@ -28,8 +28,8 @@ uint64_t gOps = 0;
 std::string gLastOp;
 
 [[noreturn]] void Fail(const char* what, uint64_t a = 0, uint64_t b = 0) {
-    std::fprintf(stderr, "DIVERGENCIA op#%" PRIu64 " (%s): %s  nova=0x%" PRIx64
-                 " antiga=0x%" PRIx64 "\n", gOps, gLastOp.c_str(), what, a, b);
+    std::fprintf(stderr, "DIVERGENCE op#%" PRIu64 " (%s): %s  new=0x%" PRIx64
+                 " old=0x%" PRIx64 "\n", gOps, gLastOp.c_str(), what, a, b);
     std::exit(1);
 }
 
@@ -44,8 +44,8 @@ struct Events {
     std::vector<std::pair<uint32_t, size_t>> Observed;
 };
 
-// Mapa: RAM gravável 64 KiB, ROM de 8 KiB, região que não cobre páginas
-// inteiras (sem entrada rápida), RAM pequena gravável, e buracos.
+// Map: 64 KiB writable RAM, 8 KiB ROM, a region not covering whole pages
+// (no fast entry), small writable RAM, and holes.
 template <typename M>
 void Map(M& memory) {
     std::vector<uint8_t> ram(0x10000), rom(0x2000), odd(0x1800), small(0x3000);
@@ -69,7 +69,7 @@ uint32_t RandomAddress() {
     const uint32_t base = bases[Rand(8)];
     switch (Rand(4)) {
     case 0: return base + Rand(0x10000);
-    case 1: return base + (Rand(16) << 12) - Rand(9);  // borda de página
+    case 1: return base + (Rand(16) << 12) - Rand(9);  // page boundary
     case 2: return base + Rand(0x3000);
     default: return base + (Rand(0x4000) & ~3U);
     }
@@ -114,7 +114,7 @@ void CompareState(Pair& p, bool full) {
     Eq("watch.PointerWrites", nc.PointerWrites, oc.PointerWrites);
     Eq("observed.size", p.NE.Observed.size(), p.OE.Observed.size());
     if (p.NE.Observed != p.OE.Observed) Fail("observed events");
-    // Gerações por página e por intervalos aleatórios.
+    // Per-page and random-range generations.
     for (uint32_t page = 0x0F000; page < 0x56000; page += 0x1000) {
         const auto a = n.RangeWriteGeneration(page, 0x1000);
         const auto b = o.RangeWriteGeneration(page, 0x1000);
@@ -134,7 +134,7 @@ void CompareState(Pair& p, bool full) {
            o.HasEscapedWritePointer(address, size));
     }
     if (full) {
-        // Materializa (as duas do mesmo jeito) e compara conteúdo/estado/rastreio.
+        // Materialize (both the same way) and compare content/state/trace.
         Eq("ContentFingerprint", n.ContentFingerprint(), o.ContentFingerprint());
         Eq("StateFingerprint", n.StateFingerprint(), o.StateFingerprint());
         Eq("WriteTraceFingerprint", n.WriteTraceFingerprint(), o.WriteTraceFingerprint());
@@ -339,13 +339,13 @@ void Step(Pair& p) {
         Eq("MaterializeDeferredWrites", p.N->MaterializeDeferredWrites(), p.O->MaterializeDeferredWrites());
     } else if (kind < 83) {
         gLastOp = "restore";
-        // CaptureState/RestoreState (materializa antes, como o savestate).
+        // CaptureState/RestoreState (materialize first, like the savestate).
         p.N->MaterializeDeferredWrites();
         p.O->MaterializeDeferredWrites();
         const auto ns = p.N->CaptureState();
         const auto os = p.O->CaptureState();
         if (ns != os) Fail("CaptureState(restore)");
-        // Às vezes restaura um estado com outra geração.
+        // Sometimes restore a state with a different generation.
         auto changed = ns;
         if (Rand(2)) changed["write_generation"] = ns["write_generation"].get<uint64_t>() + 1 + Rand(5);
         std::string e1, e2;
@@ -354,7 +354,7 @@ void Step(Pair& p) {
         gLastOp = "copy";
         p.N->MaterializeDeferredWrites();
         p.O->MaterializeDeferredWrites();
-        // Imagem copiada e atribuída de volta (épocas de certificado novas).
+        // Image copied and assigned back (new certificate epochs).
         if (Rand(2)) {
             New nc(*p.N);
             Old oc(*p.O);
@@ -371,7 +371,7 @@ void Step(Pair& p) {
         p.HasToken = false;
     } else {
         gLastOp = "range";
-        // Só consultas (CompareState faz o resto).
+        // Queries only (CompareState does the rest).
     }
 }
 
@@ -399,7 +399,7 @@ int main(int argc, char** argv) {
         gLastOp = "final";
         CompareState(p, true);
     }
-    std::printf("memdiff: %" PRIu64 " operações, %" PRIu64 " episódios, zero divergências\n",
+    std::printf("memdiff: %" PRIu64 " operations, %" PRIu64 " episodes, zero divergences\n",
                 gOps, episodes);
     return 0;
 }

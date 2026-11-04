@@ -1,3 +1,5 @@
+English: [SWITCH_RESEARCH_2026-10-17.md](SWITCH_RESEARCH_2026-10-17.md)
+
 # Pesquisa: técnicas de outros projetos 3D no Switch homebrew (2026-10-17)
 
 Fonte principal: **SwitchWakerHD** (Wind Waker HD recompilado PPC→C no Switch; 48 rodadas de otimização medidas):

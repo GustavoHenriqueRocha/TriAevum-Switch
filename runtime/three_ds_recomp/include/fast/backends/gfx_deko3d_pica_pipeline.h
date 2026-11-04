@@ -1,6 +1,6 @@
 #pragma once
 
-// Package 5 of the deko3d backend (docs/DEKO3D_PROGRESSO.md): render targets,
+// Package 5 of the deko3d backend (docs/DEKO3D_PROGRESS.md): render targets,
 // pipeline state, display transfers and the scanout, as plain decisions free
 // of deko3d so the host checks them (oot3d_deko3d_backend_tests). The console
 // side (gfx_deko3d.cpp, gfx_deko3d_pica_targets.cpp) turns them into

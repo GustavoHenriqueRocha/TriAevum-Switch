@@ -1,4 +1,4 @@
-// Perfil por etapa da render thread do backend OpenGL; veja
+// Per-step profile of the OpenGL backend's render thread; see
 // fast/backends/gl_frame_profiler.h.
 
 #include "fast/backends/gl_frame_profiler.h"
@@ -30,14 +30,14 @@ constexpr std::array<const char*, kStageCount> kStageNames{
     "transfer", "post_aa", "post_easu", "scanout", "ui", "present",
     "other", "pacing", "idle"};
 
-// Contadores de chamadas GL (ganchos nos ponteiros do glad, só no Switch).
+// GL call counters (hooks on glad's pointers, Switch only).
 enum Counter : size_t {
     kDraws, kClears, kFboBinds, kFboChanges, kTexBinds, kProgramBinds,
     kProgramChanges, kVaoBinds, kUboBinds, kUniforms, kBufferUploadBytes,
     kBufferReallocs, kMapBytes, kTextureUploadBytes, kBlits, kBarriers,
     kSyncs, kFinish, kFlush, kGetError, kGets, kReadbacks, kGenDelete,
     kEnables,
-    // Caminho PICA (GlPerf::CountPica, bits PicaGlGpuLean::CountBit).
+    // PICA path (GlPerf::CountPica, PicaGlGpuLean::CountBit bits).
     kPicaFsDiscard, kPicaFsDepth, kPicaFsImage, kPicaBlended,
     kPicaLogicCopyOff, kPicaBlendIdentityOff, kPicaNoEffectSkipped,
     kPicaFullDepthClears, kCounterCount
@@ -72,7 +72,7 @@ uint64_t NowNs() {
 
 struct KindWindow {
     uint64_t Frames = 0;
-    uint64_t FrameNs = 0;  // FrameBegin -> FrameEnd (parede, render thread)
+    uint64_t FrameNs = 0;  // FrameBegin -> FrameEnd (wall, render thread)
     std::array<uint64_t, kStageCount> CpuNs{};
     std::array<uint64_t, kCounterCount> Counters{};
     std::array<uint64_t, kCounterCount> CounterMax{};
@@ -278,10 +278,10 @@ inline void Add(Counter counter, uint64_t value = 1U) {
     gFrameCounters[counter] += value;
 }
 
-// Sonda: quem são os envios grandes de textura e as realocações de buffer
-// (o console mostrou 1 MB de textura e ~29 glBufferData em todo quadro,
-// até nos de reapresentação). Só a thread do contexto escreve; o
-// relatório lê sem trava (diagnóstico, um valor rasgado não importa).
+// Probe: who the large texture uploads and buffer reallocations are
+// (the console showed 1 MB of texture and ~29 glBufferData every frame,
+// even in re-presentation ones). Only the context thread writes; the
+// report reads without a lock (diagnostics, a torn value doesn't matter).
 struct UploadProbe {
     uint32_t TexW = 0, TexH = 0, TexCount = 0;
     Stage TexStage{};
@@ -603,10 +603,10 @@ void AppendMs(std::ostringstream& out, const char* prefix, const char* name,
     out << ' ' << prefix << name << '=' << (nanoseconds / count / 1.0e6);
 }
 
-// step_draw_<fase>_ms (media por quadro), step_draw_submit_ms (total dentro
-// do SubmitPicaDraw), step_draw_outside_ms (etapas PICA - submit: o que o
-// chamador faz entre draws), step_draw_us (submit por draw), contadores e
-// secoes da render thread.
+// step_draw_<phase>_ms (per-frame average), step_draw_submit_ms (total inside
+// SubmitPicaDraw), step_draw_outside_ms (PICA steps - submit: what the
+// caller does between draws), step_draw_us (submit per draw), counters and
+// render thread sections.
 void AppendPhases(std::ostringstream& out, const std::string& prefix,
                   const KindWindow& kind, double count) {
     using namespace PicaDrawPhases;

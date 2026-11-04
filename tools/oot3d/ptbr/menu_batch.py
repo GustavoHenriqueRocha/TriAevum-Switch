@@ -1,4 +1,4 @@
-"""Lista de rótulos PT-BR por textura (índices das regiões de regioes.py)."""
+"""List of PT-BR labels per texture (region indices from regions.py)."""
 EQ = 'EQUIP.'
 SIM_NAO = {}
 LOTE = {

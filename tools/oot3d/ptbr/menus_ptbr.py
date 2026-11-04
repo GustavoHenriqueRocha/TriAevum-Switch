@@ -1,11 +1,11 @@
-"""Gera as texturas de menu em PT-BR (por enquanto: HUD)."""
+"""Generates the PT-BR menu textures (for now: HUD)."""
 import struct, sys
 sys.path.insert(0, '.')
 from ctxb import decodificar, ler, CTXB_HEADER_SIZE, encode_rgba4_tiled, cabecalho
-from rotulos import rotulo
-from caminhos import TRABALHO
+from labels import rotulo
+from paths import TRABALHO
 
-HUD = [  # colunas de 64 px, linhas de 18 px a partir de y=92 (mesma ordem do original)
+HUD = [  # 64 px columns, 18 px rows starting at y=92 (same order as the original)
     ['Atacar', 'Olhar', 'Entrar', 'Voltar', 'Abrir', 'Pular', 'Decidir', 'Mergulhar', 'Galopar'],
     ['Lançar', 'Navi', 'Subir', 'Soltar', 'Descer', 'Salvar', 'Falar', 'Próximo', 'Agarrar'],
     ['Sair', 'Guardar', 'Puxar', 'Trocar', 'Equipar'],
@@ -14,7 +14,7 @@ HUD = [  # colunas de 64 px, linhas de 18 px a partir de y=92 (mesma ordem do or
 
 def hud():
     im = decodificar(ler('06_EU_SPANISH', 'hud_all00'))
-    im.paste((0, 0, 0, 0), (0, 92, 192, 256))               # grade de palavras inteira
+    im.paste((0, 0, 0, 0), (0, 92, 192, 256))               # whole word grid
     for c, coluna in enumerate(HUD):
         for r, palavra in enumerate(coluna):
             y = 92 + 18 * r
@@ -39,7 +39,7 @@ if __name__ == '__main__':
 
 
 def gravar_na_romfs(romfs, nome, ctxb_bytes):
-    """Substitui menu/06_EU_SPANISH e 07_US_SPANISH/<nome>.ctxb, mesmo tamanho."""
+    """Replaces menu/06_EU_SPANISH and 07_US_SPANISH/<nome>.ctxb, same size."""
     from romfs import localizar
     for idioma in ('06_EU_SPANISH', '07_US_SPANISH'):
         o, tam = localizar(romfs, f'menu/{idioma}/{nome}.ctxb')
@@ -49,12 +49,12 @@ def gravar_na_romfs(romfs, nome, ctxb_bytes):
 
 
 SANS_NEGRITO = '/usr/share/fonts/liberation/LiberationSans-Bold.ttf'
-# selos girados de menu_hint_movie_parts00: caixa no original, texto, cor
+# rotated badges of menu_hint_movie_parts00: box in the original, text, color
 SELOS = [((393, 0, 447, 39), 'Completo', (32, 166, 32, 255), 9), ((458, 4, 501, 37), 'Novo', (255, 0, 0, 255), 12)]
 
 
 def selos(im, angulo=33, E=4):
-    """Redesenha os selos "Completado"/"Nuevo": texto colorido, contorno branco, girado como o original."""
+    """Redraws the "Completado"/"Nuevo" badges: colored text, white outline, rotated like the original."""
     from PIL import Image, ImageDraw, ImageFont
     im = im.copy()
     for (x0, y0, x1, y1), texto, cor, altura in SELOS:

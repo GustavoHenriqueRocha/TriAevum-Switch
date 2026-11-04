@@ -1,4 +1,4 @@
-"""Lê arquivos de um MPQ do SoH (.otr), incluindo os criptografados."""
+"""Reads files from a SoH MPQ (.otr), including encrypted ones."""
 import bz2, struct, sys, zlib
 from io import BytesIO
 from pathlib import Path
@@ -41,7 +41,7 @@ class Otr(mpyq.MPQArchive):
                 return bz2.decompress(s[1:])
             if t == 0:
                 return s[1:]
-            raise RuntimeError(f"compressão {t:#x} não suportada em {nome}")
+            raise RuntimeError(f"compression {t:#x} not supported in {nome}")
 
         if b.flags & MPQ_FILE_SINGLE_UNIT:
             if chave is not None:

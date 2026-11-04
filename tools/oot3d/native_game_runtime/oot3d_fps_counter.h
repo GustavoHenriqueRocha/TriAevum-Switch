@@ -6,15 +6,15 @@
 
 namespace Oot3dNativeGame {
 
-// Contador de FPS na tela (config/fps_counter). Conta os quadros apresentados,
-// inclusive os interpolados do fps60, e fecha uma média a cada `windowSeconds`;
-// o pior intervalo da janela mostra travadinhas que a média esconde.
+// On-screen FPS counter (config/fps_counter). Counts presented frames,
+// including the fps60 interpolated ones, and closes an average every `windowSeconds`;
+// the window's worst interval shows hitches the average hides.
 class FpsCounter {
 public:
   explicit FpsCounter(double windowSeconds = 0.5) : mWindowSeconds(windowSeconds) {}
 
-  // Um quadro apresentado em `nowSeconds` (relógio monotônico).
-  // Devolve true quando uma janela fechou e o texto mudou.
+  // A frame presented at `nowSeconds` (monotonic clock).
+  // Returns true when a window closed and the text changed.
   bool Observe(double nowSeconds) {
     if (mLastSeconds < 0.0) {
       mLastSeconds = mWindowStartSeconds = nowSeconds;

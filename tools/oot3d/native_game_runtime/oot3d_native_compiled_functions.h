@@ -46,16 +46,16 @@ struct Oot3dWholeAotExternalTarget {
 
 bool Oot3dWholeAotAvailable() noexcept;
 
-// Substituições nativas de funções guest (oot3d_native_guest_overrides).
-// Sem efeito quando o build não as compila (módulo whole-AOT pré-compilado).
+// Native overrides of guest functions (oot3d_native_guest_overrides).
+// No effect when the build doesn't compile them (precompiled whole-AOT module).
 void SetOot3dGuestOverridesActive(bool enabled) noexcept;
-// Liga o perfil guest às substituições nativas (Oot3dGuestOverrideProfileHook
-// em oot3d_native_guest_overrides.h); sem substituições no build, nada faz.
+// Connects the guest profile to the native overrides (Oot3dGuestOverrideProfileHook
+// in oot3d_native_guest_overrides.h); without overrides in the build, does nothing.
 void RegisterOot3dGuestOverrideProfileHook(
     oot3d::recomp::a32::BlockEntryCallback callback,
     bool (*forwards)(const void* user, uint32_t first, uint32_t last) noexcept,
     void (*mark)(void* user, uint32_t pc) noexcept) noexcept;
-// Uma linha por substituição: entrada, nome, execuções nativas e recusas.
+// One line per override: entry, name, native executions and refusals.
 std::string DescribeOot3dGuestOverrides();
 std::span<const uint32_t> Oot3dCompiledFunctionEntryPoints(
     bool includeWholeAot = true,

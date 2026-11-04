@@ -3,7 +3,7 @@
 // (command memory + stream memory + fence), the window image acquire and the
 // present. The rendering API (gfx_deko3d.cpp) records into Cmd().
 //
-// Conventions (docs/DEKO3D_PROGRESSO.md, "Decisões"): DepthMinusOneToOne and
+// Conventions (docs/DEKO3D_PROGRESS.md, "Decisions"): DepthMinusOneToOne and
 // OriginUpperLeft, so offscreen images have the GL framebuffer layout (row 0 =
 // y 0) and the GL 4.3 shader texts run unchanged; only drawing into the
 // window flips Y.

@@ -3,7 +3,7 @@
 // deko3d rendering backend (Switch): selected at run time by
 // sdmc:/switch/oot3dre/config/renderer containing "deko3d". Without the file
 // (or with "gl") the OpenGL/Mesa backend stays in use, unchanged.
-// docs/DEKO3D_PROGRESSO.md has the design and the package status.
+// docs/DEKO3D_PROGRESS.md has the design and the package status.
 
 #include <cctype>
 #include <cstdint>
@@ -92,9 +92,9 @@ struct Deko3dSwapTimes {
     float FenceMs = 0.0F;   // waiting for the frame in flight (BeginFrame)
     float SubmitMs = 0.0F;  // the frame's last submit (dkQueueSubmitCommands + flush)
     float PresentMs = 0.0F; // dkQueuePresentImage
-    // Antes do acquire da janela: espera pelo present thread (o
-    // nwindowQueueBuffer do quadro anterior), o acquire em si e quanto aquele
-    // nwindowQueueBuffer levou (p6v: picos de render_wait).
+    // Before the window acquire: wait for the present thread (the
+    // previous frame's nwindowQueueBuffer), the acquire itself and how long that
+    // nwindowQueueBuffer took (p6v: render_wait spikes).
     float WaitPresentMs = 0.0F;
     float AcquireMs = 0.0F;
     float QueueBufferMs = 0.0F;

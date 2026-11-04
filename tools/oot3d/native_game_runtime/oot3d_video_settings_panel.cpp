@@ -54,34 +54,34 @@ public:
       : mConfig(std::move(config)), mBoot(VideoSettings::Load(mConfig)), mSettings(mBoot) {}
   const char *Label() const noexcept override { return "Video"; }
   void Draw() override {
-    bool changed = ScaleCombo("Resolucao no dock", mSettings.DockedScale, kDocked);
-    changed |= ScaleCombo("Resolucao no portatil", mSettings.HandheldScale, kHandheld);
-    const char *const rates[] = {"30 FPS", "60 FPS (interpolado)"};
+    bool changed = ScaleCombo("Docked resolution", mSettings.DockedScale, kDocked);
+    changed |= ScaleCombo("Handheld resolution", mSettings.HandheldScale, kHandheld);
+    const char *const rates[] = {"30 FPS", "60 FPS (interpolated)"};
     int rate = mSettings.Fps60 ? 1 : 0;
     if (ImGui::Combo("FPS", &rate, rates, 2)) {
       mSettings.Fps60 = rate == 1;
       changed = true;
     }
-    const char *const upscalers[] = {"FSR + nitidez (padrao)", "FSR sem nitidez",
-                                     "Linear (mais leve)"};
+    const char *const upscalers[] = {"FSR + sharpening (default)", "FSR without sharpening",
+                                     "Linear (lightest)"};
     int upscaler = static_cast<int>(mSettings.Upscaler);
-    if (ImGui::Combo("Ampliacao", &upscaler, upscalers, 3)) {
+    if (ImGui::Combo("Upscaling", &upscaler, upscalers, 3)) {
       mSettings.Upscaler = static_cast<VideoSettings::Upscale>(upscaler);
       changed = true;
     }
-    const char *const filters[] = {"Desligado", "4x (padrao)"};
+    const char *const filters[] = {"Off", "4x (default)"};
     int anisotropy = mSettings.Anisotropy ? 1 : 0;
-    if (ImGui::Combo("Filtro anisotropico", &anisotropy, filters, 2)) {
+    if (ImGui::Combo("Anisotropic filter", &anisotropy, filters, 2)) {
       mSettings.Anisotropy = anisotropy == 1;
       changed = true;
     }
     if (changed) mError = mSettings.Save(mConfig);
     if (!mError.empty())
-      ImGui::TextWrapped("Nao foi possivel gravar config/%s.", mError.c_str());
+      ImGui::TextWrapped("Could not write config/%s.", mError.c_str());
     else if (mSettings != mBoot)
-      ImGui::TextUnformatted("Salvo. Feche e abra o jogo para aplicar.");
+      ImGui::TextUnformatted("Saved. Close and reopen the game to apply.");
     else
-      ImGui::TextDisabled("Valores em uso.");
+      ImGui::TextDisabled("Values in use.");
   }
 
 private:

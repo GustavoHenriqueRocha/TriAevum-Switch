@@ -1,4 +1,4 @@
-// Alocador com páginas de guarda: ver oot3d_switch_guard_alloc.h.
+// Guard-page allocator: see oot3d_switch_guard_alloc.h.
 #include "oot3d_switch_guard_alloc.h"
 
 #include <cstdlib>
@@ -8,12 +8,12 @@ namespace Oot3dNativeGame::GuardAlloc {
 
 namespace {
 
-// Próximo número sem sinal de `text` (pula espaços); falso se não há número
-// ou ele é inválido. `text` avança.
+// Next unsigned number in `text` (skips spaces); false if there is no number
+// or it is invalid. `text` advances.
 bool NextNumber(const char*& text, size_t& value, bool& found) noexcept {
     while (*text == ' ' || *text == '\t' || *text == '\r' || *text == '\n') ++text;
     found = false;
-    if (*text == '\0' || (*text >= 'a' && *text <= 'z')) return true;  // fim ou o modo
+    if (*text == '\0' || (*text >= 'a' && *text <= 'z')) return true;  // end or the mode
     if (*text < '0' || *text > '9') return false;
     size_t parsed = 0;
     while (*text >= '0' && *text <= '9') {
@@ -95,9 +95,9 @@ namespace {
 constexpr const char* kConfigPath = "sdmc:/switch/oot3dre/config/guard_alloc";
 
 Config gConfig;
-std::atomic<bool> gConfigured{false};  // config/guard_alloc lido
+std::atomic<bool> gConfigured{false};  // config/guard_alloc read
 std::atomic<bool> gEnabled{false};
-std::atomic<bool> gUsed{false};  // já existe algum bloco com guarda
+std::atomic<bool> gUsed{false};  // some guarded block already exists
 std::atomic<uint64_t> gSerial{0};
 std::atomic<uint64_t> gGuarded{0};
 std::atomic<uint64_t> gLive{0};
@@ -108,15 +108,15 @@ std::atomic<uint64_t> gDoubleFrees{0};
 std::atomic<uint32_t> gCanaryReports{0};
 constexpr uint32_t kMaximumCanaryReports = 4U;
 Mutex gRingMutex;
-QuarantineRing gRing;        // modo página
-PointerRing gCanaryRing;     // modo canário
+QuarantineRing gRing;        // page mode
+PointerRing gCanaryRing;     // canary mode
 
-// Chamadas ao newlib que, por dentro, chamam o _malloc_r embrulhado: o
-// calloc/realloc reais leem o cabeçalho do chunk que o malloc devolveu, que
-// num bloco com guarda é lixo. Nelas o malloc embrulhado vai direto ao real.
+// newlib calls that internally call the wrapped _malloc_r: the real
+// calloc/realloc read the header of the chunk malloc returned, which
+// in a guarded block is garbage. Inside them the wrapped malloc goes straight to the real one.
 thread_local bool tBypass = false;
 
-// Limites da pilha da thread (para seguir os frame pointers sem sair dela).
+// Thread stack bounds (to follow frame pointers without leaving it).
 thread_local uintptr_t tStackBegin = 0;
 thread_local uintptr_t tStackEnd = 0;
 
@@ -125,7 +125,7 @@ thread_local uintptr_t tStackEnd = 0;
     if (tStackEnd == 0U) {
         MemoryInfo info{};
         u32 page = 0;
-        tStackEnd = 1U;  // nada legível: não segue
+        tStackEnd = 1U;  // nothing readable: do not follow
         if (R_SUCCEEDED(svcQueryMemory(&info, &page, frame)) && (info.perm & Perm_R) != 0) {
             tStackBegin = info.addr;
             tStackEnd = info.addr + info.size;
@@ -151,7 +151,7 @@ BlockHeader* HeaderOf(void* pointer) noexcept {
     return header;
 }
 
-// ---- modo canário ------------------------------------------------------------
+// ---- canary mode -------------------------------------------------------------
 
 CanaryHeader* CanaryOf(void* pointer) noexcept {
     const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
@@ -160,7 +160,7 @@ CanaryHeader* CanaryOf(void* pointer) noexcept {
         address >= reinterpret_cast<uintptr_t>(fake_heap_end)) {
         return nullptr;
     }
-    // ptr - 8 é do próprio chunk (tamanho do newlib num bloco comum): legível.
+    // ptr - 8 belongs to the chunk itself (newlib size in an ordinary block): readable.
     if (reinterpret_cast<const uint64_t*>(address)[-1] != kCanaryTailMagic) return nullptr;
     auto* header = reinterpret_cast<CanaryHeader*>(address - sizeof(CanaryHeader));
     const uint64_t magic = header->Block.Magic;
@@ -172,7 +172,7 @@ CanaryHeader* CanaryOf(void* pointer) noexcept {
 }
 
 void* CanaryAlloc(struct _reent* reent, size_t size) noexcept {
-    // O malloc que o memalign real faz por dentro (256+ bytes) fica fora da faixa.
+    // The malloc the real memalign does internally (256+ bytes) falls outside the range.
     void* const base = __real__memalign_r(reent, kAlignment, sizeof(CanaryHeader) + size);
     if (base == nullptr) {
         gFallbacks.fetch_add(1U, std::memory_order_relaxed);
@@ -193,7 +193,7 @@ void* CanaryAlloc(struct _reent* reent, size_t size) noexcept {
 
 void AppendStack(HangWatch::Text& text, const char* label, const uint64_t (&stack)[kStackDepth]);
 
-// Um relatório de canário por vez; outro ao mesmo tempo é só contado.
+// One canary report at a time; a concurrent one is only counted.
 std::atomic<bool> gCanaryWriting{false};
 char gCanaryDetails[8 * 1024];
 
@@ -216,7 +216,7 @@ void ReportCanary(const char* title, const CanaryHeader& header, const ChangedRa
     AppendBlockLine(text, header);
     if (rangeCount > 0U) {
         const auto* object = reinterpret_cast<const uint8_t*>(&header + 1);
-        text.Str("mudou: bytes=").Dec(changedBytes);
+        text.Str("changed: bytes=").Dec(changedBytes);
         for (size_t index = 0; index < rangeCount; ++index) {
             text.Str(" [").Dec(ranges[index].Begin).Char(',').Dec(ranges[index].End).Str("):");
             for (size_t byte = ranges[index].Begin;
@@ -237,7 +237,7 @@ void ReportCanary(const char* title, const CanaryHeader& header, const ChangedRa
     gCanaryWriting.store(false, std::memory_order_release);
 }
 
-// Sai da quarentena: confere o preenchimento e devolve ao malloc de verdade.
+// Leaves quarantine: checks the fill and returns it to the real malloc.
 void CanaryRelease(struct _reent* reent, CanaryHeader* header) noexcept {
     ChangedRange ranges[8];
     size_t changedBytes = 0;
@@ -255,7 +255,7 @@ void CanaryRelease(struct _reent* reent, CanaryHeader* header) noexcept {
 
 void CanaryFree(struct _reent* reent, CanaryHeader* header) noexcept {
     if (header->Block.Magic == kCanaryFreedMagic) {
-        // Já está na quarentena: o segundo free não devolve nada.
+        // Already in quarantine: the second free returns nothing.
         gDoubleFrees.fetch_add(1U, std::memory_order_relaxed);
         ReportCanary("FREE DUPLO (canário)", *header, nullptr, 0U, 0U, true);
         return;
@@ -264,19 +264,19 @@ void CanaryFree(struct _reent* reent, CanaryHeader* header) noexcept {
     header->FreeTicks = armGetSystemTick();
     header->FreeThread = threadGetCurHandle();
     CaptureStack(header->FreeStack);
-    // Cópia, não preenchimento: leituras depois do free continuam vendo os
-    // dados antigos (com 0xFD o console inteiro travou).
+    // Copy, not fill: reads after the free keep seeing the
+    // old data (with 0xFD the whole console hung).
     std::memcpy(header->Snapshot, header + 1, header->Block.Size);
     gLive.fetch_sub(1U, std::memory_order_relaxed);
     uintptr_t evicted = 0;
     mutexLock(&gRingMutex);
     const bool full = gCanaryRing.Push(reinterpret_cast<uintptr_t>(header), evicted);
     mutexUnlock(&gRingMutex);
-    // Fora do lock: o free real pega o lock do malloc.
+    // Outside the lock: the real free takes the malloc lock.
     if (full) CanaryRelease(reent, reinterpret_cast<CanaryHeader*>(evicted));
 }
 
-// ---- modo página -------------------------------------------------------------
+// ---- page mode ---------------------------------------------------------------
 
 void* GuardedAlloc(struct _reent* reent, size_t size) noexcept {
     if (gLive.load(std::memory_order_relaxed) >= gConfig.MaxLive) {
@@ -284,7 +284,7 @@ void* GuardedAlloc(struct _reent* reent, size_t size) noexcept {
         return nullptr;
     }
     if (gConfig.GuardMode == Mode::Canary) return CanaryAlloc(reent, size);
-    // O malloc que o memalign real faz por dentro (12 KiB+) fica fora da faixa.
+    // The malloc the real memalign does internally (12 KiB+) falls outside the range.
     void* const base = __real__memalign_r(reent, kPageSize, kBlockBytes);
     if (base == nullptr) {
         gFallbacks.fetch_add(1U, std::memory_order_relaxed);
@@ -302,7 +302,7 @@ void* GuardedAlloc(struct _reent* reent, size_t size) noexcept {
     return static_cast<u8*>(base) + ObjectOffset(size);
 }
 
-// Devolve as páginas ao malloc de verdade.
+// Returns the pages to the real malloc.
 void Release(struct _reent* reent, uintptr_t page) noexcept {
     svcSetMemoryPermission(reinterpret_cast<void*>(page), kPageSize, Perm_Rw);
     reinterpret_cast<BlockHeader*>(page)->Magic = 0;
@@ -321,7 +321,7 @@ void GuardedFree(struct _reent* reent, BlockHeader* header) noexcept {
     CaptureStack(entry.FreeStack);
     gLive.fetch_sub(1U, std::memory_order_relaxed);
     if (R_FAILED(svcSetMemoryPermission(header, kPageSize, Perm_None))) {
-        // Sem blocos de memória livres no kernel, por exemplo.
+        // No free memory blocks in the kernel, for example.
         gFallbacks.fetch_add(1U, std::memory_order_relaxed);
         Release(reent, entry.Page);
         return;
@@ -330,7 +330,7 @@ void GuardedFree(struct _reent* reent, BlockHeader* header) noexcept {
     mutexLock(&gRingMutex);
     const bool full = gRing.Push(entry, evicted);
     mutexUnlock(&gRingMutex);
-    // Fora do lock: o free real pega o lock do malloc.
+    // Outside the lock: the real free takes the malloc lock.
     if (full) Release(reent, evicted.Page);
 }
 
@@ -344,8 +344,8 @@ void AppendStack(HangWatch::Text& text, const char* label, const uint64_t (&stac
     text.Char('\n');
 }
 
-// Classifica o endereço da falha contra os blocos com guarda. Sem lock: quem
-// falhou pode estar com ele (free); o anel só cresce até a capacidade.
+// Classifies the fault address against the guarded blocks. No lock: the
+// faulting thread may hold it (free); the ring only grows up to capacity.
 void AppendGuardVerdict(HangWatch::Text& text, uintptr_t address) {
     if (const QuarantineEntry* entry = gRing.Find(address)) {
         const uintptr_t object = entry->Page + ObjectOffset(entry->Size);
@@ -360,7 +360,7 @@ void AppendGuardVerdict(HangWatch::Text& text, uintptr_t address) {
         AppendStack(text, "pilha_free:", entry->FreeStack);
         return;
     }
-    text.Str("fora dos blocos com guarda\n");
+    text.Str("outside guarded blocks\n");
 }
 
 char gFaultDetails[8 * 1024];
@@ -389,7 +389,7 @@ void HandleException(ThreadExceptionDump* context) {
     HangWatch::ReportFault("EXCEÇÃO", text.Data(), frame);
 }
 
-// Antes dos construtores do jogo (a libnx já montou o sdmc no __appInit).
+// Before the game's constructors (libnx already mounted sdmc in __appInit).
 [[gnu::constructor(101)]] void StartEarly() {
     Start();
 }
@@ -452,14 +452,14 @@ using namespace Oot3dNativeGame::GuardAlloc;
 extern "C" {
 
 void* __wrap__malloc_r(struct _reent* reent, size_t size) {
-    // gEnabled antes do TLS: a libnx chama o malloc antes de tudo estar de pé.
+    // gEnabled before TLS: libnx calls malloc before everything is up.
     if (gEnabled.load(std::memory_order_relaxed) && InRange(gConfig, size) && !tBypass) {
         if (void* pointer = GuardedAlloc(reent, size)) return pointer;
     }
     return __real__malloc_r(reent, size);
 }
 
-// malloc() do devkitA64: pedidos de 32 bytes ou mais chegam aqui com alinhamento 32.
+// devkitA64's malloc(): requests of 32 bytes or more arrive here with alignment 32.
 void* __wrap__memalign_r(struct _reent* reent, size_t alignment, size_t size) {
     if (gEnabled.load(std::memory_order_relaxed) && alignment <= kAlignment &&
         InRange(gConfig, size) && !tBypass) {
@@ -538,8 +538,8 @@ size_t __wrap__malloc_usable_size_r(struct _reent* reent, void* pointer) {
     return __real__malloc_usable_size_r(reent, pointer);
 }
 
-// Handler de exceção da libnx (sempre ligado: grava o relatório e devolve,
-// então o crash segue como antes e o Atmosphère ainda gera o crash report).
+// libnx exception handler (always on: writes the report and returns,
+// so the crash proceeds as before and Atmosphère still generates the crash report).
 alignas(16) u8 __nx_exception_stack[0x10000];
 u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
 

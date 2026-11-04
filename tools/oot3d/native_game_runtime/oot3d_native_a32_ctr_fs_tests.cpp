@@ -346,9 +346,9 @@ void TestFsRootedRoundTrip() {
     std::filesystem::remove_all(directory);
 }
 
-// config/unlock_master_quest: system.dat (34 bytes; +0x00 0xBE = MQ liberado,
-// +0x1F 0xEF = modo MQ, +0x20 CRC-16/ARC) sai liberado na leitura e o disco
-// nunca recebe esse 0xBE.
+// config/unlock_master_quest: system.dat (34 bytes; +0x00 0xBE = MQ unlocked,
+// +0x1F 0xEF = MQ mode, +0x20 CRC-16/ARC) comes out unlocked on read and the disk
+// never receives that 0xBE.
 std::vector<uint8_t> MakeSystemData(uint8_t unlocked, uint8_t mode) {
     std::vector<uint8_t> data(kSystemDataSize, 0U);
     data[0] = unlocked;
@@ -423,7 +423,7 @@ void TestMasterQuestUnlockThroughFs() {
         Require(IsValidSystemData(seen) && seen[0] == (enabled ? 0xBEU : 0U) &&
                     std::equal(seen.begin() + 1, seen.begin() + 0x20, disk.begin() + 1),
                 "system.dat read through fs:USER");
-        // O jogo marca o modo MQ (+0x1F) na RAM e regrava o arquivo.
+        // The game sets the MQ mode (+0x1F) in RAM and rewrites the file.
         seen[kSystemDataModeOffset] = 0xEFU;
         StoreSystemDataChecksum(seen);
         Require(f.Memory.WriteBytes(data, seen), "system.dat write bytes");
@@ -435,7 +435,7 @@ void TestMasterQuestUnlockThroughFs() {
                 "system.dat on disk");
         std::vector<uint8_t> after(kSystemDataSize);
         Require(f.Memory.ReadBytes(data, after) && after == seen, "guest buffer changed by write");
-        // Outros arquivos do save passam intactos.
+        // Other save files pass through intact.
         fs.Storage.Bytes = disk;
         f.Call(f.Save, {0x080200C2U, 0U, 0U, 34U, (34U << 4U) | 0xCU, data});
         Require(f.Memory.ReadBytes(data, seen) && seen == disk, "save file patched");

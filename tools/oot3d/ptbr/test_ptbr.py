@@ -1,23 +1,23 @@
-"""Regressões do patch PT-BR (dados sintéticos, sem nada do jogo): python -I test_ptbr.py"""
+"""PT-BR patch regressions (synthetic data, nothing from the game): python -I test_ptbr.py"""
 import sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from conv import converter
-from exportar import texto
-from importar import para_bytes
+from export import texto
+from importer import para_bytes
 
 
 class Conversor(unittest.TestCase):
     def test_acentos_e_botao(self):
-        # "Ação" + botão A do N64 (0x9f) + fim (0x02)
+        # "Ação" + N64 A button (0x9f) + end (0x02)
         self.assertEqual(converter(b'A\x94\x93o \x9f\x02', b''), 'Ação '.encode() + b'\x7f\x24\x06\x7f\x00')
 
     def test_caixa_nova_comeca_com_quebra(self):
-        # 0x04 do N64 vira 7f01 e o 3DS precisa do 7f1c logo depois
+        # N64 0x04 becomes 7f01 and the 3DS needs 7f1c right after it
         self.assertEqual(converter(b'a\x04b\x02', b''), b'a\x7f\x01\x7f\x1cb\x7f\x00')
 
     def test_som_usa_argumento_do_3ds(self):
-        # 0x12 (som) do N64 → 7f0e com os 6 bytes de argumento da mensagem inglesa do 3DS
+        # N64 0x12 (sound) → 7f0e with the 6 argument bytes from the 3DS English message
         en = b'x\x7f\x0e' + bytes(range(1, 7)) + b'\x7f\x00'
         self.assertEqual(converter(b'\x12\x28\x0e' + b'y\x02', en), b'\x7f\x0e' + bytes(range(1, 7)) + b'y\x7f\x00')
 

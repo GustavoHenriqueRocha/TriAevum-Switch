@@ -215,8 +215,8 @@ void TestTwoFramesInFlight() {
     Require(stream.MaxFramesInFlight() == 1U, "zero frames in flight means one");
 }
 
-// tour24: o áudio adiado só entra antes da apresentação quando o próximo
-// fim de quadro esperaria o renderer (FrameSlotsFull).
+// tour24: deferred audio only goes in before presentation when the next
+// end of frame would wait on the renderer (FrameSlotsFull).
 void TestFrameSlotsFull() {
     NativeRenderCommandStream inlineStream(Mode::Inline, 1U);
     Require(!inlineStream.FrameSlotsFull(), "inline stream never waits for a slot");

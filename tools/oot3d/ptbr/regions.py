@@ -1,4 +1,4 @@
-"""Acha as áreas de texto de uma textura: onde inglês e espanhol diferem, agrupadas em retângulos."""
+"""Finds the text areas of a texture: where English and Spanish differ, grouped into rectangles."""
 import sys; sys.path.insert(0, '.')
 from ctxb import decodificar, ler
 

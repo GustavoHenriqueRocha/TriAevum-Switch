@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Compila os shaders do backend deko3d (GLSL -> DKSH com o uam do devkitPro)
-e grava o pacote que o jogo lê em sdmc:/switch/oot3dre/shadercache/deko3d.pack.
+"""Compiles the deko3d backend shaders (GLSL -> DKSH with devkitPro's uam)
+and writes the pack the game reads at sdmc:/switch/oot3dre/shadercache/deko3d.pack.
 
-Entradas (qualquer combinação, repetíveis):
-  --src DIR     arquivos .src (PGS1) do cache de shaders do GL: cada um traz o
-                vertex e o fragment já traduzidos para GL 4.3 (o mesmo texto que
-                o backend deko3d compila);
-  --glsl DIR    textos que o jogo registrou por faltar no pacote
-                (logs/deko3d_shaders/{vert,frag}_<chave>.glsl);
-  --pack FILE   um pacote anterior (as entradas dele são mantidas).
+Inputs (any combination, repeatable):
+  --src DIR     .src (PGS1) files from the GL shader cache: each holds the
+                vertex and the fragment already translated to GL 4.3 (the same text
+                the deko3d backend compiles);
+  --glsl DIR    texts the game recorded because they were missing from the pack
+                (logs/deko3d_shaders/{vert,frag}_<key>.glsl);
+  --pack FILE   a previous pack (its entries are kept).
 
-O formato e a chave (FNV-1a 64 do byte do estágio + texto) estão em
+The format and the key (FNV-1a 64 of the stage byte + text) are in
 runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_shader_pack.h.
 
   tools/oot3d/deko3d_shader_pack.py --src shadercache --glsl logs/deko3d_shaders \\
@@ -57,7 +57,7 @@ def read_pack(path: Path) -> dict:
     data = path.read_bytes()
     magic, version, count, _ = struct.unpack_from("<IIII", data, 0)
     if magic != PACK_MAGIC or version != PACK_VERSION:
-        raise SystemExit(f"{path}: não é um pacote DKP1 v1")
+        raise SystemExit(f"{path}: not a DKP1 v1 pack")
     entries = {}
     for index in range(count):
         key, offset, size, stage, _ = struct.unpack_from("<QIIII", data, 16 + 24 * index)
@@ -93,7 +93,7 @@ def compile_stage(uam: str, stage: int, text: bytes):
             return None, (result.stdout + result.stderr).strip()
         blob = output.read_bytes()
         if len(blob) < 4 or struct.unpack_from("<I", blob, 0)[0] != DKSH_MAGIC:
-            return None, "uam não gerou DKSH"
+            return None, "uam did not produce DKSH"
         return blob, ""
 
 
@@ -105,16 +105,16 @@ def main() -> int:
     parser.add_argument("-o", "--output", type=Path)
     parser.add_argument("--uam", default="/opt/devkitpro/tools/bin/uam")
     parser.add_argument("-j", "--jobs", type=int, default=min(8, os.cpu_count() or 1))
-    parser.add_argument("--selftest", action="store_true", help="confere a chave com o valor do teste C++")
+    parser.add_argument("--selftest", action="store_true", help="checks the key against the C++ test value")
     args = parser.parse_args()
 
     if args.selftest:
-        # Mesmo vetor de oot3d_deko3d_backend_tests (TestShaderPack).
+        # Same vector as oot3d_deko3d_backend_tests (TestShaderPack).
         assert shader_text_key(FRAGMENT, b"abc") == 0x593522965D44E8B2, hex(shader_text_key(FRAGMENT, b"abc"))
         print("deko3d_shader_pack: selftest ok")
         return 0
     if args.output is None:
-        parser.error("-o é obrigatório")
+        parser.error("-o is required")
 
     entries = {}
     for pack in args.pack:
@@ -125,7 +125,7 @@ def main() -> int:
         for path in sorted(directory.glob("*.src")):
             pair = read_pgs1(path)
             if pair is None:
-                print(f"aviso: {path} não é PGS1", file=sys.stderr)
+                print(f"warning: {path} is not PGS1", file=sys.stderr)
                 continue
             for stage, text in ((VERTEX, pair[0]), (FRAGMENT, pair[1])):
                 texts[shader_text_key(stage, text)] = (stage, text)
@@ -138,7 +138,7 @@ def main() -> int:
             text = path.read_bytes()
             key = shader_text_key(stage, text)
             if name.endswith(f"{key:016x}") is False:
-                print(f"aviso: {path}: chave do nome difere do texto ({key:016x})", file=sys.stderr)
+                print(f"warning: {path}: name key differs from text ({key:016x})", file=sys.stderr)
             texts[key] = (stage, text)
     pending = {key: value for key, value in texts.items() if key not in entries}
     failed = 0
@@ -150,13 +150,13 @@ def main() -> int:
             blob, error = future.result()
             if blob is None:
                 failed += 1
-                print(f"FALHA {STAGE_NAMES[stage]} {key:016x}: {error[:400]}", file=sys.stderr)
+                print(f"FAILED {STAGE_NAMES[stage]} {key:016x}: {error[:400]}", file=sys.stderr)
                 continue
             entries[key] = (stage, blob)
     write_pack(args.output, entries)
     vertex = sum(1 for stage, _ in entries.values() if stage == VERTEX)
     print(f"{args.output}: {len(entries)} shaders ({vertex} vertex, {len(entries) - vertex} fragment), "
-          f"{len(pending) - failed} compilados agora, {failed} falhas, {args.output.stat().st_size // 1024} KiB")
+          f"{len(pending) - failed} compiled now, {failed} failures, {args.output.stat().st_size // 1024} KiB")
     return 1 if failed else 0
 
 

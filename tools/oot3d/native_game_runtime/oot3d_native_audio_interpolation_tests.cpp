@@ -342,8 +342,8 @@ std::vector<s16> Sine(std::size_t length, double cyclesPerSample, double amplitu
 void QualityTests() {
     constexpr double kAmplitude = 16000.0;
     constexpr double kOutputRate = 32728.0;
-    std::printf("SNR em dB (senoide, ideal = sinal continuo; maior e melhor)\n");
-    std::printf("%8s %9s %8s %8s %8s\n", "rate", "tom (Hz)", "linear", "cubic", "sinc");
+    std::printf("SNR in dB (sine, ideal = continuous signal; higher is better)\n");
+    std::printf("%8s %9s %8s %8s %8s\n", "rate", "tone (Hz)", "linear", "cubic", "sinc");
     const float rates[] = {0.25f, 0.5f, 0.7213f, 1.0f, 1.3f, 1.9f, 2.9f};
     for (float rate : rates) {
         const double inputRate = kOutputRate * rate;
@@ -365,7 +365,7 @@ void QualityTests() {
     }
 
     // Aliasing: a tone above the output Nyquist frequency should vanish when decimating.
-    std::printf("Aliasing: tom acima de 16364 Hz com decimacao (residuo em dB re. amplitude)\n");
+    std::printf("Aliasing: tone above 16364 Hz with decimation (residue in dB re. amplitude)\n");
     for (float rate : {1.6f, 2.5f}) {
         const double inputRate = kOutputRate * rate;
         const double hertz = 0.8 * inputRate / 2.0;
@@ -379,7 +379,7 @@ void QualityTests() {
             power /= static_cast<double>(rendered.left.size() - 64);
             level[static_cast<int>(quality)] = 10.0 * std::log10(std::max(power, 1e-9) / (kAmplitude * kAmplitude / 2));
         }
-        std::printf("  rate %.2f tom %.0f Hz: linear %.1f  cubic %.1f  sinc %.1f\n", rate, hertz, level[0], level[1], level[2]);
+        std::printf("  rate %.2f tone %.0f Hz: linear %.1f  cubic %.1f  sinc %.1f\n", rate, hertz, level[0], level[1], level[2]);
         Require(level[2] < level[0] - 15.0, "sinc does not suppress aliasing");
     }
 
@@ -401,7 +401,7 @@ void QualityTests() {
                                                    ": buffer boundaries change the output");
         }
     }
-    std::printf("Fronteiras de buffer: saida identica com o fluxo partido em buffers de 1..300 amostras\n");
+    std::printf("Buffer boundaries: identical output with the stream split into buffers of 1..300 samples\n");
 
     // Loops: a looping buffer holding whole periods plays as a seamless sine across the loop point.
     for (float rate : {0.6f, 1.0f, 1.45f}) {
@@ -422,7 +422,7 @@ void QualityTests() {
             }
             jump[static_cast<int>(quality)] = worst;
         }
-        std::printf("Loop rate %.2f: SNR linear %.1f cubic %.1f sinc %.1f dB; maior erro junto ao ponto de loop: "
+        std::printf("Loop rate %.2f: SNR linear %.1f cubic %.1f sinc %.1f dB; largest error at the loop point: "
                     "linear %.0f cubic %.0f sinc %.0f\n",
                     rate, snr[0], snr[1], snr[2], jump[0], jump[1], jump[2]);
         Require(snr[2] > 60.0 && jump[2] < 40.0, "sinc loop junction is not seamless");
@@ -550,8 +550,8 @@ void Benchmark() {
     }
     for (Quality quality : {Quality::Original, Quality::Cubic, Quality::Sinc}) {
         const double perFrame = best[static_cast<int>(quality)];
-        std::printf("bench %-8s 24 vozes: %.4f ms por quadro DSP, %.3f ms por passo de 33,3 ms (6,82 quadros), "
-                    "+%.3f ms/passo sobre o original\n",
+        std::printf("bench %-8s 24 voices: %.4f ms per DSP frame, %.3f ms per 33.3 ms step (6.82 frames), "
+                    "+%.3f ms/step over the original\n",
                     AudioInterp::QualityName(quality), perFrame, perFrame * 6.82, (perFrame - best[0]) * 6.82);
     }
 }

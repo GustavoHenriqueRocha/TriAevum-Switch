@@ -1,5 +1,5 @@
-// Alocador com páginas de guarda (oot3d_switch_guard_alloc.h): leitura de
-// config/guard_alloc, posição do objeto na página e a quarentena FIFO.
+// Guard-page allocator (oot3d_switch_guard_alloc.h): parsing of
+// config/guard_alloc, object position in the page and the FIFO quarantine.
 #include "oot3d_switch_guard_alloc.h"
 
 #include <cstdlib>
@@ -51,7 +51,7 @@ void TestParse() {
 
 void TestLayout() {
     const Config config;
-    // O chunk corrompido dos tours 16-20: 0x50 bytes = pedidos de 57 a 72.
+    // The corrupted chunk from tours 16-20: 0x50 bytes = requests of 57 to 72.
     Require(!InRange(config, 56U) && InRange(config, 57U) && InRange(config, 72U) &&
                 !InRange(config, 73U),
             "default range must be exactly the 0x50 chunk class");
@@ -79,7 +79,7 @@ void TestCanary() {
     Require(FindCanaryChanges(object, snapshot, sizeof(object), ranges, 2U, changed) == 0U &&
                 changed == 0U,
             "untouched object");
-    // A escrita dos tours 16-20: 0x00ed5391'0000001a no byte 8.
+    // The write from tours 16-20: 0x00ed5391'0000001a at byte 8.
     const uint8_t write[8] = {0x1a, 0, 0, 0, 0x91, 0x53, 0xed, 0};
     for (size_t index = 0; index < 8U; ++index) object[8U + index] = write[index];
     object[70] = static_cast<uint8_t>(snapshot[70] + 1U);

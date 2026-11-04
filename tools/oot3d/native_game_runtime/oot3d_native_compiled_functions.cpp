@@ -552,10 +552,10 @@ bool ExecuteMtx3x4Multiply(
     }
 
     uint32_t exceptionFlags = 0U;
-    // Mtx3x4MultiplyFast: exato (valor e flags) contra o software, para todo
-    // FPSCR sem armadilhas (o caminho em double anterior errava IXC quando a
-    // soma em double não era exata, e UFC/sinal num produto que estoura para
-    // baixo até zero). Os outros modos continuam no software.
+    // Mtx3x4MultiplyFast: exact (value and flags) against the software, for every
+    // FPSCR without traps (the previous double path got IXC wrong when the
+    // double sum was not exact, and UFC/sign on a product that underflows
+    // to zero). The other modes stay in software.
     if ((state.fpscr & kFpscrExceptionEnableMask) == 0U) {
         Mtx3x4MultiplyFast(left.data(), right.data(), state.fpscr, output.data(),
                            exceptionFlags);
@@ -1080,8 +1080,8 @@ void RegisterOot3dGuestOverrideProfileHook(
 std::string DescribeOot3dGuestOverrides() {
 #if defined(OOT3D_GUEST_OVERRIDES)
     std::string text = Oot3dGuestOverridesEnabled()
-        ? "# substituicoes nativas: ligadas\n"
-        : "# substituicoes nativas: desligadas (config/guest_overrides_off)\n";
+        ? "# native overrides: on\n"
+        : "# native overrides: off (config/guest_overrides_off)\n";
     const auto* table = Oot3dGuestOverrideTable();
     for (size_t i = 0; i < Oot3dGuestOverrideCount(); ++i) {
         char line[160];
@@ -1093,7 +1093,7 @@ std::string DescribeOot3dGuestOverrides() {
     }
     return text;
 #else
-    return "# substituicoes nativas: nao compiladas neste build\n";
+    return "# native overrides: not compiled in this build\n";
 #endif
 }
 

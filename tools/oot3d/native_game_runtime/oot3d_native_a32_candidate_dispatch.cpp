@@ -137,9 +137,9 @@ bool ExecuteTopScreenUiSourcePortBlock(
           Oot3dNativeGame::AdvanceTopScreenDebugGameOver(
               globalInputs, static_cast<std::int16_t>(health),
               &dispatch.TopScreenDebugGameOver)) {
-        // config/debug_force_game_over: a morte segue o caminho nativo.
+        // config/debug_force_game_over: the death follows the native path.
         memory.Write16(Oot3dNativeGame::kTopScreenSaveContextHealth, 0U);
-        std::fprintf(stderr, "[topscreen] debug_force_game_over: vida zerada\n");
+        std::fprintf(stderr, "[topscreen] debug_force_game_over: health zeroed\n");
       }
     }
     Oot3dNativeGame::TopScreenRendererVisibilityInputs inputs;
@@ -161,7 +161,7 @@ bool ExecuteTopScreenUiSourcePortBlock(
          !memory.Read16(state.r[1] + 0x318CU, &inputs.CallSceneSequence))) {
       return false;
     }
-    // Produto: o gancho de 0x00427A3C é o dono do Game Over (ver
+    // Product: the 0x00427A3C hook owns the Game Over (see
     // TopScreenRendererVisibilityCallDefersToGameOverDraw).
     if (Oot3dNativeGame::TopScreenRendererVisibilityCallDefersToGameOverDraw(
             std::binary_search(dispatch.ProductTopScreenBlocks.begin(),

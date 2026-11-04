@@ -1,10 +1,10 @@
-// Clocks atuais para logs/perf.txt: ver oot3d_switch_clocks.h.
+// Current clocks for logs/perf.txt: see oot3d_switch_clocks.h.
 //
-// Por que o IPC do sys-clk e não clkrst/pcv: o sys-clk já mantém os clocks
-// (alvo e medidos) num contexto que o overlay dele lê pelo mesmo comando
-// GetCurrentContext; ler dali não abre sessão de clkrst/pcv no app (a
-// pesquisa de 2026-10-17 manda não usar clkrst no app) e não compete com o
-// sys-clk. Sem sys-clk os MHz ficam -1 e só o modo é registrado.
+// Why sys-clk's IPC and not clkrst/pcv: sys-clk already keeps the clocks
+// (target and measured) in a context its overlay reads through the same
+// GetCurrentContext command; reading from there opens no clkrst/pcv session in the app (the
+// 2026-10-17 research says not to use clkrst in the app) and doesn't compete with
+// sys-clk. Without sys-clk the MHz stay -1 and only the mode is recorded.
 #if defined(__SWITCH__)
 #include <switch.h>
 
@@ -21,11 +21,11 @@
 namespace Oot3dNativeGame {
 namespace {
 
-// Layout do SysClkContext (retronx-team/sys-clk,
-// common/include/sysclk/clock_manager.h). O prefixo (enabled, applicationId,
-// profile, freqs) é o mesmo da API 1 à 4; realFreqs existe desde a API 2.
-// Campos novos só foram acrescentados no fim, então a estrutura da API 4
-// cobre as anteriores (o que sobra fica zerado e não é lido).
+// SysClkContext layout (retronx-team/sys-clk,
+// common/include/sysclk/clock_manager.h). The prefix (enabled, applicationId,
+// profile, freqs) is the same from API 1 to 4; realFreqs exists since API 2.
+// New fields were only appended at the end, so the API 4 struct
+// covers the earlier ones (the rest stays zeroed and is not read).
 struct SysClkContextV4 {
     uint8_t Enabled;
     uint64_t ApplicationId;
@@ -49,10 +49,10 @@ const char* ProfileName(uint32_t profile) {
     return profile < 5U ? kNames[profile] : "-1";
 }
 
-// smGetService de um serviço que não existe fica esperando o registro (o sm
-// adia o pedido): pergunta antes ao sm do Atmosphère (comando de extensão
-// 65100, só leitura). Sem Atmosphère o comando falha e o sys-clk é dado como
-// ausente.
+// smGetService of a service that doesn't exist keeps waiting for registration (sm
+// defers the request): ask Atmosphère's sm first (extension command
+// 65100, read-only). Without Atmosphère the command fails and sys-clk is taken as
+// absent.
 bool SysClkRegistered() {
     const SmServiceName name = smEncodeName("sys:clk");
     u8 has = 0;
@@ -79,8 +79,8 @@ struct SysClkClient {
         Open = false;
     }
 
-    // Abre a sessão uma vez; se o sys-clk não estiver rodando (ou cair),
-    // tenta de novo só a cada 60 janelas (~5 min a 30 fps).
+    // Opens the session once; if sys-clk isn't running (or goes down),
+    // retries only every 60 windows (~5 min at 30 fps).
     bool Ensure() {
         if (Open) {
             return true;
@@ -92,7 +92,7 @@ struct SysClkClient {
         Probed = true;
         WindowsUntilRetry = 60U;
         {
-            // Watchdog de travamento: a última chamada de serviço vai no hang.txt.
+            // Hang watchdog: the last service call goes into hang.txt.
             HangWatch::ServiceCallScope call("sm:AtmosphereHasService(sys:clk)");
             if (!SysClkRegistered()) {
                 return false;
@@ -112,7 +112,7 @@ struct SysClkClient {
             versionResult = serviceDispatchOut(&Session, kSysClkCmdGetApiVersion, version);
         }
         if (R_FAILED(versionResult) || version == 0U) {
-            // API 0 tinha outro contexto: não arrisca ler.
+            // API 0 had a different context: don't risk reading it.
             Close();
             return false;
         }
@@ -145,7 +145,7 @@ std::string ReadClocks() {
         }
         ipcMicroseconds = static_cast<double>(armTicksToNs(armGetSystemTick() - start)) / 1000.0;
         if (R_SUCCEEDED(result)) {
-            // realFreqs (medido pelo sys-clk) quando houver; senão o alvo.
+            // realFreqs (measured by sys-clk) when present; otherwise the target.
             const bool real = gSysClk.ApiVersion >= 2U && context.RealFreqs[0] != 0U;
             const uint32_t* freqs = real ? context.RealFreqs : context.Freqs;
             cpu = Mhz(freqs[0]);
@@ -155,10 +155,10 @@ std::string ReadClocks() {
             profile = ProfileName(context.Profile);
             enabled = context.Enabled != 0 ? 1 : 0;
         } else {
-            gSysClk.Close(); // sys-clk saiu: reabre mais tarde
+            gSysClk.Close(); // sys-clk exited: reopen later
         }
     }
-    // Valores guardados pela libnx a partir das mensagens do applet: sem IPC.
+    // Values kept by libnx from the applet messages: no IPC.
     const char* operation = "-1";
     switch (appletGetOperationMode()) {
     case AppletOperationMode_Handheld: operation = "handheld"; break;
@@ -182,9 +182,9 @@ std::string ReadClocks() {
     return text.str();
 }
 
-// O IPC do sys-clk numa thread própria: p6w (26/10) ficou 3,4 s parado em
-// GetCurrentContext na thread do jogo (travou 4,4 s). O jogo só lê o último
-// resultado e pede o próximo; nunca espera o sys-clk.
+// sys-clk IPC on its own thread: p6w (26/10) sat 3.4 s in
+// GetCurrentContext on the game thread (froze 4.4 s). The game only reads the last
+// result and requests the next one; it never waits on sys-clk.
 struct ClockReader {
     std::mutex Mutex;
     std::condition_variable Wake;
@@ -212,9 +212,9 @@ struct ClockReader {
 
 std::string SwitchClockPerfSummary() {
     static ClockReader* reader = [] {
-        // Nunca destruído (a thread vive até o fim do processo). Sem detach():
-        // pthread_detach não existe na newlib do devkitA64 e o std::system_error
-        // ("Function not implemented") derrubou a p6x no primeiro perf.
+        // Never destroyed (the thread lives until the process ends). No detach():
+        // pthread_detach doesn't exist in devkitA64's newlib and the std::system_error
+        // ("Function not implemented") crashed p6x on the first perf.
         auto* created = new ClockReader();
         created->Thread = std::thread([created] { created->Loop(); });
         return created;
@@ -228,7 +228,7 @@ std::string SwitchClockPerfSummary() {
         reader->Requested = true;
     }
     reader->Wake.notify_one();
-    // clk_busy=1: a leitura anterior ainda não voltou (sys-clk demorando).
+    // clk_busy=1: the previous read hasn't returned yet (sys-clk is slow).
     return text + (busy ? " clk_busy=1" : " clk_busy=0");
 }
 

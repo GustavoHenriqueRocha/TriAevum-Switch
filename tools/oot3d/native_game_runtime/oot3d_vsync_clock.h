@@ -1,41 +1,41 @@
 #pragma once
 
-// Relógio do vsync real do display (config/pacer_vsync, config/frame_spikes).
+// Clock of the display's real vsync (config/pacer_vsync, config/frame_spikes).
 //
-// O pacer seguia o relógio da CPU (60,000 Hz) e o display do Switch roda um
-// pouco mais devagar (~0,2%): a fase entre o swap e o vsync deriva e, a cada
-// volta, um quadro cai do lado errado do vsync (refresh perdido periódico, e
-// a swapchain enche até o acquire segurar a render thread).
+// The pacer followed the CPU clock (60.000 Hz) and the Switch display runs a
+// little slower (~0.2%): the phase between swap and vsync drifts and, on each
+// wrap, a frame lands on the wrong side of the vsync (periodic missed refresh, and
+// the swapchain fills until acquire holds the render thread).
 //
-// VsyncClockModel (puro, testado no host) recebe o instante de cada vsync
-// visto (ns, relógio monotônico) e estima:
-//  - período: mínimos quadrados de t contra o índice do vsync numa janela
-//    longa (o atraso de acordar é ruído de média ~constante: vai para a
-//    fase, não para a inclinação);
-//  - fase: envoltória inferior (o acordar nunca é antes do vsync): um
-//    resíduo negativo puxa a fase na hora, um positivo só 1/16.
-// Vsyncs perdidos pela thread (acordou tarde demais) só pulam índices.
-// Um resíduo maior que 1/4 de período (troca de modo de vídeo, suspensão)
-// recomeça a estimativa.
+// VsyncClockModel (pure, tested on the host) receives the instant of each vsync
+// seen (ns, monotonic clock) and estimates:
+//  - period: least squares of t against the vsync index over a long
+//    window (the wake-up delay is noise with a ~constant mean: it goes into the
+//    phase, not the slope);
+//  - phase: lower envelope (waking is never before the vsync): a
+//    negative residual pulls the phase immediately, a positive one only 1/16.
+// Vsyncs missed by the thread (woke too late) just skip indices.
+// A residual larger than 1/4 of a period (video mode change, suspend)
+// restarts the estimate.
 //
-// SwitchVsyncClock (oot3d_switch_vsync_clock.cpp): thread que espera o
-// evento de vsync do display (viGetDisplayVsyncEvent) e publica o modelo.
+// SwitchVsyncClock (oot3d_switch_vsync_clock.cpp): thread that waits for the
+// display's vsync event (viGetDisplayVsyncEvent) and publishes the model.
 //
-// tour19 (pgo5n): o console devolveu rc 0x1272 (módulo 114 = vi, desc 9,
-// não documentado no switchbrew nem nos emuladores) e o relógio nunca
-// existiu (vsync_clock=0; pacer_vsync sem efeito; spikes.txt contou os
-// refreshes pelo relógio de 60,000 Hz). A janela padrão do libnx
-// (nwindowGetDefault, usada pelo SDL/Mesa) já abriu o display "Default" na
-// mesma sessão do IApplicationDisplayService e o handle dela é estático no
-// libnx (g_viDisplay, inacessível). Agora:
-//  1. tenta o evento (vi -> display -> evento) e guarda a etapa que falhou
+// tour19 (pgo5n): the console returned rc 0x1272 (module 114 = vi, desc 9,
+// not documented on switchbrew nor in the emulators) and the clock never
+// existed (vsync_clock=0; pacer_vsync had no effect; spikes.txt counted the
+// refreshes by the 60.000 Hz clock). libnx's default window
+// (nwindowGetDefault, used by SDL/Mesa) already opened the "Default" display in the
+// same IApplicationDisplayService session and its handle is static in
+// libnx (g_viDisplay, inaccessible). Now:
+//  1. tries the event (vi -> display -> event) and stores the stage that failed
 //     (StartStage: 1 viInitialize, 2 viOpenDefaultDisplay, 3
 //     viGetDisplayVsyncEvent);
-//  2. se falhar, fonte reserva: o retorno do acquire da janela (dequeue da
-//     swapchain) que bloqueou >= kAcquireVsyncMinWaitMs. Com a fila cheia o
-//     buffer só volta no vsync: o retorno é vsync + latência curta, e a
-//     envoltória inferior do modelo acha a fase (AcquireVsyncFilter).
-// Relógio: armGetSystemTick (cntpct_el0); nunca cntvct_el0 (Data Abort no
+//  2. if it fails, fallback source: the return of the window's acquire (swapchain
+//     dequeue) that blocked >= kAcquireVsyncMinWaitMs. With the queue full the
+//     buffer only comes back on vsync: the return is vsync + short latency, and the
+//     model's lower envelope finds the phase (AcquireVsyncFilter).
+// Clock: armGetSystemTick (cntpct_el0); never cntvct_el0 (Data Abort on
 // Horizon).
 
 #include <atomic>
@@ -46,16 +46,16 @@ namespace Oot3dNativeGame {
 
 struct VsyncClockSnapshot {
   bool Valid = false;
-  int64_t LastVsyncNs = 0; // fase: um vsync (relógio do chamador)
+  int64_t LastVsyncNs = 0; // phase: one vsync (caller's clock)
   double PeriodNs = 0.0;
-  uint64_t Vsyncs = 0U;    // vistos desde o início
+  uint64_t Vsyncs = 0U;    // seen since the start
   uint64_t Resets = 0U;
 };
 
 class VsyncClockModel {
 public:
   static constexpr uint32_t kMinimumSamples = 30U;
-  static constexpr uint32_t kWindow = 1200U; // ~20 s: recomeça a regressão
+  static constexpr uint32_t kWindow = 1200U; // ~20 s: restarts the regression
 
   explicit VsyncClockModel(double nominalPeriodNs = 1.0e9 / 60.0)
       : mNominalNs(nominalPeriodNs), mPeriodNs(nominalPeriodNs) {}
@@ -69,7 +69,7 @@ public:
     const double since = static_cast<double>(vsyncNs - mPhaseNs);
     const double steps = std::round(since / mPeriodNs);
     if (steps < 1.0) {
-      // Dois acordares no mesmo vsync (ou relógio voltou): só a envoltória.
+      // Two wake-ups on the same vsync (or the clock went back): envelope only.
       const double residual = since - steps * mPeriodNs;
       if (steps == 0.0 && residual < 0.0) mPhaseNs = vsyncNs;
       return;
@@ -84,7 +84,7 @@ public:
     const double base = static_cast<double>(mPhaseNs) + steps * mPeriodNs;
     mPhaseNs = static_cast<int64_t>(std::llround(
         residual < 0.0 ? base + residual : base + residual / 16.0));
-    // Regressão: x = índice, y = t - âncora.
+    // Regression: x = index, y = t - anchor.
     const double x = static_cast<double>(mIndex - mFitIndex0);
     const double y = static_cast<double>(vsyncNs - mFitT0);
     mSx += x; mSy += y; mSxx += x * x; mSxy += x * y; ++mN;
@@ -100,7 +100,7 @@ public:
       }
     }
     if (mN >= kWindow) {
-      // Nova janela a partir daqui, mantendo o período atual.
+      // New window from here on, keeping the current period.
       mFitIndex0 = mIndex;
       mFitT0 = vsyncNs;
       mSx = mSy = mSxx = mSxy = 0.0;
@@ -145,8 +145,8 @@ private:
   uint64_t mResets = 0U;
 };
 
-// Prazo do pacer ancorado no vsync: o instante mais próximo de `deadlineNs`
-// da grade lastVsync + k*período + offset.
+// Pacer deadline anchored to the vsync: the instant closest to `deadlineNs`
+// on the grid lastVsync + k*period + offset.
 [[nodiscard]] inline int64_t SnapDeadlineToVsync(int64_t deadlineNs, int64_t lastVsyncNs,
                                                  double periodNs, double offsetNs) {
   if (!(periodNs > 0.0)) return deadlineNs;
@@ -155,8 +155,8 @@ private:
   return static_cast<int64_t>(std::llround(grid + k * periodNs));
 }
 
-// Publicação lock-free (seqlock) do instantâneo: escrita por uma thread,
-// leitura por qualquer uma.
+// Lock-free (seqlock) publication of the snapshot: written by one thread,
+// read by any.
 class VsyncClockPublisher {
 public:
   void Publish(const VsyncClockSnapshot &snapshot) {
@@ -195,16 +195,16 @@ private:
   std::atomic<uint64_t> mResets{0U};
 };
 
-// Acquire que bloqueou pelo menos isto (ms) voltou num vsync.
+// An acquire that blocked at least this long (ms) returned on a vsync.
 inline constexpr double kAcquireVsyncMinWaitMs = 1.5;
 
-// Fonte reserva: retornos do acquire da janela -> modelo do vsync. Só os
-// que bloquearam (um acquire que não esperou volta a qualquer hora).
+// Fallback source: returns of the window's acquire -> vsync model. Only the
+// ones that blocked (an acquire that didn't wait returns at any time).
 class AcquireVsyncFilter {
 public:
   explicit AcquireVsyncFilter(double nominalPeriodNs = 1.0e9 / 60.0)
       : mModel(nominalPeriodNs) {}
-  // true se a amostra entrou no modelo.
+  // true if the sample went into the model.
   bool Observe(int64_t returnNs, double waitMs) {
     if (!(waitMs >= kAcquireVsyncMinWaitMs)) {
       ++mIgnored;
@@ -226,8 +226,8 @@ private:
 
 enum class VsyncClockSource : uint8_t { None = 0, DisplayEvent = 1, Acquire = 2 };
 
-// Thread do vsync no Switch (oot3d_switch_vsync_clock.cpp; no host, Start()
-// devolve false). Tempos no relógio de std::chrono::steady_clock (ns).
+// Vsync thread on the Switch (oot3d_switch_vsync_clock.cpp; on the host, Start()
+// returns false). Times on the std::chrono::steady_clock clock (ns).
 class SwitchVsyncClock {
 public:
   SwitchVsyncClock() = default;
@@ -235,19 +235,19 @@ public:
   SwitchVsyncClock(const SwitchVsyncClock &) = delete;
   SwitchVsyncClock &operator=(const SwitchVsyncClock &) = delete;
 
-  // Abre o display e o evento e inicia a thread; false se não deu (o
-  // motivo fica em StartResult()).
+  // Opens the display and the event and starts the thread; false if it failed (the
+  // reason is in StartResult()).
   bool Start();
   void Stop();
   [[nodiscard]] bool Running() const { return mRunning.load(std::memory_order_acquire); }
   [[nodiscard]] uint32_t StartResult() const { return mStartResult; }
-  // Etapa que falhou (0 nenhuma; 1 vi, 2 display, 3 evento).
+  // Stage that failed (0 none; 1 vi, 2 display, 3 event).
   [[nodiscard]] uint32_t StartStage() const { return mStartStage; }
   [[nodiscard]] VsyncClockSnapshot Read() const { return mPublisher.Read(); }
 
-  // Fonte reserva (tour19): sem o evento, o retorno do acquire da janela.
-  // StartAcquireFallback() liga; ObserveAcquire() vem da render thread
-  // (uma só escritora do publicador, já que a thread do evento não existe).
+  // Fallback source (tour19): without the event, the return of the window's acquire.
+  // StartAcquireFallback() enables it; ObserveAcquire() comes from the render thread
+  // (a single writer of the publisher, since the event thread doesn't exist).
   bool StartAcquireFallback() {
     if (Running()) return false;
     mSource.store(VsyncClockSource::Acquire, std::memory_order_release);
@@ -277,8 +277,8 @@ private:
   void *mImpl = nullptr;
 };
 
-// O relógio cuja fonte reserva recebe os acquires (gancho da janela na
-// render thread); nulo sem ela.
+// The clock whose fallback source receives the acquires (window hook on the
+// render thread); null without it.
 inline std::atomic<SwitchVsyncClock *> gAcquireVsyncClock{nullptr};
 
 } // namespace Oot3dNativeGame

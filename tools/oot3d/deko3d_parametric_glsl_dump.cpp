@@ -16,7 +16,7 @@
 
 int main(int argc, char** argv) {
     if (argc != 2) {
-        std::fprintf(stderr, "uso: %s <diretório>\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <directory>\n", argv[0]);
         return 2;
     }
     const std::filesystem::path directory(argv[1]);
@@ -27,19 +27,19 @@ int main(int argc, char** argv) {
         std::string error;
         if (!Oot3dNativeGame::GenerateOot3dPicaParametricBaseFragmentShader((index & 1U) != 0U, (index & 2U) != 0U,
                                                                               generated, &error)) {
-            std::fprintf(stderr, "base %u: sem programa paramétrico (%s)\n", index, error.c_str());
+            std::fprintf(stderr, "base %u: no parametric program (%s)\n", index, error.c_str());
             continue;
         }
         std::string translated;
         if (!Fast::Renderer3ds::TranslatePicaShaderToOpenGl43(generated.Source, translated, &error)) {
-            std::fprintf(stderr, "base %u: tradução GL 4.3 falhou (%s)\n", index, error.c_str());
+            std::fprintf(stderr, "base %u: GL 4.3 translation failed (%s)\n", index, error.c_str());
             return 1;
         }
         const uint64_t key = Fast::Deko3d::ShaderTextKey(Fast::Deko3d::ShaderStage::Fragment, translated);
         char name[64];
         std::snprintf(name, sizeof(name), "frag_%016llx.glsl", static_cast<unsigned long long>(key));
         std::ofstream(directory / name, std::ios::binary | std::ios::trunc) << translated;
-        std::printf("base %u (luz=%u, textura0 inteira=%u): %s, %zu bytes\n", index, index & 1U, (index >> 1) & 1U,
+        std::printf("base %u (light=%u, integer texture0=%u): %s, %zu bytes\n", index, index & 1U, (index >> 1) & 1U,
                     name, translated.size());
         ++written;
     }

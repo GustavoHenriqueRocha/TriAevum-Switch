@@ -337,7 +337,7 @@ class Oot3dDebugMenuWindow final : public Ship::GuiWindow {
     void DrawElement() override {
         // Readable on a TV: about twice the default font at 1080p.
         ImGui::SetWindowFontScale(std::max(1.0F, ImGui::GetMainViewport()->WorkSize.y / 540.0F));
-        ImGui::TextDisabled("L3+R3 fecha  |  A seleciona  B volta  L/R troca de aba");
+        ImGui::TextDisabled("L3+R3 closes  |  A selects  B back  L/R switches tab");
         Oot3d::DrawApplicationSettingsTabs();
     }
 };
@@ -585,7 +585,7 @@ void Fast3dGui::ImGuiBackendInit() {
 #ifdef ENABLE_OPENGL
         case WindowBackend::FAST3D_SDL_OPENGL:
             if (Deko3dRendererSelected()) {
-                break; // no GL context: ImGui is not drawn (docs/DEKO3D_PROGRESSO.md)
+                break; // no GL context: ImGui is not drawn (docs/DEKO3D_PROGRESS.md)
             }
 #ifdef __APPLE__
             ImGui_ImplOpenGL3_Init("#version 410 core");

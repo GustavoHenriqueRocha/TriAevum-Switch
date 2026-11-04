@@ -709,9 +709,9 @@ def build_topscreen_30_pack(*, archive: Path, region: str,
     entries = build_topscreen_30_native_entries(
         ui_rgba, width, height, original_romfs=original_romfs,
         original_romfs_image=original_romfs_image)
-    # Uma romfs modificada (ex.: patch PT-BR no slot espanhol) muda o payload
-    # de menu_top_parts00: sem entrada para o hash dela o override não casa e
-    # o HUD perde molduras/rótulos dos botões X/Y/I/II e a cruz do D-pad.
+    # A modified romfs (e.g. PT-BR patch in the Spanish slot) changes the payload
+    # of menu_top_parts00: without an entry for its hash the override doesn't match and
+    # the HUD loses the frames/labels of the X/Y/I/II buttons and the D-pad cross.
     known = {original for original, _, _ in entries}
     for image in extra_romfs_images:
         for entry in build_topscreen_30_native_entries(
@@ -741,8 +741,8 @@ def main() -> int:
     originals.add_argument("--original-romfs-image", type=Path)
     parser.add_argument(
         "--extra-romfs-image", type=Path, action="append", default=[],
-        help="RomFS modificada (ex.: romfs-ptbr.bin) cujas texturas "
-             "localizadas também recebem os sprites do 3.0; repetível")
+        help="Modified RomFS (e.g. romfs-ptbr.bin) whose localized "
+             "textures also get the 3.0 sprites; repeatable")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument(
         "--region", choices=sorted(TOPSCREEN_30_TITLE_IDS),

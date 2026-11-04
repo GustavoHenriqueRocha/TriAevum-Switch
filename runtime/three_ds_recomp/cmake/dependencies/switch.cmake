@@ -80,7 +80,7 @@ find_library(GLAPI_LIBRARY glapi
     HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)
 find_library(DRM_NOUVEAU_LIBRARY drm_nouveau
     HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)
-# deko3d backend (config/renderer = deko3d; docs/DEKO3D_PROGRESSO.md).
+# deko3d backend (config/renderer = deko3d; docs/DEKO3D_PROGRESS.md).
 find_library(DEKO3D_LIBRARY deko3d
     HINTS "${DEVKITPRO}/libnx/lib" REQUIRED)
 # Debug variant (libdeko3dd): validates every call and reports GPU faults

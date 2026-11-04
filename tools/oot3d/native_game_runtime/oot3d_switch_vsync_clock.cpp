@@ -1,4 +1,4 @@
-// Thread do vsync do display: ver oot3d_vsync_clock.h.
+// Display vsync thread: see oot3d_vsync_clock.h.
 #include "oot3d_vsync_clock.h"
 
 #include <chrono>
@@ -33,11 +33,11 @@ int64_t SteadyNowNs() {
 bool SwitchVsyncClock::Start() {
   if (Running()) return true;
   auto *impl = new SwitchVsyncImpl();
-  // vi já foi aberto pela janela padrão (nwindowGetDefault); o serviço tem
-  // contagem de referências, e o display "Default" pode ser aberto de novo
-  // (o evento de vsync é por handle de display).
-  // tour19: rc 0x1272 (vi desc 9) aqui; StartStage diz em que etapa, e a
-  // sessão cai para a fonte reserva (StartAcquireFallback).
+  // vi was already opened by the default window (nwindowGetDefault); the service is
+  // reference-counted, and the "Default" display can be opened again
+  // (the vsync event is per display handle).
+  // tour19: rc 0x1272 (vi desc 9) here; StartStage says at which stage, and the
+  // session falls back to the fallback source (StartAcquireFallback).
   mStartStage = 1U;
   Result rc = viInitialize(ViServiceType_Default);
   if (R_SUCCEEDED(rc)) {
@@ -68,15 +68,15 @@ bool SwitchVsyncClock::Start() {
 
 void SwitchVsyncClock::Loop() {
   auto *impl = static_cast<SwitchVsyncImpl *>(mImpl);
-  // Acima das threads do jogo (0x2C) e da render thread: o atraso de
-  // acordar é o erro da fase (a thread quase não roda: ~1 us por vsync).
+  // Above the game threads (0x2C) and the render thread: the wake-up
+  // delay is the phase error (the thread barely runs: ~1 us per vsync).
   svcSetThreadPriority(CUR_THREAD_HANDLE, 0x20);
   VsyncClockModel model;
   while (!mStop.load(std::memory_order_relaxed)) {
-    // 100 ms: Stop() não espera mais que isso.
+    // 100 ms: Stop() doesn't wait longer than that.
     if (R_FAILED(eventWait(&impl->Vsync, 100000000ULL))) continue;
     const uint64_t tick = armGetSystemTick(); // cntpct_el0
-    // Relógio do steady_clock: a diferença medida agora (os dois andam juntos).
+    // steady_clock clock: the difference measured now (the two advance together).
     const int64_t steadyNow = SteadyNowNs();
     const uint64_t tickNow = armGetSystemTick();
     const int64_t stampNs =

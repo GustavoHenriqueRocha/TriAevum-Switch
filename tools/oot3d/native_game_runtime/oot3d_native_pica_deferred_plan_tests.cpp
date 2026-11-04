@@ -393,7 +393,7 @@ void TestConcurrentBatches() {
 
 } // namespace
 
-constexpr uint64_t kMaxPlanAllocations = 2U;  // medido em 2026-10-22
+constexpr uint64_t kMaxPlanAllocations = 2U;  // measured on 2026-10-22
 constexpr uint64_t kMaxPlanAllocationsTextured = 3U;
 
 // Allocations of one plan build once the shader cache is warm. The

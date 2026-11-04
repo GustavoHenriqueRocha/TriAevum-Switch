@@ -16,14 +16,14 @@ using PicaGlUniformTrim::FragmentUsedBytes;
 using PicaGlUniformTrim::kAll;
 using PicaGlUniformTrim::VertexUsedBytes;
 
-// Cabecalho igual ao do gerador (oot3d_native_pica_shader_gen.cpp) depois
-// de TranslatePicaShaderToOpenGl43.
+// Header identical to the generator's (oot3d_native_pica_shader_gen.cpp) after
+// TranslatePicaShaderToOpenGl43.
 const std::string kVertexHead =
     "#version 430\n"
     "layout(binding=0, std140) uniform PicaVertexUniforms {\n"
     "    uint b;\n    int flip_viewport;\n    uvec4 i[4];\n    vec4 f[96];\n"
     "} uniforms;\n";
-// O auxiliar do decompilador (enderecamento relativo a0/aL).
+// The decompiler helper (a0/aL relative addressing).
 const std::string kOffsetHelper =
     "vec4 get_offset_register(int base_index, int offset) {\n"
     "    int fixed_offset = offset >= -128 && offset <= 127 ? offset : 0;\n"
@@ -47,7 +47,7 @@ TEST(PicaGlUniformTrim, VertexHeaderOnly) {
     EXPECT_EQ(VertexUsedBytes(kVertexHead + kVertexMain), 8U);
     EXPECT_EQ(VertexUsedBytes(kVertexHead + "bool x = (uniforms.b & 1u) != 0u;\n"), 4U);
     EXPECT_EQ(VertexUsedBytes(kVertexHead + "uvec4 l = uniforms.i[2];\n"), 16U + 3U * 16U);
-    // i[] com indice nao literal: o array inteiro, nao o bloco.
+    // i[] with a non-literal index: the whole array, not the block.
     EXPECT_EQ(VertexUsedBytes(kVertexHead + "uvec4 l = uniforms.i[n];\n"), 80U);
 }
 
@@ -70,7 +70,7 @@ TEST(PicaGlUniformTrim, DirectNonLiteralIndexReadsTheWholeFloatArray) {
     EXPECT_EQ(VertexUsedBytes(kVertexHead + "vec4 v = uniforms.f[address_registers.x + 4];\n"),
               kVertexBlock);
     EXPECT_EQ(VertexUsedBytes(kVertexHead + "vec4 v = uniforms.f[0x10];\n"), kVertexBlock);
-    // Array inteiro sem indice (copia/atribuicao).
+    // Whole array without index (copy/assignment).
     EXPECT_EQ(VertexUsedBytes(kVertexHead + "vec4 c[96] = uniforms.f;\n"), kVertexBlock);
 }
 
@@ -79,13 +79,13 @@ TEST(PicaGlUniformTrim, AnythingUnknownIsTheWholeBlock) {
     EXPECT_EQ(VertexUsedBytes(kVertexHead + "#define U uniforms\nvec4 v = U.f[1];\n"), kAll);
     EXPECT_EQ(VertexUsedBytes(kVertexHead + "vec4 v = uniforms.f[96];\n"), kAll);
     EXPECT_EQ(FragmentUsedBytes("float x = fragment_uniforms.not_a_member;\n"), kAll);
-    // Um auxiliar chamado com recursao/sem corpo fecha: conta tudo.
+    // A helper called with recursion/body that doesn't close: counts everything.
     EXPECT_EQ(VertexUsedBytes(kVertexHead + "vec4 get_offset_register(int a, int b) { return uniforms.f[a];\n"),
               kVertexBlock);
 }
 
 TEST(PicaGlUniformTrim, OtherBlocksAndIdentifiersDoNotMatch) {
-    // "fragment_uniforms" e "PicaVertexUniforms" nao sao o token "uniforms".
+    // "fragment_uniforms" and "PicaVertexUniforms" are not the "uniforms" token.
     EXPECT_EQ(VertexUsedBytes(kVertexHead + "float a = fragment_uniforms.depth_scale;\n" + kVertexMain), 8U);
     EXPECT_EQ(FragmentUsedBytes("vec4 v = uniforms.f[90];\n"), 0U);
 }
@@ -103,7 +103,7 @@ TEST(PicaGlUniformTrim, FragmentMembersGiveTheirEnd) {
         "void main() { vec4 k = fragment_uniforms.tev_constants[2] + fragment_uniforms.combiner_buffer_color; }\n";
     EXPECT_EQ(FragmentUsedBytes(base), 1184U);
     EXPECT_EQ(FragmentUsedBytes(kFragmentHead + "float d = fragment_uniforms.depth_scale;"), 120U);
-    // Indice nao literal num array: o membro inteiro.
+    // Non-literal index into an array: the whole member.
     EXPECT_EQ(FragmentUsedBytes(kFragmentHead + "vec4 f = fragment_uniforms.fog_lut[idx];"), 1168U);
     EXPECT_EQ(FragmentUsedBytes(kFragmentHead + "vec4 f = fragment_uniforms.tev_constants[i];"), 96U);
     EXPECT_EQ(FragmentUsedBytes(base + "vec4 l = fragment_uniforms.lighting_attenuation[i];\n"
@@ -136,7 +136,7 @@ TEST(PicaGlUniformTrim, ProgramUsageUnitesBothStages) {
     auto usage = PicaGlUniformTrim::ProgramUsedBytes(vertex, fragment);
     EXPECT_EQ(usage.Vertex, 80U + 3U * 16U);
     EXPECT_EQ(usage.Fragment, 1184U);
-    // Um estagio que lesse o bloco do outro alarga a faixa (ou o bloco todo).
+    // A stage that read the other's block widens the range (or the whole block).
     usage = PicaGlUniformTrim::ProgramUsedBytes(vertex, fragment + "vec4 x = uniforms.f[40];\n");
     EXPECT_EQ(usage.Vertex, 80U + 41U * 16U);
     usage = PicaGlUniformTrim::ProgramUsedBytes(vertex + "float d = fragment_uniforms.w_buffering;\n" +
@@ -156,12 +156,12 @@ TEST(PicaGlUniformTrim, SendBytes) {
     EXPECT_EQ(SendBytes(true, 9000U, kFragmentBlock), kFragmentBlock);
 }
 
-// Simulacao do envio de uniforms de uma sequencia de draws pelo anel real
-// (StreamRing), caminho antigo (bloco inteiro, dedup do bloco inteiro) e
-// novo (prefixo lido, dedup do prefixo). A cada geracao o armazenamento
-// comeca com lixo (orfanado). No fim, para cada draw, os bytes que o
-// programa le na faixa ligada sao os do bloco e iguais aos do caminho
-// antigo, e a faixa ligada tem o mesmo tamanho.
+// Simulation of sending the uniforms of a sequence of draws through the real ring
+// (StreamRing), old path (whole block, whole-block dedup) and
+// new (read prefix, prefix dedup). On each generation the storage
+// starts with garbage (orphaned). At the end, for each draw, the bytes the
+// program reads in the bound range are the block's and equal to the old
+// path's, and the bound range has the same size.
 struct Bound {
     uint64_t Generation = 0U;
     uint64_t Offset = 0U;
@@ -199,17 +199,17 @@ struct SimulatedRing {
 
 TEST(PicaGlUniformTrim, TrimmedUploadsBindTheSameBytesTheProgramReads) {
     std::mt19937 random(1234U);
-    // Programas: prefixos lidos como os do corpus do console (1184, 2096) e
-    // um que le tudo.
+    // Programs: read prefixes like those of the console corpus (1184, 2096) and
+    // one that reads everything.
     const std::vector<size_t> programs{1184U, 2096U, kAll, 120U};
-    // Poucos blocos distintos (repeticao como num quadro real), mas que
-    // diferem tambem so na cauda nao lida.
+    // Few distinct blocks (repetition as in a real frame), but that
+    // also differ only in the unread tail.
     std::vector<std::vector<uint8_t>> blocks(5, std::vector<uint8_t>(kFragmentBlock));
     for (auto& block : blocks) {
         for (auto& byte : block) byte = static_cast<uint8_t>(random() & 3U);
     }
     blocks[1] = blocks[0];
-    blocks[1][3000] ^= 0xFFU; // so a cauda muda
+    blocks[1][3000] ^= 0xFFU; // only the tail changes
     SimulatedRing before, after;
     struct Record {
         size_t Block, Used;
@@ -233,9 +233,9 @@ TEST(PicaGlUniformTrim, TrimmedUploadsBindTheSameBytesTheProgramReads) {
             ASSERT_EQ(newStorage[record.New.Offset + index], block[index]) << index;
         }
     }
-    // Menos bytes copiados. O reuso pode ate cair (o anterior copiou so o
-    // prefixo de um programa que le menos e este le mais), sem afetar a
-    // imagem.
+    // Fewer bytes copied. Reuse may even drop (the previous one copied only the
+    // prefix of a program that reads less and this one reads more), without affecting the
+    // image.
     EXPECT_LT(after.SentBytes, before.SentBytes);
     EXPECT_GT(after.Reused, 0U);
 }
@@ -248,14 +248,14 @@ TEST(PicaGlUniformTrim, TrimOffIsTheOldPath) {
     EXPECT_TRUE(PicaGlUniformTrim::PlanUpload(false, true, last, 1U, a, 8U).Reuse);
     EXPECT_FALSE(PicaGlUniformTrim::PlanUpload(false, true, last, 1U, b, 8U).Reuse);
     EXPECT_EQ(PicaGlUniformTrim::PlanUpload(false, true, last, 1U, b, 8U).Send, kVertexBlock);
-    // Com trim, a cauda nao lida nao impede o reuso.
+    // With trim, the unread tail doesn't prevent reuse.
     EXPECT_TRUE(PicaGlUniformTrim::PlanUpload(true, true, last, 1U, b, 8U).Reuse);
-    // Outra geracao, outro tamanho ou sem dedup: envia.
+    // Another generation, another size or no dedup: sends.
     EXPECT_FALSE(PicaGlUniformTrim::PlanUpload(true, true, last, 2U, a, 8U).Reuse);
     EXPECT_FALSE(PicaGlUniformTrim::PlanUpload(true, false, last, 1U, a, 8U).Reuse);
     std::vector<uint8_t> shorter(kVertexBlock - 16U, 1U);
     EXPECT_FALSE(PicaGlUniformTrim::PlanUpload(true, true, last, 1U, shorter, 8U).Reuse);
-    // O anterior copiou menos do que este programa le: envia.
+    // The previous one copied less than this program reads: sends.
     PicaGlUniformTrim::Remember(last, a, 16U, 1U, 512U);
     EXPECT_FALSE(PicaGlUniformTrim::PlanUpload(true, true, last, 1U, a, 80U).Reuse);
     EXPECT_TRUE(PicaGlUniformTrim::PlanUpload(true, true, last, 1U, a, 8U).Reuse);

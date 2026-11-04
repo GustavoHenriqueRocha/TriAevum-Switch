@@ -1,4 +1,4 @@
-"""Divide uma área de texto em linhas e, em cada linha, em blocos separados por espaço largo."""
+"""Splits a text area into lines and, in each line, into blocks separated by wide spacing."""
 import sys; sys.path.insert(0, '.')
 
 

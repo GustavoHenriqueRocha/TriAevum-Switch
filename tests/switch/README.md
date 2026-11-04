@@ -1,27 +1,29 @@
-# Testes de regressão do port Switch
+> Portuguese original: [README.pt-BR.md](README.pt-BR.md)
 
-Rodar antes de cada versão enviada ao console. **Regra: todo bug e todo erro
-encontrado ganha um teste de regressão aqui** (unidade, guarda ou checagem no Eden),
-para não acontecer de novo. O objetivo é que um bug já
-corrigido nunca volte sem alguém perceber, e que as melhorias sejam medidas.
+# Switch port regression tests
 
-| Camada | Comando | Tempo | Pega |
+Run before every version sent to the console. **Rule: every bug and every error
+found gets a regression test here** (unit, guard or check on Eden),
+so it doesn't happen again. The goal is that an already
+fixed bug never comes back without someone noticing, and that improvements are measured.
+
+| Layer | Command | Time | Catches |
 |---|---|---|---|
-| Guardas | `tests/switch/run.sh --quick` | segundos | correção de bug apagada por merge/refactor |
-| Unidade (PC) | `tests/switch/run.sh` | ~5 min (com cache) | lógica do runtime: pacing, áudio, threads, watchdog, FS, pausa, contador de FPS |
-| DSP AArch64 | (incluído em `run.sh`) | ~1 min | mixagem de áudio com as flags reais do Switch (devkitA64 + qemu) |
-| Eden | `tests/switch/run.sh --eden build/oot3d_native_game.nro` | ~4 min | .nro que não abre, trava ou não passa de N quadros |
-| Console | `tests/switch/perf_gate.py logs/perf.txt --mode 30` | — | queda de FPS, velocidade do jogo, travadinhas |
+| Guards | `tests/switch/run.sh --quick` | seconds | bug fix erased by merge/refactor |
+| Unit (PC) | `tests/switch/run.sh` | ~5 min (with cache) | runtime logic: pacing, audio, threads, watchdog, FS, pause, FPS counter |
+| DSP AArch64 | (included in `run.sh`) | ~1 min | audio mixing with the real Switch flags (devkitA64 + qemu) |
+| Eden | `tests/switch/run.sh --eden build/oot3d_native_game.nro` | ~4 min | .nro that doesn't open, hangs or doesn't get past N frames |
+| Console | `tests/switch/perf_gate.py logs/perf.txt --mode 30` | — | FPS drop, game speed, stutters |
 
-## Guardas (`test_bug_guards.py`)
+## Guards (`test_bug_guards.py`)
 
-Uma entrada por bug visto no console, apontando o arquivo da correção e o teste de
-comportamento, quando existe. `--list` mostra todas. **Ao corrigir um bug novo,
-acrescentar a guarda dele aqui.**
+One entry per bug seen on the console, pointing to the file with the fix and the
+behavior test, when there is one. `--list` shows them all. **When fixing a new bug,
+add its guard here.**
 
-## Build de host (uma vez)
+## Host build (once)
 
-O CMake de host precisa de cabeçalhos que o Arch não tem por padrão. Sem sudo:
+The host CMake needs headers that Arch doesn't have by default. Without sudo:
 
 ```sh
 P=~/oot3d-work/host-deps   # Vulkan-Headers 1.4.357, nlohmann_json 3.12.0, tinyxml2 11.0.0
@@ -30,27 +32,27 @@ cmake -S . -B ~/oot3d-work/build-host-tests -G Ninja \
   -DTHREE_DS_RECOMP_ENABLE_SSSR=OFF -DTHREE_DS_RECOMP_ENABLE_CACAO=OFF
 ```
 
-`oot3d_native_audio_tests` pula (código 77) sem `OOT3D_TEST_EXTRACT_ROOT` apontando
-para um romfs desempacotado. `oot3d_native_audio_dsp_mix_tests` no host só bate com
-o digest guardado em build Release (`-O3 -ffast-math`); o que vale é a versão AArch64.
+`oot3d_native_audio_tests` skips (code 77) without `OOT3D_TEST_EXTRACT_ROOT` pointing
+to an unpacked romfs. `oot3d_native_audio_dsp_mix_tests` on the host only matches
+the stored digest in a Release build (`-O3 -ffast-math`); what counts is the AArch64 version.
 
-## Desempenho (`perf_gate.py`)
+## Performance (`perf_gate.py`)
 
-Referências em `perf_baseline.json` (final 4, CPU 1785 MHz, portátil):
-30 FPS = 29,6 fps globais / 98,8% de velocidade; 60 FPS = 57,5 fps / 99,7%.
-Só compara com o mesmo clock de CPU. Uma versão melhor vira a nova referência
-com `--update`.
+Baselines in `perf_baseline.json` (final 4, CPU 1785 MHz, handheld):
+30 FPS = 29.6 global fps / 98.8% speed; 60 FPS = 57.5 fps / 99.7%.
+Only compares with the same CPU clock. A better version becomes the new baseline
+with `--update`.
 
 ## Eden (`eden_smoke.sh`)
 
-Usa o Eden da Ryzen (`D:\Emuladores\Eden-Windows-v0.2.1...`) numa tarefa agendada
-interativa (`/IT`), porque um processo aberto pelo ssh não tem tela. A pasta
-`%APPDATA%\eden\sdmc\switch\oot3dre` precisa ter `game/`, `config/` e
-`resources.o2r`. O script fecha qualquer Eden aberto antes de rodar.
+Uses Eden on the Ryzen (`D:\Emuladores\Eden-Windows-v0.2.1...`) in an interactive
+scheduled task (`/IT`), because a process opened over ssh has no screen. The folder
+`%APPDATA%\eden\sdmc\switch\oot3dre` must have `game/`, `config/` and
+`resources.o2r`. The script closes any open Eden before running.
 
-Ele reprova também quando: o SD do Eden não bate com o SD de referência (cópia
-corrompida — não é bug do build), o `boot-status.txt` termina em `status=failed`
-(mostra o `detail=`) ou o jogo altera arquivos que só deveria ler. Esses casos
-vieram do bug de 2026-10-22: a rotação de log ao abrir do upstream (#72) usa
-`rename`, que falha no Horizon, e o sink quebrado estragou a leitura do
+It also fails when: Eden's SD doesn't match the reference SD (corrupted
+copy — not a build bug), `boot-status.txt` ends in `status=failed`
+(shows the `detail=`) or the game changes files it should only read. These cases
+came from the 2026-10-22 bug: upstream's log rotation on open (#72) uses
+`rename`, which fails on Horizon, and the broken sink spoiled reading
 `atlas_overrides.o3tu` ("payload hash mismatch").

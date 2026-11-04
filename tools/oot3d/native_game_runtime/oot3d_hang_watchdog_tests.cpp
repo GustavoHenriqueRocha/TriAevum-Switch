@@ -1,7 +1,7 @@
-// Watchdog de travamento (política, texto sem malloc, marcadores) e a
-// varredura limitada dos bins do malloc do newlib. Rode também com ASan:
-// a varredura nunca pode ler fora do heap sintético, nem com elos
-// corrompidos ao acaso.
+// Hang watchdog (policy, malloc-free text, markers) and the
+// bounded walk of newlib's malloc bins. Also run with ASan:
+// the walk must never read outside the synthetic heap, not even with
+// randomly corrupted links.
 #include "oot3d_hang_watchdog.h"
 #include "oot3d_heap_bin_check.h"
 
@@ -50,7 +50,7 @@ void TestTrackerReportsOnceAndRecovers() {
         Require(tracker.Observe(Observe(now, frames, frames)).Kind == StallTracker::Verdict::None,
                 "progressing threads reported");
     }
-    // O jogo para em 10 s; a render thread continua (não fica ociosa).
+    // The game stops at 10 s; the render thread keeps going (not idle).
     StallTracker::Result hang;
     int reports = 0;
     for (uint64_t now = 11000; now <= 20000; now += 1000) {
@@ -64,11 +64,11 @@ void TestTrackerReportsOnceAndRecovers() {
     Require(reports == 1, "a stall must be reported exactly once");
     Require(hang.StalledMask == (1U << kGame), "only the game thread was stalled");
     Require(hang.Milliseconds >= 3000 && hang.Milliseconds < 4000, "report after ~3 s");
-    // Volta a andar: "recuperou" uma vez, com a duração do travamento.
+    // Moves again: "recovered" once, with the hang duration.
     const auto recovered = tracker.Observe(Observe(21000, frames + 1, 21000));
     Require(recovered.Kind == StallTracker::Verdict::Recovered, "recovery not seen");
     Require(recovered.Milliseconds == 11000, "recovered duration");
-    // Rearmado: um novo travamento é relatado de novo.
+    // Rearmed: a new hang is reported again.
     frames += 1;
     reports = 0;
     for (uint64_t now = 22000; now <= 30000; now += 1000) {
@@ -82,22 +82,22 @@ void TestTrackerReportsOnceAndRecovers() {
 void TestTrackerIgnoresFocusLossAndSuspend() {
     StallTracker tracker;
     Require(tracker.Observe(Observe(0, 1, 1)).Kind == StallTracker::Verdict::None, "start");
-    // HOME: nada anda por 20 s, fora de foco.
+    // HOME: nothing moves for 20 s, out of focus.
     for (uint64_t now = 1000; now <= 20000; now += 1000) {
         Require(tracker.Observe(Observe(now, 1, 1, false)).Kind == StallTracker::Verdict::None,
                 "stall reported out of focus");
     }
-    // De volta ao foco: conta a partir daqui.
+    // Back in focus: counts from here.
     Require(tracker.Observe(Observe(21000, 1, 1)).Kind == StallTracker::Verdict::None,
             "focus regained counted the time away");
     Require(tracker.Observe(Observe(22000, 2, 2)).Kind == StallTracker::Verdict::None,
             "progress after focus");
-    // Sleep do console: o watchdog também parou (salto de 60 s).
+    // Console sleep: the watchdog also stopped (60 s jump).
     Require(tracker.Observe(Observe(82000, 2, 2)).Kind == StallTracker::Verdict::None,
             "a suspension gap was taken as a stall");
     Require(tracker.Observe(Observe(83000, 3, 3)).Kind == StallTracker::Verdict::None,
             "progress after resume");
-    // Render thread não vigiada (ociosa): só o jogo conta.
+    // Render thread not watched (idle): only the game counts.
     uint64_t game = 3;
     for (uint64_t now = 84000; now <= 95000; now += 1000) {
         game += 60;
@@ -131,7 +131,7 @@ void TestStageScope() {
     for (size_t stage = 0; stage < static_cast<size_t>(HangWatch::Stage::Count); ++stage) {
         Require(HangWatch::StageName(static_cast<uint8_t>(stage))[0] != '?', "stage name");
     }
-    // Uma thread sem slot não escreve nada.
+    // A thread without a slot writes nothing.
     std::thread([] {
         HangWatch::Mark(HangWatch::Stage::RenderSwap);
         HangWatch::Advance();
@@ -141,7 +141,7 @@ void TestStageScope() {
             "an unbound thread wrote a slot");
 }
 
-// ---- heap sintético no layout do newlib ----------------------------------------
+// ---- synthetic heap in newlib's layout -----------------------------------------
 
 struct Chunk {
     size_t PrevSize;
@@ -179,7 +179,7 @@ struct SyntheticHeap {
         chunk->Fd = chunk->Bk = nullptr;
         return chunk;
     }
-    // frontlink: insere no começo do bin.
+    // frontlink: inserts at the start of the bin.
     void Free(size_t bin, Chunk* chunk) {
         Chunk* header = Header(bin);
         chunk->Bk = header;
@@ -216,7 +216,7 @@ void TestHeapWalkStopsOnCorruption() {
         void (*Corrupt)(SyntheticHeap&, std::vector<Chunk*>&);
     };
     const Case cases[] = {
-        // double free: frontlink outra vez deixa a lista com p->bk == p
+        // double free: frontlink again leaves the list with p->bk == p
         {"double_free", [](SyntheticHeap& h, std::vector<Chunk*>& c) { h.Free(3, c[1]); }},
         {"self_loop", [](SyntheticHeap&, std::vector<Chunk*>& c) { c[2]->Bk = c[2]; }},
         {"cycle", [](SyntheticHeap&, std::vector<Chunk*>& c) {
@@ -255,8 +255,8 @@ void TestHeapWalkStopsOnCorruption() {
     }
 }
 
-// Elos e tamanhos aleatórios: a varredura sempre termina e nunca lê fora do
-// heap (ASan acusaria).
+// Random links and sizes: the walk always terminates and never reads outside the
+// heap (ASan would flag it).
 void TestHeapWalkFuzz() {
     std::mt19937_64 random(20261017U);
     uint64_t corrupt = 0;
