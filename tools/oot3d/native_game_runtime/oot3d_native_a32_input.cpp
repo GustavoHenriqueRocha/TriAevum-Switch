@@ -233,6 +233,7 @@ ThreeDsRecomp::Input::MappingConfig BuildThreeDsMappingConfig(
         config.NativeAimInvertY,
         config.GyroscopeBiasDegreesPerSecond,
         config.AccelerometerNeutral,
+        config.TouchAimDegreesPerPixel,
     };
 }
 

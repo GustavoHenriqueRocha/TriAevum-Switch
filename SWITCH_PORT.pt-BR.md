@@ -73,9 +73,24 @@ Desempenho e usabilidade:
     cujo frustum o hook alargou (anisotropia medida = 1/fator) têm o viewport alargado pelo mesmo
     fator em torno do centro, recortado ao quadro (não ficam espremidos). Política e testes:
     `gl_widescreen_menu_policy.h`, `tests/gl_widescreen_menu_policy_tests.cpp`.
-- **Tela de toque**: tocar funciona onde o mouse funciona no PC (tela de título/seleção de arquivo e
-  as páginas de pausa Itens/Mapa/Equipamento do TopScreen); no jogo em movimento o toque é ignorado,
-  como o mouse no PC. Toques curtos ficam retidos até o jogo ler.
+- **Tela de toque**: lida do HID (libnx `hidGetTouchScreenStates`), já que o SDL não reporta dedos
+  sem janela (deko3d). Tocar funciona onde o mouse funciona no PC (tela de título/seleção de arquivo
+  e as páginas de pausa Itens/Mapa/Equipamento do TopScreen). No jogo em movimento, tocar num
+  controle do HUD do TopScreen aperta o controle que ele mostra enquanto o dedo está na tela: X, Y,
+  Item I (ZR), Item II (ZL), B e a direção do D-pad dos ícones de ação em volta da cruz
+  (Visão/Navi, Ocarina, botas...). Cada dedo é testado onde encosta (vários dedos ao mesmo tempo).
+  O primeiro dedo que encosta fora de todos os controles mira arrastando (estilingue, arco, gancho,
+  visão em primeira pessoa), somado ao analógico direito e ao giroscópio como a mira do mouse no
+  PC: `aim.touch_enabled` (padrão ligado) e `aim.touch_degrees_per_pixel` (padrão 0,14: meia tela,
+  640 px, gira cerca de 90°) no `oot3d_controls.json`, também em L3+R3 → Controls → Aiming;
+  `aim.invert_x`/`invert_y` valem. Ele alimenta o giroscópio do jogo, que o jogo só lê mirando,
+  então arrastar em terceira pessoa não faz nada. Outros dedos fora de um controle são ignorados.
+  Toques curtos ficam retidos até o jogo ler. Com o menu L3+R3 (ou outra janela ImGui) aberto, o
+  primeiro dedo que encosta é um mouse de toque do ImGui: toque em botões, caixas, abas e itens de
+  combo, arraste sliders e barras de rolagem, arraste espaço vazio para rolar; o controle continua
+  navegando. Esse dedo nunca chega ao jogo, e dedos que encostaram antes de o menu abrir ficam fora
+  dele. Teste de acerto, encaixe, posse e o gesto do menu: `oot3d_top_screen_hud_touch.h`,
+  `oot3d_top_screen_hud_touch_tests.cpp`.
 - **Gerador AOT**: helpers quentes com caminho rápido inline e lento frio; LDM/STM por bloco;
   literais PC-relativos dobrados; shards sem `-ffast-math` (exatidão do VFP).
 - **Orçamento de blocos** 2048 (era 128) no Switch.

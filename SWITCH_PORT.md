@@ -73,9 +73,24 @@ Performance and usability:
     whose frustum the hook widened (measured anisotropy = 1/factor) get their viewport widened by the
     same factor around the center, clipped to the frame (so they are not squeezed). Policy and tests:
     `gl_widescreen_menu_policy.h`, `tests/gl_widescreen_menu_policy_tests.cpp`.
-- **Touch screen**: touch works where the mouse works on PC (title/file select screen and
-  TopScreen's Items/Map/Equipment pause pages); during gameplay touch is ignored,
-  like the mouse on PC. Short taps are held until the game reads them.
+- **Touch screen**: read from HID (libnx `hidGetTouchScreenStates`), since SDL reports no fingers
+  without a window (deko3d). Touch works where the mouse works on PC (title/file select screen and
+  TopScreen's Items/Map/Equipment pause pages). During gameplay a tap on a TopScreen HUD control
+  presses the control it pictures while the finger is down: X, Y, Item I (ZR), Item II (ZL), B,
+  and the D-pad direction of the action icons around the cross (View/Navi, Ocarina, boots...).
+  Each finger hit-tests where it lands (several fingers at once). The first finger that lands
+  outside every control aims by dragging (bow, slingshot, hookshot, first-person view), added to
+  the right stick and the gyro like PC mouse aim: `aim.touch_enabled` (default on) and
+  `aim.touch_degrees_per_pixel` (default 0.14: half the screen, 640 px, turns about 90°) in
+  `oot3d_controls.json`, also in L3+R3 → Controls → Aiming; `aim.invert_x`/`invert_y` apply. It
+  feeds the game's gyro, which the game reads only while aiming, so a drag in third-person play
+  does nothing. Other fingers outside a control are ignored. Short taps are held until the game
+  reads them. While the L3+R3 menu (or another ImGui window) is open, the first finger that lands
+  is an ImGui touch-screen mouse: tap buttons, checkboxes, tabs and combo items, drag sliders and
+  scrollbars, drag empty space to scroll; the controller keeps navigating. That finger never
+  reaches the game, and fingers that landed before the menu opened stay out of it. Hit-test, fit,
+  ownership and the menu gesture: `oot3d_top_screen_hud_touch.h`,
+  `oot3d_top_screen_hud_touch_tests.cpp`.
 - **AOT generator**: hot helpers with an inline fast path and cold slow path; per-block LDM/STM;
   PC-relative literals folded; shards without `-ffast-math` (VFP exactness).
 - **Block budget** 2048 (was 128) on Switch.

@@ -928,6 +928,8 @@ bool NativeA32WindowSession::RunFrame() {
                          presentationElapsedSeconds,
                          guestRefreshesDue != 0U,
                          nativeControlPollingState,
+                         lastTopScreenPrimitivesBySubsystem[static_cast<
+                             std::size_t>(oot3d::ui::UiSubsystem::GameplayHud)],
                          WidescreenMenuCornersActive());
   if (physicalInputFrame.Exit || devLabQuit) {
     if (devLabQuit) scriptedExit = true;

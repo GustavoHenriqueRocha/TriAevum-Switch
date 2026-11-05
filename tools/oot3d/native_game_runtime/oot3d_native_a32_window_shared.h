@@ -697,6 +697,10 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                    double samplePeriodSeconds,
                    bool guestRefreshWillConsume,
                    NativeControlPollingState &pollingState,
+                   // The gameplay HUD drawn last frame (400x240 canvas):
+                   // on Switch, taps on its controls press them.
+                   std::span<const oot3d::ui::UiPrimitive>
+                       topScreenHudPrimitives,
                    bool widescreenMenuCorners = false);
 
 Oot3dNativeGame::NativeA32InputFrame ResolveNativeA32GuestInput(
