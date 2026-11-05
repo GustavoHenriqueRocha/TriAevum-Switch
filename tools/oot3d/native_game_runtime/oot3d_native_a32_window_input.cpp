@@ -3,6 +3,7 @@
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
 #if defined(__SWITCH__)
 #include "fast/oot3d/debug_menu.h"
+#include "oot3d_switch_motion.h"
 #endif
 
 #if defined(__SWITCH__)
@@ -144,6 +145,15 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
   const bool keyboardCaptured = hostGuiVisible || io.WantCaptureKeyboard;
   const bool mouseCaptured = hostGuiVisible;
 
+#if defined(__SWITCH__)
+  // SDL pad 0 is player 1 plus handheld. Its sensors come from
+  // oot3d_switch_motion.h, which devkitPro's SDL does not report.
+  if (SwitchMotionSensorConnected()) {
+    for (auto &device : selectedController.Devices) {
+      if (device.InstanceId == 0) device.HasGyroscope = device.HasAccelerometer = true;
+    }
+  }
+#endif
   const auto selectedDevice = std::find_if(selectedController.Devices.begin(), selectedController.Devices.end(),
       [](const auto& device) { return device.Selected; });
   config = ControlsForDevice(config, selectedDevice != selectedController.Devices.end() ? &*selectedDevice : nullptr);
@@ -234,6 +244,24 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
   ThreeDsRecomp::Input::SampleSdlController(
       config.ControllerEnabled ? selectedController.Controller : nullptr, host, !hostGuiVisible,
       config.ControllerTouchpadEnabled ? config.ControllerTouchpadIndex : -1, triggerThreshold);
+#if defined(__SWITCH__)
+  // devkitPro's SDL has no sensor support: the console's own six-axis sensor
+  // (oot3d_switch_motion.h) fills the same observation for SDL pad 0. It
+  // also runs while host UI is visible so calibration from the L3+R3 menu
+  // receives samples; the motion is cleared below for gameplay.
+  if (!host.ControllerMotion.GyroscopeValid && !host.ControllerMotion.AccelerometerValid) {
+    const bool motionAim = config.NativeAimSource == NativeMotionSource::Automatic ||
+        config.NativeAimSource == NativeMotionSource::ControllerGyroscope ||
+        config.NativeAimSource == NativeMotionSource::ControllerAccelerometer ||
+        config.NativeAimSource == NativeMotionSource::ControllerMotion;
+    const auto switchMotion = PollSwitchMotion(
+        config.ControllerEnabled && selectedController.InstanceId == 0 &&
+            (motionAim || controls.CalibrationStatus().Active),
+        guestRefreshWillConsume || hostGuiVisible);
+    if (switchMotion.SourceChanged) pollingState.VirtualMotion.ResetController();
+    host.ControllerMotion = switchMotion.Motion;
+  }
+#endif
   controls.ObserveMotion(host.ControllerMotion);
   pollingState.PendingControllerButtons |= host.ControllerButtons & ~pollingState.PreviousControllerButtons;
   pollingState.PreviousControllerButtons = host.ControllerButtons;

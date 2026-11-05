@@ -141,6 +141,14 @@ SDL controller motion is normalized before mapping:
 - accelerometer: m/s2 to `g`, with SDL-to-CTR axis conversion;
 - gyroscope: rad/s to degrees/s, with SDL-to-CTR axis conversion.
 
+On Nintendo Switch, devkitPro's SDL reports no sensors. `oot3d_switch_motion.cpp`
+reads libnx's six-axis state for SDL pad 0 (player 1 Pro Controller, the right
+Joy-Con of a dual pair, or Handheld) and fills the same observation:
+accelerometer `(-a.x, +a.z, +a.y)` in `g`, gyroscope `360 * (-w.x, +w.z, +w.y)`
+deg/s (libnx reports revolutions/s), time-weighted over every sample since the
+guest last consumed input. It runs only while `aim.source` uses controller
+motion (or calibration is active).
+
 `Calibrate controller motion` averages 60 valid host samples. Gyroscope bias
 and the neutral accelerometer pose are persisted; the latter is used by the
 freecam tilt source while native HID retains the physical gravity vector.

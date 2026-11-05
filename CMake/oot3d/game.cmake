@@ -512,6 +512,8 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp
         # Display vsync clock (config/pacer_vsync, config/frame_spikes).
         tools/oot3d/native_game_runtime/oot3d_switch_vsync_clock.cpp
+        # The console's six-axis sensors as controller motion (gyro aiming).
+        tools/oot3d/native_game_runtime/oot3d_switch_motion.cpp
         # Guard pages for one malloc size range (config/guard_alloc) and the
         # libnx exception handler that reports faults to logs/hang.txt.
         tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp)
