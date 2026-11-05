@@ -3,6 +3,8 @@
 #include "oot3d_native_a32_ctr_system_archives.h"
 #include "oot3d_native_a32_ctr_save_safety.h"
 
+#include <set>
+
 namespace Oot3dNativeGame {
 
 namespace {
@@ -123,6 +125,8 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
                 encodedObject["file_path"] = portable->second;
                 encodedObject["file_path_base"] = portable->first;
             }
+            // Handle escritor no diário do save (commit por handle).
+            if (object.SaveJournalWriter != 0U) encodedObject["save_journal_writer"] = object.SaveJournalWriter;
         }
         // Só objetos criados pelo guest de outro título têm estes campos; o
         // estado do OoT3D continua com as mesmas chaves.
@@ -320,6 +324,9 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             }
             return false;
         }
+        // Primeiro acesso ao save pode ser este restore: a recuperação do
+        // diário (troca interrompida) roda antes de religar os arquivos.
+        SaveJournal();
         NativeA32CtrHostServices staged(mConfig);
         const auto normalizedAbsolute = [](const std::filesystem::path& path) {
             return std::filesystem::absolute(path).lexically_normal();
@@ -424,6 +431,7 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             object->FileSize = encoded.at("file_size").get<uint64_t>();
             object->FileOpenMode = encoded.at("file_open_mode").get<uint32_t>();
             object->FileClosed = encoded.value("file_closed", false);
+            object->SaveJournalWriter = encoded.value("save_journal_writer", uint64_t{0});
             if (isRomFsFile && (object->FileOffset != mConfig.RomFsImageOffset ||
                                 object->FileSize != mConfig.RomFsImageSize)) {
                 throw std::runtime_error("restored RomFS service view is incompatible");
@@ -785,6 +793,15 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
         // O diário do save é da execução, não do savestate: escritas pendentes,
         // backups já feitos e a recuperação continuam valendo.
         staged.mSaveJournal = mSaveJournal;
+        if (mSaveJournal) {
+            // Escritores pendentes que não existem no estado restaurado não
+            // podem segurar a confirmação para sempre.
+            std::set<uint64_t> writers;
+            for (const auto& record : staged.mHandles)
+                if (record.Object && record.Object->SaveJournalWriter != 0U && !record.Object->FileClosed)
+                    writers.insert(record.Object->SaveJournalWriter);
+            mSaveJournal->RetainWriters(writers);
+        }
         *this = std::move(staged);
         return true;
     } catch (const std::exception& exception) {

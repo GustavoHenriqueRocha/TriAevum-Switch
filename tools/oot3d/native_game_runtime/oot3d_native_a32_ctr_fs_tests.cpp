@@ -13,6 +13,12 @@
 #include <iostream>
 #include <iterator>
 #include <nlohmann/json.hpp>
+#if defined(__linux__)
+#include <csignal>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 namespace {
 using namespace Oot3dNativeGame;
 using oot3d::recomp::a32::GuestState;
@@ -898,6 +904,32 @@ struct DirFs {
         Require(Word(1) == 0U, "GetSize");
         return Word(2) | (static_cast<uint64_t>(Word(3)) << 32U);
     }
+    // Versões que devolvem o resultado sem exigir sucesso (disco cheio etc.).
+    uint32_t TryWrite(uint32_t file, uint64_t at, const std::vector<uint8_t>& bytes) {
+        Require(bytes.size() <= DataSize && Memory.WriteBytes(Data, bytes), "write payload");
+        const uint32_t length = static_cast<uint32_t>(bytes.size());
+        Call(file, {0x08030102U, static_cast<uint32_t>(at), static_cast<uint32_t>(at >> 32U), length, 1U,
+                    (length << 4U) | 0xAU, Data});
+        return Word(1);
+    }
+    uint32_t TrySetSize(uint32_t file, uint64_t size) {
+        Call(file, {0x08050080U, static_cast<uint32_t>(size), static_cast<uint32_t>(size >> 32U)});
+        return Word(1);
+    }
+    uint32_t TryFlush(uint32_t file) { Call(file, {0x08090000U}); return Word(1); }
+    uint32_t TryClose(uint32_t file) { Call(file, {0x08080000U}); return Word(1); }
+    uint32_t TryCommit(uint32_t archive) {
+        Call(Fs, {0x080D0144U, archive, 0U, 0U, 1U, 1U, 0x1AU, Path + 0x40U, 0x1CU, Path + 0x44U});
+        return Word(1);
+    }
+    // svcCloseHandle direto na sessão do arquivo, sem FSFILE_Close.
+    void SvcClose(uint32_t handle) {
+        State.r[0] = handle;
+        NativeA32HostContext context{Process, 0U};
+        Require(Host.HandleSvc(0x23U, State, Memory, context).Action == NativeA32HostAction::Resume &&
+                    State.r[0] == 0U,
+                "svcCloseHandle");
+    }
     void Flush(uint32_t file) { Call(file, {0x08090000U}); Require(Word(1) == 0U, "Flush"); }
     void Close(uint32_t file) { Call(file, {0x08080000U}); Require(Word(1) == 0U, "Close"); }
     void Commit(uint32_t archive) {  // ControlArchive(commit), como o OoT3D faz ao salvar
@@ -1343,6 +1375,423 @@ void TestTitleSaveLayout() {
             "format/backup paths");
 }
 
+// ---------------------------------------------------------------------------
+// 05/11 (rodada 2): pendências da verificação adversarial (S1..S8).
+namespace {
+#if defined(__linux__)
+// "SD cheio": RLIMIT_FSIZE faz toda escrita além de bytes falhar (EFBIG).
+struct FileSizeLimit {
+    explicit FileSizeLimit(rlim_t bytes) {
+        previousHandler = std::signal(SIGXFSZ, SIG_IGN);
+        getrlimit(RLIMIT_FSIZE, &previous);
+        rlimit limit = previous;
+        limit.rlim_cur = bytes;
+        setrlimit(RLIMIT_FSIZE, &limit);
+    }
+    ~FileSizeLimit() {
+        setrlimit(RLIMIT_FSIZE, &previous);
+        std::signal(SIGXFSZ, previousHandler);
+    }
+    rlimit previous{};
+    void (*previousHandler)(int) = nullptr;
+};
+#endif
+const std::vector<std::string> kZeldaFiles{"save00.bin", "save03.bin", "save04.bin", "system.dat"};
+// Todos os arquivos regulares de todas as gerações AAAAMMDD-HHMMSS[-n].
+std::vector<fs::path> BackupFiles(const fs::path& backups) {
+    std::vector<fs::path> files;
+    for (const auto& generation : Generations(backups))
+        for (const auto& entry : fs::recursive_directory_iterator(generation))
+            if (entry.is_regular_file()) files.push_back(entry.path());
+    return files;
+}
+} // namespace
+
+// S2: um Write (ou SetSize) que falha no meio, com o SD cheio, marca a
+// transação como falha: Close, Flush e ControlArchive não instalam o
+// temporário meio escrito; o save antigo fica e o temporário vai para
+// <save>-backups/incompleto-*. A transação seguinte recomeça do save antigo.
+void TestFailedWriteIsNotCommitted() {
+#if defined(__linux__)
+    SetMasterQuestUnlockOptionForTesting(false);
+    const auto root = FreshRoot("escrita_falha");
+    const auto save = root / "savedata";
+    const auto backups = root / "savedata-backups";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        // (a) Write falha e o jogo fecha o arquivo.
+        uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
+        Require(f.TryWrite(file, 0U, Pattern(1024U, 0xA1U)) == 0U, "first chunk");
+        {
+            FileSizeLimit full(kZeldaSaveSize);
+            Require(f.TryWrite(file, 5000U, Pattern(1024U, 0xB2U)) != 0U, "write past the limit succeeded");
+        }
+        f.TryClose(file);
+        Require(ReadAll(save / "save00.bin") == zelda.Save00,
+                "Close committed a transaction whose Write failed (partial save installed)");
+        Require(ListTree(save) == kZeldaFiles, "failed transaction left journal files inside the save");
+        const auto aside = DirectoriesStartingWith(backups, "incompleto-");
+        Require(aside.size() == 1U && fs::exists(aside[0] / "save00.bin.triaevum-tmp"),
+                "failed transaction was not kept in incompleto-*");
+        // A transação seguinte começa do save antigo, não do temporário com erro.
+        file = f.OpenFile(archive, "save00.bin", 3U);
+        Require(f.Read(file, 0U, kZeldaSaveSize) == zelda.Save00, "new transaction saw the failed writes");
+        const auto fresh = Pattern(kZeldaSaveSize, 0x2EU);
+        f.Write(file, 0U, fresh);
+        f.Close(file);
+        Require(ReadAll(save / "save00.bin") == fresh, "transaction after a failed one did not commit");
+        // (b) Write falha e o jogo chama Flush: falha, nada instalado.
+        file = f.OpenFile(archive, "save03.bin", 3U);
+        f.Write(file, 0U, Pattern(1024U, 0x31U));
+        {
+            FileSizeLimit full(kZeldaSaveSize);
+            Require(f.TryWrite(file, 5000U, Pattern(1024U, 0x32U)) != 0U, "write past the limit succeeded");
+        }
+        Require(f.TryFlush(file) != 0U, "Flush of a failed transaction answered success");
+        Require(ReadAll(save / "save03.bin") == zelda.Save03, "Flush committed a failed transaction");
+        f.TryClose(file);
+        Require(ReadAll(save / "save03.bin") == zelda.Save03, "Close after Flush committed a failed transaction");
+        // (c) SetSize falha e o jogo chama ControlArchive.
+        file = f.OpenFile(archive, "save04.bin", 3U);
+        f.Write(file, 0U, Pattern(512U, 0x41U));
+        {
+            FileSizeLimit full(kZeldaSaveSize);
+            Require(f.TrySetSize(file, 2U * kZeldaSaveSize) != 0U, "SetSize past the limit succeeded");
+        }
+        Require(f.TryCommit(archive) != 0U, "ControlArchive with a failed transaction answered success");
+        Require(ReadAll(save / "save04.bin") == zelda.Save04, "ControlArchive committed a failed transaction");
+        f.TryClose(file);
+        Require(ReadAll(save / "save04.bin") == zelda.Save04, "Close after ControlArchive committed it");
+        Require(ListTree(save) == kZeldaFiles, "journal files left inside the save");
+    }
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+#endif
+}
+
+// S3: commit por handle. Close/Flush de um handle que não escreveu (só
+// leitura) não confirma a escrita pela metade de outro handle; a transação de
+// um arquivo é confirmada quando o último handle com escrita pendente fecha
+// ou dá Flush (svcCloseHandle sem FSFILE_Close conta como Close), ou no
+// ControlArchive (commit do archive, como no 3DS).
+void TestReadOnlyCloseDoesNotCommit() {
+    SetMasterQuestUnlockOptionForTesting(false);
+    const auto root = FreshRoot("handle_leitura");
+    const auto save = root / "savedata";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    const auto fresh = Pattern(kZeldaSaveSize, 0x60U);
+    const std::vector<uint8_t> firstHalf(fresh.begin(), fresh.begin() + 2048);
+    const std::vector<uint8_t> secondHalf(fresh.begin() + 2048, fresh.end());
+    const auto a = Pattern(kZeldaSaveSize, 0x70U), b = Pattern(1024U, 0x71U);
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        const uint32_t writer = f.OpenFile(archive, "save00.bin", 3U);
+        f.Write(writer, 0U, firstHalf);
+        const uint32_t reader = f.OpenFile(archive, "save00.bin", 1U);
+        Require(f.Read(reader, 0U, 2048U) == firstHalf, "reader did not see the pending write");
+        f.Flush(reader);
+        f.Close(reader);
+        Require(ReadAll(save / "save00.bin") == zelda.Save00,
+                "Flush/Close of a read-only handle committed another handle's partial write");
+        // Dois handles escrevendo: só o último a fechar confirma.
+        const uint32_t other = f.OpenFile(archive, "save00.bin", 3U);
+        f.Write(other, 2048U, secondHalf);
+        f.Close(other);
+        Require(ReadAll(save / "save00.bin") == zelda.Save00,
+                "Close of one writer committed while another writer was still pending");
+        f.Close(writer);
+        Require(ReadAll(save / "save00.bin") == fresh, "last writer's Close did not commit");
+        // svcCloseHandle sem FSFILE_Close: conta como Close do handle.
+        const uint32_t closer = f.OpenFile(archive, "save03.bin", 3U);
+        f.Write(closer, 0U, a);
+        f.SvcClose(closer);
+        Require(ReadAll(save / "save03.bin") == a, "svcCloseHandle of the writer did not commit");
+        // Flush confirma; escrever de novo deixa o handle pendente outra vez.
+        const uint32_t again = f.OpenFile(archive, "save04.bin", 3U);
+        f.Write(again, 0U, a);
+        f.Flush(again);
+        Require(ReadAll(save / "save04.bin") == a, "writer Flush did not commit");
+        f.Write(again, 0U, b);
+        const uint32_t peek = f.OpenFile(archive, "save04.bin", 1U);
+        f.Close(peek);
+        Require(ReadAll(save / "save04.bin") == a, "read-only Close committed a partial write after a Flush");
+        // Queda com o handle `again` pendente.
+    }
+    Require(ReadAll(save / "save04.bin") == a, "crash left save04.bin half written");
+    {
+        DirFs f(save);
+        f.OpenArchive();
+        Require(ListTree(save) == kZeldaFiles, "journal files left after the crash");
+        Require(DirectoriesStartingWith(root / "savedata-backups", "incompleto-").size() == 1U,
+                "pending write was not kept in incompleto-*");
+    }
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
+// S4: a rotação ordena as gerações pela sequência de criação, não pelo nome
+// com a data (o relógio do console pode voltar), e a geração recém-criada
+// nunca é apagada pelo próprio prune.
+void TestBackupPruneUsesSequence() {
+    SetMasterQuestUnlockOptionForTesting(false);
+    const auto root = FreshRoot("relogio");
+    const auto save = root / "savedata";
+    const auto backups = root / "savedata-backups";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    // 20 gerações antigas com data no futuro (relógio adiantado na época).
+    // Sementes 0x80+ para não coincidir com o save do fixture (0x11...).
+    for (int index = 0; index < 20; ++index) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "20270101-0000%02d", index);
+        WriteAll(backups / name / "save00.bin", Pattern(kZeldaSaveSize, static_cast<uint8_t>(0x80 + index)));
+    }
+    const auto first = Pattern(kZeldaSaveSize, 0xD0U), second = Pattern(kZeldaSaveSize, 0xD1U);
+    const auto holding = [&](const std::vector<uint8_t>& bytes) {
+        std::vector<fs::path> found;
+        for (const auto& generation : Generations(backups))
+            if (ReadAll(generation / "save00.bin") == bytes) found.push_back(generation);
+        return found;
+    };
+    for (const auto* bytes : {&first, &second}) {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        const uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
+        f.Write(file, 0U, *bytes);
+        f.Close(file);
+        Require(Generations(backups).size() == kCtrSaveBackupGenerations, "generation count after prune");
+        Require(holding(bytes == &first ? zelda.Save00 : first).size() == 1U,
+                "the backup made by this run was pruned (ordered by the date in the name)");
+    }
+    // A geração da primeira execução (mais nova que as 2027 pela sequência)
+    // sobrevive à segunda; quem sai são as 2027 mais antigas.
+    Require(holding(zelda.Save00).size() == 1U, "older run's generation pruned before the 2027 ones");
+    Require(!fs::exists(backups / "20270101-000000") && !fs::exists(backups / "20270101-000001") &&
+                fs::exists(backups / "20270101-000002"),
+            "prune did not remove the oldest generations by sequence");
+    // Direto: a geração protegida nunca sai, mesmo sendo a mais antiga.
+    const auto direct = FreshRoot("relogio_direto");
+    for (int index = 0; index < 3; ++index) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "20260101-00000%d", index);
+        WriteAll(direct / name / "save00.bin", {static_cast<uint8_t>(index)});
+    }
+    PruneCtrSaveBackups(direct, 1U, direct / "20260101-000000");
+    Require(fs::exists(direct / "20260101-000000"), "protected generation was pruned");
+    fs::remove_all(direct);
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
+// S1: a cópia de backup só conta depois de conferida (tamanho e checksum
+// contra a origem). Cópia truncada (SD cheio) ou estragada é descartada e não
+// aparece na geração com o nome do arquivo (o prune contaria como cópia).
+void TestBackupIsVerified() {
+    SetMasterQuestUnlockOptionForTesting(false);
+    const auto root = FreshRoot("backup_conferido");
+    const auto save = root / "savedata";
+    const auto backups = root / "savedata-backups";
+    const ZeldaSave zelda;
+#if defined(__linux__)
+    zelda.Write(save);
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        const uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
+        {
+            FileSizeLimit full(4096U);
+            Require(f.TryWrite(file, 0U, Pattern(1024U, 0xEEU)) != 0U, "write with a full SD succeeded");
+        }
+        for (const auto& copy : BackupFiles(backups))
+            Require(copy.filename() == "save00.bin" && ReadAll(copy) == zelda.Save00,
+                    "truncated backup copy kept in the generation (" + copy.string() + ")");
+        Require(ListTree(save) == kZeldaFiles, "partial journal copy left inside the save");
+        f.TryClose(file);
+        Require(ReadAll(save / "save00.bin") == zelda.Save00, "save changed after the failed write");
+    }
+    fs::remove_all(root);
+    fs::create_directories(root);
+#endif
+    // SD que grava errado (mesmo tamanho, um byte trocado).
+    zelda.Write(save);
+    SetCtrSaveCopyFaultForTesting([&](const fs::path& destination) {
+        // Só a cópia de backup (a cópia de trabalho do diário fica no save).
+        if (!CtrPathWithin(backups, destination) || !destination.filename().string().starts_with("save03.bin"))
+            return;
+        std::fstream stream(destination, std::ios::binary | std::ios::in | std::ios::out);
+        stream.seekp(100);
+        stream.put('\x5A');
+    });
+    const auto fresh = Pattern(kZeldaSaveSize, 0x3EU);
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        const uint32_t file = f.OpenFile(archive, "save03.bin", 3U);
+        f.Write(file, 0U, fresh);
+        f.Close(file);
+    }
+    SetCtrSaveCopyFaultForTesting(nullptr);
+    Require(ReadAll(save / "save03.bin") == fresh, "write did not commit after a failed backup");
+    for (const auto& copy : BackupFiles(backups))
+        Require(ReadAll(copy) == zelda.Save03, "corrupted backup copy kept (" + copy.string() + ")");
+#if defined(__linux__)
+    // Queda REAL no meio da cópia de backup (cópia cortada em 100 bytes e
+    // SIGKILL): a sobra nunca tem o nome do arquivo (o prune contaria como
+    // cópia); só <nome>.triaevum-tmp, e o save fica intacto.
+    fs::remove_all(root);
+    zelda.Write(save);
+    const pid_t child = fork();
+    if (child == 0) {
+        SetCtrSaveCopyFaultForTesting([&](const fs::path& destination) {
+            if (!CtrPathWithin(backups, destination)) return;
+            fs::resize_file(destination, 100U);
+            ::kill(::getpid(), SIGKILL);
+        });
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        const uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
+        f.Write(file, 0U, fresh);
+        std::_Exit(0);
+    }
+    int status = 0;
+    waitpid(child, &status, 0);
+    Require(WIFSIGNALED(status), "backup crash child did not die mid-copy");
+    const auto leftovers = BackupFiles(backups);
+    Require(!leftovers.empty(), "crash fixture left no partial backup copy");
+    for (const auto& copy : leftovers)
+        Require(copy.filename().string().ends_with(".triaevum-tmp"),
+                "interrupted backup copy has the file's own name (" + copy.string() + ")");
+    Require(ReadAll(save / "save00.bin") == zelda.Save00, "save changed by the crash during the backup");
+#endif
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
+// S8: a recuperação (.triaevum-new / .triaevum-old) roda no primeiro acesso
+// da execução, não só no OpenArchive: uma execução que começa pelo restore de
+// savestate ou pelo GetFormatInfo acha o save trocado.
+void TestRecoveryBeforeFirstAccess() {
+    SetMasterQuestUnlockOptionForTesting(false);
+    const auto root = FreshRoot("recupera_estado");
+    const auto save = root / "savedata";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    const auto committed = Pattern(kZeldaSaveSize, 0x8CU);
+    nlohmann::json snapshot;
+    uint32_t file = 0U;
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        file = f.OpenFile(archive, "save00.bin", 1U);
+        snapshot = f.Host.CaptureState();
+    }
+    // Queda no meio da troca: o antigo já saiu, o novo está completo.
+    fs::remove(save / "save00.bin");
+    WriteAll(save / "save00.bin.triaevum-new", committed);
+    {
+        DirFs f(save);
+        std::string error;
+        const bool restored = f.Host.RestoreState(snapshot, f.Process, &error);
+        Require(restored, "restore: " + error);
+        f.Call(file, {0x080200C2U, 0U, 0U, kZeldaSaveSize, (kZeldaSaveSize << 4U) | 0xCU, DirFs::Data});
+        Require(f.Word(1) == 0U && f.Word(2) == kZeldaSaveSize,
+                "Read after a savestate restore did not find the interrupted commit");
+        Require(ReadAll(save / "save00.bin") == committed && ListTree(save) == kZeldaFiles,
+                "restore did not finish the interrupted commit");
+    }
+    // Primeiro acesso pelo GetFormatInfo (Mario 3D Land pergunta antes de abrir).
+    fs::remove(save / "save03.bin");
+    WriteAll(save / "save03.bin.triaevum-new", committed);
+    {
+        DirFs f(save);
+        Require(f.GetFormatInfo() == 0U && f.Word(4) == 4U, "GetFormatInfo before recovery");
+        Require(ReadAll(save / "save03.bin") == committed && ListTree(save) == kZeldaFiles,
+                "GetFormatInfo did not finish the interrupted commit");
+    }
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
+// Horizon: o rename não sobrescreve, então a troca precisa tirar o destino do
+// lugar. Se o rename do novo falha depois disso, o save não pode sumir: o
+// destino vira <nome>.triaevum-old e volta se o rename falhar; a recuperação
+// conhece .triaevum-old; e escrita nova na mesma execução não estraga o
+// .triaevum-new bom.
+void TestRenameFailureNeverLosesSave() {
+    SetMasterQuestUnlockOptionForTesting(false);
+    SetCtrSaveRenameFailsOnExistingForTesting(true);
+    const auto root = FreshRoot("rename_falha");
+    const auto save = root / "savedata";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    const auto fresh = Pattern(kZeldaSaveSize, 0x9AU), more = Pattern(512U, 0x9BU);
+    bool failInstall = true, failRollback = false;
+    SetCtrSaveRenameFaultForTesting([&](const fs::path& from, const fs::path& to) {
+        const auto name = from.filename().string();
+        if (failInstall && name.ends_with(".triaevum-new") && to.filename() == "save00.bin") return true;
+        if (failRollback && name.ends_with(".triaevum-old") && to.filename() == "save00.bin") return true;
+        return false;
+    });
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
+        f.Write(file, 0U, fresh);
+        Require(f.TryClose(file) != 0U, "Close answered success with the commit rename failing");
+        Require(fs::is_regular_file(save / "save00.bin"),
+                "save00.bin vanished after a failed commit rename (Horizon)");
+        Require(ReadAll(save / "save00.bin.triaevum-new") == fresh, "committed data lost");
+        // Na mesma execução o jogo vê o que confirmou e não estraga o .new.
+        file = f.OpenFile(archive, "save00.bin", 3U);
+        Require(f.Read(file, 0U, kZeldaSaveSize) == fresh, "Read after a failed install");
+        Require(f.TryWrite(file, 0U, more) != 0U || ReadAll(save / "save00.bin.triaevum-new") == fresh,
+                "write after a failed install clobbered the committed .triaevum-new");
+        failInstall = false;  // o SD voltou: a próxima escrita termina a troca
+        f.Write(file, 0U, more);
+        f.Close(file);
+        auto expected = fresh;
+        std::copy(more.begin(), more.end(), expected.begin());
+        Require(ReadAll(save / "save00.bin") == expected, "write after recovering the install");
+        Require(ListTree(save) == kZeldaFiles, "journal leftovers after recovering the install");
+    }
+    // Rename do novo e a volta do antigo falham: o save sai do lugar durante
+    // a execução, mas a próxima execução instala o .triaevum-new.
+    failInstall = failRollback = true;
+    const auto last = Pattern(kZeldaSaveSize, 0x9CU);
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        const uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
+        f.Write(file, 0U, last);
+        f.TryClose(file);
+        Require(ReadAll(save / "save00.bin.triaevum-new") == last, "committed data lost (double failure)");
+    }
+    failInstall = failRollback = false;
+    {
+        DirFs f(save);
+        f.OpenArchive();
+        Require(ReadAll(save / "save00.bin") == last && ListTree(save) == kZeldaFiles,
+                "recovery after a double rename failure");
+    }
+    // Só sobrou o .triaevum-old (destino tirado do lugar, sem .new): volta.
+    fs::rename(save / "save04.bin", save / "save04.bin.triaevum-old");
+    {
+        DirFs f(save);
+        f.OpenArchive();
+        Require(ReadAll(save / "save04.bin") == zelda.Save04 && ListTree(save) == kZeldaFiles,
+                "recovery did not put .triaevum-old back");
+    }
+    SetCtrSaveRenameFaultForTesting(nullptr);
+    SetCtrSaveRenameFailsOnExistingForTesting(false);
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
 int main(int argc, char** argv) {
     // Sem argumento: todos. Com nomes: só esses (para ver um teste falhar sozinho).
     const std::vector<std::pair<std::string_view, void (*)()>> tests{
@@ -1367,6 +1816,12 @@ int main(int argc, char** argv) {
         {"TestHorizonRenameCommit", TestHorizonRenameCommit},
         {"TestBackupPruneKeepsOnlyCopies", TestBackupPruneKeepsOnlyCopies},
         {"TestTitleSaveLayout", TestTitleSaveLayout},
+        {"TestFailedWriteIsNotCommitted", TestFailedWriteIsNotCommitted},
+        {"TestReadOnlyCloseDoesNotCommit", TestReadOnlyCloseDoesNotCommit},
+        {"TestBackupPruneUsesSequence", TestBackupPruneUsesSequence},
+        {"TestBackupIsVerified", TestBackupIsVerified},
+        {"TestRecoveryBeforeFirstAccess", TestRecoveryBeforeFirstAccess},
+        {"TestRenameFailureNeverLosesSave", TestRenameFailureNeverLosesSave},
     };
     for (const auto& [name, test] : tests) {
         bool selected = argc <= 1;

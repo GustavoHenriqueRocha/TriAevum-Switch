@@ -94,9 +94,22 @@ extdata e o módulo Forge não mudam.
         no Windows basta o fechamento do stream);
      2. `tmp -> <nome>.triaevum-new` (o destino não existe, o que vale no Horizon);
      3. `new -> <nome>`. Quando o destino existe, o rename dá EEXIST (Horizon, simulado no PC por
-        `SetCtrSaveRenameFailsOnExistingForTesting`), e então a troca vira remove + rename.
-   - **Recuperação** no primeiro OpenArchive(SaveData) da execução:
-     - um `.triaevum-new` que sobrou está completo por construção e é instalado;
+        `SetCtrSaveRenameFailsOnExistingForTesting`). Então o destino vira `<nome>.triaevum-old`,
+        o novo entra e só depois o `.old` sai; se o rename do novo falha, o `.old` volta para o
+        lugar (rodada 2; antes era remove + rename, e o save sumia se o segundo rename falhasse).
+   - **Regra de commit (rodada 2):** a transação de um arquivo é confirmada quando o **último
+     handle que escreveu nela** dá Flush ou fecha (FSFILE_Close, ou svcCloseHandle sem
+     FSFILE_Close), ou no **ControlArchive** (commit do archive inteiro). Handle só de leitura
+     nunca confirma. Flush de um escritor com outro escritor ainda pendente não confirma (os
+     dados ficam no tmp até o último fechar ou até o ControlArchive). Write ou SetSize que falha
+     marca a transação como falha: Flush/Close/ControlArchive respondem falha, o tmp vai para
+     `incompleto-*` e a transação seguinte parte do save antigo.
+   - **Recuperação** no primeiro acesso ao save da execução (o diário é criado no primeiro
+     OpenArchive, OpenFile, E/S, GetFormatInfo ou restore de savestate, e a recuperação roda na
+     criação; antes era só no OpenArchive):
+     - um `.triaevum-new` que sobrou está completo por construção e é instalado (se não der, a
+       E/S lê dele e a próxima escrita tenta instalar antes de começar);
+     - um `.triaevum-old` volta para o lugar se o arquivo sumiu, ou sai se o arquivo está lá;
      - um `.triaevum-tmp` que sobrou não foi confirmado: o save continua o anterior, e o tmp vai
        para `<save>-backups/incompleto-<data>/` (não é apagado).
    - Sufixos distintos (`.triaevum-tmp`/`.triaevum-new`, em vez de `.tmp`) evitam colisão com
@@ -106,8 +119,14 @@ extdata e o módulo Forge não mudam.
      vai para `<save>-backups/<AAAAMMDD-HHMMSS>/` (no Zelda: `sdmc:/switch/oot3dre/savedata-backups/`).
    - Quando a mesma execução apaga um arquivo depois de escrever nele, a versão atual vai junto,
      como `<nome>.apagado`.
-   - Ficam 20 gerações, mas uma geração que tem a única cópia de algum arquivo nunca é apagada.
-     `format-*` e `incompleto-*` não entram na rotação.
+   - Ficam 20 gerações, mas uma geração que tem a única cópia de algum arquivo nunca é apagada,
+     nem a recém-criada. `format-*` e `incompleto-*` não entram na rotação.
+   - Rodada 2: a ordem das gerações vem de `<save>-backups/.triaevum-geracoes` (uma linha por
+     geração, na ordem de criação); as que não estão nele (anteriores) vêm antes, por nome. A
+     data no nome não decide nada (o relógio do console pode voltar).
+   - Rodada 2: cada cópia é gravada como `<nome>.triaevum-tmp`, relida e conferida contra a
+     origem (tamanho + FNV-1a 64) e só então renomeada. Cópia que não confere é apagada (o
+     original continua intacto) e não conta; queda no meio deixa só o `.triaevum-tmp`.
    - Se o backup falha (SD cheio), a escrita segue, porque a troca atômica continua protegendo o
      save, e o log mostra `TRIAEVUM_SAVE_BACKUP_FAILED`. Se o backup antes de um DeleteFile
      falha, o DeleteFile é recusado.
@@ -151,12 +170,45 @@ Abrir e ler o save não cria nada. A primeira escrita de uma execução cria
 `sdmc:/switch/oot3dre/savedata-backups/<data>/` com a versão anterior dos arquivos escritos.
 Nenhum arquivo novo fica dentro de `savedata/`.
 
+### Rodada 2: buracos achados na verificação adversarial
+
+O harness (cenários S1..S9, fora do repo) achou formas de perder dado que os testes da rodada 1
+não cobriam. Cada uma virou teste em `oot3d_native_a32_ctr_fs_tests` que falhou no código da
+rodada 1 antes da correção:
+
+| Cenário | Problema | Teste |
+|---|---|---|
+| S2 | Write que falha (SD cheio) seguido de Close instalava o tmp meio escrito | `TestFailedWriteIsNotCommitted` |
+| S3 | Close/Flush de um handle só de leitura confirmava a escrita pela metade de outro | `TestReadOnlyCloseDoesNotCommit` |
+| S4 | relógio para trás: o prune ordenava pelo nome e apagava a geração recém-criada | `TestBackupPruneUsesSequence` |
+| S1 | backup truncado (SD cheio) ou estragado ficava com o nome do arquivo e contava como cópia | `TestBackupIsVerified` |
+| S8 | troca interrompida + execução que começa por savestate: o Read não achava o save | `TestRecoveryBeforeFirstAccess` |
+| rename | Horizon: remove do destino e rename do novo falhando = save sumido | `TestRenameFailureNeverLosesSave` |
+
+**Referência para a regra de commit (S3).** O Azahar não serve de modelo aqui: o `DiskFile::Write`
+grava direto (`src/core/file_sys/disk_archive.cpp`) e o `ArchiveBackend::Control` é stub que só
+loga e devolve sucesso (`src/core/file_sys/archive_backend.h`, commit e9b14fd1 do repo local).
+No 3DS, o 3dbrew descreve o `FSUSER_ControlArchive` ação 0 como commit do save data; isso não foi
+conferido em hardware. A regra escolhida é a que não perde dado: o ControlArchive confirma tudo
+(como o commit do 3DS) e, sem ele, só o último escritor confirma; o que não for confirmado vai
+para `incompleto-*`.
+
+O identificador do escritor fica no objeto do handle (`SaveJournalWriter`) e vai para o savestate
+(`save_journal_writer`); no restore, escritores que não existem no estado restaurado são
+esquecidos (`RetainWriters`), para não segurarem a confirmação para sempre.
+
 ## Alternativas rejeitadas
 
 - **"Não introduzir escrita atômica por rename"** (conclusão da pesquisa da manhã, por causa do
   EEXIST): rejeitada. O EEXIST só impede o rename por cima, e o protocolo em dois passos (tmp ->
   new, e new -> nome com remove + rename) mais a recuperação cobre a janela entre o remove e o
   rename.
+- **Commit por caminho (qualquer Close/Flush do arquivo confirma):** era a rodada 1; confirma a
+  escrita pela metade de outro handle (S3).
+- **Ordenar as gerações por mtime:** o mtime vem do mesmo relógio que o nome; com o relógio para
+  trás erra do mesmo jeito. O arquivo de ordem não depende do relógio.
+- **Arquivo de sequência dentro de cada geração:** misturaria metadado com as cópias que o usuário
+  restaura à mão; o arquivo de ordem fica na raiz de `<save>-backups`.
 - **Escrever no `.tmp` só no Flush ou Close, mantendo os pedaços em memória:** perde tudo se o
   processo morrer antes. O tmp em disco acompanha cada Write, e a recuperação o guarda em
   `incompleto-*`.
@@ -193,7 +245,8 @@ Nenhum arquivo novo fica dentro de `savedata/`.
   jogo pode reformatar. Se isso acontecer, o save vai para `format-*` (sem perda), mas o jogo vê
   um save vazio. Comparar com a ordem e os valores que o SM3DL usa quando chegar ao save.
 - Um jogo que escreve e nunca chama Flush, Close nem ControlArchive perde as escritas da sessão
-  (elas ficam em `incompleto-*`). É a semântica do 3DS, mas não foi verificada com um título real
+  (elas ficam em `incompleto-*`). Idem para dois handles escrevendo no mesmo arquivo em que um
+  nunca fecha: o Flush do outro não confirma. É a semântica do 3DS, mas não foi verificada com um título real
   além da sequência documentada do OoT3D.
 - Extdata (Play Coins, banco de Miis) continua write-through e sem backup.
 - O OpenArchive(SaveData) continua criando a pasta e respondendo sucesso (legado do OoT3D). A
@@ -205,3 +258,6 @@ Nenhum arquivo novo fica dentro de `savedata/`.
   medido no Switch.
 - Restaurar um backup é manual (copiar de `savedata-backups/<data>/` para `savedata/`). Não há
   menu.
+- Fora do escopo da rodada 2 (escopo fechado em "não perder save"): `--save-data` com a pasta do
+  Zelda escrita em outra caixa (`sdmc:/SWITCH/OOT3DRE/savedata`) não é redirecionado para outro
+  título (o FAT ignora caixa; S9 do harness). Só acontece se alguém passar esse argumento à mão.

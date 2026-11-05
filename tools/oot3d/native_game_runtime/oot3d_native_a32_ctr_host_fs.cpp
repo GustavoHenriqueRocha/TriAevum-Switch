@@ -50,7 +50,13 @@ bool ReadExtDataLowPath(NativeA32Memory& memory, uint32_t type, uint32_t size, u
 
 CtrSaveJournal* NativeA32CtrHostServices::SaveJournal() {
     if (mConfig.Filesystem != nullptr || mConfig.SaveDataDirectory.empty()) return nullptr;
-    if (!mSaveJournal) mSaveJournal = std::make_shared<CtrSaveJournal>(mConfig.SaveDataDirectory);
+    if (!mSaveJournal) {
+        mSaveJournal = std::make_shared<CtrSaveJournal>(mConfig.SaveDataDirectory);
+        // Primeiro acesso ao save da execução (OpenArchive, OpenFile, E/S,
+        // GetFormatInfo, restore de savestate): termina troca interrompida
+        // antes de qualquer leitura.
+        mSaveJournal->RecoverOnce();
+    }
     return mSaveJournal.get();
 }
 
@@ -168,7 +174,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
     // Arquivo do save no backend de pasta (NRO do Switch e PC): a E/S passa
     // pelo diário (oot3d_native_a32_ctr_save_safety.h). A primeira escrita
     // copia o arquivo para <nome>.triaevum-tmp, que recebe as escritas e as
-    // leituras; Flush/Close/ControlArchive confirmam. Extdata fica direto.
+    // leituras. Confirma o Flush/Close do último handle que escreveu, ou o
+    // ControlArchive; handle só de leitura não confirma; escrita que falha
+    // impede a confirmação. Extdata fica direto.
     CtrSaveJournal* journal = !romfs && !file.FileBackend && *sessionType == "client_session:file:savedata"
                                   ? SaveJournal() : nullptr;
     if (journal != nullptr && !journal->Covers(file.FilePath)) journal = nullptr;
@@ -273,7 +281,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
                 success = file.FileBackend->Write(offset, bytes, &written) && written == length;
                 if (success) file.FileSize = file.FileBackend->Size();
             } else {
-                if (journal != nullptr && !journal->BeginWrite(file.FilePath))
+                if (journal != nullptr && !journal->BeginWrite(file.FilePath, file.SaveJournalWriter))
                     return fail(kFsBackendFailure, "save-journal-begin-failed", offset, length);
                 const auto target = diskPath();
                 std::fstream stream(target, std::ios::binary | std::ios::in | std::ios::out);
@@ -290,6 +298,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
                 const auto size = std::filesystem::file_size(target, error);
                 success = success && !error;
                 if (success) { file.FileSize = size; written = length; }
+                // SD cheio/erro no meio: a transação não pode ser confirmada.
+                if (!success && journal != nullptr) journal->MarkFailed(file.FilePath);
             }
             if (!success) return fail(kFsBackendFailure, "backend-write-failed", offset, length);
             return reply(kFileWriteResponse, "Write", written, descriptor, address);
@@ -349,10 +359,11 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
             return fail(kFsOutOfRange, "size-overflow", 0U, size);
         bool resized = false;
         if (file.FileBackend) resized = file.FileBackend->Resize(size);
-        else if (journal == nullptr || journal->BeginWrite(file.FilePath)) {
+        else if (journal == nullptr || journal->BeginWrite(file.FilePath, file.SaveJournalWriter)) {
             std::error_code error;
             std::filesystem::resize_file(diskPath(), size, error);
             resized = !error;
+            if (!resized && journal != nullptr) journal->MarkFailed(file.FilePath);
         }
         if (!resized) return fail(kFsBackendFailure, "backend-resize-failed", 0U, size);
         file.FileSize = size;
@@ -361,14 +372,14 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
     if (event.Detail == kFileFlushRequest) {
         // RootedFilesystemBackendV1::Write flushes before returning success.
         // Backend de pasta: confirma a transação do save (troca atômica).
-        if (journal != nullptr && !journal->Commit(file.FilePath))
+        if (journal != nullptr && !journal->Flush(file.FilePath, file.SaveJournalWriter))
             return fail(kFsBackendFailure, "save-commit-failed");
         return reply(kFileFlushResponse, "Flush");
     }
     if (event.Detail == kFileCloseRequest) {
         // FSFILE_Close releases the backing stream. svcCloseHandle separately
         // releases the session handle; keep it valid until that SVC arrives.
-        const bool committed = journal == nullptr || journal->Commit(file.FilePath);
+        const bool committed = journal == nullptr || journal->Close(file.FilePath, file.SaveJournalWriter);
         file.FileBackend.reset();
         file.RomFsBacking.reset();
         file.FileClosed = true;
@@ -802,9 +813,15 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                     }
                 } else {
                     const auto filePath = archive->Root / *relativePath;
+                    // Diário antes de olhar o disco: recupera troca
+                    // interrompida e enxerga o .triaevum-new que ainda não
+                    // entrou (nunca recria o arquivo vazio por cima dele).
+                    auto* journal = archive->Id == kFsSaveDataArchiveId ? SaveJournal() : nullptr;
+                    if (journal != nullptr && !journal->Covers(filePath)) journal = nullptr;
+                    const auto diskPath = journal != nullptr ? journal->ActivePath(filePath) : filePath;
                     std::error_code fileError;
                     bool exists = std::filesystem::is_regular_file(
-                        filePath, fileError);
+                        diskPath, fileError);
                     if (!exists &&
                         fileError ==
                             std::errc::no_such_file_or_directory) {
@@ -822,11 +839,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                         file->Type = "client_session:file:savedata";
                         file->FilePath = filePath;
                         file->FileOffset = 0;
-                        auto* journal = archive->Id == kFsSaveDataArchiveId ? SaveJournal() : nullptr;
-                        file->FileSize = std::filesystem::file_size(
-                            journal != nullptr && journal->Covers(filePath) ? journal->ActivePath(filePath)
-                                                                            : filePath,
-                            fileError);
+                        file->FileSize = std::filesystem::file_size(diskPath, fileError);
                         file->FileOpenMode = openMode;
                         if (!fileError) {
                             fileSession = CreateHandle(file);

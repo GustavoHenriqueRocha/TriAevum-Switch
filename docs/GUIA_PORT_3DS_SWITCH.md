@@ -1068,16 +1068,22 @@ O NRO usa o backend de pasta do PC sobre o devoptab da libnx (`SaveDataDirectory
 `docs/pesquisas/2026-11-05-saves-seguros.md`):
 
 - **Transação por arquivo:** a primeira escrita copia `<nome>` para `<nome>.triaevum-tmp`; Read,
-  Write, GetSize e SetSize usam a cópia; Flush, Close e ControlArchive confirmam. É a semântica do
-  save do 3DS (nada é durável antes do commit), não write-through.
+  Write, GetSize e SetSize usam a cópia. Confirma o Flush/Close do **último handle que escreveu**
+  (handle só de leitura nunca confirma) ou o ControlArchive; Write/SetSize que falha (SD cheio)
+  impede a confirmação. É a semântica do save do 3DS (nada é durável antes do commit), não
+  write-through.
 - **Troca no Horizon:** `rename` por cima de arquivo existente dá EEXIST. Confirmar em dois passos:
-  `tmp -> <nome>.triaevum-new` (destino não existe) e depois `new -> <nome>` com fallback
-  remove + rename. A recuperação no primeiro OpenArchive instala um `.triaevum-new` que sobrou
-  (está completo por construção) e tira de dentro do save um `.triaevum-tmp` sem confirmação
-  (vai para `<save>-backups/incompleto-*`).
+  `tmp -> <nome>.triaevum-new` (destino não existe) e depois `new -> <nome>`; no EEXIST, o
+  destino vira `<nome>.triaevum-old`, o novo entra e só então o `.old` sai (se o rename do novo
+  falha, o `.old` volta). Nunca remover o destino antes do novo entrar. A recuperação no primeiro
+  acesso ao save (inclusive restore de savestate) instala um `.triaevum-new` que sobrou, devolve
+  um `.triaevum-old` órfão e tira de dentro do save um `.triaevum-tmp` sem confirmação (vai para
+  `<save>-backups/incompleto-*`).
 - **Backups:** antes da primeira escrita (ou do DeleteFile) de cada arquivo na execução,
   `<save>-backups/<AAAAMMDD-HHMMSS>/`; ficam 20 gerações, mas nunca some a última cópia de um
-  arquivo. FormatSaveData move a pasta para `<save>-backups/format-*` em vez de `remove_all`, e
+  arquivo nem a geração recém-criada. A ordem vem de um arquivo de ordem de criação, não da data
+  no nome (relógio do console volta). Cópia gravada como `.triaevum-tmp`, conferida (tamanho +
+  checksum) e só então renomeada: SD cheio não deixa backup truncado contando como cópia. FormatSaveData move a pasta para `<save>-backups/format-*` em vez de `remove_all`, e
   save legado (arquivos sem `.format`) recebe formato sintetizado em vez de NotFormatted.
 - **Caminho `sdmc:/` não é absoluto para o `std::filesystem`:** nada de `absolute`, `canonical` ou
   `weakly_canonical` no FS do host (concatenam o cwd); contenção lexical (`CtrArchivePathContained`).
