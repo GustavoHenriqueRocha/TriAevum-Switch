@@ -586,6 +586,18 @@ def _linear_register_writes(item: DecodedInstruction) -> set[int] | None:
         if raw & (1 << 21) or not raw & (1 << 24):
             writes.add((raw >> 16) & 15)
         return writes
+    if (raw & 0x0E000090) == 0x00000090 and raw & 0x60:
+        # LDRH/LDRSB/LDRSH/LDRD/STRH/STRD (Super Mario 3D Land loads the
+        # callee's argument with LDRH between "add lr, pc, #imm" and "mov pc").
+        if raw & (1 << 20):
+            writes = {(raw >> 12) & 15}
+        elif (raw & 0x60) == 0x40:  # LDRD
+            writes = {(raw >> 12) & 15, ((raw >> 12) & 15) + 1}
+        else:
+            writes = set()
+        if raw & (1 << 21) or not raw & (1 << 24):
+            writes.add((raw >> 16) & 15)
+        return writes
     if item.kind == "block_memory":
         writes = {reg for reg in range(16) if raw & (1 << reg)} if raw & (1 << 20) else set()
         if raw & (1 << 21):

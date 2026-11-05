@@ -736,8 +736,12 @@ def build_program(
     executable_size: int | None = None,
     observed_sites: Iterable[int] = (),
     extra_roots: Iterable[int] = (),
+    seed_roots: Iterable[int] = (),
 ) -> AotProgram:
     extra_roots = frozenset(extra_roots)
+    # Seed roots (callbacks built with "add rD, pc, rT") also start the flow,
+    # since nothing else may reach them; never where the flow found a literal.
+    seed_roots = frozenset(seed_roots)
     if executable_size is None:
         executable_size = len(code)
     if executable_size <= 0 or executable_size > len(code):
@@ -753,6 +757,12 @@ def build_program(
         (function.entry for function in callable_functions),
         flow_slots,
     )
+    seed_roots = frozenset(
+        seed for seed in seed_roots
+        if seed in flow.decoded_reachable
+        or (seed not in literal_data and seed not in flow.unknown_stops)
+    )
+    missing_seeds = seed_roots - flow.decoded_reachable
     # "Not an independent callable" does not mean "not executable". Audited
     # switch cases retain the caller's registers and may use relative tables
     # that the pointer-root pass cannot recognize (notably movie codecs).
@@ -766,10 +776,11 @@ def build_program(
         }
     internal_cases -= flow.decoded_reachable | flow.unknown_stops
     internal_cases &= flow_slots - literal_data
-    if internal_cases:
+    if internal_cases or missing_seeds:
         flow, literal_data, literal_sources, extra_iterations = pinned._address_aware_flow(
             decoder, flow_slots,
-            (*[function.entry for function in callable_functions], *sorted(internal_cases)),
+            (*[function.entry for function in callable_functions], *sorted(seed_roots),
+             *sorted(internal_cases)),
             flow_slots,
         )
         iterations += extra_iterations
@@ -800,7 +811,7 @@ def build_program(
     # Extra roots (e.g. code pointers found in .rodata/.data) only count where
     # the flow already decoded a block, so data words never become functions.
     roots = (set(inventory_by_entry) | set(flow.pointer_roots) | direct_targets | internal_cases
-             | set(extra_roots))
+             | set(extra_roots) | set(seed_roots))
     roots &= set(entry_to_block)
     blocks = _normalize_complementary_branch_chains(blocks, roots | observed)
 
@@ -814,6 +825,8 @@ def build_program(
             return None, f"address_taken_{entry:08X}", "address_taken"
         if entry in extra_roots:
             return None, f"data_pointer_{entry:08X}", "data_pointer"
+        if entry in seed_roots:
+            return None, f"pc_relative_{entry:08X}", "pc_relative"
         return None, f"direct_target_{entry:08X}", "direct_target"
 
     function_entries = set(roots)
