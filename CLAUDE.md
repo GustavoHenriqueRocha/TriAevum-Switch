@@ -43,6 +43,19 @@ Relatório de agente/workflow também vai para lá, depois de verificado.
 - **Alegação não é fato.** Achado de agente, comentário antigo, nome de função
   ou doc desatualizado é hipótese até ser conferido no código, no log ou na
   fonte de verdade. Por isso os workflows têm etapa de verificação adversarial.
+- **Nunca enfraquecer teste ou guarda para passar.** Não afrouxar limite de frame
+  time, não pular teste, não apagar guarda de `test_bug_guards.py`. Se o esperado
+  mudou de verdade, o commit explica por que o antigo estava errado.
+- **Teste sem a ROM.** Testes de regressão usam dado sintético montado à mão
+  (imagens NCCH/BLZ, programas A32 mínimos, comandos PICA), para rodar em
+  qualquer máquina e em CI sem arquivo do jogo.
+- **Medida que oscila se repete.** Frame time e tours no Switch têm ruído:
+  compare pelo menos duas rodadas antes de chamar de melhora ou regressão.
+- **Pronto é no commit exato.** Testes rodados no SHA que foi para o Switch ou
+  para o GitHub. Mais de 3 correções numa sessão: revise o intervalo inteiro
+  (`git diff <início>..HEAD`) antes do push.
+- **Relatório de agente usa três estados:** confirmado, parcial ou sem suporte,
+  cada um com a evidência.
 - **Comportamento do OoT3D não muda por acidente.** Tudo que for genérico passa
   pelo perfil de título (`ctr_title_profile.h`) e ganha guarda em
   `tests/switch/test_bug_guards.py`.
