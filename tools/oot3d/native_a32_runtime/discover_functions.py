@@ -6,11 +6,14 @@ addresses it finds in literal pools; seeded with just the ExHeader entry point
 it reaches every instruction the reviewed OoT3D inventory reaches. Code
 pointers stored in .rodata/.data (vtables, callback tables) are added as extra
 roots where the flow decoded a block. The output CSV is a report (functions
-the flow leaves unbounded have empty end/size); wiring discover() into the
-whole-AOT build in place of the reviewed inventory is the next step.
+the flow leaves unbounded have empty end/size). --program-output and
+--selection-output write what generate_whole_aot_cpp.py reads: the program
+manifest and a selection with every closed-CFG function (direct-call targets
+left open become external functions).
 
   discover_functions.py --code code.bin --exheader exheader.bin --output inventory.csv
       [--compare reviewed_inventory.csv --profile eur_rev0]
+      [--program-output aot_program.json --selection-output functions.json]
 
 OoT3D EUR (2026-11-05): 14580 functions, 924525 instructions (same as the
 reviewed inventory), 0 unclaimed blocks, 0 unresolved edges; 10307 of the
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import struct
 import sys
 import tempfile
@@ -27,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import whole_aot_program as program  # noqa: E402
+from whole_aot_cpp import SELECTION_FORMAT  # noqa: E402
 
 PAGE = 0x1000
 INVENTORY_FIELDS = ("profile", "entry", "end", "size", "name", "status")
@@ -76,6 +81,19 @@ def discover(code: bytes, exheader: bytes, profile: str) -> tuple[program.AotPro
     return result, pointers
 
 
+def closed_selection(manifest: dict) -> dict:
+    """Every closed-CFG function; open direct-call targets become external."""
+    records = {int(item["entry"]): item for item in manifest["functions"]}
+    selected = {entry for entry, record in records.items() if record.get("closed_static_cfg")}
+    external = {int(call["target"]) for entry in selected
+                for call in records[entry].get("direct_calls", [])} - selected
+    return {"format": SELECTION_FORMAT, "selection_mode": "all_lowerable",
+            "functions": [{"entry": entry, "name": records[entry]["name"],
+                           "reason": "discovered closed CFG"} for entry in sorted(selected)],
+            "external_functions": [{"entry": entry, "reason": "open CFG"} for entry in sorted(external)],
+            "performance_exclusions": [], "selection_conflicts": [], "closure_groups": []}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--code", type=Path, required=True)
@@ -83,6 +101,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--profile", default="title")
     parser.add_argument("--compare", type=Path, help="reviewed inventory to measure recall against")
+    parser.add_argument("--program-output", type=Path, help="whole-AOT program manifest (JSON)")
+    parser.add_argument("--selection-output", type=Path, help="whole-AOT function selection (JSON)")
     args = parser.parse_args()
     code = args.code.read_bytes()
     result, pointers = discover(code, args.exheader.read_bytes(), args.profile)
@@ -95,7 +115,15 @@ def main() -> int:
                              "end": f"0x{function.end:08X}" if bounded else "",
                              "size": str(function.end - function.entry + 1) if bounded else "",
                              "name": function.name, "status": function.origin})
-    counts = result.to_manifest(False)["counts"]
+    manifest = result.to_manifest(False)
+    counts = manifest["counts"]
+    if args.program_output:
+        args.program_output.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
+    if args.selection_output:
+        selection = closed_selection(manifest)
+        args.selection_output.write_text(json.dumps(selection, indent=2) + "\n")
+        print(f"seleção: {len(selection['functions'])} funções com CFG fechado, "
+              f"{len(selection['external_functions'])} externas")
     print(f"{counts['functions']} funções, {counts['instructions']} instruções, "
           f"{counts['unclaimed_blocks']} blocos sem dono, {counts['unresolved_static_edges']} arestas "
           f"sem destino; {len(pointers)} ponteiros de código no ro/data -> {args.output}")
