@@ -543,6 +543,66 @@ void TestSlotEraseWithRelativeSaveRoot() {
 #endif
 } // namespace
 
+
+// Super Mario 3D Land: GetFormatInfo (0x0845) antes de abrir o save e
+// FormatSaveData (0x084C) na primeira vez; sem isso o jogo ia para err:f.
+void TestSaveDataFormatInfo() {
+    const auto directory =
+        std::filesystem::temp_directory_path() / "triaevum_fs_format_test" / "save";
+    std::filesystem::remove_all(directory.parent_path());
+    auto config = MakeConfig();
+    config.SaveDataDirectory = directory;
+    NativeA32CtrHostServices host(config);
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    NativeA32Memory memory;
+    GuestState state{};
+    constexpr uint32_t tls = FsFixture::Tls, cmd = FsFixture::Cmd, buffer = FsFixture::Buffer;
+    std::string error;
+    Require(memory.MapRegion({"tls", tls, 0x1000U, true, false, {}}, &error), error);
+    state.thread_pointer = tls;
+    NativeA32HostContext context{process, 0U};
+    const auto call = [&](uint32_t handle, std::initializer_list<uint32_t> words) {
+        uint32_t address = cmd;
+        for (const uint32_t word : words) {
+            Require(memory.Write32(address, word), "request");
+            address += 4;
+        }
+        state.r[0] = handle;
+        Require(host.HandleSvc(0x32U, state, memory, context).Action == NativeA32HostAction::Resume,
+                "FS request did not resume");
+    };
+    const auto word = [&](unsigned index) {
+        uint32_t value = 0U;
+        Require(memory.Read32(cmd + index * 4U, &value), "reply word");
+        return value;
+    };
+    const std::array<uint8_t, 5> port{'s', 'r', 'v', ':', 0};
+    Require(memory.WriteBytes(buffer, port), "port");
+    state.r[1] = buffer;
+    Require(host.HandleSvc(0x2D, state, memory, context).Action == NativeA32HostAction::Resume,
+            "srv open");
+    call(state.r[1], {0x00050100U, 0x553A7366U, 0x00524553U, 7U});
+    const uint32_t fs = word(3);
+    Require(memory.Fill(buffer, 16U, 0U), "path");
+
+    call(fs, {0x084500C2U, 4U, 1U, 1U, 0x4002U, buffer});
+    Require(word(0) == 0x08450140U && word(1) == 0xC8A04554U,
+            "an unformatted save did not answer NotFormatted");
+    std::filesystem::create_directories(directory);
+    std::ofstream(directory / "lixo.bin") << "x";
+    call(fs, {0x084C0242U, 4U, 1U, 1U, 0x10U, 8U, 16U, 8U, 16U, 1U, 0x4002U, buffer});
+    Require(word(0) == 0x084C0040U && word(1) == 0U, "FormatSaveData failed");
+    Require(std::filesystem::is_directory(directory) &&
+                std::filesystem::is_empty(directory),
+            "FormatSaveData did not leave an empty save");
+    call(fs, {0x084500C2U, 4U, 1U, 1U, 0x4002U, buffer});
+    Require(word(1) == 0U && word(2) == 0x10U * 512U && word(3) == 8U &&
+                word(4) == 16U && word(5) == 1U,
+            "GetFormatInfo did not return the formatted layout");
+    std::filesystem::remove_all(directory.parent_path());
+}
+
 int main() {
     TestFullHistoryIntentionalWait();
     TestFsFailuresAndRestore();
@@ -552,5 +612,6 @@ int main() {
 #if !defined(_WIN32)
     TestSlotEraseWithRelativeSaveRoot();
 #endif
+    TestSaveDataFormatInfo();
     std::cout << "oot3d_native_a32_ctr_fs_tests: ok\n";
 }
