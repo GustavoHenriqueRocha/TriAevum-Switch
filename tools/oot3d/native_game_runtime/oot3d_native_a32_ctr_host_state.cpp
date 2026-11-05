@@ -45,6 +45,9 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
     for (const auto& object : mHidEvents) {
         registerObject(object);
     }
+    for (const auto& object : mKernelTimers) {
+        registerObject(object);
+    }
     const auto objectId = [&](const std::shared_ptr<KernelObject>& object) {
         return object ? objectIds.at(object.get()) : 0U;
     };
@@ -52,7 +55,7 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
     nlohmann::json encodedObjects = nlohmann::json::array();
     for (size_t index = 0; index < objects.size(); ++index) {
         const auto& object = *objects[index];
-        encodedObjects.push_back({
+        auto& encodedObject = encodedObjects.emplace_back(nlohmann::json{
             {"id", index + 1U},
             {"type", object.Type},
             {"thread_id", object.ThreadId.has_value()
@@ -73,6 +76,16 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
                                    ? nlohmann::json(*object.MappedAddress)
                                    : nlohmann::json(nullptr)},
         });
+        // Só objetos criados pelo guest de outro título têm estes campos; o
+        // estado do OoT3D continua com as mesmas chaves.
+        if (object.MaximumCount != 0) {
+            encodedObject["maximum_count"] = object.MaximumCount;
+        }
+        if (object.Type.starts_with("timer:")) {
+            encodedObject["timer_armed"] = object.TimerArmed;
+            encodedObject["timer_next_tick"] = object.TimerNextTick;
+            encodedObject["timer_interval_ticks"] = object.TimerIntervalTicks;
+        }
     }
     nlohmann::json handles = nlohmann::json::array();
     for (const auto& handle : mHandles) {
@@ -93,11 +106,17 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
         for (const auto& object : waiter.Objects) {
             waiterObjects.push_back(objectId(object));
         }
-        synchronizationWaiters.push_back({
+        auto& encodedWaiter = synchronizationWaiters.emplace_back(nlohmann::json{
             {"objects", std::move(waiterObjects)},
             {"thread_id", waiter.ThreadId},
             {"wait_all", waiter.WaitAll},
         });
+        if (waiter.SingleObject) {
+            encodedWaiter["single_object"] = true;
+        }
+        if (waiter.DeadlineTick.has_value()) {
+            encodedWaiter["deadline_tick"] = *waiter.DeadlineTick;
+        }
     }
     nlohmann::json sleepWaiters = nlohmann::json::array();
     for (const auto& waiter : mSleepWaiters) {
@@ -366,6 +385,15 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
                 object->MappedAddress =
                     encoded.at("mapped_address").get<uint32_t>();
             }
+            object->MaximumCount = encoded.value("maximum_count", int64_t{0});
+            if (object->Type.starts_with("timer:")) {
+                object->TimerArmed = encoded.value("timer_armed", false);
+                object->TimerNextTick =
+                    encoded.value("timer_next_tick", uint64_t{0});
+                object->TimerIntervalTicks =
+                    encoded.value("timer_interval_ticks", uint64_t{0});
+                staged.mKernelTimers.push_back(object);
+            }
             objects.push_back(std::move(object));
         }
         const auto object = [&](uint32_t id) -> std::shared_ptr<KernelObject> {
@@ -402,6 +430,12 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             waiter.Process = &process;
             waiter.ThreadId = encoded.at("thread_id").get<uint32_t>();
             waiter.WaitAll = encoded.at("wait_all").get<bool>();
+            waiter.SingleObject = encoded.value("single_object", false);
+            if (const auto deadline = encoded.find("deadline_tick");
+                deadline != encoded.end()) {
+                waiter.DeadlineTick = deadline->get<uint64_t>();
+                ++staged.mTimedSynchronizationWaiters;
+            }
             if (!validThread(waiter.ThreadId)) {
                 throw std::runtime_error(
                     "synchronization waiter thread is invalid");

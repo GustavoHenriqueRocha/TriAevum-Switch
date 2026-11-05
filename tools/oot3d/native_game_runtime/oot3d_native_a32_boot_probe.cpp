@@ -1,3 +1,15 @@
+// Boot probe de um processo CTR: monta code.bin/ExHeader/RomFS pelo manifesto
+// do processo (build_process_manifest.py), roda até a primeira espera e
+// entrega VBlanks, e escreve o relatório JSON (SVCs, threads, PICA).
+//
+// Duas montagens:
+//  - oot3d_native_a32_boot_probe: blocos A32 traduzidos do OoT3D
+//    (oot3d_a32_generated, generate_aot.py);
+//  - ctr_title_boot_probe (OOT3D_BOOT_PROBE_WHOLE_AOT): só o whole-AOT
+//    (shards oot3d_whole_aot_shard_*.cpp de qualquer título), sem registro de
+//    blocos. PC fora das funções traduzidas vira falha "MissingBlock" com o PC.
+// O perfil de título (ctr_title_profile.h) vem do program id do ExHeader.
+#include "ctr_title_profile.h"
 #include "oot3d_native_a32_ctr_host.h"
 #include "oot3d_native_a32_process_image.h"
 #include "oot3d_native_pica_fragment_shader_gen.h"
@@ -6,7 +18,14 @@
 #include "oot3d_native_pica_submission.h"
 #include "oot3d_native_pica_vulkan_plan.h"
 
+#if defined(OOT3D_BOOT_PROBE_WHOLE_AOT)
+#include "oot3d_native_a32_memory.h"
+#include "oot3d_native_compiled_functions.h"
+#else
 #include "oot3d_a32_generated.h"
+#endif
+
+#include <cstdio>
 
 #include <filesystem>
 #include <fstream>
@@ -31,12 +50,15 @@ struct Arguments {
     std::filesystem::path Output;
     std::filesystem::path SaveDataDirectory;
     uint32_t VblankCount = 2;
+    // auto (program id do manifesto), oot3d ou generic.
+    std::string TitleProfile = "auto";
 };
 
 void PrintUsage() {
     std::cerr << "usage: oot3d_native_a32_boot_probe --manifest <process.json> "
                  "[--code-bin <code.bin>] [--output <report.json>] "
-                 "[--save-data <directory>] [--vblanks <count>]\n";
+                 "[--save-data <directory>] [--vblanks <count>] "
+                 "[--title-profile auto|oot3d|generic]\n";
 }
 
 std::optional<Arguments> ParseArguments(int argc, char** argv) {
@@ -53,6 +75,13 @@ std::optional<Arguments> ParseArguments(int argc, char** argv) {
             result.CodeBin = value;
         } else if (option == "--output") {
             result.Output = value;
+        } else if (option == "--title-profile") {
+            result.TitleProfile = value.string();
+            if (result.TitleProfile != "auto" &&
+                result.TitleProfile != "oot3d" &&
+                result.TitleProfile != "generic") {
+                return std::nullopt;
+            }
         } else if (option == "--save-data") {
             result.SaveDataDirectory = value;
         } else if (option == "--vblanks") {
@@ -193,6 +222,39 @@ bool CompileFragmentShader(const std::string& source, std::string& error) {
 #endif
 }
 
+#if defined(OOT3D_BOOT_PROBE_WHOLE_AOT)
+struct WholeAotDispatch {
+    bool ManualCompiledFunctions = false;
+};
+
+// Sem registro de blocos: todo PC passa por aqui. Fora das funções
+// traduzidas devolve false e o processo cai em MissingBlock (falha com PC).
+bool ExecuteTitleWholeAot(uint32_t pc, oot3d::recomp::a32::GuestState& state,
+                          oot3d::recomp::a32::MemoryBus& memory,
+                          oot3d::recomp::a32::ExecutionResult* result,
+                          uint32_t blockBudget, uint32_t* blocksConsumed,
+                          void* user) {
+    const auto* dispatch = static_cast<const WholeAotDispatch*>(user);
+    auto& nativeMemory = static_cast<Oot3dNativeGame::NativeA32Memory&>(memory);
+    return Oot3dNativeGame::ExecuteOot3dCompiledFunction(
+        pc, state, nativeMemory, result, blockBudget, blocksConsumed, nullptr,
+        nullptr, nullptr, 0U, false,
+        dispatch != nullptr && dispatch->ManualCompiledFunctions, true, 0U);
+}
+#endif
+
+Oot3dNativeGame::CtrTitleProfile SelectProfile(
+    const Arguments& arguments,
+    const Oot3dNativeGame::NativeA32ProcessImageManifest& manifest) {
+    if (arguments.TitleProfile == "oot3d") {
+        return Oot3dNativeGame::Oot3dTitleProfile(manifest.TitleId);
+    }
+    if (arguments.TitleProfile == "generic") {
+        return Oot3dNativeGame::GenericTitleProfile(manifest.TitleId);
+    }
+    return Oot3dNativeGame::SelectCtrTitleProfile(manifest.TitleId);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -211,34 +273,71 @@ int main(int argc, char** argv) {
             throw std::runtime_error(error);
         }
 
+        const auto profile = SelectProfile(*arguments, *manifest);
+        std::fprintf(stderr,
+                     "[boot-probe] processo \"%s\" title_id=%016llx perfil=%s"
+                     " (nucleos manuais do OoT3D: %s, servicos stub: %s, "
+                     "timeouts do kernel: %s)\n",
+                     manifest->ProcessName.c_str(),
+                     static_cast<unsigned long long>(
+                         manifest->TitleId.value_or(0U)),
+                     std::string(profile.Name).c_str(),
+                     profile.ManualCompiledFunctions ? "sim" : "nao",
+                     profile.StubUnknownServices ? "sim" : "nao",
+                     profile.KernelWaitTimeouts ? "sim" : "nao");
+#if !defined(OOT3D_BOOT_PROBE_WHOLE_AOT)
+        if (profile.Kind != Oot3dNativeGame::CtrTitleKind::Oot3d) {
+            throw std::runtime_error(
+                "this probe links the OoT3D A32 block registry; use "
+                "ctr_title_boot_probe (whole-AOT shards) for another title");
+        }
+#endif
+
         Oot3dNativeGame::Oot3dNativePicaFrontend picaFrontend;
-        Oot3dNativeGame::NativeA32CtrHostConfig hostConfig{
-            manifest->ResourceLimitValues,
-            manifest->ResourceCurrentValues,
-            manifest->LinearHeapBaseAddress,
-            manifest->LinearHeapSize,
-            manifest->HeapBaseAddress,
-            manifest->HeapSize,
-            manifest->RomFsImagePath,
-            manifest->RomFsImageOffset,
-            manifest->RomFsImageSize,
-            &picaFrontend,
-        };
+        // Campo a campo: a inicialização posicional antiga quebrou quando
+        // Filesystem/RomFsContentPath entraram antes de PicaFrontend.
+        Oot3dNativeGame::NativeA32CtrHostConfig hostConfig;
+        hostConfig.ResourceLimitValues = manifest->ResourceLimitValues;
+        hostConfig.ResourceCurrentValues = manifest->ResourceCurrentValues;
+        hostConfig.LinearHeapBaseAddress = manifest->LinearHeapBaseAddress;
+        hostConfig.LinearHeapSize = manifest->LinearHeapSize;
+        hostConfig.HeapBaseAddress = manifest->HeapBaseAddress;
+        hostConfig.HeapSize = manifest->HeapSize;
+        hostConfig.RomFsImagePath = manifest->RomFsImagePath;
+        hostConfig.RomFsImageOffset = manifest->RomFsImageOffset;
+        hostConfig.RomFsImageSize = manifest->RomFsImageSize;
+        hostConfig.PicaFrontend = &picaFrontend;
         hostConfig.SaveDataDirectory =
             arguments->SaveDataDirectory.empty()
                 ? arguments->Output.parent_path() /
-                      "oot3d_native_savedata"
+                      (std::string(profile.Name) + "_native_savedata")
                 : arguments->SaveDataDirectory;
         // The probe serializes every SVC boundary, unlike the product runtime
         // which only needs bounded diagnostic summaries.
         hostConfig.RetainFullSvcHistory = true;
         // Probe traces must not depend on the host clock: anchor the CTR
         // RTC at 2011-06-16 00:00 (title release) plus the virtual clock.
-        hostConfig.FixedDateTimeMilliseconds = 3517257600000ULL;
+        hostConfig.FixedDateTimeMilliseconds = profile.ProbeDateTimeMilliseconds;
+        hostConfig.StubUnknownServices = profile.StubUnknownServices;
+        hostConfig.KernelWaitTimeouts = profile.KernelWaitTimeouts;
+        hostConfig.MasterQuestUnlock = profile.MasterQuestUnlock;
         Oot3dNativeGame::NativeA32CtrHostServices hostServices(
             std::move(hostConfig));
+#if defined(OOT3D_BOOT_PROBE_WHOLE_AOT)
+        if (!Oot3dNativeGame::Oot3dWholeAotAvailable()) {
+            throw std::runtime_error(
+                "ctr_title_boot_probe was built without whole-AOT functions");
+        }
+        Oot3dNativeGame::SetOot3dGuestOverridesActive(profile.GuestOverrides);
+        static const oot3d::recomp::a32::Registry emptyRegistry{};
+        WholeAotDispatch wholeAotDispatch{profile.ManualCompiledFunctions};
+        Oot3dNativeGame::NativeA32Process process(emptyRegistry, hostServices);
+        process.SetNativeBlockCallback(&ExecuteTitleWholeAot,
+                                       &wholeAotDispatch);
+#else
         Oot3dNativeGame::NativeA32Process process(
             oot3d::recomp::GetA32GeneratedRegistry(), hostServices);
+#endif
         if (!Oot3dNativeGame::MountNativeA32ProcessImage(
                 process, *manifest, arguments->CodeBin, &error)) {
             throw std::runtime_error(error);
@@ -592,8 +691,46 @@ int main(int argc, char** argv) {
                 {"resources", std::move(resources)},
             });
         }
+#if defined(OOT3D_BOOT_PROBE_WHOLE_AOT)
+        const auto wholeAotStats =
+            Oot3dNativeGame::GetOot3dCompiledFunctionStats();
+        const nlohmann::json wholeAot = {
+            {"entry_points",
+             Oot3dNativeGame::Oot3dCompiledFunctionEntryPoints(true, false)
+                 .size()},
+            {"calls", wholeAotStats.WholeAotCalls},
+            {"svc_exits", wholeAotStats.WholeAotSvcExits},
+            {"block_limit_exits", wholeAotStats.WholeAotBlockLimitExits},
+            {"memory_faults", wholeAotStats.WholeAotMemoryFaults},
+            {"unsupported_exits", wholeAotStats.WholeAotUnsupportedExits},
+            {"manual_compiled_calls", wholeAotStats.Calls},
+        };
+#else
+        const nlohmann::json wholeAot = nullptr;
+#endif
+        std::fprintf(stderr,
+                     "[boot-probe] fim: run=%s vblanks=%u/%u svcs=%llu "
+                     "ultimo_svc=\"%s\" pc=0x%08x%s%s\n",
+                     RunKindName(result.Kind), vblanksDelivered,
+                     arguments->VblankCount,
+                     static_cast<unsigned long long>(
+                         hostServices.SvcEventCount()),
+                     lastSvc.Name.c_str(),
+                     boundaryKind == "fallback" ? hostServices.FallbackPc()
+                                                : lastSvc.Pc,
+                     result.Error.empty() ? "" : " erro=",
+                     result.Error.c_str());
         const nlohmann::json report = {
             {"format", "oot3d_native_a32_boot_probe_v1"},
+            {"title",
+             {{"title_id", manifest->TitleId.has_value()
+                               ? nlohmann::json(*manifest->TitleId)
+                               : nlohmann::json(nullptr)},
+              {"profile", std::string(profile.Name)},
+              {"manual_compiled_functions", profile.ManualCompiledFunctions},
+              {"stub_unknown_services", profile.StubUnknownServices},
+              {"kernel_wait_timeouts", profile.KernelWaitTimeouts}}},
+            {"whole_aot", wholeAot},
             {"process",
              {{"name", manifest->ProcessName},
               {"entrypoint", manifest->EntryAddress},

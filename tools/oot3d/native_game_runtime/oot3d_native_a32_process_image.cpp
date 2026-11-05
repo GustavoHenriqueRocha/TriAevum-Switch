@@ -120,6 +120,14 @@ ParseNativeA32ProcessImageManifest(const Json& document,
         result.ProcessName = process.at("name").get<std::string>();
         result.EntryAddress = ReadU32(process, "entrypoint");
         result.PageSize = ReadU32(process, "page_size");
+        // Opcional: manifestos antigos (sempre OoT3D) não têm o program id.
+        if (const auto titleId = process.find("title_id");
+            titleId != process.end() && !titleId->is_null()) {
+            if (!titleId->is_number_unsigned()) {
+                throw std::runtime_error("process.title_id must be unsigned");
+            }
+            result.TitleId = titleId->get<uint64_t>();
+        }
         if (result.CodeBinSha256.size() != 64 ||
             result.RomFsImagePath.empty() || result.RomFsImageSize == 0 ||
             result.RomFsImageOffset > result.RomFsImageFileSize ||

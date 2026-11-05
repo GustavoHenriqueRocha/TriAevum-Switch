@@ -5,6 +5,62 @@
 #include <cstdio>
 
 namespace Oot3dNativeGame {
+namespace {
+
+// Nome do SVC no log de "unimplemented" (tabela do kernel CTR / Azahar).
+const char* CtrSvcName(uint32_t immediate) {
+    switch (immediate) {
+    case 0x02: return "QueryMemory";
+    case 0x03: return "ExitProcess";
+    case 0x04: return "GetProcessAffinityMask";
+    case 0x05: return "SetProcessAffinityMask";
+    case 0x06: return "GetProcessIdealProcessor";
+    case 0x07: return "SetProcessIdealProcessor";
+    case 0x0C: return "SetThreadPriority";
+    case 0x0D: return "GetThreadAffinityMask";
+    case 0x0E: return "SetThreadAffinityMask";
+    case 0x0F: return "GetThreadIdealProcessor";
+    case 0x10: return "SetThreadIdealProcessor";
+    case 0x11: return "GetCurrentProcessorNumber";
+    case 0x12: return "Run";
+    case 0x1E: return "CreateMemoryBlock";
+    case 0x20: return "UnmapMemoryBlock";
+    case 0x26: return "SignalAndWait";
+    case 0x29: return "GetHandleInfo";
+    case 0x2A: return "GetSystemInfo";
+    case 0x2B: return "GetProcessInfo";
+    case 0x2C: return "GetThreadInfo";
+    case 0x2E: return "SendSyncRequest1";
+    case 0x2F: return "SendSyncRequest2";
+    case 0x30: return "SendSyncRequest3";
+    case 0x31: return "SendSyncRequest4";
+    case 0x33: return "OpenProcess";
+    case 0x34: return "OpenThread";
+    case 0x36: return "GetProcessIdOfThread";
+    case 0x3B: return "GetThreadContext";
+    case 0x3C: return "Break";
+    case 0x3D: return "OutputDebugString";
+    case 0x3E: return "ControlPerformanceCounter";
+    case 0x47: return "CreatePort";
+    case 0x48: return "CreateSessionToPort";
+    case 0x49: return "CreateSession";
+    case 0x4A: return "AcceptSession";
+    case 0x4F: return "ReplyAndReceive";
+    case 0x50: return "BindInterrupt";
+    case 0x51: return "UnbindInterrupt";
+    case 0x52: return "InvalidateProcessDataCache";
+    case 0x53: return "StoreProcessDataCache";
+    case 0x54: return "FlushProcessDataCache";
+    case 0x70: return "ControlProcessMemory";
+    case 0x71: return "MapProcessMemory";
+    case 0x72: return "UnmapProcessMemory";
+    case 0x7C: return "KernelSetState";
+    case 0x7D: return "QueryProcessMemory";
+    default: return nullptr;
+    }
+}
+
+} // namespace
 
 detail::NativeA32CtrSvcEventHistory::NativeA32CtrSvcEventHistory(
     bool retainFullHistory, bool collectIpcNameCounts,
@@ -292,7 +348,8 @@ bool NativeA32CtrHostServices::IsKernelObjectReady(
         return object.AvailableCount > 0 || object.OwnerThreadId == threadId;
     }
     if (object.Type.starts_with("semaphore:") ||
-        object.Type.starts_with("event:")) {
+        object.Type.starts_with("event:") ||
+        object.Type.starts_with("timer:")) {
         return object.AvailableCount > 0;
     }
     if (object.Type == "thread" && object.ThreadId.has_value()) {
@@ -316,6 +373,9 @@ void NativeA32CtrHostServices::AcquireKernelObject(KernelObject& object,
     } else if (object.Type.starts_with("event:") && object.AvailableCount > 0 &&
                object.ResetType == 0) {
         --object.AvailableCount;
+    } else if (object.Type.starts_with("timer:") && object.ResetType == 0) {
+        // One-shot: a espera que o consome o limpa (sticky e pulse não).
+        object.AvailableCount = 0;
     }
 }
 
@@ -365,8 +425,14 @@ void NativeA32CtrHostServices::WakeSynchronizationWaiters() {
         }
         if (state != nullptr) {
             state->r[0] = kResultSuccess;
-            state->r[1] = selectedIndex;
+            if (!selected->SingleObject) {
+                state->r[1] = selectedIndex;
+            }
             selected->Process->ResumeThread(selected->ThreadId);
+        }
+        if (selected->DeadlineTick.has_value() &&
+            mTimedSynchronizationWaiters > 0U) {
+            --mTimedSynchronizationWaiters;
         }
         mSynchronizationWaiters.erase(selected);
     }
@@ -587,6 +653,20 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvc(
     auto result = HandleSvcImpl(immediate, state, memory, context);
     if (result.Action == NativeA32HostAction::Wait) {
         const auto* event = mSvcEvents.LastEvent();
+        if (mConfig.StubUnknownServices && immediate == 0x32U && event &&
+            !event->Handled) {
+            // Serviço com HLE parcial e comando ainda não coberto: no perfil
+            // de outro título vira stub registrado em vez de parar o boot.
+            if (const auto sessionType = LookupHandleType(state.r[0]);
+                sessionType.has_value() &&
+                sessionType->starts_with("client_session:")) {
+                NativeA32CtrSvcEvent stubEvent = *event;
+                stubEvent.Name += ":sem-HLE";
+                return HandleStubServiceRequest(
+                    state, memory, *sessionType, state.thread_pointer + 0x80U,
+                    std::move(stubEvent));
+            }
+        }
         if (!event || !event->Handled) {
             // Only a registered/intentional wait may park a guest. Unsupported
             // host emulation must produce a named fault, not an orphan waiter.
@@ -887,82 +967,69 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
         }
+        if (!mKernelTimers.empty()) {
+            // Timer sem nenhum handle nem espera: o kernel o destrói.
+            std::erase_if(mKernelTimers, [](const auto& timer) {
+                return timer.use_count() == 1;
+            });
+        }
         state.r[0] = kResultSuccess;
         mSvcEvents.push_back(std::move(event));
         return {NativeA32HostAction::Resume};
-    case 0x25: {
-        event.Name = "WaitSynchronizationN";
-        const uint32_t handlesAddress = state.r[1];
-        const uint32_t handleCount = state.r[2];
-        const bool waitAll = state.r[3] != 0;
-        if (handleCount > 0x40U) {
-            mSvcEvents.push_back(std::move(event));
-            return {NativeA32HostAction::Wait};
+    case 0x24:
+    case 0x25:
+        return HandleWaitSynchronization(immediate, state, memory, context,
+                                         std::move(event));
+    case 0x13:
+    case 0x15:
+    case 0x16:
+    case 0x1A:
+    case 0x1B:
+    case 0x1C:
+    case 0x1D:
+        return HandleKernelSyncObjectSvc(immediate, state, context,
+                                         std::move(event));
+    case 0x0B:
+    case 0x35:
+    case 0x37: {
+        // GetThreadPriority / GetProcessId / GetThreadId(out r1, handle r1).
+        event.Name = immediate == 0x0BU   ? "GetThreadPriority"
+                     : immediate == 0x35U ? "GetProcessId"
+                                          : "GetThreadId";
+        const uint32_t handle = state.r[1];
+        std::optional<uint32_t> threadId;
+        if (handle == kCurrentThreadHandle) {
+            threadId = context.ThreadId;
+        } else if (const auto* record = LookupHandle(handle);
+                   record != nullptr && record->Object->Type == "thread") {
+            threadId = record->Object->ThreadId;
         }
-        std::vector<const HandleRecord*> handles;
-        handles.reserve(handleCount);
-        std::string detail = waitAll ? ":all" : ":any";
-        for (uint32_t index = 0; index < handleCount; ++index) {
-            uint32_t handle = 0;
-            if (!memory.Read32(handlesAddress + index * sizeof(uint32_t),
-                               &handle)) {
+        if (immediate == 0x35U) {
+            if (handle != kCurrentProcessHandle) {
                 mSvcEvents.push_back(std::move(event));
                 return {NativeA32HostAction::Wait};
             }
-            detail += index == 0 ? ":0x" : ",0x";
-            AppendHex8(detail, handle);
-            const auto type = LookupHandleType(handle);
-            detail += "=";
-            detail += type.value_or("invalid");
-            const auto* record = LookupHandle(handle);
-            if (record == nullptr) {
-                mSvcEvents.push_back(std::move(event));
-                return {NativeA32HostAction::Wait};
-            }
-            handles.push_back(record);
-            if (index == 0) {
-                event.Detail = handle;
-            }
-        }
-        event.Name += detail;
-        const auto isReady = [&](const HandleRecord* record) {
-            return IsKernelObjectReady(*record->Object, context.ThreadId,
-                                       context.Process);
-        };
-        if (waitAll) {
-            if (std::all_of(handles.begin(), handles.end(), isReady)) {
-                for (const auto* record : handles) {
-                    AcquireKernelObject(*record->Object, context.ThreadId);
-                }
-                state.r[0] = kResultSuccess;
-                event.Handled = true;
-                mSvcEvents.push_back(std::move(event));
-                return {NativeA32HostAction::Resume};
-            }
+            // Um processo só; o id é o do primeiro processo de aplicação.
+            state.r[0] = kResultSuccess;
+            state.r[1] = kApplicationProcessId;
         } else {
-            const auto ready =
-                std::find_if(handles.begin(), handles.end(), isReady);
-            if (ready != handles.end()) {
-                AcquireKernelObject(*(*ready)->Object, context.ThreadId);
-                state.r[0] = kResultSuccess;
-                state.r[1] = static_cast<uint32_t>(
-                    std::distance(handles.begin(), ready));
-                event.Handled = true;
+            const auto priority =
+                threadId.has_value()
+                    ? context.Process.ThreadPriority(*threadId)
+                    : std::nullopt;
+            if (!threadId.has_value() ||
+                (immediate == 0x0BU && !priority.has_value())) {
                 mSvcEvents.push_back(std::move(event));
-                return {NativeA32HostAction::Resume};
+                return {NativeA32HostAction::Wait};
             }
+            state.r[0] = kResultSuccess;
+            state.r[1] = immediate == 0x0BU ? *priority
+                                            : kFirstThreadId + *threadId;
         }
-        SynchronizationWaiter waiter;
-        waiter.Process = &context.Process;
-        waiter.ThreadId = context.ThreadId;
-        waiter.WaitAll = waitAll;
-        for (const auto* handle : handles) {
-            waiter.Objects.push_back(handle->Object);
-        }
-        mSynchronizationWaiters.push_back(std::move(waiter));
         event.Handled = true;
+        event.Detail = state.r[1];
         mSvcEvents.push_back(std::move(event));
-        return {NativeA32HostAction::Wait};
+        return {NativeA32HostAction::Resume};
     }
     case 0x27:
         event.Name = "DuplicateHandle";
@@ -1056,6 +1123,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             return HandleFsRequest(state, memory, context, sessionType,
                                    commandBuffer, std::move(event));
         }
+        if (sessionType->starts_with("client_session:stub:")) {
+            return HandleStubServiceRequest(state, memory, *sessionType,
+                                            commandBuffer, std::move(event));
+        }
         if (*sessionType != "client_session:srv:") {
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
@@ -1118,8 +1189,42 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
                         mSvcEvents.push_back(std::move(event));
                         return {NativeA32HostAction::Resume};
                     }
+                } else if (mConfig.StubUnknownServices &&
+                           !serviceName.empty()) {
+                    // Serviço sem HLE: sessão stub que registra cada comando.
+                    const uint32_t session =
+                        CreateHandle("client_session:stub:" + serviceName);
+                    std::fprintf(stderr,
+                                 "[ctr-host] srv:GetServiceHandle(\"%s\"): "
+                                 "servico sem HLE -> sessao stub 0x%08x "
+                                 "(pc=0x%08x thread=%u)\n",
+                                 serviceName.c_str(), session, event.Pc,
+                                 event.ThreadId);
+                    if (memory.Write32(commandBuffer,
+                                       kSrvGetServiceHandleResponse) &&
+                        memory.Write32(commandBuffer + 4U, kResultSuccess) &&
+                        memory.Write32(commandBuffer + 8U,
+                                       kMoveHandleDescriptor) &&
+                        memory.Write32(commandBuffer + 12U, session)) {
+                        state.r[0] = kResultSuccess;
+                        event.Name += ":stub";
+                        event.Handled = true;
+                        mSvcEvents.push_back(std::move(event));
+                        return {NativeA32HostAction::Resume};
+                    }
+                } else {
+                    std::fprintf(stderr,
+                                 "[ctr-host] srv:GetServiceHandle(\"%s\"): "
+                                 "servico sem HLE (pc=0x%08x thread=%u)\n",
+                                 serviceName.c_str(), event.Pc,
+                                 event.ThreadId);
                 }
             }
+        }
+        if (mConfig.StubUnknownServices) {
+            // Outros comandos do srv: (Subscribe, ReceiveNotification...).
+            return HandleStubServiceRequest(state, memory, *sessionType,
+                                            commandBuffer, std::move(event));
         }
         mSvcEvents.push_back(std::move(event));
         return {NativeA32HostAction::Wait};
@@ -1143,9 +1248,414 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         return {NativeA32HostAction::Resume};
     default:
         event.Name = "unimplemented";
+        if (const char* name = CtrSvcName(immediate)) {
+            event.Name += ":";
+            event.Name += name;
+        }
         mSvcEvents.push_back(std::move(event));
         return {NativeA32HostAction::Wait};
     }
+}
+
+NativeA32HostResult NativeA32CtrHostServices::HandleWaitSynchronization(
+    uint32_t immediate, oot3d::recomp::a32::GuestState& state,
+    NativeA32Memory& memory, NativeA32HostContext& context,
+    NativeA32CtrSvcEvent event) {
+    // 0x24 WaitSynchronization1(handle r0, timeout r3:r2) e
+    // 0x25 WaitSynchronizationN(out r1, handles r1, count r2, all r3,
+    // timeout r4:r0), como o svc.cpp do Azahar. O caminho sem
+    // KernelWaitTimeouts (OoT3D) é o de sempre: toda espera é infinita.
+    const bool single = immediate == 0x24U;
+    event.Name = single ? "WaitSynchronization1" : "WaitSynchronizationN";
+    const uint32_t handlesAddress = state.r[1];
+    const uint32_t handleCount = single ? 1U : state.r[2];
+    const bool waitAll = !single && state.r[3] != 0;
+    const int64_t timeoutNanoseconds =
+        single ? static_cast<int64_t>(static_cast<uint64_t>(state.r[2]) |
+                                      (static_cast<uint64_t>(state.r[3]) << 32U))
+               : static_cast<int64_t>(static_cast<uint64_t>(state.r[0]) |
+                                      (static_cast<uint64_t>(state.r[4]) << 32U));
+    if (handleCount > 0x40U) {
+        mSvcEvents.push_back(std::move(event));
+        return {NativeA32HostAction::Wait};
+    }
+    std::vector<const HandleRecord*> handles;
+    handles.reserve(handleCount);
+    std::string detail = single ? "" : (waitAll ? ":all" : ":any");
+    for (uint32_t index = 0; index < handleCount; ++index) {
+        uint32_t handle = 0;
+        if (single) {
+            handle = state.r[0];
+        } else if (!memory.Read32(handlesAddress + index * sizeof(uint32_t),
+                                  &handle)) {
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Wait};
+        }
+        detail += index == 0 ? ":0x" : ",0x";
+        AppendHex8(detail, handle);
+        const auto type = LookupHandleType(handle);
+        detail += "=";
+        detail += type.value_or("invalid");
+        const auto* record = LookupHandle(handle);
+        if (record == nullptr) {
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Wait};
+        }
+        handles.push_back(record);
+        if (index == 0) {
+            event.Detail = handle;
+        }
+    }
+    event.Name += detail;
+    const bool timed = mConfig.KernelWaitTimeouts && timeoutNanoseconds >= 0;
+    if (timed) {
+        event.Name += ":timeout=" + std::to_string(timeoutNanoseconds);
+    }
+    const auto isReady = [&](const HandleRecord* record) {
+        return IsKernelObjectReady(*record->Object, context.ThreadId,
+                                   context.Process);
+    };
+    if (waitAll) {
+        if (std::all_of(handles.begin(), handles.end(), isReady)) {
+            for (const auto* record : handles) {
+                AcquireKernelObject(*record->Object, context.ThreadId);
+            }
+            state.r[0] = kResultSuccess;
+            event.Handled = true;
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Resume};
+        }
+    } else {
+        const auto ready =
+            std::find_if(handles.begin(), handles.end(), isReady);
+        if (ready != handles.end()) {
+            AcquireKernelObject(*(*ready)->Object, context.ThreadId);
+            state.r[0] = kResultSuccess;
+            if (!single) {
+                state.r[1] = static_cast<uint32_t>(
+                    std::distance(handles.begin(), ready));
+            }
+            event.Handled = true;
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Resume};
+        }
+    }
+    if (timed && timeoutNanoseconds == 0) {
+        // Consulta: nada pronto, volta na hora com timeout.
+        state.r[0] = kResultTimeout;
+        if (!single) {
+            state.r[1] = 0xFFFFFFFFU;
+        }
+        event.Name += ":expired";
+        event.Handled = true;
+        mSvcEvents.push_back(std::move(event));
+        return {NativeA32HostAction::Resume};
+    }
+    SynchronizationWaiter waiter;
+    waiter.Process = &context.Process;
+    waiter.ThreadId = context.ThreadId;
+    waiter.WaitAll = waitAll;
+    waiter.SingleObject = single;
+    if (timed) {
+        const uint64_t ticks =
+            NanosecondsToCtrTicks(static_cast<uint64_t>(timeoutNanoseconds));
+        waiter.DeadlineTick =
+            ticks > std::numeric_limits<uint64_t>::max() - mSystemTicks
+                ? std::numeric_limits<uint64_t>::max()
+                : mSystemTicks + ticks;
+        ++mTimedSynchronizationWaiters;
+    }
+    for (const auto* handle : handles) {
+        waiter.Objects.push_back(handle->Object);
+    }
+    mSynchronizationWaiters.push_back(std::move(waiter));
+    event.Handled = true;
+    mSvcEvents.push_back(std::move(event));
+    return {NativeA32HostAction::Wait};
+}
+
+NativeA32HostResult NativeA32CtrHostServices::HandleKernelSyncObjectSvc(
+    uint32_t immediate, oot3d::recomp::a32::GuestState& state,
+    NativeA32HostContext& context, NativeA32CtrSvcEvent event) {
+    // Objetos de sincronização criados pelo guest (o OoT3D só usa eventos e
+    // árbitros; um título da EAD usa mutex, semáforo e timer no boot).
+    const auto resume = [&](uint32_t result) {
+        state.r[0] = result;
+        event.Handled = true;
+        mSvcEvents.push_back(std::move(event));
+        return NativeA32HostResult{NativeA32HostAction::Resume};
+    };
+    const auto unserved = [&] {
+        mSvcEvents.push_back(std::move(event));
+        return NativeA32HostResult{NativeA32HostAction::Wait};
+    };
+    const auto lookup = [&](uint32_t handle, const char* prefix)
+        -> std::shared_ptr<KernelObject> {
+        const auto* record = LookupHandle(handle);
+        if (record == nullptr || !record->Object->Type.starts_with(prefix)) {
+            return nullptr;
+        }
+        return record->Object;
+    };
+    switch (immediate) {
+    case 0x13: {
+        // CreateMutex(out r1, initial_locked r1)
+        event.Name = "CreateMutex";
+        if (mConfig.ResourceCurrentValues[kResourceMutex] >=
+            mConfig.ResourceLimitValues[kResourceMutex]) {
+            return unserved();
+        }
+        const bool locked = state.r[1] != 0U;
+        auto object = std::make_shared<KernelObject>();
+        object->Type = "mutex:guest";
+        object->AvailableCount = locked ? 0 : 1;
+        if (locked) {
+            object->OwnerThreadId = context.ThreadId;
+            object->RecursionCount = 1;
+        }
+        state.r[1] = CreateHandle(object);
+        ++mConfig.ResourceCurrentValues[kResourceMutex];
+        event.Detail = locked ? 1U : 0U;
+        event.Name += locked ? ":locked" : ":unlocked";
+        return resume(kResultSuccess);
+    }
+    case 0x15: {
+        // CreateSemaphore(out r1, initial r1, maximum r2)
+        event.Name = "CreateSemaphore";
+        const int32_t initial = static_cast<int32_t>(state.r[1]);
+        const int32_t maximum = static_cast<int32_t>(state.r[2]);
+        event.Name += ":initial=" + std::to_string(initial) +
+                      ":max=" + std::to_string(maximum);
+        if (initial < 0 || maximum < 0 || initial > maximum) {
+            return resume(kResultInvalidCombinationKernel);
+        }
+        if (mConfig.ResourceCurrentValues[kResourceSemaphore] >=
+            mConfig.ResourceLimitValues[kResourceSemaphore]) {
+            return unserved();
+        }
+        auto object = std::make_shared<KernelObject>();
+        object->Type = "semaphore:guest";
+        object->AvailableCount = initial;
+        object->MaximumCount = maximum;
+        state.r[1] = CreateHandle(object);
+        ++mConfig.ResourceCurrentValues[kResourceSemaphore];
+        return resume(kResultSuccess);
+    }
+    case 0x16: {
+        // ReleaseSemaphore(out previous r1, handle r1, count r2)
+        event.Name = "ReleaseSemaphore";
+        const auto object = lookup(state.r[1], "semaphore:");
+        const int32_t count = static_cast<int32_t>(state.r[2]);
+        event.Detail = state.r[1];
+        event.Name += ":count=" + std::to_string(count);
+        if (!object) {
+            return unserved();
+        }
+        // Semáforos internos do host (srv notification) não têm máximo.
+        if (count < 0 ||
+            (object->MaximumCount > 0 &&
+             object->AvailableCount + count > object->MaximumCount)) {
+            return resume(kResultOutOfRangeKernel);
+        }
+        state.r[1] = static_cast<uint32_t>(object->AvailableCount);
+        object->AvailableCount += count;
+        WakeSynchronizationWaiters();
+        return resume(kResultSuccess);
+    }
+    case 0x1A: {
+        // CreateTimer(out r1, reset_type r1)
+        event.Name = "CreateTimer";
+        const uint32_t resetType = state.r[1];
+        event.Detail = resetType;
+        event.Name += ":reset=" + std::to_string(resetType);
+        if (resetType > 2U ||
+            mConfig.ResourceCurrentValues[kResourceTimer] >=
+                mConfig.ResourceLimitValues[kResourceTimer]) {
+            return unserved();
+        }
+        auto object = std::make_shared<KernelObject>();
+        object->Type = "timer:guest";
+        object->ResetType = resetType;
+        state.r[1] = CreateHandle(object);
+        mKernelTimers.push_back(object);
+        ++mConfig.ResourceCurrentValues[kResourceTimer];
+        return resume(kResultSuccess);
+    }
+    case 0x1B: {
+        // SetTimer(handle r0, initial r3:r2, interval r4:r1)
+        event.Name = "SetTimer";
+        const auto timer = lookup(state.r[0], "timer:");
+        const int64_t initial = static_cast<int64_t>(
+            static_cast<uint64_t>(state.r[2]) |
+            (static_cast<uint64_t>(state.r[3]) << 32U));
+        const int64_t interval = static_cast<int64_t>(
+            static_cast<uint64_t>(state.r[1]) |
+            (static_cast<uint64_t>(state.r[4]) << 32U));
+        event.Detail = state.r[0];
+        event.Name += ":initial=" + std::to_string(initial) +
+                      ":interval=" + std::to_string(interval);
+        if (!timer) {
+            return unserved();
+        }
+        if (initial < 0 || interval < 0) {
+            return resume(kResultOutOfRangeKernel);
+        }
+        // NanosecondsToCtrTicks arredonda para no mínimo 1 tick (SleepThread);
+        // aqui 0 significa "sem período" / "agora".
+        const auto ticksOrZero = [](int64_t nanoseconds) {
+            return nanoseconds == 0
+                       ? uint64_t{0}
+                       : NanosecondsToCtrTicks(
+                             static_cast<uint64_t>(nanoseconds));
+        };
+        timer->TimerIntervalTicks = ticksOrZero(interval);
+        timer->TimerArmed = true;
+        const uint64_t initialTicks = ticksOrZero(initial);
+        timer->TimerNextTick =
+            initialTicks > std::numeric_limits<uint64_t>::max() - mSystemTicks
+                ? std::numeric_limits<uint64_t>::max()
+                : mSystemTicks + initialTicks;
+        // Resultado gravado antes: o sinal imediato pode acordar outra thread.
+        auto result = resume(kResultSuccess);
+        if (initial == 0) {
+            FireKernelTimers();
+        }
+        return result;
+    }
+    case 0x1C:
+    case 0x1D: {
+        // CancelTimer / ClearTimer(handle r0)
+        const bool cancel = immediate == 0x1CU;
+        event.Name = cancel ? "CancelTimer" : "ClearTimer";
+        const auto timer = lookup(state.r[0], "timer:");
+        event.Detail = state.r[0];
+        if (!timer) {
+            return unserved();
+        }
+        if (cancel) {
+            timer->TimerArmed = false;
+        } else {
+            timer->AvailableCount = 0;
+        }
+        return resume(kResultSuccess);
+    }
+    default:
+        event.Name = "unimplemented";
+        return unserved();
+    }
+}
+
+void NativeA32CtrHostServices::SignalKernelTimer(KernelObject& timer) {
+    timer.AvailableCount = 1;
+    WakeSynchronizationWaiters();
+    if (timer.ResetType == 2U) {
+        // Pulse: acorda quem já esperava e não fica sinalizado.
+        timer.AvailableCount = 0;
+    }
+}
+
+void NativeA32CtrHostServices::FireKernelTimers() {
+    if (mKernelTimers.empty()) {
+        return;
+    }
+    // Cópia: acordar uma thread não cria timers, mas não dependemos disso.
+    const auto timers = mKernelTimers;
+    for (const auto& timer : timers) {
+        if (!timer->TimerArmed || timer->TimerNextTick > mSystemTicks) {
+            continue;
+        }
+        if (timer->TimerIntervalTicks == 0U) {
+            timer->TimerArmed = false;
+        } else {
+            // Períodos perdidos num salto do relógio contam como um sinal.
+            const uint64_t missed = (mSystemTicks - timer->TimerNextTick) /
+                                    timer->TimerIntervalTicks;
+            const uint64_t advance = (missed + 1U) * timer->TimerIntervalTicks;
+            timer->TimerNextTick =
+                advance > std::numeric_limits<uint64_t>::max() -
+                              timer->TimerNextTick
+                    ? std::numeric_limits<uint64_t>::max()
+                    : timer->TimerNextTick + advance;
+        }
+        SignalKernelTimer(*timer);
+    }
+}
+
+void NativeA32CtrHostServices::ExpireSynchronizationTimeouts() {
+    if (mTimedSynchronizationWaiters == 0U) {
+        return;
+    }
+    for (auto waiter = mSynchronizationWaiters.begin();
+         waiter != mSynchronizationWaiters.end();) {
+        if (!waiter->DeadlineTick.has_value() ||
+            *waiter->DeadlineTick > mSystemTicks) {
+            ++waiter;
+            continue;
+        }
+        if (auto* state = waiter->Process->ThreadState(waiter->ThreadId)) {
+            state->r[0] = kResultTimeout;
+            if (!waiter->SingleObject) {
+                state->r[1] = 0xFFFFFFFFU;
+            }
+            waiter->Process->ResumeThread(waiter->ThreadId);
+        }
+        --mTimedSynchronizationWaiters;
+        waiter = mSynchronizationWaiters.erase(waiter);
+    }
+}
+
+NativeA32HostResult NativeA32CtrHostServices::HandleStubServiceRequest(
+    oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
+    const std::string& sessionType, uint32_t commandBuffer,
+    NativeA32CtrSvcEvent event) {
+    // Guia do primeiro boot de outro título: todo comando IPC sem HLE sai no
+    // stderr (serviço, comando, parâmetros) e recebe "sucesso" com o resto da
+    // resposta zerado. Repetições são resumidas (1, 2, 3, 4, 8, 16, ...).
+    const std::string service =
+        sessionType.starts_with("client_session:")
+            ? sessionType.substr(15U)
+            : sessionType;
+    const uint32_t header = event.Detail;
+    const uint32_t command = header >> 16U;
+    const uint32_t normalWords = (header >> 6U) & 0x3FU;
+    const uint32_t translateWords = header & 0x3FU;
+    const std::string key = service + ":" + std::to_string(command);
+    const uint64_t count = ++mStubServiceCallCounts[key];
+    if (count <= 4U || (count & (count - 1U)) == 0U) {
+        std::ostringstream line;
+        line << "[ctr-host] IPC sem HLE: servico=\"" << service
+             << "\" comando=0x" << std::hex << std::setw(4)
+             << std::setfill('0') << command << " header=0x" << std::setw(8)
+             << header << std::dec << " normais=" << normalWords
+             << " traducao=" << translateWords << " pc=0x" << std::hex
+             << event.Pc << std::dec << " thread=" << event.ThreadId
+             << " chamada=" << count << " params=[";
+        for (uint32_t word = 0; word < std::min(normalWords, 8U); ++word) {
+            uint32_t value = 0;
+            if (!memory.Read32(commandBuffer + 4U + word * 4U, &value)) {
+                break;
+            }
+            line << (word == 0U ? "" : ",") << "0x" << std::hex << value
+                 << std::dec;
+        }
+        line << "] -> stub: sucesso";
+        std::fprintf(stderr, "%s\n", line.str().c_str());
+    }
+    bool written = memory.Write32(commandBuffer, (command << 16U) | 0x40U) &&
+                   memory.Write32(commandBuffer + 4U, kResultSuccess);
+    for (uint32_t word = 2U; written && word < 16U; ++word) {
+        written = memory.Write32(commandBuffer + word * 4U, 0U);
+    }
+    event.Name += ":stub:cmd=0x";
+    AppendHex8(event.Name, command);
+    if (!written) {
+        mSvcEvents.push_back(std::move(event));
+        return {NativeA32HostAction::Wait};
+    }
+    state.r[0] = kResultSuccess;
+    event.Handled = true;
+    mSvcEvents.push_back(std::move(event));
+    return {NativeA32HostAction::Resume};
 }
 
 NativeA32HostResult NativeA32CtrHostServices::HandleFallback(
@@ -1161,6 +1671,11 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFallback(
     detail << "boot reached an unimplemented A32 fallback at pc=0x" << std::hex
            << pc << ", raw=0x" << op.raw << std::dec
            << ", reason=" << static_cast<uint32_t>(reason);
+    if (reason == oot3d::recomp::a32::FallbackReason::MissingBlock) {
+        // No ctr_title_boot_probe: nenhuma função do whole-AOT cobre este PC
+        // (função não descoberta/não traduzida, ou salto para dado).
+        detail << " (MissingBlock: no translated code at this PC)";
+    }
     return {NativeA32HostAction::Fault, std::nullopt, 0, detail.str()};
 }
 
@@ -1241,6 +1756,9 @@ void NativeA32CtrHostServices::AdvanceSystemTicks(uint64_t ticks) {
                        ? std::numeric_limits<uint64_t>::max()
                        : mSystemTicks + ticks;
     WakeSleepWaiters();
+    // Ambos são no-op sem timers/prazos (o OoT3D não cria nenhum).
+    FireKernelTimers();
+    ExpireSynchronizationTimeouts();
     if (!mDspAudioRunning || mNextDspAudioFrameTick == 0U ||
         mSystemTicks < mNextDspAudioFrameTick) {
         return;
@@ -1255,14 +1773,28 @@ void NativeA32CtrHostServices::AdvanceSystemTicks(uint64_t ticks) {
 }
 
 std::optional<uint64_t> NativeA32CtrHostServices::NextSleepWakeTick() const {
-    if (mSleepWaiters.empty()) {
-        return std::nullopt;
+    std::optional<uint64_t> next;
+    const auto consider = [&next](uint64_t tick) {
+        if (!next.has_value() || tick < *next) {
+            next = tick;
+        }
+    };
+    for (const auto& waiter : mSleepWaiters) {
+        consider(waiter.WakeTick);
     }
-    return std::min_element(mSleepWaiters.begin(), mSleepWaiters.end(),
-                            [](const SleepWaiter& lhs, const SleepWaiter& rhs) {
-                                return lhs.WakeTick < rhs.WakeTick;
-                            })
-        ->WakeTick;
+    for (const auto& timer : mKernelTimers) {
+        if (timer->TimerArmed) {
+            consider(timer->TimerNextTick);
+        }
+    }
+    if (mTimedSynchronizationWaiters != 0U) {
+        for (const auto& waiter : mSynchronizationWaiters) {
+            if (waiter.DeadlineTick.has_value()) {
+                consider(*waiter.DeadlineTick);
+            }
+        }
+    }
+    return next;
 }
 
 size_t NativeA32CtrHostServices::PendingSleepCount() const {

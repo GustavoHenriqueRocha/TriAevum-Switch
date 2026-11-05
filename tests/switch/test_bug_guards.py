@@ -507,6 +507,36 @@ GUARDS = [
     Guard("uber embutia o avaliador de proctex mesmo com a unidade desligada",
           "tools/oot3d/native_pica_frontend/oot3d_native_pica_fragment_shader_gen.cpp",
           r'if \(procTexEnabled\)\s+source << Fast::Renderer3ds::PicaProcTexCode'),
+    # --- 05/11: outro título (Super Mario 3D Land) no mesmo runtime ---
+    # Os núcleos manuais (PicaCommandWriter 0x00307BD8, memcpy 0x00371738...) e o
+    # desbloqueio do Master Quest estão presos a endereços/arquivos do OoT3D; num
+    # outro code.bin corromperiam o processo. O perfil vem do program id.
+    Guard("perfil genérico de título religou núcleos manuais/MQ do OoT3D (corromperia outro code.bin)",
+          "tools/oot3d/native_game_runtime/ctr_title_profile.h",
+          r'GenericTitleProfile.*?ManualCompiledFunctions = false;.*?GuestOverrides = false;'
+          r'.*?MasterQuestUnlock = false;',
+          "oot3d_native_a32_ctr_host_tests"),
+    Guard("manifesto sem title_id (OoT3D antigo) deixou de escolher o perfil do OoT3D",
+          "tools/oot3d/native_game_runtime/ctr_title_profile.h",
+          r'if \(!titleId\.has_value\(\) \|\| IsOot3dTitleId\(\*titleId\)\)\s*\{\s+return Oot3dTitleProfile'),
+    Guard("Zelda mudou: timeouts do kernel / serviços stub ligados por padrão no host",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.h",
+          r'bool StubUnknownServices = false;.*?bool KernelWaitTimeouts = false;.*?bool MasterQuestUnlock = true;',
+          "oot3d_native_a32_ctr_host_tests (TestOot3dProfileWaitsStayInfinite)"),
+    Guard("desbloqueio do Master Quest mexia no system.dat de outro título",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'const bool masterQuestUnlock = mConfig\.MasterQuestUnlock && !romfs &&'),
+    Guard("boot de outro título parava em CreateMutex/CreateSemaphore/CreateTimer sem HLE",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
+          r'case 0x13:\s+case 0x15:\s+case 0x16:\s+case 0x1A:\s+case 0x1B:\s+case 0x1C:\s+case 0x1D:'
+          r'\s+return HandleKernelSyncObjectSvc',
+          "oot3d_native_a32_ctr_host_tests (TestGuestKernelTimers)"),
+    Guard("timers do kernel não entravam no relógio do host (SetTimer nunca disparava)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
+          r'WakeSleepWaiters\(\);\s+// Ambos.*?FireKernelTimers\(\);\s+ExpireSynchronizationTimeouts\(\);'),
+    Guard("ctr_title_boot_probe ligava núcleos manuais do OoT3D sem olhar o perfil",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_boot_probe.cpp",
+          r'dispatch != nullptr && dispatch->ManualCompiledFunctions, true, 0U\);'),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

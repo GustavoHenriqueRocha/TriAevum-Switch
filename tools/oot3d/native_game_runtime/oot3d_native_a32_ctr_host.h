@@ -252,6 +252,14 @@ struct NativeA32CtrHostConfig {
     // time zone). Set, the RTC is this base plus the virtual ARM11 clock,
     // so probes, parity runs and replays stay deterministic.
     std::optional<uint64_t> FixedDateTimeMilliseconds;
+    // Perfil de título (ctr_title_profile.h). Os defaults são o OoT3D, que
+    // nunca exercitou nenhum destes caminhos: o Zelda não muda.
+    // Sessão stub (registrada no stderr) para serviço desconhecido.
+    bool StubUnknownServices = false;
+    // WaitSynchronization1/N com timeout finito expiram (0x09401BFE).
+    bool KernelWaitTimeouts = false;
+    // Desbloqueio do Master Quest no /system.dat (só existe no OoT3D).
+    bool MasterQuestUnlock = true;
 };
 
 class NativeA32CtrHostServices final : public NativeA32HostServices {
@@ -283,6 +291,8 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     const std::map<std::string, uint64_t>& IpcNameCounts() const noexcept;
     uint64_t SvcEventCount() const noexcept;
     void AdvanceSystemTicks(uint64_t ticks);
+    // Próximo tick em que o host acorda algo: SleepThread, timer do kernel
+    // (CreateTimer/SetTimer) ou prazo de WaitSynchronization com timeout.
     std::optional<uint64_t> NextSleepWakeTick() const;
     size_t PendingSleepCount() const;
     uint32_t TakePendingDspAudioFrames();
@@ -353,6 +363,13 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         std::shared_ptr<NativeA32CtrFile> FileBackend;
         std::shared_ptr<RomFsBackingFile> RomFsBacking;
         std::optional<uint32_t> MappedAddress;
+        // semaphore:guest (CreateSemaphore): contagem máxima.
+        int64_t MaximumCount = 0;
+        // timer:guest (CreateTimer/SetTimer): AvailableCount é o sinal,
+        // ResetType 0 = one-shot, 1 = sticky, 2 = pulse.
+        bool TimerArmed = false;
+        uint64_t TimerNextTick = 0;
+        uint64_t TimerIntervalTicks = 0;
     };
 
     struct HandleRecord {
@@ -372,6 +389,10 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         NativeA32Process* Process = nullptr;
         uint32_t ThreadId = 0;
         bool WaitAll = false;
+        // WaitSynchronization1 devolve só r0 (sem índice em r1).
+        bool SingleObject = false;
+        // Prazo do timeout (KernelWaitTimeouts); ausente = espera infinita.
+        std::optional<uint64_t> DeadlineTick;
     };
 
     struct SleepWaiter {
@@ -411,6 +432,23 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     void AcquireKernelObject(KernelObject& object, uint32_t threadId);
     void WakeSynchronizationWaiters();
     void WakeSleepWaiters();
+    // Timers do kernel vencidos até mSystemTicks: sinaliza, acorda e rearma.
+    void FireKernelTimers();
+    void SignalKernelTimer(KernelObject& timer);
+    // Esperas com prazo vencido voltam com 0x09401BFE (timeout).
+    void ExpireSynchronizationTimeouts();
+    NativeA32HostResult HandleWaitSynchronization(
+        uint32_t immediate, oot3d::recomp::a32::GuestState& state,
+        NativeA32Memory& memory, NativeA32HostContext& context,
+        NativeA32CtrSvcEvent event);
+    NativeA32HostResult HandleKernelSyncObjectSvc(
+        uint32_t immediate, oot3d::recomp::a32::GuestState& state,
+        NativeA32HostContext& context, NativeA32CtrSvcEvent event);
+    // Serviço desconhecido (StubUnknownServices): registra e responde sucesso.
+    NativeA32HostResult HandleStubServiceRequest(
+        oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
+        const std::string& sessionType, uint32_t commandBuffer,
+        NativeA32CtrSvcEvent event);
     bool QueueGspInterrupt(NativeA32Memory& memory, uint8_t interruptId);
     bool ApplyGspFramebufferUpdate(NativeA32Memory& memory, uint32_t screenId);
     bool SetGspFramebuffer(uint32_t screenId, uint32_t activeBuffer,
@@ -487,6 +525,12 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     std::vector<ArbiterWaiter> mArbiterWaiters;
     std::vector<SynchronizationWaiter> mSynchronizationWaiters;
     std::vector<SleepWaiter> mSleepWaiters;
+    // Timers do kernel criados pelo guest (vazio no OoT3D).
+    std::vector<std::shared_ptr<KernelObject>> mKernelTimers;
+    // Esperas com prazo pendentes (0 no OoT3D: nada a varrer por tick).
+    size_t mTimedSynchronizationWaiters = 0;
+    // Chamadas por "serviço:comando" das sessões stub (resumo do log).
+    std::map<std::string, uint64_t> mStubServiceCallCounts;
     std::vector<ArchiveRecord> mArchives;
     uint16_t mNextSlot = 0;
     uint16_t mNextGeneration = 1;

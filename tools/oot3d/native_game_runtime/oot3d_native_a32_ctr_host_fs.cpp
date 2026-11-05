@@ -185,7 +185,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
         }
         // config/unlock_master_quest age só em /system.dat do arquivo de save
         // (oot3d_native_master_quest_unlock.h).
-        const bool masterQuestUnlock = !romfs &&
+        // Só no perfil do OoT3D (NativeA32CtrHostConfig::MasterQuestUnlock).
+        const bool masterQuestUnlock = mConfig.MasterQuestUnlock && !romfs &&
                                        *sessionType == "client_session:file:savedata" &&
                                        IsSystemDataPath(file.FilePath) &&
                                        MasterQuestUnlockOptionEnabled();

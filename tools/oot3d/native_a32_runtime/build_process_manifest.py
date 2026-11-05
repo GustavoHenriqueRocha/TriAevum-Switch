@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a native OOT3D process layout from ExHeader and decompressed .code."""
+"""Build a native CTR process layout (OoT3D or another title) from ExHeader and decompressed .code."""
 
 from __future__ import annotations
 
@@ -251,6 +251,9 @@ def build_manifest(
         raise ValueError("process image collides with the main stack")
 
     process_name = exheader[0:8].split(b"\0", 1)[0].decode("ascii", "strict")
+    # ARM11 local system capabilities: program id. O runtime escolhe o perfil
+    # de título por ele (ctr_title_profile.h); OoT3D = 0x00040000000334/5/600.
+    title_id = struct.unpack_from("<Q", exheader, 0x200)[0]
     segments = [
         {
             "name": "text",
@@ -315,6 +318,7 @@ def build_manifest(
         },
         "process": {
             "name": process_name,
+            "title_id": title_id,
             "entrypoint": text["address"],
             "page_size": PAGE_SIZE,
             "bss_declared_size": bss_size,

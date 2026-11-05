@@ -74,6 +74,15 @@ constexpr size_t kResourceAddressArbiter = 8;
 constexpr size_t kResourceCommit = 1;
 constexpr size_t kResourceEvent = 3;
 constexpr size_t kResourceSemaphore = 5;
+constexpr size_t kResourceMutex = 4;
+constexpr size_t kResourceTimer = 6;
+// Resultados do kernel (Azahar svc.cpp / errors.h).
+constexpr uint32_t kResultTimeout = 0x09401BFEU;
+// GetProcessId / GetThreadId: um processo de aplicação só.
+constexpr uint32_t kApplicationProcessId = 0x28U;
+constexpr uint32_t kFirstThreadId = 0x100U;
+constexpr uint32_t kResultOutOfRangeKernel = 0xD8E007FDU;
+constexpr uint32_t kResultInvalidCombinationKernel = 0xE0E01BEEU;
 constexpr size_t kResourceThread = 2;
 constexpr uint32_t kMemoryOperationMask = 0xFFU;
 constexpr uint32_t kMemoryOperationCommit = 3U;

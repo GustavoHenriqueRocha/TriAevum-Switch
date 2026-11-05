@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -523,8 +524,464 @@ void TestSharedPageDateTime() {
             "host clock RTC is not the local wall clock");
 }
 
+
+// --- Objetos de sincronização do guest (perfil de outro título) ------------
+// Regressão do boot de títulos que não o OoT3D (Super Mario 3D Land):
+// CreateMutex/CreateSemaphore/ReleaseSemaphore/CreateTimer/SetTimer/
+// CancelTimer/ClearTimer e WaitSynchronization1/N com timeout faltavam no
+// HLE e paravam o boot com TRIAEVUM_HOST_REQUEST_UNSERVED.
+constexpr uint32_t kTestResultTimeout = 0x09401BFEU;
+constexpr uint32_t kTestOutOfRange = 0xD8E007FDU;
+constexpr uint32_t kTestInvalidCombination = 0xE0E01BEEU;
+
+struct GuestThreads {
+    NativeA32CtrHostServices& Host;
+    NativeA32Process& Process;
+
+    GuestState& State(uint32_t thread) {
+        auto* state = Process.ThreadState(thread);
+        Require(state != nullptr, "guest test thread does not exist");
+        return *state;
+    }
+
+    NativeA32HostAction Svc(uint32_t thread, uint32_t immediate) {
+        NativeA32HostContext context{Process, thread};
+        return Host.HandleSvc(immediate, State(thread), Process.Memory(),
+                              context)
+            .Action;
+    }
+
+    // WaitSynchronization1(handle, timeout em ns; negativo = infinito).
+    NativeA32HostAction Wait1(uint32_t thread, uint32_t handle,
+                              int64_t timeout) {
+        auto& state = State(thread);
+        state.r[0] = handle;
+        state.r[2] = static_cast<uint32_t>(static_cast<uint64_t>(timeout));
+        state.r[3] =
+            static_cast<uint32_t>(static_cast<uint64_t>(timeout) >> 32U);
+        return Svc(thread, 0x24);
+    }
+
+    NativeA32HostAction WaitN(uint32_t thread, uint32_t handle,
+                              int64_t timeout) {
+        auto& state = State(thread);
+        const uint32_t array = state.thread_pointer + 0x40U;
+        Require(Process.Memory().Write32(array, handle),
+                "cannot write wait handle array");
+        state.r[0] = static_cast<uint32_t>(static_cast<uint64_t>(timeout));
+        state.r[1] = array;
+        state.r[2] = 1;
+        state.r[3] = 0;
+        state.r[4] =
+            static_cast<uint32_t>(static_cast<uint64_t>(timeout) >> 32U);
+        return Svc(thread, 0x25);
+    }
+};
+
+void MakeGuestThreads(NativeA32Process& process) {
+    std::string error;
+    Require(process.MapRegion({"text", 0x00100000, 0x1000, false, true, {}},
+                              &error) &&
+                process.MapRegion(
+                    {"stacks", 0x0FF00000, 0x00010000, true, false, {}},
+                    &error),
+            error);
+    NativeA32PrimaryThreadConfig primary;
+    primary.EntryAddress = 0x00100000;
+    primary.StackBaseAddress = 0x0FF10000;
+    primary.StackSize = 0x4000;
+    primary.TlsBaseAddress = 0x1FF82000;
+    primary.TlsSize = 0x1000;
+    primary.ThreadPointer = 0x1FF82000;
+    primary.InitialCpsr = 0x10;
+    primary.Priority = 0x30;
+    Require(process.CreatePrimaryThread(primary, &error), error);
+    // Thread 1 tem prioridade maior (número menor) que a thread 2.
+    Require(process.CreateThread({0x00100000, 1, 0x0FF08000, 0x10, 0, 0x20},
+                                 &error) == 1U &&
+                process.CreateThread(
+                    {0x00100000, 2, 0x0FF0C000, 0x10, 0, 0x31}, &error) == 2U,
+            "cannot create guest test threads: " + error);
+}
+
+void TestGuestMutexSemaphoreAndTimeouts() {
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.KernelWaitTimeouts = true;
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+
+    // Mutex criado travado pela thread 0; duas esperas infinitas.
+    guest.State(0).r[1] = 1;
+    Require(guest.Svc(0, 0x13) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0 && guest.State(0).r[1] != 0,
+            "CreateMutex(locked) did not return a handle");
+    const uint32_t mutex = guest.State(0).r[1];
+    guest.State(1).r[1] = 0xABCD1234U;
+    Require(guest.Wait1(1, mutex, -1) == NativeA32HostAction::Wait &&
+                guest.Wait1(2, mutex, -1) == NativeA32HostAction::Wait,
+            "a locked mutex did not park its waiters");
+    guest.State(0).r[0] = mutex;
+    Require(guest.Svc(0, 0x14) == NativeA32HostAction::Resume,
+            "ReleaseMutex by the owner failed");
+    Require(guest.State(1).r[0] == 0 && guest.State(1).r[1] == 0xABCD1234U &&
+                guest.State(2).r[0] == mutex,
+            "ReleaseMutex did not hand the mutex to the higher-priority "
+            "waiter only (or WaitSynchronization1 wrote r1)");
+    guest.State(1).r[0] = mutex;
+    Require(guest.Svc(1, 0x14) == NativeA32HostAction::Resume &&
+                guest.State(2).r[0] == 0,
+            "the second mutex waiter was not woken");
+    // Recursivo para o dono; soltar sem ser dono para o host (falha nomeada).
+    Require(guest.Wait1(2, mutex, -1) == NativeA32HostAction::Resume,
+            "the mutex owner could not lock recursively");
+    guest.State(2).r[0] = mutex;
+    Require(guest.Svc(2, 0x14) == NativeA32HostAction::Resume,
+            "recursive ReleaseMutex failed");
+    guest.State(2).r[0] = mutex;
+    Require(guest.Svc(2, 0x14) == NativeA32HostAction::Resume,
+            "final ReleaseMutex failed");
+    guest.State(0).r[0] = mutex;
+    Require(guest.Svc(0, 0x14) == NativeA32HostAction::Fault,
+            "ReleaseMutex by a non-owner was not a named host fault");
+    guest.State(0).r[1] = 0;
+    Require(guest.Svc(0, 0x13) == NativeA32HostAction::Resume &&
+                guest.Wait1(1, guest.State(0).r[1], 0) ==
+                    NativeA32HostAction::Resume &&
+                guest.State(1).r[0] == 0,
+            "an unlocked mutex was not immediately acquired");
+
+    // Semáforo: combinação inválida, espera, liberação, limite e consulta.
+    guest.State(0).r[1] = 3;
+    guest.State(0).r[2] = 2;
+    Require(guest.Svc(0, 0x15) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == kTestInvalidCombination,
+            "CreateSemaphore accepted initial > maximum");
+    guest.State(0).r[1] = 0;
+    guest.State(0).r[2] = 2;
+    Require(guest.Svc(0, 0x15) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0,
+            "CreateSemaphore failed");
+    const uint32_t semaphore = guest.State(0).r[1];
+    Require(guest.WaitN(1, semaphore, -1) == NativeA32HostAction::Wait,
+            "an empty semaphore did not park its waiter");
+    guest.State(0).r[1] = semaphore;
+    guest.State(0).r[2] = 1;
+    Require(guest.Svc(0, 0x16) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0 && guest.State(0).r[1] == 0 &&
+                guest.State(1).r[0] == 0 && guest.State(1).r[1] == 0,
+            "ReleaseSemaphore did not wake the waiter with index 0");
+    guest.State(0).r[1] = semaphore;
+    guest.State(0).r[2] = 3;
+    Require(guest.Svc(0, 0x16) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == kTestOutOfRange,
+            "ReleaseSemaphore exceeded the maximum count");
+    guest.State(0).r[1] = semaphore;
+    guest.State(0).r[2] = 2;
+    Require(guest.Svc(0, 0x16) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0 && guest.State(0).r[1] == 0,
+            "ReleaseSemaphore to the maximum failed");
+    Require(guest.Wait1(0, semaphore, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0 &&
+                guest.Wait1(0, semaphore, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0 &&
+                guest.Wait1(0, semaphore, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == kTestResultTimeout,
+            "semaphore polls did not consume two counts then time out");
+
+    // Espera com prazo: expira com 0x09401BFE (N também devolve r1 = -1).
+    guest.State(0).r[1] = 0;
+    Require(guest.Svc(0, 0x17) == NativeA32HostAction::Resume,
+            "CreateEvent failed");
+    const uint32_t event = guest.State(0).r[1];
+    const uint64_t start = host.SystemTicks();
+    constexpr uint64_t kTwoMillisecondTicks = 536224U; // ceil(2 ms)
+    Require(guest.Wait1(1, event, 2'000'000) == NativeA32HostAction::Wait &&
+                host.NextSleepWakeTick() == start + kTwoMillisecondTicks,
+            "a timed wait did not publish its deadline");
+    Require(guest.WaitN(2, event, 1'000'000) == NativeA32HostAction::Wait,
+            "a timed WaitSynchronizationN did not park");
+    host.AdvanceSystemTicks(268112U);
+    Require(guest.State(2).r[0] == kTestResultTimeout &&
+                guest.State(2).r[1] == 0xFFFFFFFFU &&
+                guest.State(1).r[0] == event,
+            "WaitSynchronizationN did not time out at its own deadline");
+    host.AdvanceSystemTicks(kTwoMillisecondTicks - 268112U);
+    Require(guest.State(1).r[0] == kTestResultTimeout &&
+                !host.NextSleepWakeTick().has_value(),
+            "WaitSynchronization1 did not time out at its deadline");
+    // Sinalizado antes do prazo: o prazo some com a espera.
+    Require(guest.Wait1(1, event, 5'000'000) == NativeA32HostAction::Wait,
+            "second timed wait did not park");
+    guest.State(0).r[0] = event;
+    Require(guest.Svc(0, 0x18) == NativeA32HostAction::Resume &&
+                guest.State(1).r[0] == 0 &&
+                !host.NextSleepWakeTick().has_value(),
+            "a signaled timed wait kept its deadline");
+    guest.State(1).r[0] = 0x5A5A5A5AU;
+    host.AdvanceSystemTicks(10U * 268112U);
+    Require(guest.State(1).r[0] == 0x5A5A5A5AU,
+            "an already satisfied wait timed out later");
+}
+
+void TestGuestKernelTimers() {
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.KernelWaitTimeouts = true;
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    constexpr uint64_t kMillisecondTicks = 268112U; // ceil(1 ms)
+    const auto createTimer = [&](uint32_t resetType) {
+        guest.State(0).r[1] = resetType;
+        Require(guest.Svc(0, 0x1A) == NativeA32HostAction::Resume &&
+                    guest.State(0).r[0] == 0,
+                "CreateTimer failed");
+        return guest.State(0).r[1];
+    };
+    const auto setTimer = [&](uint32_t timer, int64_t initial,
+                              int64_t interval) {
+        auto& state = guest.State(0);
+        state.r[0] = timer;
+        state.r[2] = static_cast<uint32_t>(initial);
+        state.r[3] = static_cast<uint32_t>(static_cast<uint64_t>(initial) >> 32U);
+        state.r[1] = static_cast<uint32_t>(interval);
+        state.r[4] =
+            static_cast<uint32_t>(static_cast<uint64_t>(interval) >> 32U);
+        return guest.Svc(0, 0x1B) == NativeA32HostAction::Resume &&
+               state.r[0] == 0;
+    };
+
+    // One-shot: dispara no prazo exato e acorda a espera.
+    const uint32_t oneShot = createTimer(0);
+    Require(guest.Wait1(1, oneShot, -1) == NativeA32HostAction::Wait &&
+                setTimer(oneShot, 1'000'000, 0) &&
+                host.NextSleepWakeTick() ==
+                    host.SystemTicks() + kMillisecondTicks,
+            "SetTimer did not schedule the one-shot timer");
+    host.AdvanceSystemTicks(kMillisecondTicks - 1U);
+    Require(guest.State(1).r[0] == oneShot, "timer fired early");
+    host.AdvanceSystemTicks(1U);
+    Require(guest.State(1).r[0] == 0 && !host.NextSleepWakeTick().has_value(),
+            "one-shot timer did not fire once at its deadline");
+    guest.State(0).r[0] = oneShot;
+    Require(guest.Wait1(0, oneShot, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == kTestResultTimeout,
+            "a consumed one-shot timer stayed signaled");
+
+    // Periódico: sinaliza, rearma; CancelTimer para; savestate preserva.
+    Require(setTimer(oneShot, 1'000'000, 1'000'000), "periodic SetTimer");
+    host.AdvanceSystemTicks(kMillisecondTicks);
+    Require(guest.Wait1(0, oneShot, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0 &&
+                host.NextSleepWakeTick() ==
+                    host.SystemTicks() + kMillisecondTicks,
+            "periodic timer did not signal and re-arm");
+    const auto saved = host.CaptureState();
+    const auto savedWake = host.NextSleepWakeTick();
+    std::string error;
+    guest.State(0).r[0] = oneShot;
+    Require(guest.Svc(0, 0x1C) == NativeA32HostAction::Resume &&
+                !host.NextSleepWakeTick().has_value(),
+            "CancelTimer did not disarm the timer");
+    Require(host.RestoreState(saved, process, &error) &&
+                host.NextSleepWakeTick() == savedWake,
+            "an armed kernel timer did not survive a savestate: " + error);
+    guest.State(0).r[0] = oneShot;
+    Require(guest.Svc(0, 0x1C) == NativeA32HostAction::Resume,
+            "CancelTimer after restore failed");
+
+    // Pulse: acorda todas as esperas e não fica sinalizado.
+    const uint32_t pulse = createTimer(2);
+    Require(guest.Wait1(1, pulse, -1) == NativeA32HostAction::Wait &&
+                guest.Wait1(2, pulse, -1) == NativeA32HostAction::Wait &&
+                setTimer(pulse, 0, 0) && guest.State(1).r[0] == 0 &&
+                guest.State(2).r[0] == 0,
+            "a pulse timer did not wake every waiter");
+    Require(guest.Wait1(0, pulse, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == kTestResultTimeout,
+            "a pulse timer stayed signaled");
+
+    // Sticky: fica sinalizado até ClearTimer.
+    const uint32_t sticky = createTimer(1);
+    Require(setTimer(sticky, 0, 0) &&
+                guest.Wait1(0, sticky, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0 &&
+                guest.Wait1(0, sticky, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0,
+            "a sticky timer was consumed by a wait");
+    guest.State(0).r[0] = sticky;
+    Require(guest.Svc(0, 0x1D) == NativeA32HostAction::Resume &&
+                guest.Wait1(0, sticky, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == kTestResultTimeout,
+            "ClearTimer did not reset a sticky timer");
+    Require(!setTimer(sticky, -1, 0) &&
+                guest.State(0).r[0] == kTestOutOfRange,
+            "SetTimer accepted a negative initial delay");
+
+    // Timer sem handle: CloseHandle o destrói (nada mais a acordar).
+    Require(setTimer(sticky, 1'000'000, 0) &&
+                host.NextSleepWakeTick().has_value(),
+            "sticky timer did not re-arm");
+    guest.State(0).r[0] = sticky;
+    Require(guest.Svc(0, 0x23) == NativeA32HostAction::Resume &&
+                !host.NextSleepWakeTick().has_value(),
+            "a closed kernel timer kept its schedule");
+}
+
+void TestOot3dProfileWaitsStayInfinite() {
+    // Perfil do OoT3D (defaults): timeout ignorado como sempre foi, e serviço
+    // desconhecido continua sendo falha nomeada do host.
+    NativeA32CtrHostServices host(MakeConfig());
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    guest.State(0).r[1] = 0;
+    Require(guest.Svc(0, 0x17) == NativeA32HostAction::Resume,
+            "CreateEvent failed");
+    const uint32_t event = guest.State(0).r[1];
+    Require(guest.Wait1(1, event, 0) == NativeA32HostAction::Wait &&
+                guest.WaitN(2, event, 1'000'000) == NativeA32HostAction::Wait &&
+                !host.NextSleepWakeTick().has_value(),
+            "the OoT3D profile started honoring wait timeouts");
+    Require(host.SvcEvents().back().Name.find(":timeout=") ==
+                std::string::npos,
+            "the OoT3D profile changed the WaitSynchronizationN event name");
+}
+
+uint32_t OpenSrv(GuestThreads& guest) {
+    constexpr std::array<uint8_t, 5> portName{'s', 'r', 'v', ':', 0};
+    Require(guest.Process.Memory().WriteBytes(0x0FF00100, portName),
+            "cannot write srv port name");
+    guest.State(0).r[1] = 0x0FF00100;
+    Require(guest.Svc(0, 0x2D) == NativeA32HostAction::Resume,
+            "ConnectToPort(srv:) failed");
+    return guest.State(0).r[1];
+}
+
+NativeA32HostAction GetServiceHandle(GuestThreads& guest, uint32_t srv,
+                                     std::string_view name,
+                                     uint32_t* session) {
+    auto& memory = guest.Process.Memory();
+    std::array<uint8_t, 8> bytes{};
+    std::copy(name.begin(), name.end(), bytes.begin());
+    uint32_t low = 0;
+    uint32_t high = 0;
+    for (size_t index = 0; index < 4; ++index) {
+        low |= static_cast<uint32_t>(bytes[index]) << (index * 8U);
+        high |= static_cast<uint32_t>(bytes[index + 4U]) << (index * 8U);
+    }
+    Require(memory.Write32(0x1FF82080, 0x00050100) &&
+                memory.Write32(0x1FF82084, low) &&
+                memory.Write32(0x1FF82088, high) &&
+                memory.Write32(0x1FF8208C, static_cast<uint32_t>(name.size())),
+            "cannot write srv:GetServiceHandle");
+    guest.State(0).r[0] = srv;
+    const auto action = guest.Svc(0, 0x32);
+    if (session != nullptr) {
+        Require(memory.Read32(0x1FF8208C, session), "cannot read session");
+    }
+    return action;
+}
+
+void TestUnknownServicesAreLoggedStubs() {
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.StubUnknownServices = true;
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    auto& memory = process.Memory();
+    const uint32_t srv = OpenSrv(guest);
+    uint32_t ptm = 0;
+    Require(GetServiceHandle(guest, srv, "ptm:u", &ptm) ==
+                    NativeA32HostAction::Resume &&
+                ptm != 0 &&
+                host.SvcEvents().back().Name ==
+                    "SendSyncRequest:srv::GetServiceHandle:ptm:u:stub",
+            "an unknown service did not get a logged stub session");
+    Require(memory.Write32(0x1FF82080, 0x00050000) &&
+                memory.Write32(0x1FF82088, 0xDEADBEEFU),
+            "cannot write stub request");
+    guest.State(0).r[0] = ptm;
+    uint32_t header = 0;
+    uint32_t result = 1;
+    uint32_t cleared = 1;
+    Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0 &&
+                memory.Read32(0x1FF82080, &header) && header == 0x00050040 &&
+                memory.Read32(0x1FF82084, &result) && result == 0 &&
+                memory.Read32(0x1FF82088, &cleared) && cleared == 0 &&
+                host.SvcEvents().back().Name.find(":stub:cmd=0x00000005") !=
+                    std::string::npos,
+            "a stub service request did not answer success with a clean "
+            "response");
+    // Comando sem HLE de um serviço conhecido também vira stub registrado.
+    uint32_t apt = 0;
+    Require(GetServiceHandle(guest, srv, "APT:U", &apt) ==
+                NativeA32HostAction::Resume,
+            "APT:U was not opened");
+    Require(memory.Write32(0x1FF82080, 0x00FE0000), "cannot write APT stub");
+    guest.State(0).r[0] = apt;
+    Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume &&
+                memory.Read32(0x1FF82080, &header) && header == 0x00FE0040,
+            "an unhandled APT:U command was not stubbed");
+    // srv: Subscribe etc. sem HLE também.
+    Require(memory.Write32(0x1FF82080, 0x00090040) &&
+                memory.Write32(0x1FF82084, 0x100),
+            "cannot write srv:Subscribe");
+    guest.State(0).r[0] = srv;
+    Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume &&
+                memory.Read32(0x1FF82080, &header) && header == 0x00090040,
+            "srv:Subscribe was not stubbed");
+
+    // Perfil OoT3D: serviço desconhecido continua falha nomeada.
+    NativeA32CtrHostServices strictHost(MakeConfig());
+    NativeA32Process strictProcess(registry, strictHost);
+    MakeGuestThreads(strictProcess);
+    GuestThreads strict{strictHost, strictProcess};
+    const uint32_t strictSrv = OpenSrv(strict);
+    Require(GetServiceHandle(strict, strictSrv, "ptm:u", nullptr) ==
+                NativeA32HostAction::Fault,
+            "the OoT3D profile stubbed an unknown service");
+}
+
+void TestThreadQueries() {
+    NativeA32CtrHostServices host(MakeConfig());
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    guest.State(2).r[1] = 0xFFFF8000U;
+    Require(guest.Svc(2, 0x0B) == NativeA32HostAction::Resume &&
+                guest.State(2).r[0] == 0 && guest.State(2).r[1] == 0x31,
+            "GetThreadPriority(current) is wrong");
+    guest.State(1).r[1] = 0xFFFF8000U;
+    Require(guest.Svc(1, 0x37) == NativeA32HostAction::Resume &&
+                guest.State(1).r[1] == 0x101,
+            "GetThreadId(current) is wrong");
+    guest.State(0).r[1] = 0xFFFF8001U;
+    Require(guest.Svc(0, 0x35) == NativeA32HostAction::Resume &&
+                guest.State(0).r[1] == 0x28,
+            "GetProcessId(current) is wrong");
+    Require(guest.Svc(0, 0x0C) == NativeA32HostAction::Fault &&
+                host.SvcEvents().back().Name ==
+                    "unimplemented:SetThreadPriority",
+            "an unimplemented SVC is not named in the host fault");
+}
+
 int main() {
     TestSharedPageDateTime();
+    TestGuestMutexSemaphoreAndTimeouts();
+    TestGuestKernelTimers();
+    TestOot3dProfileWaitsStayInfinite();
+    TestUnknownServicesAreLoggedStubs();
+    TestThreadQueries();
     TestDeferredDeviceMemory();
     TestDeferredDeviceFailureAndOverwrite();
     TestGpuMemoryWriteOwnership();

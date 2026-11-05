@@ -43,6 +43,9 @@ struct NativeA32ProcessImageManifest {
     uint64_t RomFsImageOffset = 0;
     uint64_t RomFsImageSize = 0;
     std::string ProcessName;
+    // Program id do ExHeader (0x200); ausente nos manifestos antigos do OoT3D.
+    // Escolhe o perfil de título (ctr_title_profile.h).
+    std::optional<uint64_t> TitleId;
     uint32_t EntryAddress = 0;
     uint32_t PageSize = 0;
     std::vector<NativeA32ProcessImageSegment> Segments;

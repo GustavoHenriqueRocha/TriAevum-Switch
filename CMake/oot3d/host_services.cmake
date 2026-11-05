@@ -382,3 +382,34 @@ if (TARGET oot3d_native_a32_aot)
     endif()
     oot3d_target_defaults(oot3d_native_a32_boot_probe FOLDER Tools)
 endif()
+
+# Boot probe só com o whole-AOT (sem o registro de blocos A32 do OoT3D): serve
+# para qualquer título CTR cujos shards estejam em OOT3D_WHOLE_AOT_GENERATED_DIR
+# (OOT3D_REBUILD_WHOLE_AOT=ON, OOT3D_REGENERATE_WHOLE_AOT=OFF, fora do modo
+# produto). O perfil de título vem do program id do ExHeader no manifesto do
+# processo (ctr_title_profile.h). Montagem: tools/ctr/build_title_boot_probe.sh.
+if (TARGET oot3d_native_whole_aot AND NOT OOT3D_WHOLE_AOT_PRODUCT_MODE)
+    add_executable(ctr_title_boot_probe EXCLUDE_FROM_ALL
+        tools/oot3d/native_game_runtime/oot3d_native_a32_boot_probe.cpp
+    )
+    target_compile_definitions(ctr_title_boot_probe PRIVATE
+        OOT3D_BOOT_PROBE_WHOLE_AOT=1)
+    target_link_libraries(ctr_title_boot_probe PRIVATE
+        oot3d_native_a32_process_image
+        oot3d_native_a32_ctr_host
+        oot3d_native_pica_submission
+        oot3d_native_pica_vulkan_plan
+    )
+    if(OOT3D_ENABLE_VULKAN_RENDERER AND TARGET three_ds_recomp_shaderc)
+        target_link_libraries(ctr_title_boot_probe PRIVATE
+            three_ds_recomp_shaderc)
+        target_compile_definitions(ctr_title_boot_probe PRIVATE
+            OOT3D_NATIVE_HAS_SHADERC=1)
+        add_custom_command(TARGET ctr_title_boot_probe POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:three_ds_recomp_shaderc>
+                    $<TARGET_FILE_DIR:ctr_title_boot_probe>
+            COMMENT "Deploying shaderc for ctr_title_boot_probe")
+    endif()
+    oot3d_target_defaults(ctr_title_boot_probe FOLDER Tools)
+endif()
