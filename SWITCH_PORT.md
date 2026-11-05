@@ -80,6 +80,13 @@ Performance and usability:
   PC-relative literals folded; shards without `-ffast-math` (VFP exactness).
 - **Block budget** 2048 (was 128) on Switch.
 - **On-console profile**: `logs/perf.txt` every 150 frames (ms per phase + Mesa counters).
+- **Gyro aiming**: the console's own six-axis sensor feeds the controller motion that devkitPro's
+  SDL does not report (`oot3d_switch_motion.cpp`): player 1's Pro Controller, else the right Joy-Con
+  of a dual pair (left if only it is connected), else Handheld (the Switch Lite). A single sideways
+  Joy-Con is not supported. With `aim.source` `automatic` (the default) tilting the console aims
+  in first person; `aim.invert_x`/`invert_y` and the gyro sensitivity apply as on PC, and
+  "Calibrate controller motion" (L3+R3 menu, Controls) removes drift. The sensor is stopped out of
+  focus and restarted on return (HOME, sleep) or when its data stalls.
 - **TopScreen 3.0**: 2.1.1 was removed from GameBanana; the importer now accepts the 3.0 package.
 - **USA ROM** accepted in the build (the project's own canonical USA→EUR adapter).
 - **Input paths** configurable via `OOT3D_OPERATIONAL_<variable>` (previously hardcoded to the author's Windows).
