@@ -404,6 +404,13 @@ and the `SysClkContext` layout are reproduced, from
   behind the diagnostic allocator `oot3d_switch_guard_alloc.cpp`. No code was
   copied; the allocator is an independent implementation.
 
+## Switch updater: libcurl and Mbed TLS
+
+The Switch NRO links devkitPro's switch-curl (libcurl 7.69.1, on libnx's TLS
+backend) for the OTA updater's HTTPS requests and switch-mbedtls 2.28
+(`mbedcrypto`) for its SHA-256 checks. Their notices are in `LICENSES/curl.txt`
+and `LICENSES/mbedtls.txt`; the Switch release zip carries both.
+
 ## Other dependencies
 
 Dependencies obtained through CMake, vcpkg or platform SDKs retain their own

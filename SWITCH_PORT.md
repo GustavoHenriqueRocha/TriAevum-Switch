@@ -835,6 +835,42 @@ loads).
   window closes (`oot3d_fps_counter.h`, tests in `oot3d_fps_counter_tests.cpp`).
 - Needs ImGui on the window: with deko3d and `config/serial_presentation` nothing ImGui draws shows.
 
+### Version, Exit game and OTA updates: L3+R3 > Updates
+- Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
+  field; default `0.1.0-dev`) and `OOT3D_RELEASE_BUILD` (monotonic integer; default 0). Both go
+  into `oot3d_build_version.cpp` only, the NACP `VERSION` and the first line of the L3+R3 menu
+  (`1.0.0-test.1 (build 5)`). The build number orders releases across channels.
+- "Exit game" (end of the menu's first line) asks for confirmation ("Progress since your last save
+  will be lost.") and then closes the window from the game thread, the path HOME > Close takes:
+  the render stream discards queued frames, `Finish` runs and `main` returns.
+- Updates tab: installed version and build; channel Stable (releases only) or Test (also
+  pre-releases), saved in `config/update_channel` (default: Test for a pre-release build);
+  repository `JohnUzoka/TriAevum-Switch`, or `config/update_repo` (`owner/name`). "Check for
+  updates" reads `GET /repos/{repo}/releases` (unauthenticated: 60 requests an hour per address)
+  and offers the highest-version release tagged `v<version>` whose `release.json` is valid and
+  whose files are all assets of the listed size (and of GitHub's `digest`, when listed). A newer
+  build is "Download and install", the same build "Reinstall (repair)", an older one "Install this
+  older build". Release notes are the release body.
+- `release.json`: `{"format": "oot3dre_switch_release_v1", "version", "build" (> 0), "channel"
+  ("stable" for a full release, "test" for a pre-release), "files": [{"path", "size", "sha256"}]}`.
+  Paths are relative to `sdmc:/switch/oot3dre/`, `[A-Za-z0-9._-]` components, never under
+  `game/`, `savedata/`, `logs/`, `config/`, `update/`, `lab/`, `bench/`, never
+  `game_language.json`, `.new`/`.old`/`.tmp`; `oot3d_native_game.nro` is required; each file's
+  asset is named after its last component.
+- Install (worker thread; sockets and libcurl only while it runs; libcurl follows the redirect to
+  GitHub's CDN, HTTPS only, certificates checked by the system's SSL service): checks free space,
+  downloads each file to `<file>.new` with its SHA-256 (mbedcrypto) and size, checks the NRO's NACP
+  version, then journals the files other than the NRO in `update/pending.json` and swaps the NRO
+  (`.nro` → `.nro.old`, `.nro.new` → `.nro`; Horizon cannot rename over a file). The others may
+  be open (`resources.o2r` is), so the next start swaps them before anything opens them
+  (`FinishPendingUpdate` in `main`; a journal for another build is dropped). Cancel or any failure
+  removes the `.new` files and leaves the installed version as it was. Log: `logs/update.txt`.
+- "Restart now" (confirmation) sets `envSetNextLoad` to the NRO and exits like Exit game. Rollback:
+  rename `oot3d_native_game.nro.old` back to `oot3d_native_game.nro`.
+- Without `config/atlas_overrides.o3tu` (built from the third-party TopScreen mod, CC BY-NC-ND,
+  not shippable) the game now starts without TopScreen texture overrides instead of refusing.
+- Logic and install steps: `oot3d_update_release.{h,cpp}`, tests `oot3d_update_release_tests`.
+
 ### Stable heap and less phantom work per frame (2026-10-17)
 Measured (`switch-logs/interp1`, fps60, scale 2, 8.5 min): `heap_arena_mb` 631 → 1659 MB with
 `heap_used_mb` ~700 MB (fragmentation of newlib's malloc, which Mesa/nouveau also use: devkitPro's

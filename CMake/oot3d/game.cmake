@@ -504,6 +504,23 @@ if(COMMAND three_ds_recomp_deploy_nri_runtime)
 endif()
 unset(_oot3d_vulkan_hosts)
 oot3d_target_defaults(oot3d_native_game NO_WARNING_OVERRIDE)
+# Release identity (~/workshop-OOT/scripts/release-fork.sh sets both): the
+# version the NACP and the L3+R3 menu show and the build number the OTA
+# updater compares (higher = newer, across channels).
+set(OOT3D_RELEASE_VERSION "0.1.0-dev" CACHE STRING
+    "Release version (semver; at most 15 characters, the NACP's limit)")
+set(OOT3D_RELEASE_BUILD "0" CACHE STRING
+    "Monotonic release build number (0 for development builds)")
+string(LENGTH "${OOT3D_RELEASE_VERSION}" _oot3d_release_version_length)
+if (NOT OOT3D_RELEASE_VERSION MATCHES
+        "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"
+    OR _oot3d_release_version_length GREATER 15)
+    message(FATAL_ERROR "OOT3D_RELEASE_VERSION '${OOT3D_RELEASE_VERSION}' is not a semver of at most 15 characters")
+endif()
+if (NOT OOT3D_RELEASE_BUILD MATCHES "^(0|[1-9][0-9]*)$")
+    message(FATAL_ERROR "OOT3D_RELEASE_BUILD '${OOT3D_RELEASE_BUILD}' is not a build number")
+endif()
+unset(_oot3d_release_version_length)
 if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     # Core and priority placement for every pthread (see the source).
     target_sources(oot3d_native_game PRIVATE
@@ -516,11 +533,28 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         tools/oot3d/native_game_runtime/oot3d_switch_motion.cpp
         # Guard pages for one malloc size range (config/guard_alloc) and the
         # libnx exception handler that reports faults to logs/hang.txt.
-        tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp)
+        tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp
+        # Release identity, the OTA updater (L3+R3 > Updates) and the
+        # start-up step that finishes an install.
+        tools/oot3d/native_game_runtime/oot3d_build_version.cpp
+        tools/oot3d/native_game_runtime/oot3d_update_release.cpp
+        tools/oot3d/native_game_runtime/oot3d_switch_updater.cpp
+        tools/oot3d/native_game_runtime/oot3d_update_panel.cpp)
     # First-launch import of the player's decrypted dump into game/.
     target_sources(oot3d_native_game PRIVATE
         tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
         tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp)
+    # Only this file sees the version: a new one recompiles one source.
+    set_source_files_properties(tools/oot3d/native_game_runtime/oot3d_build_version.cpp
+        PROPERTIES COMPILE_DEFINITIONS
+        "OOT3D_RELEASE_VERSION=\"${OOT3D_RELEASE_VERSION}\";OOT3D_RELEASE_BUILD=${OOT3D_RELEASE_BUILD}")
+    # libcurl (devkitPro's, on libnx's TLS backend) for the updater's HTTPS
+    # and mbedcrypto for its SHA-256 checks.
+    find_library(OOT3D_SWITCH_CURL_LIBRARY curl HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)
+    find_library(OOT3D_SWITCH_MBEDCRYPTO_LIBRARY mbedcrypto HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)
+    find_library(OOT3D_SWITCH_Z_LIBRARY z HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)
+    target_link_libraries(oot3d_native_game PRIVATE
+        ${OOT3D_SWITCH_CURL_LIBRARY} ${OOT3D_SWITCH_MBEDCRYPTO_LIBRARY} ${OOT3D_SWITCH_Z_LIBRARY})
     target_link_options(oot3d_native_game PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=threadCreate
         -Wl,--wrap=SDL_SetThreadPriority
         -Wl,--wrap=_malloc_r -Wl,--wrap=_memalign_r -Wl,--wrap=_free_r -Wl,--wrap=_realloc_r
@@ -528,7 +562,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     nx_generate_nacp(oot3d_native_game.nacp
         NAME "The Legend of Zelda: Ocarina of Time 3D Recompiled"
         AUTHOR "OoT3D Recompiled contributors"
-        VERSION "0.1.0")
+        VERSION "${OOT3D_RELEASE_VERSION}")
     nx_create_nro(oot3d_native_game
         NACP oot3d_native_game.nacp
         ICON ${CMAKE_CURRENT_SOURCE_DIR}/res/switch/icon.jpg)

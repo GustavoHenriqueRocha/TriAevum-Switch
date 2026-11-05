@@ -11,6 +11,8 @@
 #include "fast/backends/gfx_deko3d.h"
 #include <algorithm>
 #include <fstream>
+#include "oot3d_build_version.h"
+#include "oot3d_update_panel.h"
 #endif
 #include <cstdlib>
 #include <string>
@@ -986,6 +988,12 @@ void NativeA32WindowSession::Setup() {
 #if defined(__SWITCH__)
   applicationSettingsTabs.push_back(
       Oot3dNativeGame::CreateVideoSettingsPanel("sdmc:/switch/oot3dre/config"));
+#endif
+#if defined(__SWITCH__)
+  // OTA updates from GitHub Releases, and the build at the top of the menu.
+  applicationSettingsTabs.push_back(Oot3dNativeGame::CreateUpdatePanel("sdmc:/switch/oot3dre"));
+  Fast::Oot3d::DebugMenuTitleText().store(Oot3dNativeGame::BuildVersionLabel(),
+                                          std::memory_order_relaxed);
 #endif
 #if defined(TRIAEVUM_DEVELOPER_TOOLS)
   devWarp = std::make_shared<Oot3dNativeGame::DevWarpRuntime>(

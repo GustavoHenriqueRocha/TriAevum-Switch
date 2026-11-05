@@ -19,6 +19,8 @@ their imported source.
 | SDL2 2.32.10 (statically linked) | zlib | `LICENSES/SDL2-zlib.txt` |
 | SDL_GameControllerDB mappings | zlib | `LICENSES/SDL-GameControllerDB-zlib.txt` |
 | Zstandard 1.5.6 (statically linked) | BSD-3-Clause (upstream is dual BSD/GPL-2.0; used under BSD) | `LICENSES/zstd-BSD-3-Clause.txt` |
+| libcurl 7.69.1 (devkitPro switch-curl, statically linked into the Switch NRO for the updater) | curl license (MIT/X style) | `LICENSES/curl.txt` |
+| Mbed TLS 2.28 mbedcrypto (devkitPro switch-mbedtls, statically linked into the Switch NRO for SHA-256) | Apache-2.0 OR GPL-2.0-or-later | `LICENSES/mbedtls.txt` |
 | Microsoft Visual C++ runtime for shaderc | Microsoft runtime redistribution terms | `LICENSES/Microsoft-Visual-Cpp-Runtime.md` |
 | NXVK probe | GPL-2.0-or-later | `ports/switch_vulkan_probe/COPYING` |
 | shaderc shared runtime | Apache-2.0 | `LICENSES/shaderc-Apache-2.0.txt` |
