@@ -842,10 +842,12 @@ loads).
   (`1.0.0-test.1 (build 5)`). The build number orders releases across channels.
 - "Exit game" (end of the menu's first line) asks for confirmation ("Progress since your last save
   will be lost.") and then closes the window from the game thread, the path HOME > Close takes:
-  the render stream discards queued frames and `Finish` runs. `main` then ends the application
-  with `svcExitProcess` instead of returning to the homebrew loader: on return hbl maps the next
-  NRO into memory this process's services still hold and aborts (crash report on the console:
-  `hbl + 0x3810`, 2001-0106 InvalidCurrentMemory).
+  the render stream discards queued frames and `Finish` runs. `main` then sets libnx's
+  `__nx_applet_exit_mode = 1` and returns, so libnx's exit closes the application through AM
+  (`ISelfController::Exit`) instead of returning to the homebrew loader: on return hbl maps the
+  next NRO into memory this process's services still hold and aborts (crash report on the console:
+  `hbl + 0x3810`, 2001-0106 InvalidCurrentMemory). Ending the process with `svcExitProcess`
+  (1.0.0-test.2) avoided that, but the console still reported a crash on exit.
 - Updates tab: installed version and build; channel Stable (releases only) or Test (also
   pre-releases), saved in `config/update_channel` (default: Test for a pre-release build);
   repository `JohnUzoka/TriAevum-Switch`, or `config/update_repo` (`owner/name`). "Check for

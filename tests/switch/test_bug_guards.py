@@ -530,9 +530,10 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'if \(physicalInputFrame\.Exit \|\| devLabQuit \|\| Fast::Oot3d::ExitGameRequested\(\)\) \{'),
     # --- 04/11: crash on Exit game (hbl + 0x3810, 2001-0106) and right after the ROM import ---
-    Guard("Exit game must end the process: returning to hbl crashed it (InvalidCurrentMemory)",
+    Guard("Exit game must leave through AM: returning to hbl crashed it (InvalidCurrentMemory), svcExitProcess still showed a crash",
           "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
-          r'if \(Fast::Oot3d::ExitGameRequested\(\)\) \{\s+std::fflush\(nullptr\);\s+svcExitProcess\(\);'),
+          r'if \(Fast::Oot3d::ExitGameRequested\(\)\)\s+__nx_applet_exit_mode = 1;',
+          forbid=r'svcExitProcess\('),
     Guard("ROM import screen: stdout/stderr put back after consoleExit (first log line crashed)",
           "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
           r'consoleExit\(nullptr\);\s+devoptab_list\[STD_OUT\] = mStdout;\s+devoptab_list\[STD_ERR\] = mStderr;'),

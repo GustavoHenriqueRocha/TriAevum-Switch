@@ -34,7 +34,9 @@
 #include "oot3d_whole_aot_gcov.h"
 #include "oot3d_switch_rom_import.h"
 #include <switch.h>
-#include <cstdio>
+// libnx (applet.c, weak, default 0): 1 makes libnx's exit end the application
+// through AM instead of returning to the homebrew loader.
+extern "C" u32 __nx_applet_exit_mode;
 void PlaceSwitchMainThread(); // oot3d_switch_threads.cpp
 #endif
 
@@ -289,15 +291,15 @@ int main(int argc, char** argv) {
         DestroyContextForDemo();
 #if defined(__SWITCH__)
         WriteSwitchBootStatus("completed");
-        // Exit game (L3+R3) ends the application here instead of returning to
-        // the homebrew loader. On return hbl maps the next NRO into memory this
-        // process's services still hold and aborts (Atmosphère crash report:
-        // hbl + 0x3810, 2001-0106 InvalidCurrentMemory). The teardown above
-        // has run; flush what stdio still buffers before leaving.
-        if (Fast::Oot3d::ExitGameRequested()) {
-            std::fflush(nullptr);
-            svcExitProcess();
-        }
+        // Exit game (L3+R3) ends the application instead of returning to the
+        // homebrew loader: on return hbl maps the next NRO into memory this
+        // process's services still hold and aborts (hbl + 0x3810, 2001-0106
+        // InvalidCurrentMemory). svcExitProcess (1.0.0-test.2) ended the process
+        // behind AM's back and the console still reported a crash on exit. With
+        // exit mode 1, libnx's exit sends AM ISelfController::Exit
+        // (_appletSelfExit), the way an application closes itself.
+        if (Fast::Oot3d::ExitGameRequested())
+            __nx_applet_exit_mode = 1;
 #endif
         return 0;
 #else
