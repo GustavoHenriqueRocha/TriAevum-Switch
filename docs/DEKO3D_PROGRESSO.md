@@ -430,3 +430,31 @@ Na p6w o render desenha em 3 imagens próprias. Uma fila deko3d separada, na thr
 - p6x: crash no primeiro perf. `std::thread::detach()` lança std::system_error ("Function not implemented"), porque não há pthread_detach na newlib do devkitA64. p6y: a thread fica guardada num objeto que nunca é destruído.
 - p6y (tour20 limpo, sem trava): 125 perdas (0,63/janela), 74% das janelas sem perda, 19 picos fora de load, 126 quadros descartados pelo mailbox (até 7 por janela; nenhuma parada longa) e `clk_busy` nunca 1.
   Os descartes também são imperfeição visual (um quadro pulado), e 42 das 49 janelas da p6w que tiveram descarte também tiveram perda: o descarte costuma ser a cauda da mesma travada.
+
+## Histórico p7a–p7e e packs v5–v9 (26/10 a 05/11)
+
+Compilado da memória antiga do Claude (`triaevum-deko3d.md`) na fase 2 do ai-memory. O estado vivo
+(o que está no Switch, pendências) fica no ai-memory (`mem contexto triaevum`), não aqui.
+
+- **p7a (26/10)**: p6y + controle no menu de dev (L3+R3) + trava de 30 por clock (`config/fps60_clock`).
+  Sem overclock (1020/307) nem o 30 nativo segura (27–28 fps, gargalo na CPU) e a trava por clock
+  ficou pior: decisão do Gustavo, sem overclock não vale investir (o jogo é pensado para 1785/614).
+- **Guarda de heap (p6r–p6u, 26/10)**: `config/guard_alloc` (b52b74e7 + 1e5cb956) com páginas de
+  guarda e handler de exceção no `hang.txt`. A "corrupção determinística" era uma linha da sessão 96
+  (tour16, pgo5o/Mesa) repetida no `perf.txt` acumulado. p6u (canário) rodou o tour sem achar nada;
+  p6t (0xFD no free) travou o console; p6s com quarentena esgotou o kernel. O handler ficou;
+  `guard_alloc` saiu do SD.
+- **Packs (28/10 a 04/11)**: v5 (319 shaders) e v6 (331) por textura que sumia (shaders fora do
+  pack); v7 (347, 04/11). Fontes de cada rodada em `logs/deko3d_shaders.compilados-vN`.
+- **p7c (04/11, ed3e6418)**: salvar controle/warp/savestates no Switch (EEXIST do Horizon no rename);
+  311d8fd7: mapa da dungeon troca de andar (o port anulava 0x00442F38 achando que era toque).
+- **Pack previsto (05/11)**: censo dos CMB do romfs (af088449, `tools/oot3d/cmb_tev_census.py`):
+  1998 CMB, 11173 materiais, 534 TEV únicos. `cmb_tev_registers.py` + gerador real: 189/197
+  assinaturas conhecidas batem. v8 previsto (a7424d3b, `tools/oot3d/deko3d_shader_predict.py`):
+  2187 shaders, 7,5 MiB, 0 falhas, holdout ~13–15/16 da v7. `ShaderStore::Init` lê o pack num read só.
+- **p7e + pack v9 (05/11, 6884c113)**: uber leve (loop TEV com limite uniforme, proctex só se ligado;
+  base 91 → 16 KiB, com luz 154 → 36 KiB; `pica_tev_gpu_tests` sem diferença). v9 = v8 + 8 bases
+  (2195). Tour p7e (`bench/p7e`, roteiro do tour27, termina em r44): missing=0 e uber=0 em ~2M draws;
+  nas 29 áreas comuns, perdidas/janela 60,9 → 12,5, FPS mínimo médio 58,4 → 59,4, pior quadro
+  19,1 → 17,7 ms; Market 6,2 → 0, Kakariko 5,5 → 0,2, Water Temple 5,2 → 2,5; nenhuma área piorou
+  (o tour27 era de build mais antiga: parte do ganho pode vir de outras mudanças).
