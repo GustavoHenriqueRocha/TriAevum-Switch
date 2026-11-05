@@ -969,9 +969,22 @@ void TestThreadQueries() {
     Require(guest.Svc(0, 0x35) == NativeA32HostAction::Resume &&
                 guest.State(0).r[1] == 0x28,
             "GetProcessId(current) is wrong");
-    Require(guest.Svc(0, 0x0C) == NativeA32HostAction::Fault &&
+    // Super Mario 3D Land parou aqui (SVC 0x0C) depois de 751 SVCs.
+    guest.State(1).r[0] = 0xFFFF8000U;
+    guest.State(1).r[1] = 0x2C;
+    Require(guest.Svc(1, 0x0C) == NativeA32HostAction::Resume &&
+                guest.State(1).r[0] == 0 &&
+                process.ThreadPriority(1) == std::optional<uint32_t>(0x2C),
+            "SetThreadPriority(current) did not change the priority");
+    guest.State(1).r[0] = 0xFFFF8000U;
+    guest.State(1).r[1] = 0x40;
+    Require(guest.Svc(1, 0x0C) == NativeA32HostAction::Resume &&
+                guest.State(1).r[0] == 0xE0E01BFDU &&
+                process.ThreadPriority(1) == std::optional<uint32_t>(0x2C),
+            "SetThreadPriority accepted a priority above 0x3F");
+    Require(guest.Svc(0, 0x0D) == NativeA32HostAction::Fault &&
                 host.SvcEvents().back().Name ==
-                    "unimplemented:SetThreadPriority",
+                    "unimplemented:GetThreadAffinityMask",
             "an unimplemented SVC is not named in the host fault");
 }
 

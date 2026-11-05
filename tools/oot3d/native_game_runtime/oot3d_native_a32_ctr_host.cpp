@@ -1031,6 +1031,36 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         mSvcEvents.push_back(std::move(event));
         return {NativeA32HostAction::Resume};
     }
+    case 0x0C: {
+        // SetThreadPriority(handle r0, priority r1); 0x18-0x3F como no kernel,
+        // 0..0x3F aceitos (o kernel só confere o limite de recurso).
+        event.Name = "SetThreadPriority";
+        const uint32_t handle = state.r[0];
+        const uint32_t priority = state.r[1];
+        std::optional<uint32_t> threadId;
+        if (handle == kCurrentThreadHandle) {
+            threadId = context.ThreadId;
+        } else if (const auto* record = LookupHandle(handle);
+                   record != nullptr && record->Object->Type == "thread") {
+            threadId = record->Object->ThreadId;
+        }
+        if (!threadId.has_value()) {
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Wait};
+        }
+        if (priority > 0x3FU) {
+            state.r[0] = 0xE0E01BFDU;  // ERR_OUT_OF_RANGE
+        } else if (!context.Process.SetThreadPriority(*threadId, priority)) {
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Wait};
+        } else {
+            state.r[0] = kResultSuccess;
+        }
+        event.Handled = true;
+        event.Detail = priority;
+        mSvcEvents.push_back(std::move(event));
+        return {NativeA32HostAction::Resume};
+    }
     case 0x27:
         event.Name = "DuplicateHandle";
         if (state.r[1] != kCurrentThreadHandle) {

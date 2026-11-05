@@ -1226,6 +1226,18 @@ std::optional<uint32_t> NativeA32Process::ThreadPriority(
                : std::nullopt;
 }
 
+bool NativeA32Process::SetThreadPriority(uint32_t threadId, uint32_t priority) {
+    if (threadId == 0) {
+        if (mPrimaryThreadStatus == NativeA32ThreadStatus::Empty) return false;
+        mPrimaryThreadPriority = priority;
+        return true;
+    }
+    const size_t index = static_cast<size_t>(threadId - 1U);
+    if (index >= mSecondaryThreads.size()) return false;
+    mSecondaryThreads[index].Priority = priority;
+    return true;
+}
+
 std::optional<uint32_t> NativeA32Process::ThreadEntryAddress(
     uint32_t threadId) const {
     if (threadId == 0) {

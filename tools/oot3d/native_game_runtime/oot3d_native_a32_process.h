@@ -203,6 +203,7 @@ class NativeA32Process {
     oot3d::recomp::a32::GuestState* ThreadState(uint32_t threadId);
     NativeA32ThreadStatus ThreadStatus(uint32_t threadId) const;
     std::optional<uint32_t> ThreadPriority(uint32_t threadId) const;
+    bool SetThreadPriority(uint32_t threadId, uint32_t priority);
     std::optional<uint32_t> ThreadEntryAddress(uint32_t threadId) const;
     std::optional<uint32_t> ThreadArgument(uint32_t threadId) const;
 
