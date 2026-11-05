@@ -951,6 +951,40 @@ void TestUnknownServicesAreLoggedStubs() {
             "the OoT3D profile stubbed an unknown service");
 }
 
+// Super Mario 3D Land: CreateMemoryBlock de uma página do próprio .bss
+// (depois de 3365 SVCs).
+void TestCreateMemoryBlockOfGuestMemory() {
+    NativeA32CtrHostServices host(MakeConfig());
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    std::string error;
+    Require(process.Memory().MapRegion(
+                {"data", 0x00500000U, 0x2000, true, false, {}}, &error),
+            error);
+    GuestThreads guest{host, process};
+    auto& state = guest.State(0);
+    state.r[0] = 3;
+    state.r[1] = 0x00501000U;
+    state.r[2] = 0x1000;
+    state.r[3] = 3;
+    Require(guest.Svc(0, 0x1E) == NativeA32HostAction::Resume &&
+                state.r[0] == 0 && state.r[1] != 0 &&
+                host.SvcEvents().back().Handled &&
+                host.SvcEvents().back().Detail == 0x00501000U,
+            "CreateMemoryBlock did not wrap mapped guest memory");
+    state.r[0] = state.r[1];
+    Require(guest.Svc(0, 0x23) == NativeA32HostAction::Resume && state.r[0] == 0,
+            "the CreateMemoryBlock handle cannot be closed");
+    state.r[1] = 0;
+    state.r[2] = 0x1000;
+    Require(guest.Svc(0, 0x1E) != NativeA32HostAction::Resume,
+            "CreateMemoryBlock accepted a kernel-allocated block");
+    state.r[1] = 0x00600000U;
+    Require(guest.Svc(0, 0x1E) != NativeA32HostAction::Resume,
+            "CreateMemoryBlock accepted unmapped memory");
+}
+
 void TestThreadQueries() {
     NativeA32CtrHostServices host(MakeConfig());
     const oot3d::recomp::a32::Registry registry{};
@@ -995,6 +1029,7 @@ int main() {
     TestOot3dProfileWaitsStayInfinite();
     TestUnknownServicesAreLoggedStubs();
     TestThreadQueries();
+    TestCreateMemoryBlockOfGuestMemory();
     TestDeferredDeviceMemory();
     TestDeferredDeviceFailureAndOverwrite();
     TestGpuMemoryWriteOwnership();

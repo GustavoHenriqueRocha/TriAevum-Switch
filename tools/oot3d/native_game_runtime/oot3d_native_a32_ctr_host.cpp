@@ -826,6 +826,30 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         mSvcEvents.push_back(std::move(event));
         return {NativeA32HostAction::Resume};
     }
+    case 0x1E: {
+        // CreateMemoryBlock(other r0, address r1, size r2, my r3) -> handle r1.
+        // Super Mario 3D Land shares a page of its own .bss; the HLE services
+        // read guest memory directly, so the block only records the region.
+        // Address 0 (kernel-allocated block) is not supported yet.
+        event.Name = "CreateMemoryBlock";
+        const uint32_t address = state.r[1];
+        const uint32_t size = state.r[2];
+        event.Detail = address;
+        if (address == 0 || (address & 0xFFFU) != 0 || size == 0 ||
+            (size & 0xFFFU) != 0 || !memory.IsMapped(address, size)) {
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Wait};
+        }
+        auto block = std::make_shared<KernelObject>();
+        block->Type = "shared_memory:application";
+        block->FileSize = size;
+        block->MappedAddress = address;
+        state.r[0] = kResultSuccess;
+        state.r[1] = CreateHandle(block);
+        event.Handled = true;
+        mSvcEvents.push_back(std::move(event));
+        return {NativeA32HostAction::Resume};
+    }
     case 0x1F: {
         event.Name = "MapMemoryBlock";
         const HandleRecord* memoryBlock = LookupHandle(state.r[0]);
