@@ -92,4 +92,23 @@ class NativeA32CtrMemoryFile final : public NativeA32CtrFile {
     std::span<const uint8_t> mBytes;
 };
 
+// Mesmo arquivo só de leitura, dono dos bytes (seções do ExeFS do título).
+class NativeA32CtrOwnedMemoryFile final : public NativeA32CtrFile {
+  public:
+    explicit NativeA32CtrOwnedMemoryFile(std::vector<uint8_t> bytes)
+        : mBytes(std::move(bytes)), mView(mBytes) {}
+    bool Read(uint64_t offset, std::span<uint8_t> destination, uint32_t* returnedSize) override {
+        return mView.Read(offset, destination, returnedSize);
+    }
+    bool Write(uint64_t offset, std::span<const uint8_t> data, uint32_t* writtenSize) override {
+        return mView.Write(offset, data, writtenSize);
+    }
+    bool Resize(uint64_t) override { return false; }
+    uint64_t Size() const noexcept override { return mBytes.size(); }
+
+  private:
+    std::vector<uint8_t> mBytes;
+    NativeA32CtrMemoryFile mView;
+};
+
 } // namespace Oot3dNativeGame

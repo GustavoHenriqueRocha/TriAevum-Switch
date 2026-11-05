@@ -231,6 +231,11 @@ struct NativeA32CtrHostConfig {
     const Oot3dPicaCompositionDomain* PicaCompositionDomain = nullptr;
     Oot3dPicaCommandListCompositionProvider* PicaCompositionProvider = nullptr;
     std::filesystem::path SaveDataDirectory;
+    // Seções do ExeFS do próprio título (icon, banner, logo) servidas pelo
+    // archive SelfNCCH (id 3, caminho binário tipo 2): <ExeFsDirectory>/<nome>,
+    // extraídas por tools/ctr/ncch_extract.py. Vazio ou arquivo ausente = seção
+    // inexistente (0xC8804637, como o Azahar sem a seção).
+    std::filesystem::path ExeFsDirectory;
     bool HeadphonesConnected = false;
     uint8_t SoundOutputMode = 1;
     uint8_t SystemLanguage = 1;
@@ -242,6 +247,9 @@ struct NativeA32CtrHostConfig {
     float GyroscopeRawToDpsCoefficient = 14.375F;
     bool DetailedSvcDiagnostics = false;
     bool ProfileRuntime = false;
+    // Contagem de IPC por nome sem o resto do perfil de runtime (despejo
+    // TRIAEVUM_GUEST_STATE_DUMP, oot3d_native_a32_guest_state_dump.h).
+    bool CollectIpcNameCounts = false;
     std::array<int16_t, 9> GyroscopeCalibration{
         0, 6700, -6700, 0, 6700, -6700, 0, 6700, -6700,
     };
@@ -294,6 +302,12 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
 
     const std::vector<NativeA32CtrSvcEvent>& SvcEvents() const;
     const std::map<std::string, uint64_t>& IpcNameCounts() const noexcept;
+    // Endereço onde o guest mapeou a memória compartilhada do GSP (fila de
+    // comandos GX em +0x800, interrupções em +0x000); vazio antes do mapa.
+    std::optional<uint32_t> GspSharedMemoryAddress() const noexcept;
+    bool CollectsIpcNameCounts() const noexcept {
+        return mConfig.ProfileRuntime || mConfig.CollectIpcNameCounts;
+    }
     uint64_t SvcEventCount() const noexcept;
     void AdvanceSystemTicks(uint64_t ticks);
     // Próximo tick em que o host acorda algo: SleepThread, timer do kernel
@@ -358,6 +372,15 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
         uint32_t commandBuffer, const std::optional<std::string>& sessionType,
         NativeA32CtrSvcEvent event, const std::array<uint32_t, 12>& words);
+    // Sessão de arquivo da RomFS do título (OpenFileDirectly e SelfNCCH tipo 0).
+    // 0 = RomFS indisponível ou falha do backend.
+    uint32_t OpenTitleRomFsFile();
+    // FS:OpenFile num archive SelfNCCH (id 3), como o Azahar
+    // (file_sys/archive_selfncch.cpp): caminho binário {u32 tipo, char[8]}.
+    NativeA32HostResult OpenSelfNcchFile(
+        oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
+        uint32_t commandBuffer, NativeA32CtrSvcEvent event, uint32_t pathType,
+        uint32_t pathSize, uint32_t pathAddress);
     struct RomFsBackingFile;
 
     struct KernelObject {

@@ -4,6 +4,31 @@
 
 namespace Oot3dNativeGame {
 
+namespace {
+
+// Blocos de configuração com valor fixo nos padrões do Azahar
+// (service/cfg/cfg_defaults.cpp, acesso Global, lidos pelo cfg:u GetConfig).
+// O tamanho pedido tem de ser o do bloco (o Azahar devolve InvalidSize).
+std::optional<std::vector<uint8_t>> AzaharDefaultConfigBlock(uint32_t blockId, uint32_t size) {
+    std::vector<uint8_t> value;
+    switch (blockId) {
+    case 0x000C0000U: value.assign(0xC0U, 0U); break;  // RestrictedPhotoExchange (parental)
+    case 0x000C0001U: value.assign(0x14U, 0U); break;  // CoppacsRestriction
+    case 0x000C0002U: value.assign(0x200U, 0U); break; // ParentalRestrictionEmail
+    case 0x000D0000U: value = {0x7FU, 0x7FU, 0U, 0U}; break; // EULA aceito: 0x7F.0x7F
+    case 0x000E0000U: value.assign(1U, 0U); break;
+    case 0x00130000U: value.assign(4U, 0U); break;     // DebugMode
+    case 0x00150002U: value = {'L', '1', 0U, 0U}; break; // ServerType
+    case 0x00160000U: value.assign(4U, 0U); break;
+    case 0x00170000U: value.assign(4U, 0U); break;     // MiiverseAccessKey
+    default: return std::nullopt;
+    }
+    if (value.size() != size) return std::nullopt;
+    return value;
+}
+
+} // namespace
+
 // SendSyncRequest on a client session of ndm:u.
 NativeA32HostResult NativeA32CtrHostServices::HandleNdmRequest(
     oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
@@ -70,6 +95,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleCfgRequest(
                 std::memcpy(value.data(),
                             mConfig.StereoCameraSettings.data(),
                             value.size());
+            } else if (auto fixed = AzaharDefaultConfigBlock(blockId, size)) {
+                value = std::move(*fixed);
             }
             if (value.size() == size &&
                 memory.WriteBytes(address, value) &&

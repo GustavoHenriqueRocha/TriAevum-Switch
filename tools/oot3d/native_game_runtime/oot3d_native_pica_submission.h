@@ -87,6 +87,11 @@ class Oot3dPicaPhysicalMemoryView {
     MappingCheck mMappingCheck;
 };
 
+// Leitor de CMDBUF_JUMP0/1 do frontend sobre esta visão: endereço físico ->
+// palavras e endereço do guest. A visão precisa viver mais que o frontend.
+Oot3dPicaCommandBufferReader MakeOot3dPicaCommandBufferReader(
+    const Oot3dPicaPhysicalMemoryView& view);
+
 enum class Oot3dPicaResourceKind : uint8_t {
     IndexBuffer,
     VertexLoader,

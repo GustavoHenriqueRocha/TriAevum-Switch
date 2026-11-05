@@ -567,4 +567,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleGspRequest(
     return {NativeA32HostAction::Wait};
 }
 
+std::optional<uint32_t>
+NativeA32CtrHostServices::GspSharedMemoryAddress() const noexcept {
+    if (!mGspSharedMemory) return std::nullopt;
+    return mGspSharedMemory->MappedAddress;
+}
+
 } // namespace Oot3dNativeGame

@@ -228,6 +228,7 @@ void NativeA32WindowSession::Setup() {
   hostConfig.RomFsImagePath = manifest->RomFsImagePath;
   hostConfig.RomFsImageOffset = manifest->RomFsImageOffset;
   hostConfig.RomFsImageSize = manifest->RomFsImageSize;
+  hostConfig.ExeFsDirectory = manifest->ExeFsDirectory;
   hostConfig.PicaFrontend = &picaFrontend;
   hostConfig.PicaCompositionDomain = &picaCompositionDomain;
   hostConfig.PicaCompositionProvider = &picaCompositionTracker;
@@ -274,6 +275,16 @@ void NativeA32WindowSession::Setup() {
   }
   hostConfig.DetailedSvcDiagnostics = launch.ExtendedDiagnostics;
   hostConfig.ProfileRuntime = launch.ProfileA32Runtime;
+  // TRIAEVUM_GUEST_STATE_DUMP=<N>: despejo do estado das threads do guest a
+  // cada N VBlanks no stderr (oot3d_native_a32_guest_state_dump.h).
+  if (const auto interval = Oot3dNativeGame::ParseGuestStateDumpInterval(
+          std::getenv("TRIAEVUM_GUEST_STATE_DUMP"))) {
+    hostConfig.CollectIpcNameCounts = true;
+    guestStateDumper =
+        std::make_unique<Oot3dNativeGame::GuestStateDumper>(*interval);
+    guestStateDumper->SetMemoryRanges(Oot3dNativeGame::ParseGuestMemoryRanges(
+        std::getenv("TRIAEVUM_GUEST_STATE_MEM")));
+  }
   // Fronteira de quadro pelo perfil de título. O OoT3D segue nos PCs de
   // sempre e o host não recebe provedor (FrameBoundary nulo): Zelda igual.
   frameBoundaryProvider =
@@ -985,6 +996,9 @@ void NativeA32WindowSession::Setup() {
   }
   submissionQueue.SetRuntimeProfilingEnabled(launch.ProfileA32Runtime);
   picaFrontend.SetPacketSink(&submissionQueue);
+  // CMDBUF_JUMP0/1: listas que chamam sub-rotinas por endereço físico (SM3DL).
+  picaFrontend.SetCommandBufferReader(
+      Oot3dNativeGame::MakeOot3dPicaCommandBufferReader(picaMemoryView));
   // Work off the game thread (config/offload_*, oot3d_native_offload.h).
   offload = Oot3dNativeGame::ReadNativeOffloadOptions();
   submissionQueue.SetLeanCapture(offload.Capture);

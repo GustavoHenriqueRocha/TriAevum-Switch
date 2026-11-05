@@ -639,6 +639,29 @@ int main() {
         guarded.SetWriteObserver({});
     }
 
+    {
+        // CMDBUF_JUMP lê por endereço físico: FCRAM 0x2000xxxx vira o guest
+        // 0x1400xxxx; fora das regiões ou tamanho torto = falha.
+        Oot3dNativeGame::NativeA32Memory jumpMemory;
+        Require(jumpMemory.MapRegion(
+                    {"linear", 0x14000000U, 0x2000U, true, false, {}}, &error) &&
+                    jumpMemory.Write32(0x14000800U, 0xAABBCCDDU) &&
+                    jumpMemory.Write32(0x14000804U, 0x000F0041U),
+                "cannot map the command buffer jump memory");
+        const Oot3dNativeGame::Oot3dPicaPhysicalMemoryView jumpView(
+            jumpMemory, {{0x20000000U, 0x14000000U, 0x2000U}});
+        const auto reader =
+            Oot3dNativeGame::MakeOot3dPicaCommandBufferReader(jumpView);
+        std::vector<uint32_t> words;
+        uint32_t guest = 0;
+        Require(reader(0x20000800U, 8U, words, guest) && guest == 0x14000800U &&
+                    words == std::vector<uint32_t>{0xAABBCCDDU, 0x000F0041U},
+                "the command buffer reader did not read the physical buffer");
+        Require(!reader(0x30000000U, 8U, words, guest) &&
+                    !reader(0x20000800U, 6U, words, guest),
+                "the command buffer reader accepted an unmapped or odd buffer");
+    }
+
     std::cout << "oot3d_native_pica_submission_tests: ok\n";
     return 0;
 }

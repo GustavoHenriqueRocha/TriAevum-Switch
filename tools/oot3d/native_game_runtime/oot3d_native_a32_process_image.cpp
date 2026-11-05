@@ -117,6 +117,11 @@ ParseNativeA32ProcessImageManifest(const Json& document,
         result.RomFsImageOffset =
             source.at("romfs_service_offset").get<uint64_t>();
         result.RomFsImageSize = source.at("romfs_service_size").get<uint64_t>();
+        if (const auto exeFs = source.find("exefs_directory");
+            exeFs != source.end() && !exeFs->is_null()) {
+            result.ExeFsDirectory = ResolvePackagedInputPath(
+                result.ManifestPath, exeFs->get<std::string>());
+        }
         result.ProcessName = process.at("name").get<std::string>();
         result.EntryAddress = ReadU32(process, "entrypoint");
         result.PageSize = ReadU32(process, "page_size");

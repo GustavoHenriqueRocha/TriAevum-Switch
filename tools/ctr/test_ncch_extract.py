@@ -29,7 +29,8 @@ def blz(prefix: bytes) -> tuple[bytes, bytes]:
     return prefix + stream + footer, plain
 
 
-def ncch(code: bytes, romfs: bytes, *, compressed: bool, encrypted: bool = False) -> bytes:
+def ncch(code: bytes, romfs: bytes, *, compressed: bool, encrypted: bool = False,
+         sections: dict[bytes, bytes] | None = None) -> bytes:
     header = bytearray(0x200)
     header[0x100:0x104] = b"NCCH"
     struct.pack_into("<Q", header, 0x118, 0x0004000000123400)
@@ -40,7 +41,11 @@ def ncch(code: bytes, romfs: bytes, *, compressed: bool, encrypted: bool = False
     stored = blz(code)[0] if compressed else code
     exefs = bytearray(0x200)
     struct.pack_into("<8sII", exefs, 0, b".code", 0, len(stored))
-    exefs_body = bytes(exefs) + stored.ljust(-(-len(stored) // MU) * MU, b"\0")
+    body = stored.ljust(-(-len(stored) // MU) * MU, b"\0")
+    for index, (name, data) in enumerate((sections or {}).items(), start=1):
+        struct.pack_into("<8sII", exefs, index * 16, name, len(body), len(data))
+        body += data.ljust(-(-len(data) // MU) * MU, b"\0")
+    exefs_body = bytes(exefs) + body
     exefs_offset = 0x200 + 0x800
     romfs_offset = exefs_offset + len(exefs_body)
     struct.pack_into("<2I", header, 0x1A0, exefs_offset // MU, len(exefs_body) // MU)
@@ -79,6 +84,26 @@ class NcchExtractTest(unittest.TestCase):
     def test_bare_ncch_with_plain_code(self) -> None:
         self.extract(ncch(self.prefix, self.romfs, compressed=False))
         self.assertEqual((self.root / "saida/code.bin").read_bytes(), self.prefix)
+
+    def test_exefs_sections_for_the_selfncch_archive(self) -> None:
+        # O Mario lê o "icon" (SMDH) pelo archive SelfNCCH depois da tela de
+        # título; o host serve <extract>/exefs/<nome>. Só icon/banner/logo:
+        # o .code nunca vai para lá (o Azahar recusa abrir o .code por ali).
+        icon = bytes(range(256)) * 54 + bytes(0x36C0 - 256 * 54)
+        banner = b"CBMD" + bytes(MU)
+        info = self.extract(ncsd(ncch(self.prefix, self.romfs, compressed=True,
+                                      sections={b"icon": icon, b"banner": banner})))
+        exefs = self.root / "saida/exefs"
+        self.assertEqual((exefs / "icon").read_bytes(), icon)
+        self.assertEqual((exefs / "banner").read_bytes(), banner)
+        self.assertFalse((exefs / "logo").exists())
+        self.assertEqual(sorted(path.name for path in exefs.iterdir()), ["banner", "icon"])
+        self.assertEqual(info["exefs_sections"], ["banner", "icon"])
+
+    def test_no_exefs_sections_leaves_no_directory(self) -> None:
+        info = self.extract(ncch(self.prefix, self.romfs, compressed=False))
+        self.assertFalse((self.root / "saida/exefs").exists())
+        self.assertEqual(info["exefs_sections"], [])
 
     def test_encrypted_content_is_refused(self) -> None:
         with self.assertRaisesRegex(ncch_extract.ExtractError, "criptografado"):

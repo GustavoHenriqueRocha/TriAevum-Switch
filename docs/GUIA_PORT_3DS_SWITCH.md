@@ -1546,6 +1546,33 @@ Armadilhas encontradas no Super Mario 3D Land (05/11):
 Resultado: logo "SUPER MARIO 3D LAND" na janela; 60 s em `-O0` = 1597 VBlanks (~27/s, meio tempo),
 79 400 draws, 1596 display transfers.
 
+### 8.4 Jogo parado numa tela sem erro: despejo de estado do guest
+
+Quando a janela fica num quadro fixo sem falha nem `UNSERVED`
+(`docs/pesquisas/2026-11-05-sm3dl-logo.md`):
+
+1. **Entrada antes de tudo**: a tela de título pode só estar esperando um botão. Rode com uma
+   timeline (`-- --input-timeline x.json`, schema `oot3d.native_game.input_timeline.v1`) com A
+   repetido; um A só, cedo demais, é ignorado.
+2. **`TRIAEVUM_GUEST_STATE_DUMP=60`**: a cada 60 VBlanks o stderr mostra cada thread (status, pc,
+   lr, último SVC) e só os IPC que mudaram. Uma thread com o mesmo `last_svc` por centenas de VBlanks
+   é a trava; o `lr` leva à função (desmontar o `code.bin` com capstone).
+3. **`TRIAEVUM_GUEST_STATE_MEM=<hex>:<hex>[,...]`**: palavras de memória do guest no mesmo despejo
+   (até 0x100 bytes por faixa). O cabeçalho traz `gsp_shared=` (fila GX em +0x800, interrupções em
+   +0x000) para ver a fila de comandos e as interrupções na hora da trava.
+
+Armadilhas do SM3DL (05/11), todas genéricas:
+
+- **SelfNCCH** (arquivo 3): o SDK abre o `icon` do ExeFS para ler a versão do EULA no SMDH. O
+  `ncch_extract.py` agora grava `exefs/{icon,banner,logo}` e o manifesto ganha `exefs_directory`.
+- **Blocos de config que o Azahar sempre tem** (EULA 0x000D0000 = 0x7F.0x7F, COPPACS, etc.): sem
+  eles o stub responde zeros e o jogo pré-carrega o applet de EULA (0x406) e espera para sempre.
+- **CMDBUF_JUMP0/1 da PICA** (registradores 0x238–0x23D): a lista do GSP pode só chamar uma
+  sub-rotina (endereço físico ×8) que volta por JUMP1 para o resto, onde está o IRQ 0x010. O nngx
+  conclui cada comando GX contando UMA interrupção qualquer: lista sem P3D = fila GX travada
+  (thread principal em `ArbitrateAddress` no lock do GX). O frontend segue os saltos pelo leitor
+  `MakeOot3dPicaCommandBufferReader` (OoT3D não usa: nenhum `0x804F0238` no code.bin).
+
 ---
 
 ## 9. Lacunas conhecidas deste guia

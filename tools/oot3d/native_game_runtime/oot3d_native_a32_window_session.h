@@ -31,6 +31,7 @@
 #include "oot3d_legacy_ui_adapters.h"
 #include "oot3d_n64_ui_renderer.h"
 #include "oot3d_native_a32_ctr_host.h"
+#include "oot3d_native_a32_guest_state_dump.h"
 #include "ctr_title_profile.h"
 #include "oot3d_native_a32_dsp_hle.h"
 #include "oot3d_host_audio_resampler.h"
@@ -561,6 +562,7 @@ private:
   // framebuffers): an earlier snapshot into one ends a superseded guest frame.
   std::vector<uint32_t> topDisplayOutputs;
   uint64_t vblankCount = 0;
+  std::unique_ptr<Oot3dNativeGame::GuestStateDumper> guestStateDumper;
   NativeA32DspMixStats dspStats;
   nlohmann::json displayTransferEvents = nlohmann::json::array();
   nlohmann::json drawEvents = nlohmann::json::array();

@@ -3,12 +3,14 @@
 #include "ctr_library_natives.h"
 #include "oot3d_native_a32_ctr_host.h"
 #include "oot3d_native_a32_dsp_hle.h"
+#include "oot3d_native_a32_guest_state_dump.h"
 #include "oot3d_native_pica_frontend.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -1351,7 +1354,332 @@ void TestAptGetSharedFont() {
             "a second shared font block was mapped");
 }
 
+// --- Despejo periódico do estado do guest (TRIAEVUM_GUEST_STATE_DUMP) -------
+// O Mario parava no logo sem erro; para saber em que cada thread espera, o
+// despejo mostra PC/LR, o último SVC de cada thread e os IPC que mudaram.
+void TestGuestStateDump() {
+    Require(!ParseGuestStateDumpInterval(nullptr) &&
+                !ParseGuestStateDumpInterval("") &&
+                !ParseGuestStateDumpInterval("0") &&
+                !ParseGuestStateDumpInterval("30x") &&
+                !ParseGuestStateDumpInterval("-5") &&
+                ParseGuestStateDumpInterval("60") == std::optional<uint32_t>(60),
+            "TRIAEVUM_GUEST_STATE_DUMP interval parsing is wrong");
+    GuestStateDumper off(0);
+    GuestStateDumper every30(30);
+    Require(!off.Due(30) && !every30.Due(0) && !every30.Due(29) &&
+                every30.Due(30) && every30.Due(60),
+            "the guest state dump is due at the wrong VBlanks");
+
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.StubUnknownServices = true;
+    config.CollectIpcNameCounts = true;
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    auto& memory = process.Memory();
+    // Thread 1 para num mutex travado pela thread 0.
+    guest.State(0).r[1] = 1;
+    Require(guest.Svc(0, 0x13) == NativeA32HostAction::Resume,
+            "CreateMutex failed");
+    const uint32_t mutex = guest.State(0).r[1];
+    guest.State(1).r[15] = 0x00123456U;
+    guest.State(1).r[14] = 0x00ABCDEFU;
+    Require(guest.Wait1(1, mutex, -1) == NativeA32HostAction::Wait,
+            "the locked mutex did not park thread 1");
+    // Thread 0 faz dois IPC iguais a um serviço stub.
+    const uint32_t srv = OpenSrv(guest);
+    uint32_t ptm = 0;
+    Require(GetServiceHandle(guest, srv, "ptm:u", &ptm) ==
+                NativeA32HostAction::Resume,
+            "ptm:u stub was not opened");
+    for (int i = 0; i < 2; ++i) {
+        Require(memory.Write32(0x1FF82080, 0x00050000), "cannot write IPC");
+        guest.State(0).r[0] = ptm;
+        Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume,
+                "stub IPC failed");
+    }
+
+    GuestStateDumper dumper(30);
+    const std::string first = dumper.Format(process, host, 30, 0x00000001U);
+    const auto has = [](const std::string& text, std::string_view needle) {
+        return text.find(needle) != std::string::npos;
+    };
+    Require(has(first, "TRIAEVUM_GUEST_STATE vblank=30 ") &&
+                has(first, " pad=0x00000001 threads=3 ipc_counts=on gsp_shared=0x00000000\n"),
+            "the dump header is missing VBlank, pad or thread count:\n" + first);
+    Require(has(first, "TRIAEVUM_GUEST_THREAD vblank=30 id=1 ") &&
+                has(first, "pc=0x00123456 lr=0x00abcdef") &&
+                has(first, "last_svc=\"WaitSynchronization1"),
+            "the dump does not show where thread 1 waits:\n" + first);
+    Require(has(first, "id=2 ") && has(first, "prio=0x31"),
+            "the dump skips a thread or its priority:\n" + first);
+    Require(has(first, "TRIAEVUM_GUEST_IPC vblank=30 delta=2 total=2 name=\""),
+            "the dump does not count the repeated IPC:\n" + first);
+    // Sem IPC novo, o despejo seguinte não repete as linhas IPC e o delta
+    // de SVC é zero.
+    const std::string second = dumper.Format(process, host, 60, 0U);
+    Require(!has(second, "TRIAEVUM_GUEST_IPC") && has(second, "svc_delta=0 "),
+            "the second dump repeated unchanged IPC counts:\n" + second);
+    Require(memory.Write32(0x1FF82080, 0x00050000), "cannot write IPC");
+    guest.State(0).r[0] = ptm;
+    Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume, "stub IPC failed");
+    const std::string third = dumper.Format(process, host, 90, 0U);
+    Require(has(third, "TRIAEVUM_GUEST_IPC vblank=90 delta=1 total=3 "),
+            "the third dump did not report the IPC delta:\n" + third);
+
+    // Faixas de memória: palavras little-endian; endereço sem mapa = unmapped.
+    Require(ParseGuestMemoryRanges("1ff82080:8,0:4").size() == 2U &&
+                ParseGuestMemoryRanges("1ff82080").empty() &&
+                ParseGuestMemoryRanges("1ff82080:0").empty() &&
+                ParseGuestMemoryRanges("1ff82080:101").empty() &&
+                ParseGuestMemoryRanges("zz:4").empty() &&
+                ParseGuestMemoryRanges(nullptr).empty(),
+            "TRIAEVUM_GUEST_STATE_MEM parsing is wrong");
+    Require(memory.Write32(0x1FF82080, 0x11223344U) &&
+                memory.Write32(0x1FF82084, 0xA0B0C0D0U),
+            "cannot write the watched words");
+    dumper.SetMemoryRanges(ParseGuestMemoryRanges("1ff82080:8,4:4"));
+    const std::string fourth = dumper.Format(process, host, 120, 0U);
+    Require(has(fourth, "TRIAEVUM_GUEST_MEM vblank=120 addr=0x1ff82080 "
+                        "words=0x11223344 0xa0b0c0d0\n") &&
+                has(fourth, "addr=0x00000004 words=unmapped\n"),
+            "the dump does not show the watched guest memory:\n" + fourth);
+
+    // Sem a contagem por nome o cabeçalho avisa.
+    NativeA32CtrHostServices plain(MakeConfig());
+    NativeA32Process plainProcess(registry, plain);
+    MakeGuestThreads(plainProcess);
+    GuestStateDumper plainDumper(1);
+    Require(has(plainDumper.Format(plainProcess, plain, 1, 0U), "ipc_counts=off"),
+            "the dump did not say IPC counts are off");
+}
+
+// --- Archive SelfNCCH (id 3): RomFS e seções do ExeFS do próprio título -----
+// O Mario, depois de A na tela de título, abre o archive 3 com caminho vazio e
+// lê o "icon" do ExeFS (SMDH, 0x36C0 bytes) para a caixa do StreetPass. O host
+// respondia 0xE0E046BE (unsupported-archive-path) e o jogo parava em err:f.
+// Comportamento conferido no Azahar (file_sys/archive_selfncch.cpp).
+void TestSelfNcchArchive() {
+    const auto directory = std::filesystem::temp_directory_path() /
+                           "oot3d_native_a32_ctr_host_test_selfncch";
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    std::filesystem::create_directories(directory / "exefs");
+    std::vector<uint8_t> icon(0x36C0U);
+    for (size_t i = 0; i < icon.size(); ++i) icon[i] = static_cast<uint8_t>(i * 7U + 3U);
+    {
+        std::ofstream out(directory / "exefs" / "icon", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(icon.data()),
+                  static_cast<std::streamsize>(icon.size()));
+        Require(out.good(), "cannot write the ExeFS icon fixture");
+    }
+    constexpr std::array<uint8_t, 12> romFsBytes{0x49, 0x56, 0x46, 0x43, 0xA0, 0xA1,
+                                                 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7};
+    {
+        std::ofstream out(directory / "romfs.bin", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(romFsBytes.data()),
+                  static_cast<std::streamsize>(romFsBytes.size()));
+        Require(out.good(), "cannot write the RomFS fixture");
+    }
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.StubUnknownServices = true;
+    config.ExeFsDirectory = directory / "exefs";
+    // Como a janela: com pasta de save, a raiz vazia do SelfNCCH não coincide
+    // com a do SaveData no savestate.
+    config.SaveDataDirectory = directory / "save";
+    config.RomFsImagePath = directory / "romfs.bin";
+    config.RomFsImageOffset = 4;
+    config.RomFsImageSize = romFsBytes.size() - 4U;
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    auto& memory = process.Memory();
+    const uint32_t srv = OpenSrv(guest);
+    uint32_t fs = 0;
+    Require(GetServiceHandle(guest, srv, "fs:USER", &fs) == NativeA32HostAction::Resume &&
+                fs != 0,
+            "fs:USER was not opened");
+    const auto call = [&](uint32_t session) {
+        guest.State(0).r[0] = session;
+        Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume,
+                "an FS request did not resume");
+        uint32_t result = 0xFFFFFFFFU;
+        Require(memory.Read32(0x1FF82084, &result), "cannot read the FS result");
+        return result;
+    };
+    Require(memory.Write32(0x1FF82080, 0x08010002) && memory.Write32(0x1FF82084, 0x20) &&
+                memory.Write32(0x1FF82088, 0) && call(fs) == 0,
+            "FS:Initialize failed");
+
+    // OpenArchive(3, caminho vazio) como o Mario faz (pc 0x23E468).
+    constexpr uint32_t pathAddress = 0x0FF00200;
+    uint32_t faultAddress = 0;
+    Require(memory.Write32(pathAddress, 0) && memory.Write32(0x1FF82080, 0x080C00C2) &&
+                memory.Write32(0x1FF82084, 3) && memory.Write32(0x1FF82088, 1) &&
+                memory.Write32(0x1FF8208C, 1) && memory.Write32(0x1FF82090, (1U << 14U) | 2U) &&
+                memory.Write32(0x1FF82094, pathAddress),
+            "cannot write FS:OpenArchive(SelfNCCH)");
+    const uint32_t openArchiveResult = call(fs);
+    uint32_t header = 0;
+    uint64_t archive = 0;
+    Require(openArchiveResult == 0 && memory.Read32(0x1FF82080, &header) &&
+                header == 0x080C00C0 &&
+                memory.Read64(0x1FF82088, &archive, &faultAddress) && archive != 0,
+            "FS:OpenArchive(SelfNCCH, empty path) did not open the archive (result 0x" +
+                [&] { std::ostringstream o; o << std::hex << openArchiveResult; return o.str(); }() + ")");
+
+    // OpenFile(archive, caminho binário de 12 bytes {tipo, nome[8]}).
+    const auto openFile = [&](uint32_t pathType, uint32_t type, std::string_view name,
+                              uint32_t pathSize, uint32_t* session) {
+        std::array<uint8_t, 12> path{};
+        std::memcpy(path.data(), &type, 4);
+        std::copy(name.begin(), name.end(), path.begin() + 4);
+        Require(memory.WriteBytes(pathAddress, path) && memory.Write32(0x1FF82080, 0x080201C2) &&
+                    memory.Write32(0x1FF82084, 0) &&
+                    memory.Write64(0x1FF82088, archive, &faultAddress) &&
+                    memory.Write32(0x1FF82090, pathType) && memory.Write32(0x1FF82094, pathSize) &&
+                    memory.Write32(0x1FF82098, 1) && memory.Write32(0x1FF8209C, 0) &&
+                    memory.Write32(0x1FF820A0, (pathSize << 14U) | 2U) &&
+                    memory.Write32(0x1FF820A4, pathAddress),
+                "cannot write FS:OpenFile(SelfNCCH)");
+        const uint32_t result = call(fs);
+        *session = 0;
+        if (result == 0) Require(memory.Read32(0x1FF8208C, session), "cannot read file session");
+        return result;
+    };
+    constexpr uint32_t readAddress = 0x0FF04000;
+    const auto read = [&](uint32_t session, uint64_t offset, uint32_t length, uint32_t* returned) {
+        Require(memory.Write32(0x1FF82080, 0x080200C2) &&
+                    memory.Write64(0x1FF82084, offset, &faultAddress) &&
+                    memory.Write32(0x1FF8208C, length) &&
+                    memory.Write32(0x1FF82090, (length << 4U) | 0xCU) &&
+                    memory.Write32(0x1FF82094, readAddress),
+                "cannot write File:Read");
+        const uint32_t result = call(session);
+        if (returned != nullptr) Require(memory.Read32(0x1FF82088, returned), "cannot read count");
+        return result;
+    };
+    uint32_t iconFile = 0;
+    Require(openFile(2, 2, "icon", 12, &iconFile) == 0 && iconFile != 0,
+            "SelfNCCH OpenFile(ExeFS icon) failed");
+    Require(memory.Write32(0x1FF82080, 0x08040000) && call(iconFile) == 0,
+            "ExeFS icon GetSize failed");
+    uint64_t iconSize = 0;
+    Require(memory.Read64(0x1FF82088, &iconSize, &faultAddress) && iconSize == icon.size(),
+            "ExeFS icon GetSize is not the section size");
+    uint32_t returned = 0;
+    std::vector<uint8_t> readBack(icon.size());
+    Require(read(iconFile, 0, static_cast<uint32_t>(icon.size()), &returned) == 0 &&
+                returned == icon.size() && memory.ReadBytes(readAddress, readBack) &&
+                readBack == icon,
+            "ExeFS icon Read did not return the section bytes");
+    // Azahar ExeFSSectionFile: leitura inteira de uma vez, do offset 0.
+    Require(read(iconFile, 0, 0x100, nullptr) == 0xE0C046F9U,
+            "a partial ExeFS read was not IncorrectExeFSReadSize");
+    Require(read(iconFile, 4, static_cast<uint32_t>(icon.size()), nullptr) == 0xE0C046F8U,
+            "an ExeFS read at a non-zero offset was not UnsupportedOpenFlags");
+
+    uint32_t other = 0;
+    Require(openFile(2, 2, "banner", 12, &other) == 0xC8804637U,
+            "a missing ExeFS section was not ExeFSSectionNotFound");
+    Require(openFile(2, 2, "bogus", 12, &other) == 0xE0E046BEU,
+            "an unknown ExeFS section was not InvalidPath");
+    Require(openFile(2, 1, "", 12, &other) == 0xD9004676U,
+            "the .code section was not CommandNotAllowed");
+    Require(openFile(2, 7, "", 12, &other) == 0xE0E046BEU,
+            "an unknown SelfNCCH file type was not InvalidPath");
+    Require(openFile(2, 2, "icon", 8, &other) == 0xE0E046BEU,
+            "a short SelfNCCH binary path was not InvalidPath");
+    Require(openFile(3, 2, "icon", 12, &other) == 0xE0E046BEU,
+            "a non-binary SelfNCCH path was not InvalidPath");
+    Require(openFile(2, 5, "", 12, &other) == 0xC8804464U,
+            "the update RomFS (absent) was not RomFSNotFound");
+    uint32_t romFsFile = 0;
+    std::array<uint8_t, 4> romFsRead{};
+    Require(openFile(2, 0, "", 12, &romFsFile) == 0 && romFsFile != 0 &&
+                read(romFsFile, 2, 4, &returned) == 0 && returned == 4 &&
+                memory.ReadBytes(readAddress, romFsRead) &&
+                romFsRead == std::array<uint8_t, 4>{0xA2, 0xA3, 0xA4, 0xA5},
+            "SelfNCCH OpenFile(RomFS) did not open the title RomFS view");
+
+    // Savestate com o archive e a seção abertos: volta lendo os mesmos bytes.
+    const auto saved = host.CaptureState();
+    std::string error;
+    Require(host.RestoreState(saved, process, &error),
+            "a savestate with the SelfNCCH archive and ExeFS icon open did not restore: " +
+                error);
+    std::fill(readBack.begin(), readBack.end(), uint8_t{0});
+    Require(memory.WriteBytes(readAddress, readBack) &&
+                read(iconFile, 0, static_cast<uint32_t>(icon.size()), &returned) == 0 &&
+                memory.ReadBytes(readAddress, readBack) && readBack == icon,
+            "the restored ExeFS icon did not read the section bytes");
+    uint32_t afterRestore = 0;
+    Require(openFile(2, 2, "icon", 12, &afterRestore) == 0 && afterRestore != 0,
+            "the restored SelfNCCH archive handle no longer opens files");
+    std::filesystem::remove_all(directory, ignored);
+}
+
+// --- cfg:u GetConfig dos blocos padrão do Azahar (cfg_defaults.cpp) ---------
+// Depois do A na tela de título o Mario lê o bloco 0x000D0000 (versão do EULA
+// aceita) e compara com a do SMDH (1.0 = 0x100, 0x2523CC). O stub respondia
+// sucesso sem escrever o buffer: versão < 0x100, o jogo pré-carregava o applet
+// do EULA (0x406) e esperava para sempre por ele. Azahar: EULA 0x7F.0x7F.
+void TestCfgAzaharDefaultBlocks() {
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.StubUnknownServices = true;
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    auto& memory = process.Memory();
+    const uint32_t srv = OpenSrv(guest);
+    uint32_t cfg = 0;
+    Require(GetServiceHandle(guest, srv, "cfg:u", &cfg) == NativeA32HostAction::Resume &&
+                cfg != 0,
+            "cfg:u was not opened");
+    constexpr uint32_t output = 0x0FF00400;
+    const auto getConfig = [&](uint32_t block, uint32_t size, std::vector<uint8_t>* bytes) {
+        std::vector<uint8_t> garbage(size, 0xAAU);
+        Require(memory.WriteBytes(output, garbage) &&
+                    memory.Write32(0x1FF82080, 0x00010082) &&
+                    memory.Write32(0x1FF82084, size) && memory.Write32(0x1FF82088, block) &&
+                    memory.Write32(0x1FF8208C, (size << 4U) | 0xCU) &&
+                    memory.Write32(0x1FF82090, output),
+                "cannot write cfg:u GetConfig");
+        guest.State(0).r[0] = cfg;
+        Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume, "GetConfig did not resume");
+        uint32_t header = 0, result = 1;
+        bytes->assign(size, 0);
+        Require(memory.Read32(0x1FF82080, &header) && memory.Read32(0x1FF82084, &result) &&
+                    memory.ReadBytes(output, *bytes),
+                "cannot read GetConfig reply");
+        return header == 0x00010042U && result == 0U;
+    };
+    std::vector<uint8_t> bytes;
+    Require(getConfig(0x000D0000U, 4, &bytes) &&
+                bytes == std::vector<uint8_t>{0x7F, 0x7F, 0x00, 0x00},
+            "cfg block 0x000D0000 (agreed EULA version) is not Azahar's 0x7F.0x7F");
+    Require(getConfig(0x000C0000U, 0xC0, &bytes) &&
+                bytes == std::vector<uint8_t>(0xC0, 0x00),
+            "cfg block 0x000C0000 (parental restrictions) is not all zero");
+    Require(getConfig(0x000C0001U, 0x14, &bytes) &&
+                bytes == std::vector<uint8_t>(0x14, 0x00),
+            "cfg block 0x000C0001 (COPPACS) is not all zero");
+    Require(getConfig(0x00150002U, 4, &bytes) &&
+                bytes == std::vector<uint8_t>{'L', '1', 0, 0},
+            "cfg block 0x00150002 (server type) is not L1");
+}
+
 int main() {
+    TestCfgAzaharDefaultBlocks();
+    TestSelfNcchArchive();
+    TestGuestStateDump();
     TestRvctLibraryNatives();
     TestWindowProfileGatesOot3dHooks();
     TestFrameBoundaryProviderSelection();

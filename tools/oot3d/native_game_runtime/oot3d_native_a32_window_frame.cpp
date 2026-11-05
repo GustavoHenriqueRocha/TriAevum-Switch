@@ -2453,6 +2453,13 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
     frameBoundaryProvider->ObserveVBlank();
   }
   ++vblankCount;
+  // TRIAEVUM_GUEST_STATE_DUMP=<N>: threads, último SVC e IPC a cada N VBlanks.
+  if (guestStateDumper != nullptr && guestStateDumper->Due(vblankCount)) {
+    const std::string dump = guestStateDumper->Format(
+        process, hostServices, vblankCount, inputFrame.Hid.Buttons);
+    std::fwrite(dump.data(), 1, dump.size(), stderr);
+    std::fflush(stderr);
+  }
   return true;
 }
 

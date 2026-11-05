@@ -6,6 +6,7 @@
 #include "oot3d_native_pica_shader_gen.h"
 #include "oot3d_native_pica_affine_layout.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdlib>
@@ -1079,6 +1080,103 @@ int main(int argc, char** argv) {
                 interrupts[0] ==
                     Oot3dNativeGame::Oot3dPicaInterruptId::P3d,
             "PICA IRQ request did not produce the native P3D interrupt");
+
+    // CMDBUF_JUMP0/1 (0x23C/0x23D): a lista enviada pelo GSP salta para outro
+    // buffer (endereço físico = CMDBUF_ADDRn * 8, tamanho = CMDBUF_SIZEn * 8)
+    // e o resto do buffer atual não roda. O SM3DL chama uma sub-rotina assim
+    // (salto 0 para a sub-rotina, que volta com salto 1) e o IRQ de fim de
+    // lista (0x010) só existe no buffer de retorno: sem o salto não há P3D e
+    // a lista nunca conclui.
+    {
+        Oot3dNativeGame::Oot3dNativePicaFrontend jumpFrontend;
+        // Sub-rotina (físico 0x18001000, 3 pares): marca 0x041, salta para o
+        // retorno (CMDBUF_JUMP1) e a escrita depois do salto não pode rodar.
+        const std::vector<uint32_t> subroutine{
+            0x00000041U, 0x000F0041U,
+            0x00000001U, 0x000F023DU,
+            0xDEADBEEFU, 0x000F0043U};
+        // Retorno (físico 0x20002000, 3 pares): marca 0x042 e pede o IRQ.
+        const std::vector<uint32_t> returnBuffer{
+            0x00000042U, 0x000F0042U,
+            0x12345678U, 0x000F0020U,
+            0x12345678U, 0x000F0010U};
+        uint32_t reads = 0;
+        jumpFrontend.SetCommandBufferReader(
+            [&](uint32_t physicalAddress, uint32_t byteSize,
+                std::vector<uint32_t>& words, uint32_t& guestAddress) {
+                ++reads;
+                const std::vector<uint32_t>* source =
+                    physicalAddress == 0x18001000U   ? &subroutine
+                    : physicalAddress == 0x20002000U ? &returnBuffer
+                                                     : nullptr;
+                if (source == nullptr || byteSize > source->size() * 4U)
+                    return false;
+                words.assign(source->begin(),
+                             source->begin() + byteSize / 4U);
+                guestAddress = physicalAddress == 0x18001000U ? 0x1F001000U
+                                                              : 0x14002000U;
+                return true;
+            });
+        // Lista do GSP: CMDBUF_SIZE0/1, ADDR0/1 e JUMP0 numa escrita agrupada
+        // (como o SM3DL monta) e uma escrita depois do salto que não roda.
+        const std::array<uint32_t, 8> callList{
+            subroutine.size() * 4U / 8U, 0x804F0238U,
+            returnBuffer.size() * 4U / 8U, 0x18001000U / 8U,
+            0x20002000U / 8U, 0x00000001U,
+            0xDEADBEEFU, 0x000F0044U};
+        Oot3dNativeGame::Oot3dGspCommandPacket callSubmit{};
+        callSubmit.Control = 1;
+        callSubmit.Parameters[0] = 0x14004000U;
+        callSubmit.Parameters[1] = static_cast<uint32_t>(callList.size() * 4U);
+        Require(jumpFrontend.SubmitGspCommand(callSubmit, callList, &error),
+                "PICA command buffer jump failed: " + error);
+        const auto jumpInterrupts = jumpFrontend.TakePendingInterrupts();
+        Require(reads == 2U &&
+                    jumpFrontend.ReadPicaRegister(0x41U) == 0x41U &&
+                    jumpFrontend.ReadPicaRegister(0x42U) == 0x42U,
+                "PICA CMDBUF_JUMP0/1 did not run the subroutine and the "
+                "return buffer");
+        Require(jumpFrontend.ReadPicaRegister(0x43U) == 0U &&
+                    jumpFrontend.ReadPicaRegister(0x44U) == 0U,
+                "PICA ran the words after a command buffer jump");
+        Require(jumpInterrupts.size() == 1U &&
+                    jumpInterrupts[0] ==
+                        Oot3dNativeGame::Oot3dPicaInterruptId::P3d,
+                "the IRQ request in the return buffer gave no P3D");
+        const auto jumpWrite = std::find_if(
+            jumpFrontend.PendingRegisterWrites().begin(),
+            jumpFrontend.PendingRegisterWrites().end(),
+            [](const auto& write) { return write.RegisterId == 0x42U; });
+        Require(jumpWrite != jumpFrontend.PendingRegisterWrites().end() &&
+                    jumpWrite->CommandListAddress == 0x14002000U,
+                "a jumped buffer write is not attributed to its own address");
+
+        // Sem leitor o salto é erro explícito (antes: ignorado em silêncio e
+        // o jogo esperava para sempre um P3D que não vinha).
+        Oot3dNativeGame::Oot3dNativePicaFrontend noReader;
+        Require(!noReader.SubmitGspCommand(callSubmit, callList, &error) &&
+                    error.find("jump") != std::string::npos,
+                "a PICA command buffer jump without a reader was ignored");
+        // Buffer que salta para si mesmo: o limite de saltos encerra.
+        Oot3dNativeGame::Oot3dNativePicaFrontend loopFrontend;
+        const std::vector<uint32_t> selfJump{
+            0x00000001U, 0x000F023CU};
+        loopFrontend.SetCommandBufferReader(
+            [&](uint32_t, uint32_t byteSize, std::vector<uint32_t>& words,
+                uint32_t& guestAddress) {
+                if (byteSize != selfJump.size() * 4U) return false;
+                words = selfJump;
+                guestAddress = 0x14005000U;
+                return true;
+            });
+        const std::array<uint32_t, 6> loopList{
+            1U, 0x000F0238U, 0x20005000U / 8U, 0x000F023AU,
+            0x00000001U, 0x000F023CU};
+        callSubmit.Parameters[1] = static_cast<uint32_t>(loopList.size() * 4U);
+        Require(!loopFrontend.SubmitGspCommand(callSubmit, loopList, &error) &&
+                    error.find("jump") != std::string::npos,
+                "a self-jumping PICA command buffer did not stop");
+    }
 
     MemoryFillSink runtimeSink;
     auto runtimeFrontendStorage =

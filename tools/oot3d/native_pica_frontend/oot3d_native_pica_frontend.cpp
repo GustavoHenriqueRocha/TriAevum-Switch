@@ -22,6 +22,14 @@ constexpr uint16_t kPicaIrqRequest = 0x010U;
 constexpr uint16_t kPicaIrqCompare = 0x020U;
 constexpr uint16_t kPicaIrqMask = 0x030U;
 constexpr uint16_t kPicaIrqAutoStop = 0x034U;
+// Canais de command buffer da PICA: SIZEn (unidades de 8 bytes), ADDRn
+// (endereço físico / 8) e JUMPn (qualquer escrita salta para o buffer n).
+constexpr uint16_t kPicaCommandBufferSize0 = 0x238U;
+constexpr uint16_t kPicaCommandBufferAddress0 = 0x23AU;
+constexpr uint16_t kPicaCommandBufferJump0 = 0x23CU;
+constexpr uint16_t kPicaCommandBufferJump1 = 0x23DU;
+// Uma lista que salta para si mesma não pode prender o host.
+constexpr uint32_t kMaximumCommandBufferJumps = 4096U;
 constexpr uint16_t kPicaGeometryShaderBase = 0x280U;
 constexpr uint16_t kPicaVertexShaderBase = 0x2B0U;
 constexpr uint16_t kPicaPipelineUseGeometryShader = 0x229U;
@@ -469,7 +477,7 @@ bool Oot3dNativePicaFrontend::WriteHardwareRegistersWithMask(
 
 bool Oot3dNativePicaFrontend::SubmitGspCommand(
     const Oot3dGspCommandPacket& command,
-    std::span<const uint32_t> commandListWords, std::string* error,
+    std::span<const uint32_t> submittedListWords, std::string* error,
     bool* displayTransferDeferredToGpu, bool* memoryFillDeferredToGpu,
     bool* displayTransferCpuCopySuppressed) {
     if (displayTransferDeferredToGpu != nullptr) {
@@ -488,7 +496,7 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
     }
     if (commandId !=
         static_cast<uint32_t>(Oot3dGspCommandId::SubmitCommandList)) {
-        if (!commandListWords.empty()) {
+        if (!submittedListWords.empty()) {
             SetError(error, "non-submit GSP command has command-list data");
             return false;
         }
@@ -540,7 +548,13 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
         return true;
     }
 
-    const uint32_t commandListAddress = command.Parameters[0];
+    // Endereço e palavras do buffer em execução: começam na lista do GSP e
+    // trocam a cada CMDBUF_JUMP0/1 (o resto do buffer anterior não roda).
+    uint32_t commandListAddress = command.Parameters[0];
+    std::span<const uint32_t> commandListWords = submittedListWords;
+    std::vector<uint32_t> jumpedListWords;
+    std::optional<uint32_t> pendingJumpChannel;
+    uint32_t jumpCount = 0;
     const uint32_t commandListSize = command.Parameters[1];
     if ((commandListSize & 3U) != 0 ||
         commandListSize > kMaximumCommandListBytes ||
@@ -621,6 +635,10 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
                 mPendingRegisterWrites.push_back(
                     {commandListAddress, offsetWords, id, parameterMask,
                      supported, writeValue, finalValue});
+            }
+            if (id == kPicaCommandBufferJump0 ||
+                id == kPicaCommandBufferJump1) {
+                pendingJumpChannel = id - kPicaCommandBufferJump0;
             }
             if (id == kPicaTriggerDraw ||
                 id == kPicaTriggerDrawIndexed) {
@@ -741,6 +759,42 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
                             extraOffset)) {
                 return false;
             }
+        }
+        if (pendingJumpChannel.has_value()) {
+            // O salto vale ao fim do pacote que o escreveu (o SM3DL escreve
+            // SIZE0/1, ADDR0/1 e JUMP0 numa só escrita agrupada).
+            const uint32_t channel = *pendingJumpChannel;
+            pendingJumpChannel.reset();
+            if (!mCommandBufferReader) {
+                SetError(error,
+                         "PICA command buffer jump has no memory reader");
+                return false;
+            }
+            if (++jumpCount > kMaximumCommandBufferJumps) {
+                SetError(error, "PICA command buffer jump limit exceeded");
+                return false;
+            }
+            const uint64_t jumpSize =
+                uint64_t{mPicaRegisters[kPicaCommandBufferSize0 + channel] &
+                         0x000FFFFFU} * 8U;
+            const uint32_t jumpAddress =
+                (mPicaRegisters[kPicaCommandBufferAddress0 + channel] &
+                 0x0FFFFFFFU) * 8U;
+            std::vector<uint32_t> nextWords;
+            uint32_t nextGuestAddress = 0;
+            if (jumpSize == 0U || jumpSize > kMaximumCommandListBytes ||
+                !mCommandBufferReader(jumpAddress,
+                                      static_cast<uint32_t>(jumpSize),
+                                      nextWords, nextGuestAddress) ||
+                nextWords.size() * 4U != jumpSize) {
+                SetError(error,
+                         "PICA command buffer jump target is not readable");
+                return false;
+            }
+            jumpedListWords = std::move(nextWords);
+            commandListWords = jumpedListWords;
+            commandListAddress = nextGuestAddress;
+            cursor = 0;
         }
     }
     if (mDiagnosticHistoryEnabled) {

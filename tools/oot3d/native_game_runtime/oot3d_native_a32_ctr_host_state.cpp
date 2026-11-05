@@ -352,7 +352,19 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
                     throw std::runtime_error("system archive kernel object is unknown");
                 }
             }
-            if (mConfig.Filesystem == nullptr && !systemArchive &&
+            // Seção do ExeFS (SelfNCCH): o path só nomeia a seção; os bytes
+            // vêm de NativeA32CtrHostConfig::ExeFsDirectory.
+            std::optional<std::vector<uint8_t>> exeFsSection;
+            if (object->Type == kExeFsSectionFileType) {
+                const std::string path = object->FilePath.generic_string();
+                const std::string name = path.starts_with("exefs/") ? path.substr(6) : "";
+                if (name == "icon" || name == "banner" || name == "logo")
+                    exeFsSection = ReadCtrExeFsSection(mConfig.ExeFsDirectory, name);
+                if (!exeFsSection) {
+                    throw std::runtime_error("ExeFS section kernel object is unknown");
+                }
+            }
+            if (mConfig.Filesystem == nullptr && !systemArchive && !exeFsSection &&
                 !validFilePath(object->FilePath)) {
                 throw std::runtime_error(
                     "kernel object file path is incompatible");
@@ -365,7 +377,15 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
                                 object->FileSize != mConfig.RomFsImageSize)) {
                 throw std::runtime_error("restored RomFS service view is incompatible");
             }
-            if (systemArchive) {
+            if (exeFsSection) {
+                if (object->FileOffset != 0U || object->FileSize != exeFsSection->size()) {
+                    throw std::runtime_error("restored ExeFS section is incompatible");
+                }
+                if (!object->FileClosed) {
+                    object->FileBackend =
+                        std::make_shared<NativeA32CtrOwnedMemoryFile>(std::move(*exeFsSection));
+                }
+            } else if (systemArchive) {
                 if (object->FileOffset != 0U || object->FileSize != systemArchive->RomFs.size()) {
                     throw std::runtime_error("restored system archive view is incompatible");
                 }
@@ -496,7 +516,10 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
                 std::distance(extDataRelative.begin(), extDataRelative.end()) == 3 &&
                 std::none_of(extDataRelative.begin(), extDataRelative.end(),
                              [](const auto& part) { return part == ".." || part == "."; });
-            if (!extDataRoot && archive.Root.lexically_normal() !=
+            // SelfNCCH não tem raiz no host.
+            const bool selfNcch =
+                archive.Id == kFsSelfNcchArchiveId && archive.Root.empty();
+            if (!extDataRoot && !selfNcch && archive.Root.lexically_normal() !=
                 expectedRoot.lexically_normal()) {
                 throw std::runtime_error("archive root is incompatible");
             }

@@ -42,6 +42,9 @@ struct NativeA32ProcessImageManifest {
     uint64_t RomFsImageFileSize = 0;
     uint64_t RomFsImageOffset = 0;
     uint64_t RomFsImageSize = 0;
+    // Opcional (source.exefs_directory): seções icon/banner/logo do ExeFS para
+    // o archive SelfNCCH. Ausente nos manifestos do OoT3D.
+    std::filesystem::path ExeFsDirectory;
     std::string ProcessName;
     // Program id do ExHeader (0x200); ausente nos manifestos antigos do OoT3D.
     // Escolhe o perfil de título (ctr_title_profile.h).

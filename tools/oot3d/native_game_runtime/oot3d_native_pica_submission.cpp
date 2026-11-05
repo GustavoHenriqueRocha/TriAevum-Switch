@@ -214,6 +214,24 @@ bool Oot3dPicaPhysicalMemoryView::Read(
     return true;
 }
 
+Oot3dPicaCommandBufferReader MakeOot3dPicaCommandBufferReader(
+    const Oot3dPicaPhysicalMemoryView& view) {
+    return [&view](uint32_t physicalAddress, uint32_t byteSize,
+                   std::vector<uint32_t>& words, uint32_t& guestAddress) {
+        if ((byteSize & 3U) != 0U) return false;
+        const auto guest = view.Translate(physicalAddress, byteSize);
+        if (!guest.has_value()) return false;
+        words.assign(byteSize / 4U, 0U);
+        if (!view.Read(physicalAddress,
+                       std::span<uint8_t>(
+                           reinterpret_cast<uint8_t*>(words.data()),
+                           byteSize)))
+            return false;
+        guestAddress = *guest;
+        return true;
+    };
+}
+
 bool Oot3dPicaPhysicalMemoryView::ReadGuest(
     uint32_t guestAddress, std::span<uint8_t> output) const {
     if (output.empty()) return true;

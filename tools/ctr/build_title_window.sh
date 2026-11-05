@@ -9,7 +9,10 @@
 #   tools/ctr/build_title_window.sh --work ~/oot3d-work/conv/sm3dl \
 #       [--jobs 2] [--no-build] [--run] [--seconds 20] \
 #       [--shots <pasta>] [--shot-start 120] [--shot-interval 240] \
-#       [--width 1280] [--height 720]
+#       [--width 1280] [--height 720] [-- <argumentos extras do executável>]
+#
+# Tudo depois de `--` vai direto para o oot3d_native_game (por exemplo
+# `-- --input-timeline entrada.json` ou `-- --frames 900`).
 #
 # <work> é a pasta do ctr_convert.py: extract/{code,exheader,romfs}.bin,
 # cpp/ (shards do whole-AOT) e build/ (o mesmo build Ninja do boot probe:
@@ -32,8 +35,9 @@ set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 WORK="" JOBS=2 BUILD_STEP=1 RUN=0 SECONDS_LIMIT=20
 SHOTS="" SHOT_START=120 SHOT_INTERVAL=240 WIDTH=1280 HEIGHT=720
+EXTRA=()
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-64}"; }
+usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-64}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -48,6 +52,7 @@ while [ $# -gt 0 ]; do
     --width) WIDTH=$2; shift 2 ;;
     --height) HEIGHT=$2; shift 2 ;;
     -h|--help) usage 0 ;;
+    --) shift; EXTRA=("$@"); break ;;
     *) echo "opção desconhecida: $1" >&2; usage ;;
   esac
 done
@@ -68,12 +73,14 @@ fi
 BIN=$BUILD/oot3d_native_game
 MANIFEST=$BUILD/title/process.json
 [ -x "$BIN" ] || { echo "não existe: $BIN" >&2; exit 66; }
-if [ ! -f "$MANIFEST" ]; then
-  mkdir -p "$BUILD/title"
-  python3 -I "$REPO/tools/oot3d/native_a32_runtime/build_process_manifest.py" \
-    --exheader "$EXTRACT/exheader.bin" --code-bin "$EXTRACT/code.bin" \
-    --romfs-image "$EXTRACT/romfs.bin" --output "$MANIFEST"
-fi
+# Sempre regerado (barato): pega seções do ExeFS extraídas depois do build.
+mkdir -p "$BUILD/title"
+EXEFS_ARGS=()
+[ -d "$EXTRACT/exefs" ] && EXEFS_ARGS=(--exefs-dir "$EXTRACT/exefs")
+python3 -I "$REPO/tools/oot3d/native_a32_runtime/build_process_manifest.py" \
+  --exheader "$EXTRACT/exheader.bin" --code-bin "$EXTRACT/code.bin" \
+  --romfs-image "$EXTRACT/romfs.bin" ${EXEFS_ARGS[@]+"${EXEFS_ARGS[@]}"} \
+  --output "$MANIFEST" > /dev/null
 
 RUN_DIR=$WORK/window
 mkdir -p "$RUN_DIR/config" "$RUN_DIR/savedata" "$RUN_DIR/resources" "$SHOTS"
@@ -90,7 +97,8 @@ CMD=("$BIN"
      --screenshot "$SHOTS/quadro.png"
      --screenshot-sequence
      --screenshot-start-frame "$SHOT_START"
-     --screenshot-interval "$SHOT_INTERVAL")
+     --screenshot-interval "$SHOT_INTERVAL"
+     ${EXTRA[@]+"${EXTRA[@]}"})
 if [ "$RUN" = 0 ]; then
   printf 'para rodar:'; printf ' %q' "${CMD[@]}"; printf '\n'
   exit 0

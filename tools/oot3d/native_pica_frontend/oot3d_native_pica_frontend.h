@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <functional>
 #include <atomic>
 #include <memory>
 #include <optional>
@@ -378,6 +379,13 @@ class Oot3dPicaPacketSink {
     }
 };
 
+// Lê um command buffer da PICA pelo endereço FÍSICO (CMDBUF_ADDRn * 8) para
+// CMDBUF_JUMP0/1: devolve as palavras e o endereço do guest onde o buffer
+// está mapeado (atribuição das escritas). False = faixa sem mapa.
+using Oot3dPicaCommandBufferReader = std::function<bool(
+    uint32_t physicalAddress, uint32_t byteSize, std::vector<uint32_t>& words,
+    uint32_t& guestAddress)>;
+
 class Oot3dNativePicaFrontend {
   public:
     explicit Oot3dNativePicaFrontend(
@@ -388,6 +396,9 @@ class Oot3dNativePicaFrontend {
     // sink as SubmitDrawPacketSource (built in place by the queue).
     void SetInPlaceDrawPackets(bool enabled) noexcept {
         mInPlaceDrawPackets = enabled;
+    }
+    void SetCommandBufferReader(Oot3dPicaCommandBufferReader reader) {
+        mCommandBufferReader = std::move(reader);
     }
     void SetCommandListCompositionDomain(
         Oot3dPicaCompositionDomain domain) noexcept;
@@ -435,6 +446,7 @@ class Oot3dNativePicaFrontend {
         bool mirrorToGeometryShader);
 
     Oot3dPicaPacketSink* mPacketSink = nullptr;
+    Oot3dPicaCommandBufferReader mCommandBufferReader;
     std::unordered_map<uint32_t, uint32_t> mHardwareRegisters;
     std::vector<Oot3dPicaHardwareRegisterWrite> mPendingWrites;
     std::array<uint32_t, 0x300> mPicaRegisters{};

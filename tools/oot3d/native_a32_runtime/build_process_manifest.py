@@ -205,7 +205,10 @@ def ctr_system_regions(exheader: bytes) -> list[dict[str, object]]:
 
 
 def build_manifest(
-    exheader_path: Path, code_path: Path, romfs_image_path: Path
+    exheader_path: Path,
+    code_path: Path,
+    romfs_image_path: Path,
+    exefs_directory: Path | None = None,
 ) -> dict[str, object]:
     exheader = exheader_path.read_bytes()
     code = code_path.read_bytes()
@@ -302,7 +305,7 @@ def build_manifest(
     ]
     resource_current_values = [0, initial_commit, 1, 0, 0, 0, 0, 0, 0, 0]
 
-    return {
+    manifest = {
         "format": "oot3d_native_process_manifest_v1",
         "source": {
             "exheader_path": str(exheader_path.resolve()),
@@ -350,6 +353,14 @@ def build_manifest(
             "priority": exheader[0x20F],
         },
     }
+    # Seções do ExeFS (icon/banner/logo, de tools/ctr/ncch_extract.py) para o
+    # archive SelfNCCH do host. Ausente = chave ausente: o manifesto do OoT3D
+    # não muda.
+    if exefs_directory is not None:
+        if not exefs_directory.is_dir():
+            raise ValueError(f"ExeFS directory does not exist: {exefs_directory}")
+        manifest["source"]["exefs_directory"] = str(exefs_directory.resolve())
+    return manifest
 
 
 def main() -> int:
@@ -371,9 +382,16 @@ def main() -> int:
         default=REPO_ROOT / "build-codex/oot3d_native_process_manifest.json",
     )
     parser.add_argument("--expected-code-sha256")
+    parser.add_argument(
+        "--exefs-dir",
+        type=Path,
+        help="pasta com as seções icon/banner/logo do ExeFS (archive SelfNCCH)",
+    )
     args = parser.parse_args()
 
-    manifest = build_manifest(args.exheader, args.code_bin, args.romfs_image)
+    manifest = build_manifest(
+        args.exheader, args.code_bin, args.romfs_image, args.exefs_dir
+    )
     actual_hash = manifest["source"]["code_bin_sha256"]
     if args.expected_code_sha256 and actual_hash.lower() != args.expected_code_sha256.lower():
         raise SystemExit(

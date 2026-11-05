@@ -4,6 +4,10 @@
 #include "oot3d_native_a32_ctr_system_archives.h"
 
 #include <array>
+#include <vector>
+#include <iterator>
+#include <cstring>
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 
@@ -156,8 +160,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
     if (file.FileClosed) {
         return fail(kSessionClosed, "closed-file");
     }
+    const bool exefs = *sessionType == kExeFsSectionFileType;
     const bool romfs = *sessionType == "client_session:file:romfs" ||
-                       *sessionType == kCtrSystemArchiveFileType;
+                       *sessionType == kCtrSystemArchiveFileType || exefs;
     // Validate the reply BEFORE any disk mutation or backend allocation.
     const uint32_t replyBytes = event.Detail == kFileReadRequest || event.Detail == kFileWriteRequest
                                     ? 20U : event.Detail == kFileGetSizeRequest ? 16U : 8U;
@@ -215,6 +220,15 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
             (length != 0U && (writing ? !memory.IsMapped(address, length)
                                      : !memory.IsWritable(address, length)))) {
             return fail(kInvalidBufferDescriptor, "invalid-mapped-buffer", offset, length);
+        }
+        // Azahar ExeFSSectionFile: a seção é lida inteira, de uma vez, do
+        // offset 0; escrita é UnsupportedOpenFlags.
+        if (exefs && (writing || offset != 0U)) {
+            return fail(kFsUnsupportedOpenFlags, writing ? "exefs-write" : "exefs-offset",
+                        offset, length);
+        }
+        if (exefs && length != file.FileSize) {
+            return fail(kFsIncorrectExeFsReadSize, "exefs-read-size", offset, length);
         }
         if ((writing && (romfs || (file.FileOpenMode & 2U) == 0U)) ||
             (!writing && !romfs && (file.FileOpenMode & 1U) == 0U)) {
@@ -414,6 +428,110 @@ NativeA32HostResult NativeA32CtrHostServices::OpenCtrSystemArchiveRomFs(
                          kFsBackendFailure, "system-archive-open-failed");
 }
 
+uint32_t NativeA32CtrHostServices::OpenTitleRomFsFile() {
+    if (mConfig.RomFsImageSize == 0U ||
+        (mConfig.Filesystem == nullptr && mConfig.RomFsImagePath.empty())) {
+        return 0U;
+    }
+    auto file = std::make_shared<KernelObject>();
+    file->Type = "client_session:file:romfs";
+    file->FileOffset = mConfig.RomFsImageOffset;
+    file->FileSize = mConfig.RomFsImageSize;
+    bool opened = false;
+    if (mConfig.Filesystem != nullptr) {
+        file->FilePath = mConfig.RomFsContentPath;
+        opened = mConfig.Filesystem->Open(NativeA32CtrFilesystemRoot::Content,
+                                          mConfig.RomFsContentPath,
+                                          NativeA32CtrFileOpenRead,
+                                          &file->FileBackend) &&
+                 file->FileBackend != nullptr &&
+                 file->FileOffset <= file->FileBackend->Size() &&
+                 file->FileSize <= file->FileBackend->Size() - file->FileOffset;
+    } else {
+        file->FilePath = mConfig.RomFsImagePath;
+        file->RomFsBacking = std::make_shared<RomFsBackingFile>(file->FilePath);
+        opened = true;
+    }
+    return opened ? CreateHandle(file) : 0U;
+}
+
+std::optional<std::vector<uint8_t>> ReadCtrExeFsSection(const std::filesystem::path& directory,
+                                                        std::string_view name) {
+    if (directory.empty()) return std::nullopt;
+    std::ifstream input(directory / std::string(name), std::ios::binary);
+    if (!input) return std::nullopt;
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+    if (input.bad()) return std::nullopt;
+    return bytes;
+}
+
+NativeA32HostResult NativeA32CtrHostServices::OpenSelfNcchFile(
+    oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory, uint32_t commandBuffer,
+    NativeA32CtrSvcEvent event, uint32_t pathType, uint32_t pathSize, uint32_t pathAddress) {
+    // Resposta de FS:OpenFile; erro do Azahar devolve handle nulo.
+    const auto reply = [&](uint32_t result, uint32_t handle,
+                           const std::string& name) -> NativeA32HostResult {
+        if (!memory.Write32(commandBuffer, kFsOpenFileResponse) ||
+            !memory.Write32(commandBuffer + 4U, result) ||
+            !memory.Write32(commandBuffer + 8U, kMoveHandleDescriptor) ||
+            !memory.Write32(commandBuffer + 12U, handle)) {
+            if (handle != 0U) CloseHandle(handle);
+            return {NativeA32HostAction::Fault, std::nullopt, 0U,
+                    "FS:OpenFile(SelfNCCH) reply write failed"};
+        }
+        state.r[0] = kResultSuccess;
+        event.Name += ":OpenFile:SelfNCCH:" + name;
+        event.Detail = result;
+        event.Handled = true;
+        mSvcEvents.push_back(std::move(event));
+        return {NativeA32HostAction::Resume};
+    };
+    std::array<uint8_t, 12> path{};
+    if (pathType != 2U || pathSize != path.size() || !memory.ReadBytes(pathAddress, path)) {
+        return reply(kFsInvalidPath, 0U, "invalid-path");
+    }
+    uint32_t type = 0;
+    std::memcpy(&type, path.data(), sizeof(type));
+    switch (type) {
+    case 0U: { // RomFS do título
+        const uint32_t handle = OpenTitleRomFsFile();
+        return handle != 0U ? reply(kResultSuccess, handle, "RomFS")
+                            : reply(kFsRomFsNotFound, 0U, "RomFS:NotFound");
+    }
+    case 1U: // .code: o Azahar recusa (só pelo archive 0x2345678E).
+        return reply(kFsCommandNotAllowed, 0U, "Code:NotAllowed");
+    case 5U: // RomFS do update: o host não tem update instalado.
+        return reply(kFsRomFsNotFound, 0U, "UpdateRomFS:NotFound");
+    case 2U: { // ExeFS
+        const auto end = std::find(path.begin() + 4, path.end(), uint8_t{0});
+        const std::string name(path.begin() + 4, end);
+        if (name != "icon" && name != "banner" && name != "logo") {
+            return reply(kFsInvalidPath, 0U, "ExeFS:Unknown");
+        }
+        auto bytes = ReadCtrExeFsSection(mConfig.ExeFsDirectory, name);
+        if (!bytes) {
+            return reply(kFsExeFsSectionNotFound, 0U, "ExeFS:" + name + ":NotFound");
+        }
+        auto file = std::make_shared<KernelObject>();
+        file->Type = std::string(kExeFsSectionFileType);
+        file->FilePath = "exefs/" + name;
+        file->FileOffset = 0U;
+        file->FileSize = bytes->size();
+        file->FileOpenMode = 1U;
+        file->FileBackend = std::make_shared<NativeA32CtrOwnedMemoryFile>(std::move(*bytes));
+        const uint32_t handle = CreateHandle(file);
+        if (handle == 0U) {
+            return FailFsRequest(state, memory, commandBuffer, "client_session:fs:USER", event,
+                                 kFsBackendFailure, "exefs-handle-failed");
+        }
+        return reply(kResultSuccess, handle, "ExeFS:" + name);
+    }
+    default:
+        return reply(kFsInvalidPath, 0U, "type=" + std::to_string(type));
+    }
+}
+
 // SendSyncRequest on a client session of fs:USER.
 NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
     oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
@@ -498,32 +616,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                                      0xC8804464U, "romfs-unavailable");
             }
             if (opensRomFs) {
-                auto file = std::make_shared<KernelObject>();
-                file->Type = "client_session:file:romfs";
-                file->FileOffset = mConfig.RomFsImageOffset;
-                file->FileSize = mConfig.RomFsImageSize;
-                bool opened = false;
-                if (mConfig.Filesystem != nullptr) {
-                    file->FilePath = mConfig.RomFsContentPath;
-                    opened =
-                        mConfig.Filesystem->Open(
-                            NativeA32CtrFilesystemRoot::Content,
-                            mConfig.RomFsContentPath,
-                            NativeA32CtrFileOpenRead,
-                            &file->FileBackend) &&
-                        file->FileBackend != nullptr &&
-                        file->FileOffset <= file->FileBackend->Size() &&
-                        file->FileSize <= file->FileBackend->Size() -
-                                              file->FileOffset;
-                } else {
-                    file->FilePath = mConfig.RomFsImagePath;
-                    file->RomFsBacking =
-                        std::make_shared<RomFsBackingFile>(
-                            file->FilePath);
-                    opened = true;
-                }
-                const uint32_t handle =
-                    opened ? CreateHandle(file) : 0U;
+                const uint32_t handle = OpenTitleRomFsFile();
                 if (handle != 0U &&
                     memory.Write32(commandBuffer,
                                    kFsOpenFileDirectlyResponse) &&
@@ -739,6 +832,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                 [archiveHandle](const ArchiveRecord& record) {
                     return record.Handle == archiveHandle;
                 });
+            if (archive != mArchives.end() && archive->Id == kFsSelfNcchArchiveId) {
+                return OpenSelfNcchFile(state, memory, commandBuffer, std::move(event),
+                                        pathType, pathSize, pathAddress);
+            }
             const auto relativePath = DecodeArchiveRelativePath(
                 memory, pathType, pathSize, pathAddress);
             uint32_t result = archive == mArchives.end() ? kFsInvalidArchiveHandle : kFsInvalidPath;
@@ -933,6 +1030,25 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             }
             return FailFsRequest(state, memory, commandBuffer, sessionType, event,
                                  kFsBackendFailure, "save-root-open-failed");
+        }
+        // SelfNCCH: o Azahar ignora o caminho (ArchiveFactory_SelfNCCH::Open).
+        if (validStaticBuffer && archiveId == kFsSelfNcchArchiveId) {
+            const uint64_t archiveHandle = mNextArchiveHandle++;
+            mArchives.push_back({archiveHandle, archiveId, {}});
+            uint32_t faultAddress = 0;
+            if (memory.Write32(commandBuffer, kFsOpenArchiveResponse) &&
+                memory.Write32(commandBuffer + 4U, kResultSuccess) &&
+                memory.Write64(commandBuffer + 8U, archiveHandle, &faultAddress)) {
+                state.r[0] = kResultSuccess;
+                event.Name += ":OpenArchive:SelfNCCH";
+                event.Detail = archiveId;
+                event.Handled = true;
+                mSvcEvents.push_back(std::move(event));
+                return {NativeA32HostAction::Resume};
+            }
+            mArchives.pop_back();
+            return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                                 kFsBackendFailure, "selfncch-reply-failed");
         }
         if (validStaticBuffer) {
             std::ostringstream archiveDetail;

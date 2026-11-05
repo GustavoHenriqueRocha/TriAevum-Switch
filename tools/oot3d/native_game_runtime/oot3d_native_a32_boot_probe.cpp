@@ -433,6 +433,7 @@ int main(int argc, char** argv) {
         hostConfig.RomFsImagePath = manifest->RomFsImagePath;
         hostConfig.RomFsImageOffset = manifest->RomFsImageOffset;
         hostConfig.RomFsImageSize = manifest->RomFsImageSize;
+        hostConfig.ExeFsDirectory = manifest->ExeFsDirectory;
         hostConfig.PicaFrontend = &picaFrontend;
         hostConfig.SaveDataDirectory =
             arguments->SaveDataDirectory.empty()
@@ -524,10 +525,16 @@ int main(int argc, char** argv) {
                 break;
             }
         }
+        // CMDBUF_JUMP0/1 lê pelas mesmas regiões físicas da fila.
+        const Oot3dNativeGame::Oot3dPicaPhysicalMemoryView commandBufferView(
+            process.Memory(), picaMemoryRegions);
         Oot3dNativeGame::Oot3dNativePicaSubmissionQueue submissionQueue(
             Oot3dNativeGame::Oot3dPicaPhysicalMemoryView(
                 process.Memory(), std::move(picaMemoryRegions)));
         picaFrontend.SetPacketSink(&submissionQueue);
+        picaFrontend.SetCommandBufferReader(
+            Oot3dNativeGame::MakeOot3dPicaCommandBufferReader(
+                commandBufferView));
 
         auto result = RunUntilGuestWait(process);
         std::vector<Oot3dNativeGame::Oot3dPicaDrawSubmission> retainedDraws;

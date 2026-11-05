@@ -148,6 +148,14 @@ constexpr uint32_t kInvalidBufferDescriptor = 0xD9001830U;
 constexpr uint32_t kInvalidSessionHandle = 0xD8E007F7U;
 constexpr uint32_t kSessionClosed = 0xC920181AU;
 constexpr uint32_t kFsSaveDataArchiveId = 4U;
+// SelfNCCH: RomFS e ExeFS (icon/banner/logo) do próprio título. Resultados do
+// Azahar (file_sys/errors.h) para OpenFile/Read neste archive.
+constexpr uint32_t kFsSelfNcchArchiveId = 3U;
+constexpr std::string_view kExeFsSectionFileType = "client_session:file:exefs";
+constexpr uint32_t kFsRomFsNotFound = 0xC8804464U;
+constexpr uint32_t kFsExeFsSectionNotFound = 0xC8804637U;
+constexpr uint32_t kFsUnsupportedOpenFlags = 0xE0C046F8U;
+constexpr uint32_t kFsIncorrectExeFsReadSize = 0xE0C046F9U;
 // ExtSaveData (6, do próprio título) e SharedExtSaveData (7, do sistema: Play
 // Coins 0xF000000B etc.). Backend de pasta: <pai do save>/extdata/<mídia>/
 // <id alto>/<id baixo>/ (CtrExtDataDirectory). Path binário de 12 bytes:
@@ -482,6 +490,10 @@ uint64_t NanosecondsToCtrTicks(uint64_t nanoseconds) {
 }
 
 } // namespace
+
+// <directory>/<nome> (icon, banner ou logo); nullopt = seção inexistente.
+std::optional<std::vector<uint8_t>> ReadCtrExeFsSection(const std::filesystem::path& directory,
+                                                        std::string_view name);
 
 struct NativeA32CtrHostServices::RomFsBackingFile {
     explicit RomFsBackingFile(std::filesystem::path path)

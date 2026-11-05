@@ -152,9 +152,12 @@ echo "compilado em $(( $(date +%s) - START )) s: $BUILD/$TARGET"
 # --- 3. manifesto do processo -------------------------------------------------
 OUT="$BUILD/title"
 mkdir -p "$OUT"
+# Seções do ExeFS (ncch_extract.py: <extract>/exefs) para o archive SelfNCCH.
+EXEFS_ARGS=()
+[ -d "$(dirname "$ROMFS")/exefs" ] && EXEFS_ARGS=(--exefs-dir "$(dirname "$ROMFS")/exefs")
 python3 -I "$REPO/tools/oot3d/native_a32_runtime/build_process_manifest.py" \
   --exheader "$EXHEADER" --code-bin "$CODE_BIN" --romfs-image "$ROMFS" \
-  --output "$OUT/process.json"
+  ${EXEFS_ARGS[@]+"${EXEFS_ARGS[@]}"} --output "$OUT/process.json"
 
 # --- 4. rodar -----------------------------------------------------------------
 if [ "$TARGET" != ctr_title_boot_probe ]; then

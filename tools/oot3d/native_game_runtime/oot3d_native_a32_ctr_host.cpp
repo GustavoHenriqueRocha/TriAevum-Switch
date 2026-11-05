@@ -197,7 +197,8 @@ bool detail::NativeA32CtrSvcEventHistory::RetainsFullHistory() const noexcept {
 
 NativeA32CtrHostServices::NativeA32CtrHostServices(
     NativeA32CtrHostConfig config)
-    : mSvcEvents(config.RetainFullSvcHistory, config.ProfileRuntime,
+    : mSvcEvents(config.RetainFullSvcHistory,
+                 config.ProfileRuntime || config.CollectIpcNameCounts,
                  static_cast<size_t>(config.ResourceLimitValues[2])),
       mConfig(std::move(config)),
       mLinearHeapCursor(mConfig.LinearHeapBaseAddress) {}
@@ -1179,7 +1180,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         }
         if (*sessionType == "client_session:file:romfs" ||
             *sessionType == "client_session:file:savedata" ||
-            *sessionType == kCtrSystemArchiveFileType) {
+            *sessionType == kCtrSystemArchiveFileType ||
+            *sessionType == kExeFsSectionFileType) {
             return HandleRomFsRequest(state, memory, context, sessionType,
                                       commandBuffer, std::move(event));
         }

@@ -610,6 +610,37 @@ GUARDS = [
           "tools/oot3d/native_demo_host/oot3d_demo_host_screenshot.cpp",
           r'const bool png = ScreenshotPathIsPng\(screenshotPath\);.*?WritePngFromRgb8Framebuffer',
           "oot3d_demo_host_png_tests"),
+    # --- 05/11: SM3DL parado no logo amarelo (docs/pesquisas/2026-11-05-sm3dl-logo.md) ---
+    Guard("SM3DL: SelfNCCH (arquivo 3, ícone do ExeFS) dava err:f e matava o processo",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'archive->Id == kFsSelfNcchArchiveId.*?'
+          r'validStaticBuffer && archiveId == kFsSelfNcchArchiveId',
+          "oot3d_native_a32_ctr_host_tests (TestSelfNcchArchive)"),
+    Guard("SM3DL: ncch_extract não extraía icon/banner/logo do ExeFS (SelfNCCH sem dados)",
+          "tools/ctr/ncch_extract.py",
+          r'EXEFS_SECTIONS = \(b"icon", b"banner", b"logo"\)',
+          "python3 -I tools/ctr/test_ncch_extract.py"),
+    Guard("SM3DL: janela/probe sem a pasta do ExeFS (SelfNCCH respondia ExeFSSectionNotFound)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'hostConfig\.ExeFsDirectory = manifest->ExeFsDirectory;'),
+    Guard("SM3DL: cfg sem o bloco EULA 0x000D0000 = applet de EULA (0x406) esperado para sempre",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_system.cpp",
+          r'case 0x000D0000U: value = \{0x7FU, 0x7FU, 0U, 0U\};.*?'
+          r'else if \(auto fixed = AzaharDefaultConfigBlock\(blockId, size\)\)',
+          "oot3d_native_a32_ctr_host_tests (TestCfgAzaharDefaultBlocks)"),
+    Guard("SM3DL: CMDBUF_JUMP0/1 da PICA ignorado (sub-rotina sem IRQ, lista GX nunca concluía)",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'kPicaCommandBufferJump0 = 0x23CU;.*?pendingJumpChannel = id - kPicaCommandBufferJump0;.*?'
+          r'commandListWords = jumpedListWords;',
+          "oot3d_native_pica_frontend_tests"),
+    Guard("SM3DL: janela sem leitor de command buffer (salto da PICA vira erro)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'picaFrontend\.SetCommandBufferReader\(\s+Oot3dNativeGame::MakeOot3dPicaCommandBufferReader\(picaMemoryView\)\);',
+          "oot3d_native_pica_submission_tests"),
+    Guard("despejo do estado do guest (TRIAEVUM_GUEST_STATE_DUMP) saiu do laço da janela",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'guestStateDumper != nullptr && guestStateDumper->Due\(vblankCount\)',
+          "oot3d_native_a32_ctr_host_tests (TestGuestStateDump)"),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar
