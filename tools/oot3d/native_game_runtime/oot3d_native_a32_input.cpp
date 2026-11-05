@@ -1,4 +1,5 @@
 #include "oot3d_native_a32_input.h"
+#include "oot3d_top_screen_page_layout.h"
 
 #include "oot3d/renderer/ui_presentation_layout.h"
 
@@ -347,20 +348,30 @@ NativeA32TouchMapping MapHostPointerToNativeA32Touch(
     int32_t pointerX, int32_t pointerY, uint32_t hostWidth,
     uint32_t hostHeight, bool pointerPressed,
     NativeA32TouchPresentation presentation) noexcept {
-    const float presentationWidth =
-        presentation == NativeA32TouchPresentation::TopScreen400x240
-            ? static_cast<float>(NativeA32TopScreenWidth)
-            : static_cast<float>(NativeA32TouchWidth);
-    const float presentationHeight =
-        presentation == NativeA32TouchPresentation::TopScreen400x240
-            ? static_cast<float>(NativeA32TopScreenHeight)
-            : static_cast<float>(NativeA32TouchHeight);
-    const auto logical = Oot3d::Renderer::MapUiPresentationPoint(
-        hostWidth, hostHeight, presentationWidth, presentationHeight,
+    const float touchWidth = static_cast<float>(NativeA32TouchWidth);
+    const float touchHeight = static_cast<float>(NativeA32TouchHeight);
+    if (presentation == NativeA32TouchPresentation::NativeLowerScreen320x240) {
+        const auto logical = Oot3d::Renderer::MapUiPresentationPoint(
+            hostWidth, hostHeight, touchWidth, touchHeight,
+            static_cast<float>(pointerX), static_cast<float>(pointerY));
+        return ThreeDsRecomp::Input::MapPresentationPointToTouch(
+            logical.X, logical.Y, touchWidth, touchHeight, logical.Inside,
+            pointerPressed);
+    }
+    // The window shows the whole top screen (the renderer's centred fit);
+    // the page sits on it one native pixel per touch pixel, offset as the
+    // page layout places it. Rows match one to one.
+    const auto topScreen = Oot3d::Renderer::MapUiPresentationPoint(
+        hostWidth, hostHeight, static_cast<float>(NativeA32TopScreenWidth),
+        static_cast<float>(NativeA32TopScreenHeight),
         static_cast<float>(pointerX), static_cast<float>(pointerY));
+    const auto layout =
+        presentation == NativeA32TouchPresentation::TopScreenWideItemsPage
+            ? TopScreenPageLayout::WideItems
+            : TopScreenPageLayout::Centred;
     return ThreeDsRecomp::Input::MapPresentationPointToTouch(
-        logical.X, logical.Y, presentationWidth, presentationHeight,
-        logical.Inside, pointerPressed);
+        TopScreenPresentedToPageX(topScreen.X, layout), topScreen.Y,
+        touchWidth, touchHeight, topScreen.Inside, pointerPressed);
 }
 
 NativeA32TouchMapping MapTopScreenPageShortcutToNativeTouch(

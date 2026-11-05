@@ -85,9 +85,16 @@ NativeA32InputFrame MapNativeControlInput(
 
 using NativeA32TouchMapping = ThreeDsRecomp::Input::TouchMapping;
 
+// Where the window shows the native touch screen. TopScreen draws the lower
+// screen's pages on the top screen: the window shows the 400x240 top screen
+// (the renderer's centred fit) and the page sits on it as
+// oot3d_top_screen_page_layout.h describes.
 enum class NativeA32TouchPresentation : uint8_t {
     NativeLowerScreen320x240,
-    TopScreen400x240,
+    // Centred pages, the frontend menus, the wide dungeon Map and System.
+    TopScreenCentredPage,
+    // The widened Items page (grid at X + 63, sixth column at X + 80).
+    TopScreenWideItemsPage,
 };
 
 enum class NativeA32TopScreenPage : uint8_t {

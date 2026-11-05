@@ -75,7 +75,13 @@ Performance and usability:
     `gl_widescreen_menu_policy.h`, `tests/gl_widescreen_menu_policy_tests.cpp`.
 - **Touch screen**: read from HID (libnx `hidGetTouchScreenStates`), since SDL reports no fingers
   without a window (deko3d). Touch works where the mouse works on PC (title/file select screen and
-  TopScreen's Items/Map/Equipment pause pages). During gameplay a tap on a TopScreen HUD control
+  TopScreen's Items/Map/Equipment pause pages). A tap on those pages lands on the element under the
+  finger: TopScreen draws the 320-wide lower-screen pages one pixel per pixel on the 400-wide top
+  screen at X + 40 (the widened Items grid at X + 63, its sixth column at X + 80), and the touch
+  inverts that (`oot3d_top_screen_page_layout.h`, which the page target plans and the widened Items
+  draw also read; test `oot3d_native_a32_input_tests`). Until 0.1.0 the touch scaled 400 to 320
+  instead, so on the left of the Items page a tap selected the item to the right (first column:
+  native X 76 instead of 32). During gameplay a tap on a TopScreen HUD control
   presses the control it pictures while the finger is down: X, Y, Item I (ZR), Item II (ZL), B,
   and the D-pad direction of the action icons around the cross (View/Navi, Ocarina, boots...).
   Each finger hit-tests where it lands (several fingers at once). The first finger that lands

@@ -576,6 +576,20 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
           r'DecodeOptions\{native, kUiTextureMaxScale, false\}',
           "oot3d_azahar_texture_pack_tests (CapsHudTexturesAtThreeTimesWithoutMipmaps)"),
+    # --- 05/11: inventory taps one slot off (pause Items/Gear/Map, TopScreen) ---
+    # The touch scaled the 400-wide top screen down to the 320-wide touch
+    # screen, but TopScreen draws the page one pixel per pixel at X + 40 (the
+    # widened Items grid at X + 63, its sixth column at X + 80): a tap on the
+    # first Items column landed on the second.
+    Guard("tapping an item in the pause inventory selected the block to its right (left side of the page)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_input.cpp",
+          r'MapPresentationPointToTouch\(\s+TopScreenPresentedToPageX\(topScreen\.X, layout\), topScreen\.Y,',
+          "oot3d_native_a32_input_tests (TestSwitchPageTouchLandsOnTheTappedElement)",
+          forbid=r'TopScreen400x240'),
+    Guard("inventory touch: the widened Items page maps with its own layout (grid X + 63, sixth column X + 80)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'ReadTopScreenWidePageState\(memory, &page\) &&\s+page\.ItemsActive\s+'
+          r'\? NativeA32TouchPresentation::TopScreenWideItemsPage'),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay

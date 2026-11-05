@@ -921,6 +921,9 @@ bool NativeA32WindowSession::RunFrame() {
       gui->GetMenuOrMenubarVisible() || gui->GetAnyGuiWindowVisible();
   auto physicalInputFrame =
       PollNativeA32Input(window, nativeFrontendTouchEnabled,
+                         ResolveNativeA32TouchPresentation(
+                             process.Memory(),
+                             nativeCandidateDispatch.TopScreenUiProfile),
                          hostGuiVisible,
                          nativeCandidateDispatch.TopScreenUiProfile,
                          activeTopScreenConfig.FreeCameraEnabled,

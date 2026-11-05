@@ -27,6 +27,7 @@ UNIT_TESTS=(
     oot3d_input_bench_tests
     oot3d_native_a32_ctr_fs_tests
     oot3d_native_a32_ctr_host_tests
+    oot3d_native_a32_input_tests
     oot3d_native_audio_interpolation_tests
     oot3d_native_audio_storage_tests
     oot3d_native_audio_tests
@@ -53,6 +54,7 @@ UNIT_TESTS=(
     oot3d_top_screen_mod_profile_tests
     oot3d_top_screen_pause_transaction_tests
     oot3d_top_screen_texture_overrides_tests
+    oot3d_top_screen_wide_items_runtime_tests
     oot3d_topscreen_import_tests
     oot3d_update_release_tests
     triaevum_audio_service_tests

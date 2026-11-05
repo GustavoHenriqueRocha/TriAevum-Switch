@@ -1,4 +1,8 @@
 #include "oot3d_native_a32_input.h"
+#include "oot3d_top_screen_page_layout.h"
+
+#include "fast/backends/gfx_deko3d_pica_pipeline.h"
+#include "fast/oot3d/gl_widescreen_menu_policy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -112,6 +116,134 @@ void EmitMouseAimTimeline(const std::filesystem::path& path, std::string_view ax
         {"frame_origin", "run"}, {"segments", segments}}.dump(2));
 }
 
+// Where the Switch shows native page X, Y: the deko3d top target (scale 3,
+// widened by GlWidescreenFactor), the widescreen placement of a pause-page
+// draw on it, the page's projection row inside that viewport, and the
+// scanout of the 720x1280 display image on the 1280x720 screen.
+struct ScreenPoint {
+    int32_t X = 0;
+    int32_t Y = 0;
+};
+
+struct PageDraw {
+    float ViewportY = 0.0F;     // native, presented axis
+    float ViewportHeight = 0.0F;
+    float ProjectionScale = 0.0F; // clip = scale * x + offset
+    float ProjectionOffset = 0.0F;
+};
+
+ScreenPoint SwitchScreenPoint(const PageDraw& page, float pageX, float pageY) {
+    constexpr uint32_t kWindowWidth = 1280U;
+    constexpr uint32_t kWindowHeight = 720U;
+    constexpr float kScale = 3.0F;
+    const float factor = Fast::Oot3d::GlWidescreenFactor(kWindowWidth, kWindowHeight);
+    Require(std::abs(factor - 1280.0F / 1200.0F) < 1.0e-4F, "Switch widescreen factor is not 1.0667");
+    const auto extent = Fast::Deko3d::PlanPicaTargetExtent(
+        Fast::Deko3d::kTopScreenPhysicalWidth, Fast::Deko3d::kTopScreenPhysicalHeight, kScale, factor,
+        Fast::Deko3d::kTopScreenPhysicalWidth, Fast::Deko3d::kTopScreenPhysicalHeight);
+    Require(extent.Wide && extent.Width == 1440U && extent.Height == 1280U,
+            "Switch top target is not 1440x1280 wide");
+    // A pause-page element: Ui domain, a quad that does not cover the
+    // viewport (gfx_deko3d_pica_draw.cpp ResolveWidescreenPlacement).
+    Fast::Oot3d::GlWidescreenDrawEvidence evidence;
+    evidence.UiDomain = true;
+    evidence.ViewportSpansPresentedWidth =
+        page.ViewportY <= 0.5F && page.ViewportY + page.ViewportHeight >= 399.5F;
+    evidence.ViewportCoversTarget = evidence.ViewportSpansPresentedWidth;
+    const auto placement = Fast::Oot3d::ResolveGlWidescreenDrawPlacement(
+        evidence, extent.ScaleY / extent.Scale, true);
+    Require(placement.Canvas, "a pause-page element left the native canvas");
+    Fast::Oot3d::GlWidescreenPresentedAxisInput axisInput;
+    axisInput.ViewportY = page.ViewportY;
+    axisInput.ViewportHeight = page.ViewportHeight;
+    axisInput.FramebufferHeight = Fast::Deko3d::kTopScreenPhysicalHeight;
+    axisInput.TargetHeight = extent.Height;
+    axisInput.ResolutionScale = extent.Scale;
+    axisInput.TargetScaleY = extent.ScaleY;
+    const auto axis = Fast::Oot3d::ResolveGlWidescreenPresentedAxis(placement, axisInput);
+    const float clip = page.ProjectionScale * pageX + page.ProjectionOffset;
+    const float targetY = static_cast<float>(axis.ViewportBegin) +
+                          (1.0F - clip) * 0.5F * static_cast<float>(axis.ViewportEnd - axis.ViewportBegin);
+    const auto scanout = Fast::Deko3d::PlanPicaScanout(240U, 400U, extent.Height, kScale, kWindowWidth,
+                                                       kWindowHeight);
+    Require(scanout.CoversWindow, "Switch scanout does not cover the screen");
+    const float screenX = static_cast<float>(scanout.Viewport.X) +
+                          targetY * static_cast<float>(scanout.Viewport.Width) / static_cast<float>(extent.Height);
+    const float screenY = static_cast<float>(scanout.Viewport.Y) +
+                          pageY * static_cast<float>(scanout.Viewport.Height) / 240.0F;
+    return {static_cast<int32_t>(std::lround(screenX)), static_cast<int32_t>(std::lround(screenY))};
+}
+
+// 05/11 console bug: on the TopScreen Items page a tap on an item selected
+// the one to its right (left side of the page). The touch mapping scaled
+// the 400-wide top screen down to the 320-wide touch screen, but the page is
+// drawn one pixel per pixel: centred at X + 40, the widened Items grid at
+// X + 63 and its sixth column at X + 80.
+void TestSwitchPageTouchLandsOnTheTappedElement() {
+    // PauseItemsSlot_GetPosition (0x002EB304): slot n at X 11 + 48 * (n % 6),
+    // Y 7 + 48 * (n / 6); the sixth column's slots are fixed (slot 11 at
+    // 275, 73). PauseItemsPage_UpdateTouchGrid (0x002EBA9C) hit-tests each
+    // as a 42x42 rectangle in touch coordinates.
+    struct Slot {
+        const char* Name;
+        float X, Y;
+    };
+    constexpr float kSlotSize = 42.0F;
+    const PageDraw itemsGrid{0.0F, 400.0F, kTopScreenWidePageScale, kTopScreenWideItemsOffset};
+    for (const Slot slot : {Slot{"left (slot 0)", 11.0F, 7.0F}, Slot{"centre (slot 8)", 107.0F, 55.0F},
+                            Slot{"right (slot 11)", 275.0F, 73.0F}}) {
+        const float centreX = slot.X + kSlotSize * 0.5F;
+        const float centreY = slot.Y + kSlotSize * 0.5F;
+        // The grid's quads left of X 256 move by -17 before the 0.6 draw.
+        const float drawnX = centreX < kTopScreenWideItemsLeftRegionEnd
+                                 ? centreX + kTopScreenWideItemsGridShift
+                                 : centreX;
+        const auto screen = SwitchScreenPoint(itemsGrid, drawnX, centreY);
+        const auto touch = MapHostPointerToNativeA32Touch(screen.X, screen.Y, 1280U, 720U, true,
+                                                          NativeA32TouchPresentation::TopScreenWideItemsPage);
+        if (!(touch.Inside && touch.X >= slot.X && touch.X < slot.X + kSlotSize && touch.Y >= slot.Y &&
+              touch.Y < slot.Y + kSlotSize && std::abs(touch.X - centreX) <= 1.0F &&
+              std::abs(touch.Y - centreY) <= 1.0F)) {
+            std::cerr << "Items " << slot.Name << ": centre " << centreX << ',' << centreY << " drawn at screen "
+                      << screen.X << ',' << screen.Y << " -> touch " << touch.X << ',' << touch.Y << '\n';
+            Fail("a tap on an Items slot's on-screen centre did not land on that slot");
+        }
+    }
+    // Centred pages (Gear, World Map, file select, name entry): viewport
+    // (0, 40, 480, 320) and the page's own 320-wide orthographic.
+    const PageDraw centred{40.0F, 320.0F, -1.0F / 160.0F, 1.0F};
+    for (const float pageX : {20.0F, 160.0F, 300.0F}) {
+        const auto screen = SwitchScreenPoint(centred, pageX, 120.0F);
+        const auto touch = MapHostPointerToNativeA32Touch(screen.X, screen.Y, 1280U, 720U, true,
+                                                          NativeA32TouchPresentation::TopScreenCentredPage);
+        if (!(touch.Inside && std::abs(touch.X - pageX) <= 1.0F && touch.Y == 120U)) {
+            std::cerr << "centred page X " << pageX << " drawn at screen " << screen.X << " -> touch "
+                      << touch.X << '\n';
+            Fail("a tap on a centred page did not land where it is drawn");
+        }
+    }
+    // The wide dungeon Map and System use the page offset 0.8: centred.
+    const PageDraw widePage{0.0F, 400.0F, kTopScreenWidePageScale, kTopScreenWidePageOffset};
+    for (const float pageX : {20.0F, 160.0F, 300.0F}) {
+        const auto screen = SwitchScreenPoint(widePage, pageX, 120.0F);
+        const auto touch = MapHostPointerToNativeA32Touch(screen.X, screen.Y, 1280U, 720U, true,
+                                                          NativeA32TouchPresentation::TopScreenCentredPage);
+        Require(touch.Inside && std::abs(touch.X - pageX) <= 1.0F,
+                "a tap on the wide dungeon Map or System did not land where it is drawn");
+    }
+    // Forward and inverse layouts agree, and the gap between the Items
+    // grid's region and its sixth column maps between them.
+    for (const auto layout : {TopScreenPageLayout::Centred, TopScreenPageLayout::WideItems}) {
+        for (float pageX = 0.0F; pageX < 320.0F; pageX += 1.0F) {
+            Require(std::abs(TopScreenPresentedToPageX(TopScreenPageToPresentedX(pageX, layout), layout) - pageX) <
+                        1.0e-3F,
+                    "TopScreen page layout does not invert");
+        }
+    }
+    Require(TopScreenPresentedToPageX(327.0F, TopScreenPageLayout::WideItems) == kTopScreenWideItemsLeftRegionEnd,
+            "the widened Items gap left the gap");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -121,6 +253,7 @@ int main(int argc, char** argv) {
     }
     Require(argc == 1, "usage: [--emit-mouse-aim FILE pitch|yaw]");
     TestShoulderMappings();
+    TestSwitchPageTouchLandsOnTheTappedElement();
     const auto mousePreset = NativeControlPreset(NativeControlProfile::KeyboardMouse);
     const auto controllerPreset = NativeControlPreset(NativeControlProfile::Controller);
     Require(mousePreset.NativeAimSource == NativeMotionSource::Mouse &&
@@ -503,10 +636,12 @@ int main(int argc, char** argv) {
     RequireTouch(MapHostPointerToNativeA32Touch(0, 0, 0, 1080, true), false,
                  false, 0, 0,
                  "invalid host extent accepted a native touch");
+    // The lower-screen tab centres, where a centred page draws them
+    // (top-screen X + 40, three pixels per native pixel at 720p).
     const auto topScreenPresentation =
-        NativeA32TouchPresentation::TopScreen400x240;
+        NativeA32TouchPresentation::TopScreenCentredPage;
     RequireTouch(MapHostPointerToNativeA32Touch(
-                     400, 663, 1280, 720, true, topScreenPresentation),
+                     448, 663, 1280, 720, true, topScreenPresentation),
                  true, true, 96, 221,
                  "widescreen TopScreen Gear target did not map to native touch");
     RequireTouch(MapHostPointerToNativeA32Touch(
@@ -514,11 +649,11 @@ int main(int argc, char** argv) {
                  true, true, 160, 221,
                  "widescreen TopScreen Map target did not map to native touch");
     RequireTouch(MapHostPointerToNativeA32Touch(
-                     880, 663, 1280, 720, true, topScreenPresentation),
+                     832, 663, 1280, 720, true, topScreenPresentation),
                  true, true, 224, 221,
                  "widescreen TopScreen Items target did not map to native touch");
     RequireTouch(MapHostPointerToNativeA32Touch(
-                     308, 643, 1024, 768, true, topScreenPresentation),
+                     349, 643, 1024, 768, true, topScreenPresentation),
                  true, true, 96, 221,
                  "4:3 TopScreen Gear target did not map to native touch");
     RequireTouch(MapHostPointerToNativeA32Touch(
