@@ -1494,6 +1494,20 @@ jogo para no primeiro quadro. O resumo do stderr e o `report.json` (`frame_bound
 fronteiras, VBlanks e o histograma de intervalos (1 = 60 quadros/s, 2 = 30). Super Mario 3D Land
 (05/11): 127 fronteiras em 130 VBlanks, todas com intervalo 1 (60 quadros/s no boot).
 
+### 8.2 Arquivos de sistema do console (fonte, Mii) sem dump
+
+Títulos abrem system data archives pelo fs:USER `OpenFileDirectly` no archive NCCH `0x2345678A`
+(path do archive = title id + mídia; path do arquivo = 20 bytes zerados = RomFS) ou pedem a fonte
+por `APT:GetSharedFont`. O host serve os substitutos livres do Citra/Azahar
+(`tools/oot3d/third_party/ctr_open_source_archives`, licenças no README de lá), embutidos no binário:
+fonte `0004009B00014002` (e CHN/KOR/TWN com a mesma), Mii `0004009B00010202`, países
+`0004009B00010402`, NG word `000400DB00010302`. O `GetSharedFont` devolve `0x18000000` e um bloco de
+0x332000 que o `MapMemoryBlock` preenche: cabeçalho de 0x80 (status 2), BCFNT descomprimido com
+assinatura `CFNU` e ponteiros FINF/CMAP/CWDH/TGLP relocados para esse endereço. Título fora da
+lista responde `0xC8804464` (não encontrado). Código: `oot3d_native_a32_ctr_system_archives.*`;
+testes em `oot3d_native_a32_ctr_fs_tests` e `oot3d_native_a32_ctr_host_tests`. Super Mario 3D Land
+(05/11) pede o archive do Mii, não a fonte.
+
 ---
 
 ## 9. Lacunas conhecidas deste guia

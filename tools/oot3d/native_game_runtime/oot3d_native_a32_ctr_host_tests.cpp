@@ -1215,6 +1215,65 @@ void TestThreadQueries() {
             "an unimplemented SVC is not named in the host fault");
 }
 
+// APT:GetSharedFont sem arquivos do console: bloco de 0x332000 com a fonte
+// substituta (CFNU, ponteiros relocados para 0x18000000), mapeado só leitura.
+void TestAptGetSharedFont() {
+    NativeA32CtrHostServices host(MakeConfig());
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    auto& memory = process.Memory();
+    const uint32_t srv = OpenSrv(guest);
+    uint32_t apt = 0;
+    Require(GetServiceHandle(guest, srv, "APT:U", &apt) == NativeA32HostAction::Resume && apt != 0,
+            "APT:U was not opened");
+    const auto getSharedFont = [&](uint32_t* address, uint32_t* handle) {
+        uint32_t header = 0, result = 1, descriptor = 1;
+        Require(memory.Write32(0x1FF82080, 0x00440000U), "cannot write APT:GetSharedFont");
+        guest.State(0).r[0] = apt;
+        Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume &&
+                    memory.Read32(0x1FF82080, &header) && header == 0x00440082U &&
+                    memory.Read32(0x1FF82084, &result) && result == 0U &&
+                    memory.Read32(0x1FF82088, address) &&
+                    memory.Read32(0x1FF8208C, &descriptor) && descriptor == 0U &&
+                    memory.Read32(0x1FF82090, handle) && *handle != 0U,
+                "APT:GetSharedFont response is wrong");
+    };
+    uint32_t address = 0, handle = 0;
+    getSharedFont(&address, &handle);
+    Require(address == 0x18000000U, "shared font address");
+    auto& state = guest.State(0);
+    state.r[0] = handle;
+    state.r[1] = address;
+    state.r[2] = 1U;            // leitura
+    state.r[3] = 0x10000000U;   // DONTCARE
+    Require(guest.Svc(0, 0x1F) == NativeA32HostAction::Resume && state.r[0] == 0U,
+            "MapMemoryBlock of the shared font failed");
+    uint32_t status = 0, region = 0, size = 0, magic = 0, tglp = 0;
+    Require(memory.Read32(address, &status) && status == 2U &&
+                memory.Read32(address + 4U, &region) && region == 1U &&
+                memory.Read32(address + 8U, &size) && size == 0x2FD4E6U &&
+                memory.Read32(address + 0x80U, &magic) && magic == 0x554E4643U &&
+                memory.IsMapped(address, 0x332000U) && !memory.IsWritable(address, 4U),
+            "shared font block contents");
+    // FINF logo após o cabeçalho CFNT (0x14); o ponteiro do TGLP é absoluto.
+    uint32_t tglpMagic = 0;
+    Require(memory.Read32(address + 0x80U + 0x14U + 0x10U, &tglp) &&
+                tglp > address && tglp < address + 0x332000U &&
+                memory.Read32(tglp - 8U, &tglpMagic) && tglpMagic == 0x504C4754U,
+            "shared font TGLP pointer is not relocated");
+    // Segunda chamada: o mesmo bloco (já mapeado), sem segunda cópia.
+    uint32_t again = 0, secondHandle = 0;
+    getSharedFont(&again, &secondHandle);
+    state.r[0] = secondHandle;
+    state.r[1] = 0x18400000U;
+    state.r[2] = 1U;
+    state.r[3] = 0x10000000U;
+    Require(again == address && guest.Svc(0, 0x1F) != NativeA32HostAction::Resume,
+            "a second shared font block was mapped");
+}
+
 int main() {
     TestFrameBoundaryProviderSelection();
     TestGspFrameBoundaryProvider();
@@ -1227,6 +1286,7 @@ int main() {
     TestUnknownServicesAreLoggedStubs();
     TestThreadQueries();
     TestCreateMemoryBlockOfGuestMemory();
+    TestAptGetSharedFont();
     TestDeferredDeviceMemory();
     TestDeferredDeviceFailureAndOverwrite();
     TestGpuMemoryWriteOwnership();

@@ -2,7 +2,39 @@
 # game module, the A32 process, savestate and boot probe, and their tests.
 # Included from the root CMakeLists.txt, in its scope.
 
+# System data archives substitutos (fonte compartilhada, Mii, países, NG word)
+# do Citra/Azahar: os .romfs de third_party/ctr_open_source_archives viram
+# arrays no build (README.md e licenças naquela pasta).
+set(_ctr_open_source_archives_dir
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/oot3d/third_party/ctr_open_source_archives)
+set(_ctr_open_source_archives_names shared_font mii country_list bad_word_list)
+set(_ctr_open_source_archives_inputs)
+foreach(_name IN LISTS _ctr_open_source_archives_names)
+    list(APPEND _ctr_open_source_archives_inputs
+        ${_ctr_open_source_archives_dir}/data/${_name}.romfs)
+endforeach()
+string(REPLACE ";" "," _ctr_open_source_archives_names_arg
+    "${_ctr_open_source_archives_names}")
+set(_ctr_open_source_archives_cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/ctr_open_source_archives_data.cpp)
+add_custom_command(
+    OUTPUT ${_ctr_open_source_archives_cpp}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND ${CMAKE_COMMAND}
+        -DOUTPUT=${_ctr_open_source_archives_cpp}
+        -DDATA_DIR=${_ctr_open_source_archives_dir}/data
+        -DNAMES=${_ctr_open_source_archives_names_arg}
+        -P ${_ctr_open_source_archives_dir}/embed_romfs.cmake
+    DEPENDS ${_ctr_open_source_archives_inputs}
+        ${_ctr_open_source_archives_dir}/embed_romfs.cmake
+    COMMENT "Embutindo os system archives substitutos (fonte compartilhada, Mii...)"
+    VERBATIM)
+# Um só produtor do .cpp para as duas bibliotecas abaixo (geradores VS/Make).
+add_custom_target(ctr_open_source_archives_data DEPENDS ${_ctr_open_source_archives_cpp})
+
 set(_oot3d_native_a32_ctr_host_sources
+    tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_system_archives.cpp
+    ${_ctr_open_source_archives_cpp}
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_system.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_hid.cpp
@@ -89,6 +121,8 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 set_property(TARGET oot3d_native_a32_ctr_service_host PROPERTY FOLDER Tools)
+add_dependencies(oot3d_native_a32_ctr_host ctr_open_source_archives_data)
+add_dependencies(oot3d_native_a32_ctr_service_host ctr_open_source_archives_data)
 
 add_library(oot3d_triaevum_pica_client_bridge STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/triaevum_oot3d_pica_client_bridge.cpp

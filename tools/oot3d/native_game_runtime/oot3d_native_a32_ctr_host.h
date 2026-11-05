@@ -351,6 +351,13 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         uint32_t commandBuffer, const std::optional<std::string>& sessionType,
         NativeA32CtrSvcEvent event, uint32_t result, std::string_view reason,
         uint64_t offset = 0U, uint64_t length = 0U);
+    // fs:USER OpenFileDirectly do archive NCCH 0x2345678A: RomFS dos system
+    // data archives substitutos (oot3d_native_a32_ctr_system_archives.h).
+    // words = as 12 palavras do pedido após o cabeçalho.
+    NativeA32HostResult OpenCtrSystemArchiveRomFs(
+        oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
+        uint32_t commandBuffer, const std::optional<std::string>& sessionType,
+        NativeA32CtrSvcEvent event, const std::array<uint32_t, 12>& words);
     struct RomFsBackingFile;
 
     struct KernelObject {

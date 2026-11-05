@@ -1,5 +1,6 @@
 #include "oot3d_native_a32_ctr_host.h"
 #include "oot3d_native_master_quest_unlock.h"
+#include "oot3d_native_a32_ctr_system_archives.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -610,6 +611,122 @@ void TestSharedExtDataPlayCoins() {
     std::filesystem::remove_all(root);
 }
 
+// 05/11: o Super Mario 3D Land abria o archive NCCH 0x2345678A (Mii
+// 0004009B00010202) e o host respondia unsupported-romfs-path -> err:f. Os
+// system data archives substitutos (fonte compartilhada, Mii, países, NG
+// word) são servidos sem arquivos do console, e sobrevivem ao savestate.
+void TestSystemDataArchiveRomFs() {
+    TestFs fs;
+    FsFixture f(fs);
+    const uint32_t archivePath = FsFixture::Buffer + 0x200U;
+    const uint32_t filePath = FsFixture::Buffer + 0x240U;
+    const auto open = [&](uint64_t titleId, bool exefs = false) {
+        Require(f.Memory.Write64(archivePath, titleId, nullptr) &&
+                    f.Memory.Write64(archivePath + 8U, 0U, nullptr) &&
+                    f.Memory.Fill(filePath, 20U, 0U) &&
+                    (!exefs || f.Memory.Write32(filePath + 8U, 2U)),
+                "system archive paths");
+        f.Call(f.Fs, {0x08030204U, 0U, 0x2345678AU, 2U, 16U, 2U, 20U, 1U, 0U,
+                      (16U << 14U) | 2U, archivePath, (20U << 14U) | 2U, filePath});
+        Require(f.State.r[0] == 0U && f.Word(0) == 0x08030042U, "system archive reply header");
+        return f.Word(1) == 0U ? f.Word(3) : 0U;
+    };
+    // Mii (o pedido do Mario) e a fonte de todas as regiões.
+    const uint32_t mii = open(0x0004009B00010202ULL);
+    Require(mii != 0U, "Mii system archive not served");
+    Require(f.Call(mii, {0x08040000U}).Action == NativeA32HostAction::Resume &&
+                f.Word(1) == 0U && f.Word(2) == 73600U && f.Word(3) == 0U,
+            "Mii RomFS size");
+    f.Read(mii, 0U, 0x28U, (0x28U << 4U) | 0xCU);
+    uint32_t header = 0U, metaOffset = 0U, dataOffset = 0U;
+    Require(f.Word(1) == 0U && f.Word(2) == 0x28U &&
+                f.Memory.Read32(FsFixture::Buffer, &header) && header == 0x28U &&
+                f.Memory.Read32(FsFixture::Buffer + 0x1CU, &metaOffset) && metaOffset == 0x58U &&
+                f.Memory.Read32(FsFixture::Buffer + 0x24U, &dataOffset) && dataOffset == 0x90U,
+            "Mii RomFS level-3 header");
+    for (const uint64_t font : {0x0004009B00014002ULL, 0x0004009B00014102ULL,
+                                0x0004009B00014202ULL, 0x0004009B00014302ULL}) {
+        const uint32_t handle = open(font);
+        Require(handle != 0U, "shared font archive not served");
+        // cbf_std.bcfnt.lz em +0xA0: LZ11 de 0x2FD4E6 bytes.
+        f.Read(handle, 0xA0U, 4U, (4U << 4U) | 0xCU);
+        uint32_t lz = 0U;
+        Require(f.Word(2) == 4U && f.Memory.Read32(FsFixture::Buffer, &lz) && lz == 0x2FD4E611U,
+                "shared font LZ11 header");
+    }
+    Require(open(0x0004009B00010402ULL) != 0U && open(0x000400DB00010302ULL) != 0U,
+            "country list / NG word archives not served");
+    // Título sem substituto e ExeFS: "não encontrado", sem prender a thread.
+    Require(open(0x0004009B00010702ULL) == 0U && f.Word(1) == 0xC8804464U,
+            "unknown system title result");
+    Require(open(0x0004009B00010202ULL, true) == 0U && f.Word(1) == 0xC8804464U,
+            "system archive ExeFS result");
+    // Arquivo só de leitura.
+    Require(f.Call(mii, {0x08030102U, 0U, 0U, 4U, 0U, (4U << 4U) | 0xAU, FsFixture::Buffer})
+                    .Action == NativeA32HostAction::Resume && f.Word(1) == 0xC92044E6U,
+            "system archive accepted a write");
+    // Savestate: o handle continua lendo os mesmos bytes; título forjado falha.
+    auto snapshot = f.Host.CaptureState();
+    std::string error;
+    Require(f.Host.RestoreState(snapshot, f.Process, &error), error);
+    f.Read(mii, 0U, 4U, (4U << 4U) | 0xCU);
+    Require(f.Word(1) == 0U && f.Word(2) == 4U && f.Memory.Read32(FsFixture::Buffer, &header) &&
+                header == 0x28U,
+            "restored system archive read");
+    bool forged = false;
+    for (auto& object : snapshot.at("kernel_objects")) {
+        if (object.at("file_path") == "system_archive/0004009b00010202") {
+            object["file_path"] = "system_archive/0004009b00010702";
+            forged = true;
+        }
+    }
+    Require(forged && !f.Host.RestoreState(snapshot, f.Process, &error),
+            "restore accepted an unknown system archive");
+}
+
+void TestSharedFontRomFsAndRelocation() {
+    // cbf_std.bcfnt.lz -> BCFNT, e o bloco do APT:GetSharedFont relocado.
+    const auto archive = FindCtrSystemArchive(0x0004009B00014002ULL);
+    Require(archive && archive->Name == "shared_font" && !archive->Substitute,
+            "shared font archive lookup");
+    Require(FindCtrSystemArchive(0x0004009B00014202ULL)->Substitute, "KOR font substitute flag");
+    const auto lz = FindCtrRomFsRootFile(archive->RomFs, u"cbf_std.bcfnt.lz");
+    Require(lz && lz->size() == 1089582U, "cbf_std.bcfnt.lz not found");
+    Require(!FindCtrRomFsRootFile(archive->RomFs, u"cbf_ko-Hang-KR.bcfnt.lz"),
+            "found a font file the substitute does not have");
+    std::vector<uint8_t> bcfnt;
+    Require(DecompressCtrLz11(*lz, &bcfnt) && bcfnt.size() == 0x2FD4E6U &&
+                std::memcmp(bcfnt.data(), "CFNT", 4U) == 0,
+            "BCFNT decompression");
+    Require(!DecompressCtrLz11(lz->first(lz->size() / 2U), &bcfnt), "truncated LZ11 accepted");
+    std::vector<uint8_t> memory;
+    Require(BuildCtrSharedFontMemory(0x18000000U, &memory) && memory.size() == 0x332000U,
+            "shared font memory");
+    uint32_t value = 0U;
+    std::memcpy(&value, memory.data(), 4U);
+    Require(value == 2U && std::memcmp(memory.data() + 0x80U, "CFNU", 4U) == 0,
+            "shared font header");
+    // FINF está logo após o cabeçalho CFNT; seus ponteiros apontam para
+    // seções dentro do bloco mapeado em 0x18000000.
+    uint16_t cfntHeader = 0U;
+    std::memcpy(&cfntHeader, memory.data() + 0x86U, 2U);
+    const size_t finf = 0x80U + cfntHeader;
+    Require(std::memcmp(memory.data() + finf, "FINF", 4U) == 0, "FINF position");
+    const char* sections[] = {"TGLP", "CWDH", "CMAP"};
+    for (int index = 0; index < 3; ++index) {
+        std::memcpy(&value, memory.data() + finf + 0x10U + index * 4U, 4U);
+        Require(value >= 0x18000008U && value < 0x18000000U + 0x332000U &&
+                    std::memcmp(memory.data() + (value - 0x18000000U) - 8U, sections[index], 4U) == 0,
+                "relocated FINF pointer");
+    }
+    // Relocar de novo para outra base desloca todos os ponteiros juntos.
+    Require(RelocateCtrSharedFont(memory, 0x30000000U), "second relocation");
+    std::memcpy(&value, memory.data() + finf + 0x10U, 4U);
+    Require(value >= 0x30000008U && std::memcmp(memory.data() + (value - 0x30000000U) - 8U,
+                                                "TGLP", 4U) == 0,
+            "rebased FINF pointer");
+}
+
 int main() {
     TestFullHistoryIntentionalWait();
     TestFsFailuresAndRestore();
@@ -618,5 +735,7 @@ int main() {
     TestMasterQuestUnlockThroughFs();
     TestSaveDataFormatInfo();
     TestSharedExtDataPlayCoins();
+    TestSystemDataArchiveRomFs();
+    TestSharedFontRomFsAndRelocation();
     std::cout << "oot3d_native_a32_ctr_fs_tests: ok\n";
 }

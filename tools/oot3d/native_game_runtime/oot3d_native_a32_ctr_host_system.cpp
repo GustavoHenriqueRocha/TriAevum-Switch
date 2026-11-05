@@ -1,5 +1,6 @@
 // CTR host services: the ndm:u, cfg:u, y2r:u and APT:U sessions.
 #include "oot3d_native_a32_ctr_host_internal.h"
+#include "oot3d_native_a32_ctr_system_archives.h"
 
 namespace Oot3dNativeGame {
 
@@ -216,6 +217,36 @@ NativeA32HostResult NativeA32CtrHostServices::HandleAptRequest(
             CloseHandle(notification);
             CloseHandle(parameter);
         }
+    }
+    if (event.Detail == kAptGetSharedFontRequest) {
+        // Bloco de memória com a fonte substituta, relocada para
+        // kCtrSharedFontAddress; o MapMemoryBlock o preenche. Um só objeto
+        // por processo: reaproveita o de um handle ainda aberto.
+        std::shared_ptr<KernelObject> font;
+        for (const auto& record : mHandles) {
+            if (record.Object && record.Object->Type == "shared_memory:apt_font") {
+                font = record.Object;
+                break;
+            }
+        }
+        if (!font) {
+            font = std::make_shared<KernelObject>();
+            font->Type = "shared_memory:apt_font";
+            font->FileSize = kCtrSharedFontMemorySize;
+        }
+        const uint32_t handle = CreateHandle(font);
+        if (memory.Write32(commandBuffer, kAptGetSharedFontResponse) &&
+            memory.Write32(commandBuffer + 4U, kResultSuccess) &&
+            memory.Write32(commandBuffer + 8U, kCtrSharedFontAddress) &&
+            memory.Write32(commandBuffer + 12U, kCopyHandleDescriptor) &&
+            memory.Write32(commandBuffer + 16U, handle)) {
+            state.r[0] = kResultSuccess;
+            event.Name += ":GetSharedFont";
+            event.Handled = true;
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Resume};
+        }
+        CloseHandle(handle);
     }
     if (event.Detail == kAptEnableRequest &&
         memory.Write32(commandBuffer, kAptEnableResponse) &&

@@ -1,5 +1,6 @@
 // CTR host services: savestate capture and restore of the host service state.
 #include "oot3d_native_a32_ctr_host_internal.h"
+#include "oot3d_native_a32_ctr_system_archives.h"
 
 namespace Oot3dNativeGame {
 
@@ -340,7 +341,18 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
                         ? std::filesystem::path(mConfig.RomFsContentPath)
                         : mConfig.RomFsImagePath;
             }
-            if (mConfig.Filesystem == nullptr &&
+            // System data archive substituto: o path só identifica o título;
+            // os bytes vêm do binário, nunca do disco.
+            std::optional<CtrSystemArchive> systemArchive;
+            if (object->Type == kCtrSystemArchiveFileType) {
+                const auto titleId =
+                    ParseCtrSystemArchiveFilePath(object->FilePath.generic_string());
+                systemArchive = titleId ? FindCtrSystemArchive(*titleId) : std::nullopt;
+                if (!systemArchive) {
+                    throw std::runtime_error("system archive kernel object is unknown");
+                }
+            }
+            if (mConfig.Filesystem == nullptr && !systemArchive &&
                 !validFilePath(object->FilePath)) {
                 throw std::runtime_error(
                     "kernel object file path is incompatible");
@@ -353,7 +365,15 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
                                 object->FileSize != mConfig.RomFsImageSize)) {
                 throw std::runtime_error("restored RomFS service view is incompatible");
             }
-            if (!object->FileClosed && mConfig.Filesystem != nullptr && (isRomFsFile || isSaveFile)) {
+            if (systemArchive) {
+                if (object->FileOffset != 0U || object->FileSize != systemArchive->RomFs.size()) {
+                    throw std::runtime_error("restored system archive view is incompatible");
+                }
+                if (!object->FileClosed) {
+                    object->FileBackend =
+                        std::make_shared<NativeA32CtrMemoryFile>(systemArchive->RomFs);
+                }
+            } else if (!object->FileClosed && mConfig.Filesystem != nullptr && (isRomFsFile || isSaveFile)) {
                 uint32_t openFlags = 0U;
                 if (isRomFsFile || (object->FileOpenMode & 1U) != 0U) {
                     openFlags |= NativeA32CtrFileOpenRead;

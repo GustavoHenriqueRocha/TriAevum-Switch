@@ -1,6 +1,7 @@
 // CTR host services of the native A32 process: SVC dispatch, handles and kernel objects, GSP
 // framebuffers and interrupts, memory, timing. Services: oot3d_native_a32_ctr_host_*.cpp.
 #include "oot3d_native_a32_ctr_host_internal.h"
+#include "oot3d_native_a32_ctr_system_archives.h"
 
 #include <cstdio>
 
@@ -873,6 +874,15 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
         }
+        // APT:GetSharedFont: o bloco nasce com a fonte substituta, relocada
+        // para o endereço que o APT devolveu (como no console).
+        std::vector<uint8_t> initialBytes;
+        if (memoryBlock->Object->Type == "shared_memory:apt_font" &&
+            !BuildCtrSharedFontMemory(kCtrSharedFontAddress, &initialBytes)) {
+            event.Name += ":shared-font-unavailable";
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Wait};
+        }
         std::string mapError;
         if (!memory.MapRegion(
                 {memoryBlock->Object->Type,
@@ -880,7 +890,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
                  static_cast<size_t>(memoryBlock->Object->FileSize),
                  (permissions & 2U) != 0,
                  (permissions & 4U) != 0,
-                 {}},
+                 initialBytes},
                 &mapError)) {
             event.Name += ":" + mapError;
             mSvcEvents.push_back(std::move(event));
@@ -1168,7 +1178,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
                                     commandBuffer, std::move(event));
         }
         if (*sessionType == "client_session:file:romfs" ||
-            *sessionType == "client_session:file:savedata") {
+            *sessionType == "client_session:file:savedata" ||
+            *sessionType == kCtrSystemArchiveFileType) {
             return HandleRomFsRequest(state, memory, context, sessionType,
                                       commandBuffer, std::move(event));
         }

@@ -1,6 +1,7 @@
 // CTR host services: the fs:USER session and RomFS files.
 #include "oot3d_native_a32_ctr_host_internal.h"
 #include "oot3d_native_master_quest_unlock.h"
+#include "oot3d_native_a32_ctr_system_archives.h"
 
 #include <array>
 #include <cstdio>
@@ -155,7 +156,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
     if (file.FileClosed) {
         return fail(kSessionClosed, "closed-file");
     }
-    const bool romfs = *sessionType == "client_session:file:romfs";
+    const bool romfs = *sessionType == "client_session:file:romfs" ||
+                       *sessionType == kCtrSystemArchiveFileType;
     // Validate the reply BEFORE any disk mutation or backend allocation.
     const uint32_t replyBytes = event.Detail == kFileReadRequest || event.Detail == kFileWriteRequest
                                     ? 20U : event.Detail == kFileGetSizeRequest ? 16U : 8U;
@@ -351,6 +353,67 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
     return fail(kFsNotImplemented, "unsupported-file-command");
 }
 
+// OpenFileDirectly(archive NCCH 0x2345678A): path do archive = {title id u64,
+// mídia u32, reservado u32}; path do arquivo = 20 bytes {tipo de abertura,
+// índice do conteúdo, tipo do path, nome ExeFS[8]}, todo zero = RomFS do
+// conteúdo 0. Só os system data archives com substituto embutido existem; os
+// outros títulos (ou ExeFS) respondem "não encontrado", como o Azahar sem
+// NAND.
+NativeA32HostResult NativeA32CtrHostServices::OpenCtrSystemArchiveRomFs(
+    oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
+    uint32_t commandBuffer, const std::optional<std::string>& sessionType,
+    NativeA32CtrSvcEvent event, const std::array<uint32_t, 12>& words) {
+    std::array<uint8_t, 16> archivePath{};
+    std::array<uint8_t, 20> filePath{};
+    const bool wellFormed =
+        words[2] == 2U && words[3] == archivePath.size() &&
+        words[4] == 2U && words[5] == filePath.size() &&
+        (words[8] & 0xFU) == 2U && (words[8] >> 14U) == words[3] &&
+        (words[10] & 0xFU) == 2U && (words[10] >> 14U) == words[5] &&
+        memory.ReadBytes(words[9], archivePath) && memory.ReadBytes(words[11], filePath);
+    if (!wellFormed) {
+        return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                             kFsInvalidPath, "unsupported-ncch-archive-path");
+    }
+    uint64_t titleId = 0;
+    std::memcpy(&titleId, archivePath.data(), sizeof(titleId));
+    const bool romfs = std::all_of(filePath.begin(), filePath.end(),
+                                   [](uint8_t byte) { return byte == 0U; });
+    const auto archive = romfs ? FindCtrSystemArchive(titleId) : std::nullopt;
+    if (!archive) {
+        return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                             0xC8804464U, romfs ? "ncch-title-not-found" : "ncch-exefs-unsupported");
+    }
+    auto file = std::make_shared<KernelObject>();
+    file->Type = std::string(kCtrSystemArchiveFileType);
+    file->FilePath = CtrSystemArchiveFilePath(titleId);
+    file->FileOffset = 0U;
+    file->FileSize = archive->RomFs.size();
+    file->FileOpenMode = 1U;
+    file->FileBackend = std::make_shared<NativeA32CtrMemoryFile>(archive->RomFs);
+    const uint32_t handle = CreateHandle(file);
+    if (handle != 0U &&
+        memory.Write32(commandBuffer, kFsOpenFileDirectlyResponse) &&
+        memory.Write32(commandBuffer + 4U, kResultSuccess) &&
+        memory.Write32(commandBuffer + 8U, kMoveHandleDescriptor) &&
+        memory.Write32(commandBuffer + 12U, handle)) {
+        if (archive->Substitute) {
+            std::fprintf(stderr,
+                         "TRIAEVUM_SYSTEM_ARCHIVE title=%016llx: fonte CHN/KOR/TWN ausente; "
+                         "servindo a substituta JPN/EUR/USA (ideogramas da região faltam)\n",
+                         static_cast<unsigned long long>(titleId));
+        }
+        event.Name += ":SystemArchive:" + std::string(archive->Name);
+        state.r[0] = kResultSuccess;
+        event.Handled = true;
+        mSvcEvents.push_back(std::move(event));
+        return {NativeA32HostAction::Resume};
+    }
+    if (handle != 0U) CloseHandle(handle);
+    return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                         kFsBackendFailure, "system-archive-open-failed");
+}
+
 // SendSyncRequest on a client session of fs:USER.
 NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
     oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
@@ -422,6 +485,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                                     mConfig.RomFsImageSize != 0U &&
                                     (mConfig.Filesystem != nullptr ||
                                      !mConfig.RomFsImagePath.empty());
+            if (words[1] == kCtrNcchArchiveId) {
+                return OpenCtrSystemArchiveRomFs(state, memory, commandBuffer, sessionType,
+                                                 std::move(event), words);
+            }
             if (!requestsRomFs) {
                 return FailFsRequest(state, memory, commandBuffer, sessionType, event,
                                      kFsInvalidPath, "unsupported-romfs-path");
