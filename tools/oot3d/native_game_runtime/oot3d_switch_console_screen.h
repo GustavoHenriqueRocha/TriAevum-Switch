@@ -1,7 +1,8 @@
 #pragma once
 // A libnx text console for the start-up screens (game data import, HUD
-// texture download). Switch only; released before SDL/deko3d take the
-// window over.
+// texture download). Switch only; closed before SDL/deko3d take the window
+// over. The screens share one console (StartupScreen), so the import hands
+// over to the HUD texture offer without the screen going away in between.
 #if defined(__SWITCH__)
 
 #include <switch.h>
@@ -41,6 +42,8 @@ public:
     SwitchConsoleScreen(const SwitchConsoleScreen&) = delete;
     SwitchConsoleScreen& operator=(const SwitchConsoleScreen&) = delete;
 
+    void SetTitle(std::string title) { mTitle = std::move(title); }
+
     void Show(const std::string& body) {
         consoleClear();
         std::printf("\x1b[1;1H\x1b[36m%s\x1b[0m\n\n%s", mTitle.c_str(), body.c_str());
@@ -72,6 +75,25 @@ private:
     const devoptab_t* mStdout;
     const devoptab_t* mStderr;
 };
+
+inline std::optional<SwitchConsoleScreen>& StartupScreenStorage() {
+    static std::optional<SwitchConsoleScreen> screen;
+    return screen;
+}
+
+// The start-up console under `title`, opened on first use and kept open for
+// the next start-up step.
+inline SwitchConsoleScreen& StartupScreen(std::string title) {
+    auto& screen = StartupScreenStorage();
+    if (screen)
+        screen->SetTitle(std::move(title));
+    else
+        screen.emplace(std::move(title));
+    return *screen;
+}
+
+// main(), after the last start-up step: gives the window back for SDL/deko3d.
+inline void CloseStartupScreen() { StartupScreenStorage().reset(); }
 
 } // namespace Oot3dNativeGame
 

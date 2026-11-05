@@ -32,6 +32,7 @@
 #include "fast/oot3d/debug_menu.h"
 #include "oot3d_update_panel.h"
 #include "oot3d_whole_aot_gcov.h"
+#include "oot3d_switch_console_screen.h"
 #include "oot3d_switch_rom_import.h"
 #include "oot3d_switch_topscreen_import.h"
 #include <switch.h>
@@ -199,9 +200,12 @@ int main(int argc, char** argv) {
             return 0;
         // The TopScreen HUD textures come from a mod the release cannot ship:
         // offer to download it and build config/atlas_overrides.o3tu from
-        // game/romfs.bin before the launch arguments look for the pack.
+        // game/romfs.bin before the launch arguments look for the pack, on
+        // the same console as the import.
         if (!Oot3dNativeGame::RunSwitchTopScreenImport())
             return 0;
+        // The start-up console gives the window back to SDL/deko3d.
+        Oot3dNativeGame::CloseStartupScreen();
         // A Mesa built with its Horizon disk cache (see docs) stores compiled
         // GLSL and nvc0 code here; the stock devkitPro Mesa ignores these.
         setenv("MESA_SHADER_CACHE_DIR", "sdmc:/switch/oot3dre/mesacache", 0);

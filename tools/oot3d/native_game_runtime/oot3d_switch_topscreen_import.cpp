@@ -277,7 +277,7 @@ bool RunSwitchTopScreenImport() {
     if (!local && !ts::ShouldOffer(packExists, hdAtlasExists, romfsExists, setting)) return true;
     if (packExists) Log("the pack has no HD UI atlas (" + std::string(ts::kUiAtlasHdName) + ")");
 
-    SwitchConsoleScreen screen("Ocarina of Time 3D - HUD textures");
+    SwitchConsoleScreen& screen = StartupScreen("Ocarina of Time 3D - HUD textures");
     std::string notice;
     if (local) {
         const fs::path& localPath = local->first;

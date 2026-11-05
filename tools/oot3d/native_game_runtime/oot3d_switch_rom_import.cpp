@@ -69,7 +69,7 @@ bool RunSwitchRomImport() {
     if (sources.empty() && haveGame)
         return true;
 
-    SwitchConsoleScreen screen("Ocarina of Time 3D - game data import");
+    SwitchConsoleScreen& screen = StartupScreen("Ocarina of Time 3D - game data import");
     if (sources.empty()) {
         screen.Show("No game data was found.\n\n" + Where() + "\nPress + to exit.\n");
         (void)screen.Wait(HidNpadButton_Plus);

@@ -541,6 +541,18 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
           r'consoleInit\(nullptr\);.*?static const devoptab_t\* const console = devoptab_list\[STD_OUT\];\s+'
           r'devoptab_list\[STD_OUT\] = console;'),
+    Guard("game data import hands over to the HUD texture offer on the same console (no screen of its own)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
+          r'SwitchConsoleScreen& screen = StartupScreen\("Ocarina of Time 3D - game data import"\);',
+          forbid=r'SwitchConsoleScreen screen\('),
+    Guard("HUD texture offer reuses the start-up console the import opened",
+          "tools/oot3d/native_game_runtime/oot3d_switch_topscreen_import.cpp",
+          r'SwitchConsoleScreen& screen = StartupScreen\("Ocarina of Time 3D - HUD textures"\);',
+          forbid=r'SwitchConsoleScreen screen\('),
+    Guard("the start-up console is closed after the HUD step, before SDL/deko3d take the window",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(!Oot3dNativeGame::RunSwitchTopScreenImport\(\)\)\s+return 0;\s+(//[^\n]*\n\s+)*'
+          r'Oot3dNativeGame::CloseStartupScreen\(\);.*?FinishPendingUpdate'),
     # --- 04/11: TopScreen HUD textures downloaded and built on the console ---
     # The mod (CC BY-NC-ND) cannot ship with a release: the console downloads
     # it and builds config/atlas_overrides.o3tu. A damaged pack stops the game
