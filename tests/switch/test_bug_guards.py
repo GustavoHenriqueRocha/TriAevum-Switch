@@ -502,7 +502,14 @@ GUARDS = [
           r'if \(gLive\.load\(std::memory_order_relaxed\) >= gConfig\.MaxLive\) \{'),
     Guard("exception handler writes logs/hang.txt without allocating and returns (Atmosphère crash report still happens)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
-          r'void __libnx_exception_handler\(ThreadExceptionDump\* context\) \{\s+HandleException\(context\);\s+\}'),
+          r'void __libnx_exception_handler\(ThreadExceptionDump\* context\) \{\s+HandleException\(context\);\s+\}'),    # --- 04/11: first-launch import of the player's dump into game/ ---
+    Guard("ROM import must run before the launch arguments read game/ (manifest)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(!Oot3dNativeGame::RunSwitchRomImport\(\)\)\s+return 0;.*?oot3d_native_process_manifest\.json'),
+    Guard("ROM import: Horizon FS does not rename over an existing file (remove first)",
+          "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
+          r'void Replace\(const fs::path& from, const fs::path& to\) \{\s+std::error_code error;\s+fs::remove\(to, error\);',
+          "oot3d_rom_import_tests"),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay

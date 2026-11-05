@@ -358,6 +358,15 @@ target_link_libraries(oot3d_switch_motion_tests PRIVATE
     three_ds_recomp_input)
 oot3d_target_defaults(oot3d_switch_motion_tests FOLDER Tests)
 
+# First-launch ROM import core (oot3d_rom_import.h): synthetic NCSD/NCCH,
+# LZSS, COPY program, RomFS adaptation and manifest. `--import <dump> <dir>`
+# runs a real import on the PC.
+add_executable(oot3d_rom_import_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_rom_import_tests.cpp
+    tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
+)
+oot3d_target_defaults(oot3d_rom_import_tests FOLDER Tests)
+
 # Input bench: a walk recorded after the boot warp replays frame for frame
 # (oot3d_input_bench.h; config/bench_record, config/bench_replay).
 add_executable(oot3d_input_bench_tests EXCLUDE_FROM_ALL
