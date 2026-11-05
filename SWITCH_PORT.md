@@ -73,9 +73,14 @@ Performance and usability:
     whose frustum the hook widened (measured anisotropy = 1/factor) get their viewport widened by the
     same factor around the center, clipped to the frame (so they are not squeezed). Policy and tests:
     `gl_widescreen_menu_policy.h`, `tests/gl_widescreen_menu_policy_tests.cpp`.
-- **Touch screen**: touch works where the mouse works on PC (title/file select screen and
-  TopScreen's Items/Map/Equipment pause pages); during gameplay touch is ignored,
-  like the mouse on PC. Short taps are held until the game reads them.
+- **Touch screen**: read from HID (libnx `hidGetTouchScreenStates`), since SDL reports no fingers
+  without a window (deko3d). Touch works where the mouse works on PC (title/file select screen and
+  TopScreen's Items/Map/Equipment pause pages). During gameplay a tap on a TopScreen HUD control
+  presses the control it pictures while the finger is down: X, Y, Item I (ZR), Item II (ZL), B,
+  and the D-pad direction of the action icons around the cross (View/Navi, Ocarina, boots...).
+  Each finger hit-tests where it lands (several fingers at once); a touch that lands outside a
+  control is ignored. Short taps are held until the game reads them. Hit-test and fit:
+  `oot3d_top_screen_hud_touch.h`, `oot3d_top_screen_hud_touch_tests.cpp`.
 - **AOT generator**: hot helpers with an inline fast path and cold slow path; per-block LDM/STM;
   PC-relative literals folded; shards without `-ffast-math` (VFP exactness).
 - **Block budget** 2048 (was 128) on Switch.

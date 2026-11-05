@@ -10,6 +10,7 @@ add_library(oot3d_ui_topscreen STATIC EXCLUDE_FROM_ALL
     tools/oot3d/ui_topscreen/oot3d_top_screen_controls.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_gameplay_actions.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_presentation.cpp
+    tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_items_hint.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_camera.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_camera_guest.cpp
@@ -26,6 +27,10 @@ add_library(oot3d_ui_topscreen STATIC EXCLUDE_FROM_ALL
 target_include_directories(oot3d_ui_topscreen PUBLIC
     tools/oot3d/native_game_runtime
     tools/oot3d/ui_topscreen
+)
+# The HUD touch targets use the renderer's UI fit (ui_presentation_layout.h).
+target_include_directories(oot3d_ui_topscreen PRIVATE
+    runtime/three_ds_recomp/include
 )
 target_link_libraries(oot3d_ui_topscreen PUBLIC
     three_ds_recomp_input
@@ -48,6 +53,13 @@ add_executable(oot3d_top_screen_mod_profile_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_top_screen_mod_profile_tests PRIVATE
     oot3d_ui_topscreen)
 oot3d_target_defaults(oot3d_top_screen_mod_profile_tests FOLDER Tests)
+
+add_executable(oot3d_top_screen_hud_touch_tests EXCLUDE_FROM_ALL
+    tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch_tests.cpp
+)
+target_link_libraries(oot3d_top_screen_hud_touch_tests PRIVATE
+    oot3d_ui_topscreen)
+oot3d_target_defaults(oot3d_top_screen_hud_touch_tests FOLDER Tests)
 
 add_executable(oot3d_top_screen_items_hint_tests EXCLUDE_FROM_ALL
     tools/oot3d/ui_topscreen/oot3d_top_screen_items_hint_tests.cpp
