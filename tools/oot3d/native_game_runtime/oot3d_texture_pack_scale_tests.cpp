@@ -48,6 +48,12 @@ void CapSizes() {
   Require(CappedReplacementSize({128, 128}, {64, 64}, 2) == TextureSize{64, 64}, "never enlarged");
   Require(CappedReplacementSize({64, 32}, {512, 512}, 2) == TextureSize{128, 64}, "each axis capped on its own");
   Require(CappedReplacementSize({64, 64}, {512, 100}, 2) == TextureSize{128, 100}, "only the axis above the cap");
+  // HUD textures: 3x native whatever "HD texture size" says (720 = 3 x 240).
+  Require(kUiTextureMaxScale == 3U, "the HUD cap is 3x");
+  Require(CappedReplacementSize({512, 256}, {4096, 2048}, kUiTextureMaxScale) == TextureSize{1536, 768},
+          "an 8x HUD atlas -> 3x (1536x768)");
+  Require(CappedReplacementSize({64, 64}, {128, 128}, kUiTextureMaxScale) == TextureSize{128, 128},
+          "a 2x HUD image is kept");
   Require(CappedReplacementSize({0, 0}, {512, 512}, 2) == TextureSize{512, 512}, "unknown native size: no cap");
   Require(CappedReplacementSize({128, 128}, {512, 512}, 1) == TextureSize{128, 128}, "cap 1: native size");
 }

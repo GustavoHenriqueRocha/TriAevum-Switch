@@ -60,9 +60,9 @@ void RunTopScreenDpadPresentationTests() {
           const auto &icon = result[direction];
           const auto &badge = result[4 + direction];
           require(badge.texture.semantic_name != icon.texture.semantic_name &&
-                      badge.uv.x == 458.0F / 512 && badge.uv.y == 2.0F / 512 &&
-                      badge.uv.width == 40.0F / 512 && badge.uv.height == 40.0F / 512,
-                  "cycle mark must use the original custom-menu atlas rect");
+                      badge.uv.x == 320.0F / 512 && badge.uv.y == 3.0F / 256 &&
+                      badge.uv.width == 40.0F / 512 && badge.uv.height == 40.0F / 256,
+                  "cycle mark must use the custom_ui01 rect");
           require(badge.destination.x == icon.destination.x +
                       ((action == 7 && direction < 2) ? 2.0F : 0.0F) &&
                       badge.destination.y == icon.destination.y - 1.0F &&
@@ -126,15 +126,15 @@ void RunTopScreenDpadPresentationTests() {
   config.AdultDpad = {TopScreenDpadAction::None, TopScreenDpadAction::View,
                       TopScreenDpadAction::None, TopScreenDpadAction::None};
   const auto eye = viewQuad();
-  require(at(eye, 29 - 8 + 2, 90 - 5, 16, 10) && eye.uv.x == 129.0F / 512 &&
-              eye.uv.width == 47.0F / 512,
+  require(at(eye, 29 - 8 + 2, 90 - 5, 16, 10) && eye.uv.x == 451.0F / 512 &&
+              eye.uv.width == 48.0F / 512,
           "View eye must be 16x10 at its lane center with the 2.1.1 lane offset");
   view.HasPlayState = true;
   view.StateType = 3;
   view.StateSubtype = 2;
   view.PlayerHudMode = 0x0123;
   auto navi = viewQuad();
-  require(at(navi, 29 - 7 + 2, 90 - 7, 14, 14) && navi.uv.x == 176.0F / 512 &&
+  require(at(navi, 29 - 7 + 2, 90 - 7, 14, 14) && navi.uv.x == 199.0F / 512 &&
               navi.uv.height == 48.0F / 256,
           "Navi prompt must be 14x14 centered on the View lane");
   config.AdultDpad[1] = TopScreenDpadAction::Ocarina;

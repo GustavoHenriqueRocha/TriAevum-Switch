@@ -463,4 +463,55 @@ TEST_F(Oot3dAzaharTexturePackTest, CapsMipmapsAndReleasesReplacementsOnTheWorker
     EXPECT_EQ(runtime.PollOrQueue(hash, 8U, 8U).State, AzaharTextureResolveState::Disabled);
 }
 
+TEST_F(Oot3dAzaharTexturePackTest, CapsHudTexturesAtThreeTimesWithoutMipmaps) {
+    using namespace Oot3d::Renderer;
+    std::array<uint8_t, 256> native{};
+    for (size_t index = 0; index < native.size(); ++index) native[index] = static_cast<uint8_t>(index * 11U);
+    const uint64_t hash = AzaharCityHash64(native);
+    const auto pack = Root / "hud";
+    std::filesystem::create_directories(pack);
+    {
+        std::ofstream output(pack / "pack.json");
+        output << nlohmann::json{{"options", {{"skip_mipmap", true}, {"flip_png_files", true}, {"use_new_hash", true}}}};
+    }
+    // A 64x64 image (8x) for an 8x8 native HUD texture.
+    std::vector<uint8_t> large(64U * 64U * 4U, 255U);
+    WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, hash, 0U, 0U), 64U, 64U, large);
+    AzaharTextureRequest hud{8U, 8U, 0U, 0U, native, {}};
+    hud.UserInterface = true;
+    const AzaharTextureRequest world{8U, 8U, 0U, 0U, native, {}};
+
+    // "HD texture size" 2x with mipmaps for world textures.
+    AzaharTexturePackRuntime runtime;
+    runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack,
+                       .MaxReplacementScale = 2U, .GenerateMipmaps = true});
+    runtime.WaitForPendingLoads();
+    EXPECT_EQ(runtime.ResolveOrQueue(hud).State, AzaharTextureResolveState::Pending);
+    runtime.WaitForPendingLoads();
+    const auto hudImage = runtime.ResolveOrQueue(hud);
+    ASSERT_EQ(hudImage.State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(hudImage.Replacement->Width, 24U);
+    EXPECT_EQ(hudImage.Replacement->Height, 24U);
+    EXPECT_TRUE(hudImage.Replacement->Mips.empty());
+    // The same hash as a world texture keeps the world cap and mipmaps.
+    EXPECT_EQ(runtime.ResolveOrQueue(world).State, AzaharTextureResolveState::Pending);
+    runtime.WaitForPendingLoads();
+    const auto worldImage = runtime.ResolveOrQueue(world);
+    ASSERT_EQ(worldImage.State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(worldImage.Replacement->Width, 16U);
+    EXPECT_FALSE(worldImage.Replacement->Mips.empty());
+    EXPECT_EQ(runtime.ResolveOrQueue(hud).Replacement->Width, 24U);
+    // A world release does not drop the HUD copy.
+    runtime.ReleaseDecoded(hash, worldImage.Replacement->Generation);
+    EXPECT_EQ(runtime.ResolveOrQueue(hud).State, AzaharTextureResolveState::Ready);
+
+    // HD textures off: HUD replacements go at once, with a new generation.
+    const uint64_t generation = runtime.Generation();
+    runtime.Configure({.LoadCustomTextures = false, .UserDirectory = Root, .LoadDirectory = pack});
+    EXPECT_NE(runtime.Generation(), generation);
+    runtime.WaitForPendingLoads();
+    EXPECT_EQ(runtime.ResolveOrQueue(hud).State, AzaharTextureResolveState::Disabled);
+    EXPECT_EQ(runtime.Snapshot().LoadedTextures, 0U);
+}
+
 } // namespace

@@ -1064,6 +1064,12 @@ romfs, reusing the `AzaharTexturePackRuntime` that already existed for Vulkan:
   Real-ESRGAN `realesrgan-x4plus-anime` 4x (Vulkan, runs without an NVIDIA GPU) → `assemble` reduces to 2x
   with Lanczos and **restores the native alpha** (bicubic): the upscaler blurs transparent edges.
   OoT3D EU: 384 textures, ~15 MB.
+- **HUD (UI renderer):** the native UI texture provider offers each HUD texture to
+  `SetCustomTextureSource` (`oot3d_native_a32_window_setup.cpp`): `ResolveOrQueue` with
+  `UserInterface = true` (3x cap, no mips, own cache) while the pack is on, else TopScreen's HD UI
+  atlas (`config/topscreen_ui_atlas_hd.png`) for the exact `ui_atlas` bytes. UVs are normalized, so a
+  replacement of any size draws with the same coordinates; provisional pixels stand in while a
+  decode is pending and are polled every 8 frames; the pack generation is the provider's `Revision`.
 - **HD font** doesn't need the pack: `config/font_coverage.zip` is already backend-neutral; generate the
   coverage for the ROM's region (`message/eu/` on EU; the ready-made zip covered only `message/us`).
 

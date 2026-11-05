@@ -118,7 +118,7 @@ std::size_t AppendTopScreenDpadPresentation(
     const TopScreenDpadPresentationState &state,
     const TopScreenAuxiliaryTouchInputs &viewState, float alpha,
     const oot3d::ui::UiTextureIdentity &itemIcons,
-    const oot3d::ui::UiTextureIdentity &pauseTopPage,
+    const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output) {
   if (!config.RenderHud || !(alpha > 0) ||
       (viewState.PauseState >= 12U && viewState.PauseState <= 19U) ||
@@ -134,14 +134,14 @@ std::size_t AppendTopScreenDpadPresentation(
   const auto firstView = std::find(actions.begin(), actions.end(), TopScreenDpadAction::View);
   std::uint32_t viewCount = 0U;
   const auto appendView = [&](std::size_t direction, bool laneCorrection) {
-    if (!view.Visible || pauseTopPage.semantic_name.empty()) return;
+    if (!view.Visible || uiAtlas.semantic_name.empty()) return;
     oot3d::ui::UiPrimitive p;
     p.subsystem = oot3d::ui::UiSubsystem::GameplayHud;
     p.role = oot3d::ui::UiPrimitiveRole::ActionButton;
     p.owner_address = 0x005D4A8CU;
     p.source_quad = 38U + viewCount++;
     p.layer = 13U;
-    p.texture = pauseTopPage;
+    p.texture = uiAtlas;
     p.color = view.Color;
     p.destination = {
         view.Position.X + kCenterX[direction] - kCenterX[0] +
@@ -201,12 +201,14 @@ std::size_t AppendTopScreenDpadPresentation(
       output.push_back(std::move(p));
   }
   // 005D818C..005D81FC: the original adds cycle marks only for boots/sword.
-  // Rect 005E1894 belongs to custom_menu, not either native item atlas.
+  // Rect 005E1894 belongs to custom_menu, not either native item atlas: the
+  // custom_ui01 cycle mark (320,3,40,40), which the 2.1.1 menu atlas copied
+  // to (458,2). Drawn from custom_ui01, TopScreen's HD UI atlas replaces it.
   for (std::size_t direction = 0; direction < actions.size(); ++direction) {
     const auto action = actions[direction];
     if ((action != TopScreenDpadAction::SwordToggle &&
          action != TopScreenDpadAction::AllBootsToggle) ||
-        !ResolveItem(action, state))
+        !ResolveItem(action, state) || uiAtlas.semantic_name.empty())
       continue;
     oot3d::ui::UiPrimitive p;
     p.subsystem = oot3d::ui::UiSubsystem::GameplayHud;
@@ -214,12 +216,12 @@ std::size_t AppendTopScreenDpadPresentation(
     p.owner_address = 0x005D4A8CU;
     p.source_quad = static_cast<std::uint32_t>(4 + direction);
     p.layer = 14;
-    p.texture.semantic_name = kTopScreen211MenuAtlasSemantic;
+    p.texture = uiAtlas;
     p.color = {1, 1, 1, std::clamp(alpha, 0.0F, 1.0F)};
     const float shift = action == TopScreenDpadAction::SwordToggle && direction < 2 ? 2.0F : 0.0F;
     p.destination = {kCenterX[direction] - 7.0F + shift,
                      kCenterY[direction] - 8.0F, 14.0F, 14.0F};
-    p.uv = {458.0F / 512, 2.0F / 512, 40.0F / 512, 40.0F / 512};
+    p.uv = {320.0F / 512, 3.0F / 256, 40.0F / 512, 40.0F / 256};
     output.push_back(std::move(p));
   }
   return output.size() - start;

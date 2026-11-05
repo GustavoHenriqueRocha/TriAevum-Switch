@@ -17,6 +17,10 @@ struct Oot3dNativeGameLaunch {
     Args Host;
     std::filesystem::path A32ProcessManifestPath;
     std::filesystem::path TopScreenTextureOverridePackPath;
+    // TopScreen's HD UI atlas: the pack's oot3d/topscreen/3.0/ui_atlas at an
+    // integer multiple of its size, keyed by the native atlas content. On the
+    // Switch, config/topscreen_ui_atlas_hd.png (3x, built by the import).
+    std::filesystem::path TopScreenUiAtlasHdPath;
     std::filesystem::path TopScreenConfigPath;
     std::filesystem::path ControlConfigPath;
     std::filesystem::path SaveDataDirectory;

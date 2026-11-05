@@ -1,9 +1,11 @@
 #include "oot3d_native_ui_texture_provider.h"
 #include "oot3d_native_a32_memory.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -327,6 +329,134 @@ int main() {
     unknownIdentity.semantic_name = "oot3d/native/not_a_texture";
     Require(!packlessProvider.Resolve(unknownIdentity, pixels, &error),
             "an unknown native UI semantic resolved");
+    // A custom texture source (a texture pack, the HD UI atlas) sees the
+    // encoded base level and replaces the decoded pixels, at any size, once
+    // its replacement is ready.
+    Oot3dNativeUiCustomTexture::State packState =
+        Oot3dNativeUiCustomTexture::State::Pending;
+    std::shared_ptr<const std::vector<std::uint8_t>> standIn;
+    std::vector<std::uint8_t> requested;
+    std::uint8_t requestedFormat = 0xFFU;
+    std::uint64_t packRevision = 7U;
+    const auto replacement =
+        std::make_shared<const std::vector<std::uint8_t>>(24U * 24U * 4U, 0x40U);
+    const Oot3dNativeUiCustomTextureSource packSource{
+        [&](const Oot3dNativeUiCustomTextureRequest& request) {
+            requested.assign(request.encoded_base_level.begin(),
+                             request.encoded_base_level.end());
+            requestedFormat = request.native_pica_format;
+            Oot3dNativeUiCustomTexture custom;
+            custom.state = packState;
+            if (packState == Oot3dNativeUiCustomTexture::State::Ready) {
+                custom.width = 24U;
+                custom.height = 24U;
+                custom.rgba8 = replacement;
+            } else if (standIn != nullptr) {
+                custom.width = 16U;
+                custom.height = 16U;
+                custom.rgba8 = standIn;
+            }
+            return custom;
+        },
+        [&] { return packRevision; },
+    };
+    profileTextureProvider.SetCustomTextureSource(packSource);
+    Require(profileTextureProvider.Revision() == 7U,
+            "UI provider does not report its custom texture revision");
+    Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels,
+                                           &error) &&
+                pixels.provisional && pixels.width == 8U &&
+                pixels.rgba8.front() == 0xFFU &&
+                requested == profileTexturePayload && requestedFormat == 0U,
+            "a pending custom texture did not keep provisional native pixels");
+    // A pending pack image over the HD atlas: the atlas stands in.
+    standIn = std::make_shared<const std::vector<std::uint8_t>>(16U * 16U * 4U, 0x20U);
+    Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels,
+                                           &error) &&
+                pixels.provisional && pixels.width == 16U &&
+                pixels.height == 16U && pixels.rgba8 == *standIn,
+            "a pending custom texture did not draw its stand-in");
+    packState = Oot3dNativeUiCustomTexture::State::Ready;
+    Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels,
+                                           &error) &&
+                !pixels.provisional && pixels.width == 24U &&
+                pixels.height == 24U && pixels.rgba8 == *replacement &&
+                profileTextureProvider.Stats().custom_texture_replacements == 1U &&
+                profileTextureProvider.Stats().custom_texture_pending == 2U,
+            "a ready custom texture did not replace the TopScreen profile pixels");
+    packState = Oot3dNativeUiCustomTexture::State::None;
+    Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels,
+                                           &error) &&
+                !pixels.provisional && pixels.width == 8U &&
+                pixels.rgba8.front() == 0xFFU,
+            "without a custom texture the native pixels did not come back");
+
+    // Native CTXB textures are identified after the TopScreen override, as
+    // the game with that mod installed would upload them.
+    Require(memory.WriteBytes(0x14000000U, originalPayload),
+            "could not restore the native override fixture");
+    packState = Oot3dNativeUiCustomTexture::State::Ready;
+    overrideProvider.SetCustomTextureSource(packSource);
+    requested.clear();
+    Require(overrideProvider.Resolve(identity, pixels, &error) &&
+                pixels.width == 24U && !requested.empty() &&
+                requested.size() <= replacementPayload.size() &&
+                std::equal(requested.begin(), requested.end(),
+                           replacementPayload.begin()),
+            "native UI custom texture was not identified by its overridden bytes");
+
+    // The HUD's choice between the player's pack and the HD UI atlas.
+    {
+        using Oot3d::Renderer::AzaharTextureResolveResult;
+        using Oot3d::Renderer::AzaharTextureResolveState;
+        using State = Oot3dNativeUiCustomTexture::State;
+        const std::vector<std::uint8_t> atlasPayload(64U, 0x11U), otherPayload(64U, 0x22U);
+        Oot3dUiHdAtlas atlas;
+        atlas.rgba8 = std::make_shared<const std::vector<std::uint8_t>>(48U * 24U * 4U, 0x33U);
+        atlas.width = 48U;
+        atlas.height = 24U;
+        atlas.native_payload = atlasPayload;
+        Oot3dNativeUiCustomTextureRequest atlasRequest{16U, 8U, 13U, atlasPayload, {}};
+        Oot3dNativeUiCustomTextureRequest otherRequest{16U, 8U, 13U, otherPayload, {}};
+        const auto pack = [](AzaharTextureResolveState state) {
+            AzaharTextureResolveResult result;
+            result.State = state;
+            return result;
+        };
+        AzaharTextureResolveResult packImage = pack(AzaharTextureResolveState::Ready);
+        auto replacementImage = std::make_shared<Oot3d::Renderer::AzaharTextureReplacement>();
+        replacementImage->Width = 32U;
+        replacementImage->Height = 16U;
+        replacementImage->Rgba8 = std::make_shared<const std::vector<std::uint8_t>>(32U * 16U * 4U, 0x44U);
+        packImage.Replacement = replacementImage;
+        // The pack wins over the HD atlas.
+        auto chosen = ChooseUiCustomTexture(packImage, atlasRequest, &atlas);
+        Require(chosen.state == State::Ready && chosen.width == 32U && chosen.rgba8 == replacementImage->Rgba8,
+                "the player's pack did not win over the HD UI atlas");
+        // HD textures off, or no pack image: the HD atlas for the native atlas only.
+        for (const auto state : {AzaharTextureResolveState::Disabled, AzaharTextureResolveState::Missing,
+                                 AzaharTextureResolveState::Failed}) {
+            chosen = ChooseUiCustomTexture(pack(state), atlasRequest, &atlas);
+            Require(chosen.state == State::Ready && chosen.width == 48U && chosen.rgba8 == atlas.rgba8,
+                    "the HD UI atlas did not replace the native atlas");
+            Require(ChooseUiCustomTexture(pack(state), otherRequest, &atlas).state == State::None,
+                    "the HD UI atlas replaced another texture");
+            Require(ChooseUiCustomTexture(pack(state), atlasRequest, nullptr).state == State::None,
+                    "a missing HD UI atlas still replaced the native atlas");
+        }
+        // The pack still deciding: the HD atlas stands in for the atlas,
+        // the native pixels for anything else.
+        chosen = ChooseUiCustomTexture(pack(AzaharTextureResolveState::Pending), atlasRequest, &atlas);
+        Require(chosen.state == State::Pending && chosen.rgba8 == atlas.rgba8,
+                "the HD UI atlas did not stand in while the pack decodes");
+        chosen = ChooseUiCustomTexture(pack(AzaharTextureResolveState::Pending), otherRequest, &atlas);
+        Require(chosen.state == State::Pending && chosen.rgba8 == nullptr,
+                "a pending pack image had a stand-in other than the native pixels");
+        Require(IsUiHdAtlasSize(1536U, 768U, 512U, 256U) && IsUiHdAtlasSize(4096U, 2048U, 512U, 256U) &&
+                    IsUiHdAtlasSize(512U, 256U, 512U, 256U) && !IsUiHdAtlasSize(1536U, 1536U, 512U, 256U) &&
+                    !IsUiHdAtlasSize(1000U, 500U, 512U, 256U) && !IsUiHdAtlasSize(0U, 0U, 512U, 256U),
+                "HD UI atlas sizes must be whole multiples of the native atlas");
+    }
 
     std::cout << "oot3d_native_ui_texture_provider_tests: ok\n";
     return 0;

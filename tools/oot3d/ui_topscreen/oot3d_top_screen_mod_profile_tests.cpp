@@ -491,14 +491,18 @@ int main() {
 
   const auto touchLabels = BuildTopScreenTouchLabelsGeometry(
       std::array<float, 4>{0.0F, 0.0F, 4.0F, -3.0F}, 0.5F);
-  Require(touchLabels.Quads[0].Position.X == 362.0F &&
-              touchLabels.Quads[0].Position.Y == 37.0F &&
-              touchLabels.Quads[1].Position.X == 338.0F &&
-              touchLabels.Quads[1].Position.Y == 54.0F &&
-              touchLabels.Quads[0].AtlasOrigin.Y == 190.0F &&
-              touchLabels.Quads[1].AtlasOrigin.Y == 201.0F &&
+  // SingleScreen 3.0 custom_ui01 ZR (rect 15) and ZL (rect 14), 16 px.
+  Require(touchLabels.Quads[0].Position.X == 364.0F &&
+              touchLabels.Quads[0].Position.Y == 35.0F &&
+              touchLabels.Quads[1].Position.X == 340.0F &&
+              touchLabels.Quads[1].Position.Y == 52.0F &&
+              touchLabels.Quads[0].AtlasOrigin.X == 47.0F &&
+              touchLabels.Quads[0].AtlasOrigin.Y == 231.0F &&
+              touchLabels.Quads[1].AtlasOrigin.X == 245.0F &&
+              touchLabels.Quads[1].AtlasOrigin.Y == 227.0F &&
+              touchLabels.Quads[1].Size.X == 16.0F &&
               std::abs(touchLabels.Quads[0].Color.alpha - 0.45F) < 0.001F,
-          "touch-label geometry diverges from payload 0x005C9940");
+          "touch-label geometry diverges from SingleScreen 3.0");
   std::vector<oot3d::ui::UiPrimitive> touchLabelPresentation;
   const oot3d::ui::UiTextureIdentity navigationTexture{
       0x005D1000U, 0x18010000U, "oot3d/native/pause_shared/pause_top_page"};
@@ -1254,24 +1258,29 @@ int main() {
               touchCluster.Positions[3].Y == 55.0F &&
               touchCluster.Positions[4].X == 232.0F &&
               touchCluster.Positions[4].Y == 8.0F &&
-              touchCluster.Positions[5].X == 14.0F &&
-              touchCluster.Positions[5].Y == 52.0F &&
-              touchCluster.AtlasOrigins[0].X == 386.0F &&
-              touchCluster.AtlasOrigins[5].X == 432.0F &&
-              touchCluster.AtlasOrigins[5].Y == 218.0F &&
+              touchCluster.Positions[5].X == 16.5F &&
+              touchCluster.Positions[5].Y == 53.0F &&
+              touchCluster.AtlasOrigins[0].X == 148.0F &&
+              touchCluster.AtlasOrigins[4].X == 97.0F &&
+              touchCluster.AtlasOrigins[5].X == 385.0F &&
+              touchCluster.AtlasOrigins[5].Y == 108.0F &&
+              touchCluster.AtlasSizes[5].X == 29.0F &&
               touchCluster.Alpha[4] == 1.0F,
-          "TopScreen touch cluster payload geometry is incorrect");
+          "SingleScreen 3.0 touch cluster geometry is incorrect");
   std::vector<oot3d::ui::UiPrimitive> touchPrimitives;
-  Require(AppendTopScreenTouchClusterPresentation(touchCluster, heartTexture,
+  oot3d::ui::UiTextureIdentity touchAtlas;
+  touchAtlas.semantic_name = "oot3d/topscreen/3.0/ui_atlas";
+  Require(AppendTopScreenTouchClusterPresentation(touchCluster, touchAtlas,
                                                   touchPrimitives) == 6U &&
               touchPrimitives[0].owner_address == 0x005C9940U &&
-              touchPrimitives[0].uv.x == 386.0F / 512.0F &&
-              touchPrimitives[0].uv.y == 201.0F / 256.0F &&
+              touchPrimitives[0].texture.semantic_name == touchAtlas.semantic_name &&
+              touchPrimitives[0].uv.x == 148.0F / 512.0F &&
+              touchPrimitives[0].uv.y == 3.0F / 256.0F &&
               touchPrimitives[0].uv.height == 48.0F / 256.0F &&
               touchPrimitives[0].color.alpha == 0.5F &&
               touchPrimitives[4].color.alpha == 1.0F &&
-              touchPrimitives[5].destination.width == 30.0F,
-          "TopScreen touch cluster presentation is incorrect");
+              touchPrimitives[5].destination.width == 28.0F,
+          "SingleScreen 3.0 touch cluster presentation is incorrect");
 
   NativeA32Memory touchStateMemory;
   Require(touchStateMemory.MapRegion({"topscreen-touch-state-fixture",
@@ -1323,7 +1332,9 @@ int main() {
               auxiliaryGeometry.Quads[0].Position.Y == 8.0F &&
               auxiliaryGeometry.Quads[2].Visible &&
               auxiliaryGeometry.Quads[2].Position.X == 227.0F &&
-              auxiliaryGeometry.Quads[2].AtlasOrigin.Y == 174.0F &&
+              auxiliaryGeometry.Quads[2].AtlasOrigin.X == 363.0F &&
+              auxiliaryGeometry.Quads[2].AtlasOrigin.Y == 225.0F &&
+              auxiliaryGeometry.Quads[0].AtlasOrigin.X == 207.0F &&
               !auxiliaryGeometry.Quads[3].Visible &&
               auxiliaryGeometry.Quads[4].Position.X == 23.0F &&
               auxiliaryGeometry.Quads[4].Size.Y == 14.0F &&
@@ -1363,11 +1374,13 @@ int main() {
   const auto fixedAuxiliaryGeometry = BuildTopScreenAuxiliaryTouchGeometry(
       auxiliaryInputs, dynamicTouch.VerticalOffsets, 1.0F);
   // 2.1.1 centers it on the lane; the presentation adds the lane offset.
-  Require(fixedAuxiliaryGeometry.Quads[4].Position.X == 20.0F &&
+  // SingleScreen 3.0 draws the camera from custom_ui01 rect 6 (320,198,36,21)
+  // 10 px high at its own aspect.
+  Require(std::abs(fixedAuxiliaryGeometry.Quads[4].Position.X - (30.0F - 5.0F * 36.0F / 21.0F)) < 0.001F &&
               fixedAuxiliaryGeometry.Quads[4].Position.Y == 40.0F &&
-              fixedAuxiliaryGeometry.Quads[4].Size.X == 20.0F &&
-              fixedAuxiliaryGeometry.Quads[4].AtlasOrigin.Y == 56.0F &&
-              fixedAuxiliaryGeometry.Quads[4].AtlasSize.Y == 24.0F,
+              std::abs(fixedAuxiliaryGeometry.Quads[4].Size.X - 10.0F * 36.0F / 21.0F) < 0.001F &&
+              fixedAuxiliaryGeometry.Quads[4].AtlasOrigin.Y == 198.0F &&
+              fixedAuxiliaryGeometry.Quads[4].AtlasSize.Y == 21.0F,
           "TopScreen group-39 fixed layout is incorrect");
 
   NativeA32Memory compositorGateMemory;
@@ -1680,27 +1693,46 @@ int main() {
               std::abs(pauseEdgePrimitives[1].destination.x) < 0.001F,
           "TopScreen pause-edge presentation is incorrect");
   {
-    // 2.1.1 L/R tab hints (0x005CFE48): backings first, glyphs a quarter turn.
-    const oot3d::ui::UiTextureIdentity cursor{0U, 0U, "oot3d/native/pause_shared/cursor"};
-    const oot3d::ui::UiTextureIdentity equipment{0U, 0U, "oot3d/native/pause_shared/equipment"};
+    // 3.0 0x005D4A0C uses custom_ui01 for both backings and upright L/R.
+    const oot3d::ui::UiTextureIdentity atlas{0U, 0U, "oot3d/topscreen/3.0/ui_atlas"};
     std::vector<oot3d::ui::UiPrimitive> hints;
-    TopScreenTabHintInputs closed;
-    Require(AppendTopScreenTabHintPresentation(closed, cursor, equipment, hints) == 0U,
+    Require(AppendTopScreenTabHintPresentation({}, atlas, hints) == 0U && hints.empty(),
             "tab hints must stay hidden without an open Items/Gear/Map page");
-    TopScreenTabHintInputs open;
-    open.PageOpen = true;
-    open.RightHeld = true;
-    Require(AppendTopScreenTabHintPresentation(open, cursor, equipment, hints) == 4U &&
-                hints[0].destination.x == 64.0F && hints[1].destination.x == 294.0F &&
-                hints[2].destination.x == 66.0F && hints[2].destination.y == 208.0F &&
-                hints[2].destination.width == 36.0F && hints[2].uv_quarter_turn &&
-                hints[2].uv.x == 100.0F / 128.0F && hints[3].uv.x == 72.0F / 128.0F &&
-                hints[3].destination.x == 298.0F && hints[2].color.red == 1.0F &&
-                hints[3].color.red == 0.55F && !hints[0].uv_quarter_turn,
-            "TopScreen tab hints diverge from 2.1.1 0x005CFE48");
+    Require(AppendTopScreenTabHintPresentation({true}, {}, hints) == 0U && hints.empty(),
+            "tab hints require the 3.0 atlas");
+    Require(AppendTopScreenTabHintPresentation({true}, atlas, hints) == 4U,
+            "tab hints must append two backings before two glyphs");
+    for (unsigned i = 0; i < hints.size(); ++i) {
+      Require(hints[i].owner_address == 0x005D4A0CU && hints[i].source_quad == i &&
+                  hints[i].texture.semantic_name == atlas.semantic_name && !hints[i].uv_quarter_turn &&
+                  hints[i].layer == 14U && hints[i].color.alpha == 1.0F,
+              "tab hints retained the retired native atlases or rotated crops");
+    }
+    Require(hints[0].destination.x == 65.5F && hints[1].destination.x == 293.5F &&
+                hints[0].destination.y == 206.0F && hints[0].destination.width == 41.0F &&
+                hints[0].destination.height == 42.0F &&
+                hints[0].uv.x == 401.0F / 512.0F && hints[0].uv.y == 196.0F / 256.0F &&
+                hints[0].uv.width == 18.0F / 512.0F && hints[0].uv.height == 18.0F / 256.0F &&
+                hints[0].role == oot3d::ui::UiPrimitiveRole::PauseBackground,
+            "tab backings diverge from the 3.0 atlas and geometry");
+    Require(std::abs(hints[2].destination.x - 65.575F) < 0.001F &&
+                std::abs(hints[3].destination.x - 295.575F) < 0.001F &&
+                std::abs(hints[2].destination.y - 208.3F) < 0.001F &&
+                std::abs(hints[2].destination.width - 38.85F) < 0.001F &&
+                std::abs(hints[2].destination.height - 29.4F) < 0.001F &&
+                hints[2].uv.x == 462.0F / 512.0F && hints[2].uv.y == 108.0F / 256.0F &&
+                hints[3].uv.x == 240.0F / 512.0F && hints[3].uv.y == 117.0F / 256.0F &&
+                hints[2].uv.width == 37.0F / 512.0F && hints[2].uv.height == 28.0F / 256.0F &&
+                hints[2].role == oot3d::ui::UiPrimitiveRole::TouchControl,
+            "L/R hints diverge from 3.0 rects 20/21 or their 1.05 centre scaling");
+    TopScreenTabHintInputs held;
+    held.PageOpen = true;
+    held.RightHeld = true;
     hints.clear();
-    Require(AppendTopScreenTabHintPresentation(open, cursor, {}, hints) == 2U,
-            "a missing backing atlas must skip only the backings");
+    Require(AppendTopScreenTabHintPresentation(held, atlas, hints) == 4U &&
+                hints[2].color.red == 1.0F && hints[3].color.red == 0.55F &&
+                hints[0].color.red == 1.0F && hints[3].color.alpha == 1.0F,
+            "a held shoulder dimmed the wrong glyph or a backing");
   }
 
   NativeA32Memory nativeTouchMemory;

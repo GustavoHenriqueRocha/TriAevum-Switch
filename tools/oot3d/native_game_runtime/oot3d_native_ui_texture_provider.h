@@ -1,5 +1,6 @@
 #pragma once
 
+#include "oot3d/renderer/azahar_texture_pack.h"
 #include "oot3d_n64_ui_renderer.h"
 #include "oot3d_native_pica_submission.h"
 #include "oot3d_top_screen_texture_overrides.h"
@@ -7,7 +8,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -52,7 +56,67 @@ struct Oot3dNativeUiTextureProviderStats {
     // TopScreen profile textures no pack provides (the release cannot ship
     // the mod they come from); each resolved to one transparent texel.
     std::uint64_t profile_asset_absent = 0;
+    std::uint64_t custom_texture_replacements = 0;
+    std::uint64_t custom_texture_pending = 0;
 };
+
+// A decoded UI texture offered to a custom texture source (a texture pack,
+// the TopScreen HD UI atlas). Its identity is the one a native PICA upload of
+// the same bytes has: the encoded base level, after any TopScreen CTXB
+// override, as the game with that mod installed would upload it.
+struct Oot3dNativeUiCustomTextureRequest {
+    std::uint16_t width = 0;
+    std::uint16_t height = 0;
+    std::uint8_t native_pica_format = 0;
+    std::span<const std::uint8_t> encoded_base_level;
+    std::span<const std::uint8_t> rgba8;
+};
+
+struct Oot3dNativeUiCustomTexture {
+    // Pending: the final image is still decoding; the texture is resolved
+    // again later. Its stand-in is `rgba8` when set, else the native pixels.
+    enum class State : std::uint8_t { None, Pending, Ready };
+    State state = State::None;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::shared_ptr<const std::vector<std::uint8_t>> rgba8;
+};
+
+struct Oot3dNativeUiCustomTextureSource {
+    std::function<Oot3dNativeUiCustomTexture(
+        const Oot3dNativeUiCustomTextureRequest&)> resolve;
+    // Changes when replacements may differ from earlier ones.
+    std::function<std::uint64_t()> revision;
+};
+
+// Bytes of a PICA texture's base level, or 0 for an unknown format.
+std::size_t Oot3dNativePicaBaseLevelBytes(std::uint8_t nativePicaFormat,
+                                          std::uint16_t width,
+                                          std::uint16_t height) noexcept;
+
+// TopScreen's HD UI atlas (--topscreen-ui-atlas-hd): the pack's native
+// oot3d/topscreen/3.0/ui_atlas redrawn at a whole multiple of its size.
+struct Oot3dUiHdAtlas {
+    std::shared_ptr<const std::vector<std::uint8_t>> rgba8;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    // The encoded native atlas it replaces (the pack's profile payload).
+    std::span<const std::uint8_t> native_payload;
+};
+
+// Whether `width` x `height` is the native size times a whole number >= 1
+// on both axes (the same aspect).
+bool IsUiHdAtlasSize(std::uint32_t width, std::uint32_t height,
+                     std::uint32_t nativeWidth, std::uint32_t nativeHeight) noexcept;
+
+// The HUD's custom texture for a request: the player's texture pack image
+// when it has one; otherwise the HD atlas when the request is the exact
+// native atlas. While the pack is still deciding (indexing or decoding),
+// the HD atlas (or the native pixels) stands in. `hdAtlas` may be null.
+Oot3dNativeUiCustomTexture ChooseUiCustomTexture(
+    const Oot3d::Renderer::AzaharTextureResolveResult& pack,
+    const Oot3dNativeUiCustomTextureRequest& request,
+    const Oot3dUiHdAtlas* hdAtlas);
 
 // Reads the CTXB payload selected by the original OoT3D resource loader from
 // guest/PICA memory, then decodes its native tiled representation for upload.
@@ -66,17 +130,29 @@ class Oot3dNativeA32UiTextureProvider final
     bool Resolve(const oot3d::ui::UiTextureIdentity& identity,
                  oot3d::ui::UiTexturePixels& pixels,
                  std::string* error = nullptr) const override;
+    std::uint64_t Revision() const noexcept override;
 
     const Oot3dNativeUiTextureProviderStats& Stats() const noexcept;
     void SetGeneratedTextureTransform(Oot3dNativePicaSubmissionQueue::TextureSnapshotTransform transform) {
         mGeneratedTextureTransform = std::move(transform);
     }
+    // Native and TopScreen profile textures (not generated text) are offered
+    // to this source; a ready replacement is returned in their place, of any
+    // size (UI coordinates are normalized).
+    void SetCustomTextureSource(Oot3dNativeUiCustomTextureSource source) {
+        mCustomTextures = std::move(source);
+    }
 
   private:
+    void ApplyCustomTexture(std::uint8_t nativePicaFormat,
+                            std::span<const std::uint8_t> encoded,
+                            oot3d::ui::UiTexturePixels& pixels) const;
+
     const Oot3dPicaPhysicalMemoryView& mMemory;
     const TopScreenTextureOverridePack* mTextureOverrides = nullptr;
     mutable Oot3dNativeUiTextureProviderStats mStats;
     Oot3dNativePicaSubmissionQueue::TextureSnapshotTransform mGeneratedTextureTransform;
+    Oot3dNativeUiCustomTextureSource mCustomTextures;
 };
 
 } // namespace Oot3dNativeGame

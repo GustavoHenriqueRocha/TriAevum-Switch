@@ -1,11 +1,13 @@
 // Host tests for oot3d_topscreen_import (ZIP reader, RomFS reader, texture
-// codecs, QBF pairing, font pack, offer setting, verified writes). Plain
-// main(); exits non-zero on failure.
+// codecs, QBF pairing, font pack, PNG codec, HD UI atlas extraction and 3x
+// reduction, offer rules, verified writes). Plain main(); exits non-zero on
+// failure.
 //
 //   oot3d_topscreen_import_tests                      run the tests
-//   oot3d_topscreen_import_tests --build <archive> <romfs.bin> <pack.o3tu> <font_coverage.zip>
-//       build both outputs from the real mod archive and RomFS (compare them
-//       with build_topscreen_texture_override_pack.py / prepare_qbf_font_pack.py)
+//   oot3d_topscreen_import_tests --build <archive> <romfs.bin> <pack.o3tu> <font_coverage.zip> [<ui_atlas_hd.png>]
+//       build the outputs from the real mod archive and RomFS (compare the
+//       first two with build_topscreen_texture_override_pack.py /
+//       prepare_qbf_font_pack.py)
 
 #include "oot3d_topscreen_import.h"
 
@@ -518,10 +520,182 @@ void TestOffer() {
     CHECK(ts::ParseOfferSetting("ask\n") == OfferSetting::Ask);
     CHECK(ts::ParseOfferSetting("garbage") == OfferSetting::Ask);
     CHECK(ts::ParseOfferSetting(ts::OfferSettingText(OfferSetting::Never)) == OfferSetting::Never);
-    CHECK(ts::ShouldOffer(false, true, OfferSetting::Ask));
-    CHECK(!ts::ShouldOffer(true, true, OfferSetting::Ask));
-    CHECK(!ts::ShouldOffer(false, false, OfferSetting::Ask));
-    CHECK(!ts::ShouldOffer(false, true, OfferSetting::Never));
+    // No pack: offer the download.
+    CHECK(ts::ShouldOffer(false, false, true, OfferSetting::Ask));
+    CHECK(ts::ShouldOffer(false, true, true, OfferSetting::Ask));
+    // A pack from before the HD atlas: offer it again.
+    CHECK(ts::ShouldOffer(true, false, true, OfferSetting::Ask));
+    CHECK(!ts::ShouldOffer(true, true, true, OfferSetting::Ask));
+    CHECK(!ts::ShouldOffer(false, false, false, OfferSetting::Ask));
+    CHECK(!ts::ShouldOffer(true, false, false, OfferSetting::Ask));
+    CHECK(!ts::ShouldOffer(false, false, true, OfferSetting::Never));
+    CHECK(!ts::ShouldOffer(true, false, true, OfferSetting::Never));
+    // A local archive: always without a pack; with one, only to add the HD
+    // atlas, and only from a release that carries it (3.2.1, not 3.0).
+    const ts::Archive& v30 = ts::KnownArchives()[0];
+    const ts::Archive& v321 = ts::DownloadArchive();
+    CHECK(std::string_view(v30.Version) == "3.0" && v30.UiAtlasHdSha256 == nullptr);
+    CHECK(ts::ShouldBuildFromLocalArchive(false, false, v30));
+    CHECK(ts::ShouldBuildFromLocalArchive(false, false, v321));
+    CHECK(ts::ShouldBuildFromLocalArchive(true, false, v321));
+    CHECK(!ts::ShouldBuildFromLocalArchive(true, false, v30));
+    CHECK(!ts::ShouldBuildFromLocalArchive(true, true, v321));
+}
+
+// 8-bit RGBA PNG rows with the given filter types (raw zlib stream), for the
+// decoder's filter paths the encoder does not write.
+Bytes MakePng(std::uint32_t width, std::uint32_t height, const Bytes& rgba, const std::vector<std::uint8_t>& filters,
+              std::uint8_t colorType = 6) {
+    const std::size_t stride = static_cast<std::size_t>(width) * 4;
+    Bytes raw;
+    for (std::uint32_t y = 0; y < height; ++y) {
+        const std::uint8_t filter = filters[y % filters.size()];
+        raw.push_back(filter);
+        for (std::size_t x = 0; x < stride; ++x) {
+            const int value = rgba[y * stride + x];
+            const int left = x >= 4 ? rgba[y * stride + x - 4] : 0;
+            const int up = y ? rgba[(y - 1) * stride + x] : 0;
+            const int predicted = filter == 1 ? left : filter == 2 ? up : filter == 3 ? (left + up) / 2 : 0;
+            raw.push_back(static_cast<std::uint8_t>(value - predicted));
+        }
+    }
+    uLongf size = compressBound(static_cast<uLong>(raw.size()));
+    Bytes compressed(size);
+    compress2(compressed.data(), &size, raw.data(), static_cast<uLong>(raw.size()), 6);
+    compressed.resize(size);
+    const auto chunk = [](Bytes& out, const char* type, const Bytes& data) {
+        const auto be32 = [&](std::uint32_t value) {
+            for (int shift = 24; shift >= 0; shift -= 8) out.push_back(static_cast<std::uint8_t>(value >> shift));
+        };
+        be32(static_cast<std::uint32_t>(data.size()));
+        const std::size_t start = out.size();
+        out.insert(out.end(), type, type + 4);
+        out.insert(out.end(), data.begin(), data.end());
+        be32(static_cast<std::uint32_t>(crc32(0, out.data() + start, static_cast<uInt>(out.size() - start))));
+    };
+    Bytes png{137, 80, 78, 71, 13, 10, 26, 10};
+    Bytes header;
+    for (const std::uint32_t value : {width, height})
+        for (int shift = 24; shift >= 0; shift -= 8) header.push_back(static_cast<std::uint8_t>(value >> shift));
+    for (const std::uint8_t value : {std::uint8_t{8}, colorType, std::uint8_t{0}, std::uint8_t{0}, std::uint8_t{0}})
+        header.push_back(value);
+    chunk(png, "IHDR", header);
+    chunk(png, "tEXt", Text("Comment"));
+    chunk(png, "IDAT", compressed);
+    chunk(png, "IEND", {});
+    return png;
+}
+
+void TestPng() {
+    ts::Rgba8Image image;
+    image.Width = 7;
+    image.Height = 5;
+    for (std::uint32_t i = 0; i < image.Width * image.Height * 4; ++i)
+        image.Pixels.push_back(static_cast<std::uint8_t>(i * 37 + (i >> 3)));
+    const Bytes encoded = ts::EncodePngRgba8(image);
+    const ts::Rgba8Image decoded = ts::DecodePngRgba8(encoded, 1000);
+    CHECK(decoded.Width == 7 && decoded.Height == 5 && decoded.Pixels == image.Pixels);
+    CHECK(ts::EncodePngRgba8(image) == encoded); // deterministic
+    // None, Sub, Up and Average rows, and an ancillary chunk to skip.
+    const ts::Rgba8Image filtered = ts::DecodePngRgba8(MakePng(7, 5, image.Pixels, {0, 1, 2, 3}), 1000);
+    CHECK(filtered.Pixels == image.Pixels);
+    CHECK_THROWS(ts::DecodePngRgba8(MakePng(7, 5, image.Pixels, {0}, 2), 1000), "not 8-bit RGBA");
+    CHECK_THROWS(ts::DecodePngRgba8(encoded, 34), "unexpected PNG size");
+    Bytes damaged = encoded;
+    damaged[40] ^= 0xFF;
+    CHECK_THROWS(ts::DecodePngRgba8(damaged, 1000), "CRC");
+    CHECK_THROWS(ts::DecodePngRgba8(Bytes(encoded.begin(), encoded.end() - 20), 1000), "truncated");
+    CHECK_THROWS(ts::DecodePngRgba8(Text("GIF89a not a png"), 1000), "not a PNG");
+}
+
+void TestUiAtlasHd(const fs::path& directory) {
+    // A 4x atlas (2048x1024): an opaque red block on transparent black,
+    // with an edge that is not on the 3x grid.
+    ts::Rgba8Image source;
+    source.Width = 2048;
+    source.Height = 1024;
+    source.Pixels.assign(static_cast<std::size_t>(source.Width) * source.Height * 4, 0);
+    for (std::uint32_t y = 100; y < 300; ++y)
+        for (std::uint32_t x = 202; x < 602; ++x) {
+            std::uint8_t* pixel = &source.Pixels[(static_cast<std::size_t>(y) * source.Width + x) * 4];
+            pixel[0] = 255;
+            pixel[3] = 255;
+        }
+    const Bytes built = ts::BuildUiAtlasHd(ts::EncodePngRgba8(source));
+    const ts::Rgba8Image reduced = ts::DecodePngRgba8(built, 1U << 22U);
+    CHECK(reduced.Width == 512 * ts::kUiAtlasHdScale && reduced.Height == 256 * ts::kUiAtlasHdScale);
+    CHECK(reduced.Width == 1536 && reduced.Height == 768);
+    const auto at = [&](std::uint32_t x, std::uint32_t y) {
+        return &reduced.Pixels[(static_cast<std::size_t>(y) * reduced.Width + x) * 4];
+    };
+    // Inside: opaque red; outside: fully transparent.
+    CHECK(at(300, 150)[0] == 255 && at(300, 150)[3] == 255 && at(300, 150)[1] == 0);
+    CHECK(at(10, 10)[3] == 0 && at(1000, 600)[3] == 0);
+    // Left edge, x 202 in the source = 151.5 at 3/4: half covered. The
+    // colour stays red (alpha-weighted), only the alpha drops.
+    const std::uint8_t* edge = at(151, 150);
+    CHECK(edge[3] > 0 && edge[3] < 255 && edge[0] == 255 && edge[1] == 0 && edge[2] == 0);
+    // A 3x source is kept as it is; 2x, or another aspect, is refused.
+    ts::Rgba8Image exact;
+    exact.Width = 1536;
+    exact.Height = 768;
+    exact.Pixels.assign(static_cast<std::size_t>(exact.Width) * exact.Height * 4, 0x80);
+    CHECK(ts::DecodePngRgba8(ts::BuildUiAtlasHd(ts::EncodePngRgba8(exact)), 1U << 22U).Pixels == exact.Pixels);
+    ts::Rgba8Image small;
+    small.Width = 1024;
+    small.Height = 512;
+    small.Pixels.assign(static_cast<std::size_t>(small.Width) * small.Height * 4, 0);
+    CHECK_THROWS(ts::BuildUiAtlasHd(ts::EncodePngRgba8(small)), "not a multiple of 512x256");
+    small.Width = 1536;
+    small.Height = 1536;
+    small.Pixels.assign(static_cast<std::size_t>(small.Width) * small.Height * 4, 0);
+    CHECK_THROWS(ts::BuildUiAtlasHd(ts::EncodePngRgba8(small)), "not a multiple of 512x256");
+
+    // Extraction: the release's pin (size and SHA-256) is checked; 3.0 has none.
+    const ts::Archive& v321 = ts::DownloadArchive();
+    const std::string eur = std::string(v321.Root) +
+                            "/EUR/Emulator/load/textures/0004000000033600/UI/tex1_512x256_1FAF9B5B2ADF6038_13_mip0.png";
+    const auto zip = [&](const char* name, std::vector<ZipFixtureEntry> entries) {
+        WriteFile(directory / name, MakeZip(entries));
+        return directory / name;
+    };
+    {
+        const ts::ZipReader archive(zip("hd_missing.zip", {{std::string(v321.Root) + "/EUR/readme.txt", Text("x")}}));
+        CHECK_THROWS(ts::ExtractUiAtlasHd(archive, v321, "EUR"), "has no HD UI atlas");
+        CHECK(ts::ExtractUiAtlasHd(archive, ts::KnownArchives()[0], "EUR").empty());
+        CHECK_THROWS(ts::ExtractUiAtlasHd(archive, v321, "KOR"), "unsupported TopScreen region");
+    }
+    {
+        const ts::ZipReader archive(zip("hd_small.zip", {{eur, built}}));
+        CHECK_THROWS(ts::ExtractUiAtlasHd(archive, v321, "EUR"), "unexpected HD UI atlas size");
+    }
+    {
+        // The pinned size with other content (a re-uploaded file).
+        const ts::ZipReader archive(zip("hd_other.zip", {{eur, Bytes(v321.UiAtlasHdBytes, 0x5A), true}}));
+        CHECK_THROWS(ts::ExtractUiAtlasHd(archive, v321, "EUR"), "unexpected HD UI atlas");
+    }
+}
+
+void TestInstall(const fs::path& directory) {
+    const fs::path config = directory / "install" / "config";
+    ts::Outputs outputs;
+    outputs.Source = &ts::DownloadArchive();
+    outputs.Pack = Text("pack");
+    outputs.Fonts = Text("fonts");
+    outputs.UiAtlasHd = Text("atlas");
+    ts::Install(outputs, config);
+    CHECK(AsString(ReadFile(config / ts::kUiAtlasHdName)) == "atlas");
+    CHECK(AsString(ReadFile(config / ts::kPackName)) == "pack");
+    const std::string receipt = AsString(ReadFile(config / ts::kReceiptName));
+    CHECK(receipt.find("\"ui_atlas_hd_sha256\"") != std::string::npos);
+    CHECK(receipt.find(ts::DownloadArchive().UiAtlasHdSha256) != std::string::npos);
+    CHECK(receipt.find("\"ui_atlas_hd_scale\": 3") != std::string::npos ||
+          receipt.find("\"ui_atlas_hd_scale\":3") != std::string::npos);
+    // A release without the HD atlas leaves an existing one alone.
+    outputs.UiAtlasHd.clear();
+    ts::Install(outputs, config);
+    CHECK(AsString(ReadFile(config / ts::kUiAtlasHdName)) == "atlas");
+    CHECK(AsString(ReadFile(config / ts::kReceiptName)).find("ui_atlas_hd") == std::string::npos);
 }
 
 void TestWriteAndIdentify(const fs::path& directory) {
@@ -549,7 +723,8 @@ void TestWriteAndIdentify(const fs::path& directory) {
 
 std::string Sha256Of(const Bytes& data) { return ri::Hex(ri::Sha256Of(data)); }
 
-int RealBuild(const fs::path& archive, const fs::path& romfs, const fs::path& pack, const fs::path& fonts) {
+int RealBuild(const fs::path& archive, const fs::path& romfs, const fs::path& pack, const fs::path& fonts,
+              const fs::path& atlas) {
     const auto started = std::chrono::steady_clock::now();
     std::string error;
     const ts::Archive* source = ts::IdentifyArchiveFile(archive, &error);
@@ -568,15 +743,52 @@ int RealBuild(const fs::path& archive, const fs::path& romfs, const fs::path& pa
     std::printf("%s %zu bytes sha256 %s\n", pack.string().c_str(), outputs.Pack.size(), Sha256Of(outputs.Pack).c_str());
     std::printf("%s %zu bytes sha256 %s\n", fonts.string().c_str(), outputs.Fonts.size(),
                 Sha256Of(outputs.Fonts).c_str());
-    return 0;
+    if (outputs.UiAtlasHd.empty()) {
+        std::printf("no HD UI atlas in %s\n", source->Version);
+        return 0;
+    }
+    if (!atlas.empty()) WriteFile(atlas, outputs.UiAtlasHd);
+    // The 3x atlas against the native custom_ui01 it replaces: the same
+    // layout, so the texels each one covers (alpha >= 128, the 3x atlas
+    // reduced to 1x) mostly agree; upside down they would not. The redraw
+    // has sharper edges and lighter shadows, so they never agree fully.
+    const ts::Rgba8Image hd = ts::DecodePngRgba8(outputs.UiAtlasHd, 1U << 22U);
+    const ts::ZipReader zip(archive);
+    const auto* ctxb = zip.Find(std::string(source->Root) +
+                                "/EUR/Emulator/load/mods/0004000000033600/romfs/menu/custom_ui01.ctxb");
+    if (!ctxb) throw ts::ImportError("no EUR custom_ui01.ctxb");
+    const Bytes ctxbData = zip.Read(*ctxb, 1U << 20U);
+    const Bytes native = ts::DecodeEtc1a4(std::span(ctxbData).subspan(0x48, 512 * 256), 512, 256);
+    double mismatch = 0, flippedMismatch = 0;
+    for (std::uint32_t y = 0; y < 256; ++y)
+        for (std::uint32_t x = 0; x < 512; ++x) {
+            const auto covered = [&](std::uint32_t row) {
+                int sum = 0;
+                for (std::uint32_t dy = 0; dy < 3; ++dy)
+                    for (std::uint32_t dx = 0; dx < 3; ++dx)
+                        sum += hd.Pixels[((static_cast<std::size_t>(row) * 3 + dy) * hd.Width + x * 3 + dx) * 4 + 3];
+                return sum >= 9 * 128;
+            };
+            const bool nativeCovered = native[(static_cast<std::size_t>(y) * 512 + x) * 4 + 3] >= 128;
+            mismatch += covered(y) != nativeCovered;
+            flippedMismatch += covered(255 - y) != nativeCovered;
+        }
+    mismatch /= 512.0 * 256.0;
+    flippedMismatch /= 512.0 * 256.0;
+    std::printf("%s %ux%u %zu bytes sha256 %s, pixels sha256 %s; coverage differs from custom_ui01 on %.1f%% "
+                "of texels (%.1f%% upside down)\n",
+                atlas.empty() ? "HD UI atlas" : atlas.string().c_str(), hd.Width, hd.Height,
+                outputs.UiAtlasHd.size(), Sha256Of(outputs.UiAtlasHd).c_str(), Sha256Of(hd.Pixels).c_str(),
+                mismatch * 100.0, flippedMismatch * 100.0);
+    return hd.Width == 1536 && hd.Height == 768 && mismatch < 0.25 && mismatch * 2.0 < flippedMismatch ? 0 : 1;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc == 6 && std::string_view(argv[1]) == "--build") {
+    if ((argc == 6 || argc == 7) && std::string_view(argv[1]) == "--build") {
         try {
-            return RealBuild(argv[2], argv[3], argv[4], argv[5]);
+            return RealBuild(argv[2], argv[3], argv[4], argv[5], argc == 7 ? fs::path(argv[6]) : fs::path());
         } catch (const std::exception& error) {
             std::fprintf(stderr, "build failed: %s\n", error.what());
             return 1;
@@ -595,6 +807,9 @@ int main(int argc, char** argv) {
         TestPackRejections(directory);
         TestFontPack(directory);
         TestOffer();
+        TestPng();
+        TestUiAtlasHd(directory);
+        TestInstall(directory);
         TestWriteAndIdentify(directory);
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL: unexpected exception: %s\n", error.what());

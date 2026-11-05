@@ -257,6 +257,13 @@ int main(int argc, char** argv) {
         std::vector<char*> homebrewArgv(homebrewArguments.begin(), homebrewArguments.end());
         if (!std::filesystem::is_regular_file(homebrewArguments[14])) {
             homebrewArgv.erase(homebrewArgv.begin() + 13, homebrewArgv.begin() + 15);
+        } else if (std::filesystem::is_regular_file(
+                       "sdmc:/switch/oot3dre/config/topscreen_ui_atlas_hd.png")) {
+            // The HD HUD art beside the pack (built by the same import); a
+            // file the game cannot use falls back to the native atlas.
+            homebrewArgv.push_back(const_cast<char*>("--topscreen-ui-atlas-hd"));
+            homebrewArgv.push_back(
+                const_cast<char*>("sdmc:/switch/oot3dre/config/topscreen_ui_atlas_hd.png"));
         }
         if (argc <= 1) {
             argc = static_cast<int>(homebrewArgv.size());

@@ -1,6 +1,10 @@
 #include "oot3d_topscreen_import.h"
 
+#include "oot3d/renderer/azahar_texture_scale.h"
+
 #include <zlib.h>
+
+#include <cstdlib>
 
 #include <algorithm>
 #include <array>
@@ -17,13 +21,20 @@ namespace ri = RomImport;
 
 constexpr Archive kArchives[] = {
     {"3.0", "SingleScreen_3.0", "singlescreen_30.zip", 28'883'512,
-     "5668640fec8dc2b47b4516fd0b871c4d7d90ca1c2203acc2a22adb59aaab5993", nullptr},
+     "5668640fec8dc2b47b4516fd0b871c4d7d90ca1c2203acc2a22adb59aaab5993", nullptr, 0, nullptr},
+    // The HD UI atlas is byte-identical in the EUR, USA and JPN folders.
     {"3.2.1", "SingleScreen_3.2.1", "singlescreen_321.zip", 56'466'735,
      "737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0",
-     "https://gamebanana.com/dl/1875895"},
+     "https://gamebanana.com/dl/1875895", 7'007'958,
+     "082582da95930114a149db8fa3c14e8be546d7df1b003c71c81bbbc2d4fde71e"},
 };
 
 constexpr const char* kUiAtlasSha256 = "20290e417c56973cd19daa1f61a6c3963f075d61776db3d996954ee3296d07d8";
+// Azahar's name for the custom_ui01 replacement (its CityHash, ETC1A4).
+constexpr const char* kUiAtlasHdFile = "tex1_512x256_1FAF9B5B2ADF6038_13_mip0.png";
+constexpr std::uint32_t kUiAtlasWidth = 512, kUiAtlasHeight = 256;
+// The largest HD atlas decoded (8x, the mod's own is 4096x2048).
+constexpr std::uint64_t kMaxUiAtlasHdPixels = 4096ULL * 2048ULL;
 constexpr const char* kUiAtlas = "menu/custom_ui01.ctxb";
 constexpr const char* kTargetRomFs[] = {"Emulator/load/mods/", "3DS Hardware/luma/titles/"};
 constexpr std::size_t kCtxbHeaderSize = 0x48;
@@ -595,8 +606,12 @@ OfferSetting ParseOfferSetting(std::string_view text) {
 
 const char* OfferSettingText(OfferSetting setting) { return setting == OfferSetting::Never ? "never" : "ask"; }
 
-bool ShouldOffer(bool packExists, bool romfsExists, OfferSetting setting) {
-    return !packExists && romfsExists && setting == OfferSetting::Ask;
+bool ShouldOffer(bool packExists, bool hdAtlasExists, bool romfsExists, OfferSetting setting) {
+    return (!packExists || !hdAtlasExists) && romfsExists && setting == OfferSetting::Ask;
+}
+
+bool ShouldBuildFromLocalArchive(bool packExists, bool hdAtlasExists, const Archive& archive) {
+    return !packExists || (!hdAtlasExists && archive.UiAtlasHdSha256 != nullptr);
 }
 
 // ---- ZipReader ----
@@ -990,6 +1005,185 @@ Bytes BuildFontPack(const ZipReader& archive, const Archive& root, const RomFsIm
     return WriteStoredZip(files);
 }
 
+namespace {
+
+constexpr std::uint8_t kPngSignature[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+
+std::uint32_t GetBe32(const std::uint8_t* data) {
+    return (std::uint32_t(data[0]) << 24U) | (std::uint32_t(data[1]) << 16U) | (std::uint32_t(data[2]) << 8U) |
+           data[3];
+}
+
+void PutBe32(Bytes& out, std::uint32_t value) {
+    for (int shift = 24; shift >= 0; shift -= 8) out.push_back(static_cast<std::uint8_t>(value >> shift));
+}
+
+void PutPngChunk(Bytes& out, const char (&type)[5], std::span<const std::uint8_t> data) {
+    PutBe32(out, static_cast<std::uint32_t>(data.size()));
+    const std::size_t start = out.size();
+    out.insert(out.end(), type, type + 4);
+    out.insert(out.end(), data.begin(), data.end());
+    PutBe32(out, static_cast<std::uint32_t>(crc32(0, out.data() + start, static_cast<uInt>(out.size() - start))));
+}
+
+std::uint8_t Paeth(int left, int up, int upLeft) {
+    const int estimate = left + up - upLeft;
+    const int toLeft = std::abs(estimate - left), toUp = std::abs(estimate - up), toUpLeft = std::abs(estimate - upLeft);
+    if (toLeft <= toUp && toLeft <= toUpLeft) return static_cast<std::uint8_t>(left);
+    return static_cast<std::uint8_t>(toUp <= toUpLeft ? up : upLeft);
+}
+
+} // namespace
+
+Rgba8Image DecodePngRgba8(std::span<const std::uint8_t> png, std::uint64_t maxPixels) {
+    if (png.size() < 8 || !std::equal(std::begin(kPngSignature), std::end(kPngSignature), png.begin()))
+        throw ImportError("not a PNG file");
+    Rgba8Image image;
+    Bytes compressed;
+    bool header = false, end = false;
+    for (std::size_t position = 8; !end;) {
+        if (png.size() - position < 12) throw ImportError("truncated PNG");
+        const std::uint32_t length = GetBe32(&png[position]);
+        if (length > png.size() - position - 12) throw ImportError("truncated PNG chunk");
+        const std::uint8_t* type = &png[position + 4];
+        const std::uint8_t* data = type + 4;
+        if (crc32(0, type, length + 4) != GetBe32(data + length)) throw ImportError("PNG chunk CRC mismatch");
+        const std::string_view name(reinterpret_cast<const char*>(type), 4);
+        if (name == "IHDR") {
+            if (header || length != 13) throw ImportError("invalid PNG header");
+            image.Width = GetBe32(data);
+            image.Height = GetBe32(data + 4);
+            // 8-bit RGBA, deflate, adaptive filters, not interlaced.
+            if (data[8] != 8 || data[9] != 6 || data[10] != 0 || data[11] != 0 || data[12] != 0)
+                throw ImportError("the PNG is not 8-bit RGBA without interlacing");
+            if (image.Width == 0 || image.Height == 0 ||
+                static_cast<std::uint64_t>(image.Width) * image.Height > maxPixels)
+                throw ImportError("unexpected PNG size " + std::to_string(image.Width) + "x" +
+                                  std::to_string(image.Height));
+            header = true;
+        } else if (name == "IDAT") {
+            if (!header) throw ImportError("PNG data before its header");
+            compressed.insert(compressed.end(), data, data + length);
+        } else if (name == "IEND") {
+            end = true;
+        } else if (name[0] >= 'A' && name[0] <= 'Z') {
+            throw ImportError("unsupported critical PNG chunk " + std::string(name));
+        }
+        position += 12U + length;
+    }
+    if (!header || compressed.empty()) throw ImportError("PNG without image data");
+    const std::size_t stride = static_cast<std::size_t>(image.Width) * 4U;
+    Bytes raw(static_cast<std::size_t>(image.Height) * (stride + 1U));
+    z_stream stream{};
+    if (inflateInit(&stream) != Z_OK) throw ImportError("zlib inflateInit failed");
+    stream.next_in = compressed.data();
+    stream.avail_in = static_cast<uInt>(compressed.size());
+    stream.next_out = raw.data();
+    stream.avail_out = static_cast<uInt>(raw.size());
+    const int status = inflate(&stream, Z_FINISH);
+    const bool complete = status == Z_STREAM_END && stream.total_out == raw.size();
+    inflateEnd(&stream);
+    if (!complete) throw ImportError("damaged PNG image data");
+    compressed = Bytes();
+    // Undo the row filters in place (the row above is already undone), then
+    // drop the filter bytes.
+    for (std::uint32_t y = 0; y < image.Height; ++y) {
+        std::uint8_t* row = raw.data() + y * (stride + 1U);
+        const std::uint8_t filter = row[0];
+        std::uint8_t* line = row + 1;
+        const std::uint8_t* up = y > 0 ? line - (stride + 1U) : nullptr;
+        for (std::size_t x = 0; x < stride; ++x) {
+            const int left = x >= 4 ? line[x - 4] : 0;
+            const int above = up ? up[x] : 0;
+            const int aboveLeft = up && x >= 4 ? up[x - 4] : 0;
+            switch (filter) {
+            case 0: break;
+            case 1: line[x] = static_cast<std::uint8_t>(line[x] + left); break;
+            case 2: line[x] = static_cast<std::uint8_t>(line[x] + above); break;
+            case 3: line[x] = static_cast<std::uint8_t>(line[x] + ((left + above) >> 1)); break;
+            case 4: line[x] = static_cast<std::uint8_t>(line[x] + Paeth(left, above, aboveLeft)); break;
+            default: throw ImportError("invalid PNG row filter");
+            }
+        }
+    }
+    for (std::uint32_t y = 0; y < image.Height; ++y)
+        std::memmove(raw.data() + y * stride, raw.data() + y * (stride + 1U) + 1U, stride);
+    raw.resize(static_cast<std::size_t>(image.Height) * stride);
+    image.Pixels = std::move(raw);
+    return image;
+}
+
+Bytes EncodePngRgba8(const Rgba8Image& image) {
+    const std::size_t stride = static_cast<std::size_t>(image.Width) * 4U;
+    if (image.Width == 0 || image.Height == 0 || image.Pixels.size() != stride * image.Height)
+        throw ImportError("invalid RGBA8 image");
+    Bytes filtered(static_cast<std::size_t>(image.Height) * (stride + 1U));
+    for (std::uint32_t y = 0; y < image.Height; ++y) {
+        const std::uint8_t* line = image.Pixels.data() + y * stride;
+        const std::uint8_t* up = y > 0 ? line - stride : nullptr;
+        std::uint8_t* out = filtered.data() + y * (stride + 1U);
+        out[0] = 4; // Paeth
+        for (std::size_t x = 0; x < stride; ++x) {
+            const int left = x >= 4 ? line[x - 4] : 0;
+            const int above = up ? up[x] : 0;
+            const int aboveLeft = up && x >= 4 ? up[x - 4] : 0;
+            out[1 + x] = static_cast<std::uint8_t>(line[x] - Paeth(left, above, aboveLeft));
+        }
+    }
+    uLongf compressedSize = compressBound(static_cast<uLong>(filtered.size()));
+    Bytes compressed(compressedSize);
+    if (compress2(compressed.data(), &compressedSize, filtered.data(), static_cast<uLong>(filtered.size()),
+                  Z_DEFAULT_COMPRESSION) != Z_OK)
+        throw ImportError("zlib could not compress the PNG");
+    compressed.resize(compressedSize);
+    Bytes header;
+    PutBe32(header, image.Width);
+    PutBe32(header, image.Height);
+    for (const std::uint8_t value : {8, 6, 0, 0, 0}) header.push_back(value);
+    Bytes png(std::begin(kPngSignature), std::end(kPngSignature));
+    PutPngChunk(png, "IHDR", header);
+    PutPngChunk(png, "IDAT", compressed);
+    PutPngChunk(png, "IEND", {});
+    return png;
+}
+
+Bytes ExtractUiAtlasHd(const ZipReader& archive, const Archive& root, std::string_view region) {
+    if (root.UiAtlasHdSha256 == nullptr) return {};
+    const char* titleId = TitleIdFor(region);
+    if (!titleId) throw ImportError("unsupported TopScreen region: " + std::string(region));
+    const std::string name = std::string(root.Root) + "/" + std::string(region) + "/Emulator/load/textures/" +
+                             titleId + "/UI/" + kUiAtlasHdFile;
+    const ZipReader::Entry* entry = archive.Find(name);
+    if (!entry) throw ImportError("archive has no HD UI atlas " + name);
+    if (entry->Size != root.UiAtlasHdBytes)
+        throw ImportError("unexpected HD UI atlas size " + std::to_string(entry->Size));
+    Bytes data = archive.Read(*entry, kMaxEntryBytes);
+    if (Sha256Hex(data) != root.UiAtlasHdSha256) throw ImportError("unexpected HD UI atlas " + name);
+    return data;
+}
+
+Bytes BuildUiAtlasHd(std::span<const std::uint8_t> sourcePng) {
+    Rgba8Image source = DecodePngRgba8(sourcePng, kMaxUiAtlasHdPixels);
+    if (source.Width % kUiAtlasWidth != 0 || source.Width / kUiAtlasWidth < kUiAtlasHdScale ||
+        static_cast<std::uint64_t>(source.Width) * kUiAtlasHeight !=
+            static_cast<std::uint64_t>(source.Height) * kUiAtlasWidth)
+        throw ImportError("the HD UI atlas is " + std::to_string(source.Width) + "x" +
+                          std::to_string(source.Height) + ", not a multiple of 512x256 of at least " +
+                          std::to_string(kUiAtlasHdScale) + "x");
+    Rgba8Image reduced;
+    reduced.Width = kUiAtlasWidth * kUiAtlasHdScale;
+    reduced.Height = kUiAtlasHeight * kUiAtlasHdScale;
+    if (source.Width == reduced.Width) {
+        reduced.Pixels = std::move(source.Pixels);
+    } else {
+        reduced.Pixels = Oot3d::Renderer::DownscaleRgba8(source.Pixels, {source.Width, source.Height},
+                                                         {reduced.Width, reduced.Height});
+        source.Pixels = Bytes();
+        if (reduced.Pixels.empty()) throw ImportError("could not reduce the HD UI atlas");
+    }
+    return EncodePngRgba8(reduced);
+}
+
 const Archive* IdentifyArchiveFile(const fs::path& path, std::string* error,
                                    const std::function<void(std::uint64_t, std::uint64_t)>& progress) {
     auto file = Open(path, "rb");
@@ -1033,10 +1227,12 @@ Outputs Build(const fs::path& archivePath, const Archive& source, const fs::path
     if (root != &source) throw ImportError("the archive is not laid out as Single Screen Experience " +
                                            std::string(source.Version));
     const RomFsImage romfs(romfsPath);
+    const std::string region = DetectRegion(romfs);
     Outputs outputs;
     outputs.Source = &source;
-    outputs.Pack = BuildTexturePack(archive, source, romfs);
+    outputs.Pack = BuildTexturePack(archive, source, romfs, region);
     outputs.Fonts = BuildFontPack(archive, source, romfs, source.Sha256);
+    if (Bytes hd = ExtractUiAtlasHd(archive, source, region); !hd.empty()) outputs.UiAtlasHd = BuildUiAtlasHd(hd);
     return outputs;
 }
 
@@ -1079,10 +1275,17 @@ void Install(const Outputs& outputs, const fs::path& configDirectory) {
     receipt.Members["archive_sha256"] = Json::Of(std::string(outputs.Source->Sha256));
     receipt.Members["pack_sha256"] = Json::Of(Sha256Hex(outputs.Pack));
     receipt.Members["font_pack_sha256"] = Json::Of(Sha256Hex(outputs.Fonts));
+    if (!outputs.UiAtlasHd.empty()) {
+        // The mod's HD UI atlas reduced to 3x the native one.
+        receipt.Members["ui_atlas_hd_source_sha256"] = Json::Of(std::string(outputs.Source->UiAtlasHdSha256));
+        receipt.Members["ui_atlas_hd_sha256"] = Json::Of(Sha256Hex(outputs.UiAtlasHd));
+        receipt.Members["ui_atlas_hd_scale"] = Json::Of(std::int64_t{kUiAtlasHdScale});
+    }
     std::string text;
     receipt.Write(text, 0);
     text += '\n';
     WriteFileVerified(configDirectory / kReceiptName, std::span(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+    if (!outputs.UiAtlasHd.empty()) WriteFileVerified(configDirectory / kUiAtlasHdName, outputs.UiAtlasHd);
     WriteFileVerified(configDirectory / kPackName, outputs.Pack);
 }
 

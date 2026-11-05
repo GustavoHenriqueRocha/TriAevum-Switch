@@ -39,6 +39,9 @@ struct UiTexturePixels {
     std::uint16_t width = 0;
     std::uint16_t height = 0;
     std::vector<std::uint8_t> rgba8;
+    // Valid pixels standing in for a final payload that is still being
+    // prepared (a custom texture decoding); the texture is resolved again.
+    bool provisional = false;
 };
 
 // Backend-independent boundary for textures whose authoritative payload lives
@@ -49,6 +52,9 @@ class UiTextureProvider {
     virtual bool Resolve(const UiTextureIdentity& identity,
                          UiTexturePixels& pixels,
                          std::string* error = nullptr) const = 0;
+    // Changes whenever previously resolved payloads may have become stale
+    // (for example a texture pack was turned on, off or reloaded).
+    virtual std::uint64_t Revision() const noexcept { return 0U; }
 };
 
 // A texture payload read from its provider ahead of the Render that first
@@ -89,11 +95,14 @@ class N64UiFast3dRenderer {
                 std::string* error = nullptr);
     // Resolves every texture a Render of these primitives would resolve for
     // the first time. Prepared keys are remembered (until Release), so each
-    // payload is read once, as Render alone would.
+    // payload is read once, as Render alone would; a provisional payload is
+    // resolved again on later calls, and a new provider Revision resolves
+    // every texture again.
     [[nodiscard]] PreparedUiTextures
     PrepareTextures(std::span<const UiPrimitive> primitives);
     // Hands prepared payloads to the renderer without drawing (a frame that
-    // renders nothing still owns them for its next Render).
+    // renders nothing still owns them for its next Render). A payload
+    // prepared again replaces the resident texture of the same key.
     void Stage(PreparedUiTextures prepared);
     // Render without reading the provider: first uses consume `prepared`.
     bool Render(std::span<const UiPrimitive> primitives,
@@ -118,8 +127,12 @@ class N64UiFast3dRenderer {
     const UiTextureProvider* texture_provider_ = nullptr;
     std::unordered_map<std::string, ResidentTexture> textures_;
     std::unordered_set<std::string> failed_textures_;
-    // Preparing side: keys already handed to the renderer.
+    // Preparing side: keys already handed to the renderer, those handed with
+    // provisional pixels, and the provider revision they were resolved at.
     std::unordered_set<std::string> prepared_keys_;
+    std::unordered_set<std::string> provisional_keys_;
+    std::uint64_t prepared_revision_ = 0;
+    std::uint32_t provisional_poll_ = 0;
     // Rendering side: prepared payloads not consumed yet.
     std::unordered_map<std::string, PreparedUiTexture> staged_textures_;
     // Per-frame scratch (storage kept between frames).

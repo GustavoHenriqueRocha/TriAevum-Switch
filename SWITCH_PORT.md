@@ -158,23 +158,29 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
 (`oot3d_switch_topscreen_import.cpp`; the libnx console screen, shared with the import in
 `oot3d_switch_console_screen.h`, puts stdout and stderr back on exit).
 
-- When the pack is missing, `game/romfs.bin` exists and `config/topscreen_offer` is not `never`,
-  the screen names the mod, its author, page and license and offers **A** download (56 MB) and
+- When the pack is missing, or exists without `config/topscreen_ui_atlas_hd.png` (an install
+  from before the HD UI atlas), `game/romfs.bin` exists and `config/topscreen_offer` is not
+  `never`, the screen names the mod, its author, page and license and offers **A** download (56 MB) and
   start the game, **B** not now (asked again at the next start), **X** never ask again
-  (`config/topscreen_offer` = `never`). L3+R3 > Updates > HUD textures > "Offer the download at the
+  (`config/topscreen_offer` = `never`). For an existing install the text says the download adds the
+  mod's HD HUD art; everything is rebuilt from the archive and the old files stay until the new ones
+  are written. L3+R3 > Updates > HUD textures > "Offer the download at the
   next start" writes `ask` for players who skipped; it takes effect at the next start.
 - A downloads `https://gamebanana.com/dl/1875895` (version 3.2.1; GameBanana redirects to its CDN)
   on a worker thread with the updater's HTTPS code (`oot3d_switch_network.{h,cpp}`: sockets and
   libcurl only while it runs, HTTPS only, certificates checked by the system), to
   `singlescreen_321.zip.partial`, with a progress bar, B to cancel and auto-sleep off. The body may
   not exceed 56,466,735 bytes and is hashed while it streams; size and SHA-256
-  (`737807fd…c77aa0`) must match. The archive is then read for two entries only, the pack and
-  the font coverage are built from `game/romfs.bin`, and the download is deleted.
+  (`737807fd…c77aa0`) must match. The archive is then read for three entries only, the pack,
+  the font coverage and the HD UI atlas are built from `game/romfs.bin`, and the download is deleted.
 - An official archive the player copied to `sdmc:/switch/oot3dre/` (`singlescreen_321.zip`, or
   3.0's `singlescreen_30.zip`) is verified and used without network or question, and left there.
+  With a pack already installed it is only used to add a missing HD UI atlas, and only a release
+  that carries one (3.2.1; 3.0's is not pinned, so a 3.0 install is offered the 3.2.1 download).
 - Written to `config/`, each through `<name>.partial`, read back and compared, then moved over
   the old file (removed first: Horizon cannot rename over a file): `font_coverage.zip`,
-  `topscreen_import.json` (mod, author, page, license, archive/pack/font SHA-256) and
+  `topscreen_import.json` (mod, author, page, license, archive/pack/font SHA-256 and the HD UI
+  atlas's source and output SHA-256 and scale), `topscreen_ui_atlas_hd.png` and
   `atlas_overrides.o3tu` last, since it is what the game looks for. Log:
   `logs/topscreen_import.txt`.
 - Failures leave nothing installed and the game starts as before, without the pack: no network,
@@ -189,6 +195,25 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
   (`oot3d_native_a32_window_setup.cpp`) and uses it from 480 output pixels high, so the Switch
   (720p) uses it: the mod's 64x64 Latin `ltn16.qbf` covers the native 16x16 glyphs, paired by
   character. Its `sys8.qbf` uses an encoding the pairing does not support and is not imported.
+- HD UI atlas: the archive's `SingleScreen_3.2.1/<region>/Emulator/load/textures/<title>/UI/
+  tex1_512x256_1FAF9B5B2ADF6038_13_mip0.png` (Azahar's name for `custom_ui01`, 4096x2048,
+  7,007,958 bytes, SHA-256 `082582da…d4fde71e`, byte-identical in the EUR, USA and JPN folders) is
+  checked, decoded (8-bit RGBA PNG, own zlib decoder), reduced to 3x the native 512x256 atlas
+  (1536x768: the HUD is drawn at 3x on 720p) with `azahar_texture_scale`'s area-weighted,
+  alpha-aware filter and written as `config/topscreen_ui_atlas_hd.png` (about 1.3 MB). Peak memory
+  of the step about 45 MB (the 32 MB decode), 1 s on the PC. The Switch launch passes
+  `--topscreen-ui-atlas-hd` when the file exists beside the pack; the window setup decodes it
+  (`stbi_load`) and requires a whole multiple of the pack's `oot3d/topscreen/3.0/ui_atlas`, else it
+  logs `topscreen: HD UI atlas unused: ...` and keeps the native atlas. The HUD's UI texture
+  provider replaces the exact native atlas bytes with it (`ChooseUiCustomTexture`).
+- What draws from it: the HUD now draws its 3.x art from `custom_ui01` itself, as upstream's
+  `oot3d_top_screen_mod_profile_hud.cpp` does: the four button circles and the A circle, the D-pad
+  cross, the ZR/ZL and X/Y/B labels, the View eye/Navi/camera prompt, the L/R tab hints and their
+  backings, the Ocarina arrows, the Items "SELECT ?" hint and the D-pad cycle marks. Before, they came
+  from the painted `menu_top_parts00`/`menu_cursor00` replacements and the composed 2.1.1
+  `menu_atlas`, all native size; those textures stay in the pack (the native touch copies, hearts,
+  magic meter and pause pages still use `menu_top_parts00`'s native art). Without the pack's
+  `ui_atlas` these elements are left out.
 - Core (`oot3d_topscreen_import.{h,cpp}`, standard C++ and zlib, host-buildable): a port of the 3.x
   path of `build_topscreen_texture_override_pack.py` (ZIP reader, Level-3/IVFC RomFS reader,
   ETC1A4/RGBA4/RGBA8 codecs, hash-matched `menu_top_parts00`/`menu_cursor00` replacements, O3TU
@@ -196,13 +221,17 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
   <romfs.bin> <pack> <fonts>` matches both Python tools byte for byte on the real archive: canonical
   EUR RomFS, pack `6e79f87d…22ea7f` (2,949,460 bytes, also p7b's 3.0-built file) and fonts
   `f625baf7…7ed5289`; raw USA Rev 1 RomFS, the same pack and fonts `5be4041b…6d00267`. On the PC
-  the build takes 0.03 s after a 0.3 s archive hash.
-- Without the pack (B, X, or a failed download) the game runs with the game's own HUD art. The
-  pack-only profile textures (`oot3d/topscreen/2.1.1/*`, `oot3d/topscreen/3.0/*`) then resolve to
-  one transparent texel in `Oot3dNativeA32UiTextureProvider::Resolve` (`profile_asset_absent`), so
-  their consumers, the Items hint and the D-pad cycle badges, draw nothing. Before 0.1.1-test.2 the
-  lookup failed with "OoT3D UI semantic is not a native localized texture", the UI frame threw and
-  the game closed (logs7, 05/11).
+  the build takes 0.03 s after a 0.3 s archive hash. With a sixth argument it also writes the HD UI
+  atlas: 1536x768, pixels SHA-256 `f8be9f0e…f807998be`; its coverage (alpha >= 128, reduced to 1x)
+  differs from the native `custom_ui01` on 16% of texels (50% upside down: the redraw has sharper
+  edges and lighter shadows).
+- Without the pack (B, X, or a failed download) the game runs with the game's own HUD art: the
+  bridge leaves out the elements drawn from `custom_ui01` (`SetTopScreenUiAtlasAvailable`), and any
+  other request for a pack-only profile texture (`oot3d/topscreen/2.1.1/*`, `oot3d/topscreen/3.0/*`)
+  resolves to one transparent texel in `Oot3dNativeA32UiTextureProvider::Resolve`
+  (`profile_asset_absent`). Before 0.1.1-test.2 the Items hint and the D-pad cycle badges asked
+  for `menu_atlas`, the lookup failed with "OoT3D UI semantic is not a native localized texture",
+  the UI frame threw and the game closed (logs7, 05/11).
 - A fatal error (any exception that reaches `main`) shows the system's error dialog with the
   message and the log's path, then closes the application through AM (`__nx_applet_exit_mode = 1`,
   as Exit game does). Returning to the homebrew loader made it abort (`hbl + 0x3810`, 2001-0106).
@@ -897,6 +926,18 @@ loads).
 - Needs ImGui on the window: with deko3d and `config/serial_presentation` nothing ImGui draws shows.
 
 ### HD texture packs: L3+R3 > Video (`config/texture_pack`, `config/texture_pack_scale`)
+- **HUD:** while HD textures are on, the HUD's textures (drawn by the UI renderer, not PICA) resolve
+  the pack too, with the same hash, as `AzaharTextureRequest::UserInterface` requests: reduced to 3x
+  native (`kUiTextureMaxScale`) whatever "HD texture size" says, no mip chain, cached apart from
+  world textures. The pack wins over TopScreen's HD UI atlas; while the pack is indexing or decoding
+  the HD atlas (or the native texture) stands in. Turning HD textures off changes the pack
+  generation, which the UI provider reports as its `Revision`, so the UI renderer resolves its
+  textures again on the next frame and the HUD replacements go at once. The HD UI atlas is not a
+  pack: it is used whenever the file exists. The UI path's memory is its own: a resident texture per
+  UI texture key (`gfx_deko3d_ui.cpp`, any size; a superseded texture is retired after the frames in
+  flight); the HD atlas costs 4.5 MiB of GPU memory and 4.5 MiB of RAM (the decoded copy the
+  provider hands out again after a revision change), plus a transient 4.5 MiB staging block and
+  4.5 MiB copy at each upload.
 - **Which pack:** Azahar/Citra packs load as they are. For HenrikoMagnifico's *Ocarina of Time 3D 4K*
   pack use the **1080p** download (`OOT3D 4K 5.0a (1080p).zip`, 1.8 GB; its images are 4x the native
   textures); the game reduces it to 2x. The 4K download (8x, 3.7 GB) works too but takes twice the SD

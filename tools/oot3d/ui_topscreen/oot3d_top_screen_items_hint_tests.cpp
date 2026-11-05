@@ -65,7 +65,7 @@ int main() {
           "the recovered Items hint geometry differs from payload 0x005D2078");
 
   oot3d::ui::UiTextureIdentity menuAtlas;
-  menuAtlas.semantic_name = kTopScreen211MenuAtlasSemantic;
+  menuAtlas.semantic_name = kTopScreen30UiAtlasSemantic;
   std::vector<oot3d::ui::UiPrimitive> primitives;
   Require(
       AppendTopScreenItemsHintPresentation(geometry, menuAtlas, primitives) ==
@@ -73,13 +73,13 @@ int main() {
           primitives.size() == 2U &&
           primitives[0].subsystem == oot3d::ui::UiSubsystem::Items &&
           primitives[0].texture.semantic_name ==
-              kTopScreen211MenuAtlasSemantic &&
+              kTopScreen30UiAtlasSemantic &&
           Near(primitives[0].destination.x, 170.875F) &&
           Near(primitives[0].destination.width, 40.0F) &&
-          Near(primitives[0].uv.x, 434.0F / 512.0F) &&
-          Near(primitives[0].uv.y, 410.0F / 512.0F) &&
-          Near(primitives[1].uv.x, 492.0F / 512.0F) &&
-          Near(primitives[1].uv.y, 104.0F / 512.0F),
+          Near(primitives[0].uv.x, 277.0F / 512.0F) &&
+          Near(primitives[0].uv.y, 222.0F / 256.0F) &&
+          Near(primitives[1].uv.x, 344.0F / 512.0F) &&
+          Near(primitives[1].uv.y, 222.0F / 256.0F),
       "the Items hint was not presented through generic 400x240 primitives");
 
   AdvanceTopScreenItemsHintState(state,

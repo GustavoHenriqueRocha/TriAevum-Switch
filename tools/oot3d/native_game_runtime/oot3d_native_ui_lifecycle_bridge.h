@@ -105,6 +105,12 @@ public:
   void
   SetTopScreenInputFrame(const TopScreenExtendedInputFrame &input) noexcept;
   void SetTopScreenConfig(const TopScreenUiConfig &config) noexcept;
+  // Whether the TopScreen pack has custom_ui01 (kTopScreen30UiAtlasSemantic):
+  // the button circles, D-pad cross, touch labels and tab hints draw from it
+  // and are left out without it.
+  void SetTopScreenUiAtlasAvailable(bool available) noexcept {
+    mTopScreenUiAtlasAvailable = available;
+  }
   bool ReadOcarinaGeometry(TopScreenOcarinaGeometry &geometry, std::string *error) {
     return ReadTopScreenOcarinaGeometry(mMemory, mTopScreenOcarina, &geometry, error);
   }
@@ -172,6 +178,7 @@ private:
   float mTopScreenViewAlpha = 1.0F;
   bool mVersionChoiceRevealRequired = false;
   bool mVersionChoiceRevealed = false;
+  bool mTopScreenUiAtlasAvailable = false;
   TopScreenUiConfig mTopScreenConfig;
 };
 

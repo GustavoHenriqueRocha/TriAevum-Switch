@@ -298,7 +298,7 @@ std::size_t AppendTopScreenMagicMeterPresentation(
 
 std::size_t AppendTopScreenTouchClusterPresentation(
     const TopScreenTouchClusterGeometry &geometry,
-    const oot3d::ui::UiTextureIdentity &pauseTopPage,
+    const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output);
 
 std::size_t AppendTopScreenPauseEdgePresentation(
@@ -316,13 +316,11 @@ struct TopScreenTabHintInputs {
   bool RightHeld = false;
 };
 bool ReadTopScreenTabHintInputs(NativeA32Memory &memory, TopScreenTabHintInputs *inputs);
-// Appends the two backing quads (EquipmentPage atlas, 512x256) and then the
-// two glyphs (Cursor atlas, 128x128, stored a quarter turn), in the 400x240
-// top-screen domain: the payload's 320-wide page coordinates plus the
-// page's 40-pixel offset. Returns the number of primitives appended.
+// Two backing quads, then glyphs: custom_ui01 (512x256), rects 20/21 at
+// 0x0060A568. The 400x240 top-screen domain adds the page's 40-pixel offset.
+// Returns the number of primitives appended.
 std::size_t AppendTopScreenTabHintPresentation(
-    const TopScreenTabHintInputs &inputs, const oot3d::ui::UiTextureIdentity &cursor,
-    const oot3d::ui::UiTextureIdentity &equipmentPage,
+    const TopScreenTabHintInputs &inputs, const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output);
 
 struct TopScreenTexturedQuad {
@@ -407,7 +405,7 @@ TopScreenTouchLabelsGeometry BuildTopScreenTouchLabelsGeometry(
 
 std::size_t AppendTopScreenTouchLabelsPresentation(
     const TopScreenTouchLabelsGeometry &geometry,
-    const oot3d::ui::UiTextureIdentity &pauseTopPage,
+    const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output);
 
 struct TopScreenAuxiliaryTouchInputs {
@@ -442,7 +440,7 @@ TopScreenAuxiliaryTouchGeometry BuildTopScreenAuxiliaryTouchGeometry(
     TopScreenHudLayout layout = TopScreenHudLayout::Normal) noexcept;
 std::size_t AppendTopScreenAuxiliaryTouchPresentation(
     const TopScreenAuxiliaryTouchGeometry &geometry,
-    const oot3d::ui::UiTextureIdentity &pauseTopPage,
+    const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output);
 
 // Typed equivalents of payload words 005E3D8C (previous player state) and

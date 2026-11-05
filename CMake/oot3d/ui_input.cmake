@@ -375,17 +375,22 @@ add_executable(oot3d_rom_import_tests EXCLUDE_FROM_ALL
 oot3d_target_defaults(oot3d_rom_import_tests FOLDER Tests)
 
 # TopScreen HUD texture import core (oot3d_topscreen_import.h): ZIP and RomFS
-# readers, texture codecs, QBF pairing, font pack and verified writes.
-# `--build <archive> <romfs.bin> <pack.o3tu> <font_coverage.zip>` builds both
-# outputs from the real mod archive, to compare with the Python builders.
+# readers, texture codecs, QBF pairing, font pack, PNG codec, HD UI atlas
+# reduction, offer rules and verified writes.
+# `--build <archive> <romfs.bin> <pack.o3tu> <font_coverage.zip> [<atlas.png>]`
+# builds the outputs from the real mod archive, to compare with the Python
+# builders and check the HD atlas against the native one.
 find_package(ZLIB)
 if (ZLIB_FOUND)
     add_executable(oot3d_topscreen_import_tests EXCLUDE_FROM_ALL
         tools/oot3d/native_game_runtime/oot3d_topscreen_import_tests.cpp
         tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp
         tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
+        runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_scale.cpp
     )
     target_compile_features(oot3d_topscreen_import_tests PRIVATE cxx_std_20)
+    target_include_directories(oot3d_topscreen_import_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/runtime/three_ds_recomp/include)
     target_link_libraries(oot3d_topscreen_import_tests PRIVATE ZLIB::ZLIB)
     oot3d_target_defaults(oot3d_topscreen_import_tests FOLDER Tests)
 endif()

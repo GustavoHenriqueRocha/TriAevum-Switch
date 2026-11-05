@@ -50,6 +50,7 @@ public:
     mChannel = saved.value_or(DefaultChannelFor(BuildVersion()));
     std::error_code ignored;
     mHudInstalled = std::filesystem::is_regular_file(mConfig / TopScreenImport::kPackName, ignored);
+    mHudAtlasInstalled = std::filesystem::is_regular_file(mConfig / TopScreenImport::kUiAtlasHdName, ignored);
     mHudOffer = TopScreenImport::ParseOfferSetting(ReadTrimmed(mConfig / TopScreenImport::kOfferSettingName));
   }
 
@@ -188,13 +189,18 @@ private:
     ImGui::SeparatorText("HUD textures");
     ImGui::TextWrapped("Art from the mod \"%s\" by %s (%s, %s).", TopScreenImport::kModName,
                        TopScreenImport::kModAuthor, TopScreenImport::kModPage, TopScreenImport::kModLicense);
-    if (mHudInstalled) {
-      ImGui::TextUnformatted("Installed.");
+    if (mHudInstalled && mHudAtlasInstalled) {
+      ImGui::TextUnformatted("Installed, with the HD HUD art.");
       return;
     }
-    ImGui::TextWrapped("Not installed. The console downloads the mod from GameBanana (%s) at start-up and builds "
-                       "the textures from your game data.",
-                       Megabytes(TopScreenImport::DownloadArchive().Bytes).c_str());
+    if (mHudInstalled)
+      ImGui::TextWrapped("Installed without the HD HUD art (built by an earlier version). The console downloads "
+                         "the mod again from GameBanana (%s) at start-up to add it.",
+                         Megabytes(TopScreenImport::DownloadArchive().Bytes).c_str());
+    else
+      ImGui::TextWrapped("Not installed. The console downloads the mod from GameBanana (%s) at start-up and builds "
+                         "the textures from your game data.",
+                         Megabytes(TopScreenImport::DownloadArchive().Bytes).c_str());
     if (mHudOfferRequested) {
       ImGui::TextWrapped("The next start offers the download. Close the game and start it again.");
       return;
@@ -219,6 +225,7 @@ private:
   Channel mChannel = Channel::Stable;
   bool mChannelError = false;
   bool mHudInstalled = false;
+  bool mHudAtlasInstalled = false;
   TopScreenImport::OfferSetting mHudOffer = TopScreenImport::OfferSetting::Ask;
   bool mHudOfferRequested = false;
   bool mHudOfferError = false;

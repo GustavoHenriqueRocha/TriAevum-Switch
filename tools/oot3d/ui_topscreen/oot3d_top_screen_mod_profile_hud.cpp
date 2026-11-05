@@ -92,9 +92,13 @@ BuildTopScreenMagicMeterGeometry(const oot3d::ui::UiHudMagicContent &magic,
 TopScreenTouchClusterGeometry BuildTopScreenTouchClusterGeometry(
     const std::array<float, 4> &nativeVerticalOffsets,
     float nativeAlpha, TopScreenHudLayout layout) noexcept {
-  // Payload arrays 0x005D33A0/0x005D33B4 and literals
-  // 0x005CAF7C/0x005CAF9C/0x005CAFA0. FUN_005C7230 converts these atlas
-  // rectangles to PICA UVs after the producer has supplied top-origin pixels.
+  // SingleScreen 3.0 hub 0x005DCAD0..0x005DCCB0 (2.1.1 arrays
+  // 0x005D33A0/0x005D33B4): the four button circles centred on table
+  // 0x00609770/0x00609784, 32 px, custom_ui01 rect 1 (148,3,48,48); the A
+  // circle at (248, 24) with rect 0 (97,3,48,48); the D-pad cross centred on
+  // (30.5, 67), 28 px, rect 3 drawn as (385,108,29,29). The 2.1.1 drew them
+  // from its replaced menu_top_parts00 (native size); drawn from custom_ui01,
+  // TopScreen's HD UI atlas replaces them.
   constexpr std::array<TopScreenVec2, 4> kNativeCenters{
       {{358.0F, 20.0F}, {334.0F, 44.0F}, {382.0F, 44.0F}, {358.0F, 68.0F}}};
   TopScreenTouchClusterGeometry result;
@@ -103,7 +107,7 @@ TopScreenTouchClusterGeometry BuildTopScreenTouchClusterGeometry(
                                kNativeCenters[index].Y - 16.0F +
                                    nativeVerticalOffsets[index]};
     result.Sizes[index] = {32.0F, 32.0F};
-    result.AtlasOrigins[index] = {386.0F, 201.0F};
+    result.AtlasOrigins[index] = {148.0F, 3.0F};
     result.AtlasSizes[index] = {48.0F, 48.0F};
     result.Alpha[index] =
         layout == TopScreenHudLayout::Restoration && index >= 2U ? 0.0F
@@ -115,14 +119,14 @@ TopScreenTouchClusterGeometry BuildTopScreenTouchClusterGeometry(
           ? TopScreenVec2{342.0F, 52.0F}
           : TopScreenVec2{232.0F, 8.0F};
   result.Sizes[4] = {32.0F, 32.0F};
-  result.AtlasOrigins[4] = {386.0F, 201.0F};
+  result.AtlasOrigins[4] = {97.0F, 3.0F};
   result.AtlasSizes[4] = {48.0F, 48.0F};
   result.Alpha[4] = 1.0F;
 
-  result.Positions[5] = {14.0F, 52.0F};
-  result.Sizes[5] = {30.0F, 30.0F};
-  result.AtlasOrigins[5] = {432.0F, 218.0F};
-  result.AtlasSizes[5] = {30.0F, 30.0F};
+  result.Positions[5] = {30.5F - 14.0F, 67.0F - 14.0F};
+  result.Sizes[5] = {28.0F, 28.0F};
+  result.AtlasOrigins[5] = {385.0F, 108.0F};
+  result.AtlasSizes[5] = {29.0F, 29.0F};
   result.Alpha[5] = nativeAlpha;
   return result;
 }
@@ -451,9 +455,9 @@ std::size_t AppendTopScreenMagicMeterPresentation(
 
 std::size_t AppendTopScreenTouchClusterPresentation(
     const TopScreenTouchClusterGeometry &geometry,
-    const oot3d::ui::UiTextureIdentity &pauseTopPage,
+    const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output) {
-  if (pauseTopPage.semantic_name.empty()) {
+  if (uiAtlas.semantic_name.empty()) {
     return 0U;
   }
   const std::size_t startSize = output.size();
@@ -467,7 +471,7 @@ std::size_t AppendTopScreenTouchClusterPresentation(
     primitive.role = oot3d::ui::UiPrimitiveRole::TouchControl;
     primitive.owner_address = 0x005C9940U;
     primitive.source_quad = static_cast<std::uint32_t>(index);
-    primitive.texture = pauseTopPage;
+    primitive.texture = uiAtlas;
     primitive.destination = {geometry.Positions[index].X,
                              geometry.Positions[index].Y,
                              geometry.Sizes[index].X, geometry.Sizes[index].Y};
@@ -523,7 +527,7 @@ std::size_t AppendTopScreenPauseEdgePresentation(
 
 bool ReadTopScreenTabHintInputs(NativeA32Memory &memory, TopScreenTabHintInputs *inputs) {
   if (inputs == nullptr) return false;
-  // 0x005CFE58..0x005CFEA4: Items 0x0050672C, Gear 0x00504484, Map 0x00506CE8.
+  // 3.0 0x005D4A0C: Items 0x0050672C, Gear 0x00504484, Map 0x00506CE8.
   std::uint32_t items = 0U, gear = 0U, map = 0U, held = 0U;
   if (!memory.Read32(0x0050672CU, &items) || !memory.Read32(0x00504484U, &gear) ||
       !memory.Read32(0x00506CE8U, &map) || !memory.Read32(0x005655A0U, &held))
@@ -535,42 +539,43 @@ bool ReadTopScreenTabHintInputs(NativeA32Memory &memory, TopScreenTabHintInputs 
 }
 
 std::size_t AppendTopScreenTabHintPresentation(
-    const TopScreenTabHintInputs &inputs, const oot3d::ui::UiTextureIdentity &cursor,
-    const oot3d::ui::UiTextureIdentity &equipmentPage,
+    const TopScreenTabHintInputs &inputs, const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output) {
-  if (!inputs.PageOpen || cursor.semantic_name.empty()) return 0U;
+  if (!inputs.PageOpen || uiAtlas.semantic_name.empty()) return 0U;
   constexpr float kPageOffsetX = 40.0F;
   const std::size_t startSize = output.size();
-  // 0x005CFEF0..0x005CFFF0: optional 42x42 backings from atlas index 4,
-  // crop (255,103,136,28), at (24,205) and (254,205). They precede the glyphs.
-  if (!equipmentPage.semantic_name.empty()) {
-    for (const float x : {24.0F, 254.0F}) {
-      oot3d::ui::UiPrimitive backing;
-      backing.subsystem = oot3d::ui::UiSubsystem::GameplayHud;
-      backing.role = oot3d::ui::UiPrimitiveRole::PauseBackground;
-      backing.owner_address = 0x005E4030U;
-      backing.source_quad = x < 100.0F ? 0U : 1U;
-      backing.texture = equipmentPage;
-      backing.destination = {x + kPageOffsetX, 205.0F, 42.0F, 42.0F};
-      backing.uv = {255.0F / 512.0F, 103.0F / 256.0F, 136.0F / 512.0F, 28.0F / 256.0F};
-      backing.layer = 14U;
-      output.push_back(std::move(backing));
-    }
+  // 0x005D1644 binds both models to custom_ui01. 0x005D4A0C draws the
+  // 41x42 backings first, using its (401,196,18,18) crop without dimming.
+  for (unsigned index = 0; index < 2; ++index) {
+    oot3d::ui::UiPrimitive backing;
+    backing.subsystem = oot3d::ui::UiSubsystem::GameplayHud;
+    backing.role = oot3d::ui::UiPrimitiveRole::PauseBackground;
+    backing.owner_address = 0x005D4A0CU;
+    backing.source_quad = index;
+    backing.texture = uiAtlas;
+    backing.destination = {(index == 0 ? 25.5F : 253.5F) + kPageOffsetX,
+                           206.0F, 41.0F, 42.0F};
+    backing.uv = {401.0F / 512.0F, 196.0F / 256.0F, 18.0F / 512.0F, 18.0F / 256.0F};
+    backing.layer = 14U;
+    output.push_back(std::move(backing));
   }
-  // 0x005D0150..0x005D0364: the L glyph (crop X 100) at x 26 and the R glyph
-  // (crop X 72) at x 258, 36x28 at y 208, from the 28x36 crop at y 89.
-  struct Glyph { float X, CropX; bool Held; };
-  for (const Glyph glyph : {Glyph{26.0F, 100.0F, inputs.LeftHeld},
-                            Glyph{258.0F, 72.0F, inputs.RightHeld}}) {
+  // 0x0060A568 rects 20/21 are upright 37x28 glyphs. The payload grows
+  // each by 1.05 around its centre, with +1.5/-1.5 X and +1 Y offsets.
+  constexpr float kWidth = 37.0F, kHeight = 28.0F, kScale = 1.05F;
+  constexpr float kCentreOffset = (1.0F - kScale) * 0.5F;
+  struct Glyph { float X, CropX, CropY; bool Held; };
+  unsigned glyphIndex = 2;
+  for (const Glyph glyph : {Glyph{62.0F - kWidth + 1.5F, 462.0F, 108.0F, inputs.LeftHeld},
+                            Glyph{258.0F - 1.5F, 240.0F, 117.0F, inputs.RightHeld}}) {
     oot3d::ui::UiPrimitive hint;
     hint.subsystem = oot3d::ui::UiSubsystem::GameplayHud;
     hint.role = oot3d::ui::UiPrimitiveRole::TouchControl;
-    hint.owner_address = 0x005E4058U;
-    hint.source_quad = glyph.X < 100.0F ? 0U : 1U;
-    hint.texture = cursor;
-    hint.destination = {glyph.X + kPageOffsetX, 208.0F, 36.0F, 28.0F};
-    hint.uv = {glyph.CropX / 128.0F, 89.0F / 128.0F, 28.0F / 128.0F, 36.0F / 128.0F};
-    hint.uv_quarter_turn = true;
+    hint.owner_address = 0x005D4A0CU;
+    hint.source_quad = glyphIndex++;
+    hint.texture = uiAtlas;
+    hint.destination = {glyph.X + kWidth * kCentreOffset + kPageOffsetX,
+                        209.0F + kHeight * kCentreOffset, kWidth * kScale, kHeight * kScale};
+    hint.uv = {glyph.CropX / 512.0F, glyph.CropY / 256.0F, kWidth / 512.0F, kHeight / 256.0F};
     const float rgb = glyph.Held ? 0.55F : 1.0F;
     hint.color = {rgb, rgb, rgb, 1.0F};
     hint.layer = 14U;
@@ -993,21 +998,24 @@ TopScreenTouchLabelsGeometry BuildTopScreenTouchLabelsGeometry(
       layout == TopScreenHudLayout::Restoration
           ? 0.0F
           : std::clamp(nativeAlpha * 0.9F, 0.0F, 1.0F);
+  // SingleScreen 3.0 hub 0x005DD0D8/0x005DD168: ZR at (364, lane 2 + 31)
+  // with custom_ui01 rect 15 (47,231), ZL at (340, lane 3 + 55) with rect 14
+  // (245,227), both 16 px.
   TopScreenTouchLabelsGeometry result;
-  result.Quads[0] = {alpha != 0.0F,  {362.0F, nativeVerticalOffsets[2] + 33.0F},
-                     {17.0F, 11.0F}, {440.0F, 190.0F},
-                     {17.0F, 11.0F}, {1.0F, 1.0F, 1.0F, alpha}};
-  result.Quads[1] = {alpha != 0.0F,  {338.0F, nativeVerticalOffsets[3] + 57.0F},
-                     {17.0F, 11.0F}, {440.0F, 201.0F},
-                     {17.0F, 11.0F}, {1.0F, 1.0F, 1.0F, alpha}};
+  result.Quads[0] = {alpha != 0.0F,  {364.0F, nativeVerticalOffsets[2] + 31.0F},
+                     {16.0F, 16.0F}, {47.0F, 231.0F},
+                     {16.0F, 16.0F}, {1.0F, 1.0F, 1.0F, alpha}};
+  result.Quads[1] = {alpha != 0.0F,  {340.0F, nativeVerticalOffsets[3] + 55.0F},
+                     {16.0F, 16.0F}, {245.0F, 227.0F},
+                     {16.0F, 16.0F}, {1.0F, 1.0F, 1.0F, alpha}};
   return result;
 }
 
 std::size_t AppendTopScreenTouchLabelsPresentation(
     const TopScreenTouchLabelsGeometry &geometry,
-    const oot3d::ui::UiTextureIdentity &pauseTopPage,
+    const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output) {
-  if (pauseTopPage.semantic_name.empty()) {
+  if (uiAtlas.semantic_name.empty()) {
     return 0U;
   }
   const std::size_t startSize = output.size();
@@ -1021,7 +1029,7 @@ std::size_t AppendTopScreenTouchLabelsPresentation(
     primitive.role = oot3d::ui::UiPrimitiveRole::TouchControl;
     primitive.owner_address = 0x005C9940U;
     primitive.source_quad = static_cast<std::uint32_t>(index);
-    primitive.texture = pauseTopPage;
+    primitive.texture = uiAtlas;
     primitive.destination = {quad.Position.X, quad.Position.Y, quad.Size.X,
                              quad.Size.Y};
     primitive.uv = {quad.AtlasOrigin.X / 512.0F, quad.AtlasOrigin.Y / 256.0F,
@@ -1136,7 +1144,11 @@ TopScreenAuxiliaryTouchGeometry BuildTopScreenAuxiliaryTouchGeometry(
     float nativeAlpha, TopScreenHudLayout layout) noexcept {
   constexpr std::array<float, 4> kCentersX{358.0F, 334.0F, 382.0F, 358.0F};
   constexpr std::array<float, 4> kCentersY{20.0F, 44.0F, 44.0F, 68.0F};
-  constexpr std::array<float, 4> kAtlasY{142.0F, 158.0F, 126.0F, 190.0F};
+  // SingleScreen 3.0 hub 0x005DA708 label model (rects from table
+  // 0x00609808): X rect 10 (207,227), Y rect 11 (226,227), B rect 9
+  // (363,225) of custom_ui01; the fourth label is never drawn (II, rect 13).
+  constexpr std::array<TopScreenVec2, 4> kLabelAtlas{
+      {{207.0F, 227.0F}, {226.0F, 227.0F}, {363.0F, 225.0F}, {188.0F, 227.0F}}};
   const float auxiliaryAlpha = std::clamp(nativeAlpha * 0.9F, 0.0F, 1.0F);
   const bool conditionalVisible = inputs.SuppressBCopies;
 
@@ -1147,7 +1159,7 @@ TopScreenAuxiliaryTouchGeometry BuildTopScreenAuxiliaryTouchGeometry(
                    (index < 2U || (index == 2U && conditionalVisible));
     quad.Position = {500.0F, 300.0F};
     quad.Size = {16.0F, 16.0F};
-    quad.AtlasOrigin = {158.0F, kAtlasY[index]};
+    quad.AtlasOrigin = kLabelAtlas[index];
     quad.AtlasSize = {16.0F, 16.0F};
     quad.Color = {1.0F, 1.0F, 1.0F, auxiliaryAlpha};
     if (index < 2U) {
@@ -1158,7 +1170,6 @@ TopScreenAuxiliaryTouchGeometry BuildTopScreenAuxiliaryTouchGeometry(
           layout == TopScreenHudLayout::Restoration
               ? TopScreenVec2{337.0F, 54.0F}
               : TopScreenVec2{227.0F, 10.0F};
-      quad.AtlasOrigin.Y = 174.0F;
     }
   }
 
@@ -1171,24 +1182,29 @@ TopScreenAuxiliaryTouchGeometry BuildTopScreenAuxiliaryTouchGeometry(
   layoutQuad.Color = {1.0F, 1.0F, 1.0F, viewAlpha};
   float extraX = 0.0F;
   // Variant priority is touch+70 == 1, then Navi, then actor mode / eye.
+  // SingleScreen 3.0 hub 0x005DD200..0x005DD6C8 draws them from custom_ui01:
+  // camera rect 6 (320,198,36,21) 10 px high at its own aspect, Navi rect 5
+  // (199,3,48,48) 14 px, eye rect 4 (451,73,48,32) 16x10. The native
+  // menu_top_parts00 versions carry VIEW/BACK captions that 2.1.1 erased.
+  constexpr float kCameraWidth = 10.0F * 36.0F / 21.0F;
   if (inputs.TouchLayoutState == 1U) {
-    layoutQuad.Size = {20.0F, 10.0F};
-    layoutQuad.AtlasOrigin = {176.0F, 56.0F};
-    layoutQuad.AtlasSize = {48.0F, 24.0F};
+    layoutQuad.Size = {kCameraWidth, 10.0F};
+    layoutQuad.AtlasOrigin = {320.0F, 198.0F};
+    layoutQuad.AtlasSize = {36.0F, 21.0F};
   } else if (inputs.HasPlayState && inputs.StateType == 3U &&
              inputs.StateSubtype == 2U && inputs.PlayerHudMode != 0) {
     layoutQuad.Size = {14.0F, 14.0F};
-    layoutQuad.AtlasOrigin = {176.0F, 0.0F};
+    layoutQuad.AtlasOrigin = {199.0F, 3.0F};
     layoutQuad.AtlasSize = {48.0F, 48.0F};
   } else if (inputs.ViewActorMode20) {
-    layoutQuad.Size = {20.0F, 10.0F};
-    layoutQuad.AtlasOrigin = {128.0F, 56.0F};
-    layoutQuad.AtlasSize = {48.0F, 24.0F};
+    layoutQuad.Size = {kCameraWidth, 10.0F};
+    layoutQuad.AtlasOrigin = {320.0F, 198.0F};
+    layoutQuad.AtlasSize = {36.0F, 21.0F};
     extraX = 1.0F;
   } else {
     layoutQuad.Size = {16.0F, 10.0F};
-    layoutQuad.AtlasOrigin = {129.0F, 0.0F};
-    layoutQuad.AtlasSize = {47.0F, 30.0F};
+    layoutQuad.AtlasOrigin = {451.0F, 73.0F};
+    layoutQuad.AtlasSize = {48.0F, 32.0F};
   }
   // Base center, not the Up lane: singleton Navi has no lane correction.
   // AppendTopScreenDpadPresentation adds {1,2,0,0} only for mapped lanes.
@@ -1199,9 +1215,9 @@ TopScreenAuxiliaryTouchGeometry BuildTopScreenAuxiliaryTouchGeometry(
 
 std::size_t AppendTopScreenAuxiliaryTouchPresentation(
     const TopScreenAuxiliaryTouchGeometry &geometry,
-    const oot3d::ui::UiTextureIdentity &pauseTopPage,
+    const oot3d::ui::UiTextureIdentity &uiAtlas,
     std::vector<oot3d::ui::UiPrimitive> &output) {
-  if (pauseTopPage.semantic_name.empty()) {
+  if (uiAtlas.semantic_name.empty()) {
     return 0U;
   }
   const std::size_t startSize = output.size();
@@ -1215,7 +1231,7 @@ std::size_t AppendTopScreenAuxiliaryTouchPresentation(
     primitive.role = oot3d::ui::UiPrimitiveRole::TouchControl;
     primitive.owner_address = 0x005C9940U;
     primitive.source_quad = static_cast<std::uint32_t>(34U + index);
-    primitive.texture = pauseTopPage;
+    primitive.texture = uiAtlas;
     primitive.destination = {quad.Position.X, quad.Position.Y, quad.Size.X,
                              quad.Size.Y};
     primitive.uv = {quad.AtlasOrigin.X / 512.0F, quad.AtlasOrigin.Y / 256.0F,

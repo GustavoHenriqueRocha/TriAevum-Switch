@@ -19,6 +19,8 @@
 #include <string_view>
 #include "oot3d_native_direct_aot.h"
 #include "oot3d_title_grass_rules.h"
+#include "oot3d/renderer/azahar_texture_pack.h"
+#include <stb_image.h>
 #include "fast/oot3d/graphics_settings_persistence.h"
 #include "fast/oot3d/gl_widescreen_policy.h"
 
@@ -710,6 +712,9 @@ void NativeA32WindowSession::Setup() {
   auto &uiLifecycleBridge = uiLifecycleBridgeStorage.emplace(
       process.Memory());
   uiLifecycleBridge.SetTopScreenConfig(activeTopScreenConfig);
+  uiLifecycleBridge.SetTopScreenUiAtlasAvailable(
+      topScreenTextureOverridePackPointer != nullptr &&
+      topScreenTextureOverridePack.FindProfileTexture(Oot3dNativeGame::kTopScreen30UiAtlasSemantic) != nullptr);
   uiLifecycleBridge.SetVersionChoiceRevealRequired(
       launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen);
   widescreenProjection.UiLifecycleBridge = &uiLifecycleBridge;
@@ -1103,6 +1108,60 @@ void NativeA32WindowSession::Setup() {
 #endif
   auto &nativeUiTextureProvider = nativeUiTextureProviderStorage.emplace(
       picaMemoryView, topScreenTextureOverridePackPointer);
+  // TopScreen's HD UI atlas (on the Switch, config/topscreen_ui_atlas_hd.png
+  // from the mod's 4096x2048 redraw reduced to 3x): it replaces the exact
+  // native ui_atlas bytes, and a texture pack image of that atlas wins. A
+  // missing or unusable file keeps the native atlas.
+  std::shared_ptr<const Oot3dNativeGame::Oot3dUiHdAtlas> uiHdAtlas;
+  if (!launch.TopScreenUiAtlasHdPath.empty() && topScreenTextureOverridePackPointer != nullptr) {
+    const auto *native = topScreenTextureOverridePack.FindProfileTexture("oot3d/topscreen/3.0/ui_atlas");
+    int width = 0, height = 0, channels = 0;
+    stbi_uc *decoded = native == nullptr ? nullptr
+                                         : stbi_load(launch.TopScreenUiAtlasHdPath.string().c_str(),
+                                                     &width, &height, &channels, 4);
+    if (native == nullptr) {
+      std::fprintf(stderr, "topscreen: HD UI atlas unused: the texture pack has no 3.0 ui_atlas\n");
+    } else if (decoded == nullptr) {
+      std::fprintf(stderr, "topscreen: HD UI atlas unused: cannot decode %s (%s)\n",
+                   launch.TopScreenUiAtlasHdPath.string().c_str(),
+                   stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown");
+    } else if (!Oot3dNativeGame::IsUiHdAtlasSize(static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                                                 native->Width, native->Height)) {
+      std::fprintf(stderr, "topscreen: HD UI atlas unused: %dx%d is not a whole multiple of %ux%u\n", width,
+                   height, static_cast<unsigned>(native->Width), static_cast<unsigned>(native->Height));
+    } else {
+      auto atlas = std::make_shared<Oot3dNativeGame::Oot3dUiHdAtlas>();
+      atlas->rgba8 = std::make_shared<const std::vector<uint8_t>>(
+          decoded, decoded + static_cast<size_t>(width) * static_cast<size_t>(height) * 4U);
+      atlas->width = static_cast<uint32_t>(width);
+      atlas->height = static_cast<uint32_t>(height);
+      atlas->native_payload = native->EncodedPayload;
+      uiHdAtlas = std::move(atlas);
+      std::fprintf(stderr, "topscreen: HD UI atlas %dx%d (%zu KiB)\n", width, height,
+                   uiHdAtlas->rgba8->size() / 1024U);
+    }
+    if (decoded != nullptr) stbi_image_free(decoded);
+  }
+  // HUD textures resolve the player's texture pack exactly as native PICA
+  // uploads do (same identity, same async decode) while HD textures are on,
+  // reduced to 3x native (kUiTextureMaxScale) whatever "HD texture size"
+  // says. The pack's generation changes when HD textures are turned on or
+  // off, so the UI renderer resolves its textures again at once.
+  nativeUiTextureProvider.SetCustomTextureSource({
+      [uiHdAtlas](const Oot3dNativeGame::Oot3dNativeUiCustomTextureRequest &request) {
+        const auto pack = Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ResolveOrQueue({
+            .Width = request.width,
+            .Height = request.height,
+            .NativeFormat = request.native_pica_format,
+            .MipLevel = 0U,
+            .NativeBytes = request.encoded_base_level,
+            .NativeRgba8 = request.rgba8,
+            .UserInterface = true,
+        });
+        return Oot3dNativeGame::ChooseUiCustomTexture(pack, request, uiHdAtlas.get());
+      },
+      [] { return Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Generation(); },
+  });
   if (hdFontsLoaded) nativeUiTextureProvider.SetGeneratedTextureTransform(
       [&](const Oot3dNativeGame::Oot3dPicaTextureState& texture,
           Oot3dNativeGame::Oot3dPicaResourceSnapshot& resource) {

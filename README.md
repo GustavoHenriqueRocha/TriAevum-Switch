@@ -31,7 +31,9 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
 - **Not included, downloaded on the console:** the HUD textures of the TopScreen mod
   ([Single Screen Experience](https://gamebanana.com/mods/695893) by M-1, CC BY-NC-ND 4.0). Its license
   lets you download and install it but not share it, so the first start offers to download it from
-  GameBanana (56 MB) and build the textures and HD text font from your game files: A downloads, B asks
+  GameBanana (56 MB) and build the textures, the HD HUD art (the mod's HD atlas at 3x) and the HD text
+  font from your game files; an install from an earlier version is offered the download again to add
+  the HD HUD art: A downloads, B asks
   again next time, X never asks (L3+R3 → Updates turns the offer back on). Without internet, download
   `singlescreen_321.zip` from that page on a PC and copy it into `switch/oot3dre/`.
 - **HD textures (optional):** download the **1080p** version of HenrikoMagnifico's
@@ -39,7 +41,7 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
   contents of its `user/load/textures/0004000000033500/` folder (including `pack.json`) to
   `switch/oot3dre/textures/` on the SD card, whatever your dump's region, and turn on L3+R3 → Video →
   HD textures. The game reduces the pack to 2x the original textures, enough for the 720p screen
-  ("HD texture size" changes it). Expect some GPU and memory cost: each texture is four times the original
+  ("HD texture size" changes it). HUD textures in a pack are used too, at 3x. Expect some GPU and memory cost: each texture is four times the original
   (about 10–50 MB of textures per area), and on/off applies at once, so compare in the same spot with the
   performance overlay.
 

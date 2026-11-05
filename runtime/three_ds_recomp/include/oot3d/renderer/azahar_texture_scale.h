@@ -23,6 +23,11 @@ struct TextureSize {
 [[nodiscard]] TextureSize CappedReplacementSize(TextureSize native, TextureSize replacement,
                                                 uint32_t maxScale) noexcept;
 
+// HUD textures (texture pack replacements and the TopScreen HD UI atlas):
+// the HUD is drawn at 3x its 3DS size on a 720p screen (720 = 3 x 240), so
+// 3x native is one texel per pixel in handheld mode.
+inline constexpr uint32_t kUiTextureMaxScale = 3U;
+
 // RGBA8 `source` of `from` resampled to `to` (each axis no larger than in
 // `from`, any ratio). Every output texel is the area-weighted average of the
 // source texels it covers. Colour is weighted by alpha, so transparent

@@ -504,6 +504,7 @@ struct LoadJob {
     uint64_t Generation = 0;
     IndexedTexture Texture;
     DecodeOptions Options;
+    bool UserInterface = false;
     std::optional<IndexedAzaharPbrMaterial> Material;
     AzaharMaterialIdentity Identity;
     std::shared_ptr<std::promise<AzaharImageLoadResult>> EditorImage;
@@ -568,8 +569,10 @@ class AzaharTexturePackRuntime::Impl {
         mIndex.clear();
         mMaterialIndex.clear();
         mReplacementCache.clear();
+        mUiReplacementCache.clear();
         mMaterialCache.clear();
         mFailedLoadHashes.clear();
+        mFailedUiLoadHashes.clear();
         mFailedMaterialHashes.clear();
         mDumpedHashes.clear();
         const auto title = Hex16(mConfiguration.TitleId);
@@ -630,7 +633,7 @@ class AzaharTexturePackRuntime::Impl {
         if (!loadEnabled) return {AzaharTextureResolveState::Disabled, hash, nullptr, true, loadUsesNewHash};
         std::scoped_lock lock(mMutex);
         if (generation != mGeneration || !mConfiguration.LoadCustomTextures) return {};
-        return QueueOrPollLocked(hash, {request.Width, request.Height});
+        return QueueOrPollLocked(hash, {request.Width, request.Height}, request.UserInterface);
     }
 
     AzaharTextureResolveResult PollQueued(uint64_t hash) const {
@@ -702,11 +705,11 @@ class AzaharTexturePackRuntime::Impl {
         status.PackUsesNewHash = mPack.UseNewHash;
         status.Generation = mGeneration;
         status.IndexedTextures = mIndex.size();
-        status.LoadedTextures = mReplacementCache.size();
+        status.LoadedTextures = mReplacementCache.size() + mUiReplacementCache.size();
         status.DumpedTextures = mDumpedCount;
         status.PendingDumps = mPendingDumps;
         status.PendingLoads = mPendingLoads;
-        status.FailedLoads = mFailedLoadHashes.size();
+        status.FailedLoads = mFailedLoadHashes.size() + mFailedUiLoadHashes.size();
         status.UnsupportedTextureFiles = mUnsupportedFiles;
         status.IndexPending = mRebuildRequested || mBuilding;
         status.IndexedMaterials = mMaterialIndex.size();
@@ -774,31 +777,41 @@ class AzaharTexturePackRuntime::Impl {
 
   private:
     // Queues the decode of an indexed image that is neither cached, failed
-    // nor already queued, then reports its state.
-    AzaharTextureResolveResult QueueOrPollLocked(uint64_t hash, TextureSize native) {
+    // nor already queued, then reports its state. HUD images have their own
+    // cache (another size cap and no mips than a world texture of the hash).
+    AzaharTextureResolveResult QueueOrPollLocked(uint64_t hash, TextureSize native, bool userInterface = false) {
         const auto indexed = mIndex.find(hash);
         if (indexed == mIndex.end()) return {AzaharTextureResolveState::Missing, hash, nullptr, true, mPack.UseNewHash};
-        const auto cached = mReplacementCache.find(hash);
-        if ((cached == mReplacementCache.end() || cached->second->Generation != mGeneration) &&
-            !mFailedLoadHashes.contains(hash) && !mPendingLoadGenerations.contains(hash)) {
-            mPendingLoadGenerations.emplace(hash, mGeneration);
+        auto& cache = userInterface ? mUiReplacementCache : mReplacementCache;
+        auto& pending = userInterface ? mPendingUiLoadGenerations : mPendingLoadGenerations;
+        const auto& failed = userInterface ? mFailedUiLoadHashes : mFailedLoadHashes;
+        const auto cached = cache.find(hash);
+        if ((cached == cache.end() || cached->second->Generation != mGeneration) && !failed.contains(hash) &&
+            !pending.contains(hash)) {
+            pending.emplace(hash, mGeneration);
             LoadJob job;
             job.Hash = hash;
             job.Generation = mGeneration;
             job.Texture = indexed->second;
-            job.Options = {native, mConfiguration.MaxReplacementScale, mConfiguration.GenerateMipmaps};
+            job.Options = userInterface
+                              ? DecodeOptions{native, kUiTextureMaxScale, false}
+                              : DecodeOptions{native, mConfiguration.MaxReplacementScale, mConfiguration.GenerateMipmaps};
+            job.UserInterface = userInterface;
             mLoadJobs.push_back(std::move(job));
             ++mPendingLoads;
             mWorkAvailable.notify_one();
         }
-        return PollLocked(hash);
+        return PollLocked(hash, userInterface);
     }
-    AzaharTextureResolveResult PollLocked(uint64_t hash) const {
+    AzaharTextureResolveResult PollLocked(uint64_t hash, bool userInterface = false) const {
         if (!mConfigured || !mConfiguration.LoadCustomTextures) return {};
-        if (const auto cached = mReplacementCache.find(hash); cached != mReplacementCache.end())
+        const auto& cache = userInterface ? mUiReplacementCache : mReplacementCache;
+        const auto& pending = userInterface ? mPendingUiLoadGenerations : mPendingLoadGenerations;
+        const auto& failed = userInterface ? mFailedUiLoadHashes : mFailedLoadHashes;
+        if (const auto cached = cache.find(hash); cached != cache.end())
             return {AzaharTextureResolveState::Ready, hash, cached->second, true, mPack.UseNewHash};
-        if (mFailedLoadHashes.contains(hash)) return {AzaharTextureResolveState::Failed, hash, nullptr, true, mPack.UseNewHash};
-        if (!mIndexReady || mPendingLoadGenerations.contains(hash)) return {AzaharTextureResolveState::Pending, hash, nullptr, mIndexReady, mPack.UseNewHash};
+        if (failed.contains(hash)) return {AzaharTextureResolveState::Failed, hash, nullptr, true, mPack.UseNewHash};
+        if (!mIndexReady || pending.contains(hash)) return {AzaharTextureResolveState::Pending, hash, nullptr, mIndexReady, mPack.UseNewHash};
         return {AzaharTextureResolveState::Missing, hash, nullptr, true, mPack.UseNewHash};
     }
     void RequestRebuildLocked() {
@@ -834,6 +847,7 @@ class AzaharTexturePackRuntime::Impl {
                 if (!error.empty()) { index.clear(); materials.clear(); }
                 if (mIndexReady && pack.UseNewHash != mPack.UseNewHash) {
                     mReplacementCache.clear();
+                    mUiReplacementCache.clear();
                     mMaterialCache.clear();
                 }
                 mPack = std::move(pack);
@@ -846,10 +860,13 @@ class AzaharTexturePackRuntime::Impl {
                 mPreviewSeamStatus.clear();
                 ++mMaterialRevision;
                 mFailedLoadHashes.clear();
+                mFailedUiLoadHashes.clear();
                 mFailedMaterialHashes.clear();
                 mPendingLoadGenerations.clear();
+                mPendingUiLoadGenerations.clear();
                 mPendingMaterialGenerations.clear();
                 std::erase_if(mReplacementCache, [&](const auto& entry) { return !mIndex.contains(entry.first); });
+                std::erase_if(mUiReplacementCache, [&](const auto& entry) { return !mIndex.contains(entry.first); });
                 std::erase_if(mMaterialCache, [&](const auto& entry) { return !mMaterialIndex.contains(entry.first); });
                 uint64_t firstError = std::numeric_limits<uint64_t>::max();
                 for (const auto& [hash, material] : mMaterialIndex) {
@@ -930,15 +947,19 @@ class AzaharTexturePackRuntime::Impl {
             }
         } catch (const std::exception& exception) { failure = exception.what(); }
         std::scoped_lock lock(mMutex);
-        auto& pending = job.Material ? mPendingMaterialGenerations : mPendingLoadGenerations;
-        auto& failed = job.Material ? mFailedMaterialHashes : mFailedLoadHashes;
+        auto& pending = job.Material ? mPendingMaterialGenerations
+                                     : (job.UserInterface ? mPendingUiLoadGenerations : mPendingLoadGenerations);
+        auto& failed = job.Material ? mFailedMaterialHashes
+                                    : (job.UserInterface ? mFailedUiLoadHashes : mFailedLoadHashes);
         const auto found = pending.find(job.Hash);
         if (found != pending.end() && found->second == job.Generation) {
             if (job.Generation == mGeneration && mConfiguration.LoadCustomTextures) {
                 if (material && material->ColorReplacement && job.Material->BaseColorTexture.empty())
                     mReplacementCache.insert_or_assign(job.Hash, material->ColorReplacement);
                 if (material) mMaterialCache.insert_or_assign(job.Hash, std::move(material));
-                if (replacement) mReplacementCache.insert_or_assign(job.Hash, std::move(replacement));
+                if (replacement)
+                    (job.UserInterface ? mUiReplacementCache : mReplacementCache)
+                        .insert_or_assign(job.Hash, std::move(replacement));
                 if (!failure.empty()) {
                     failed.insert(job.Hash);
                     mLastError = std::move(failure);
@@ -1020,9 +1041,12 @@ class AzaharTexturePackRuntime::Impl {
     std::unordered_map<uint64_t, IndexedTexture> mIndex;
     std::unordered_map<uint64_t, IndexedAzaharPbrMaterial> mMaterialIndex;
     std::unordered_map<uint64_t, std::shared_ptr<const AzaharTextureReplacement>> mReplacementCache;
+    // HUD images (AzaharTextureRequest::UserInterface), apart from world ones.
+    std::unordered_map<uint64_t, std::shared_ptr<const AzaharTextureReplacement>> mUiReplacementCache;
     std::unordered_map<uint64_t, std::shared_ptr<const AzaharPbrMaterial>> mMaterialCache;
-    std::unordered_map<uint64_t, uint64_t> mPendingLoadGenerations, mPendingMaterialGenerations;
-    std::unordered_set<uint64_t> mFailedLoadHashes, mFailedMaterialHashes, mDumpedHashes;
+    std::unordered_map<uint64_t, uint64_t> mPendingLoadGenerations, mPendingUiLoadGenerations,
+        mPendingMaterialGenerations;
+    std::unordered_set<uint64_t> mFailedLoadHashes, mFailedUiLoadHashes, mFailedMaterialHashes, mDumpedHashes;
     std::deque<LoadJob> mLoadJobs;
     std::deque<DumpJob> mDumpJobs;
     size_t mPendingLoads = 0U, mPendingDumps = 0U, mDumpedCount = 0U, mUnsupportedFiles = 0U;

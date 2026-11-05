@@ -83,14 +83,22 @@ std::string Attribution(const ts::Archive& archive) {
            "it, but not share it, so it is not included with this game.\n\n";
 }
 
-std::string Offer() {
+// `upgrade`: the pack exists but was built before the HD UI atlas was.
+std::string Offer(bool upgrade) {
     const ts::Archive& archive = ts::DownloadArchive();
     const std::string size = std::to_string((archive.Bytes + 500'000) / 1'000'000) + " MB";
-    return Attribution(archive) +
-           "The console can download it from GameBanana (" + size + ") and build the\n"
-           "textures and the HD text font from your own game data. Nothing else\n"
-           "from the mod is installed, and the download is deleted afterwards.\n"
-           "Without them, parts of the HUD may be missing.\n\n"
+    const std::string what =
+        upgrade ? "Your HUD textures were built by an earlier version. This one also\n"
+                  "builds the mod's HD HUD art (sharp buttons, D-pad and labels at\n"
+                  "720p), which needs the mod again: the console can download it\n"
+                  "from GameBanana (" + size + ") and rebuild the textures from your own\n"
+                  "game data. Nothing else from the mod is installed, and the download\n"
+                  "is deleted afterwards. Without it, the HUD keeps its current art.\n\n"
+                : "The console can download it from GameBanana (" + size + ") and build the\n"
+                  "textures, the HD HUD art and the HD text font from your own game data.\n"
+                  "Nothing else from the mod is installed, and the download is deleted\n"
+                  "afterwards. Without them, parts of the HUD may be missing.\n\n";
+    return Attribution(archive) + what +
            "  A  Download (" + size + ") and start the game\n"
            "  B  Not now (ask again at the next start)\n"
            "  X  Never ask again (L3+R3 > Updates can turn this back on)\n";
@@ -170,8 +178,11 @@ Outcome BuildFrom(SwitchConsoleScreen& screen, const fs::path& archivePath, cons
         const ts::Outputs outputs = ts::Build(archivePath, archive, Root() / "game" / "romfs.bin");
         ts::Install(outputs, Config());
         Log("installed " + std::string(ts::kPackName) + " (" + std::to_string(outputs.Pack.size()) +
-            " bytes) and " + ts::kFontPackName + " (" + std::to_string(outputs.Fonts.size()) + " bytes) from " +
-            archivePath.filename().string() + " " + archive.Version);
+            " bytes), " + ts::kFontPackName + " (" + std::to_string(outputs.Fonts.size()) + " bytes) and " +
+            (outputs.UiAtlasHd.empty() ? std::string("no HD UI atlas")
+                                       : std::string(ts::kUiAtlasHdName) + " (" +
+                                             std::to_string(outputs.UiAtlasHd.size()) + " bytes)") +
+            " from " + archivePath.filename().string() + " " + archive.Version);
         return Outcome::Installed;
     } catch (const std::exception& error) {
         *failure = std::string("Could not build the textures: ") + error.what() + ".";
@@ -235,12 +246,13 @@ Outcome DownloadAndBuild(SwitchConsoleScreen& screen, std::string* failure) {
     return BuildFrom(screen, partial, archive, header, failure);
 }
 
-// An official archive the player put in sdmc:/switch/oot3dre/.
-std::optional<fs::path> LocalArchive() {
+// An official archive the player put in sdmc:/switch/oot3dre/, and the
+// release its name stands for (IdentifyArchiveFile checks it).
+std::optional<std::pair<fs::path, const ts::Archive*>> LocalArchive() {
     for (const ts::Archive& archive : ts::KnownArchives()) {
         const fs::path path = Root() / archive.FileName;
         std::error_code error;
-        if (fs::is_regular_file(path, error)) return path;
+        if (fs::is_regular_file(path, error)) return std::pair{path, &archive};
     }
     return std::nullopt;
 }
@@ -250,8 +262,9 @@ std::optional<fs::path> LocalArchive() {
 bool RunSwitchTopScreenImport() {
     std::error_code error;
     const bool packExists = fs::is_regular_file(Config() / ts::kPackName, error);
+    const bool hdAtlasExists = fs::is_regular_file(Config() / ts::kUiAtlasHdName, error);
     const bool romfsExists = fs::is_regular_file(Root() / "game" / "romfs.bin", error);
-    if (packExists || !romfsExists) return true;
+    if ((packExists && hdAtlasExists) || !romfsExists) return true;
     // A download interrupted by closing the app.
     for (const ts::Archive& archive : ts::KnownArchives()) {
         fs::path partial = Root() / archive.FileName;
@@ -259,26 +272,29 @@ bool RunSwitchTopScreenImport() {
         fs::remove(partial, error);
     }
     const auto setting = ts::ParseOfferSetting(ReadText(Config() / ts::kOfferSettingName));
-    const auto local = LocalArchive();
-    if (!local && !ts::ShouldOffer(packExists, romfsExists, setting)) return true;
+    auto local = LocalArchive();
+    if (local && !ts::ShouldBuildFromLocalArchive(packExists, hdAtlasExists, *local->second)) local.reset();
+    if (!local && !ts::ShouldOffer(packExists, hdAtlasExists, romfsExists, setting)) return true;
+    if (packExists) Log("the pack has no HD UI atlas (" + std::string(ts::kUiAtlasHdName) + ")");
 
     SwitchConsoleScreen screen("Ocarina of Time 3D - HUD textures");
     std::string notice;
     if (local) {
+        const fs::path& localPath = local->first;
         // The player copied the archive here: build from it without asking.
-        screen.Show("Checking " + local->filename().string() + "...\n");
+        screen.Show("Checking " + localPath.filename().string() + "...\n");
         std::string reason;
-        const ts::Archive* archive = ts::IdentifyArchiveFile(*local, &reason, [&](std::uint64_t done, std::uint64_t total) {
+        const ts::Archive* archive = ts::IdentifyArchiveFile(localPath, &reason, [&](std::uint64_t done, std::uint64_t total) {
             if (done % (8U << 20U) < (1U << 20U) || done == total)
-                screen.Show("Checking " + local->filename().string() + "...\n" + Bar(done, total) + "\n");
+                screen.Show("Checking " + localPath.filename().string() + "...\n" + Bar(done, total) + "\n");
         });
         if (archive) {
             std::string failure;
-            if (BuildFrom(screen, *local, *archive, Attribution(*archive), &failure) == Outcome::Installed)
+            if (BuildFrom(screen, localPath, *archive, Attribution(*archive), &failure) == Outcome::Installed)
                 return true;
             notice = failure + "\n\n";
         } else {
-            Log("rejected " + local->string() + ": " + reason);
+            Log("rejected " + localPath.string() + ": " + reason);
             notice = reason + ".\nIt was left on the SD card untouched.\n\n";
         }
         if (setting == ts::OfferSetting::Never) {
@@ -288,7 +304,7 @@ bool RunSwitchTopScreenImport() {
     }
 
     for (;;) {
-        screen.Show(notice + Offer());
+        screen.Show(notice + Offer(packExists));
         const auto button = screen.Wait(HidNpadButton_A | HidNpadButton_B | HidNpadButton_X);
         if (!button) return false;
         if (*button & HidNpadButton_B) {

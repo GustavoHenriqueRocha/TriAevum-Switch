@@ -1,7 +1,8 @@
 #pragma once
 
-// Builds config/atlas_overrides.o3tu (and the HD font coverage beside it) on
-// the console from the official "OoT3D: Single Screen Experience" archive by
+// Builds config/atlas_overrides.o3tu (and the HD font coverage and the HD UI
+// atlas beside it) on the console from the official "OoT3D: Single Screen
+// Experience" archive by
 // M-1 (https://gamebanana.com/mods/695893, CC BY-NC-ND 4.0) and the player's
 // own RomFS. The mod may be downloaded and installed but not redistributed,
 // so the game never ships it: the player's console downloads it and builds
@@ -14,10 +15,12 @@
 // v2) and of prepare_qbf_font_pack.py / qbf_font.py (font_coverage.zip). For
 // the same archive and RomFS both outputs are byte-identical to the Python
 // tools' (oot3d_topscreen_import_tests --build). Only the texture and font
-// entries listed below are read; the mod's executable patches, ExHeader,
-// models and PNG packs are never extracted.
+// entries listed below and the HD UI atlas PNG (custom_ui01 for Azahar,
+// reduced here to 3x) are read; the mod's executable patches, ExHeader,
+// models and other PNGs are never extracted.
 //
-// Pure standard C++ plus zlib (inflate, crc32), so it builds on the host.
+// Standard C++ plus zlib (inflate, deflate, crc32) and the pure
+// azahar_texture_scale filter, so it builds on the host.
 
 #include "oot3d_rom_import.h"
 
@@ -50,6 +53,11 @@ struct Archive {
     std::uint64_t Bytes;
     const char* Sha256;   // lowercase hex
     const char* Url;      // nullptr: no longer downloadable
+    // The HD UI atlas inside it (4096x2048 PNG of custom_ui01 for Azahar,
+    // the same in every region folder): size and SHA-256, or 0/nullptr when
+    // the release is not known to carry one.
+    std::uint64_t UiAtlasHdBytes;
+    const char* UiAtlasHdSha256;
 };
 
 // The release the console downloads (3.2.1, GameBanana file 1875895).
@@ -66,15 +74,25 @@ inline constexpr const char* kModLicense = "CC BY-NC-ND 4.0";
 inline constexpr const char* kPackName = "atlas_overrides.o3tu";
 inline constexpr const char* kFontPackName = "font_coverage.zip";
 inline constexpr const char* kReceiptName = "topscreen_import.json";
+// The mod's HD UI atlas reduced to kUiAtlasHdScale x the native atlas: the
+// HUD's art at one texel per pixel on a 720p screen (--topscreen-ui-atlas-hd).
+inline constexpr const char* kUiAtlasHdName = "topscreen_ui_atlas_hd.png";
+inline constexpr std::uint32_t kUiAtlasHdScale = 3;
 // The player's answer to the start-up offer: "never" stops it; anything else
-// (or no file) offers the download at the next start when the pack is missing.
+// (or no file) offers the download at the next start when the pack or the HD
+// atlas is missing.
 inline constexpr const char* kOfferSettingName = "topscreen_offer";
 
 enum class OfferSetting { Ask, Never };
 [[nodiscard]] OfferSetting ParseOfferSetting(std::string_view text);
 [[nodiscard]] const char* OfferSettingText(OfferSetting setting);
-// Whether the start-up screen offers the download.
-[[nodiscard]] bool ShouldOffer(bool packExists, bool romfsExists, OfferSetting setting);
+// Whether the start-up screen offers the download: no pack yet, or a pack
+// without the HD atlas (an install from before it was imported).
+[[nodiscard]] bool ShouldOffer(bool packExists, bool hdAtlasExists, bool romfsExists, OfferSetting setting);
+// Whether a verified archive the player copied to switch/oot3dre/ is built
+// at start-up without asking: always without a pack; with a pack, only when
+// the HD atlas is missing and that archive carries one.
+[[nodiscard]] bool ShouldBuildFromLocalArchive(bool packExists, bool hdAtlasExists, const Archive& archive);
 
 // ---- ZIP (stored or deflated entries, no ZIP64, no encryption) ----
 
@@ -153,6 +171,18 @@ private:
 [[nodiscard]] Bytes EncodeRgba4Tiled(std::span<const std::uint8_t> rgba, std::uint32_t width,
                                      std::uint32_t height);
 
+// ---- PNG (8-bit RGBA, non-interlaced; what the HD atlas is) ----
+
+struct Rgba8Image {
+    std::uint32_t Width = 0, Height = 0;
+    Bytes Pixels; // top-down rows, Width x Height x 4
+};
+// Throws ImportError on any other PNG, a damaged one, or one larger than
+// maxPixels.
+[[nodiscard]] Rgba8Image DecodePngRgba8(std::span<const std::uint8_t> png, std::uint64_t maxPixels);
+// A PNG of one IDAT, Paeth-filtered rows, zlib's default level.
+[[nodiscard]] Bytes EncodePngRgba8(const Rgba8Image& image);
+
 // ---- Outputs ----
 
 // O3TU v2 from a 3.x archive (`root`) and the player's RomFS. `region` empty:
@@ -165,6 +195,15 @@ private:
 [[nodiscard]] Bytes BuildFontPack(const ZipReader& archive, const Archive& root,
                                   const RomFsImage& romfs, std::string_view archiveSha256);
 
+// The archive's HD UI atlas PNG for `region` ("EUR", "USA" or "JPN"; the
+// release's pin is checked). Empty when the release carries none.
+[[nodiscard]] Bytes ExtractUiAtlasHd(const ZipReader& archive, const Archive& root, std::string_view region);
+// The HD atlas reduced to kUiAtlasHdScale x the native 512x256 atlas
+// (1536x768) by azahar_texture_scale's area-weighted, alpha-aware filter,
+// as a PNG. Throws when the source is not a whole multiple of 512x256 at
+// kUiAtlasHdScale or more.
+[[nodiscard]] Bytes BuildUiAtlasHd(std::span<const std::uint8_t> sourcePng);
+
 // Size and SHA-256 of a file against a known release; nullptr and a reason
 // when it is none of them. `progress(done, total)` may be empty.
 [[nodiscard]] const Archive* IdentifyArchiveFile(
@@ -175,8 +214,9 @@ struct Outputs {
     const Archive* Source = nullptr;
     Bytes Pack;
     Bytes Fonts;
+    Bytes UiAtlasHd; // empty when the release has no HD atlas
 };
-// Both outputs from a verified archive (`source`, see IdentifyArchiveFile).
+// The outputs from a verified archive (`source`, see IdentifyArchiveFile).
 [[nodiscard]] Outputs Build(const std::filesystem::path& archive, const Archive& source,
                             const std::filesystem::path& romfs);
 
@@ -184,8 +224,8 @@ struct Outputs {
 // (removed first: Horizon cannot rename over a file). Throws ImportError.
 void WriteFileVerified(const std::filesystem::path& path, std::span<const std::uint8_t> bytes);
 
-// Writes the font pack, the receipt and the pack (last: it is what the game
-// looks for) into `configDirectory`.
+// Writes the font pack, the receipt, the HD atlas (when built) and the pack
+// (last: it is what the game looks for) into `configDirectory`.
 void Install(const Outputs& outputs, const std::filesystem::path& configDirectory);
 
 } // namespace Oot3dNativeGame::TopScreenImport

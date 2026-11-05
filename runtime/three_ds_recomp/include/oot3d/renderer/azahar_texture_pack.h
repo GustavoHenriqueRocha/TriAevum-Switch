@@ -39,6 +39,11 @@ struct AzaharTextureRequest {
     uint32_t MipLevel = 0;
     std::span<const uint8_t> NativeBytes;
     std::span<const uint8_t> NativeRgba8;
+    // A HUD texture (the native UI renderer's): reduced to kUiTextureMaxScale
+    // x native (azahar_texture_scale.h) whatever MaxReplacementScale says,
+    // without a mip chain, and cached apart from a world texture of the same
+    // hash. The UI renderer keeps its own copy; ReleaseDecoded does not apply.
+    bool UserInterface = false;
 };
 
 struct AzaharTextureReplacement {
