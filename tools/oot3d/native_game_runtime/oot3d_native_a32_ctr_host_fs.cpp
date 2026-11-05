@@ -2,7 +2,9 @@
 #include "oot3d_native_a32_ctr_host_internal.h"
 #include "oot3d_native_master_quest_unlock.h"
 
+#include <array>
 #include <cstdio>
+#include <fstream>
 
 namespace Oot3dNativeGame {
 
@@ -864,6 +866,57 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                 handleDetail << std::hex << archiveHandle
                              << ":result=0x" << result;
                 event.Name += handleDetail.str();
+                event.Detail = result;
+                event.Handled = true;
+                mSvcEvents.push_back(std::move(event));
+                return {NativeA32HostAction::Resume};
+            }
+        }
+    }
+    // GetFormatInfo / FormatSaveData do save do próprio título (Super Mario
+    // 3D Land pergunta se o save está formatado antes de abri-lo e formata
+    // na primeira vez). O formato fica em <save>.format, ao lado da pasta,
+    // fora do que o jogo lista; o backend do Switch ainda não tem isso.
+    if ((event.Detail == kFsGetFormatInfoRequest ||
+         event.Detail == kFsFormatSaveDataRequest) &&
+        sessionType == "client_session:fs:USER" && mConfig.Filesystem == nullptr &&
+        !mConfig.SaveDataDirectory.empty()) {
+        const bool format = event.Detail == kFsFormatSaveDataRequest;
+        uint32_t archiveId = 0, pathType = 0, pathSize = 0;
+        std::array<uint32_t, 6> values{};  // tamanho do bloco, dirs, arquivos, buckets x2, duplicado
+        bool readable = memory.Read32(commandBuffer + 4U, &archiveId) &&
+                        memory.Read32(commandBuffer + 8U, &pathType) &&
+                        memory.Read32(commandBuffer + 12U, &pathSize);
+        for (size_t index = 0; format && index < values.size(); ++index) {
+            readable = readable && memory.Read32(commandBuffer + 16U + 4U * index, &values[index]);
+        }
+        if (readable && archiveId == kFsSaveDataArchiveId && pathType == 1U) {
+            const std::filesystem::path formatPath =
+                mConfig.SaveDataDirectory.string() + ".format";
+            uint32_t result = kResultSuccess;
+            std::array<uint32_t, 4> info{};  // tamanho total, dirs, arquivos, duplicado
+            std::error_code error;
+            if (format) {
+                info = {values[0] * 512U, values[1], values[2], values[5] & 0xFFU};
+                std::filesystem::remove_all(mConfig.SaveDataDirectory, error);
+                std::filesystem::create_directories(mConfig.SaveDataDirectory, error);
+                std::ofstream output(formatPath, std::ios::trunc);
+                output << info[0] << ' ' << info[1] << ' ' << info[2] << ' ' << info[3] << '\n';
+                if (error || !output) result = kFsBackendFailure;
+            } else if (std::ifstream input(formatPath);
+                       !(input >> info[0] >> info[1] >> info[2] >> info[3])) {
+                result = kFsNotFormatted;
+            }
+            bool written = memory.Write32(commandBuffer, format ? kFsFormatSaveDataResponse
+                                                                : kFsGetFormatInfoResponse) &&
+                           memory.Write32(commandBuffer + 4U, result);
+            for (size_t index = 0; !format && index < info.size(); ++index) {
+                written = written && memory.Write32(commandBuffer + 8U + 4U * index,
+                                                    result == kResultSuccess ? info[index] : 0U);
+            }
+            if (written) {
+                state.r[0] = kResultSuccess;
+                event.Name += format ? ":FormatSaveData" : ":GetFormatInfo";
                 event.Detail = result;
                 event.Handled = true;
                 mSvcEvents.push_back(std::move(event));
