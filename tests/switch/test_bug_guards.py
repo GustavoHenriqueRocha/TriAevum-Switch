@@ -499,6 +499,14 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
           r'std::ios::binary \| std::ios::ate\);.*?file\.read\(reinterpret_cast<char\*>\(bytes\.data\(\)\)',
           forbid=r'std::vector<uint8_t> bytes\(\(std::istreambuf_iterator'),
+    Guard("uber (paramétrico) de 91-154 KiB: loop do TEV desenrolado pelo uam",
+          "runtime/three_ds_recomp/src/fast/renderer3ds/pica_tev_program.cpp",
+          r'int stage_count = program\.control\.z == 0u \? 6 : int\(program\.control\.z\);\s+'
+          r'for \(int stage = 0; stage < stage_count; \+\+stage\)',
+          "pica_tev_gpu_tests (estágios PREVIOUS no fim)", forbid=r'for \(int stage = 0; stage < 6; \+\+stage\)'),
+    Guard("uber embutia o avaliador de proctex mesmo com a unidade desligada",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_fragment_shader_gen.cpp",
+          r'if \(procTexEnabled\)\s+source << Fast::Renderer3ds::PicaProcTexCode'),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

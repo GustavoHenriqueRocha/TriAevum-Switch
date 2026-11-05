@@ -1,4 +1,4 @@
-// Writes the GLSL 4.3 text of the four parametric (uber) fragment programs
+// Writes the GLSL 4.3 text of the eight parametric (uber) fragment programs
 // the deko3d backend falls back to, as frag_<key>.glsl, the same names the
 // game records for shaders missing from shadercache/deko3d.pack. Then
 // tools/oot3d/deko3d_shader_pack.py --glsl <dir> compiles them into the pack,
@@ -22,11 +22,11 @@ int main(int argc, char** argv) {
     const std::filesystem::path directory(argv[1]);
     std::filesystem::create_directories(directory);
     int written = 0;
-    for (unsigned index = 0; index < 4U; ++index) {
+    for (unsigned index = 0; index < 8U; ++index) {
         Oot3dNativeGame::Oot3dPicaGeneratedFragmentShader generated;
         std::string error;
         if (!Oot3dNativeGame::GenerateOot3dPicaParametricBaseFragmentShader((index & 1U) != 0U, (index & 2U) != 0U,
-                                                                              generated, &error)) {
+                                                                              generated, &error, (index & 4U) != 0U)) {
             std::fprintf(stderr, "base %u: sem programa paramétrico (%s)\n", index, error.c_str());
             continue;
         }
@@ -39,9 +39,9 @@ int main(int argc, char** argv) {
         char name[64];
         std::snprintf(name, sizeof(name), "frag_%016llx.glsl", static_cast<unsigned long long>(key));
         std::ofstream(directory / name, std::ios::binary | std::ios::trunc) << translated;
-        std::printf("base %u (luz=%u, textura0 inteira=%u): %s, %zu bytes\n", index, index & 1U, (index >> 1) & 1U,
-                    name, translated.size());
+        std::printf("base %u (luz=%u, textura0 inteira=%u, proctex=%u): %s, %zu bytes\n", index, index & 1U,
+                    (index >> 1) & 1U, (index >> 2) & 1U, name, translated.size());
         ++written;
     }
-    return written == 4 ? 0 : 1;
+    return written == 8 ? 0 : 1;
 }

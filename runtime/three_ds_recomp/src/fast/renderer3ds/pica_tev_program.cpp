@@ -153,6 +153,16 @@ PicaTevDecodeError DecodePicaTevProgram(std::span<const uint32_t> registers,
         }
     }
     candidate.Control[0] = registers[0xE0] & 0xFF00;
+    // Trailing REPLACE(PREVIOUS) stages at scale 1 return PREVIOUS unchanged
+    // (it is already clamped and byte-rounded), so the parametric program can
+    // stop before them. Stage 0 always runs: its PREVIOUS aliases source C.
+    candidate.Control[2] = 1;
+    for (uint32_t stage = 1; stage < bases.size(); ++stage) {
+        const auto& words = candidate.Stages[stage];
+        const bool passThrough = (words[0] & 0x000F000FU) == 0x000F000FU && (words[1] & 0x0000F00FU) == 0U &&
+                                 words[2] == 0U && words[3] == 0U;
+        if (!passThrough) candidate.Control[2] = stage + 1;
+    }
     output = candidate;
     return PicaTevDecodeError::None;
 }
@@ -265,7 +275,11 @@ vec4 pica_evaluate_tev_resolved(PicaTevProgram program, PicaTevInputs inputs) {
     vec4 combiner_buffer = vec4(0.0);
     vec4 next_buffer = inputs.buffer_color;
     vec4 previous = vec4(0.0);
-    for (int stage = 0; stage < 6; ++stage) {
+    // A uniform bound keeps the loop rolled (an unrolled copy of every
+    // source/operation switch was most of the parametric program's code) and
+    // skips the trailing pass-through stages; 0 comes from old savestates.
+    int stage_count = program.control.z == 0u ? 6 : int(program.control.z);
+    for (int stage = 0; stage < stage_count; ++stage) {
         uvec4 words = program.stages[stage];
         vec4 colors[3];
         vec4 alphas[3];

@@ -680,11 +680,15 @@ bool GenerateOot3dPicaFragmentShader(
     source << ShadowWriteHelpers(state);
     source << procTexSource;
     if (parametric) {
-        source << Fast::Renderer3ds::PicaProcTexCode << Fast::Renderer3ds::PicaProcTexFragmentSampler;
+        // Without the procedural unit enabled texture 3 reads zero, as in the
+        // specialized emitter; its evaluator was ~25% of the parametric code.
+        if (procTexEnabled)
+            source << Fast::Renderer3ds::PicaProcTexCode << Fast::Renderer3ds::PicaProcTexFragmentSampler;
         source << (integerTexture0
                        ? Fast::Renderer3ds::PicaIntegerTexture0Program
                        : Fast::Renderer3ds::PicaFloatTexture0Program);
-        source << "vec4 pica_native_texture3() { return pica_sample_proctex(); }\n";
+        source << (procTexEnabled ? "vec4 pica_native_texture3() { return pica_sample_proctex(); }\n"
+                                  : "vec4 pica_native_texture3() { return vec4(0.0); }\n");
         source << Fast::Renderer3ds::PicaTextureSelectionProgram;
     }
     source << lightingDeclarations;
@@ -954,11 +958,11 @@ bool GenerateOot3dPicaFragmentShader(
 
 bool GenerateOot3dPicaParametricBaseFragmentShader(
     bool fragmentLighting, bool integerTexture0,
-    Oot3dPicaGeneratedFragmentShader& shader, std::string* error) {
+    Oot3dPicaGeneratedFragmentShader& shader, std::string* error, bool procTex) {
     auto packet = std::make_unique<Oot3dPicaDrawPacket>();
     Oot3dPicaDecodedDrawState state{};
     packet->Registers[0x8FU] = fragmentLighting ? 1U : 0U;
-    packet->Registers[0x80U] = 1U;
+    packet->Registers[0x80U] = procTex ? 1U | 1U << 10U : 1U;
     packet->Registers[0x83U] = integerTexture0 ? 2U << 28U : 0U;
     state.Textures[0].Enabled = true;
     state.Textures[0].Type = integerTexture0 ? 2U : 0U;

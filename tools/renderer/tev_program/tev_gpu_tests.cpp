@@ -126,7 +126,16 @@ std::vector<Case> Cases() {
             registers[base + 4] = (random() % 4) | ((random() % 4) << 16);
         }
         registers[0xE0] = random();
+        // Half the programs end in REPLACE(PREVIOUS) stages, which the GLSL
+        // loop skips (Control[2]); the CPU reference still runs all six.
+        const unsigned firstPassThrough = (&test - tests.data()) % 2 == 0 ? 6U : 1U + random() % 5;
+        for (unsigned stage = firstPassThrough; stage < 6U; ++stage) {
+            registers[bases[stage]] = 0x000F000FU;
+            registers[bases[stage] + 1] = registers[bases[stage] + 2] = registers[bases[stage] + 4] = 0U;
+        }
         Require(DecodePicaTevProgram(registers, test.Program) == PicaTevDecodeError::None, "valid program rejected");
+        Require(test.Program.Control[2] >= 1U && test.Program.Control[2] <= firstPassThrough,
+                "active stage count covers a trailing pass-through stage");
         auto color = [&] { Color c; for (auto& f : c) f = float(random() % 256) / 255.0F; return c; };
         test.Input.Primary = color();
         test.Input.PrimaryFragment = color();
