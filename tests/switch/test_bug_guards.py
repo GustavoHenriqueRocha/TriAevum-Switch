@@ -567,6 +567,49 @@ GUARDS = [
     Guard("ctr_title_boot_probe ligava núcleos manuais do OoT3D sem olhar o perfil",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_boot_probe.cpp",
           r'dispatch != nullptr && dispatch->ManualCompiledFunctions, true, 0U\);'),
+    # --- 05/11: Super Mario 3D Land no executável com janela (Linux, Vulkan) ---
+    # A janela ligava sempre os ganchos por PC do OoT3D (projeção, PlayState,
+    # composição PICA, UI, TopScreen), typed gameplay, mass/true AOT e núcleos
+    # manuais; o perfil genérico desliga tudo. O OoT3D tem de continuar igual.
+    Guard("perfil OoT3D perdeu os ganchos da janela/TopScreen (Zelda mudaria)",
+          "tools/oot3d/native_game_runtime/ctr_title_profile.h",
+          r'bool Oot3dGuestHooks = true;.*?bool TopScreenUi = true;'
+          r'.*?GenericTitleProfile.*?profile\.Oot3dGuestHooks = false;\s+profile\.TopScreenUi = false;',
+          "oot3d_native_a32_ctr_host_tests (TestWindowProfileGatesOot3dHooks)"),
+    Guard("janela de outro título manteve os ganchos por PC do OoT3D",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'genericTitle = !titleProfile\.Oot3dGuestHooks;.*?'
+          r'if \(genericTitle\) \{\s+// Só os ganchos da fronteira de quadro.*?'
+          r'blockEntryHooks\.assign\(frameBoundaryHooks\.begin\(\), frameBoundaryHooks\.end\(\)\);',
+          "oot3d_native_a32_ctr_host_tests (TestWindowProfileGatesOot3dHooks)"),
+    Guard("typed gameplay do OoT3D ligado na janela de outro título",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'enableCompiledFunctions && !launch\.DisableTypedGameplay && !genericTitle,'),
+    Guard("Mario preso no boot da janela: lista de ganchos vazia avisava em todo bloco (1 VBlank em 60 s)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'genericTitleWithoutHooks = genericTitle && blockEntryHooks\.empty\(\).*?'
+          r'nativeCandidateDispatch\.BlockEntry = nullptr;.*?'
+          r'else if \(genericTitleWithoutHooks\) \{\s+process\.SetBlockEntryCallback\(nullptr, nullptr'),
+    Guard("janela de outro título caía na detecção de idiomas do OoT3D na RomFS",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'titleProfile\.Kind == Oot3dNativeGame::CtrTitleKind::Oot3d\s+\? Oot3dNativeGame::DetectGameLanguages'),
+    Guard("Mario parava em MissingBlock 0x003A0D38 (__aeabi_f2ulz do RVCT fora do whole-AOT)",
+          "tools/oot3d/native_game_runtime/ctr_library_natives.h",
+          r'kRvctAeabiF2ulzWords\{\s+0xE1B02BC0U,.*?if \(exponent > 0xBEU\) \{\s+return ~uint64_t\{0\};',
+          "oot3d_native_a32_ctr_host_tests (TestRvctLibraryNatives)"),
+    Guard("rotinas nativas da biblioteca do RVCT ligadas no OoT3D (só no título genérico)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'std::vector<Oot3dNativeGame::CtrLibraryNativeEntry> libraryNatives;\s+if \(genericTitle\) \{'),
+    Guard("build Linux do executável com janela: Deko3dRendererSelected sem declaração fora do Switch",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'#endif\s+// Deko3dRendererSelected\(\).*?#include "fast/backends/gfx_deko3d\.h"'),
+    Guard("build Linux do executável com janela: ~SwitchVsyncClock indefinido no link",
+          "CMake/oot3d/game.cmake",
+          r'if \(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch"\).*?oot3d_switch_vsync_clock\.cpp\)'),
+    Guard("captura .png gravava BMP (primeira imagem do Mario em PNG)",
+          "tools/oot3d/native_demo_host/oot3d_demo_host_screenshot.cpp",
+          r'const bool png = ScreenshotPathIsPng\(screenshotPath\);.*?WritePngFromRgb8Framebuffer',
+          "oot3d_demo_host_png_tests"),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

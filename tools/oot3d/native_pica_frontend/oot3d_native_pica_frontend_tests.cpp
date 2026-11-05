@@ -303,6 +303,16 @@ int main(int argc, char** argv) {
             packet.VertexShader.Program[0] ^= 1;
             Require(!Oot3dNativeGame::GenerateOot3dPicaVertexShader(packet, state, rejected, &error, true),
                     "changed program must not fall back to runtime translation");
+            // Fora do modo paramétrico (o executável Vulkan do PC, que é como
+            // outro título roda: Super Mario 3D Land) um programa fora da
+            // família traduzida do OoT3D é traduzido em tempo de execução.
+            {
+                Oot3dNativeGame::Oot3dPicaGeneratedVertexShader runtimeTranslated;
+                Require(Oot3dNativeGame::GenerateOot3dPicaVertexShader(packet, state, runtimeTranslated, &error),
+                        "a program outside the translated family was not translated at runtime: " + error);
+                Require(!runtimeTranslated.Source.empty() && runtimeTranslated.StateKey != 0U,
+                        "runtime-translated vertex program has no source");
+            }
             packet.VertexShader.Program[0] ^= 1;
             packet.VertexShader.Swizzles[0] ^= 1;
             Require(!Oot3dNativeGame::GenerateOot3dPicaVertexShader(packet, state, rejected, &error, true),

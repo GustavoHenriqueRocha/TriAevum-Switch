@@ -31,6 +31,7 @@
 #include "oot3d_legacy_ui_adapters.h"
 #include "oot3d_n64_ui_renderer.h"
 #include "oot3d_native_a32_ctr_host.h"
+#include "ctr_title_profile.h"
 #include "oot3d_native_a32_dsp_hle.h"
 #include "oot3d_host_audio_resampler.h"
 #include "oot3d_host_audio_stream.h"
@@ -432,6 +433,14 @@ private:
   // Escolhida pelo program id do manifesto (ctr_title_profile.h): OoT3D =
   // PCs do code.bin; outro título = commit de framebuffer no GSP.
   std::unique_ptr<Oot3dNativeGame::FrameBoundaryProvider> frameBoundaryProvider;
+  // Perfil de título (ctr_title_profile.h), escolhido pelo program id do
+  // manifesto. OoT3D: tudo como sempre. Outro título (genérico): sem ganchos
+  // por PC do OoT3D, sem núcleos manuais, typed gameplay, mass/true AOT nem
+  // substituições; só o whole-AOT do próprio título.
+  Oot3dNativeGame::CtrTitleProfile titleProfile{};
+  bool genericTitle = false;
+  // Genérico sem nenhum gancho: nenhum callback de entrada de bloco.
+  bool genericTitleWithoutHooks = false;
   Oot3dNativeGame::NativeA32SceneViewProbe sceneViewProbe;
   Oot3dNativeGame::NativeA32PlayerTimingProbe playerTimingProbe;
   Oot3dNativeGame::NativeTemporalEventLedger temporalEventLedger;

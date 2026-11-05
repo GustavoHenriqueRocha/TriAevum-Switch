@@ -1,6 +1,8 @@
 #include "oot3d_demo_host_io.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstddef>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -49,7 +51,107 @@ uint8_t ExpandRgba5551Channel(uint16_t value) {
     return static_cast<uint8_t>((v << 3) | (v >> 2));
 }
 
+void AppendBe32(std::vector<uint8_t>& out, uint32_t value) {
+    out.push_back(static_cast<uint8_t>(value >> 24));
+    out.push_back(static_cast<uint8_t>(value >> 16));
+    out.push_back(static_cast<uint8_t>(value >> 8));
+    out.push_back(static_cast<uint8_t>(value));
+}
+
+uint32_t PngCrc32(const uint8_t* data, size_t size, uint32_t crc = 0xffffffffu) {
+    for (size_t index = 0; index < size; ++index) {
+        crc ^= data[index];
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+        }
+    }
+    return crc;
+}
+
+void AppendPngChunk(std::vector<uint8_t>& out, const char type[4], const std::vector<uint8_t>& data) {
+    AppendBe32(out, static_cast<uint32_t>(data.size()));
+    const size_t typeOffset = out.size();
+    out.insert(out.end(), type, type + 4);
+    out.insert(out.end(), data.begin(), data.end());
+    const uint32_t crc = PngCrc32(out.data() + typeOffset, data.size() + 4u) ^ 0xffffffffu;
+    AppendBe32(out, crc);
+}
+
 } // namespace
+
+bool ScreenshotPathIsPng(const std::filesystem::path& path) {
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return extension == ".png";
+}
+
+std::vector<uint8_t> EncodePngFromRgb8(uint32_t width, uint32_t height, const std::vector<uint8_t>& rgb) {
+    std::vector<uint8_t> png;
+    if (width == 0 || height == 0 || rgb.size() < static_cast<size_t>(width) * height * 3u) {
+        return png;
+    }
+    // Dados crus: cada linha com o filtro 0 (None) na frente.
+    std::vector<uint8_t> raw;
+    raw.reserve((static_cast<size_t>(width) * 3u + 1u) * height);
+    for (uint32_t y = 0; y < height; ++y) {
+        raw.push_back(0);
+        const auto* row = rgb.data() + static_cast<size_t>(y) * width * 3u;
+        raw.insert(raw.end(), row, row + static_cast<size_t>(width) * 3u);
+    }
+    // zlib: cabeçalho, blocos stored de até 65535 bytes, Adler-32.
+    std::vector<uint8_t> zlib{0x78, 0x01};
+    size_t offset = 0;
+    do {
+        const size_t length = std::min<size_t>(65535u, raw.size() - offset);
+        const bool last = offset + length == raw.size();
+        zlib.push_back(last ? 1u : 0u);
+        zlib.push_back(static_cast<uint8_t>(length));
+        zlib.push_back(static_cast<uint8_t>(length >> 8));
+        zlib.push_back(static_cast<uint8_t>(~length));
+        zlib.push_back(static_cast<uint8_t>((~length) >> 8));
+        zlib.insert(zlib.end(), raw.begin() + static_cast<std::ptrdiff_t>(offset),
+                    raw.begin() + static_cast<std::ptrdiff_t>(offset + length));
+        offset += length;
+    } while (offset < raw.size());
+    uint32_t a = 1, b = 0;
+    for (const uint8_t value : raw) {
+        a = (a + value) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    AppendBe32(zlib, (b << 16) | a);
+
+    static constexpr uint8_t kSignature[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+    png.assign(kSignature, kSignature + 8);
+    std::vector<uint8_t> header;
+    AppendBe32(header, width);
+    AppendBe32(header, height);
+    header.insert(header.end(), {8, 2, 0, 0, 0}); // 8 bits, RGB, deflate, filtro 0, sem entrelaçar
+    AppendPngChunk(png, "IHDR", header);
+    AppendPngChunk(png, "IDAT", zlib);
+    AppendPngChunk(png, "IEND", {});
+    return png;
+}
+
+void WritePngFromRgb8Framebuffer(
+    const std::filesystem::path& path,
+    uint32_t width,
+    uint32_t height,
+    const std::vector<uint8_t>& rgb) {
+    const auto png = EncodePngFromRgb8(width, height, rgb);
+    if (path.empty() || png.empty()) {
+        return;
+    }
+    const auto parent = path.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent);
+    }
+    std::ofstream file(path, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("could not write PNG screenshot: " + path.string());
+    }
+    file.write(reinterpret_cast<const char*>(png.data()), static_cast<std::streamsize>(png.size()));
+}
 
 void WriteBmpFromRgb8Framebuffer(
     const std::filesystem::path& path,

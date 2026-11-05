@@ -1,5 +1,6 @@
 #include "ctr_frame_boundary.h"
 #include "ctr_title_profile.h"
+#include "ctr_library_natives.h"
 #include "oot3d_native_a32_ctr_host.h"
 #include "oot3d_native_a32_dsp_hle.h"
 #include "oot3d_native_pica_frontend.h"
@@ -954,6 +955,82 @@ void TestUnknownServicesAreLoggedStubs() {
             "the OoT3D profile stubbed an unknown service");
 }
 
+// --- Rotinas da biblioteca do RVCT pelos bytes (ctr_library_natives.h) -------
+// O Mario parava no boot da janela em MissingBlock 0x003A0D38: __aeabi_f2ulz
+// chama o helper __fpl_* com uma palavra literal depois do BL, a descoberta
+// marca o CFG como aberto e a função fica fora do whole-AOT.
+void TestRvctLibraryNatives() {
+    struct Case { uint32_t Bits; uint64_t Expected; };
+    const Case cases[] = {
+        {0x00000000U, 0U},                       // +0
+        {0x3F000000U, 0U},                       // 0.5
+        {0x3F800000U, 1U},                       // 1.0
+        {0x3FC00000U, 1U},                       // 1.5 (trunca)
+        {0x4F32D05EU, 3000000000ULL},            // 3e9 (> 2^31)
+        {0x5F000000U, 0x8000000000000000ULL},    // 2^63
+        {0x5F7FFFFFU, 0xFFFFFF0000000000ULL},    // maior float < 2^64
+        {0x5F800000U, ~0ULL},                    // 2^64: satura (slot 3)
+        {0x7F800000U, ~0ULL},                    // +inf
+        {0x7FC00000U, 0U},                       // NaN (slot 0)
+        {0xBF000000U, 0U},                       // -0.5
+        {0xBF800000U, 0U},                       // -1.0 (slot 3: ~(-1))
+        {0xFF800000U, 0U},                       // -inf
+        {0x00000001U, 0U},                       // subnormal
+    };
+    for (const auto& item : cases) {
+        Require(CtrAeabiF2ulz(item.Bits) == item.Expected,
+                "__aeabi_f2ulz native result differs from the RVCT routine");
+    }
+    // Achada pelos bytes em qualquer endereço; um byte diferente não casa.
+    std::vector<uint8_t> text(4U * 40U, 0U);
+    std::memcpy(text.data() + 8U, kRvctAeabiF2ulzWords.data(),
+                kRvctAeabiF2ulzWords.size() * 4U);
+    std::vector<CtrLibraryNativeEntry> found;
+    FindCtrLibraryNatives(0x00100000U, text, found);
+    Require(found.size() == 1U && found[0].Pc == 0x00100008U &&
+                FindCtrLibraryNative(found, 0x00100008U) != nullptr &&
+                FindCtrLibraryNative(found, 0x0010000CU) == nullptr,
+            "RVCT f2ulz signature was not found by its bytes");
+    text[8U + 4U * 7U] ^= 1U;
+    found.clear();
+    FindCtrLibraryNatives(0x00100000U, text, found);
+    Require(found.empty(), "a changed routine matched the f2ulz signature");
+    struct Regs { uint32_t r[16]{}; } regs;
+    regs.r[0] = 0x4F32D05EU;
+    regs.r[14] = 0x002C6064U;
+    Require(ExecuteCtrLibraryNative(CtrLibraryNative::AeabiF2ulz, regs) ==
+                    0x002C6064U &&
+                regs.r[0] == 3000000000U && regs.r[1] == 0U &&
+                regs.r[15] == 0x002C6064U,
+            "native f2ulz did not return r0:r1 to lr");
+}
+
+// --- Perfil de título no executável com janela ------------------------------
+// oot3d_native_a32_window_setup.cpp ligava sempre os ganchos por PC do OoT3D
+// (projeção, PlayState, composição PICA, UI, TopScreen), typed gameplay, mass
+// e true AOT e os núcleos manuais: num outro code.bin esses PCs caem no meio
+// de funções quaisquer. O perfil genérico desliga tudo isso; o do OoT3D (com
+// ou sem title_id no manifesto) mantém tudo ligado.
+void TestWindowProfileGatesOot3dHooks() {
+    for (const std::optional<uint64_t> titleId :
+         {std::optional<uint64_t>{}, std::optional<uint64_t>{0x0004000000033400ULL},
+          std::optional<uint64_t>{0x0004000000033500ULL},
+          std::optional<uint64_t>{0x0004000000033600ULL}}) {
+        const auto profile = SelectCtrTitleProfile(titleId);
+        Require(profile.Oot3dGuestHooks && profile.TopScreenUi &&
+                    profile.ManualCompiledFunctions && profile.GuestOverrides,
+                "the OoT3D window lost its guest hooks or TopScreen UI");
+    }
+    // Super Mario 3D Land (EUR) e um title id qualquer.
+    for (const uint64_t titleId : {0x0004000000053F00ULL, 0x0004000000123400ULL}) {
+        const auto profile = SelectCtrTitleProfile(titleId);
+        Require(!profile.Oot3dGuestHooks && !profile.TopScreenUi &&
+                    !profile.ManualCompiledFunctions && !profile.GuestOverrides &&
+                    profile.StubUnknownServices && profile.KernelWaitTimeouts,
+                "a generic title window kept OoT3D guest hooks");
+    }
+}
+
 // --- Fronteira de quadro (ctr_frame_boundary.h) ---------------------------
 // O executável detectava o fim do quadro só por PCs do OoT3D (0x00417014...),
 // que não existem em outro code.bin. O provedor genérico usa o commit de
@@ -1275,6 +1352,8 @@ void TestAptGetSharedFont() {
 }
 
 int main() {
+    TestRvctLibraryNatives();
+    TestWindowProfileGatesOot3dHooks();
     TestFrameBoundaryProviderSelection();
     TestGspFrameBoundaryProvider();
     TestOot3dFrameBoundaryMatchesGsp();

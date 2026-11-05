@@ -954,6 +954,21 @@ bool ExecuteNativeCandidate(uint32_t pc, oot3d::recomp::a32::GuestState &state,
                             uint32_t blockBudget, uint32_t *blocksConsumed,
                             void *user) {
   auto &dispatch = *static_cast<NativeCandidateDispatchState *>(user);
+  if (!dispatch.LibraryNatives.empty()) {
+    if (const auto *library =
+            Oot3dNativeGame::FindCtrLibraryNative(dispatch.LibraryNatives, pc)) {
+      const uint32_t next =
+          Oot3dNativeGame::ExecuteCtrLibraryNative(library->Kind, state);
+      if (result != nullptr) {
+        *result = {oot3d::recomp::a32::ExitKind::Branch, next,
+                   oot3d::recomp::a32::FallbackReason::None, pc};
+      }
+      if (blocksConsumed != nullptr) {
+        *blocksConsumed = 1U;
+      }
+      return true;
+    }
+  }
   bool sample = false;
   if (dispatch.ProfileRuntime) {
     ++dispatch.Calls;

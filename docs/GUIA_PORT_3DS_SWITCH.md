@@ -1508,6 +1508,44 @@ lista responde `0xC8804464` (não encontrado). Código: `oot3d_native_a32_ctr_sy
 testes em `oot3d_native_a32_ctr_fs_tests` e `oot3d_native_a32_ctr_host_tests`. Super Mario 3D Land
 (05/11) pede o archive do Mii, não a fonte.
 
+### 8.3 Executável com janela para outro título (Linux, Vulkan)
+
+`tools/ctr/build_title_window.sh --work <pasta do ctr_convert.py> [--run --seconds 20]` (ou
+`ctr_convert.py ... --window [--run]`) compila o `oot3d_native_game` no mesmo build Ninja do boot
+probe (os objetos `-O0` dos 256 shards são reaproveitados; só o resto do runtime compila, ~620
+objetos na primeira vez) e roda com `--renderer vulkan --ui-profile oot3d`, gravando PNG do quadro
+apresentado (`--screenshot quadro.png --screenshot-sequence`). O perfil de título
+(`ctr_title_profile.h`: `Oot3dGuestHooks`, `TopScreenUi`) desliga na janela tudo que é PC do OoT3D:
+
+- ganchos de bloco (projeção 16:9, PlayState/Player, composição PICA, ciclo de vida da UI, TopScreen,
+  efeitos, diagnósticos), typed gameplay, mass/true AOT, núcleos manuais e `guest_overrides`;
+- detecção de idiomas (lê menus/QM do OoT3D na RomFS; outro título recebe só inglês);
+- `--ui-profile topscreen` é recusado.
+
+Armadilhas encontradas no Super Mario 3D Land (05/11):
+
+- **lista de ganchos vazia = avisar em todo bloco** (`Oot3dAotShouldNotifyBlock`, filtro do processo).
+  Sem nenhum gancho o callback tem de ser `nullptr`; senão cada bloco passa pela política do OoT3D e
+  pelo caminho lento de entrada de bloco (1 VBlank em 60 s).
+- **rotinas do RVCT com literal depois do BL**: `__aeabi_f2ulz` (e outras do `__fpl_*`) chamam um
+  helper que faz `ldr r4, [lr], #4` e volta por uma tabela de slots depois da palavra literal. A
+  descoberta vê a literal como instrução, marca CFG aberto e a função fica fora do whole-AOT
+  (`external_functions` em `functions.json`) → `MissingBlock` no boot. Solução genérica:
+  `ctr_library_natives.h` acha a rotina pelos bytes (não pelo endereço) e a executa nativa, com a
+  semântica do caminho do helper conferida na tabela de retorno do binário (NaN e negativos → 0,
+  ≥ 2^64 → saturação). Ligado só no perfil genérico (janela e boot probe). A outra função de CFG
+  aberto do Mario (`0x0010748C`, chamada sem retorno) ainda não foi exercitada.
+- vertex programs: no PC (modo especializado, `TRIAEVUM_SHADER_PREPARATION=sync`) o programa PICA
+  que o jogo envia é traduzido em tempo de execução (decompilador do Citra/Azahar); a lista fixa
+  `oot3d_translated_vertex_programs.h` só é exigida no modo paramétrico (`--pica-parametric-tev`,
+  deko3d no Switch). O logo do Mario usa 1 vertex program e 3 fragment programs.
+- build Linux do executável: `gfx_deko3d.h` incluído fora do `#if __SWITCH__`
+  (`Deko3dRendererSelected()` é falso fora do Switch) e `oot3d_switch_vsync_clock.cpp` (stubs) no
+  alvo fora do Switch.
+
+Resultado: logo "SUPER MARIO 3D LAND" na janela; 60 s em `-O0` = 1597 VBlanks (~27/s, meio tempo),
+79 400 draws, 1596 display transfers.
+
 ---
 
 ## 9. Lacunas conhecidas deste guia

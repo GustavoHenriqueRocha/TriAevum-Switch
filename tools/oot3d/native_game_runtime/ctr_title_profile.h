@@ -58,6 +58,14 @@ struct CtrTitleProfile {
     // RTC fixo do probe (ms desde a época CTR "1900"; ver
     // NativeA32CtrHostConfig::FixedDateTimeMilliseconds).
     uint64_t ProbeDateTimeMilliseconds = 3517257600000ULL; // 2011-06-16
+    // Executável com janela (oot3d_native_a32_window_setup.cpp): ganchos por
+    // PC do code.bin do OoT3D (projeção 16:9, PlayState/Player, composição
+    // PICA, ciclo de vida da UI, TopScreen, efeitos, diagnósticos) e os
+    // caminhos nativos presos a esses PCs (typed gameplay, mass AOT, true
+    // AOT). Em outro título: só o whole-AOT do próprio título.
+    bool Oot3dGuestHooks = true;
+    // --ui-profile topscreen (HUD/16:9 do OoT3D) só existe no OoT3D.
+    bool TopScreenUi = true;
     // Fronteira de quadro: no OoT3D, pelos PCs de sempre (Zelda não muda).
     CtrFrameBoundarySource FrameBoundary =
         CtrFrameBoundarySource::Oot3dGuestPcs;
@@ -96,6 +104,8 @@ inline CtrTitleProfile GenericTitleProfile(std::optional<uint64_t> titleId) {
     profile.KernelWaitTimeouts = true;
     profile.ProbeDateTimeMilliseconds = 3530649600000ULL; // 2011-11-18
     profile.FrameBoundary = CtrFrameBoundarySource::GspPresent;
+    profile.Oot3dGuestHooks = false;
+    profile.TopScreenUi = false;
     return profile;
 }
 

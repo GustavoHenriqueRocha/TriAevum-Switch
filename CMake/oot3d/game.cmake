@@ -504,6 +504,13 @@ if(COMMAND three_ds_recomp_deploy_nri_runtime)
 endif()
 unset(_oot3d_vulkan_hosts)
 oot3d_target_defaults(oot3d_native_game NO_WARNING_OVERRIDE)
+if (NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    # A sessão da janela guarda um SwitchVsyncClock em todas as plataformas;
+    # fora do Switch o .cpp só tem os stubs (Start() falso). Sem ele o link
+    # Linux falhava (~SwitchVsyncClock indefinido).
+    target_sources(oot3d_native_game PRIVATE
+        tools/oot3d/native_game_runtime/oot3d_switch_vsync_clock.cpp)
+endif()
 if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     # Core and priority placement for every pthread (see the source).
     target_sources(oot3d_native_game PRIVATE

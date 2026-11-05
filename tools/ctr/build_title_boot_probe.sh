@@ -10,7 +10,7 @@
 #       --romfs ~/oot3d-work/jogos/sm3dl/extract/romfs.bin \
 #       [--build ~/oot3d-work/build-ctr-sm3dl] [--jobs 2] [--run] \
 #       [--vblanks 2] [--title-profile auto|oot3d|generic] [--configure-only]
-#       [--complete-gpu-work]
+#       [--complete-gpu-work] [--target ctr_title_boot_probe]
 #
 # O que faz:
 #  1. configura um build Ninja Debug só com o whole-AOT do título
@@ -27,17 +27,22 @@
 #     (ctr_frame_boundary.h); com --complete-gpu-work o probe conclui o
 #     trabalho adiado para a GPU (P3D/PSC/PPF) e o jogo passa do 1º quadro.
 #
+# --target escolhe outro alvo do mesmo build (ex.: oot3d_native_game, o
+# executável com janela; tools/ctr/build_title_window.sh usa isso). Com outro
+# alvo o passo 4 (--run do probe) não se aplica.
+#
 # Variáveis: OPT (flags de C++, padrão "-O0"), DEPS_FROM (diretório _deps de
 # um build host já configurado, para não baixar as dependências de novo;
 # padrão ~/oot3d-work/build-host-tests/_deps), HOST_DEPS (prefixo com
 # nlohmann_json/tinyxml2/Vulkan headers, padrão ~/oot3d-work/host-deps),
-# LIMITE/RETOMA (°C).
+# LIMITE/RETOMA (°C), NINJA_EXTRA (flags extras do ninja, ex.: "-k 0").
 set -euo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 SHARDS="" CODE_BIN="" EXHEADER="" ROMFS=""
 BUILD="$HOME/oot3d-work/build-ctr-title"
 JOBS=2 RUN=0 VBLANKS=2 PROFILE=auto CONFIGURE_ONLY=0 GPU_WORK=0
+TARGET=ctr_title_boot_probe
 OPT=${OPT:--O0}
 DEPS_FROM=${DEPS_FROM:-$HOME/oot3d-work/build-host-tests/_deps}
 # Prefixo com nlohmann_json, tinyxml2 e cabeçalhos Vulkan (o host-deps do
@@ -46,7 +51,7 @@ HOST_DEPS=${HOST_DEPS:-$HOME/oot3d-work/host-deps}
 LIMITE=${LIMITE:-85}
 RETOMA=${RETOMA:-75}
 
-usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-64}"; }
+usage() { sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-64}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -61,6 +66,7 @@ while [ $# -gt 0 ]; do
     --run) RUN=1; shift ;;
     --configure-only) CONFIGURE_ONLY=1; shift ;;
     --complete-gpu-work) GPU_WORK=1; shift ;;
+    --target) TARGET=$2; shift 2 ;;
     -h|--help) usage 0 ;;
     *) echo "opção desconhecida: $1" >&2; usage ;;
   esac
@@ -120,10 +126,10 @@ temp() { sensors 2>/dev/null | awk '/^(Package id 0|Tctl):/ {gsub(/[+°C]/, "", 
 # Regera o build.ninja antes (o glob dos shards força um re-run do CMake e o
 # dry-run contaria 0 etapas).
 ninja -C "$BUILD" build.ninja > /dev/null 2>&1 || true
-ETAPAS=$(cd "$BUILD" && ninja -n ctr_title_boot_probe | grep -c -E 'Building|Linking' || true)
+ETAPAS=$(cd "$BUILD" && ninja -n "$TARGET" | grep -c -E 'Building|Linking' || true)
 echo "etapas: $ETAPAS, $JOBS jobs, teto ${LIMITE} °C"
 START=$(date +%s)
-setsid nice -n 19 ninja -C "$BUILD" -j "$JOBS" ctr_title_boot_probe > "$BUILD/build.log" 2>&1 &
+setsid nice -n 19 ninja -C "$BUILD" -j "$JOBS" ${NINJA_EXTRA:-} "$TARGET" > "$BUILD/build.log" 2>&1 &
 PID=$!
 PGID=$(ps -o pgid= "$PID" | tr -d ' ')
 PAUSADO=0
@@ -141,7 +147,7 @@ if ! wait "$PID"; then
   echo "build falhou: $BUILD/build.log" >&2
   exit 1
 fi
-echo "compilado em $(( $(date +%s) - START )) s: $BUILD/ctr_title_boot_probe"
+echo "compilado em $(( $(date +%s) - START )) s: $BUILD/$TARGET"
 
 # --- 3. manifesto do processo -------------------------------------------------
 OUT="$BUILD/title"
@@ -151,6 +157,10 @@ python3 -I "$REPO/tools/oot3d/native_a32_runtime/build_process_manifest.py" \
   --output "$OUT/process.json"
 
 # --- 4. rodar -----------------------------------------------------------------
+if [ "$TARGET" != ctr_title_boot_probe ]; then
+  echo "manifesto: $OUT/process.json"
+  exit 0
+fi
 CMD=("$BUILD/ctr_title_boot_probe" --manifest "$OUT/process.json"
      --output "$OUT/report.json" --save-data "$OUT/savedata"
      --vblanks "$VBLANKS" --title-profile "$PROFILE")

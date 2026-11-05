@@ -3,6 +3,7 @@
 
   ctr_convert.py <jogo.3ds> --work <pasta> [--jobs 2] [--run] [--vblanks 60]
                  [--complete-gpu-work] [--shaders] [--force]
+                 [--window [--window-seconds 20]]
 
 Etapas (cada uma pula se a saída já é mais nova que a entrada, salvo --force):
   1. extract   ncch_extract.py         -> <work>/extract/{exheader,code,romfs}.bin
@@ -12,6 +13,10 @@ Etapas (cada uma pula se a saída já é mais nova que a entrada, salvo --force)
      --run roda o probe: <work>/build/title/{report.json,stderr.log}
      --complete-gpu-work conclui o trabalho da GPU sem desenhar (o jogo não
                fica parado esperando a P3D do primeiro quadro)
+  --window     em vez do probe, monta o executável com janela (oot3d_native_game,
+               Vulkan, perfil de título pelo program id) com
+               build_title_window.sh; com --run roda --window-seconds e grava
+               PNGs do quadro apresentado em <work>/shots
   --shaders    extrai a RomFS e tira os registradores PICA dos materiais CGFX
                (<work>/shaders/regs.txt + .luz), quando o jogo usa CGFX.
 
@@ -57,6 +62,8 @@ def main() -> int:
     parser.add_argument("--complete-gpu-work", action="store_true")
     parser.add_argument("--shaders", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--window", action="store_true")
+    parser.add_argument("--window-seconds", type=int, default=20)
     args = parser.parse_args()
     if importlib.util.find_spec("capstone") is None:
         sys.exit("a descoberta precisa do capstone (pip install capstone==5.0.7)")
@@ -85,6 +92,13 @@ def main() -> int:
         run("generate", [sys.executable, "-E", "-s", A32 / "generate_whole_aot_cpp.py",
                          "--program", program, "--selection", selection, "--code", code,
                          "--output", cpp, "--shards", "256"])
+
+    if args.window:
+        command = [REPO / "tools/ctr/build_title_window.sh", "--work", args.work,
+                   "--jobs", str(args.jobs), "--seconds", str(args.window_seconds)]
+        command += ["--run"] if args.run else []
+        run("build janela" + (" + rodar" if args.run else ""), command)
+        return 0
 
     command = [REPO / "tools/ctr/build_title_boot_probe.sh", "--shards", cpp,
                "--code-bin", code, "--exheader", exheader, "--romfs", romfs,

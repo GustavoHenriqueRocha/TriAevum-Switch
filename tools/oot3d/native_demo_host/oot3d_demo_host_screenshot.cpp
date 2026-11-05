@@ -57,9 +57,28 @@ void MaybeWriteFramebufferScreenshot(const Args& args, Fast::GfxRenderingAPI& ap
         : args.ScreenshotSequence ? ScreenshotSequenceFramePath(args.ScreenshotPath, frameCount) : args.ScreenshotPath;
     // Forced (developer lab) captures keep the full 8-bit precision; the
     // deterministic captures keep their RGBA5551 baseline.
-    std::vector<uint8_t> rgb(forced ? static_cast<size_t>(width) * height * 3u : 0U);
-    if (forced && api.ReadFramebufferRgb8ToCPU(width, height, rgb.data())) {
+    // Um caminho .png (--screenshot quadro.png) grava PNG RGB de 8 bits; o
+    // .bmp de sempre segue igual (RGBA5551, ou RGB8 nas forçadas).
+    const bool png = ScreenshotPathIsPng(screenshotPath);
+    std::vector<uint8_t> rgb(forced || png ? static_cast<size_t>(width) * height * 3u : 0U);
+    if (png && api.ReadFramebufferRgb8ToCPU(width, height, rgb.data())) {
+        WritePngFromRgb8Framebuffer(screenshotPath, width, height, rgb);
+    } else if (forced && api.ReadFramebufferRgb8ToCPU(width, height, rgb.data())) {
         WriteBmpFromRgb8Framebuffer(screenshotPath, width, height, rgb);
+    } else if (png) {
+        std::vector<uint16_t> framebuffer(static_cast<size_t>(width) * height, 0);
+        api.ReadFramebufferToCPU(0, width, height, framebuffer.data());
+        for (size_t index = 0; index < framebuffer.size(); ++index) {
+            const uint16_t value = framebuffer[index];
+            const auto expand = [](uint16_t channel) {
+                const uint8_t v = static_cast<uint8_t>(channel & 0x1f);
+                return static_cast<uint8_t>((v << 3) | (v >> 2));
+            };
+            rgb[index * 3u + 0u] = expand(value >> 11);
+            rgb[index * 3u + 1u] = expand(value >> 6);
+            rgb[index * 3u + 2u] = expand(value >> 1);
+        }
+        WritePngFromRgb8Framebuffer(screenshotPath, width, height, rgb);
     } else {
         std::vector<uint16_t> framebuffer(static_cast<size_t>(width) * height, 0);
         api.ReadFramebufferToCPU(0, width, height, framebuffer.data());

@@ -8,10 +8,12 @@
 #include <glad/glad.h>
 #include <switch.h>
 #include "fast/backends/gfx_sdl.h"
-#include "fast/backends/gfx_deko3d.h"
 #include <algorithm>
 #include <fstream>
 #endif
+// Deko3dRendererSelected() (sempre falso fora do Switch): o build Linux
+// do executável com janela não compilava sem este include.
+#include "fast/backends/gfx_deko3d.h"
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -151,6 +153,21 @@ void NativeA32WindowSession::Setup() {
 #if defined(__SWITCH__)
   WriteSwitchBootStage("manifest_loaded");
 #endif
+  titleProfile = Oot3dNativeGame::SelectCtrTitleProfile(manifest->TitleId);
+  genericTitle = !titleProfile.Oot3dGuestHooks;
+  if (titleProfile.Kind != Oot3dNativeGame::CtrTitleKind::Oot3d) {
+    std::fprintf(stderr,
+                 "TRIAEVUM_TITLE_PROFILE title_id=%016llx perfil=%s "
+                 "(ganchos do OoT3D desligados)\n",
+                 static_cast<unsigned long long>(manifest->TitleId.value_or(0U)),
+                 std::string(titleProfile.Name).c_str());
+  }
+  if (!titleProfile.TopScreenUi &&
+      launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen) {
+    throw std::runtime_error(
+        "--ui-profile topscreen is OoT3D-only; run another title with "
+        "--ui-profile oot3d");
+  }
 
   if (!launch.ScenarioId.empty()) {
     scenarioCatalog =
@@ -195,8 +212,12 @@ void NativeA32WindowSession::Setup() {
       Oot3dNativeGame::Oot3dPicaCompositionDomain::Unknown;
   languageSettings = std::make_shared<Oot3dNativeGame::GameLanguageSettings>(
       std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "game_language.json",
-      Oot3dNativeGame::DetectGameLanguages(manifest->RomFsImagePath,
-          manifest->RomFsImageOffset, manifest->RomFsImageSize));
+      titleProfile.Kind == Oot3dNativeGame::CtrTitleKind::Oot3d
+          ? Oot3dNativeGame::DetectGameLanguages(manifest->RomFsImagePath,
+                manifest->RomFsImageOffset, manifest->RomFsImageSize)
+          // A detecção lê os menus/QM do OoT3D na RomFS; outro título
+          // recebe só o idioma do sistema (inglês).
+          : std::vector<Oot3dNativeGame::GameLanguage>{{"en", "English", 1U}});
   hostConfig.SystemLanguage = languageSettings->SystemId();
   hostConfig.ResourceLimitValues = manifest->ResourceLimitValues;
   hostConfig.ResourceCurrentValues = manifest->ResourceCurrentValues;
@@ -238,12 +259,25 @@ void NativeA32WindowSession::Setup() {
       manifest->ProcessName,
       std::string(oot3d::recomp::kA32SourceSnapshotId),
   };
+  // Perfil de título: no OoT3D estes valores são os defaults do host (nada
+  // muda); no genérico, serviços stub registrados e timeouts reais do kernel.
+  hostConfig.StubUnknownServices = titleProfile.StubUnknownServices;
+  hostConfig.KernelWaitTimeouts = titleProfile.KernelWaitTimeouts;
+  hostConfig.MasterQuestUnlock = titleProfile.MasterQuestUnlock;
+  // TRIAEVUM_FIXED_DATE_MS: RTC fixo (ms desde a época CTR "1900") mais o
+  // relógio virtual, como no boot probe; sem a variável, o relógio do host.
+  if (const char *fixedDate = std::getenv("TRIAEVUM_FIXED_DATE_MS")) {
+    hostConfig.FixedDateTimeMilliseconds =
+        std::string_view(fixedDate) == "probe"
+            ? titleProfile.ProbeDateTimeMilliseconds
+            : std::strtoull(fixedDate, nullptr, 10);
+  }
   hostConfig.DetailedSvcDiagnostics = launch.ExtendedDiagnostics;
   hostConfig.ProfileRuntime = launch.ProfileA32Runtime;
   // Fronteira de quadro pelo perfil de título. O OoT3D segue nos PCs de
   // sempre e o host não recebe provedor (FrameBoundary nulo): Zelda igual.
-  frameBoundaryProvider = Oot3dNativeGame::MakeFrameBoundaryProvider(
-      Oot3dNativeGame::SelectCtrTitleProfile(manifest->TitleId));
+  frameBoundaryProvider =
+      Oot3dNativeGame::MakeFrameBoundaryProvider(titleProfile);
   if (frameBoundaryProvider->Source() ==
       Oot3dNativeGame::CtrFrameBoundarySource::GspPresent) {
     hostConfig.FrameBoundary = frameBoundaryProvider.get();
@@ -298,6 +332,9 @@ void NativeA32WindowSession::Setup() {
           std::string_view(overrides) != "0");
     }
 #endif
+    // As substituições de guest_overrides.json são PCs do OoT3D.
+    if (!titleProfile.GuestOverrides)
+      Oot3dNativeGame::SetOot3dGuestOverridesActive(false);
     // Perfil de pico (config/guest_spike_ms; desligado por padrão): liga o
     // perfil em todos os quadros mesmo sem config/guest_profile (aí sem o
     // relatório periódico) e grava logs/guest_spikes.txt e
@@ -551,6 +588,14 @@ void NativeA32WindowSession::Setup() {
   enableManualCompiledFunctions =
       !launch.DisableManualCompiledFunctions;
 #endif
+  if (genericTitle) {
+    // Mass/true AOT, núcleos manuais e typed gameplay são PCs do code.bin do
+    // OoT3D: em outro título cairiam no meio de funções quaisquer.
+    enableMassAot = false;
+    enableTrueAot = false;
+    if (!titleProfile.ManualCompiledFunctions)
+      enableManualCompiledFunctions = false;
+  }
   trueAotEntries = Oot3dNativeGame::Oot3dTrueAotBlockEntryPoints();
   compiledFunctionEntries =
       Oot3dNativeGame::Oot3dCompiledFunctionEntryPoints(
@@ -564,10 +609,12 @@ void NativeA32WindowSession::Setup() {
                                   massAotEntries.begin(), massAotEntries.end());
     Oot3dNativeGame::ResetOot3dMassAotStats();
   }
-  if (enableCompiledFunctions) {
+  if (enableCompiledFunctions && !genericTitle) {
     nativeCandidateEntries.insert(nativeCandidateEntries.end(),
                                   typedGameplayEntries.begin(),
                                   typedGameplayEntries.end());
+  }
+  if (enableCompiledFunctions) {
     nativeCandidateEntries.insert(nativeCandidateEntries.end(),
                                   compiledFunctionEntries.begin(),
                                   compiledFunctionEntries.end());
@@ -706,12 +753,48 @@ void NativeA32WindowSession::Setup() {
                                   topScreenSourcePortBlocks.begin(),
                                   topScreenSourcePortBlocks.end());
   }
+  if (genericTitle) {
+    // Só os ganchos da fronteira de quadro do perfil (o do GSP não pede
+    // nenhum): todos os outros são PCs do OoT3D (projeção, PlayState,
+    // composição PICA, UI, typed gameplay, diagnósticos).
+    blockEntryHooks.assign(frameBoundaryHooks.begin(), frameBoundaryHooks.end());
+    std::sort(blockEntryHooks.begin(), blockEntryHooks.end());
+    picaCompositionHooks = {};
+    typedGameplayObservableExitHooks = {};
+    wholeAotObservableExitBlocks.clear();
+  }
   std::sort(wholeAotObservableExitBlocks.begin(),
             wholeAotObservableExitBlocks.end());
   wholeAotObservableExitBlocks.erase(
       std::unique(wholeAotObservableExitBlocks.begin(),
                   wholeAotObservableExitBlocks.end()),
       wholeAotObservableExitBlocks.end());
+  // Título genérico: rotinas da biblioteca do RVCT que a descoberta deixa de
+  // fora (CFG aberto pelo helper __fpl com literal depois do BL) rodam
+  // nativas, achadas pelos bytes no segmento executável.
+  std::vector<Oot3dNativeGame::CtrLibraryNativeEntry> libraryNatives;
+  if (genericTitle) {
+    std::ifstream codeBin(manifest->CodeBinPath, std::ios::binary);
+    for (const auto &segment : manifest->Segments) {
+      if (!segment.Executable || segment.FileSize == 0U || !codeBin)
+        continue;
+      std::vector<uint8_t> bytes(segment.FileSize);
+      codeBin.clear();
+      codeBin.seekg(static_cast<std::streamoff>(segment.FileOffset));
+      if (!codeBin.read(reinterpret_cast<char *>(bytes.data()),
+                        static_cast<std::streamsize>(bytes.size())))
+        continue;
+      Oot3dNativeGame::FindCtrLibraryNatives(segment.Address, bytes,
+                                            libraryNatives);
+    }
+    for (const auto &entry : libraryNatives) {
+      std::fprintf(stderr, "TRIAEVUM_LIBRARY_NATIVE pc=0x%08X %s\n", entry.Pc,
+                   entry.Kind == Oot3dNativeGame::CtrLibraryNative::AeabiF2ulz
+                       ? "__aeabi_f2ulz"
+                       : "?");
+      nativeCandidateEntries.push_back(entry.Pc);
+    }
+  }
   std::sort(nativeCandidateEntries.begin(), nativeCandidateEntries.end());
   nativeCandidateEntries.erase(
       std::unique(nativeCandidateEntries.begin(), nativeCandidateEntries.end()),
@@ -760,7 +843,7 @@ void NativeA32WindowSession::Setup() {
       &process.Memory(),
       {static_cast<float>(frameRateContract.NativeUpdateRate),
        &frameRatePolicy.GameplayClock().Context()},
-      enableCompiledFunctions && !launch.DisableTypedGameplay,
+      enableCompiledFunctions && !launch.DisableTypedGameplay && !genericTitle,
       enableMassAot,
       enableCompiledFunctions,
       enableWholeAot,
@@ -768,6 +851,18 @@ void NativeA32WindowSession::Setup() {
       enableTrueAot,
       launch.ProfileA32Runtime,
   };
+  // Lista de ganchos vazia quer dizer "avise em todo bloco" para o whole-AOT
+  // (Oot3dAotShouldNotifyBlock) e para o processo. O título genérico não tem
+  // gancho nenhum (fronteira pelo GSP): sem callback, senão cada bloco
+  // passaria pela política de projeção do OoT3D e pelo caminho lento de
+  // entrada de bloco (o Mario não saía do boot: 1 VBlank em 60 s).
+  genericTitleWithoutHooks = genericTitle && blockEntryHooks.empty() &&
+                             !blockEntryForAll && !guestProfiler.Active();
+  if (genericTitleWithoutHooks) {
+    nativeCandidateDispatch.BlockEntry = nullptr;
+    nativeCandidateDispatch.BlockEntryUser = nullptr;
+  }
+  nativeCandidateDispatch.LibraryNatives = std::move(libraryNatives);
   nativeCandidateDispatch.TopScreenUiProfile =
       launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen;
   // After the rebuild above, which would discard an earlier assignment.
@@ -1151,6 +1246,8 @@ void NativeA32WindowSession::Setup() {
     process.SetBlockEntryCallback(
         &Oot3dNativeGame::GuestBlockProfiler::OnBlockEntry, &guestProfiler,
         std::vector<uint32_t>{});
+  } else if (genericTitleWithoutHooks) {
+    process.SetBlockEntryCallback(nullptr, nullptr, std::vector<uint32_t>{});
   } else {
     process.SetBlockEntryCallback(
         &ApplyNativeWidescreenProjectionPolicy, &widescreenProjection,

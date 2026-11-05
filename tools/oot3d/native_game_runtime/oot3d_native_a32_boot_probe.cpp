@@ -15,6 +15,7 @@
 // ("frame_boundary") e no resumo do stderr.
 #include "ctr_frame_boundary.h"
 #include "ctr_title_profile.h"
+#include "ctr_library_natives.h"
 #include "oot3d_native_a32_ctr_host.h"
 #include "oot3d_native_a32_process_image.h"
 #include "oot3d_native_pica_fragment_shader_gen.h"
@@ -331,6 +332,8 @@ nlohmann::json DescribeFrameBoundary(
 struct WholeAotDispatch {
     bool ManualCompiledFunctions = false;
     Oot3dNativeGame::FrameBoundaryProvider* GuestPcFrameBoundary = nullptr;
+    // Rotinas da biblioteca do RVCT achadas pelos bytes (título genérico).
+    std::vector<Oot3dNativeGame::CtrLibraryNativeEntry> LibraryNatives;
 };
 
 // Sem registro de blocos: todo PC passa por aqui. Fora das funções
@@ -343,6 +346,21 @@ bool ExecuteTitleWholeAot(uint32_t pc, oot3d::recomp::a32::GuestState& state,
     const auto* dispatch = static_cast<const WholeAotDispatch*>(user);
     if (dispatch != nullptr && dispatch->GuestPcFrameBoundary != nullptr) {
         dispatch->GuestPcFrameBoundary->ObserveGuestBlock(pc);
+    }
+    if (dispatch != nullptr) {
+        if (const auto* library = Oot3dNativeGame::FindCtrLibraryNative(
+                dispatch->LibraryNatives, pc)) {
+            const uint32_t next =
+                Oot3dNativeGame::ExecuteCtrLibraryNative(library->Kind, state);
+            if (result != nullptr) {
+                *result = {oot3d::recomp::a32::ExitKind::Branch, next,
+                           oot3d::recomp::a32::FallbackReason::None, pc};
+            }
+            if (blocksConsumed != nullptr) {
+                *blocksConsumed = 1U;
+            }
+            return true;
+        }
     }
     auto& nativeMemory = static_cast<Oot3dNativeGame::NativeA32Memory&>(memory);
     return Oot3dNativeGame::ExecuteOot3dCompiledFunction(
@@ -456,6 +474,29 @@ int main(int argc, char** argv) {
             frameBoundary->GuestHookPcs().empty() ? nullptr
                                                    : frameBoundary.get()};
         Oot3dNativeGame::NativeA32Process process(emptyRegistry, hostServices);
+        if (profile.Kind != Oot3dNativeGame::CtrTitleKind::Oot3d) {
+            std::ifstream codeBin(arguments->CodeBin.empty()
+                                      ? manifest->CodeBinPath
+                                      : arguments->CodeBin,
+                                  std::ios::binary);
+            for (const auto& segment : manifest->Segments) {
+                if (!segment.Executable || segment.FileSize == 0U || !codeBin) {
+                    continue;
+                }
+                std::vector<uint8_t> bytes(segment.FileSize);
+                codeBin.clear();
+                codeBin.seekg(static_cast<std::streamoff>(segment.FileOffset));
+                if (codeBin.read(reinterpret_cast<char*>(bytes.data()),
+                                 static_cast<std::streamsize>(bytes.size()))) {
+                    Oot3dNativeGame::FindCtrLibraryNatives(
+                        segment.Address, bytes, wholeAotDispatch.LibraryNatives);
+                }
+            }
+            for (const auto& entry : wholeAotDispatch.LibraryNatives) {
+                std::fprintf(stderr, "[boot-probe] biblioteca nativa pc=0x%08x\n",
+                             entry.Pc);
+            }
+        }
         process.SetNativeBlockCallback(&ExecuteTitleWholeAot,
                                        &wholeAotDispatch);
 #else

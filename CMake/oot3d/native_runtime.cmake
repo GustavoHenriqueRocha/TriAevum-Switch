@@ -17,6 +17,15 @@ target_compile_options(oot3d_native_application_host PRIVATE
     "${WARNING_OVERRIDE}")
 oot3d_target_defaults(oot3d_native_application_host NO_WARNING_OVERRIDE FOLDER Tools)
 
+# PNG das capturas (--screenshot quadro.png): só o io do host, sem o runtime.
+add_executable(oot3d_demo_host_png_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_demo_host/oot3d_demo_host_png_tests.cpp
+    tools/oot3d/native_demo_host/oot3d_demo_host_io.cpp
+)
+target_compile_features(oot3d_demo_host_png_tests PRIVATE cxx_std_20)
+target_link_libraries(oot3d_demo_host_png_tests PRIVATE nlohmann_json::nlohmann_json)
+oot3d_target_defaults(oot3d_demo_host_png_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 add_library(oot3d_native_audio STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_cseq.cpp
     tools/oot3d/native_game_runtime/oot3d_native_audio.cpp

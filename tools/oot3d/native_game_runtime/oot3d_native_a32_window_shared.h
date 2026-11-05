@@ -4,6 +4,7 @@
 // title addresses, the dispatch and projection state, and the functions the window calls.
 
 #include "oot3d_native_a32_window.h"
+#include "ctr_library_natives.h"
 #include "oot3d_dev_free_camera.h"
 #include "three_ds_sdl_controller.h"
 #include "oot3d_prebackend_budget.h"
@@ -580,6 +581,9 @@ struct NativeCandidateDispatchState {
   Oot3dNativeGame::TopScreenWideItemsRuntime *WideItems = nullptr;
   // Sorted TopScreen entries the product hook owns (product builds only).
   std::vector<uint32_t> ProductTopScreenBlocks;
+  // Rotinas da biblioteca do compilador achadas pelos bytes (título
+  // genérico; ctr_library_natives.h). Vazio no OoT3D.
+  std::vector<Oot3dNativeGame::CtrLibraryNativeEntry> LibraryNatives;
   uint64_t TopScreenAimProjectileCycleAttempts = 0U;
   uint64_t TopScreenAimProjectileCycleUpdates = 0U;
   uint64_t TopScreenAimProjectileCycleSoundCalls = 0U;
