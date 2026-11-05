@@ -952,6 +952,20 @@ loads).
   same; 1,943 of the pack's 2,161 images match one of them, the rest are textures this check does
   not reach or that only exist with the pack's own mods). `user/load/mods/` (code patches and RomFS
   files of other mods) and the ReShade files are not used.
+- **Smaller copy** (`tools/switch/shrink_texture_pack.py`, Python 3 + Pillow, on the PC): reads the
+  zip or an extracted folder, keeps only `load/textures/<title id>/`, and writes each texture at
+  most `--world` (2) or `--hud` (3, the `UI` and `MAPS` folders) times its native size, the caps
+  the console applies anyway, so the SD card holds less and the Switch decodes smaller PNGs.
+  Area-averaged (`BOX`) with premultiplied alpha; textures already within their size are copied
+  byte for byte; `mipN` files, other-language `UI/<folder>`s (`--language`, default English, whose
+  art is in `UI` itself) and non-texture files are left out, and a kept language folder's texture
+  replaces the same name elsewhere. `--parts hud,models,world` selects folders (models =
+  `CHARACTERS`, `CREATURES`, `LINK`). Measured on chubbycubby's Vanilla UI/HUD 3.2 (8x HUD art,
+  64 HUD textures, 398.8 MiB): 97.9 MiB at 4x, 58.7 MiB at 3x, 27.9 MiB at 2x, about 5 s on 16
+  cores. Henriko's 1080p pack holds 1,238 MiB of `ENVIRONMENT`, 231 MiB of English HUD and maps
+  and 82 MiB of models at 4x; with those ratios the default output is about 520 MiB (HUD and
+  models only: about 160 MiB). `tools/switch/test_shrink_texture_pack.py` covers sizes, alpha
+  edges, parts and languages.
 - **`pack.json`** is read from the folder's root: `use_new_hash` (Henriko's pack: `false`, Azahar's
   legacy hash of the decoded texture), `flip_png_files` and the `textures` name map are honoured.
   `skip_mipmap` is not needed: mipmaps are always made from the image (what Azahar does with
