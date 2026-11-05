@@ -5,6 +5,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -243,10 +244,106 @@ void TestAutomaticMotionComposition() {
             "opposite gravity handoff is singular");
 }
 
+void RequireNear(const std::array<float, 3>& actual, const std::array<float, 3>& expected,
+                 const std::string& what, float tolerance = 1e-3F) {
+    if (NearVector(actual, expected, tolerance)) return;
+    const auto format = [](const std::array<float, 3>& v) {
+        return "{" + std::to_string(v[0]) + ", " + std::to_string(v[1]) + ", " + std::to_string(v[2]) + "}";
+    };
+    throw std::runtime_error(what + ": got " + format(actual) + ", expected " + format(expected));
+}
+
+// Regression (Switch, Automatic aim): a player aimed the slingshot with the
+// console's gyro, then also with the right stick and a touch drag; afterwards
+// physical pitch came out inverted. Synthetic yaw was accumulated into the
+// sensor-to-virtual rotation, so once it passed 90 degrees physical pitch
+// turned into roll and past 180 degrees it flipped sign. Physical rates must
+// map the same way whatever synthetic aim came before, alone or mixed.
+void TestPhysicalGyroAfterSyntheticAim() {
+    using namespace ThreeDsRecomp::Input;
+    MappingConfig config;  // Automatic, stick 180 deg/s, touch 0.14 deg/px.
+    VirtualMotionState state;
+    PhysicalInputState still;
+    still.SamplePeriodSeconds = 1.0 / 30.0;
+    still.ControllerMotion.GyroscopeValid = still.ControllerMotion.AccelerometerValid = true;
+    still.ControllerMotion.Accelerometer = {0, -1, 0};
+    const auto step = [&](const PhysicalInputState& input) {
+        return ResolveInput(config, input, {}, {}, nullptr, true, &state).Hid;
+    };
+    // What the same input yields from the current state without advancing it.
+    const auto probe = [&](const PhysicalInputState& input) {
+        auto copy = state;
+        return ResolveInput(config, input, {}, {}, nullptr, true, &copy).Hid;
+    };
+    auto pitchUp = still;
+    pitchUp.ControllerMotion.GyroscopeDegreesPerSecond = {-36, 0, 0};
+    auto turnLeft = still;
+    turnLeft.ControllerMotion.GyroscopeDegreesPerSecond = {0, 36, 0};
+    auto stickRight = still;
+    stickRight.RightStickX = 32767;
+
+    const auto pitchBefore = step(pitchUp).GyroscopeDegreesPerSecond;
+    const auto yawBefore = step(turnLeft).GyroscopeDegreesPerSecond;
+    RequireNear(pitchBefore, {-36, 0, 0}, "physical pitch-up is not sensor X before synthetic aim");
+    RequireNear(yawBefore, {0, 36, 0}, "physical turn is not sensor Y before synthetic aim");
+
+    // 180 degrees of right-stick yaw (1 s at 180 deg/s).
+    for (int i = 0; i < 30; ++i) step(stickRight);
+    RequireNear(probe(pitchUp).GyroscopeDegreesPerSecond, pitchBefore,
+                "physical pitch-up changed after 180 degrees of stick yaw");
+    RequireNear(probe(turnLeft).GyroscopeDegreesPerSecond, yawBefore,
+                "physical turn changed after 180 degrees of stick yaw");
+
+    // 105 more degrees of yaw from a touch drag (15 x 50 px), then 60 degrees
+    // of stick pitch up taken back down by a touch drag.
+    auto touchYaw = still;
+    touchYaw.TouchAimDeltaX = 50.0F;
+    for (int i = 0; i < 15; ++i) step(touchYaw);
+    auto stickUp = still;
+    stickUp.RightStickY = 32767;
+    for (int i = 0; i < 10; ++i) step(stickUp);
+    auto touchPitch = still;
+    touchPitch.TouchAimDeltaY = 60.0F / 0.14F / 10.0F;
+    for (int i = 0; i < 10; ++i) step(touchPitch);
+    const auto settled = step(still);
+    RequireNear(settled.Accelerometer, {0, -1, 0}, "net-zero synthetic pitch left the virtual device tilted");
+    RequireNear(settled.GyroscopeDegreesPerSecond, {}, "idle frame after synthetic aim reported rotation");
+    RequireNear(probe(pitchUp).GyroscopeDegreesPerSecond, pitchBefore,
+                "physical pitch-up changed after stick and touch aim past 180 degrees");
+    RequireNear(probe(turnLeft).GyroscopeDegreesPerSecond, yawBefore,
+                "physical turn changed after stick and touch aim past 180 degrees");
+
+    // Physical and synthetic input at the same time: across another 360
+    // degrees of stick yaw, the gyro's share of every frame stays fixed.
+    auto stickAndPitch = stickRight;
+    stickAndPitch.ControllerMotion.GyroscopeDegreesPerSecond = {-36, 0, 0};
+    for (int i = 0; i < 60; ++i) {
+        const auto stickOnly = probe(stickRight).GyroscopeDegreesPerSecond;
+        const auto mixed = step(stickAndPitch).GyroscopeDegreesPerSecond;
+        RequireNear({mixed[0] - stickOnly[0], mixed[1] - stickOnly[1], mixed[2] - stickOnly[2]}, pitchBefore,
+                    "physical pitch-up mixed with stick yaw frame " + std::to_string(i));
+    }
+    auto touchAndTurn = turnLeft;
+    touchAndTurn.TouchAimDeltaX = 50.0F;
+    auto touchOnly = still;
+    touchOnly.TouchAimDeltaX = 50.0F;
+    for (int i = 0; i < 30; ++i) {
+        const auto synthetic = probe(touchOnly).GyroscopeDegreesPerSecond;
+        const auto mixed = step(touchAndTurn).GyroscopeDegreesPerSecond;
+        RequireNear({mixed[0] - synthetic[0], mixed[1] - synthetic[1], mixed[2] - synthetic[2]}, yawBefore,
+                    "physical turn mixed with touch yaw frame " + std::to_string(i));
+    }
+    RequireNear(probe(pitchUp).GyroscopeDegreesPerSecond, pitchBefore,
+                "physical pitch-up changed after mixed aim");
+    RequireNear(probe(turnLeft).GyroscopeDegreesPerSecond, yawBefore,
+                "physical turn changed after mixed aim");
+}
+
 } // namespace
 
 int main() try {
     TestAutomaticMotionComposition();
+    TestPhysicalGyroAfterSyntheticAim();
     {
         using namespace ThreeDsRecomp::Input;
         const auto motion = ConvertSdlMotion({9.80665F, 9.80665F, -9.80665F}, true,
