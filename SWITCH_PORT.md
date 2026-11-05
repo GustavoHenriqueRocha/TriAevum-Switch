@@ -87,10 +87,14 @@ Performance and usability:
   does nothing. Other fingers outside a control are ignored. Short taps are held until the game
   reads them. While the L3+R3 menu (or another ImGui window) is open, the first finger that lands
   is an ImGui touch-screen mouse: tap buttons, checkboxes, tabs and combo items, drag sliders and
-  scrollbars, drag empty space to scroll; the controller keeps navigating. That finger never
-  reaches the game, and fingers that landed before the menu opened stay out of it. Hit-test, fit,
-  ownership and the menu gesture: `oot3d_top_screen_hud_touch.h`,
-  `oot3d_top_screen_hud_touch_tests.cpp`.
+  scrollbars, drag empty space to scroll; the controller keeps navigating. A tap (a finger that
+  lifts within 16 px at 720p) always clicks where it landed, however short: the pressed pointer
+  holds still until the finger leaves that slop, so a finger rolling as it lifts can't carry the
+  release off a small button. A finger landing within 24 px of a window's title-bar X (17 px, under
+  2 mm on a Lite) presses the X, which closes the menu as L3+R3 does. That finger never reaches
+  the game, and fingers that landed before the menu opened stay out of it. Hit-test, fit and
+  ownership: `oot3d_top_screen_hud_touch.h`, `oot3d_top_screen_hud_touch_tests.cpp`; the menu
+  gesture: `oot3d_host_menu_touch.h`, `oot3d_host_menu_touch_tests.cpp`.
 - **AOT generator**: hot helpers with an inline fast path and cold slow path; per-block LDM/STM;
   PC-relative literals folded; shards without `-ffast-math` (VFP exactness).
 - **Block budget** 2048 (was 128) on Switch.
