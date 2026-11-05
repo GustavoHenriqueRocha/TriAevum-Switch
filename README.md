@@ -28,28 +28,41 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
   the limit); a higher CPU clock with sys-clk helps.
 - **Defaults:** 60 fps interpolation (delete `switch/oot3dre/config/fps60` for 30 fps) and Master Quest
   unlocked from the start (delete `switch/oot3dre/config/unlock_master_quest`).
-- **Not included, downloaded on the console:** the HUD textures of the TopScreen mod
-  ([Single Screen Experience](https://gamebanana.com/mods/695893) by M-1, CC BY-NC-ND 4.0). Its license
-  lets you download and install it but not share it, so the first start offers to download it from
-  GameBanana (56 MB) and build the textures, the HD HUD art (the mod's HD atlas at 3x) and the HD text
-  font from your game files; an install from an earlier version is offered the download again to add
-  the HD HUD art: A downloads, B asks
-  again next time, X never asks (L3+R3 → Updates turns the offer back on). Without internet, download
-  `singlescreen_321.zip` from that page on a PC and copy it into `switch/oot3dre/`.
-- **HD textures (optional):** download the **1080p** version of HenrikoMagnifico's
-  [Ocarina of Time 3D 4K texture pack](https://www.henrikomagnifico.com/zelda-ocarina-of-time-3d-4k), copy the
-  contents of its `user/load/textures/0004000000033500/` folder (including `pack.json`) to
-  `switch/oot3dre/textures/` on the SD card, whatever your dump's region, and turn on L3+R3 → Video →
-  HD textures. The game reduces the pack to 2x the original textures, enough for the 720p screen
-  ("HD texture size" changes it). HUD textures in a pack are used too, at 3x. Expect some GPU and memory cost: each texture is four times the original
-  (about 10–50 MB of textures per area), and on/off applies at once, so compare in the same spot with the
-  performance overlay.
-  - **Smaller copy:** on a PC with Python 3 and Pillow (`pip install pillow`),
-    [`tools/switch/shrink_texture_pack.py`](tools/switch/shrink_texture_pack.py) turns the downloaded zip
-    into a folder at the sizes the Switch uses (world 2x, HUD 3x): 352 MB instead of 1.9 GB.
-    `python3 shrink_texture_pack.py "OOT3D 4K 5.0a (1080p).zip" textures`, then copy the contents of
-    `textures` to `switch/oot3dre/textures/`. `--parts hud,models` leaves out the world (scenery)
-    textures (65 MB left), `--world 1`/`--hud 2` makes it smaller still.
+- **HUD art, downloaded on the console:** the single-screen HUD's art comes from the TopScreen mod
+  ([Single Screen Experience](https://gamebanana.com/mods/695893) by M-1, CC BY-NC-ND 4.0), whose license
+  lets you download and install it but not share it. The first start offers to download it from
+  GameBanana (56 MB) and builds the HUD textures, the HD HUD art and the HD text font from your game
+  files: A downloads, B asks again next time, X never asks (L3+R3 → Updates turns the offer back on).
+  Without internet, download `singlescreen_321.zip` from that page on a PC and copy it into
+  `switch/oot3dre/`. Without the mod the game still runs, with the game's own HUD art.
+
+### HD textures (optional)
+
+HenrikoMagnifico's texture pack replaces the world, character and HUD textures with sharper ones.
+
+1. Download the **1080p** version of the
+   [Ocarina of Time 3D 4K texture pack](https://www.henrikomagnifico.com/zelda-ocarina-of-time-3d-4k)
+   (`OOT3D 4K 5.0a (1080p).zip`, 1.9 GB). If Google Drive says the download quota is exceeded, use the
+   MediaFire mirror on the same page.
+2. Make a copy at the sizes the Switch uses, on a PC: install [Python 3](https://www.python.org/downloads/)
+   and Pillow (`pip install pillow`), download
+   [`shrink_texture_pack.py`](tools/switch/shrink_texture_pack.py) into the same folder as the zip, and run
+
+   ```
+   python shrink_texture_pack.py "OOT3D 4K 5.0a (1080p).zip" textures
+   ```
+
+   It writes a `textures` folder of about 350 MB instead of 1.9 GB (world 2x the original, HUD 3x), so
+   the Switch also loads it faster. Add `--parts hud,models` for the HUD and characters only (65 MB).
+   Skipping this step works too: copy the contents of the zip's `user/load/textures/0004000000033500/`
+   folder instead, and the game reduces each texture as it loads it.
+3. Copy the contents of `textures` (the folders and `pack.json`) to `switch/oot3dre/textures/` on the SD
+   card, whatever your dump's region.
+4. In the game, L3+R3 → Video → **HD textures**. It applies at once and turns off the same way.
+   "HD texture size" (default 2x) is the most the world textures are drawn at.
+
+Higher resolution costs some GPU time and memory (about 10–50 MB of textures per area at 2x): if a busy
+area slows down, compare the same spot with HD textures off, using the performance overlay.
 
 # TriAevum — Echoes of Time
 
