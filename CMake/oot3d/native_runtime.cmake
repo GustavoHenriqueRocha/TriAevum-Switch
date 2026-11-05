@@ -514,6 +514,14 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
                     # A function whose CFG changed since the collection run
                     # (edited runtime header) just loses its profile.
                     -Wno-error=coverage-mismatch)
+                # ccache refuses -fprofile-partial-training; the launcher
+                # hides it from ccache and hashes each shard's .gcda.
+                if (CMAKE_CXX_COMPILER_LAUNCHER MATCHES "ccache")
+                    set_property(TARGET oot3d_native_whole_aot PROPERTY
+                        CXX_COMPILER_LAUNCHER
+                        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/switch/ccache-pgo.sh"
+                        "${OOT3D_WHOLE_AOT_PROFILE_FILE}")
+                endif()
             endif()
         elseif (OOT3D_WHOLE_AOT_PROFILE_MODE STREQUAL "generate")
             target_compile_options(oot3d_native_whole_aot PRIVATE

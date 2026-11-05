@@ -64,6 +64,9 @@ result test_bug_guards "$code"
 python3 "$here/test_perf_tools.py" > /tmp/switch-perf-tools.$$ 2>&1; code=$?
 grep -E '^FAIL' /tmp/switch-perf-tools.$$ | sed 's/^/  /'; rm -f /tmp/switch-perf-tools.$$
 result test_perf_tools "$code"
+python3 "$here/test_ccache_pgo.py" > /tmp/switch-ccache-pgo.$$ 2>&1; code=$?
+grep -E '^(FAIL|ERROR)' /tmp/switch-ccache-pgo.$$ | sed 's/^/  /'; rm -f /tmp/switch-ccache-pgo.$$
+result test_ccache_pgo "$code"
 (cd "$here/../.." && python3 -m unittest tools.triaevum_release.test_topscreen_30_pack) > /tmp/switch-topscreen.$$ 2>&1; code=$?
 grep -E '^(FAIL|ERROR)' /tmp/switch-topscreen.$$ | sed 's/^/  /'; rm -f /tmp/switch-topscreen.$$
 result test_topscreen_30_pack "$code"
