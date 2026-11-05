@@ -99,6 +99,8 @@ int main() {
           "the inactive native Items controller retained hint geometry");
 
   Oot3dNativeUiLifecycleBridge bridge(memory);
+  // The TopScreen pack is installed: custom_ui01 provides the tab hints.
+  bridge.SetTopScreenUiAtlasAvailable(true);
   const auto backgroundIdentity = bridge.NativePauseSharedTextureIdentity(
       oot3d::ui::UiPauseSharedTextureSlot::CommonBackground00);
   Require(backgroundIdentity.has_value() &&
@@ -228,11 +230,22 @@ int main() {
               memory.Write32(0x0055B4A0U, 0x00560500U) &&
               memory.Write32(0x0056054CU, 0x14020000U) && memory.Write32(0x0050672CU, 2U),
           "cannot seed cursor/equipment atlases for tab hints");
+  // 3.0 draws the tab hints from custom_ui01 (0x005D4A0C): two backings and
+  // two glyphs.
+  const auto isTabHint = [](const auto &primitive) {
+    return primitive.owner_address == 0x005D4A0CU &&
+           primitive.texture.semantic_name == kTopScreen30UiAtlasSemantic;
+  };
   const auto pageHints = bridge.BuildTopScreenPresentation(oot3d::ui::UiSubsystem::GameplayHud);
-  for (const auto owner : {0x005E4030U, 0x005E4058U})
-    Require(std::count_if(pageHints.begin(), pageHints.end(), [=](const auto &primitive) {
-              return primitive.owner_address == owner;
-            }) == 2, "the ordinary page did not emit both tab-hint lanes");
+  Require(std::count_if(pageHints.begin(), pageHints.end(), isTabHint) == 4,
+          "the ordinary page did not emit both tab-hint lanes");
+  // Without the pack (the player declined the download) they are left out.
+  bridge.SetTopScreenUiAtlasAvailable(false);
+  const auto packlessHints = bridge.BuildTopScreenPresentation(oot3d::ui::UiSubsystem::GameplayHud);
+  Require(std::none_of(packlessHints.begin(), packlessHints.end(), [](const auto &primitive) {
+            return primitive.owner_address == 0x005D4A0CU;
+          }), "tab hints drew without the TopScreen pack's custom_ui01");
+  bridge.SetTopScreenUiAtlasAvailable(true);
   Require(memory.Write32(0x0050A530U, 2U), "cannot activate System over the Items gate");
   bridge.SetTopScreenSystemPagePresentation(true);
   for (const bool redrawEdges : {true, false}) {
@@ -242,8 +255,7 @@ int main() {
     }
     const auto systemPresentation = bridge.BuildTopScreenPresentation(oot3d::ui::UiSubsystem::GameplayHud);
     for (const auto &primitive : systemPresentation)
-      Require(primitive.owner_address != 0x005CD1E0U && primitive.owner_address != 0x005E4030U &&
-                  primitive.owner_address != 0x005E4058U,
+      Require(primitive.owner_address != 0x005CD1E0U && primitive.owner_address != 0x005D4A0CU,
               "System retained pause edges or tab hints");
   }
   Require(memory.Write32(0x0050A530U, 0U) && memory.Write32(0x0050672CU, 0U),

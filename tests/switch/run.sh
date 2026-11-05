@@ -42,6 +42,9 @@ UNIT_TESTS=(
     oot3d_pica_etc1_transcode_tests
     oot3d_pica_texture_predecode_tests
     oot3d_host_menu_touch_tests
+    oot3d_n64_ui_renderer_tests
+    oot3d_native_ui_lifecycle_bridge_tests
+    oot3d_native_ui_texture_provider_tests
     oot3d_rom_import_tests
     oot3d_switch_motion_tests
     oot3d_switch_thread_layout_tests
