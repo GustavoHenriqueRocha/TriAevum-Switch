@@ -3,12 +3,11 @@
 #if defined(__SWITCH__)
 
 #include "oot3d_rom_import.h"
+#include "oot3d_switch_console_screen.h"
 
 #include <switch.h>
-#include <sys/iosupport.h>
 
 #include <chrono>
-#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -26,51 +25,6 @@ constexpr const char* kRoot = "sdmc:/switch/oot3dre";
 constexpr const char* kGame = "sdmc:/switch/oot3dre/game";
 
 class ImportCancelled : public std::exception {};
-
-// libnx text console on the default window; released before SDL/deko3d
-// take the window over. consoleInit points stdout and stderr at the console
-// and consoleExit does not point them back: the first write after the import
-// (spdlog's console sink, as the game starts) drew into the freed console and
-// crashed (ConsoleSwRenderer_drawChar, null write). The previous devoptabs
-// are put back on exit.
-class Screen {
-public:
-    Screen() : mStdout(devoptab_list[STD_OUT]), mStderr(devoptab_list[STD_ERR]) {
-        consoleInit(nullptr);
-        padConfigureInput(1, HidNpadStyleSet_NpadStandard);
-        padInitializeDefault(&mPad);
-    }
-    ~Screen() {
-        consoleExit(nullptr);
-        devoptab_list[STD_OUT] = mStdout;
-        devoptab_list[STD_ERR] = mStderr;
-    }
-    Screen(const Screen&) = delete;
-    Screen& operator=(const Screen&) = delete;
-
-    void Show(const std::string& body) {
-        consoleClear();
-        std::printf("\x1b[1;1H\x1b[36mOcarina of Time 3D - game data import\x1b[0m\n\n%s", body.c_str());
-        consoleUpdate(nullptr);
-    }
-
-    // Waits for one of `buttons`; nullopt when the player leaves the app.
-    std::optional<u64> Wait(u64 buttons) {
-        while (appletMainLoop()) {
-            padUpdate(&mPad);
-            const u64 down = padGetButtonsDown(&mPad);
-            if (down & buttons)
-                return down & buttons;
-            consoleUpdate(nullptr);
-        }
-        return std::nullopt;
-    }
-
-private:
-    PadState mPad{};
-    const devoptab_t* mStdout;
-    const devoptab_t* mStderr;
-};
 
 std::string Where() {
     return "Copy your own decrypted cartridge dump (.3ds or .cci) to\n"
@@ -115,7 +69,7 @@ bool RunSwitchRomImport() {
     if (sources.empty() && haveGame)
         return true;
 
-    Screen screen;
+    SwitchConsoleScreen screen("Ocarina of Time 3D - game data import");
     if (sources.empty()) {
         screen.Show("No game data was found.\n\n" + Where() + "\nPress + to exit.\n");
         (void)screen.Wait(HidNpadButton_Plus);

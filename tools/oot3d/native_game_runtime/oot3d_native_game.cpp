@@ -33,6 +33,7 @@
 #include "oot3d_update_panel.h"
 #include "oot3d_whole_aot_gcov.h"
 #include "oot3d_switch_rom_import.h"
+#include "oot3d_switch_topscreen_import.h"
 #include <switch.h>
 // libnx (applet.c, weak, default 0): 1 makes libnx's exit end the application
 // through AM instead of returning to the homebrew loader.
@@ -185,6 +186,11 @@ int main(int argc, char** argv) {
         // before anything reads the manifest or the RomFS.
         if (!Oot3dNativeGame::RunSwitchRomImport())
             return 0;
+        // The TopScreen HUD textures come from a mod the release cannot ship:
+        // offer to download it and build config/atlas_overrides.o3tu from
+        // game/romfs.bin before the launch arguments look for the pack.
+        if (!Oot3dNativeGame::RunSwitchTopScreenImport())
+            return 0;
         // A Mesa built with its Horizon disk cache (see docs) stores compiled
         // GLSL and nvc0 code here; the stock devkitPro Mesa ignores these.
         setenv("MESA_SHADER_CACHE_DIR", "sdmc:/switch/oot3dre/mesacache", 0);
@@ -233,9 +239,10 @@ int main(int argc, char** argv) {
             homebrewArguments[18] = const_cast<char*>("native30_interpolated");
             homebrewArguments[20] = const_cast<char*>("60");
         }
-        // config/atlas_overrides.o3tu is built from the third-party TopScreen
-        // mod, which a release cannot ship: without it the TopScreen UI runs
-        // without texture overrides instead of refusing to start.
+        // config/atlas_overrides.o3tu is built on the console from the
+        // third-party TopScreen mod (RunSwitchTopScreenImport), which a release
+        // cannot ship: without it the TopScreen UI runs without texture
+        // overrides instead of refusing to start.
         std::vector<char*> homebrewArgv(homebrewArguments.begin(), homebrewArguments.end());
         if (!std::filesystem::is_regular_file(homebrewArguments[14])) {
             homebrewArgv.erase(homebrewArgv.begin() + 13, homebrewArgv.begin() + 15);

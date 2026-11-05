@@ -534,9 +534,26 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
           r'if \(Fast::Oot3d::ExitGameRequested\(\)\)\s+__nx_applet_exit_mode = 1;',
           forbid=r'svcExitProcess\('),
-    Guard("ROM import screen: stdout/stderr put back after consoleExit (first log line crashed)",
-          "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
+    Guard("start-up console screens (ROM import, HUD textures): stdout/stderr put back after consoleExit (first log line crashed)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
           r'consoleExit\(nullptr\);\s+devoptab_list\[STD_OUT\] = mStdout;\s+devoptab_list\[STD_ERR\] = mStderr;'),
+    # --- 04/11: TopScreen HUD textures downloaded and built on the console ---
+    # The mod (CC BY-NC-ND) cannot ship with a release: the console downloads
+    # it and builds config/atlas_overrides.o3tu. A damaged pack stops the game
+    # at start-up ("cannot load TopScreen texture overrides").
+    Guard("HUD texture offer runs after the ROM import and before the launch arguments look for atlas_overrides.o3tu",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(!Oot3dNativeGame::RunSwitchRomImport\(\)\)\s+return 0;.*?'
+          r'if \(!Oot3dNativeGame::RunSwitchTopScreenImport\(\)\)\s+return 0;.*?config/atlas_overrides\.o3tu'),
+    Guard("HUD texture pack: read back before it replaces anything; Horizon does not rename over a file (remove first)",
+          "tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp",
+          r'the SD card did not keep .*?fs::remove\(path, error\); // Horizon cannot rename over an existing file\s+'
+          r'fs::rename\(partial, path, error\);',
+          "oot3d_topscreen_import_tests (TestWriteAndIdentify)"),
+    Guard("HUD texture pack written last: the game only looks for the font pack beside an existing pack",
+          "tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp",
+          r'WriteFileVerified\(configDirectory / kFontPackName, outputs\.Fonts\);.*?'
+          r'WriteFileVerified\(configDirectory / kPackName, outputs\.Pack\);\s+\}'),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay

@@ -21,8 +21,9 @@ topscreen_pack=${4:-${OOT3D_TOPSCREEN_PACK:-}}
 topscreen_archive=${OOT3D_TOPSCREEN_211_ARCHIVE:-}
 topscreen_archive_label=2_1_1
 if [[ -z ${topscreen_archive} && -n ${OOT3D_TOPSCREEN_30_ARCHIVE:-} ]]; then
+    # Any verified 3.x archive: 3.0 or 3.2.1 (singlescreen_321.zip).
     topscreen_archive=${OOT3D_TOPSCREEN_30_ARCHIVE}
-    topscreen_archive_label=3_0
+    topscreen_archive_label=3_x
 fi
 
 for input in "${nro}" "${game_dir}/code.bin" "${game_dir}/exheader.bin" \
@@ -41,7 +42,7 @@ if [[ -z ${topscreen_pack} ]]; then
             'TopScreen input is missing. Pass an O3TU v2 pack as argument 4,' \
             'set OOT3D_TOPSCREEN_PACK, or set OOT3D_TOPSCREEN_211_ARCHIVE' \
             'to the original TopScreen 2.1.1 zip (or OOT3D_TOPSCREEN_30_ARCHIVE' \
-            'to the verified TopScreen 3.0 zip).' >&2
+            'to the verified TopScreen 3.0 or 3.2.1 zip).' >&2
         exit 2
     fi
     topscreen_pack=${repo_root}/build-switch-product/topscreen_${topscreen_archive_label}.o3tu

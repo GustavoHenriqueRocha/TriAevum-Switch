@@ -3,6 +3,7 @@
 #include "fast/oot3d/debug_menu.h"
 #include "oot3d_build_version.h"
 #include "oot3d_switch_updater.h"
+#include "oot3d_topscreen_import.h"
 #include "oot3d_update_release.h"
 
 #include <imgui.h>
@@ -47,6 +48,9 @@ public:
         mUpdater(mRoot, LoadRepository(mConfig), BuildNumber()) {
     const auto saved = ParseChannel(ReadTrimmed(mConfig / kChannelFile));
     mChannel = saved.value_or(DefaultChannelFor(BuildVersion()));
+    std::error_code ignored;
+    mHudInstalled = std::filesystem::is_regular_file(mConfig / TopScreenImport::kPackName, ignored);
+    mHudOffer = TopScreenImport::ParseOfferSetting(ReadTrimmed(mConfig / TopScreenImport::kOfferSettingName));
   }
 
   const char *Label() const noexcept override { return "Updates"; }
@@ -81,6 +85,7 @@ public:
       if (ImGui::Button("Check again")) mUpdater.Check(mChannel);
       break;
     }
+    DrawHudTextures();
   }
 
 private:
@@ -176,11 +181,47 @@ private:
     }
   }
 
+  // The TopScreen HUD textures (oot3d_switch_topscreen_import.h): built at
+  // start-up from the mod downloaded from GameBanana. A player who skipped
+  // the offer turns it back on here; it shows at the next start.
+  void DrawHudTextures() {
+    ImGui::SeparatorText("HUD textures");
+    ImGui::TextWrapped("Art from the mod \"%s\" by %s (%s, %s).", TopScreenImport::kModName,
+                       TopScreenImport::kModAuthor, TopScreenImport::kModPage, TopScreenImport::kModLicense);
+    if (mHudInstalled) {
+      ImGui::TextUnformatted("Installed.");
+      return;
+    }
+    ImGui::TextWrapped("Not installed. The console downloads the mod from GameBanana (%s) at start-up and builds "
+                       "the textures from your game data.",
+                       Megabytes(TopScreenImport::DownloadArchive().Bytes).c_str());
+    if (mHudOfferRequested) {
+      ImGui::TextWrapped("The next start offers the download. Close the game and start it again.");
+      return;
+    }
+    if (mHudOffer == TopScreenImport::OfferSetting::Never)
+      ImGui::TextDisabled("You chose not to be asked at start-up.");
+    if (ImGui::Button("Offer the download at the next start")) {
+      std::error_code ignored;
+      std::filesystem::create_directories(mConfig, ignored);
+      std::ofstream file(mConfig / TopScreenImport::kOfferSettingName, std::ios::trunc);
+      file << TopScreenImport::OfferSettingText(TopScreenImport::OfferSetting::Ask) << '\n';
+      mHudOfferRequested = static_cast<bool>(file);
+      if (mHudOfferRequested) mHudOffer = TopScreenImport::OfferSetting::Ask;
+      mHudOfferError = !file;
+    }
+    if (mHudOfferError) ImGui::TextWrapped("Could not write config/%s.", TopScreenImport::kOfferSettingName);
+  }
+
   std::filesystem::path mRoot;
   std::filesystem::path mConfig;
   SwitchUpdater mUpdater;
   Channel mChannel = Channel::Stable;
   bool mChannelError = false;
+  bool mHudInstalled = false;
+  TopScreenImport::OfferSetting mHudOffer = TopScreenImport::OfferSetting::Ask;
+  bool mHudOfferRequested = false;
+  bool mHudOfferError = false;
 };
 } // namespace
 

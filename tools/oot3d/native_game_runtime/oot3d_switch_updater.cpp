@@ -1,8 +1,8 @@
 #include "oot3d_switch_updater.h"
 
 #include "oot3d_build_version.h"
+#include "oot3d_switch_network.h"
 
-#include <curl/curl.h>
 #include <mbedtls/sha256.h>
 #include <switch.h>
 
@@ -17,10 +17,10 @@
 namespace Oot3dNativeGame {
 namespace {
 using namespace Update;
+using SwitchNetwork::GetResult;
+using SwitchNetwork::NetworkSession;
+using SwitchNetwork::Transfer;
 
-constexpr long kConnectTimeoutSeconds = 15;
-// A transfer that stays below 1 KiB/s for this long fails.
-constexpr long kStallSeconds = 30;
 constexpr std::uint64_t kListingMaxBytes = 4U << 20U;
 // The newest release.json files a check reads looking for a complete release.
 constexpr size_t kManifestsRead = 5;
@@ -28,115 +28,19 @@ constexpr size_t kManifestsRead = 5;
 constexpr std::uint64_t kSpareBytes = 32U << 20U;
 constexpr size_t kWriteBuffer = 1U << 20U;
 
-// Sockets and libcurl for one check or download. curl_global_init opens
-// the console's SSL service (devkitPro's libcurl uses libnx's TLS backend:
-// certificates are checked by the system against its trusted CAs); both
-// are closed again when the job ends.
-class NetworkSession {
-public:
-  NetworkSession() {
-    mSockets = R_SUCCEEDED(socketInitializeDefault());
-    mCurl = mSockets && curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
-  }
-  ~NetworkSession() {
-    if (mCurl) curl_global_cleanup();
-    if (mSockets) socketExit();
-  }
-  NetworkSession(const NetworkSession &) = delete;
-  NetworkSession &operator=(const NetworkSession &) = delete;
-  bool Ready() const { return mCurl; }
-
-private:
-  bool mSockets = false;
-  bool mCurl = false;
-};
-
-struct Transfer {
-  std::function<bool(const char *, size_t)> Write;
-  std::uint64_t Limit = 0;
-  std::uint64_t Received = 0;
-  const std::atomic<bool> *Cancel = nullptr;
-  std::string Failure;
-};
-
-size_t WriteCallback(char *data, size_t size, size_t count, void *user) {
-  auto &transfer = *static_cast<Transfer *>(user);
-  const size_t length = size * count;
-  if (transfer.Cancel->load(std::memory_order_relaxed)) return 0;
-  if (transfer.Received + length > transfer.Limit) {
-    transfer.Failure = "the download is longer than expected";
-    return 0;
-  }
-  if (!transfer.Write(data, length)) {
-    if (transfer.Failure.empty()) transfer.Failure = "cannot write to the SD card";
-    return 0;
-  }
-  transfer.Received += length;
-  return length;
-}
-
-int ProgressCallback(void *user, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-  return static_cast<Transfer *>(user)->Cancel->load(std::memory_order_relaxed) ? 1 : 0;
-}
-
-enum class GetResult { Ok, Cancelled, Failed };
-
-// HTTPS GET of `url`, following redirects (release assets redirect to
-// GitHub's CDN), HTTPS only.
+// HTTPS GET from GitHub's API or a release asset (which redirects to
+// GitHub's CDN), explaining GitHub's rate limit.
 GetResult HttpGet(const std::string &url, const char *accept, Transfer &transfer, std::string *error) {
-  CURL *curl = curl_easy_init();
-  if (curl == nullptr) {
-    *error = "libcurl could not start a request";
-    return GetResult::Failed;
-  }
-  const std::string acceptHeader = std::string("Accept: ") + accept;
-  curl_slist *headers = curl_slist_append(nullptr, acceptHeader.c_str());
-  headers = curl_slist_append(headers, "X-GitHub-Api-Version: 2022-11-28");
-  const std::string userAgent = std::string("oot3dre-switch/") + BuildVersion();
-  std::array<char, CURL_ERROR_SIZE> message{};
-  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, userAgent.c_str());
-  curl_easy_setopt(curl, CURLOPT_PROTOCOLS, static_cast<long>(CURLPROTO_HTTPS));
-  curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, static_cast<long>(CURLPROTO_HTTPS));
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-  curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
-  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, kConnectTimeoutSeconds);
-  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
-  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, kStallSeconds);
-  curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 128L * 1024L);
-  curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(transfer.Limit));
-  curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, message.data());
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &WriteCallback);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &transfer);
-  curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-  curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, &ProgressCallback);
-  curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &transfer);
-  const CURLcode code = curl_easy_perform(curl);
   long status = 0;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-  curl_easy_cleanup(curl);
-  curl_slist_free_all(headers);
-  if (code == CURLE_OK) return GetResult::Ok;
-  if (transfer.Cancel->load(std::memory_order_relaxed) || code == CURLE_ABORTED_BY_CALLBACK)
-    return GetResult::Cancelled;
-  if (code == CURLE_WRITE_ERROR && !transfer.Failure.empty()) {
-    *error = transfer.Failure;
-  } else if (code == CURLE_FILESIZE_EXCEEDED) {
-    *error = "the download is longer than expected";
-  } else if (code == CURLE_HTTP_RETURNED_ERROR) {
+  const GetResult result = SwitchNetwork::HttpGet(
+      url, {std::string("Accept: ") + accept, "X-GitHub-Api-Version: 2022-11-28"}, transfer, &status, error);
+  if (result == GetResult::Failed && status >= 400) {
     *error = status == 403 || status == 429
                  ? "GitHub refused the request (HTTP " + std::to_string(status) +
                        "): it allows 60 checks an hour per internet address; try again later"
                  : "GitHub answered HTTP " + std::to_string(status);
-  } else {
-    *error = message[0] != '\0' ? std::string(message.data()) : curl_easy_strerror(code);
   }
-  return GetResult::Failed;
+  return result;
 }
 
 GetResult GetText(const std::string &url, const char *accept, std::uint64_t limit,

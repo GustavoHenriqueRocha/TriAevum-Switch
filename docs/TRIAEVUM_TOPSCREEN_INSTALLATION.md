@@ -8,13 +8,13 @@ replace the title adapter with the mod's executable patch.
 
 1. Select the supported decrypted `.3ds` or `.cci` ROM in Forge as before.
 2. Forge verifies the precompiled module and the original game data.
-3. Forge imports the official TopScreen 2.1.1 texture changes automatically.
-   It also prepares the archive's HD Latin font coverage for the ROM's region,
-   without a second download, selector or installation step.
+3. Forge imports the official TopScreen ("Single Screen Experience") texture
+   changes automatically. It also prepares the archive's HD Latin font coverage
+   for the ROM's region, without a second download, selector or installation step.
 4. The launch profile receives the verified local pack and the game is ready.
 
 Only the ROM is requested through the normal UI. First installation needs
-internet access unless `topscreen211.zip` is already beside `TriAevumForge.exe`,
+internet access unless `singlescreen_321.zip` is already beside `TriAevumForge.exe`,
 under `mods/` beside it, or in `data/downloads/`. Archive size and SHA-256 must
 match the recipe; a same-name archive is not automatically trusted. Later
 installations reuse the verified local pack without another download.
@@ -26,15 +26,21 @@ texture-incomplete replacement. Saves and valid user configurations are preserve
 ## Exact payload and boundary
 
 - Official source: [Single Screen Experience by M-1](https://gamebanana.com/mods/695893).
-- Version: 2.1.1, download `https://gamebanana.com/dl/1772020`.
-- Archive: 179,430,508 bytes; SHA-256
-  `e0c143c872ccf4ad72033caab768753b147a4033d260a701204a63ee6bc16df4`.
+- Recipes (`optional_inputs.topscreen_archive`) pin version 3.2.1, download
+  `https://gamebanana.com/dl/1875895`: 56,466,735 bytes, SHA-256
+  `737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0`. They
+  pinned 2.1.1 (`https://gamebanana.com/dl/1772020`, 179,430,508 bytes, SHA-256
+  `e0c143c872ccf4ad72033caab768753b147a4033d260a701204a63ee6bc16df4`) until it
+  was removed from GameBanana; the builder still accepts a 2.1.1 archive given
+  to it directly. See [TopScreen 3.x](#topscreen-3x-switchdeveloper-path) for
+  what 3.x contains and how it maps onto the 2.1.1 layout.
 - Supported revision: the existing EUR recipe. Other revisions do not inherit
   this import implicitly.
-- Inputs: 18 localized CTXB files (`menu_top_parts00` and `menu_cursor00`,
+- 2.1.1 inputs: 18 localized CTXB files (`menu_top_parts00` and `menu_cursor00`,
   nine languages), plus `custom_menu00` and `custom_font00` profile textures.
 - The existing native CTXB decoder/pack builder deduplicates identical original
-  texture identities. The verified real pack occupies 3,211,552 bytes.
+  texture identities. The verified real 2.1.1 pack occupied 3,211,552 bytes; the
+  3.2.1 pack from the EUR RomFS occupies 2,949,460 bytes.
 - The optional 4K PNG pack is **not** imported by this base path.
 - No IPS, ExHeader replacement or injected ARM code is extracted/applied.
 - No ROM, mod archive or derived texture pack is included in the public release.
@@ -116,18 +122,34 @@ The local candidate's Forge and private install have been updated. A new public
 release archive has **not** been promoted or audited by this change; use the
 normal allowlist release workflow, never distribute that installed directory.
 
-## TopScreen 3.0 (Switch/developer path)
+## TopScreen 3.x (Switch/developer path)
 
-TopScreen 2.1.1 is no longer downloadable from GameBanana; only "Single Screen
-Experience" 3.0 is. The pack builder also accepts that archive, verified exactly:
+TopScreen 2.1.1 is no longer downloadable from GameBanana; "Single Screen
+Experience" 3.x is. The pack builder accepts these archives, verified exactly
+(`TOPSCREEN_3X_ARCHIVES`):
 
-- Archive: 28,883,512 bytes; SHA-256
+- 3.0: 28,883,512 bytes; SHA-256
   `5668640fec8dc2b47b4516fd0b871c4d7d90ca1c2203acc2a22adb59aaab5993`.
-- Layout: `SingleScreen_3.0/<EUR|USA|JPN>/<Emulator|3DS Hardware>/...`.
-  Each RomFS contains `menu/custom_ui01.ctxb` (byte-identical everywhere,
-  SHA-256 `20290e41...6d07d8`), `actor/zelda_link_ext.zar`, `stage_grid.bin`;
-  the Emulator variant adds HD `message/<eu|us>/ltn16.qbf` and
-  `message/sys8.qbf`; every variant has `code.ips` and `exheader.bin`.
+- 3.2.1 (`singlescreen_321.zip`, `https://gamebanana.com/dl/1875895`, the
+  current file): 56,466,735 bytes; MD5 `4ca742c16975e11c04f81c2496f21695`;
+  SHA-256 `737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0`.
+- Layout: `SingleScreen_<version>/<EUR|USA|JPN>/<Emulator|3DS Hardware>/...`.
+  Each RomFS contains `menu/custom_ui01.ctxb` (byte-identical everywhere and in
+  both versions, SHA-256 `20290e41...6d07d8`), `actor/zelda_link_ext.zar`,
+  `stage_grid.bin`; the Emulator variant adds HD `message/<eu|us>/ltn16.qbf`
+  and `message/sys8.qbf` and a 4K PNG pack under `load/textures/`; every
+  variant has `code.ips` and `exheader.bin`.
+- 3.2.1 also adds `menu/hud_rupee00.ctxb` (32x32), a texture the original
+  game does not have: only the mod's `code.ips` reads it, so it is not
+  imported. From the same RomFS, 3.0 and 3.2.1 therefore build the same pack:
+  from the canonical EUR RomFS, 3.2.1 gives SHA-256
+  `6e79f87d39e8f6da6a6ac653d926bb0ccd68ec14f95032626789ec65b622ea7f`
+  (2,949,460 bytes, 8 entries, 3 profile textures), byte-identical to the pack
+  the p7b package built from 3.0. The raw USA Rev 1 RomFS gives the same pack.
+
+The Switch build downloads 3.2.1 and builds the pack on the console
+(`oot3d_topscreen_import.cpp`, a C++ port of this builder and of
+`prepare_qbf_font_pack.py`, byte-identical to both; see `SWITCH_PORT.md`).
 
 ### What changed relative to 2.1.1
 
@@ -187,10 +209,10 @@ python3 tools/oot3d/decomp_support/scripts/build_topscreen_texture_override_pack
 # or: OOT3D_TOPSCREEN_30_ARCHIVE=singlescreen_30.zip scripts/switch/stage-product.sh ...
 ```
 
-`prepare_qbf_font_pack.py` also accepts the verified 3.0 archive and pairs its
+`prepare_qbf_font_pack.py` also accepts a verified 3.x archive and pairs its
 Emulator `ltn16.qbf` (64x64 HD, same contract as 2.1.1). Its `sys8.qbf`
 (1,575,184 bytes vs 26,896 native) uses an encoding the QBF pairing does not
-support and is not imported. Forge recipes still pin 2.1.1 only.
+support and is not imported. Forge recipes pin 3.2.1.
 
 Not yet verified on hardware: the Items hint, the D-pad cross/cycle marks,
 action circles, labels, Ocarina arrows and L/R tab hints with 3.0 art. The

@@ -24,7 +24,7 @@ class TopScreenAssetsTests(unittest.TestCase):
         self.contract = {"sha256": hashlib.sha256(self.archive_bytes).hexdigest(),
                          "bytes": len(self.archive_bytes), "url": "https://example.test/archive"}
         self.recipe = {"inputs": {"romfs": {"sha256": "a" * 64}},
-                       "optional_inputs": {"topscreen_2_1_1_archive": self.contract}}
+                       "optional_inputs": {"topscreen_archive": self.contract}}
 
     def prepare(self):
         return prepare_topscreen_assets(root=self.root, data_root=self.data,
@@ -36,7 +36,7 @@ class TopScreenAssetsTests(unittest.TestCase):
         return {"fonts": [{"romfs_path": "message/eu/ltn16.qbf"}]}
 
     def test_local_import_then_verified_cache_without_archive_or_network(self):
-        archive = self.root / "topscreen211.zip"
+        archive = self.root / "singlescreen_321.zip"
         archive.write_bytes(self.archive_bytes)
         with patch("topscreen_assets.build_texture_pack", return_value=b"O3TU fixture") as build, \
                 patch("topscreen_assets.prepare_font_pack", side_effect=self.fake_font_pack) as fonts, \
@@ -52,7 +52,7 @@ class TopScreenAssetsTests(unittest.TestCase):
             network.assert_not_called()
 
     def test_old_texture_receipt_upgrades_only_fonts_using_cached_download(self):
-        cache = self.data / "downloads/topscreen211.zip"
+        cache = self.data / "downloads/singlescreen_321.zip"
         cache.parent.mkdir(parents=True)
         cache.write_bytes(self.archive_bytes)
         with patch("topscreen_assets.build_texture_pack", return_value=b"O3TU fixture") as build, \
@@ -69,7 +69,7 @@ class TopScreenAssetsTests(unittest.TestCase):
             network.assert_not_called()
 
     def test_corrupt_font_and_new_import_version_are_reprepared(self):
-        (self.root / "topscreen211.zip").write_bytes(self.archive_bytes)
+        (self.root / "singlescreen_321.zip").write_bytes(self.archive_bytes)
         with patch("topscreen_assets.build_texture_pack", return_value=b"O3TU fixture") as build, \
                 patch("topscreen_assets.prepare_font_pack", side_effect=self.fake_font_pack) as fonts:
             pack = self.prepare()
@@ -85,7 +85,7 @@ class TopScreenAssetsTests(unittest.TestCase):
             self.assertEqual(receipt["minimum_output_height"], 480)
 
     def test_font_failure_is_not_cached_as_success_and_can_be_retried(self):
-        (self.root / "topscreen211.zip").write_bytes(self.archive_bytes)
+        (self.root / "singlescreen_321.zip").write_bytes(self.archive_bytes)
         with patch("topscreen_assets.build_texture_pack", return_value=b"O3TU fixture") as build:
             with patch("topscreen_assets.prepare_font_pack", side_effect=ValueError("invalid QBF")):
                 with self.assertRaisesRegex(ValueError, "invalid QBF"):
@@ -96,7 +96,7 @@ class TopScreenAssetsTests(unittest.TestCase):
             self.assertEqual(build.call_count, 1)
 
     def test_corrupt_local_archive_rejected_before_import(self):
-        (self.root / "topscreen211.zip").write_bytes(b"bad")
+        (self.root / "singlescreen_321.zip").write_bytes(b"bad")
         with patch("topscreen_assets.build_texture_pack") as build:
             with self.assertRaisesRegex(ValueError, "failed verification"):
                 prepare_topscreen_assets(root=self.root, data_root=self.data,
@@ -114,7 +114,7 @@ class TopScreenAssetsTests(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(ValueError, "size or time limit"):
                         acquire_archive(self.root, self.data, self.contract, lambda *_: None)
-                    self.assertFalse((self.data / "downloads/topscreen211.zip").exists())
+                    self.assertFalse((self.data / "downloads/singlescreen_321.zip").exists())
             self.assertFalse(list(self.data.rglob("*.partial")))
 
     def test_other_title_does_not_acquire_oot3d_assets(self):

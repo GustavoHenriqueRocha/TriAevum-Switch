@@ -538,18 +538,25 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         # start-up step that finishes an install.
         tools/oot3d/native_game_runtime/oot3d_build_version.cpp
         tools/oot3d/native_game_runtime/oot3d_update_release.cpp
+        tools/oot3d/native_game_runtime/oot3d_switch_network.cpp
         tools/oot3d/native_game_runtime/oot3d_switch_updater.cpp
         tools/oot3d/native_game_runtime/oot3d_update_panel.cpp)
     # First-launch import of the player's decrypted dump into game/.
     target_sources(oot3d_native_game PRIVATE
         tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
         tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp)
+    # TopScreen HUD textures: the mod downloaded from GameBanana and built
+    # into config/atlas_overrides.o3tu at start-up (zlib reads the archive).
+    target_sources(oot3d_native_game PRIVATE
+        tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp
+        tools/oot3d/native_game_runtime/oot3d_switch_topscreen_import.cpp)
     # Only this file sees the version: a new one recompiles one source.
     set_source_files_properties(tools/oot3d/native_game_runtime/oot3d_build_version.cpp
         PROPERTIES COMPILE_DEFINITIONS
         "OOT3D_RELEASE_VERSION=\"${OOT3D_RELEASE_VERSION}\";OOT3D_RELEASE_BUILD=${OOT3D_RELEASE_BUILD}")
-    # libcurl (devkitPro's, on libnx's TLS backend) for the updater's HTTPS
-    # and mbedcrypto for its SHA-256 checks.
+    # libcurl (devkitPro's, on libnx's TLS backend) for the updater's and the
+    # HUD texture download's HTTPS, mbedcrypto for the updater's SHA-256
+    # checks and zlib for the mod archive.
     find_library(OOT3D_SWITCH_CURL_LIBRARY curl HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)
     find_library(OOT3D_SWITCH_MBEDCRYPTO_LIBRARY mbedcrypto HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)
     find_library(OOT3D_SWITCH_Z_LIBRARY z HINTS "${DEVKITPRO}/portlibs/switch/lib" REQUIRED)

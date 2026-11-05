@@ -28,8 +28,12 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
   the limit); a higher CPU clock with sys-clk helps.
 - **Defaults:** 60 fps interpolation (delete `switch/oot3dre/config/fps60` for 30 fps) and Master Quest
   unlocked from the start (delete `switch/oot3dre/config/unlock_master_quest`).
-- **Not included:** the HUD textures of the TopScreen mod (Single Screen Experience by M-1 on GameBanana);
-  its license does not allow redistribution.
+- **Not included, downloaded on the console:** the HUD textures of the TopScreen mod
+  ([Single Screen Experience](https://gamebanana.com/mods/695893) by M-1, CC BY-NC-ND 4.0). Its license
+  lets you download and install it but not share it, so the first start offers to download it from
+  GameBanana (56 MB) and build the textures and HD text font from your game files: A downloads, B asks
+  again next time, X never asks (L3+R3 → Updates turns the offer back on). Without internet, download
+  `singlescreen_321.zip` from that page on a PC and copy it into `switch/oot3dre/`.
 
 # TriAevum — Echoes of Time
 

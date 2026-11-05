@@ -108,7 +108,8 @@ Performance and usability:
   focus and restarted on return (HOME, sleep) or when its data stalls.
   Stick, touch and gyro add up in the same aim; turning with the stick or a touch drag never
   changes how the gyro maps afterwards (it used to invert pitch after ~180° of stick/touch turn).
-- **TopScreen 3.0**: 2.1.1 was removed from GameBanana; the importer now accepts the 3.0 package.
+- **TopScreen 3.x**: 2.1.1 was removed from GameBanana; the importer now accepts the 3.0 and 3.2.1
+  packages, and the Switch build downloads 3.2.1 and builds the pack itself (below).
 - **USA ROM** accepted in the build (the project's own canonical USA→EUR adapter).
 - **Input paths** configurable via `OOT3D_OPERATIONAL_<variable>` (previously hardcoded to the author's Windows).
 - Original icon for the `.nro` (`res/switch/icon.jpg`).
@@ -145,6 +146,57 @@ the canonical one: the output is the Level-3 view without the 4 KB IVFC superblo
 English/French/Spanish payloads; no payload changes. On the PC, `oot3d_rom_import_tests --import
 <dump> <dir>` produced files byte-identical to the PC pipeline's for the USA Rev 1 cartridge in
 about 9 s; on the console expect roughly 30-60 s, bound by the SD card.
+
+### HUD textures from the TopScreen mod (first launch)
+
+The HUD and menu art comes from "OoT3D: Single Screen Experience" by M-1
+([GameBanana 695893](https://gamebanana.com/mods/695893), CC BY-NC-ND 4.0): it may be downloaded
+and installed but not redistributed, so releases never contain it or anything built from it. The
+console downloads it and builds `config/atlas_overrides.o3tu` itself, as upstream's Forge does on
+the PC (`docs/TRIAEVUM_TOPSCREEN_INSTALLATION.md`). Right after the game data import, before the
+launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
+(`oot3d_switch_topscreen_import.cpp`; the libnx console screen, shared with the import in
+`oot3d_switch_console_screen.h`, puts stdout and stderr back on exit).
+
+- When the pack is missing, `game/romfs.bin` exists and `config/topscreen_offer` is not `never`,
+  the screen names the mod, its author, page and license and offers **A** download (56 MB) and
+  start the game, **B** not now (asked again at the next start), **X** never ask again
+  (`config/topscreen_offer` = `never`). L3+R3 > Updates > HUD textures > "Offer the download at the
+  next start" writes `ask` for players who skipped; it takes effect at the next start.
+- A downloads `https://gamebanana.com/dl/1875895` (version 3.2.1; GameBanana redirects to its CDN)
+  on a worker thread with the updater's HTTPS code (`oot3d_switch_network.{h,cpp}`: sockets and
+  libcurl only while it runs, HTTPS only, certificates checked by the system), to
+  `singlescreen_321.zip.partial`, with a progress bar, B to cancel and auto-sleep off. The body may
+  not exceed 56,466,735 bytes and is hashed while it streams; size and SHA-256
+  (`737807fd…c77aa0`) must match. The archive is then read for two entries only, the pack and
+  the font coverage are built from `game/romfs.bin`, and the download is deleted.
+- An official archive the player copied to `sdmc:/switch/oot3dre/` (`singlescreen_321.zip`, or
+  3.0's `singlescreen_30.zip`) is verified and used without network or question, and left there.
+- Written to `config/`, each through `<name>.partial`, read back and compared, then moved over
+  the old file (removed first: Horizon cannot rename over a file): `font_coverage.zip`,
+  `topscreen_import.json` (mod, author, page, license, archive/pack/font SHA-256) and
+  `atlas_overrides.o3tu` last, since it is what the game looks for. Log:
+  `logs/topscreen_import.txt`.
+- Failures leave nothing installed and the game starts as before, without the pack: no network,
+  an HTTP error ("the server answered HTTP 404"), a stalled transfer (30 s below 1 KiB/s), too
+  little free space, or a different file from GameBanana. If the mod is updated and the link
+  serves a new archive, it is cut off at the expected length or fails the SHA-256 check ("GameBanana
+  sent a different file than the 3.2.1 release this game knows"); supporting it needs a new
+  release with the new pin and, if the layout changed, builder changes. The failure screen offers
+  A try again, B start without the textures, X never ask again, and explains how to copy the
+  archive from a PC.
+- HD font: the runtime loads `font_coverage.zip` from beside the pack
+  (`oot3d_native_a32_window_setup.cpp`) and uses it from 480 output pixels high, so the Switch
+  (720p) uses it: the mod's 64x64 Latin `ltn16.qbf` covers the native 16x16 glyphs, paired by
+  character. Its `sys8.qbf` uses an encoding the pairing does not support and is not imported.
+- Core (`oot3d_topscreen_import.{h,cpp}`, standard C++ and zlib, host-buildable): a port of the 3.x
+  path of `build_topscreen_texture_override_pack.py` (ZIP reader, Level-3/IVFC RomFS reader,
+  ETC1A4/RGBA4/RGBA8 codecs, hash-matched `menu_top_parts00`/`menu_cursor00` replacements, O3TU
+  v2) and of `prepare_qbf_font_pack.py`. `oot3d_topscreen_import_tests --build <archive>
+  <romfs.bin> <pack> <fonts>` matches both Python tools byte for byte on the real archive: canonical
+  EUR RomFS, pack `6e79f87d…22ea7f` (2,949,460 bytes, also p7b's 3.0-built file) and fonts
+  `f625baf7…7ed5289`; raw USA Rev 1 RomFS, the same pack and fonts `5be4041b…6d00267`. On the PC
+  the build takes 0.03 s after a 0.3 s archive hash.
 
 ## How to build (Linux)
 
@@ -874,11 +926,12 @@ loads).
 - After an install the tab offers "Close game" (confirmation), which exits like Exit game; the new
   version runs at the next launch. The loader cannot start it directly (see Exit game). Rollback:
   rename `oot3d_native_game.nro.old` back to `oot3d_native_game.nro`.
-- The first-launch import screen (`oot3d_switch_rom_import.cpp`) puts stdout and stderr back after
+- The first-launch screens (`oot3d_switch_console_screen.h`) put stdout and stderr back after
   `consoleExit`: libnx left them on the freed console, so the game's first log line crashed
   (`ConsoleSwRenderer_drawChar`, null write) right after the import.
-- Without `config/atlas_overrides.o3tu` (built from the third-party TopScreen mod, CC BY-NC-ND,
-  not shippable) the game now starts without TopScreen texture overrides instead of refusing.
+- Without `config/atlas_overrides.o3tu` (built on the console from the third-party TopScreen mod,
+  CC BY-NC-ND, not shippable; see "HUD textures from the TopScreen mod") the game starts without
+  TopScreen texture overrides instead of refusing.
 - Logic and install steps: `oot3d_update_release.{h,cpp}`, tests `oot3d_update_release_tests`.
 
 ### Stable heap and less phantom work per frame (2026-10-17)
