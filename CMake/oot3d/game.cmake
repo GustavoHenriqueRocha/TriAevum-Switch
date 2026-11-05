@@ -504,7 +504,7 @@ if(COMMAND three_ds_recomp_deploy_nri_runtime)
 endif()
 unset(_oot3d_vulkan_hosts)
 oot3d_target_defaults(oot3d_native_game NO_WARNING_OVERRIDE)
-# Release identity (~/workshop-OOT/scripts/release-fork.sh sets both): the
+# Release identity (set by the release build, -DOOT3D_RELEASE_VERSION/BUILD): the
 # version the NACP and the L3+R3 menu show and the build number the OTA
 # updater compares (higher = newer, across channels).
 set(OOT3D_RELEASE_VERSION "0.1.0-dev" CACHE STRING
