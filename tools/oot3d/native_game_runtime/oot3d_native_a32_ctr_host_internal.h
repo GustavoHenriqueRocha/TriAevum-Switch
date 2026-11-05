@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -147,6 +148,34 @@ constexpr uint32_t kInvalidBufferDescriptor = 0xD9001830U;
 constexpr uint32_t kInvalidSessionHandle = 0xD8E007F7U;
 constexpr uint32_t kSessionClosed = 0xC920181AU;
 constexpr uint32_t kFsSaveDataArchiveId = 4U;
+// ExtSaveData (6, do próprio título) e SharedExtSaveData (7, do sistema: Play
+// Coins 0xF000000B etc.). Backend de pasta: <pai do save>/extdata/<mídia>/
+// <id alto>/<id baixo>/ (CtrExtDataDirectory). Path binário de 12 bytes:
+// u32 mídia, u32 id baixo, u32 id alto (como o Azahar).
+constexpr uint32_t kFsExtSaveDataArchiveId = 6U;
+constexpr uint32_t kFsSharedExtSaveDataArchiveId = 7U;
+constexpr uint32_t kFsExtDataNotFound = 0xC8804478U;
+constexpr uint32_t kFsCreateExtSaveDataRequest = 0x08510242U;
+constexpr uint32_t kFsCreateExtSaveDataResponse = 0x08510042U;
+constexpr uint32_t kPlayCoinsExtDataLow = 0xF000000BU;
+
+inline bool IsCtrExtDataArchiveId(uint32_t id) {
+    return id == kFsExtSaveDataArchiveId || id == kFsSharedExtSaveDataArchiveId;
+}
+
+inline std::filesystem::path CtrExtDataBaseDirectory(const std::filesystem::path& saveDirectory) {
+    auto normal = saveDirectory.lexically_normal();
+    if (!normal.has_filename()) normal = normal.parent_path();
+    return normal.parent_path() / "extdata";
+}
+
+inline std::filesystem::path CtrExtDataDirectory(const std::filesystem::path& saveDirectory,
+                                                 uint32_t media, uint32_t low, uint32_t high) {
+    char highText[9], lowText[9];
+    std::snprintf(highText, sizeof(highText), "%08x", high);
+    std::snprintf(lowText, sizeof(lowText), "%08x", low);
+    return CtrExtDataBaseDirectory(saveDirectory) / std::to_string(media) / highText / lowText;
+}
 constexpr uint32_t kFileReadRequest = 0x080200C2U;
 constexpr uint32_t kFileReadResponse = 0x08020082U;
 constexpr uint32_t kFileWriteRequest = 0x08030102U;

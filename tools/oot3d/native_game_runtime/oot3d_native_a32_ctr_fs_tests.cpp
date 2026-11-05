@@ -505,6 +505,111 @@ void TestSaveDataFormatInfo() {
     std::filesystem::remove_all(directory.parent_path());
 }
 
+// Extdata compartilhado de Play Coins (SharedExtSaveData 7, NAND, 0xF000000B):
+// Super Mario 3D Land abre no boot. Backend de pasta ao lado do save.
+void TestSharedExtDataPlayCoins() {
+    const auto root = std::filesystem::temp_directory_path() / "triaevum_fs_extdata_test";
+    const auto directory = root / "save";
+    std::filesystem::remove_all(root);
+    auto config = MakeConfig();
+    config.SaveDataDirectory = directory;
+    NativeA32CtrHostServices host(config);
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    NativeA32Memory memory;
+    GuestState state{};
+    constexpr uint32_t tls = FsFixture::Tls, cmd = FsFixture::Cmd, buffer = FsFixture::Buffer;
+    constexpr uint32_t data = tls + 0x400U;
+    std::string error;
+    Require(memory.MapRegion({"tls", tls, 0x1000U, true, false, {}}, &error), error);
+    state.thread_pointer = tls;
+    NativeA32HostContext context{process, 0U};
+    const auto call = [&](uint32_t handle, std::initializer_list<uint32_t> words) {
+        uint32_t address = cmd;
+        for (const uint32_t word : words) {
+            Require(memory.Write32(address, word), "request");
+            address += 4;
+        }
+        state.r[0] = handle;
+        Require(host.HandleSvc(0x32U, state, memory, context).Action == NativeA32HostAction::Resume,
+                "FS request did not resume");
+    };
+    const auto word = [&](unsigned index) {
+        uint32_t value = 0U;
+        Require(memory.Read32(cmd + index * 4U, &value), "reply word");
+        return value;
+    };
+    const std::array<uint8_t, 5> port{'s', 'r', 'v', ':', 0};
+    Require(memory.WriteBytes(buffer, port), "port");
+    state.r[1] = buffer;
+    Require(host.HandleSvc(0x2D, state, memory, context).Action == NativeA32HostAction::Resume,
+            "srv open");
+    call(state.r[1], {0x00050100U, 0x553A7366U, 0x00524553U, 7U});
+    const uint32_t fs = word(3);
+    const auto extPath = [&](uint32_t low) {
+        Require(memory.Write32(buffer, 0U) && memory.Write32(buffer + 4U, low) &&
+                    memory.Write32(buffer + 8U, 0U),
+                "extdata path");
+    };
+
+    // Extdata compartilhado desconhecido: NotFound, sem criar nada.
+    extPath(0xF000000AU);
+    call(fs, {0x080C00C2U, 7U, 2U, 12U, (12U << 14U) | 2U, buffer});
+    Require(word(0) == 0x080C00C0U && word(1) == 0xC8804478U && word(2) == 0U,
+            "unknown shared extdata did not answer NotFound");
+
+    extPath(0xF000000BU);
+    call(fs, {0x080C00C2U, 7U, 2U, 12U, (12U << 14U) | 2U, buffer});
+    const uint32_t archive = word(2);
+    Require(word(0) == 0x080C00C0U && word(1) == 0U && archive != 0U,
+            "Play Coins shared extdata did not open");
+    const auto extdata = root / "extdata" / "0" / "00000000" / "f000000b";
+    Require(std::filesystem::file_size(extdata / "gamecoin.dat") == 0x14U,
+            "default gamecoin.dat was not created");
+
+    // gamecoin.dat padrão pelo IPC: magic 0x4F00, 42 moedas, 2014-12-29.
+    const std::array<uint8_t, 13> coinName{'/', 'g', 'a', 'm', 'e', 'c', 'o', 'i', 'n', '.', 'd', 'a', 't'};
+    Require(memory.Fill(buffer, 16U, 0U) && memory.WriteBytes(buffer, coinName), "coin path");
+    call(fs, {0x080201C2U, 0U, archive, 0U, 3U, 14U, 1U, 0U, (14U << 14U) | 2U, buffer});
+    const uint32_t coins = word(3);
+    Require(word(1) == 0U && coins != 0U, "gamecoin.dat open");
+    call(coins, {0x080200C2U, 0U, 0U, 0x14U, (0x14U << 4U) | 0xCU, data});
+    Require(word(1) == 0U && word(2) == 0x14U, "gamecoin.dat read");
+    std::array<uint8_t, 0x14> coin{};
+    Require(memory.ReadBytes(data, coin), "coin bytes");
+    Require(coin[0] == 0x00U && coin[1] == 0x4FU && coin[2] == 0U && coin[3] == 0U &&
+                coin[4] == 42U && coin[5] == 0U && coin[0x10] == 0xDEU && coin[0x11] == 0x07U &&
+                coin[0x12] == 12U && coin[0x13] == 29U,
+            "gamecoin.dat default layout");
+
+    // CreateFile + Write num arquivo novo do extdata.
+    const std::array<uint8_t, 7> testName{'/', 't', '.', 'b', 'i', 'n', 0};
+    Require(memory.Fill(buffer, 16U, 0U) && memory.WriteBytes(buffer, testName), "test path");
+    call(fs, {0x08080202U, 0U, archive, 0U, 3U, 7U, 0U, 4U, 0U, (7U << 14U) | 2U, buffer});
+    Require(word(0) == 0x08080040U && word(1) == 0U, "extdata CreateFile");
+    call(fs, {0x080201C2U, 0U, archive, 0U, 3U, 7U, 3U, 0U, (7U << 14U) | 2U, buffer});
+    const uint32_t file = word(3);
+    Require(word(1) == 0U && file != 0U, "extdata file open");
+    const std::array<uint8_t, 4> payload{1, 2, 3, 4};
+    Require(memory.WriteBytes(data, payload), "payload");
+    call(file, {0x08030102U, 0U, 0U, 4U, 1U, (4U << 4U) | 0xAU, data});
+    Require(word(1) == 0U && word(2) == 4U, "extdata write");
+    {
+        std::ifstream input(extdata / "t.bin", std::ios::binary);
+        std::array<char, 4> disk{};
+        Require(input.read(disk.data(), 4) && disk[0] == 1 && disk[3] == 4, "extdata write on disk");
+    }
+
+    // GetFormatInfo do extdata existente responde sucesso; o desconhecido, NotFound.
+    extPath(0xF000000BU);
+    call(fs, {0x084500C2U, 7U, 2U, 12U, (12U << 14U) | 2U, buffer});
+    Require(word(0) == 0x08450140U && word(1) == 0U, "extdata GetFormatInfo");
+    extPath(0xF000000AU);
+    call(fs, {0x084500C2U, 7U, 2U, 12U, (12U << 14U) | 2U, buffer});
+    Require(word(1) == 0xC8804478U, "unknown extdata GetFormatInfo");
+    std::filesystem::remove_all(root);
+}
+
 int main() {
     TestFullHistoryIntentionalWait();
     TestFsFailuresAndRestore();
@@ -512,5 +617,6 @@ int main() {
     TestMasterQuestUnlockPolicy();
     TestMasterQuestUnlockThroughFs();
     TestSaveDataFormatInfo();
+    TestSharedExtDataPlayCoins();
     std::cout << "oot3d_native_a32_ctr_fs_tests: ok\n";
 }
