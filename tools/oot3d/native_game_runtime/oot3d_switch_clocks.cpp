@@ -1,15 +1,17 @@
-// Current clocks for logs/perf.txt: see oot3d_switch_clocks.h.
+// Current clocks for logs/perf.txt and the overlay: see oot3d_switch_clocks.h.
 //
 // Why sys-clk's IPC and not clkrst/pcv: sys-clk already keeps the clocks
 // (target and measured) in a context its overlay reads through the same
 // GetCurrentContext command; reading from there opens no clkrst/pcv session in the app (the
 // 2026-10-17 research says not to use clkrst in the app) and doesn't compete with
-// sys-clk. Without sys-clk the MHz stay -1 and only the mode is recorded.
+// sys-clk. Without sys-clk the MHz are the stock clocks of the performance
+// configuration AM reports (read-only, no apm session either).
 #if defined(__SWITCH__)
 #include <switch.h>
 
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -70,7 +72,7 @@ struct SysClkClient {
     bool Open = false;
     bool Probed = false;
     uint32_t ApiVersion = 0;
-    uint32_t WindowsUntilRetry = 0;
+    uint64_t RetryTick = 0;
 
     void Close() {
         if (Open) {
@@ -80,17 +82,18 @@ struct SysClkClient {
     }
 
     // Opens the session once; if sys-clk isn't running (or goes down),
-    // retries only every 60 windows (~5 min at 30 fps).
+    // retries only once a minute (the overlay requests a read every half
+    // second, so the retry is timed, not counted).
     bool Ensure() {
         if (Open) {
             return true;
         }
-        if (Probed && WindowsUntilRetry != 0U) {
-            --WindowsUntilRetry;
+        const uint64_t now = armGetSystemTick();
+        if (Probed && now < RetryTick) {
             return false;
         }
         Probed = true;
-        WindowsUntilRetry = 60U;
+        RetryTick = now + armNsToTicks(60ULL * 1000000000ULL);
         {
             // Hang watchdog: the last service call goes into hang.txt.
             HangWatch::ServiceCallScope call("sm:AtmosphereHasService(sys:clk)");
@@ -127,11 +130,30 @@ int Mhz(uint32_t hz) {
     return hz == 0U ? -1 : static_cast<int>((hz + 500000U) / 1000000U);
 }
 
-std::string ReadClocks() {
-    int cpu = -1;
-    int gpu = -1;
-    int mem = -1;
-    const char* source = "none";
+// HOS's active performance configuration (AM ICommonStateGetter 91, 7.0.0+;
+// the same value apm:sys GetCurrentPerformanceConfiguration returns). Only
+// read when sys-clk is absent: sys-clk sets the clocks without changing it.
+SwitchClockReading ReadStockClocks() {
+    u32 configuration = 0;
+    Result result;
+    {
+        HangWatch::ServiceCallScope call("am:GetCurrentPerformanceConfiguration");
+        result = appletGetCurrentPerformanceConfiguration(&configuration);
+    }
+    if (R_FAILED(result) || configuration == 0U) {
+        return {};
+    }
+    return StockClockReading(configuration);
+}
+
+struct ClockSample {
+    SwitchClockReading Reading;
+    std::string Text = "clocks: clk_src=none";
+};
+
+ClockSample ReadClocks() {
+    ClockSample sample;
+    SwitchClockReading& reading = sample.Reading;
     const char* profile = "-1";
     int enabled = -1;
     double ipcMicroseconds = -1.0;
@@ -148,15 +170,18 @@ std::string ReadClocks() {
             // realFreqs (measured by sys-clk) when present; otherwise the target.
             const bool real = gSysClk.ApiVersion >= 2U && context.RealFreqs[0] != 0U;
             const uint32_t* freqs = real ? context.RealFreqs : context.Freqs;
-            cpu = Mhz(freqs[0]);
-            gpu = Mhz(freqs[1]);
-            mem = Mhz(freqs[2]);
-            source = real ? "sysclk_real" : "sysclk";
+            reading.CpuMhz = Mhz(freqs[0]);
+            reading.GpuMhz = Mhz(freqs[1]);
+            reading.MemMhz = Mhz(freqs[2]);
+            reading.Source = real ? SwitchClockSource::SysClkReal : SwitchClockSource::SysClkTarget;
             profile = ProfileName(context.Profile);
             enabled = context.Enabled != 0 ? 1 : 0;
         } else {
             gSysClk.Close(); // sys-clk exited: reopen later
         }
+    }
+    if (reading.Source == SwitchClockSource::None) {
+        reading = ReadStockClocks();
     }
     // Values kept by libnx from the applet messages: no IPC.
     const char* operation = "-1";
@@ -174,12 +199,20 @@ std::string ReadClocks() {
     std::ostringstream text;
     text.setf(std::ios::fixed);
     text.precision(0);
-    text << "clocks: cpu_mhz=" << cpu << " gpu_mhz=" << gpu << " mem_mhz=" << mem
-         << " clk_src=" << source << " op_mode=" << operation << " perf_mode=" << performance
+    text << "clocks: cpu_mhz=" << reading.CpuMhz << " gpu_mhz=" << reading.GpuMhz
+         << " mem_mhz=" << reading.MemMhz << " clk_src=" << SwitchClockSourceName(reading.Source);
+    if (reading.Source == SwitchClockSource::Stock) {
+        char configuration[24];
+        std::snprintf(configuration, sizeof(configuration), " perf_cfg=0x%08X",
+                      static_cast<unsigned>(reading.PerformanceConfiguration));
+        text << configuration;
+    }
+    text << " op_mode=" << operation << " perf_mode=" << performance
          << " sysclk_profile=" << profile << " sysclk_enabled=" << enabled
          << " sysclk_api=" << (gSysClk.Open ? static_cast<int>(gSysClk.ApiVersion) : -1)
          << " clk_ipc_us=" << ipcMicroseconds;
-    return text.str();
+    sample.Text = text.str();
+    return sample;
 }
 
 // sys-clk IPC on its own thread: p6w (26/10) sat 3.4 s in
@@ -188,7 +221,7 @@ std::string ReadClocks() {
 struct ClockReader {
     std::mutex Mutex;
     std::condition_variable Wake;
-    std::string Last = "clocks: clk_src=none";
+    ClockSample Last;
     bool Requested = false;
     bool Busy = false;
     std::thread Thread;
@@ -200,17 +233,15 @@ struct ClockReader {
             Requested = false;
             Busy = true;
             lock.unlock();
-            std::string text = ReadClocks();
+            ClockSample sample = ReadClocks();
             lock.lock();
-            Last = std::move(text);
+            Last = std::move(sample);
             Busy = false;
         }
     }
 };
 
-} // namespace
-
-std::string SwitchClockPerfSummary() {
+ClockReader& Reader() {
     static ClockReader* reader = [] {
         // Never destroyed (the thread lives until the process ends). No detach():
         // pthread_detach doesn't exist in devkitA64's newlib and the std::system_error
@@ -219,15 +250,34 @@ std::string SwitchClockPerfSummary() {
         created->Thread = std::thread([created] { created->Loop(); });
         return created;
     }();
+    return *reader;
+}
+
+} // namespace
+
+SwitchClockReading SwitchClockLatest() {
+    ClockReader& reader = Reader();
+    SwitchClockReading reading;
+    {
+        const std::lock_guard<std::mutex> lock(reader.Mutex);
+        reading = reader.Last.Reading;
+        reader.Requested = true;
+    }
+    reader.Wake.notify_one();
+    return reading;
+}
+
+std::string SwitchClockPerfSummary() {
+    ClockReader& reader = Reader();
     std::string text;
     bool busy = false;
     {
-        const std::lock_guard<std::mutex> lock(reader->Mutex);
-        text = reader->Last;
-        busy = reader->Busy;
-        reader->Requested = true;
+        const std::lock_guard<std::mutex> lock(reader.Mutex);
+        text = reader.Last.Text;
+        busy = reader.Busy;
+        reader.Requested = true;
     }
-    reader->Wake.notify_one();
+    reader.Wake.notify_one();
     // clk_busy=1: the previous read hasn't returned yet (sys-clk is slow).
     return text + (busy ? " clk_busy=1" : " clk_busy=0");
 }

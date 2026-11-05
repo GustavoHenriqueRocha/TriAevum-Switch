@@ -1,5 +1,6 @@
 #include "oot3d_video_settings_panel.h"
 #include "oot3d_video_settings.h"
+#include "oot3d_fps_counter.h"
 #include <imgui.h>
 #include <array>
 #include <cstdio>
@@ -51,7 +52,11 @@ bool ScaleCombo(const char *label, float &value, std::span<const ScaleOption> op
 class VideoSettingsPanel final : public Fast::Oot3d::GraphicsSettingsPanelTab {
 public:
   explicit VideoSettingsPanel(std::filesystem::path config)
-      : mConfig(std::move(config)), mBoot(VideoSettings::Load(mConfig)), mSettings(mBoot) {}
+      : mConfig(std::move(config)), mBoot(VideoSettings::Load(mConfig)), mSettings(mBoot) {
+    std::error_code error;
+    PerfOverlayEnabled().store(std::filesystem::exists(mConfig / kPerfOverlayConfigName, error),
+                               std::memory_order_relaxed);
+  }
   const char *Label() const noexcept override { return "Video"; }
   void Draw() override {
     bool changed = ScaleCombo("Docked resolution", mSettings.DockedScale, kDocked);
@@ -82,13 +87,36 @@ public:
       ImGui::TextUnformatted("Saved. Close and reopen the game to apply.");
     else
       ImGui::TextDisabled("Values in use.");
+    // Applies at once (RunFrame reads the flag every frame); the file keeps
+    // it for the next start.
+    ImGui::Separator();
+    bool overlay = PerfOverlayEnabled().load(std::memory_order_relaxed);
+    if (ImGui::Checkbox("Performance overlay (FPS, speed, clocks)", &overlay)) {
+      PerfOverlayEnabled().store(overlay, std::memory_order_relaxed);
+      mOverlayError = SaveOverlay(overlay) ? "" : kPerfOverlayConfigName;
+    }
+    if (!mOverlayError.empty())
+      ImGui::TextWrapped("Could not write config/%s.", mOverlayError.c_str());
   }
 
 private:
+  // config/fps_counter: present = overlay on.
+  bool SaveOverlay(bool enabled) const {
+    std::error_code error;
+    if (!enabled) {
+      std::filesystem::remove(mConfig / kPerfOverlayConfigName, error);
+      return !error;
+    }
+    std::filesystem::create_directories(mConfig, error);
+    std::ofstream file(mConfig / kPerfOverlayConfigName, std::ios::trunc);
+    return static_cast<bool>(file);
+  }
+
   std::filesystem::path mConfig;
   VideoSettings mBoot;
   VideoSettings mSettings;
   std::string mError;
+  std::string mOverlayError;
 };
 } // namespace
 std::shared_ptr<Fast::Oot3d::GraphicsSettingsPanelTab>

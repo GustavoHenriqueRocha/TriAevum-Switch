@@ -748,14 +748,31 @@ loads).
   overlay uses), `realFreqs` (measured) when API ≥ 2, otherwise the target (`clk_src=sysclk`). The session is
   opened on the first window and kept; beforehand, Atmosphère's sm is queried
   (`AtmosphereHasService`, 65100) because `smGetService` on an unregistered service blocks waiting.
-  Without sys-clk: MHz -1, `clk_src=none`, retry every 60 windows. Cost: one IPC per
-  150-frame window (`clk_ipc_us`), done after closing the window's timing.
+  Without sys-clk: the stock clocks of the performance configuration HOS applied
+  (`appletGetCurrentPerformanceConfiguration`, AM, 7.0.0+), mapped by the switchbrew table
+  (PTM services, PerformanceConfiguration) in `oot3d_switch_clocks.h`: `clk_src=stock
+  perf_cfg=0x00020003` (an ID missing from the table keeps MHz -1); `clk_src=none` only if that also
+  fails. sys-clk is retried once a minute. Cost: the reads run on the clock reader thread (one per
+  perf window, plus one per half second while the overlay is on); the game thread only copies the
+  last result.
 - Read-only and no clkrst/pcv in the app (SwitchWakerHD issue #33: clkrst in the app hung the console
   on wake from sleep); clocking remains sys-clk's job.
 - `op_mode` (handheld/docked) and `perf_mode` come from `appletGetOperationMode`/`appletGetPerformanceMode`
   (values cached by libnx, no IPC) and work even without sys-clk.
 - `perf_report.py` shows each session's clock; if it changes midway, it warns (window, before → after) and
   splits fps/`total_ms` by clock; `--windows` lists `cpu/gpu/mem mode` per window.
+
+### Performance overlay: L3+R3 > Video (`config/fps_counter`)
+- "Performance overlay" checkbox in the Video tab; applies in the same frame and creates/removes
+  `config/fps_counter` (present = on, the same file as the old FPS counter). Two lines in the
+  top-left corner, shadowed yellow ImGui text at 1/32 of the window height:
+  `59.9 FPS  max 18.2 ms  speed 100%` and `CPU 1785  GPU 768  MEM 1600  sys-clk` (MHz; `stock`
+  without sys-clk, `--` when unknown).
+- FPS = presented frames (fps60 interpolated ones included) per 0.5 s window; `max` = worst game-loop
+  interval of the window; `speed` = guest refreshes run / refreshes owed (run + dropped by the
+  presentation scheduler), `--` when none was owed (loading screens). Text formatted only when a
+  window closes (`oot3d_fps_counter.h`, tests in `oot3d_fps_counter_tests.cpp`).
+- Needs ImGui on the window: with deko3d and `config/serial_presentation` nothing ImGui draws shows.
 
 ### Stable heap and less phantom work per frame (2026-10-17)
 Measured (`switch-logs/interp1`, fps60, scale 2, 8.5 min): `heap_arena_mb` 631 → 1659 MB with
