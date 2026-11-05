@@ -24,6 +24,12 @@ public:
     explicit SwitchConsoleScreen(std::string title)
         : mTitle(std::move(title)), mStdout(devoptab_list[STD_OUT]), mStderr(devoptab_list[STD_ERR]) {
         consoleInit(nullptr);
+        // libnx points stdout at the console only on its first consoleInit
+        // (didFirstConsoleInit, console.c). A later screen (the HUD texture
+        // offer right after the game data import) printed into the devoptab
+        // the previous screen put back, and the console stayed black.
+        static const devoptab_t* const console = devoptab_list[STD_OUT];
+        devoptab_list[STD_OUT] = console;
         padConfigureInput(1, HidNpadStyleSet_NpadStandard);
         padInitializeDefault(&mPad);
     }

@@ -537,6 +537,10 @@ GUARDS = [
     Guard("start-up console screens (ROM import, HUD textures): stdout/stderr put back after consoleExit (first log line crashed)",
           "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
           r'consoleExit\(nullptr\);\s+devoptab_list\[STD_OUT\] = mStdout;\s+devoptab_list\[STD_ERR\] = mStderr;'),
+    Guard("second start-up screen (HUD texture offer after the game data import) stayed black: libnx redirects stdout only on the first consoleInit",
+          "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
+          r'consoleInit\(nullptr\);.*?static const devoptab_t\* const console = devoptab_list\[STD_OUT\];\s+'
+          r'devoptab_list\[STD_OUT\] = console;'),
     # --- 04/11: TopScreen HUD textures downloaded and built on the console ---
     # The mod (CC BY-NC-ND) cannot ship with a release: the console downloads
     # it and builds config/atlas_overrides.o3tu. A damaged pack stops the game
