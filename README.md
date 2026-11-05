@@ -28,7 +28,8 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
   the limit); a higher CPU clock with sys-clk helps.
 - **Defaults:** 60 fps interpolation (delete `switch/oot3dre/config/fps60` for 30 fps) and Master Quest
   unlocked from the start (delete `switch/oot3dre/config/unlock_master_quest`).
-- **Not included:** the TopScreen HUD texture pack by rlgcarrot; its license does not allow redistribution.
+- **Not included:** the HUD textures of the TopScreen mod (Single Screen Experience by M-1 on GameBanana);
+  its license does not allow redistribution.
 
 # TriAevum — Echoes of Time
 
