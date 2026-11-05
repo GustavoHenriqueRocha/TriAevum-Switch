@@ -1260,6 +1260,46 @@ Um congelamento (imagem parada, nada no `crash_reports`) não tem pilha. Receita
 - Guardar cópia de cada NRO enviado com nome e md5 (`~/oot3d-work/oot3d_native_game.<versão>.nro`) e o
   `.elf` correspondente.
 
+### 6.2.1 Saves: backup automático para o PC (e VPS)
+
+O save só existe no SD do Switch: `sdmc:/switch/oot3dre/savedata/` (`save0N.bin` de 5340 bytes por
+arquivo de jogo e `system.dat` de 34 bytes no OoT3D; sem `.format`). No Switch o NRO usa o backend de
+pasta do PC por cima do devoptab (`docs/pesquisas/2026-11-05-fs-switch-generico.md`), então um
+`FormatSaveData` vindo de outro título instalado na mesma pasta apaga tudo. Cópia fora do console é
+obrigatória.
+
+`scripts/switch/backup-saves.sh` (teste: `tests/switch/test_backup_saves.py`, roda em `run.sh`):
+
+```sh
+scripts/switch/backup-saves.sh                 # acha o Switch (192.168.3.54 e 192.168.100.24), copia e manda pro VPS
+scripts/switch/backup-saves.sh --no-remote     # só no PC
+scripts/switch/backup-saves.sh --host <ip>     # IP explícito (repetível); ou SWITCH_HOSTS="ip1 ip2"
+scripts/switch/backup-saves.sh --source <pasta> --dest <pasta> --no-remote   # pasta com layout do SD (teste)
+```
+
+- **O que copia**, de `switch/oot3dre` e de cada `switch/triaevum/<título>`: `savedata/`,
+  `savedata-backups/`, `config/`, `extdata/` (recursivo) e os `*.json`/`*.ini` da raiz. Não copia
+  `game/`, `logs/`, caches, `.nro` nem `boot-status.txt`.
+- **Onde guarda**: `~/oot3d-work/saves-backup/<AAAAMMDD-HHMMSS>/`, com os arquivos no mesmo caminho do
+  SD, `SHA256SUMS` e `manifest.txt` (origem, snapshot anterior, arquivos novos/mudados/sumidos).
+- **Só cria snapshot quando algo mudou**: compara o `SHA256SUMS` com o do último snapshot. Arquivo
+  igual ao do anterior vira hardlink, então o `atlas_overrides.o3tu` (3 MB) não ocupa espaço de novo.
+  Arquivo que sumiu do Switch aparece como `AVISO: sumiu do Switch` e continua no snapshot antigo.
+- **Nunca apaga snapshot.** Com mais de `--warn-after` (200), só avisa.
+- **Cópia baixada é conferida**: tamanho de cada arquivo contra a listagem do FTP e `sha256sum -c` antes
+  de publicar. A pasta é montada em `.trabalho-*` e renomeada no fim: snapshot incompleto não existe.
+- **Nunca usa o FTP com o jogo aberto**: o FTP do Sphaira fecha quando o jogo abre. Sem resposta, sai
+  com 0 e `Switch indisponível`; se o FTP cai no meio, nada é gravado.
+- **VPS** (`ssh vps`, `~/backups/oot3dre-save/`, desligar com `--no-remote`): manda todo snapshot local
+  que ainda não está lá (inclusive os feitos com `--no-remote` ou com o VPS fora), recebe em
+  `.recebendo-*`, confere o SHA-256 do `SHA256SUMS` e de cada arquivo do lado de lá e só então renomeia.
+  VPS fora do ar: o snapshot local fica, código de saída 2, e sobe na rodada seguinte.
+- Códigos de saída: 0 ok/sem mudança/Switch indisponível; 1 cópia local falhou (nada gravado); 2 VPS
+  falhou; 64 uso errado. Duas execuções simultâneas: a segunda sai (trava em `<dest>/.lock`).
+- **Restaurar**: conferir com `sha256sum -c SHA256SUMS` dentro do snapshot e mandar o arquivo de volta
+  com o jogo fechado, por exemplo
+  `curl -T switch/oot3dre/savedata/save00.bin ftp://<ip>:5000/switch/oot3dre/savedata/`.
+
 ### 6.3 Testes de host
 
 - Regra: **mudança que roda o tempo todo precisa de teste de longa duração antes de ir ao console**
