@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -944,6 +945,10 @@ def _emit_extension(item: Instruction) -> list[str]:
                 f"{_reg(rd)} = value;",
             ],
         )
+    if (raw & 0x0FF00FF0) in {0x06A00F30, 0x06E00F30}:  # SSAT16 / USAT16
+        return _emit_halfword_saturation(item)
+    if (raw & 0x0F800010) == 0x06000010:
+        return _emit_parallel_add_subtract(item)
     extension = raw & 0x0FF000F0
     signed = extension in {0x06800070, 0x06A00070, 0x06B00070}
     unsigned = extension in {0x06C00070, 0x06E00070, 0x06F00070}
@@ -954,9 +959,21 @@ def _emit_extension(item: Instruction) -> list[str]:
         raise LoweringError(f"extension writes PC at 0x{pc:08X}")
     rotate = ((raw >> 10) & 0x3) * 8
     byte16 = extension in {0x06800070, 0x06C00070}
-    if byte16 and rn != 15:
-        raise LoweringError(
-            f"extension-and-add pair at 0x{pc:08X} is unsupported"
+    if byte16 and rn != 15:  # SXTAB16 / UXTAB16
+        if rm == 15:
+            raise LoweringError(f"extension-and-add pair uses PC at 0x{pc:08X}")
+        value_type = "int8_t" if signed else "uint8_t"
+        return _conditional(
+            raw,
+            [
+                f"const uint32_t source = Oot3dAotRor({_reg(rm)}, {rotate}U);",
+                f"const uint32_t base = {_reg(rn)};",
+                "const uint32_t low = (base +",
+                f"    static_cast<uint32_t>(static_cast<{value_type}>(source))) & 0xFFFFU;",
+                "const uint32_t high = ((base >> 16U) +",
+                f"    static_cast<uint32_t>(static_cast<{value_type}>(source >> 16U))) & 0xFFFFU;",
+                f"{_reg(rd)} = low | (high << 16U);",
+            ],
         )
     byte = byte16 or extension in {0x06A00070, 0x06E00070}
     value_type = "int8_t" if byte else "int16_t"
@@ -980,6 +997,151 @@ def _emit_extension(item: Instruction) -> list[str]:
     if rn != 15:
         body.append(f"value += {_reg(rn, pc)};")
     body.append(f"{_reg(rd)} = value;")
+    return _conditional(raw, body)
+
+
+def _emit_halfword_saturation(item: Instruction) -> list[str]:
+    """SSAT16/USAT16: cada meia-palavra com sinal saturada; Q se alguma saturou."""
+    raw = item.raw
+    pc = item.pc
+    rd = (raw >> 12) & 0xF
+    rn = raw & 0xF
+    if 15 in {rd, rn}:
+        raise LoweringError(f"halfword saturation uses PC at 0x{pc:08X}")
+    signed = (raw & 0x0FF00000) == 0x06A00000
+    bits = ((raw >> 16) & 0xF) + (1 if signed else 0)
+    if signed:
+        low, high = -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+    else:
+        low, high = 0, (1 << bits) - 1
+    return _conditional(
+        raw,
+        [
+            f"const uint32_t source = {_reg(rn)};",
+            f"constexpr int32_t low = {low};",
+            f"constexpr int32_t high = {high};",
+            "const int32_t lane0 = static_cast<int16_t>(source);",
+            "const int32_t lane1 = static_cast<int16_t>(source >> 16U);",
+            "const int32_t clamped0 = lane0 < low ? low : lane0 > high ? high : lane0;",
+            "const int32_t clamped1 = lane1 < low ? low : lane1 > high ? high : lane1;",
+            f"{_reg(rd)} = (static_cast<uint32_t>(clamped0) & 0xFFFFU) |",
+            "    (static_cast<uint32_t>(clamped1) << 16U);",
+            "Oot3dAotSetSaturationFlag(frame,",
+            "    clamped0 != lane0 || clamped1 != lane1);",
+        ],
+    )
+
+
+# Parallel add/subtract (ARM ARM A5.4.1): op1 = bits 22:20, op2 = bits 7:5.
+_PARALLEL_PREFIX = {1: "S", 2: "Q", 3: "SH", 5: "U", 6: "UQ", 7: "UH"}
+# op2 -> (lane width, ((left lane, right lane, operator) per result lane)).
+_PARALLEL_LANES = {
+    0: (16, ((0, 0, "+"), (1, 1, "+"))),  # ADD16
+    1: (16, ((0, 1, "-"), (1, 0, "+"))),  # ASX
+    2: (16, ((0, 1, "+"), (1, 0, "-"))),  # SAX
+    3: (16, ((0, 0, "-"), (1, 1, "-"))),  # SUB16
+    4: (8, tuple((lane, lane, "+") for lane in range(4))),  # ADD8
+    7: (8, tuple((lane, lane, "-") for lane in range(4))),  # SUB8
+}
+
+
+def _emit_parallel_add_subtract(item: Instruction) -> list[str]:
+    """S/Q/SH/U/UQ/UH + ADD16/ASX/SAX/SUB16/ADD8/SUB8 (ARMv6).
+
+    S e U gravam GE (CPSR[19:16]); Q/UQ saturam sem tocar em Q nem GE;
+    SH/UH dividem por dois o resultado de 17/9 bits.
+    """
+    raw = item.raw
+    pc = item.pc
+    op1 = (raw >> 20) & 0x7
+    op2 = (raw >> 5) & 0x7
+    if op1 not in _PARALLEL_PREFIX or op2 not in _PARALLEL_LANES:
+        raise LoweringError(f"media extension 0x{raw:08X} at 0x{pc:08X} is unsupported")
+    rn = (raw >> 16) & 0xF
+    rd = (raw >> 12) & 0xF
+    rm = raw & 0xF
+    if 15 in {rn, rd, rm}:
+        raise LoweringError(f"parallel add/subtract uses PC at 0x{pc:08X}")
+    prefix = _PARALLEL_PREFIX[op1]
+    signed = prefix[0] in "SQ"
+    width, lanes = _PARALLEL_LANES[op2]
+    mask = (1 << width) - 1
+    lane_type = f"int{width}_t" if signed else f"uint{width}_t"
+    body = [
+        f"const uint32_t left = {_reg(rn)};",
+        f"const uint32_t right = {_reg(rm)};",
+        "uint32_t value = 0U;",
+    ]
+    if prefix in {"S", "U"}:
+        body.append("uint32_t ge = 0U;")
+    for index, (left_lane, right_lane, operator) in enumerate(lanes):
+        left = f"static_cast<{lane_type}>(left >> {left_lane * width}U)"
+        right = f"static_cast<{lane_type}>(right >> {right_lane * width}U)"
+        body.append(
+            f"const int32_t lane{index} = static_cast<int32_t>({left}) {operator}"
+            f" static_cast<int32_t>({right});"
+        )
+        result = f"lane{index}"
+        if prefix in {"Q", "UQ"}:
+            low, high = (
+                (-(1 << (width - 1)), (1 << (width - 1)) - 1)
+                if signed else (0, mask)
+            )
+            result = (
+                f"(lane{index} < {low} ? {low} : "
+                f"lane{index} > {high} ? {high} : lane{index})"
+            )
+        elif prefix in {"SH", "UH"}:
+            result = f"(lane{index} >> 1)"
+        body.append(
+            f"value |= (static_cast<uint32_t>({result}) & 0x{mask:X}U) << {index * width}U;"
+        )
+        if prefix in {"S", "U"}:
+            # GE: resultado com sinal >= 0; sem sinal, carry da soma ou
+            # ausência de empréstimo na subtração.
+            threshold = mask + 1 if prefix == "U" and operator == "+" else 0
+            ge_bits = (0x3 << (index * 2)) if width == 16 else (1 << index)
+            body.append(
+                f"ge |= lane{index} >= {threshold} ? 0x{ge_bits:X}U : 0U;"
+            )
+    body.append(f"{_reg(rd)} = value;")
+    if prefix in {"S", "U"}:
+        body.append("state.SetPreservedCpsrBits(0x000F0000U, ge << 16U);")
+    return _conditional(raw, body)
+
+
+def _emit_dual_signed_multiply(item: Instruction) -> list[str]:
+    """SMLAD/SMLSD (SMUAD/SMUSD com Ra = 15): Q no estouro de 32 bits."""
+    raw = item.raw
+    pc = item.pc
+    rd = (raw >> 16) & 0xF
+    ra = (raw >> 12) & 0xF
+    rm = (raw >> 8) & 0xF
+    rn = raw & 0xF
+    if 15 in {rd, rm, rn}:
+        raise LoweringError(f"dual signed multiply uses PC at 0x{pc:08X}")
+    exchange = bool(raw & (1 << 5))
+    operator = "-" if raw & (1 << 6) else "+"
+    body = [
+        f"const uint32_t left = {_reg(rn)};",
+        f"const uint32_t right = {_reg(rm)};",
+        "const int64_t lowProduct =",
+        "    static_cast<int64_t>(static_cast<int16_t>(left)) *",
+        f"    static_cast<int16_t>(right >> {16 if exchange else 0}U);",
+        "const int64_t highProduct =",
+        "    static_cast<int64_t>(static_cast<int16_t>(left >> 16U)) *",
+        f"    static_cast<int16_t>(right >> {0 if exchange else 16}U);",
+        f"int64_t result = lowProduct {operator} highProduct;",
+    ]
+    if ra != 15:
+        body.append(f"result += static_cast<int32_t>({_reg(ra)});")
+    body.extend(
+        [
+            f"{_reg(rd)} = static_cast<uint32_t>(result);",
+            "Oot3dAotSetSaturationFlag(frame,",
+            "    result != static_cast<int32_t>(static_cast<uint32_t>(result)));",
+        ]
+    )
     return _conditional(raw, body)
 
 
@@ -1818,12 +1980,30 @@ def _emit_non_control(
         return _emit_exclusive(item)
     if (raw & 0x0FF000D0) in {0x07400010, 0x07400050}:
         return _emit_dual_signed_long_multiply(item)
+    if (raw & 0x0FF000D0) in {0x07000010, 0x07000050}:  # SMLAD/SMLSD
+        return _emit_dual_signed_multiply(item)
     if (raw & 0x0E000000) == 0x08000000:
         return _emit_block_transfer(item)
     if (raw & 0x0F000010) == 0x06000010:
         return _emit_extension(item)
     if (raw & 0x0C000000) == 0x04000000:
         return _emit_single_memory(item)
+    if (
+        ((raw >> 28) & 0xF) != 0xF
+        and (raw & 0x0F000000) != 0x0F000000
+        and (raw & 0x0C000000) == 0x0C000000
+        and ((raw >> 8) & 0xF) not in {10, 11}
+    ):
+        # Coprocessador que não é VFP (CDP/MCR/MRC/LDC/STC; em modo usuário
+        # dá instrução indefinida): devolve ao interpretador nesta PC. Aparece
+        # em dado alcançado só depois de uma chamada que não retorna.
+        return _conditional(
+            raw,
+            [
+                "return Oot3dWholeAotFlow{Oot3dWholeAotFlowKind::Unsupported, "
+                f"0x{item.pc:08X}U, 0x{raw:08X}U}};",
+            ],
+        )
     if (raw & 0x0C000000) == 0x0C000000:
         return _emit_vfp(item)
     if (raw & 0x0C000000) == 0:
@@ -3704,6 +3884,12 @@ def generate(
         raise ValueError("code.bin does not match the structural AOT program")
     selection = json.loads(selection_bytes)
     functions, external_entries = _load_functions(program, selection, code)
+    # analyze_function (whole_aot_optimization_ir) percorre as SCCs com
+    # recursão de profundidade até o número de blocos da função: funções com
+    # milhares de blocos (Super Mario 3D Land) passam do limite padrão.
+    deepest = max((len(function.blocks) for function in functions), default=0)
+    if sys.getrecursionlimit() < deepest + 1000:
+        sys.setrecursionlimit(deepest + 1000)
     _FOLDED_LITERALS.clear()
     _LITERAL_IMAGE = None
     # Without a declared text size (minimal fixtures) nothing is folded.

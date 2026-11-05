@@ -731,6 +731,51 @@ class WholeAotCppTests(unittest.TestCase):
             self.assertIn("value |= (a > b ? a - b : 0U) << shift", source)
             self.assertIn("r12 = value", source)
 
+    def test_emits_sm3dl_media_simd_and_dual_multiply(self) -> None:
+        # Regressão do Super Mario 3D Land: falhavam com "media extension ...
+        # is unsupported"; SMLAD com Ra != 15 virava um STR silencioso.
+        code = words(
+            0xE6E83F33,  # USAT16 r3, #8, r3
+            0xE6AD8F38,  # SSAT16 r8, #14, r8
+            0xE6239F17,  # QADD16 r9, r3, r7
+            0xE61C3F14,  # SADD16 r3, r12, r4
+            0xE678EF9A,  # UHADD8 lr, r8, r10
+            0xE6C6C07C,  # UXTAB16 r12, r6, r12
+            0xE70CF612,  # SMUAD r12, r2, r6
+            0xE7031612,  # SMLAD r3, r2, r6, r1
+            0xE12FFF1E,
+        )
+        for promote in (False, True):
+            with self.subTest(promote=promote), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                inputs = self.write_inputs(root, code)
+                output = root / "output"
+                generate(*inputs, output, promote_registers=promote)
+                source = (output / SOURCE_NAME).read_text(encoding="utf-8")
+                self.assertIn("constexpr int32_t high = 255;", source)
+                self.assertIn("constexpr int32_t low = -8192;", source)
+                self.assertIn("lane0 < -32768 ? -32768", source)
+                self.assertIn("state.SetPreservedCpsrBits(0x000F0000U, ge << 16U);", source)
+                self.assertIn("(lane3 >> 1)", source)
+                self.assertIn("const uint32_t base = r6;", source)
+                self.assertIn("result += static_cast<int32_t>(r1);", source)
+                self.assertNotIn("WriteFast", source)
+
+    def test_non_vfp_coprocessor_exits_unsupported(self) -> None:
+        # SM3DL 0x3A0D14: dado depois de um BL que não retorna decodifica como
+        # CDP p15; o AOT devolve ao interpretador em vez de recusar a função.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs = self.write_inputs(root, words(0x3EFFFFED, 0xE12FFF1E))
+            output = root / "output"
+            generate(*inputs, output)
+            source = (output / SOURCE_NAME).read_text(encoding="utf-8")
+            self.assertIn(
+                "return Oot3dWholeAotFlow{Oot3dWholeAotFlowKind::Unsupported, "
+                "0x00001000U, 0x3EFFFFEDU};",
+                source,
+            )
+
     def test_incremental_sharding_preserves_unchanged_placement(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
