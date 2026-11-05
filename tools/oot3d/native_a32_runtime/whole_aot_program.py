@@ -735,7 +735,9 @@ def build_program(
     base: int = DEFAULT_BASE,
     executable_size: int | None = None,
     observed_sites: Iterable[int] = (),
+    extra_roots: Iterable[int] = (),
 ) -> AotProgram:
+    extra_roots = frozenset(extra_roots)
     if executable_size is None:
         executable_size = len(code)
     if executable_size <= 0 or executable_size > len(code):
@@ -795,7 +797,10 @@ def build_program(
         for edge in block.successors
         if edge.kind == "direct_call" and edge.target in entry_to_block
     }
-    roots = set(inventory_by_entry) | set(flow.pointer_roots) | direct_targets | internal_cases
+    # Extra roots (e.g. code pointers found in .rodata/.data) only count where
+    # the flow already decoded a block, so data words never become functions.
+    roots = (set(inventory_by_entry) | set(flow.pointer_roots) | direct_targets | internal_cases
+             | set(extra_roots))
     roots &= set(entry_to_block)
     blocks = _normalize_complementary_branch_chains(blocks, roots | observed)
 
@@ -807,6 +812,8 @@ def build_program(
             return None, f"internal_switch_{entry:08X}", "internal_dispatch"
         if entry in flow.pointer_roots:
             return None, f"address_taken_{entry:08X}", "address_taken"
+        if entry in extra_roots:
+            return None, f"data_pointer_{entry:08X}", "data_pointer"
         return None, f"direct_target_{entry:08X}", "direct_target"
 
     function_entries = set(roots)
