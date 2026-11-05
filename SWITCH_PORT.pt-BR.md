@@ -215,8 +215,8 @@ página fechada divide um bloco de memória do kernel e dezenas de milhares esgo
 rodada (quarentena 4096) fez o tour inteiro: 1,1 milhão de blocos com guarda, nenhuma falha, mas o
 jogo libera ~2900 blocos de 57-72 bytes por segundo, então 4096 vigia só ~1,4 s.
 
-**Modo canário (padrão desde o p6t).** O arquivo ganhou o 5º campo `canario|pagina`; vazio =
-`57 72 131072 32768 canario`. No canário o bloco é o objeto com um cabeçalho de 256 bytes antes
+**Modo canário (padrão desde o p6t).** O arquivo ganhou o 5º campo `canary|page`; vazio =
+`57 72 131072 32768 canary`. No canário o bloco é o objeto com um cabeçalho de 256 bytes antes
 (alocação comum, nenhuma chamada ao kernel). No free o objeto vira 0xFD e fica numa quarentena de
 131072 blocos (~45 MiB, ~45 s); quando sai dela, os bytes são conferidos e, se algum mudou, o
 `hang.txt` ganha "USO APÓS FREE (canário)" com serial, tamanho, quanto viveu, há quanto foi
@@ -240,8 +240,8 @@ bytes, cada um conferido ~45 s depois do free, nenhuma escrita depois do free, n
 (sempre ligado) e a varredura (`config/heap_check_windows`) também, para pegar a próxima ocorrência.
 
 O handler de exceção da libnx (sempre ligado, grava e devolve, então o crash report do Atmosphère
-continua saindo) escreve "EXCEÇÃO" no `hang.txt`: `far`, PC/LR/cadeia da thread que falhou, `USO
-APÓS FREE` com serial, tamanho, deslocamento no objeto, há quanto tempo foi liberado e as pilhas de
+continua saindo) escreve "EXCEÇÃO" no `hang.txt`: `far`, PC/LR/cadeia da thread que falhou, `USE
+AFTER FREE` com serial, tamanho, deslocamento no objeto, há quanto tempo foi liberado e as pilhas de
 alocação e de free (`addr2line` nos offsets), mais as outras threads. `perf.txt` ganha `guard_alloc=1
 guard_made guard_live guard_quarantine guard_fallbacks guard_skipped`. Custo: 8 KiB por bloco na
 faixa e uma chamada ao kernel no free; só para diagnóstico. Teste: `oot3d_switch_guard_alloc_tests`.
@@ -260,7 +260,7 @@ Ideia das páginas de guarda: Chronicle PR #205.
   (não ociosa) ficar > 3 s sem progresso com o app em foco, grava **uma vez**
   `logs/hang.txt` (append, `FsWriteOption_Flush`), pela API de FS da libnx direto — sem `fopen`,
   sem `printf` de float, sem nenhuma alocação: o travamento pode ser o próprio lock do malloc.
-  Quando tudo volta a andar, escreve `--- recuperou após N ms` e se rearma (no máximo 8
+  Quando tudo volta a andar, escreve `--- recovered after N ms` e se rearma (no máximo 8
   relatórios por execução). Fora de foco (HOME) e saltos de > 2,5 s do próprio watchdog (sleep do
   console) zeram a contagem.
 - Conteúdo: etapa, progresso (= `host_frames` do jogo / comandos da render thread), tempo parado
@@ -272,14 +272,14 @@ Ideia das páginas de guarda: Chronicle PR #205.
   relatório diz isso e fica com os marcadores. Endereços dentro do NRO saem com o offset
   `(+0x…)` para `aarch64-none-elf-addr2line -e oot3d_native_game.elf`. Também: a última chamada de
   serviço (`sm:AtmosphereHasService(sys:clk)`, `sm:GetService(sys:clk)`, `sys:clk GetApiVersion`,
-  `sys:clk GetCurrentContext`; `EM_ANDAMENTO` se não voltou), o estado do stream lido com
+  `sys:clk GetCurrentContext`; `IN_PROGRESS` se não voltou), o estado do stream lido com
   `try_lock` (`queued`, `frames_queued`, `busy`, `worker_waiting`, `progress_waiters`,
-  `submitted/executed`, esperas e `signals_skipped`; `mutex=OCUPADO` se preso) e o pacer.
+  `submitted/executed`, esperas e `signals_skipped`; `mutex=BUSY` se preso) e o pacer.
 - `perf.txt` (`threads:`) ganhou `hang_wd=1 hang_reports=N`.
 - Como ler: jogo em `perf_heap_walk` com PC no malloc/`__libc_lock_acquire_recursive` = lock do
   malloc preso; procure nas outras threads quem está dentro de `malloc/free`. Jogo em
   `wait_frames_in_flight` + render em `render_swap`/`render_pacer` = render thread presa no
-  swap/pacer. `ultima_chamada_servico=… EM_ANDAMENTO` = IPC sem resposta.
+  swap/pacer. `last_service_call=… IN_PROGRESS` = IPC sem resposta.
 
 ### Atualização (2026-10-16, noite)
 - Perfil real no console (`config/guest_profile` → `logs/guest_profile.txt`): as funções mais caras
@@ -304,7 +304,7 @@ Ideia das páginas de guarda: Chronicle PR #205.
   (`Oot3dGuestOverrideProfileHook`), as substituições só recusam se o perfil repassaria um PC do
   intervalo, e o tempo nativo fica no bloco de entrada.
 - Para ler o perfil: ~180 ns por entrada de bloco são do próprio perfil; o custo real de um bloco
-  é `ns/entrada - 180`. Blocos curtos muito executados (laços de áudio, mutex) quase não custam.
+  é `ns/entry - 180`. Blocos curtos muito executados (laços de áudio, mutex) quase não custam.
 - Maior custo real na floresta Kokiri: `Mtx3x4_Multiply` (0x36C174, ~440 chamadas/quadro, chamada
   externa manual). Núcleo exato novo (`oot3d_native_mtx3x4_kernel.h`, VFP nativo com o FPCR do
   guest): ~4,7x menos instruções; o caminho antigo em double errava IXC/UFC e o sinal de zeros
@@ -754,7 +754,7 @@ carregamentos).
 - `op_mode` (portátil/dock) e `perf_mode` vêm de `appletGetOperationMode`/`appletGetPerformanceMode`
   (valores guardados pela libnx, sem IPC) e funcionam mesmo sem sys-clk.
 - `perf_report.py` mostra o clock de cada sessão; se mudar no meio, avisa (janela, antes → depois) e
-  separa fps/`total_ms` por clock; `--windows` lista `cpu/gpu/mem modo` por janela.
+  separa fps/`total_ms` por clock; `--windows` lista `cpu/gpu/mem mode` por janela.
 
 ### Heap estável e menos trabalho fantasma por quadro (2026-10-17)
 Medido (`switch-logs/interp1`, fps60, escala 2, 8,5 min): `heap_arena_mb` 631 → 1659 MB com
@@ -968,7 +968,7 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
   (`gl_widescreen_menu_policy_tests`, 21/21, também com ASan/UBSan).
 - **Diagnóstico no console** (`config/widescreen_menus_log`, desligado sem o arquivo; desktop
   `TRIAEVUM_GL_WIDESCREEN_MENUS_LOG=<arquivo>`): `logs/widescreen_menus.txt` com uma linha por draw
-  distinto no alvo alargado: decisão (`QUADRO`, `QUADRO+COMP`, `ESTICA`, `TELA`), viewport, recorte,
+  distinto no alvo alargado: decisão (`FRAME`, `FRAME+COMP`, `STRETCH`, `SCREEN`), viewport, recorte,
   domínio/camada, projeção c0-c3, anisotropia, cobertura, textura. Apague o arquivo depois.
 - O Link 3D, a caixa "...adventure through time itself!" e o logo atrás dos cartões e as linhas
   finas do cabeçalho: ver a seção seguinte.

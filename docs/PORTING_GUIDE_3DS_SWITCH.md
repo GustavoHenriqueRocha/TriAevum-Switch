@@ -84,7 +84,7 @@ Prerequisites: devkitPro (`switch-dev switch-sdl2 switch-mesa switch-glad switch
 # 1. Extraction (and, for the OoT3D USA ROM, the adapter
 #    input_adapters.adapt_extracted_inputs with the recipe oot3d-usa-input-canonical-eur-ef210566)
 python tools/triaevum_release/ctr_rom.py ...        # produces exefs/code.bin, ncch0/exheader.bin, romfs
-export OOT3D_OPERATIONAL_oot3dExtractRoot=/caminho/extract
+export OOT3D_OPERATIONAL_oot3dExtractRoot=/path/extract
 
 # 2. Structural program and C++
 cd tools/oot3d/native_a32_runtime
@@ -105,7 +105,7 @@ cmake -S . -B build-switch -G Ninja -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Swit
 cmake --build build-switch --target oot3d_native_game_nro
 
 # 4. SD folder
-scripts/switch/stage-product.sh build-switch/oot3d_native_game.nro /caminho/extract /caminho/sd
+scripts/switch/stage-product.sh build-switch/oot3d_native_game.nro /path/extract /path/sd
 ```
 
 Ready-made alternatives in `scripts/switch/`: `build-whole-aot.sh` (only the ARM64 `.a` archive of the
@@ -150,8 +150,8 @@ block budget, hooks and tracing. It is a "partial decompilation" only where the 
 Two kinds:
 
 1. **Whole function** (`{"entry": "0x..."}`): the prologue goes at the start of
-   `Execute_<nome>_<ENTRADA>` and only acts when the function is called through its own entry.
-2. **Block/loop** (`{"entry": bloco, "function": função, "resume": [PCs]}`): the prologue goes right
+   `Execute_<name>_<ENTRY>` and only acts when the function is called through its own entry.
+2. **Block/loop** (`{"entry": block, "function": function, "resume": [PCs]}`): the prologue goes right
    after the `block_<BLOCO>:` label of the translated function; the native version runs the hot loop and returns
    `resumePc`, where the translation continues with `goto block_<PC>`, or `resumePc = 0` with an exit
    flow (budget limit etc.). Before the call the prologue does `commitState()` and afterwards
@@ -161,11 +161,11 @@ Two kinds:
 
 1. Generate the name map and copy it to the SD:
    `python summarize_guest_profile.py --program aot_program.json --export-function-map guest_functions.txt`
-   → `sdmc:/switch/<jogo>/config/guest_functions.txt`.
+   → `sdmc:/switch/<game>/config/guest_functions.txt`.
 2. Create `config/guest_profile` (optional keys: `sample_every=4`, `dump_frames=900`,
    `top_functions`, `top_blocks`, `window=1`, `max_gap_us=200`). Play the heavy scene for a few minutes.
    Out comes `logs/guest_profile.txt`: exclusive time per block and per function (19.2 MHz counter),
-   plus the `# substituicoes nativas` appendix with `nativa=N recusou=M` per replacement.
+   plus the `# native overrides` appendix with `native=N declined=M` per replacement.
 3. Aggregate per function:
    `python summarize_guest_profile.py --program aot_program.json --switch-profile guest_profile.txt --top 40 --markdown`.
    The script joins static data (instructions, blocks, VFP, memory accesses, calls, leaf) and
@@ -194,7 +194,7 @@ Two kinds:
 refreshes had the game thread as the culprit (`stage=guest`), with 20–26 ms frames against an 8–11
 average (Water Temple: 38 in one window). The per-function average of `guest_profile.txt` dilutes those
 frames; the spike profile keeps only them. File present turns it on (default **off**: it uses the
-"all blocks" mode, which makes the game slower); optional content `limite [corte]` in ms (default
+"all blocks" mode, which makes the game slower); optional content `threshold [cutoff]` in ms (default
 `14 50`). It turns the profiler on in every frame even without `config/guest_profile` (then without the
 periodic report). How it works (`oot3d_guest_spike_profile.h`): each interval the profiler attributes to a
 block also goes into a per-block `uint32` for the frame and into a list of touched blocks (allocated once;
@@ -231,9 +231,9 @@ Contract (header of `oot3d_native_guest_overrides.h`):
 
 Step by step for a new one:
 
-1. Read the translated function in `gen/cpp/oot3d_whole_aot_shard_NNN.cpp` (`Execute_*_<ENTRADA>`) and the
+1. Read the translated function in `gen/cpp/oot3d_whole_aot_shard_NNN.cpp` (`Execute_*_<ENTRY>`) and the
    disassembly; note the PC range, how many blocks each path consumes and what is read/written.
-2. Declare with `OOT3D_GUEST_OVERRIDE_DECLARE(<ENTRADA>)` or
+2. Declare with `OOT3D_GUEST_OVERRIDE_DECLARE(<ENTRY>)` or
    `OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(<BLOCO>)` in the `.h`, implement in the `.cpp`, add to the table.
 3. Add the item to `guest_overrides.json` (with `switch_share` from the profile).
 4. Prove equivalence (2.4). Only then wire it into the generated C++ and recompile the affected shards.
@@ -244,7 +244,7 @@ Step by step for a new one:
 
 - Harness: `tools/oot3d/native_a32_runtime/run_guest_override_equivalence.py` +
   `guest_override_equivalence.cpp`. The script extracts from the generated C++ (without prologues) each listed function
-  and the closure of the ones it calls, renames them to `Translated_<ENTRADA>` (block: the whole function and a
+  and the closure of the ones it calls, renames them to `Translated_<ENTRY>` (block: the whole function and a
   copy with the prologue, `Patched_<BLOCO>`, both starting at the block) and compiles with the same
   floating-point flags as the build (`-fno-fast-math -ffp-contract=off`).
 - Each case starts from identical copies (state, memory, budget, hooks, trace mode) and requires
@@ -269,7 +269,7 @@ function (500 thousand on CirSquare) in the block batch (e26eb2d1); 1M per funct
 ASan/UBSan and qemu-aarch64: the harness has no ready-made mode (gap 9: `--extra-flags` does not reach the
 link). The repo's qemu pattern is `run_vfp_aarch64_tests_qemu.sh` (devkitA64 + shard flags +
 `qemu_aarch64_test_runtime.cpp`, static `-nostartfiles` binary), also used by
-`run_audio_dsp_mix_tests_qemu.sh` and `memory_lean_diff/run_store_sequence_diff.sh` (`ALVO=switch`).
+`run_audio_dsp_mix_tests_qemu.sh` and `memory_lean_diff/run_store_sequence_diff.sh` (`TARGET=switch`).
 
 ### 2.5 The 23 current replacements (OoT3D)
 
@@ -290,18 +290,18 @@ one was not measured in isolation.
 | 0x00372070 | oot3d_translate_mtx3x4_local | function | local translation of a 3×4 matrix | kokiri 0.44% |
 | 0x003094CC | FUN_003094cc | function | (unnamed) | kokiri 0.41% |
 | 0x002CDE90 | FUN_002cde90 | function | (unnamed) | kokiri 0.36% |
-| 0x00466E68 | MeshCommandPacket_Submit:copia | block | copies the packet into the list | switch 3.02% |
-| 0x003247B0 | BgCheck_LineTestImpl:zera_marcas | block | zeroes the polygon map | switch 2.53% |
+| 0x00466E68 | MeshCommandPacket_Submit:copy | block | copies the packet into the list | switch 3.02% |
+| 0x003247B0 | BgCheck_LineTestImpl:clear_marks | block | zeroes the polygon map | switch 2.53% |
 | 0x0047AF24 | FUN_0047af24 | function | search over 50 entries | switch 1.31% |
-| 0x002FA674 | CalculateGyroscopeAxisStatus:media | block | average over the ring | switch 1.04% |
+| 0x002FA674 | CalculateGyroscopeAxisStatus:mean | block | average over the ring | switch 1.04% |
 | 0x00307B50 | PicaTev_ConvertSource | function | TEV source conversion | switch 0.84% |
 | 0x00307DC8 | PicaCompare_ConvertFunction | function | comparison function conversion | switch 0.53% |
-| 0x00308920 | NativeCurve_SampleFloat:busca | block | keyframe search | switch 0.53% |
-| 0x00308604 | CsabCurve_SampleRotation:busca | block | keyframe search (rotation) | switch 0.34% |
+| 0x00308920 | NativeCurve_SampleFloat:search | block | keyframe search | switch 0.53% |
+| 0x00308604 | CsabCurve_SampleRotation:search | block | keyframe search (rotation) | switch 0.34% |
 | 0x002BBB14 | Math3D_CirSquareVsTriSquare | function | circle×triangle test, VFP only | switch 0.70% |
-| 0x00303C78 | FUN_00303b24:copia | block | short 64-byte copy | switch 0.23% |
-| 0x0046700C | MeshCommandPacket_PatchBoneUniforms:copia | block | short copy in a loop | switch 0.21% |
-| 0x003563E0 | FUN_003562c0:percurso | block | walk of the collision polygon list | switch 0.55% |
+| 0x00303C78 | FUN_00303b24:copy | block | short 64-byte copy | switch 0.23% |
+| 0x0046700C | MeshCommandPacket_PatchBoneUniforms:copy | block | short copy in a loop | switch 0.21% |
+| 0x003563E0 | FUN_003562c0:walk | block | walk of the collision polygon list | switch 0.55% |
 
 Documented gain: the first batch (audio + memcpy) was estimated at ~4% of logic (SWITCH_PORT.md).
 The full batch (23) went to the console together with PGO 3, TBAA and fps60 ("final 3" build), with no isolated
@@ -319,17 +319,17 @@ Counters from the Kokiri session (fps60 + overclock, `sample_every=4`, 2251 meas
 
 | Replacement | Declined | Reading |
 |---|---:|---|
-| BgCheck_LineTestImpl:zera_marcas | 99.4% | almost never runs native: wrong precondition for the common case |
-| CalculateGyroscopeAxisStatus:media | 96.4% | same |
-| FUN_003562c0:percurso | 76.0% | same |
-| NativeCurve_SampleFloat:busca | 65.5% | same |
-| CsabCurve_SampleRotation:busca | 59.1% | same |
+| BgCheck_LineTestImpl:clear_marks | 99.4% | almost never runs native: wrong precondition for the common case |
+| CalculateGyroscopeAxisStatus:mean | 96.4% | same |
+| FUN_003562c0:walk | 76.0% | same |
+| NativeCurve_SampleFloat:search | 65.5% | same |
+| CsabCurve_SampleRotation:search | 59.1% | same |
 | the other 18 | 14–25% | consistent with the profiler artifact (1 in 4 frames with all blocks on) |
 
 A decline costs the precondition test **plus** the whole translation, and in block loops also the
 `commitState()/reloadState()`. With 60–99% decline the replacement is worse than nothing. Rules:
 
-- Before enabling, run on the console and look at `recusou` against `nativa` (discounting the profiler's ~1/N).
+- Before enabling, run on the console and look at `declined` against `native` (discounting the profiler's ~1/N).
 - Decline only what the translation would really do differently; handle the common case in the native path
   (e.g. sweep the range across several fast pages instead of requiring a single one).
 - Putting the decline **reason** in the report (a counter per reason) is the natural next step.
@@ -414,8 +414,8 @@ in the header runtime (`tools/oot3d/native_game_runtime/oot3d_native_whole_aot_r
   slowest shards.
 - `--giant-function-instructions N` marks functions with ≥ N guest instructions with
   `[[gnu::optimize("no-schedule-insns","no-gcse-after-reload")]]` on the signature line itself
-  (line numbers don't change). `--hot-functions lista.txt` excludes the hot ones.
-- Hot list: `whole_aot_hot_from_gcda.py --gcda-dir <coleta> --generated-dir <cpp> --output hot.txt`
+  (line numbers don't change). `--hot-functions list.txt` excludes the hot ones.
+- Hot list: `whole_aot_hot_from_gcda.py --gcda-dir <capture> --generated-dir <cpp> --output hot.txt`
   (matches each `.gcda` by `profile_id` = crc32 of the mangled name; matched 12439/12439, 3983 hot) or
   `whole_aot_hot_functions.py` from `guest_profile.txt`.
 - The attribute changes neither `profile_id` nor CFG/line checksums: the `.gcda` files are valid with or without it. In the
@@ -449,7 +449,7 @@ Flow:
    same configs the user will use, e.g. fps60 and scale 2). The game creates the folder and writes the
    counters every ~3 min (`__gcov_dump` + `__gcov_reset`, `oot3d_whole_aot_gcov.h`) and on exit.
 3. Download the `.gcda` files (FTP) into a collection folder.
-4. Final build: `-DOOT3D_WHOLE_AOT_PROFILE_MODE=use -DOOT3D_WHOLE_AOT_PROFILE_FILE=<pasta>`
+4. Final build: `-DOOT3D_WHOLE_AOT_PROFILE_MODE=use -DOOT3D_WHOLE_AOT_PROFILE_FILE=<dir>`
    (`-fprofile-use -fprofile-partial-training -Wno-missing-profile -Wno-error=coverage-mismatch`).
    The generated C++ must be the same as in the collection and be in the same `OOT3D_WHOLE_AOT_GENERATED_DIR`.
 
@@ -624,14 +624,14 @@ Horizon rules (confirmed by nfsmw-nx):
   with `clear`≈0 — the sum is the same. Dropping the in-between does not reduce the wait (the cheap frame just
   waits longer), so the inflated cost sustained itself. Fix: the acquire hook
   (`Fast::SetWindowAcquireHook`) also measures the CPU wait with `armGetSystemTick`
-  (`NativeRenderWaitClock`) and the governor learns `NativeRenderThreadBusyMs(parede, espera)`;
+  (`NativeRenderWaitClock`) and the governor learns `NativeRenderThreadBusyMs(wall, wait)`;
   `config/interp_cpu_count_wait` counts the wait again. Along with it, two holes in the 10-22 GPU
   measure: the "before the acquire" stamp was emitted **after** the `glFlush`, so it only reached the GPU with
   the "after" one (subtracted gap ≈ 0) — now it goes before the flush; and the end-of-frame stamp stayed
   unflushed until the swap, after the pacer wait (the idle GPU counted as work) — now a
   `glFlush` right after `FinishRenderFrameCost`, before the pacer, hands scanout+UI to the GPU while the
-  CPU waits (`config/gl_pacing_noflush` removes it). Fields: `perf.txt` `rt_wait_ms_<tipo>` (part of
-  `rt_ms_` blocked in the acquire), glperf `<tipo>_sec_acquire_ms` (window bind+clear), and
+  CPU waits (`config/gl_pacing_noflush` removes it). Fields: `perf.txt` `rt_wait_ms_<type>` (part of
+  `rt_ms_` blocked in the acquire), glperf `<type>_sec_acquire_ms` (window bind+clear), and
   `TRIAEVUM_INTERP_PACING ... cpu_count_wait= flush_before_pacing=` in the log. Model
   (`oot3d_native_cadence_governor_tests --report`, "tour14": swapchain of 3, display 0.2% slower,
   GPU 12.5–15.5 ms): counting the wait, 1281–1471 of 1793 in-betweens dropped (36–38 distinct
@@ -695,7 +695,7 @@ Horizon rules (confirmed by nfsmw-nx):
   envelope (the wake-up is never before the vsync), restarts with residual > 1/4 of a period.
   `config/pacer_vsync` (default **off** in this 1st version, for A/B; optional content = offset in
   ms after vsync, 0–15, default 1): the pacer uses the measured period and snaps each deadline to the grid
-  `último_vsync + k·período + offset` (`SnapDeadlineToVsync`); without a valid vsync, it goes back to the CPU
+  `last_vsync + k·period + offset` (`SnapDeadlineToVsync`); without a valid vsync, it goes back to the CPU
   clock. `frames_in_flight` does not change. Model (`oot3d_frame_spike_tests --report`, display 0.2%
   slower, swapchain 3, everything fitting): CPU pacer = 4 (1 in flight) to 35 (2 in flight) refreshes without
   a new image per minute and the render thread stuck in the acquire 29 s/min (full swapchain: the display,
@@ -887,7 +887,7 @@ Horizon rules (confirmed by nfsmw-nx):
       been cleared by the frame's fill, with the PICA value, and is not touched). Once per serial and target:
       no frame mixes scales (pure `ScaleAtDraw`/`ScaleAtColourClear` in
       `gl_pica_dynamic_scale.h`, test `TestBackendAppliesAtFirstDraw`).
-    - **Decide like the governor.** The pair becomes `2·GPU_passo + HiddenGpuMs` (3 ms); a step in which the
+    - **Decide like the governor.** The pair becomes `2·GPU_step + HiddenGpuMs` (3 ms); a step in which the
       governor is dropping (in-between level below the preferred one, or the locked 30 of
       `fps60_mode`) counts as over budget if the GPU pair is ≥ 65% of it (21.7 ms) **and** the GPU
       is the larger side of the pair (GPU pair + hidden ≥ 2 × the average busy render thread without waiting;
@@ -974,7 +974,7 @@ Horizon rules (confirmed by nfsmw-nx):
 - Files in `sdmc:/atmosphere/crash_reports/`. The `.nro` is loaded by hbloader at a variable
   address: find the base by aligning the stack's return addresses with the ELF's `bl`/`blr` instructions
   (for the right base, `retorno − base − 4` lands on a `bl/blr` in almost every frame); then
-  `aarch64-none-elf-addr2line -e oot3d_native_game.elf` with `endereço − base`.
+  `aarch64-none-elf-addr2line -e oot3d_native_game.elf` with `address − base`.
 - Keep the exact `.elf` of each `.nro` sent (`build-switch/oot3d_native_game.elf`).
 - "perf.txt stopped and there is no crash report" is also a normal exit: ask before concluding it crashed.
 
@@ -1056,8 +1056,8 @@ romfs, reusing the `AzaharTexturePackRuntime` that already existed for Vulkan:
 - **Pitfalls:** reference to the native `Texture`, not to the iterator (the replacement's `emplace` may
   rehash); inside `namespace Fast` the name `Oot3d::Renderer` resolves to `Fast::Oot3d` — use
   `::Oot3d::Renderer::`. The loader thread is `join()`ed, never `detach()`ed.
-- **Generating the pack:** `texture_pack.py exportar` (menus 06/07, `menu/map/*`, area titles) →
-  Real-ESRGAN `realesrgan-x4plus-anime` 4x (Vulkan, runs without an NVIDIA GPU) → `montar` reduces to 2x
+- **Generating the pack:** `texture_pack.py export` (menus 06/07, `menu/map/*`, area titles) →
+  Real-ESRGAN `realesrgan-x4plus-anime` 4x (Vulkan, runs without an NVIDIA GPU) → `assemble` reduces to 2x
   with Lanczos and **restores the native alpha** (bicubic): the upscaler blurs transparent edges.
   OoT3D EU: 384 textures, ~15 MB.
 - **HD font** doesn't need the pack: `config/font_coverage.zip` is already backend-neutral; generate the
@@ -1074,14 +1074,14 @@ romfs, reusing the `AzaharTexturePackRuntime` that already existed for Vulkan:
 | `logs/oot3d_native_game.log`, `logs/glthread.txt` | general log and GL context switching |
 | `logs/guest_profile.txt` | per-function profile (with `config/guest_profile`) |
 | `logs/failed_pica_*.glsl` | PICA shader source that failed |
-| `logs/spikes.txt` | with `config/frame_spikes` or `config/gpu_timing`: `session_start vsync_clock= vsync_source=event\|acquire\|none vsync_rc= vsync_rc_module= vsync_rc_desc= vsync_stage= pacer_vsync= offset_ms=` and one line per frame that missed the vsync (4.5): `spike t= host= guest= kind=step\|interp\|hold refreshes= expected= stage=guest\|render\|gpu\|pacer guest_ms= game_ms= render_ms= render_wait_ms= pacer_ms= swap_ms= gpu_ms= top=<etapa glperf> top_ms= ctx=load,tex,shader,program,gl_oom,evict,drs tex_new= prog_new= shader_new=`. `game_ms` = game thread busy; `render_wait_ms` = acquire; `top` only with `gpu_timing` (`-` without); `ctx=load` = scene change in the last ~2 s; `shader_new` = Mesa's `glsl_compiles`+`nvc0_translates` |
-| `logs/guest_spikes.txt` | with `config/guest_spike_ms` (2.2): `session_start limite_ms= corte_carregamento_ms= top= funcoes_no_mapa=` and, per game frame above the limit, `spike host_frame= guest_ms= entries= blocks= functions= load=0\|1 overflow=0\|1` followed by up to 10 lines `  fn=0x<entrada> ms= pct= name=` (most expensive first; `pct` = % of the frame; `entries` = block entries, to subtract the overhead; `overflow=1` = more than 65536 blocks, the excess ones were left out of the top) |
-| `logs/guest_spikes_summary.txt` | rewritten every 150 frames: header `# limite_ms= corte_carregamento_ms= quadros= picos= picos_carregamento=`, `# guest_ms_medio= guest_ms_medio_pico= anel_descartados= quadros_overflow= resumo_cheio=` and the 30 functions with the highest total time in non-loading spikes: `entrada ms_total %tempo_pico quadros ms/quadro ms_max nome` |
-| `logs/hang.txt` | hang watchdog: stage and PC/LR/stack of each thread when the game or the render thread stall > 3 s; "HEAP CORROMPIDO" from the heap scan |
+| `logs/spikes.txt` | with `config/frame_spikes` or `config/gpu_timing`: `session_start vsync_clock= vsync_source=event\|acquire\|none vsync_rc= vsync_rc_module= vsync_rc_desc= vsync_stage= pacer_vsync= offset_ms=` and one line per frame that missed the vsync (4.5): `spike t= host= guest= kind=step\|interp\|hold refreshes= expected= stage=guest\|render\|gpu\|pacer guest_ms= game_ms= render_ms= render_wait_ms= pacer_ms= swap_ms= gpu_ms= top=<glperf stage> top_ms= ctx=load,tex,shader,program,gl_oom,evict,drs tex_new= prog_new= shader_new=`. `game_ms` = game thread busy; `render_wait_ms` = acquire; `top` only with `gpu_timing` (`-` without); `ctx=load` = scene change in the last ~2 s; `shader_new` = Mesa's `glsl_compiles`+`nvc0_translates` |
+| `logs/guest_spikes.txt` | with `config/guest_spike_ms` (2.2): `session_start threshold_ms= load_cutoff_ms= top= functions_in_map=` and, per game frame above the limit, `spike host_frame= guest_ms= entries= blocks= functions= load=0\|1 overflow=0\|1` followed by up to 10 lines `  fn=0x<entry> ms= pct= name=` (most expensive first; `pct` = % of the frame; `entries` = block entries, to subtract the overhead; `overflow=1` = more than 65536 blocks, the excess ones were left out of the top) |
+| `logs/guest_spikes_summary.txt` | rewritten every 150 frames: header `# threshold_ms= load_cutoff_ms= frames= spikes= load_spikes=`, `# guest_ms_avg= guest_ms_avg_spike= ring_dropped= overflow_frames= summary_full=` and the 30 functions with the highest total time in non-loading spikes: `entry ms_total %spike_time frames ms/frame ms_max name` |
+| `logs/hang.txt` | hang watchdog: stage and PC/LR/stack of each thread when the game or the render thread stall > 3 s; "HEAP CORRUPTED" from the heap scan |
 
 ### 5.2 Important `perf.txt` fields
 
-- `glperf` CPU per PICA draw (only with `config/gpu_timing`; `step_`/`interp_`, ms per host frame): `draw_<fase>_ms` with phases `validate program target state uniforms vertices tex_hash tex_lookup tex_upload indices draw rest` (sum = `draw_submit_ms`, time inside `SubmitPicaDraw`; the `perf_sig` phase of the merge measurement was removed), `draw_outside_ms` (PICA stages minus submit = caller's work between draws), `draw_us` (submit per draw), per-frame counters `draw_draws`, `draw_tex_lookups`, `draw_tex_hashes`, `draw_tex_hash_bytes_kb`, `draw_tex_uploads`, `draw_tex_upload_bytes_kb`, `draw_uniform_sent[_bytes_kb]`, `draw_uniform_skipped[_bytes_kb]`, `draw_vertex_bytes_kb`, `draw_index_bytes_kb`; and `sec_<resolve_plans|pin_copy|scene_env|execute|visual_sample>_ms` (wall time of render thread sections, to break down `cpu_other`; `execute` includes the draws, `visual_sample` includes `pin_copy` and `execute`). Source: `gl_pica_draw_phases.h` (test `gl_pica_draw_phases_tests`).
+- `glperf` CPU per PICA draw (only with `config/gpu_timing`; `step_`/`interp_`, ms per host frame): `draw_<phase>_ms` with phases `validate program target state uniforms vertices tex_hash tex_lookup tex_upload indices draw rest` (sum = `draw_submit_ms`, time inside `SubmitPicaDraw`; the `perf_sig` phase of the merge measurement was removed), `draw_outside_ms` (PICA stages minus submit = caller's work between draws), `draw_us` (submit per draw), per-frame counters `draw_draws`, `draw_tex_lookups`, `draw_tex_hashes`, `draw_tex_hash_bytes_kb`, `draw_tex_uploads`, `draw_tex_upload_bytes_kb`, `draw_uniform_sent[_bytes_kb]`, `draw_uniform_skipped[_bytes_kb]`, `draw_vertex_bytes_kb`, `draw_index_bytes_kb`; and `sec_<resolve_plans|pin_copy|scene_env|execute|visual_sample>_ms` (wall time of render thread sections, to break down `cpu_other`; `execute` includes the draws, `visual_sample` includes `pin_copy` and `execute`). Source: `gl_pica_draw_phases.h` (test `gl_pica_draw_phases_tests`).
 - Main line (ms per host frame): `fps`, `guest` (game logic), `dsp_mix`, `audio_out`,
   `pica_submit`, `pica_plan`, `pica_backend`, `visual_present`, `visual_replay`, `present`,
   `pacing_wait`; memory `heap_arena_mb`, `heap_arena_peak_mb`, `proc_used_mb`/`proc_total_mb`
@@ -1106,8 +1106,8 @@ romfs, reusing the `AzaharTexturePackRuntime` that already existed for Vulkan:
   `game_cpu` 95–98% on core 0 = logic bottleneck.
 - `audio:` `min_queued avg_queued device_hz input_hz trim_pct game_speed inserted_ms removed_ms
   concealed_ms`.
-- `interp:` `level step_frames interp_frames interp_dropped reduced_refused gpu_ms_<tipo>
-  rt_ms_<tipo> est_*`; dynamic resolution (4.8): `drs drs_scale drs_min drs_scale_avg drs_pair_ms
+- `interp:` `level step_frames interp_frames interp_dropped reduced_refused gpu_ms_<type>
+  rt_ms_<type> est_*`; dynamic resolution (4.8): `drs drs_scale drs_min drs_scale_avg drs_pair_ms
   drs_changes drs_downs drs_ups drs_bounces drs_applied drs_applied_draw drs_shed drs_exempt`
   (pgo5o; see 4.8).
 
@@ -1122,7 +1122,7 @@ romfs, reusing the `AzaharTexturePackRuntime` that already existed for Vulkan:
   session's hitches (`hitch_*`); it marks what overruns. To get GPU and render thread, `config/gpu_timing`.
 - Input bench (`config/bench_record` / `config/bench_replay`, `oot3d_input_bench.h`): records the
   controller per game frame starting from the boot warp and replays the same route on each build; in
-  replay the game itself gets past the title screen. `~/oot3d-work/bench/run_bench.sh <nro> <rótulo>` runs in
+  replay the game itself gets past the title screen. `~/oot3d-work/bench/run_bench.sh <nro> <label>` runs in
   Eden and averages `perf.txt`. It is for behavior regression, not for measuring speed
   (see lesson 22).
 - Lab channel (`config/dev_lab`, `oot3d_dev_lab.h`): line-based JSON commands in
@@ -1148,7 +1148,7 @@ romfs, reusing the `AzaharTexturePackRuntime` that already existed for Vulkan:
   `-Wl,--wrap=_malloc_r` (and `_memalign_r`, `_free_r`, `_realloc_r`, `_calloc_r`, `_malloc_usable_size_r`)
   catches the whole process in devkitA64's newlib — its `malloc()` sends n >= 32 to
   `_memalign_r(32, n)`, so wrapping only `_malloc_r` catches almost nothing. The block goes to
-  `_memalign_r(0x1000, 2 páginas)`; on free the object's page is closed
+  `_memalign_r(0x1000, 2 pages)`; on free the object's page is closed
   (`svcSetMemoryPermission(Perm_None)`) and goes into quarantine; the second page is slack for the
   neighboring chunk's header. Caveats: **don't enable it at boot** (thousands of small objects × 8-12 KiB
   exhaust the heap: boot fails with "Not enough space") and put a cap on live blocks; the real
@@ -1159,7 +1159,7 @@ romfs, reusing the `AzaharTexturePackRuntime` that already existed for Vulkan:
   happens. Uses a bounded scan of newlib's bins (`oot3d_heap_bin_check.h`), not
   `mallinfo()`: the latter walks the lists without bound while holding the malloc lock and, with a corrupted
   list, freezes the whole process without a crash (that was the 2026-10-17 freeze).
-- `python3 tools/oot3d/spike_report.py <pasta> [oot3d_dev_warp_catalog.inc]`: spikes from
+- `python3 tools/oot3d/spike_report.py <dir> [oot3d_dev_warp_catalog.inc]`: spikes from
   `logs/spikes.txt` **from the last session only** (the file accumulates sessions: in tour20, 428 of the 591
   lines were from tour19), without `ctx=load`, by area (lab acks) and stage, isolated vs. in
   sequence and how much the game frame would have to shrink to fit.
@@ -1233,12 +1233,12 @@ A freeze (frozen image, nothing in `crash_reports`) has no stack. Recipe used in
 ### 6.1 Build on the Ryzen (WSL2)
 
 - Build machine: Ryzen 5 5600G, Windows 11, WSL2 Ubuntu (12 GB / 12 threads in `.wslconfig`),
-  devkitPro in `/opt/devkitpro`, same `/home/<usuário>/...` paths as the laptop (so ccache and
+  devkitPro in `/opt/devkitpro`, same `/home/<user>/...` paths as the laptop (so ccache and
   `.gcda` match). Access via ssh with a key (PowerShell shell). Address and user are kept out of the repo.
-- Scripts (currently **outside the repo**, in `C:\Users\<usuário>\`): `ryzen-build.sh`/`ryzen-status.sh` (full
+- Scripts (currently **outside the repo**, in `C:\Users\<user>\`): `ryzen-build.sh`/`ryzen-status.sh` (full
   build and status), `rt-build.sh` (recompiles only the runtime from `repo.tar.zst` and refuses if the
   shards changed; returns `rt.nro`), `lean-use.sh` (PGO `use` build), `chk.sh`. Run with
-  `wsl -d Ubuntu -u root -- bash /mnt/c/Users/<usuário>/<script>`; avoid nested quotes through
+  `wsl -d Ubuntu -u root -- bash /mnt/c/Users/<user>/<script>`; avoid nested quotes through
   PowerShell.
 - Copying sources: local `git ls-files | tar | zstd` → `scp` to Windows → extract in WSL.
 - **WSL shuts down when the last `wsl.exe` session closes.** An ssh keepalive dies if the laptop
@@ -1251,7 +1251,7 @@ A freeze (frozen image, nothing in `crash_reports`) has no stack. Recipe used in
 ### 6.2 Deploy
 
 - **Sphaira FTP**: `ftp://<IP do Switch>:5000/switch/oot3dre/`. The IP changes with the network (find it
-  by scanning port 5000). `curl -T arquivo.nro ftp://<ip>:5000/switch/oot3dre/` overwrites directly.
+  by scanning port 5000). `curl -T file.nro ftp://<ip>:5000/switch/oot3dre/` overwrites directly.
   **Check the size** afterwards (e.g. `curl -sI ftp://<ip>:5000/switch/oot3dre/oot3d_native_game.nro`
   and compare `Content-Length` with the local one, or `md5sum` of a downloaded copy).
 - Downloading logs and `.gcda`: `curl ftp://<ip>:5000/switch/oot3dre/logs/perf.txt -o perf.txt`.
@@ -1259,7 +1259,7 @@ A freeze (frozen image, nothing in `crash_reports`) has no stack. Recipe used in
   overwrite: `gio remove` and then `gio copy`.
 - Open from the Homebrew Menu **in title mode** (holding R on a game), not from the album (limited
   memory).
-- Keep a copy of each NRO sent with name and md5 (`~/oot3d-work/oot3d_native_game.<versão>.nro`) and the
+- Keep a copy of each NRO sent with name and md5 (`~/oot3d-work/oot3d_native_game.<version>.nro`) and the
   corresponding `.elf`.
 
 ### 6.3 Host tests
@@ -1483,7 +1483,7 @@ without a prior recompilation, steps 2–4 dominate and are **to be measured**.
 
 - **Decline counters contaminated by the profiler**: they are only written in the appendix of
   `guest_profile.txt`, and the profiler forces declines in every measured frame. Still missing: writing
-  `nativa/recusou` to `perf.txt` without the profiler (and a counter per decline reason).
+  `native/declined` to `perf.txt` without the profiler (and a counter per decline reason).
 - The `DescribeOot3dGuestOverrides` message mentions `config/guest_overrides_off`, but the file that
   turns them off is `config/no_guest_overrides`.
 - `run_guest_override_equivalence.py` doesn't pass `--extra-flags` to the link (ASan/UBSan don't link in) and has no

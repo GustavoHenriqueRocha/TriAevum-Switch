@@ -52,7 +52,7 @@ def guest_spike_saturation(lines):
     Above 0.5 the result doesn't isolate spikes: raise the limit (relative to the average
     measured with the profile on) and repeat."""
     for line in lines:
-        match = re.search(r"quadros=(\d+) picos=(\d+)", line)
+        match = re.search(r"frames=(\d+) spikes=(\d+)", line)
         if match and int(match.group(1)):
             return int(match.group(2)) / int(match.group(1))
     return None
@@ -63,9 +63,9 @@ def main(argv):
         with open(argv[2], errors="replace") as handle:
             ratio = guest_spike_saturation(handle)
         if ratio is None:
-            print("no quadros=/picos= header")
+            print("no frames=/spikes= header")
             return 2
-        print(f"picos/quadros={ratio:.2f}" + (" SATURATED: does not isolate spikes" if ratio > 0.5 else ""))
+        print(f"spikes/frames={ratio:.2f}" + (" SATURATED: does not isolate spikes" if ratio > 0.5 else ""))
         return 1 if ratio > 0.5 else 0
     if len(argv) < 2:
         print(__doc__)
@@ -78,7 +78,7 @@ def main(argv):
         del args[index:index + 2]
     with open(argv[1], errors="replace") as handle:
         count, averages = summarize(handle, args or DEFAULT_FIELDS, first)
-    print(f"janelas={count} " + " ".join(f"{k}={v:.2f}" for k, v in averages.items()))
+    print(f"windows={count} " + " ".join(f"{k}={v:.2f}" for k, v in averages.items()))
     return 0
 
 

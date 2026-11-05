@@ -1332,7 +1332,7 @@ int main(int argc, char** argv) {
                 why = "memory (" + where + ")";
             }
             if (!why.empty()) {
-                std::printf("FALHA %08X %s trial %" PRIu64 ": %s\n", testCase.Entry,
+                std::printf("FAIL %08X %s trial %" PRIu64 ": %s\n", testCase.Entry,
                             testCase.Name, trial, why.c_str());
                 std::printf(" input budget=%u hook=%u skip=%d trace=%d\n", s.Budget,
                             s.HookMode, s.SkipFirst, s.Trace);
@@ -1348,7 +1348,7 @@ int main(int argc, char** argv) {
         if (!failed) {
             std::string where;
             if (!SameMemory(memoryA, memoryB, true, &where)) {
-                std::printf("FALHA %08X %s final memory (%s)\n", testCase.Entry,
+                std::printf("FAIL %08X %s final memory (%s)\n", testCase.Entry,
                             testCase.Name, where.c_str());
                 ++failures;
                 failed = true;
@@ -1356,10 +1356,10 @@ int main(int argc, char** argv) {
         }
         const uint64_t calls = info ? info->Calls - callsBefore : 0U;
         const uint64_t declined = info ? info->Declined - declinedBefore : 0U;
-        std::printf("%s %08X %-36s tentativas=%" PRIu64 " nativa=%" PRIu64 " recusou=%" PRIu64
-                    " fluxos[ret=%" PRIu64 " br=%" PRIu64 " lim=%" PRIu64 " falta=%" PRIu64
-                    " nsup=%" PRIu64 "] chamadas=%" PRIu64 " regressao=%" PRIu64 "\n",
-                    failed ? "FALHOU" : "OK    ", testCase.Entry, testCase.Name, trials,
+        std::printf("%s %08X %-36s trials=%" PRIu64 " native=%" PRIu64 " declined=%" PRIu64
+                    " flows[ret=%" PRIu64 " br=%" PRIu64 " lim=%" PRIu64 " fault=%" PRIu64
+                    " nsup=%" PRIu64 "] calls=%" PRIu64 " regression=%" PRIu64 "\n",
+                    failed ? "FAILED" : "OK    ", testCase.Entry, testCase.Name, trials,
                     calls, declined, flows[0], flows[1], flows[3], flows[4], flows[5],
                     guestCalls, regressions);
 #if defined(__x86_64__) && !defined(OOT3D_GUEST_OVERRIDE_QEMU)
@@ -1407,7 +1407,7 @@ int main(int argc, char** argv) {
             std::string where;
             if (!SameMemory(memoryA, memoryB, true, &where) ||
                 memoryA.WriteGeneration() != memoryB.WriteGeneration()) {
-                std::printf("FALHA %08X memory diverges after bench (%s)\n",
+                std::printf("FAIL %08X memory diverges after bench (%s)\n",
                             testCase.Entry, where.c_str());
                 ++failures;
             }

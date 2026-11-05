@@ -10,20 +10,20 @@
 //
 // Two modes (5th field of config/guard_alloc):
 //
-// "canario" (default): the block is the object with a 384-byte header before
+// "canary" (default): the block is the object with a 384-byte header before
 // it (ordinary allocation, no kernel call). On free the header keeps a copy
 // of the object's bytes (the object stays as it was) and the block enters a
 // long FIFO quarantine (131072 blocks, ~60 MiB); when it leaves, the object is
-// compared with the copy: if any byte changed, logs/hang.txt gets "USO APÓS
-// FREE (canário)" with who allocated, who freed, which bytes changed (from/to).
+// compared with the copy: if any byte changed, logs/hang.txt gets "USE AFTER
+// FREE (canary)" with who allocated, who freed, which bytes changed (from/to).
 // It does not give the PC of the write, but gives the object's owner. A double
-// free becomes "FREE DUPLO" in the same file. The 1st version (p6t) filled the
+// free becomes "DOUBLE FREE" in the same file. The 1st version (p6t) filled the
 // object with 0xFD on free: a read after the free, which previously saw the old
 // data and carried on, began reading garbage and the whole console hung (26/10).
 // The copy keeps reads as they are without the guard and only flags writes;
 // the canary requires max <= 128.
 //
-// "pagina": the mode below, with the exact PC, but each freed block closes a
+// "page": the mode below, with the exact PC, but each freed block closes a
 // page and splits a kernel memory block. With 32768 in quarantine (26/10) the
 // process's kernel ran out of those blocks and SDL audio (and FS) failed on
 // the first frame; the page-mode quarantine is capped at kMaxPageQuarantine.
@@ -56,7 +56,7 @@
 // only.
 //
 // config/guard_alloc: "min max quarantine live mode" (bytes, bytes, blocks,
-// blocks, canario|pagina); empty = 57 72 131072 32768 canario. The quarantine
+// blocks, canary|page); empty = 57 72 131072 32768 canary. The quarantine
 // holds freed blocks: the larger it is, the later a use after free is still
 // caught (the game frees ~2900 blocks of 57-72 bytes per second). With `live`
 // guarded blocks alive, subsequent requests go to normal malloc until

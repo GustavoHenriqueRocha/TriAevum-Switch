@@ -11,10 +11,10 @@ original romfs comes from `TRIAEVUM_ROMFS` (see `paths.py`).
 ## Text sources
 - Ship of Harkinian PT-BR mod by **SolidOne and LordeJabiraca** (`.otr` read with `otr.py`), converted from the N64
   format to the 3DS one by `conv.py`. Personal use; do not distribute.
-- `traducao.json`: the messages that only exist on 3DS (exported by `export.py`, codes such as `⟦7f..⟧`).
+- `translation.json`: the messages that only exist on 3DS (exported by `export.py`, codes such as `⟦7f..⟧`).
 
 ## Steps
-1. `export.py` → pending messages + glossary; translate into `traducao.json`.
+1. `export.py` → pending messages + glossary; translate into `translation.json`.
 2. `python -I assemble.py` → `romfs-ptbr.bin` (the new eu.qm fits in the original's space; the romfs is patched in place)
    and redraws the menus (`menu_batch.py`, `menus_ptbr.py`, `swap.py`, `labels.py`, `ctxb.py`) and the area
    titles of each `scene/*.zar` (`titles.py`, LA8 textures `name/*_eusp`/`_ussp`).
@@ -26,6 +26,6 @@ original romfs comes from `TRIAEVUM_ROMFS` (see `paths.py`).
    The `menu_top_parts00` with the sprites has a different hash in the Azahar pack (`EA217158888A9410` today): its upscaled texture
    is the PT-BR one with the 2.1.1 rectangles copied from the composite version.
 
-Dependencies: `mpyq`, `Pillow`, `etcpak`; fonts M PLUS Rounded 1c and Belleza (OFL) in `$TRIAEVUM_PTBR/fontes`.
+Dependencies: `mpyq`, `Pillow`, `etcpak`; fonts M PLUS Rounded 1c and Belleza (OFL) in `$TRIAEVUM_PTBR/fonts`.
 
 Test: `python -I test_ptbr.py`.

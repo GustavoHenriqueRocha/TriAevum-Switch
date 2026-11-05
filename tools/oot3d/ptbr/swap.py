@@ -1,24 +1,24 @@
 """Swaps labels on buttons: rebuilds the background and writes the PT-BR with the original's colors."""
 import sys; sys.path.insert(0, '.')
 from PIL import Image
-from ctxb import decodificar, ler
-from regions import regioes
-from labels import rotulo
+from ctxb import decode, read
+from regions import regions
+from labels import label
 
 
-def _fundo(im, caixa, folga=2, placa=False):
+def _background(im, box, margin=2, plate=False):
     """Erases the text by repeating, on each row, the color just to the left (the buttons have a vertical gradient).
 
-    With `placa`, the box is the title plate itself: keeps the ends and redraws only the middle."""
-    x0, y0, x1, y1 = caixa; px = im.load(); w, h = im.size
-    if placa:
+    With `plate`, the box is the title plate itself: keeps the ends and redraws only the middle."""
+    x0, y0, x1, y1 = box; px = im.load(); w, h = im.size
+    if plate:
         refs = {}
         for y in range(y0, y1):
-            cores = sorted((px[x, y] for x in range(x0 + 4, x1 - 4)
+            colors = sorted((px[x, y] for x in range(x0 + 4, x1 - 4)
                             if px[x, y][3] > 200 and max(px[x, y][:3]) - min(px[x, y][:3]) > 25),
                            key=lambda c: sum(c[:3]))
-            if len(cores) >= 3:
-                refs[y] = cores[len(cores) // 2]
+            if len(colors) >= 3:
+                refs[y] = colors[len(colors) // 2]
         if not refs:
             return
         for y in range(y0, y1):
@@ -27,56 +27,56 @@ def _fundo(im, caixa, folga=2, placa=False):
                 if px[x, y][3] > 200:
                     px[x, y] = ref
         return
-    for y in range(max(0, y0 - folga), min(h, y1 + folga)):
-        ref = px[max(0, x0 - folga - 1), y]
-        for x in range(max(0, x0 - folga), min(w, x1 + folga)):
+    for y in range(max(0, y0 - margin), min(h, y1 + margin)):
+        ref = px[max(0, x0 - margin - 1), y]
+        for x in range(max(0, x0 - margin), min(w, x1 + margin)):
             px[x, y] = ref
 
 
-def _estilo(orig, fundo, caixa):
-    po, pf = orig.load(), fundo.load(); x0, y0, x1, y1 = caixa; texto = []
+def _style(orig, background, box):
+    po, pf = orig.load(), background.load(); x0, y0, x1, y1 = box; text = []
     for y in range(y0, y1):
         for x in range(x0, x1):
             a, b = po[x, y], pf[x, y]
             if a[3] > 200 and sum(abs(a[i] - b[i]) for i in range(3)) > 60:
-                texto.append(a)
-    texto.sort(key=lambda c: sum(c[:3]))
-    n = max(1, len(texto) // 5)
-    media = lambda l: tuple(sum(c[i] for c in l) // len(l) for i in range(3)) + (255,)
-    return media(texto[-n:]), media(texto[:n])
+                text.append(a)
+    text.sort(key=lambda c: sum(c[:3]))
+    n = max(1, len(text) // 5)
+    mean = lambda l: tuple(sum(c[i] for c in l) // len(l) for i in range(3)) + (255,)
+    return mean(text[-n:]), mean(text[:n])
 
 
-def caixa_do_texto(im, area, limiar=235):
+def text_box(im, area, threshold=235):
     """Box of the light, opaque pixels inside `area` (for labels identical in English and Spanish)."""
     px = im.load(); x0, y0, x1, y1 = area; pts = [(x, y) for y in range(y0, y1) for x in range(x0, x1)
-                                              if px[x, y][3] > 200 and min(px[x, y][:3]) > limiar]
+                                              if px[x, y][3] > 200 and min(px[x, y][:3]) > threshold]
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     return (min(xs) - 1, min(ys) - 1, max(xs) + 2, max(ys) + 2)
 
 
-def trocar(nome, rotulos, base='06_EU_SPANISH', altura=None, peso='ExtraBold', fator=0.8, placa=False, alinhar='centro',
-           transparente=False, cores=None, inicial=None):
-    """rotulos: {region index | ('area', x0, y0, x1, y1) | ('caixa', x0, y0, x1, y1): 'PT text'}."""
-    orig = decodificar(ler(base, nome)); im = (inicial or orig).copy(); caixas = regioes(nome)
-    for i, txt in rotulos.items():
+def swap(name, labels, base='06_EU_SPANISH', height=None, weight='ExtraBold', factor=0.8, plate=False, align='center',
+           transparent=False, colors=None, initial=None):
+    """labels: {region index | ('area', x0, y0, x1, y1) | ('box', x0, y0, x1, y1): 'PT text'}."""
+    orig = decode(read(base, name)); im = (initial or orig).copy(); boxes = regions(name)
+    for i, txt in labels.items():
         if isinstance(i, tuple):
-            caixa = caixa_do_texto(orig, i[1:]) if i[0] == 'area' else i[1:]
+            box = text_box(orig, i[1:]) if i[0] == 'area' else i[1:]
         else:
-            caixa = caixas[i]
-        x0, y0, x1, y1 = caixa
-        if transparente:
-            im.paste((0, 0, 0, 0), caixa)
+            box = boxes[i]
+        x0, y0, x1, y1 = box
+        if transparent:
+            im.paste((0, 0, 0, 0), box)
         else:
-            _fundo(im, caixa, placa=placa)
-        cor, contorno = cores or _estilo(orig, im, caixa)
-        cap = altura or max(6, round((y1 - y0 - 4) * fator))
-        alvo = (x0 + 5, y0, x1 - 5, y1) if placa else (x0, y0 - 1, x1, y1 + 1) if alinhar == 'esquerda' \
+            _background(im, box, plate=plate)
+        color, outline = colors or _style(orig, im, box)
+        cap = height or max(6, round((y1 - y0 - 4) * factor))
+        target = (x0 + 5, y0, x1 - 5, y1) if plate else (x0, y0 - 1, x1, y1 + 1) if align == 'left' \
             else (x0 - 4, y0 - 2, x1 + 4, y1 + 2)
-        rotulo(im, alvo, txt, altura_maiuscula=cap, cor=cor, contorno=contorno,
-               espessura=1.5, limpar=False, peso=peso, alinhar=alinhar)
-    return im, caixas
+        label(im, target, txt, cap_height=cap, color=color, outline=outline,
+               thickness=1.5, clear=False, weight=weight, align=align)
+    return im, boxes
 
 
-def previa(im, caminho, escala=2):
-    ver = Image.new('RGBA', im.size, (40, 40, 60, 255)); ver.alpha_composite(im)
-    ver.resize((im.width * escala, im.height * escala), Image.NEAREST).convert('RGB').save(caminho)
+def preview(im, path, scale=2):
+    canvas = Image.new('RGBA', im.size, (40, 40, 60, 255)); canvas.alpha_composite(im)
+    canvas.resize((im.width * scale, im.height * scale), Image.NEAREST).convert('RGB').save(path)

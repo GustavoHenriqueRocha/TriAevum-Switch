@@ -1,6 +1,6 @@
 import struct
 from pathlib import Path
-from paths import SOH_TEXTO as SOH, QM_ORIGINAL as QM
+from paths import SOH_TEXT as SOH, QM_ORIGINAL as QM
 
 # arguments (bytes) of each N64 code (z64message.h)
 N64_ARGS = {0x05:1,0x06:1,0x07:2,0x0C:1,0x0E:1,0x11:2,0x12:2,0x13:1,0x14:1,0x15:3,0x1E:1}

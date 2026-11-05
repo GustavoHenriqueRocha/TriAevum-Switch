@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
             total *= 1099511628211ULL;
         }
     }
-    std::printf("execucoes=%" PRIu64 " divergencias=%" PRIu64 " resumo=%016" PRIx64 "\n",
+    std::printf("runs=%" PRIu64 " divergences=%" PRIu64 " digest=%016" PRIx64 "\n",
                 uint64_t{trials} * count, divergences, total);
     return divergences == 0 ? 0 : 1;
 }

@@ -432,10 +432,10 @@ void Print(const char *name, Fps60Mode mode, const Result &result) {
   const auto &c = result.Cadence;
   const double seconds = result.Seconds;
   std::printf(
-      "%-10s %-8s fps=%5.1f pics/s=%5.1f jogo=%5.1f refr/s  "
-      "intervalos(1/2/3/4+)=%llu/%llu/%llu/%llu  "
-      "hold(1/2/3/4+)=%llu/%llu/%llu/%llu  trocas/s=%5.2f  "
-      "desvio=%4.1f ms  judder=%4.1f ms  em30=%3.0f%%  travas=%llu\n",
+      "%-10s %-8s fps=%5.1f pics/s=%5.1f game=%5.1f refr/s  "
+      "intervals(1/2/3/4+)=%llu/%llu/%llu/%llu  "
+      "hold(1/2/3/4+)=%llu/%llu/%llu/%llu  switches/s=%5.2f  "
+      "deviation=%4.1f ms  judder=%4.1f ms  at30=%3.0f%%  stalls=%llu\n",
       name, Fps60ModeName(mode).data(),
       static_cast<double>(result.Presents) / seconds,
       static_cast<double>(result.Pictures) / seconds,
@@ -677,8 +677,8 @@ void ReportRenderWaits() {
       std::snprintf(name, sizeof(name), "gpu%.1f/%s", gpu,
                     count ? "counts" : "busy");
       Print(name, Fps60Mode::Legacy, result);
-      std::printf("           intermediarios desenhados=%llu descartados=%llu "
-                  "espera_acquire=%.2f ms/quadro\n",
+      std::printf("           in_between_drawn=%llu dropped=%llu "
+                  "acquire_wait=%.2f ms/frame\n",
                   static_cast<unsigned long long>(result.InBetweenDrawn),
                   static_cast<unsigned long long>(result.InBetweenDropped),
                   result.AcquireWaitMs /
@@ -766,8 +766,8 @@ void ReportFrameSlots() {
     for (auto slot : {SlotMode::One, SlotMode::Early, SlotMode::EarlyClock,
                       SlotMode::Two}) {
       const auto result = SimulateSlots({Tour20Area(60, step)}, slot);
-      std::printf("g%.0f %-9s perdidos/min=%6.1f refr_perdidos/min=%6.1f "
-                  "pics/s=%5.1f jogo=%5.1f refr/s interm=%llu/%llu held=%llu\n",
+      std::printf("g%.0f %-9s missed/min=%6.1f refr_missed/min=%6.1f "
+                  "pics/s=%5.1f game=%5.1f refr/s interm=%llu/%llu held=%llu\n",
                   step, kNames[static_cast<int>(slot)],
                   60.0 * static_cast<double>(result.MissedFrames) /
                       result.Seconds,

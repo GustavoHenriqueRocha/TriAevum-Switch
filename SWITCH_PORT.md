@@ -178,7 +178,7 @@ Three other sessions in the same file also end mid-line (3150, 13650, 34950;
 each link is checked (pointer inside `[fake_heap_start, fake_heap_end)` and aligned, plausible
 size, `p->bk->fd == p` and `p->fd->bk == p`), cycle detected (Brent) and a step cap. A
 corrupted list becomes `heap_corrupt=<reason> bin=… chunk=… size=… fd=… bk=…` in `perf.txt` and a
-"HEAP CORROMPIDO" report in `hang.txt` with the state of all threads; the walk then stops
+"HEAP CORRUPTED" report in `hang.txt` with the state of all threads; the walk then stops
 for this session. New field `heap_free_chunks`. Tests: `oot3d_hang_watchdog_tests` (synthetic heap
 in the newlib layout: sum equal to `mallinfo`'s, double free, self-loop, cycle, pointers outside the
 heap/misaligned, absurd sizes and 3000 heaps with random links — always terminates and never
@@ -201,7 +201,7 @@ that is why the object stays 32-aligned. With the file on the SD and from the st
 object at the end of page 0 and page 1 as slack (the header of newlib's next chunk sits 16
 bytes before its aligned pointer and cannot land on a closed page). On free, page 0 loses
 access and the block sits in a FIFO quarantine before returning to malloc. An access to a freed block
-becomes an exception immediately. File: `min max quarentena vivos`, empty = `57 72 4096 32768` (quarantine of
+becomes an exception immediately. File: `min max quarantine live`, empty = `57 72 4096 32768` (quarantine of
 32 MiB; above 32768 live blocks, 256 MiB, requests go to the normal malloc).
 
 *p6r (10/26) did not open*: with the guard from the constructor, every small boot object cost 12 KiB
@@ -215,18 +215,18 @@ closed page splits a kernel memory block and tens of thousands exhaust the proce
 run (quarantine 4096) completed the whole tour: 1.1 million guarded blocks, no fault, but the
 game frees ~2900 blocks of 57-72 bytes per second, so 4096 only watches ~1.4 s.
 
-**Canary mode (default since p6t).** The file gained a 5th field `canario|pagina`; empty =
-`57 72 131072 32768 canario`. In canary mode the block is the object with a 256-byte header in front
+**Canary mode (default since p6t).** The file gained a 5th field `canary|page`; empty =
+`57 72 131072 32768 canary`. In canary mode the block is the object with a 256-byte header in front
 (ordinary allocation, no kernel call). On free the object becomes 0xFD and sits in a quarantine of
 131072 blocks (~45 MiB, ~45 s); when it leaves, the bytes are checked and, if any changed,
-`hang.txt` gets "USO APÓS FREE (canário)" with serial, size, how long it lived, how long ago it was
+`hang.txt` gets "USE AFTER FREE (canary)" with serial, size, how long it lived, how long ago it was
 freed, the changed ranges with the bytes, and the allocation and free stacks. A double free becomes
-"FREE DUPLO (canário)" (the second free returns nothing). It does not give the PC of the write, but it gives the
+"DOUBLE FREE (canary)" (the second free returns nothing). It does not give the PC of the write, but it gives the
 object's owner; then page mode can target only it. Page mode stays capped at 4096 in quarantine.
 `perf.txt`: `guard_canary=1 guard_canary_hits guard_double_frees`.
 
 *p6t (10/26) froze the whole console*: the canary filled the object with 0xFD on free. The
-`hang.txt` showed "EXCEÇÃO" in `__wrap__free_r` (game thread, `vector<Oot3dPicaDrawSubmission>`
+`hang.txt` showed "EXCEPTION" in `__wrap__free_r` (game thread, `vector<Oot3dPicaDrawSubmission>`
 reallocating): free read `ptr - 256` to find the header and the address was not mapped (`far`
 = ptr − 0x100, `esr=0x92000007`). Fixes in p6u: a mark at `ptr - 8` (in an ordinary block that is
 newlib's chunk size, always readable) before reading the rest of the header, and free keeps a
@@ -240,8 +240,8 @@ bytes, each checked ~45 s after free, no write after free, no double free and
 (always on) and so does the walk (`config/heap_check_windows`), to catch the next occurrence.
 
 The libnx exception handler (always on, writes and returns, so the Atmosphère crash report
-still comes out) writes "EXCEÇÃO" to `hang.txt`: `far`, PC/LR/chain of the faulting thread, `USO
-APÓS FREE` with serial, size, offset in the object, how long ago it was freed and the allocation
+still comes out) writes "EXCEPTION" to `hang.txt`: `far`, PC/LR/chain of the faulting thread, `USE
+AFTER FREE` with serial, size, offset in the object, how long ago it was freed and the allocation
 and free stacks (`addr2line` on the offsets), plus the other threads. `perf.txt` gains `guard_alloc=1
 guard_made guard_live guard_quarantine guard_fallbacks guard_skipped`. Cost: 8 KiB per block in the
 range and a kernel call on free; diagnostics only. Test: `oot3d_switch_guard_alloc_tests`.
@@ -260,7 +260,7 @@ Guard-page idea: Chronicle PR #205.
   (not idle) goes > 3 s without progress with the app in focus, it writes **once**
   `logs/hang.txt` (append, `FsWriteOption_Flush`), via the libnx FS API directly — no `fopen`,
   no float `printf`, no allocation at all: the hang may be the malloc lock itself.
-  When everything moves again, it writes `--- recuperou após N ms` and re-arms (at most 8
+  When everything moves again, it writes `--- recovered after N ms` and re-arms (at most 8
   reports per run). Out of focus (HOME) and jumps of > 2.5 s in the watchdog itself (console
   sleep) reset the count.
 - Contents: stage, progress (= game `host_frames` / render-thread commands), stall time
@@ -272,14 +272,14 @@ Guard-page idea: Chronicle PR #205.
   report says so and keeps to the markers. Addresses inside the NRO come out with the offset
   `(+0x…)` for `aarch64-none-elf-addr2line -e oot3d_native_game.elf`. Also: the last service
   call (`sm:AtmosphereHasService(sys:clk)`, `sm:GetService(sys:clk)`, `sys:clk GetApiVersion`,
-  `sys:clk GetCurrentContext`; `EM_ANDAMENTO` if it did not return), the stream state read with
+  `sys:clk GetCurrentContext`; `IN_PROGRESS` if it did not return), the stream state read with
   `try_lock` (`queued`, `frames_queued`, `busy`, `worker_waiting`, `progress_waiters`,
-  `submitted/executed`, waits and `signals_skipped`; `mutex=OCUPADO` if stuck) and the pacer.
+  `submitted/executed`, waits and `signals_skipped`; `mutex=BUSY` if stuck) and the pacer.
 - `perf.txt` (`threads:`) gained `hang_wd=1 hang_reports=N`.
 - How to read: game in `perf_heap_walk` with PC in malloc/`__libc_lock_acquire_recursive` = malloc
   lock stuck; look in the other threads for whoever is inside `malloc/free`. Game in
   `wait_frames_in_flight` + render in `render_swap`/`render_pacer` = render thread stuck in
-  swap/pacer. `ultima_chamada_servico=… EM_ANDAMENTO` = IPC with no response.
+  swap/pacer. `last_service_call=… IN_PROGRESS` = IPC with no response.
 
 ### Update (2026-10-16, night)
 - Real on-console profile (`config/guest_profile` → `logs/guest_profile.txt`): the most expensive
@@ -304,7 +304,7 @@ Guard-page idea: Chronicle PR #205.
   registers itself (`Oot3dGuestOverrideProfileHook`), replacements only refuse if the profile would
   forward a PC from the range, and native time is attributed to the entry block.
 - Reading the profile: ~180 ns per block entry is the profile's own; a block's real cost is
-  `ns/entrada - 180`. Short, heavily executed blocks (audio loops, mutex) cost almost nothing.
+  `ns/entry - 180`. Short, heavily executed blocks (audio loops, mutex) cost almost nothing.
 - Largest real cost in Kokiri Forest: `Mtx3x4_Multiply` (0x36C174, ~440 calls/frame, manual
   external call). New exact kernel (`oot3d_native_mtx3x4_kernel.h`, native VFP with the guest's
   FPCR): ~4.7x fewer instructions; the old double path got IXC/UFC and the sign of flushed zeros
@@ -576,7 +576,7 @@ Round proofs (scripts in the repository; run on the Ryzen and the notebook):
   `plan_serial_ms` (ms per host frame).
 - Desktop: `TRIAEVUM_DEFERRED_PICA_PLAN=1` (worker) or `=render`. Test: `oot3d_native_pica_deferred_plan_tests`.
 - Fix (the first version degraded with play time on the console: worker 3.9 → 89 ms per frame
-  in 3 min, 30 → 9 FPS): after building each plan the worker did `submissão = {}`, and a default
+  in 3 min, 30 → 9 FPS): after building each plan the worker did `submission = {}`, and a default
   PICA packet allocates and zeroes four 16 KiB shader areas (64 KiB per draw); in addition each
   pass allocated submission and plan vectors of several MB. That was ~118 KiB of extra heap per
   draw (152 KiB vs 34 KiB on the serial path), in large blocks freed by other threads:
@@ -755,7 +755,7 @@ loads).
 - `op_mode` (handheld/docked) and `perf_mode` come from `appletGetOperationMode`/`appletGetPerformanceMode`
   (values cached by libnx, no IPC) and work even without sys-clk.
 - `perf_report.py` shows each session's clock; if it changes midway, it warns (window, before → after) and
-  splits fps/`total_ms` by clock; `--windows` lists `cpu/gpu/mem modo` per window.
+  splits fps/`total_ms` by clock; `--windows` lists `cpu/gpu/mem mode` per window.
 
 ### Stable heap and less phantom work per frame (2026-10-17)
 Measured (`switch-logs/interp1`, fps60, scale 2, 8.5 min): `heap_arena_mb` 631 → 1659 MB with
@@ -969,7 +969,7 @@ sample advances one frame every block of N (one per block, alternating parity).
   (`gl_widescreen_menu_policy_tests`, 21/21, also with ASan/UBSan).
 - **Console diagnostics** (`config/widescreen_menus_log`, off without the file; desktop
   `TRIAEVUM_GL_WIDESCREEN_MENUS_LOG=<file>`): `logs/widescreen_menus.txt` with one line per
-  distinct draw on the widened target: decision (`QUADRO`, `QUADRO+COMP`, `ESTICA`, `TELA`), viewport, scissor,
+  distinct draw on the widened target: decision (`FRAME`, `FRAME+COMP`, `STRETCH`, `SCREEN`), viewport, scissor,
   domain/layer, projection c0-c3, anisotropy, coverage, texture. Delete the file afterwards.
 - The 3D Link, the "...adventure through time itself!" box and the logo behind the cards and the thin
   header lines: see the next section.

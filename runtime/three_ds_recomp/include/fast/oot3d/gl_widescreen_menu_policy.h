@@ -592,16 +592,16 @@ struct GlWidescreenDrawLogFacts {
 [[nodiscard]] inline std::string FormatGlWidescreenDrawLogLine(
     const GlWidescreenDrawLogFacts& facts, const GlWidescreenDrawEvidence& evidence,
     const GlWidescreenDrawPlacement& placement) {
-    const char* shape = evidence.Projection == GlProjectionShape::Orthographic ? "orto"
+    const char* shape = evidence.Projection == GlProjectionShape::Orthographic ? "ortho"
                         : evidence.Projection == GlProjectionShape::Perspective ? "persp"
                                                                                 : "?";
     char text[640];
     int length = std::snprintf(
         text, sizeof(text),
         "%s%s vp=%.0f,%.0f,%.0f,%.0f fb=%ux%u sc=%u:%u,%u,%u,%u dom=%u cam=%u "
-        "proj=%s aniso=%.4f cobre_vp=%d vp_largura=%d vp_alvo=%d copia=%d "
-        "atm=%d tipada=%d sem_tex=%d vtx=%u vs=%016llx tex=%u:%08x/%u",
-        placement.FillTarget ? "TELA" : placement.Canvas ? "QUADRO" : "ESTICA",
+        "proj=%s aniso=%.4f covers_vp=%d vp_width=%d vp_target=%d copy=%d "
+        "atm=%d typed=%d no_tex=%d vtx=%u vs=%016llx tex=%u:%08x/%u",
+        placement.FillTarget ? "SCREEN" : placement.Canvas ? "FRAME" : "STRETCH",
         placement.CompensateWidening ? "+COMP" : "",
         static_cast<double>(facts.Viewport[0]), static_cast<double>(facts.Viewport[1]),
         static_cast<double>(facts.Viewport[2]), static_cast<double>(facts.Viewport[3]),
@@ -625,7 +625,7 @@ struct GlWidescreenDrawLogFacts {
                                                                sizeof(text) - 1U)
                                        : 0U);
     if (placement.SplitCorners)
-        line.insert(0, "CANTOS ");
+        line.insert(0, "CORNERS ");
     if (evidence.BoundsKnown) {
         length = std::snprintf(text, sizeof(text), " ndc=v%.3f..%.3f,h%.3f..%.3f",
                                static_cast<double>(evidence.NdcMin[0]),

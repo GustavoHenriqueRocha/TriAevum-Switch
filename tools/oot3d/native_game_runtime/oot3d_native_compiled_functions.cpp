@@ -1086,7 +1086,7 @@ std::string DescribeOot3dGuestOverrides() {
     for (size_t i = 0; i < Oot3dGuestOverrideCount(); ++i) {
         char line[160];
         std::snprintf(line, sizeof(line),
-                      "0x%08X nativa=%" PRIu64 " recusou=%" PRIu64 " %s\n",
+                      "0x%08X native=%" PRIu64 " declined=%" PRIu64 " %s\n",
                       table[i].Entry, table[i].Calls, table[i].Declined,
                       table[i].Name);
         text += line;

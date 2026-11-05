@@ -483,7 +483,7 @@ def summarize_glperf(windows: list[Window], top: int, refresh: float) -> None:
             print("    warning: " + "; ".join(warnings))
 
 
-HITCHES = ["hitch_shader", "hitch_texturas", "hitch_logica", "hitch_render"]
+HITCHES = ["hitch_shader", "hitch_textures", "hitch_logic", "hitch_render"]
 
 
 def summarize_verdict(windows: list[Window], gl_windows: list[Window], overall: float) -> None:

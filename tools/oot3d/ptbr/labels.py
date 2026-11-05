@@ -2,54 +2,54 @@
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from pathlib import Path
 
-from paths import FONTES
-ESCALA = 4   # draws 4x larger and downscales: smooth edges like the original
+from paths import FONTS
+SCALE = 4   # draws 4x larger and downscales: smooth edges like the original
 
 
-SERIFA = '/usr/share/fonts/liberation/LiberationSerif-Bold.ttf'
+SERIF = '/usr/share/fonts/liberation/LiberationSerif-Bold.ttf'
 
 
-def fonte(px, peso='ExtraBold'):
-    if peso == 'serifa':
-        return ImageFont.truetype(SERIFA, px)
-    return ImageFont.truetype(str(FONTES / f'MPLUSRounded1c-{peso}.ttf'), px)
+def font(px, weight='ExtraBold'):
+    if weight == 'serif':
+        return ImageFont.truetype(SERIF, px)
+    return ImageFont.truetype(str(FONTS / f'MPLUSRounded1c-{weight}.ttf'), px)
 
 
-def rotulo(img, caixa, texto, altura_maiuscula=12, cor=(255, 255, 255, 255), contorno=(0, 0, 0, 255),
-           espessura=1.5, limpar=True, peso='ExtraBold', alinhar='centro', topo=None, sombra=0):
-    """Writes `texto` into `caixa` (x0, y0, x1, y1), erasing what was there before.
+def label(img, box, text, cap_height=12, color=(255, 255, 255, 255), outline=(0, 0, 0, 255),
+           thickness=1.5, clear=True, weight='ExtraBold', align='center', top=None, shadow=0):
+    """Writes `text` into `box` (x0, y0, x1, y1), erasing what was there before.
 
-    With `topo`, the top of the capitals sits on that line (descenders may extend past the box,
+    With `top`, the top of the capitals sits on that line (descenders may extend past the box,
     as in the original); without it, the text is centered vertically."""
-    x0, y0, x1, y1 = caixa
+    x0, y0, x1, y1 = box
     w, h = x1 - x0, y1 - y0
-    if limpar:
+    if clear:
         img.paste((0, 0, 0, 0), (x0, y0, x1, y1))
-    E = ESCALA
-    f = fonte(int(altura_maiuscula * E / (0.66 if peso == 'serifa' else 0.72)), peso)
-    l, t, r, b = f.getbbox(texto)
+    E = SCALE
+    f = font(int(cap_height * E / (0.66 if weight == 'serif' else 0.72)), weight)
+    l, t, r, b = f.getbbox(text)
     cap_t = f.getbbox('H')[1]                                # top of the capitals, to align the baseline
     tw, th = r - l, b - t
-    margem = int(espessura * E) + 2
-    camada = Image.new('RGBA', (tw + 2 * margem, th + 2 * margem), (0, 0, 0, 0))
-    d = ImageDraw.Draw(camada)
-    if sombra:
-        d.text((margem - l + sombra * E, margem - t + sombra * E), texto, font=f, fill=contorno,
-               stroke_width=int(espessura * E), stroke_fill=contorno)
-    d.text((margem - l, margem - t), texto, font=f, fill=cor, stroke_width=int(espessura * E),
-           stroke_fill=contorno)
-    camada = camada.crop((0, 0, camada.width + sombra * E, camada.height + sombra * E)) if sombra else camada
-    alvo_h = round(camada.height / E)
-    alvo_w = round(camada.width / E)
-    if alvo_w > w:                                          # doesn't fit: compress horizontally only
-        alvo_w = w
-    if alvo_h > h and topo is None:
-        alvo_h = h
-    camada = camada.resize((alvo_w, alvo_h), Image.LANCZOS)
-    px = x0 + (w - alvo_w) // 2 if alinhar == 'centro' else x0
-    if topo is not None:
-        py = topo - round((margem + cap_t - t) / E)
+    margin = int(thickness * E) + 2
+    layer = Image.new('RGBA', (tw + 2 * margin, th + 2 * margin), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    if shadow:
+        d.text((margin - l + shadow * E, margin - t + shadow * E), text, font=f, fill=outline,
+               stroke_width=int(thickness * E), stroke_fill=outline)
+    d.text((margin - l, margin - t), text, font=f, fill=color, stroke_width=int(thickness * E),
+           stroke_fill=outline)
+    layer = layer.crop((0, 0, layer.width + shadow * E, layer.height + shadow * E)) if shadow else layer
+    target_h = round(layer.height / E)
+    target_w = round(layer.width / E)
+    if target_w > w:                                          # doesn't fit: compress horizontally only
+        target_w = w
+    if target_h > h and top is None:
+        target_h = h
+    layer = layer.resize((target_w, target_h), Image.LANCZOS)
+    px = x0 + (w - target_w) // 2 if align == 'center' else x0
+    if top is not None:
+        py = top - round((margin + cap_t - t) / E)
     else:
-        py = y0 + (h - alvo_h) // 2
-    img.alpha_composite(camada, (px, py))
+        py = y0 + (h - target_h) // 2
+    img.alpha_composite(layer, (px, py))
     return img

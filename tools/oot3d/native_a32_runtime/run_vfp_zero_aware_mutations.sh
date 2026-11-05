@@ -15,16 +15,16 @@ cp "$here/oot3d_native_a32_vfp_aarch64_tests.cpp" "$out/native_a32_runtime/"
 header="$here/oot3d_native_a32_vfp_aarch64.h"
 # name|sed expression applied to the header
 mutations=(
-  "nenhuma|"
-  "soma_aceita_subnormal|/ExactZeroSum(std::uint32_t left,/,/^}/ s/return FiniteNotDenormal(left) \&\& FiniteNotDenormal(right) \&\&$/return true \&\&/"
-  "produto_descartado_aceito|s/return !ExactZero(product) || ExactZeroProduct(left, right);/return true;/"
-  "produto_aceita_subnormal|/ExactZeroProduct(std::uint32_t left,/,/^}/ s/return FiniteNotDenormal(left) \&\& FiniteNotDenormal(right) \&\&$/return/"
-  "add_qualquer_zero|s/exact = ExactZeroSum(left, right);/exact = true;/"
-  "sub_qualquer_zero|s/exact = ExactZeroSum(left, right ^ 0x80000000U);/exact = true;/"
-  "mul_qualquer_zero|s/exact = ExactZeroProduct(left, right);/exact = true;/"
-  "div_qualquer_zero|s/exact = FiniteNotDenormal(left) \&\&$/exact = true || /"
-  "sqrt_qualquer_zero|s/exact = ExactZero(left);/exact = true;/"
-  "mac_qualquer_zero|s/exact = exact \&\& ProductAgrees(product, left, right);/exact = true;/"
+  "none|"
+  "sum_accepts_subnormal|/ExactZeroSum(std::uint32_t left,/,/^}/ s/return FiniteNotDenormal(left) \&\& FiniteNotDenormal(right) \&\&$/return true \&\&/"
+  "discarded_product_accepted|s/return !ExactZero(product) || ExactZeroProduct(left, right);/return true;/"
+  "product_accepts_subnormal|/ExactZeroProduct(std::uint32_t left,/,/^}/ s/return FiniteNotDenormal(left) \&\& FiniteNotDenormal(right) \&\&$/return/"
+  "add_any_zero|s/exact = ExactZeroSum(left, right);/exact = true;/"
+  "sub_any_zero|s/exact = ExactZeroSum(left, right ^ 0x80000000U);/exact = true;/"
+  "mul_any_zero|s/exact = ExactZeroProduct(left, right);/exact = true;/"
+  "div_any_zero|s/exact = FiniteNotDenormal(left) \&\&$/exact = true || /"
+  "sqrt_any_zero|s/exact = ExactZero(left);/exact = true;/"
+  "mac_any_zero|s/exact = exact \&\& ProductAgrees(product, left, right);/exact = true;/"
 )
 status=0
 for item in "${mutations[@]}"; do
@@ -40,11 +40,11 @@ for item in "${mutations[@]}"; do
         "$here/qemu_aarch64_test_runtime.cpp" "$here/oot3d_native_a32_vfp_ops.cpp" \
         "$here/upstream/recomp/a32_vfp_binary64.cpp" \
         "$out/native_a32_runtime/oot3d_native_a32_vfp_aarch64_tests.cpp" -o "$out/$name.elf" || { echo "ERROR $name: did not compile"; status=1; continue; }
-    if "$qemu" "$out/$name.elf" > "$out/$name.txt" 2>&1; then result=passou; else result=falhou; fi
-    if [ "$name" = nenhuma ]; then
-        [ $result = passou ] && echo "OK   no mutation: passes" || { echo "ERROR no mutation: failed"; status=1; }
+    if "$qemu" "$out/$name.elf" > "$out/$name.txt" 2>&1; then result=passed; else result=failed; fi
+    if [ "$name" = none ]; then
+        [ $result = passed ] && echo "OK   no mutation: passes" || { echo "ERROR no mutation: failed"; status=1; }
     else
-        [ $result = falhou ] && echo "OK   $name: detected ($(grep -c '^za_' "$out/$name.txt") divergences shown)" || { echo "ERROR $name: NOT detected"; status=1; }
+        [ $result = failed ] && echo "OK   $name: detected ($(grep -c '^za_' "$out/$name.txt") divergences shown)" || { echo "ERROR $name: NOT detected"; status=1; }
     fi
 done
 exit $status

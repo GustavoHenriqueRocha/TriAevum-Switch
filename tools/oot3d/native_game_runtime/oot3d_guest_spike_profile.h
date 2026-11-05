@@ -250,18 +250,18 @@ public:
     std::snprintf(
         line, sizeof(line),
         "# triaevum guest_spikes v1\n"
-        "# limite_ms=%.2f corte_carregamento_ms=%.2f quadros=%" PRIu64
-        " picos=%" PRIu64 " picos_carregamento=%" PRIu64 "\n"
-        "# guest_ms_medio=%.3f guest_ms_medio_pico=%.3f anel_descartados=%" PRIu64
-        " quadros_overflow=%" PRIu64 " resumo_cheio=%" PRIu64 "\n",
+        "# threshold_ms=%.2f load_cutoff_ms=%.2f frames=%" PRIu64
+        " spikes=%" PRIu64 " load_spikes=%" PRIu64 "\n"
+        "# guest_ms_avg=%.3f guest_ms_avg_spike=%.3f ring_dropped=%" PRIu64
+        " overflow_frames=%" PRIu64 " summary_full=%" PRIu64 "\n",
         mConfig.ThresholdMs, mConfig.LoadMs, mTotals.Frames, mTotals.Spikes,
         mTotals.LoadSpikes,
         mTotals.Frames != 0U ? ms(mTotals.FrameTicks) / static_cast<double>(mTotals.Frames) : 0.0,
         normalSpikes != 0U ? ms(mTotals.SpikeTicks) / static_cast<double>(normalSpikes) : 0.0,
         mTotals.RingDropped, mTotals.OverflowFrames, mTotals.SummaryFull);
     out += line;
-    out += "# top por tempo total nos quadros com pico: entrada | ms_total | "
-           "%tempo_pico | quadros | ms/quadro | ms_max | nome\n";
+    out += "# top by total time in spike frames: entry | ms_total | "
+           "%spike_time | frames | ms/frame | ms_max | name\n";
     const size_t limit = std::min<size_t>(rows.size(), mConfig.SummaryTop);
     for (size_t i = 0; i < limit; ++i) {
       const auto &row = rows[i];

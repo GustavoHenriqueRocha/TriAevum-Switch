@@ -336,8 +336,8 @@ void AppendThreads(Text& text, const StallTracker::Result* verdict) {
             .Str(StageName(slot.CurrentStage.load(std::memory_order_relaxed)))
             .Str(" progress=").Dec(slot.Progress.load(std::memory_order_relaxed));
         if (verdict != nullptr) {
-            text.Str(" parada_ms=").Dec(verdict->StalledFor[index]);
-            if ((verdict->StalledMask & (1U << index)) != 0U) text.Str(" PARADA");
+            text.Str(" stall_ms=").Dec(verdict->StalledFor[index]);
+            if ((verdict->StalledMask & (1U << index)) != 0U) text.Str(" STALLED");
         }
         text.Str(" handle=").Hex(handle).Char('\n');
         AppendThreadContext(text, handle);
@@ -366,17 +366,17 @@ void AppendCommon(Text& text) {
         const uint64_t start = service.StartTicks.load(std::memory_order_relaxed);
         const uint64_t end = service.EndTicks.load(std::memory_order_relaxed);
         const uint64_t now = NowTicks();
-        text.Str("ultima_chamada_servico=").Str(name)
-            .Str(" chamadas=").Dec(service.Calls.load(std::memory_order_relaxed))
-            .Str(" ha_ms=").Dec(TicksToMicroseconds(now - start) / 1000U);
+        text.Str("last_service_call=").Str(name)
+            .Str(" calls=").Dec(service.Calls.load(std::memory_order_relaxed))
+            .Str(" ago_ms=").Dec(TicksToMicroseconds(now - start) / 1000U);
         if (end == 0U || end < start) {
-            text.Str(" EM_ANDAMENTO");
+            text.Str(" IN_PROGRESS");
         } else {
-            text.Str(" duracao_us=").Dec(TicksToMicroseconds(end - start));
+            text.Str(" duration_us=").Dec(TicksToMicroseconds(end - start));
         }
         text.Char('\n');
     } else {
-        text.Str("ultima_chamada_servico=nenhuma\n");
+        text.Str("last_service_call=none\n");
     }
     if (gExtra != nullptr) {
         gExtra(gExtraUser, text);
@@ -386,7 +386,7 @@ void AppendCommon(Text& text) {
 
 void AppendHeader(Text& text, const char* title) {
     text.Str("=== ").Str(title).Str(" ===\n");
-    text.Str("uptime_ms=").Dec(UptimeMilliseconds()).Str(" relatorio=")
+    text.Str("uptime_ms=").Dec(UptimeMilliseconds()).Str(" report=")
         .Dec(gReports.load(std::memory_order_relaxed) + 1U).Str(" nro_text=").Hex(gTextBegin)
         .Str("..").Hex(gTextEnd)
         .Str(" (addr2line -e oot3d_native_game.elf <offset in parentheses>)\n");
@@ -431,7 +431,7 @@ void WriteHang(const StallTracker::Result& verdict) {
     if (gReports.load(std::memory_order_relaxed) >= kMaximumReports || !AcquireWriter()) return;
     Text text(gReportBuffer, sizeof(gReportBuffer));
     AppendHeader(text, "HANG (hang watchdog)");
-    text.Str("parada_max_ms=").Dec(verdict.Milliseconds).Char('\n');
+    text.Str("max_stall_ms=").Dec(verdict.Milliseconds).Char('\n');
     AppendCommon(text);
     AppendThreads(text, &verdict);
     text.Char('\n');
@@ -445,7 +445,7 @@ void WriteRecovered(const StallTracker::Result& verdict) {
     if (!AcquireWriter()) return;
     char buffer[256];
     Text text(buffer, sizeof(buffer));
-    text.Str("--- recuperou após ").Dec(verdict.Milliseconds).Str(" ms (uptime_ms=")
+    text.Str("--- recovered after ").Dec(verdict.Milliseconds).Str(" ms (uptime_ms=")
         .Dec(UptimeMilliseconds()).Str(")\n\n");
     AppendToFile(text.Data(), text.Size());
     ReleaseWriter();
@@ -568,7 +568,7 @@ void ReportFault(const char* title, const char* details, const FaultFrame& frame
     Text text(gReportBuffer, sizeof(gReportBuffer));
     AppendHeader(text, title);
     text.Str(details).Char('\n');
-    text.Str("thread_que_falhou=").Hex(threadGetCurHandle());
+    text.Str("failed_thread=").Hex(threadGetCurHandle());
     if (const char* name = SlotNameForHandle(threadGetCurHandle())) text.Char(' ').Str(name);
     text.Char('\n');
     FrameTrace trace;

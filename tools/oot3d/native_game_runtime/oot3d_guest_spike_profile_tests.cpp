@@ -153,7 +153,7 @@ void TestTopLimitAndSummary() {
   CHECK(text.find("load=1") != std::string::npos);
   std::string summary;
   p.FormatSummary(summary, Name);
-  CHECK(summary.find("picos=4 picos_carregamento=1") != std::string::npos);
+  CHECK(summary.find("spikes=4 load_spikes=1") != std::string::npos);
   const auto actor = summary.find("0x00110000     24.00");
   const auto bg = summary.find("0x00120000     18.00");
   const auto skin = summary.find("0x00130000      6.00");
@@ -161,8 +161,8 @@ void TestTopLimitAndSummary() {
         skin != std::string::npos);
   CHECK(actor < bg && bg < skin);
   CHECK(summary.find("Actor_UpdateAll") != std::string::npos);
-  // guest_ms_medio_pico = (15 + 16 + 17) / 3.
-  CHECK(summary.find("guest_ms_medio_pico=16.000") != std::string::npos);
+  // guest_ms_avg_spike = (15 + 16 + 17) / 3.
+  CHECK(summary.find("guest_ms_avg_spike=16.000") != std::string::npos);
 }
 
 // Full ring: the oldest goes out and is counted.

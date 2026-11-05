@@ -18,8 +18,8 @@ enum class HitchCause : uint8_t { Shader, Textures, Logic, Render, Count };
 inline const char *HitchCauseName(HitchCause cause) {
   switch (cause) {
   case HitchCause::Shader: return "shader";
-  case HitchCause::Textures: return "texturas";
-  case HitchCause::Logic: return "logica";
+  case HitchCause::Textures: return "textures";
+  case HitchCause::Logic: return "logic";
   case HitchCause::Render: return "render";
   default: return "?";
   }

@@ -43,9 +43,9 @@ bool ParseConfig(const char* text, Config& config) noexcept {
         const char* word = text;
         while (*text >= 'a' && *text <= 'z') ++text;
         const size_t length = static_cast<size_t>(text - word);
-        if (length == 7U && std::strncmp(word, "canario", 7) == 0) {
+        if (length == 6U && std::strncmp(word, "canary", 6) == 0) {
             parsed.GuardMode = Mode::Canary;
-        } else if (length == 6U && std::strncmp(word, "pagina", 6) == 0) {
+        } else if (length == 4U && std::strncmp(word, "page", 4) == 0) {
             parsed.GuardMode = Mode::Page;
         } else if (length != 0U) {
             return false;
@@ -199,11 +199,11 @@ char gCanaryDetails[8 * 1024];
 
 void AppendBlockLine(HangWatch::Text& text, const CanaryHeader& header) {
     const uint64_t now = armGetSystemTick();
-    text.Str("bloco serial=").Dec(header.Block.Serial).Str(" tamanho=").Dec(header.Block.Size)
-        .Str(" objeto=").Hex(reinterpret_cast<uintptr_t>(&header + 1))
-        .Str(" vida_ms=").Dec(armTicksToNs(header.FreeTicks - header.Block.AllocTicks) / 1000000U)
-        .Str(" liberado_ha_ms=").Dec(armTicksToNs(now - header.FreeTicks) / 1000000U)
-        .Str(" thread_do_free=").Hex(header.FreeThread).Char('\n');
+    text.Str("block serial=").Dec(header.Block.Serial).Str(" size=").Dec(header.Block.Size)
+        .Str(" object=").Hex(reinterpret_cast<uintptr_t>(&header + 1))
+        .Str(" lifetime_ms=").Dec(armTicksToNs(header.FreeTicks - header.Block.AllocTicks) / 1000000U)
+        .Str(" freed_ago_ms=").Dec(armTicksToNs(now - header.FreeTicks) / 1000000U)
+        .Str(" free_thread=").Hex(header.FreeThread).Char('\n');
 }
 
 void ReportCanary(const char* title, const CanaryHeader& header, const ChangedRange* ranges,
@@ -226,12 +226,12 @@ void ReportCanary(const char* title, const CanaryHeader& header, const ChangedRa
         }
         text.Char('\n');
     }
-    AppendStack(text, "pilha_alloc:", header.Block.AllocStack);
-    AppendStack(text, "pilha_free:", header.FreeStack);
+    AppendStack(text, "alloc_stack:", header.Block.AllocStack);
+    AppendStack(text, "free_stack:", header.FreeStack);
     if (withCurrentStack) {
         uint64_t current[kStackDepth];
         CaptureStack(current);
-        AppendStack(text, "pilha_free_de_novo:", current);
+        AppendStack(text, "free_again_stack:", current);
     }
     HangWatch::ReportEvent(title, text.Data());
     gCanaryWriting.store(false, std::memory_order_release);
@@ -246,7 +246,7 @@ void CanaryRelease(struct _reent* reent, CanaryHeader* header) noexcept {
                           header->Block.Size, ranges, 8U, changedBytes);
     if (changedBytes != 0U) {
         gCanaryHits.fetch_add(1U, std::memory_order_relaxed);
-        ReportCanary("USO APÓS FREE (canário)", *header, ranges, rangeCount, changedBytes, false);
+        ReportCanary("USE AFTER FREE (canary)", *header, ranges, rangeCount, changedBytes, false);
     }
     header->Block.Magic = 0;
     header->TailMagic = 0;
@@ -257,7 +257,7 @@ void CanaryFree(struct _reent* reent, CanaryHeader* header) noexcept {
     if (header->Block.Magic == kCanaryFreedMagic) {
         // Already in quarantine: the second free returns nothing.
         gDoubleFrees.fetch_add(1U, std::memory_order_relaxed);
-        ReportCanary("FREE DUPLO (canário)", *header, nullptr, 0U, 0U, true);
+        ReportCanary("DOUBLE FREE (canary)", *header, nullptr, 0U, 0U, true);
         return;
     }
     header->Block.Magic = kCanaryFreedMagic;
@@ -349,15 +349,15 @@ void AppendStack(HangWatch::Text& text, const char* label, const uint64_t (&stac
 void AppendGuardVerdict(HangWatch::Text& text, uintptr_t address) {
     if (const QuarantineEntry* entry = gRing.Find(address)) {
         const uintptr_t object = entry->Page + ObjectOffset(entry->Size);
-        text.Str("USO APÓS FREE: bloco serial=").Dec(entry->Serial).Str(" tamanho=")
-            .Dec(entry->Size).Str(" objeto=").Hex(object).Str(" deslocamento=")
+        text.Str("USE AFTER FREE: block serial=").Dec(entry->Serial).Str(" size=")
+            .Dec(entry->Size).Str(" object=").Hex(object).Str(" offset=")
             .SignedDec(static_cast<int64_t>(address) - static_cast<int64_t>(object))
-            .Str(" liberado_ha_ms=")
+            .Str(" freed_ago_ms=")
             .Dec(armTicksToNs(armGetSystemTick() - entry->FreeTicks) / 1000000U)
-            .Str(" vida_ms=").Dec(armTicksToNs(entry->FreeTicks - entry->AllocTicks) / 1000000U)
-            .Str(" thread_do_free=").Hex(entry->FreeThread).Char('\n');
-        AppendStack(text, "pilha_alloc:", entry->AllocStack);
-        AppendStack(text, "pilha_free:", entry->FreeStack);
+            .Str(" lifetime_ms=").Dec(armTicksToNs(entry->FreeTicks - entry->AllocTicks) / 1000000U)
+            .Str(" free_thread=").Hex(entry->FreeThread).Char('\n');
+        AppendStack(text, "alloc_stack:", entry->AllocStack);
+        AppendStack(text, "free_stack:", entry->FreeStack);
         return;
     }
     text.Str("outside guarded blocks\n");
@@ -367,16 +367,16 @@ char gFaultDetails[8 * 1024];
 
 void HandleException(ThreadExceptionDump* context) {
     HangWatch::Text text(gFaultDetails, sizeof(gFaultDetails));
-    text.Str("tipo=").Hex(context->error_desc).Str(" far=").Hex(context->far.x)
+    text.Str("type=").Hex(context->error_desc).Str(" far=").Hex(context->far.x)
         .Str(" esr=").Hex(context->esr).Char('\n');
     if (gUsed.load(std::memory_order_relaxed) && gConfig.GuardMode == Mode::Page) {
         AppendGuardVerdict(text, context->far.x);
     }
     const Stats stats = CurrentStats();
-    text.Str("guard_alloc=").Dec(stats.Enabled ? 1U : 0U).Str(" faixa=").Dec(gConfig.MinSize)
-        .Char('-').Dec(gConfig.MaxSize).Str(" criados=").Dec(stats.Guarded)
-        .Str(" vivos=").Dec(stats.Live).Str(" quarentena=").Dec(stats.Quarantined)
-        .Str(" falhas=").Dec(stats.Fallbacks).Str(" teto=").Dec(stats.Skipped);
+    text.Str("guard_alloc=").Dec(stats.Enabled ? 1U : 0U).Str(" range=").Dec(gConfig.MinSize)
+        .Char('-').Dec(gConfig.MaxSize).Str(" created=").Dec(stats.Guarded)
+        .Str(" live=").Dec(stats.Live).Str(" quarantine=").Dec(stats.Quarantined)
+        .Str(" fallbacks=").Dec(stats.Fallbacks).Str(" cap=").Dec(stats.Skipped);
     HangWatch::FaultFrame frame;
     frame.Pc = context->pc.x;
     frame.Lr = context->lr.x;
@@ -386,7 +386,7 @@ void HandleException(ThreadExceptionDump* context) {
     frame.X1 = context->cpu_gprs[1].x;
     frame.X2 = context->cpu_gprs[2].x;
     frame.X19 = context->cpu_gprs[19].x;
-    HangWatch::ReportFault("EXCEÇÃO", text.Data(), frame);
+    HangWatch::ReportFault("EXCEPTION", text.Data(), frame);
 }
 
 // Before the game's constructors (libnx already mounted sdmc in __appInit).

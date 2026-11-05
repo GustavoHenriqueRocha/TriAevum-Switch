@@ -12,11 +12,11 @@ inner() {
   export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM PATH=/opt/devkitpro/tools/bin:/opt/devkitpro/devkitA64/bin:$PATH
   ninja build.ninja > $A/cmake.log 2>&1 || { echo "cmake error" > $ST; tail -30 $A/cmake.log >> $ST; return 1; }
   if [ "$MODE" = dry ]; then
-    ninja -n oot3d_native_game_nro 2>&1 | tail -n +1 > $A/dry.txt; echo "passos=$(grep -c '^\[' $A/dry.txt) shards=$(grep -c 'shard_' $A/dry.txt)"
+    ninja -n oot3d_native_game_nro 2>&1 | tail -n +1 > $A/dry.txt; echo "steps=$(grep -c '^\[' $A/dry.txt) shards=$(grep -c 'shard_' $A/dry.txt)"
     grep -oE 'Building [^ ]+ object [^ ]+' $A/dry.txt | awk '{print $4}' | sed 's#.*/##' | head -40
     return
   fi
-  echo compilando > $ST
+  echo compiling > $ST
   nice -n 10 ninja -j 3 oot3d_native_game_nro > $A/build.log 2>&1 &
   pid=$!
   while kill -0 $pid 2>/dev/null; do
@@ -34,5 +34,5 @@ export -f inner; export A MODE ST
 if /mnt/c/Windows/System32/tasklist.exe 2>/dev/null | grep -qi '^eden.exe'; then echo "error: Eden open; build refused" > $ST; exit 1; fi
 # Never two builds at the same time (faulty RAM; WSL limited to 6 GB).
 if pgrep -x ninja >/dev/null 2>&1; then echo "error: another ninja running; build refused" > $ST; exit 1; fi
-echo iniciado > $ST
+echo started > $ST
 unshare -m bash -c inner

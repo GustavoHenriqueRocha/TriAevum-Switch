@@ -5,7 +5,7 @@
 # (trace, write observer, range watch).
 #
 # usage: run_store_sequence_diff.sh <output> [base-revision] [trials] [seed] [functions] [operations]
-#   ALVO=host (native g++, default) or ALVO=switch (devkitA64 with the shard
+#   TARGET=host (native g++, default) or TARGET=switch (devkitA64 with the shard
 #   flags, run under qemu-aarch64)
 #   EXTRA=<additional flags for both sides>
 #   GIT_ROOT=<repository the base revision comes from> (default: this tree)
@@ -16,7 +16,7 @@ TRIALS=${3:-200}
 SEED=${4:-1}
 FUNCS=${5:-100}
 OPS=${6:-60}
-ALVO=${ALVO:-host}
+TARGET=${TARGET:-host}
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../../../.." && pwd)
 R=$ROOT/tools/oot3d/native_game_runtime
@@ -30,7 +30,7 @@ sed -i 's/^namespace Oot3dNativeGame {/namespace OldMem {/; s|^} // namespace Oo
     "$OUT/old_memory.h" "$OUT/old_memory.cpp"
 python3 "$HERE/gen_store_sequences.py" "$OUT/store_sequences.inc" "$FUNCS" "$OPS" "$SEED"
 INC="-I$OUT -I$R -I$A -I$A/upstream -I$A/upstream/recomp -I$A/mass_cpp -I$NLOHMANN"
-if [ "$ALVO" = switch ]; then
+if [ "$TARGET" = switch ]; then
     CXX=${DEVKITPRO:-/opt/devkitpro}/devkitA64/bin/aarch64-none-elf-g++
     FLAGS="-std=c++20 -O3 -march=armv8-a+crc+crypto -mtune=cortex-a57 -ffunction-sections -fdata-sections -finline-functions -fno-fast-math -ffp-contract=off -w"
     LINK="-static -nostartfiles $A/qemu_aarch64_test_runtime.cpp"
@@ -50,7 +50,7 @@ $CXX $FLAGS $INC -DSEQ_OLD -c "$HERE/store_sequence_side.cpp" -o "$OUT/side_old.
 wait $p2
 $CXX $FLAGS $INC -c "$R/oot3d_memory_bus_abi.cpp" -o "$OUT/bus_abi.o"
 MAIN_DEFS=""
-[ "$ALVO" = switch ] && MAIN_DEFS="-DSEQ_TRIALS=$TRIALS -DSEQ_SEED=$SEED"
+[ "$TARGET" = switch ] && MAIN_DEFS="-DSEQ_TRIALS=$TRIALS -DSEQ_SEED=$SEED"
 $CXX $FLAGS $INC $MAIN_DEFS -c "$HERE/store_sequence_main.cpp" -o "$OUT/main.o"
 $CXX $FLAGS $INC "$OUT/main.o" "$OUT/side_new.o" "$OUT/side_old.o" "$OUT/new_memory.o" \
     "$OUT/old_memory.o" "$OUT/bus_abi.o" $LINK -o "$OUT/store_sequence_diff"

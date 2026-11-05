@@ -15,7 +15,7 @@
 // stage and progress of each thread, PC/LR/FP and a return chain for
 // each registered thread (paused for an instant with svcSetThreadActivity,
 // if the NPDM allows it), the last service call and the sync counters.
-// When the threads move again, it appends "recuperou após N ms" and the
+// When the threads move again, it appends "recovered after N ms" and the
 // watchdog rearms. config/no_hang_watchdog disables it.
 //
 // Outside Switch only the markers exist (identical, cheap) plus the detection

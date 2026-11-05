@@ -1488,7 +1488,7 @@ void InitPicaGlPost(PicaGlPostState& post, std::string_view vertexSource) {
         char summary[160];
         std::snprintf(summary, sizeof(summary),
                       "post-processing: aa=%s upscaler=%s sharpen=%.2f "
-                      "anisotropia=%u",
+                      "anisotropy=%u",
                       kAa[static_cast<size_t>(config.Aa)],
                       config.Upscale == PicaGlPost::Upscaler::Fsr ? "fsr"
                                                                   : "linear",
@@ -3284,7 +3284,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDraw(
     return false;
 #else
     try {
-        GlPerf::PhaseBegin(); // glperf step_draw_*: CPU por fase do draw
+        GlPerf::PhaseBegin(); // glperf step_draw_*: CPU per draw phase
         if (!mNativePica || draw.VertexShaderSource.empty() ||
             draw.FragmentShaderSource.empty() || draw.VertexCount == 0U ||
             draw.VertexBindings.empty() || draw.VertexAttributes.empty()) {

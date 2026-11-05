@@ -191,7 +191,7 @@ void NativeA32WindowSession::Run() {
               .Str(" worker_idle_waits=").Dec(sync.Waits.WorkerIdleWaits)
               .Str(" signals_skipped=").Dec(sync.Waits.SkippedNotifies);
         } else {
-          text.Str(" mutex=OCUPADO");
+          text.Str(" mutex=BUSY");
         }
         if (session.realtimePacerStorage.has_value()) {
           const auto tail = session.realtimePacerStorage->TailCounters();

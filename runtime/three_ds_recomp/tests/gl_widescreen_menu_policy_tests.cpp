@@ -488,13 +488,13 @@ TEST(GlWidescreenMenuPolicy, DiagnosticLineNamesTheDecision) {
     fade.GeometryCoversViewport = true;
     const auto fill = ResolveGlWidescreenDrawPlacement(fade, kFactor169, true);
     const auto line = FormatGlWidescreenDrawLogLine(facts, fade, fill);
-    EXPECT_EQ(line.rfind("TELA vp=0,40,480,320", 0), 0U) << line;
-    EXPECT_NE(line.find("sem_tex=1"), std::string::npos) << line;
+    EXPECT_EQ(line.rfind("SCREEN vp=0,40,480,320", 0), 0U) << line;
+    EXPECT_NE(line.find("no_tex=1"), std::string::npos) << line;
     auto card = RelocatedMenuDraw();
     card.Projection = GlProjectionShape::Perspective;
     card.PixelAnisotropy = 1.0F / kFactor169;
     const auto placed = ResolveGlWidescreenDrawPlacement(card, kFactor169, true);
-    EXPECT_EQ(FormatGlWidescreenDrawLogLine(facts, card, placed).rfind("QUADRO+COMP", 0), 0U);
+    EXPECT_EQ(FormatGlWidescreenDrawLogLine(facts, card, placed).rfind("FRAME+COMP", 0), 0U);
     EXPECT_NE(GlWidescreenDrawLogSignature(facts, fade, fill),
               GlWidescreenDrawLogSignature(facts, card, placed));
 }

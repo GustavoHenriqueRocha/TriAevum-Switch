@@ -1741,7 +1741,7 @@ bool NativeA32WindowSession::RunFrame() {
                 .Str(" steps=").Dec(heap.Steps).Str(" host_frames=").Dec(runFrameCount);
             perf << ' ' << text.Data();
             Oot3dNativeGame::HangWatch::ReportEvent(
-                "HEAP CORROMPIDO (varredura dos bins do malloc)", text.Data());
+                "HEAP CORRUPTED (malloc bin walk)", text.Data());
           }
         }
         uint64_t usedMemory = 0U;

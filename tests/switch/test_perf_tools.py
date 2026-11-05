@@ -33,11 +33,11 @@ def main():
                 count == 2 and abs(avg["missed_refresh"] - 3.0) < 1e-9)
     ok &= check("missing field doesn't break", "x" not in summary.summarize(lines, ["x"])[1])
     # tour21: 14 ms limit with instrumentation on (39.5 ms/frame).
-    header = ["# limite_ms=14.00 corte_carregamento_ms=50.00 quadros=13051 picos=12659 picos_carregamento=728\n"]
+    header = ["# threshold_ms=14.00 load_cutoff_ms=50.00 frames=13051 spikes=12659 load_spikes=728\n"]
     ratio = summary.guest_spike_saturation(header)
     ok &= check("saturated spike profile is detected (tour21)", ratio is not None and ratio > 0.5)
     ok &= check("useful profile is not flagged",
-                summary.guest_spike_saturation(["quadros=1000 picos=40\n"]) < 0.5)
+                summary.guest_spike_saturation(["frames=1000 spikes=40\n"]) < 0.5)
     # 24/10: spikes.txt accumulates sessions (tour20: 591 lines, 428 from tour19).
     spikes = [
         "session_start pacer_vsync=0\n",

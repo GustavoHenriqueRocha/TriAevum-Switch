@@ -14,13 +14,13 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::ifstream in(argv[1], std::ios::binary);
-    std::vector<uint8_t> dados((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     size_t offset = argc > 2 ? std::strtoull(argv[2], nullptr, 0) : 0U;
-    size_t tamanho = argc > 3 ? std::strtoull(argv[3], nullptr, 0) : dados.size() - offset;
-    if (offset + tamanho > dados.size()) {
+    size_t size = argc > 3 ? std::strtoull(argv[3], nullptr, 0) : data.size() - offset;
+    if (offset + size > data.size()) {
         std::fprintf(stderr, "out of file bounds\n");
         return 1;
     }
-    const auto hash = Fast::Renderer::ContentHash64(std::span<const uint8_t>(dados).subspan(offset, tamanho));
+    const auto hash = Fast::Renderer::ContentHash64(std::span<const uint8_t>(data).subspan(offset, size));
     std::printf("%016llX\n", static_cast<unsigned long long>(hash));
 }

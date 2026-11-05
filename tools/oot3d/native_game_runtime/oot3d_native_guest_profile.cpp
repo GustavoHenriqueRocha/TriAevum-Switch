@@ -138,8 +138,8 @@ bool GuestBlockProfiler::EnableSpikes(const GuestSpikeConfig& config,
     if (mSpikeOn) {
         if (FILE* file = std::fopen(mSpikeLog.string().c_str(), "a")) {
             std::fprintf(file,
-                         "session_start limite_ms=%.2f corte_carregamento_ms=%.2f "
-                         "top=%u funcoes_no_mapa=%zu\n",
+                         "session_start threshold_ms=%.2f load_cutoff_ms=%.2f "
+                         "top=%u functions_in_map=%zu\n",
                          mSpike.Config().ThresholdMs, mSpike.Config().LoadMs,
                          mSpike.Config().TopPerSpike, entries.size());
             std::fclose(file);
@@ -380,9 +380,9 @@ bool GuestBlockProfiler::WriteReport(uint64_t hostFrame) {
     const double attributedMs = static_cast<double>(attributed) / ticksPerMs;
     std::snprintf(line, sizeof(line),
                   "# triaevum guest_profile v1\n"
-                  "# quadros_medidos=%" PRIu64 " (1 of every %u) janela_ms=%.1f entradas_de_bloco=%" PRIu64
-                  " fora_do_codigo=%" PRIu64 "\n"
-                  "# tempo_atribuido_ms=%.1f (%.2f ms/frame) intervalos_descartados=%" PRIu64
+                  "# sampled_frames=%" PRIu64 " (1 of every %u) window_ms=%.1f block_entries=%" PRIu64
+                  " outside_code=%" PRIu64 "\n"
+                  "# attributed_ms=%.1f (%.2f ms/frame) dropped_gaps=%" PRIu64
                   " (%.1f ms, guest away: SVC/host)\n"
                   "# time per block = from the block's entry to the next entry,\n"
                   "# includes the profiler's own overhead (~constant per entry).\n",
@@ -393,8 +393,8 @@ bool GuestBlockProfiler::WriteReport(uint64_t hostFrame) {
                   static_cast<double>(mGapTicks) / ticksPerMs);
     out << line;
     if (!functions.empty()) {
-        out << "\n# funcoes: entrada | %tempo | ms | ms/quadro | entradas | %entradas | "
-               "ns/entrada | blocos | nome\n";
+        out << "\n# functions: entry | %time | ms | ms/frame | entries | %entries | "
+               "ns/entry | blocks | name\n";
         const size_t limit = std::min<size_t>(functions.size(), mOptions.TopFunctions);
         for (size_t i = 0; i < limit; ++i) {
             const auto& row = functions[i];
@@ -409,11 +409,11 @@ bool GuestBlockProfiler::WriteReport(uint64_t hostFrame) {
                           mTotalEntries != 0U ? 100.0 * static_cast<double>(row.Count) /
                                                     static_cast<double>(mTotalEntries) : 0.0,
                           row.Count != 0U ? ms * 1.0e6 / static_cast<double>(row.Count) : 0.0,
-                          row.Blocks, row.Pc == 0U ? "(fora do mapa)" : nameOf(row.Pc).c_str());
+                          row.Blocks, row.Pc == 0U ? "(outside map)" : nameOf(row.Pc).c_str());
             out << line;
         }
     }
-    out << "\n# blocos: pc | %tempo | ms | entradas | ns/entrada\n";
+    out << "\n# blocks: pc | %time | ms | entries | ns/entry\n";
     const size_t limit = std::min<size_t>(blocks.size(), mOptions.TopBlocks);
     for (size_t i = 0; i < limit; ++i) {
         const auto& row = blocks[i];

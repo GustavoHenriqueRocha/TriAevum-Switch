@@ -61,7 +61,7 @@ def parse_switch_profile(path: Path, overhead_ns: float | None) -> tuple[dict[in
     section = None
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("#"):
-            section = "blocks" if line.startswith("# blocos") else None
+            section = "blocks" if line.startswith("# blocks") else None
             continue
         if section != "blocks" or not line.startswith("0x"):
             continue

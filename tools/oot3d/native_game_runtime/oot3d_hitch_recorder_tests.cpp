@@ -39,11 +39,11 @@ int main() {
     Require(line->find("prog_new=1") != std::string::npos, "prog_new");
     now += 0.070; sample.TexturesCreated += 40;
     line = recorder.Observe(now, 2, kTarget, sample);
-    Require(line && line->find("cause=texturas") != std::string::npos, "textures");
+    Require(line && line->find("cause=textures") != std::string::npos, "textures");
     Require(line->find("tex_new=40") != std::string::npos, "tex_new");
     now += 0.060; sample.GameBusyMs = 45.0;
     line = recorder.Observe(now, 3, kTarget, sample);
-    Require(line && line->find("cause=logica") != std::string::npos, "logic");
+    Require(line && line->find("cause=logic") != std::string::npos, "logic");
     now += 0.055; sample.GameBusyMs = 10.0;
     line = recorder.Observe(now, 4, kTarget, sample);
     Require(line && line->find("cause=render") != std::string::npos, "render");
