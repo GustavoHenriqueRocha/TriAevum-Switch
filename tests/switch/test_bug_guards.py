@@ -554,6 +554,14 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp",
           r'WriteFileVerified\(configDirectory / kFontPackName, outputs\.Fonts\);.*?'
           r'WriteFileVerified\(configDirectory / kPackName, outputs\.Pack\);\s+\}'),
+    # --- 05/11: without the TopScreen pack (player chose "not now") ---
+    Guard("no TopScreen pack: the Items hint/D-pad badges asked for menu_atlas and the frame threw (game closed, hbl crash)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_texture_provider.cpp",
+          r'starts_with\("oot3d/topscreen/2\.1\.1/"\).*?pixels\.rgba8\.assign\(4U, 0U\);\s+\+\+mStats\.profile_asset_absent;\s+return true;',
+          "oot3d_native_ui_texture_provider_tests (packlessProvider)"),
+    Guard("a fatal error must close the game through AM (with the error dialog), not return to hbl (2001-0106)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'catch \(const std::exception& ex\).*?ShowSwitchFatalError\(ex\.what\(\)\);.*?__nx_applet_exit_mode = 1;'),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay

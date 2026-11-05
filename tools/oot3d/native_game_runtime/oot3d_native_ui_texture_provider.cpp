@@ -320,6 +320,18 @@ bool Oot3dNativeA32UiTextureProvider::Resolve(
             return true;
         }
     }
+    // TopScreen profile textures (2.1.1 menu/font atlases, the 3.0 UI atlas)
+    // exist only in the pack built from the TopScreen mod, which the player
+    // may decline. Without it their consumers (the Items hint, the D-pad cycle
+    // badges) draw nothing instead of failing the whole UI frame.
+    if (identity.semantic_name.starts_with("oot3d/topscreen/2.1.1/") ||
+        identity.semantic_name.starts_with("oot3d/topscreen/3.0/")) {
+        pixels.width = 1U;
+        pixels.height = 1U;
+        pixels.rgba8.assign(4U, 0U);
+        ++mStats.profile_asset_absent;
+        return true;
+    }
     if (ResolveCameraOptionGlyphAtlas(identity, pixels)) {
         return true;
     }

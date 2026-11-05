@@ -60,6 +60,17 @@ void WriteSwitchBootStatus(const char* status, const std::string& detail = {}) {
         stream << "detail=" << detail << '\n';
     }
 }
+
+// A fatal error shows the system's error dialog before the game closes, so the
+// player learns why instead of getting a crash report from the homebrew loader.
+void ShowSwitchFatalError(const char* what) {
+    ErrorApplicationConfig config;
+    const std::string details = std::string(what) +
+                                "\n\nThe log is in switch/oot3dre/logs/oot3d_native_game.log.";
+    if (R_SUCCEEDED(errorApplicationCreate(
+            &config, "Ocarina of Time 3D stopped because of an error.", details.c_str())))
+        (void)errorApplicationShow(&config);
+}
 #endif
 
 void SetRendererEnvironment(const char* name,
@@ -320,6 +331,12 @@ int main(int argc, char** argv) {
 #endif
         LogFatalErrorForDemo(ex.what());
         DestroyContextForDemo();
+#if defined(__SWITCH__)
+        ShowSwitchFatalError(ex.what());
+        // Like Exit game: returning to the homebrew loader makes it abort
+        // (hbl + 0x3810, 2001-0106), so the application closes through AM.
+        __nx_applet_exit_mode = 1;
+#endif
         return 1;
     }
 }

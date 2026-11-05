@@ -49,6 +49,9 @@ struct Oot3dNativeUiTextureProviderStats {
     std::uint64_t override_no_matches = 0;
     std::uint64_t profile_asset_resolves = 0;
     std::uint64_t profile_asset_decode_failures = 0;
+    // TopScreen profile textures no pack provides (the release cannot ship
+    // the mod they come from); each resolved to one transparent texel.
+    std::uint64_t profile_asset_absent = 0;
 };
 
 // Reads the CTXB payload selected by the original OoT3D resource loader from

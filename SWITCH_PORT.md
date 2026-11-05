@@ -197,6 +197,15 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
   EUR RomFS, pack `6e79f87d…22ea7f` (2,949,460 bytes, also p7b's 3.0-built file) and fonts
   `f625baf7…7ed5289`; raw USA Rev 1 RomFS, the same pack and fonts `5be4041b…6d00267`. On the PC
   the build takes 0.03 s after a 0.3 s archive hash.
+- Without the pack (B, X, or a failed download) the game runs with the game's own HUD art. The
+  pack-only profile textures (`oot3d/topscreen/2.1.1/*`, `oot3d/topscreen/3.0/*`) then resolve to
+  one transparent texel in `Oot3dNativeA32UiTextureProvider::Resolve` (`profile_asset_absent`), so
+  their consumers, the Items hint and the D-pad cycle badges, draw nothing. Before 0.1.1-test.2 the
+  lookup failed with "OoT3D UI semantic is not a native localized texture", the UI frame threw and
+  the game closed (logs7, 05/11).
+- A fatal error (any exception that reaches `main`) shows the system's error dialog with the
+  message and the log's path, then closes the application through AM (`__nx_applet_exit_mode = 1`,
+  as Exit game does). Returning to the homebrew loader made it abort (`hbl + 0x3810`, 2001-0106).
 
 ## How to build (Linux)
 

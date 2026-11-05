@@ -304,6 +304,30 @@ int main() {
             "named TopScreen profile CTXB did not resolve through the common "
             "PICA decoder");
 
+    // Without the TopScreen pack (the player declined the mod's download),
+    // its profile textures resolve to one transparent texel, so the Items hint
+    // and the D-pad cycle badges draw nothing instead of failing the frame.
+    Oot3dNativeA32UiTextureProvider packlessProvider(picaMemory);
+    oot3d::ui::UiTextureIdentity menuAtlasIdentity;
+    menuAtlasIdentity.semantic_name = "oot3d/topscreen/2.1.1/menu_atlas";
+    Require(packlessProvider.Resolve(menuAtlasIdentity, pixels, &error) &&
+                pixels.width == 1U && pixels.height == 1U &&
+                pixels.rgba8 == std::vector<std::uint8_t>(4U, 0U) &&
+                packlessProvider.Stats().profile_asset_absent == 1U,
+            "a TopScreen profile texture without its pack failed the UI frame");
+    // A pack that lacks the semantic behaves the same.
+    oot3d::ui::UiTextureIdentity uiAtlasIdentity;
+    uiAtlasIdentity.semantic_name = "oot3d/topscreen/3.0/ui_atlas";
+    Require(profileTextureProvider.Resolve(uiAtlasIdentity, pixels, &error) &&
+                pixels.width == 1U && pixels.rgba8 == std::vector<std::uint8_t>(4U, 0U) &&
+                profileTextureProvider.Stats().profile_asset_absent == 1U,
+            "a TopScreen profile texture missing from its pack failed the UI frame");
+    // Native semantics keep their contract.
+    oot3d::ui::UiTextureIdentity unknownIdentity;
+    unknownIdentity.semantic_name = "oot3d/native/not_a_texture";
+    Require(!packlessProvider.Resolve(unknownIdentity, pixels, &error),
+            "an unknown native UI semantic resolved");
+
     std::cout << "oot3d_native_ui_texture_provider_tests: ok\n";
     return 0;
 }
