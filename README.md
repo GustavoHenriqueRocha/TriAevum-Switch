@@ -1,7 +1,34 @@
-> **Fork with a Nintendo Switch port.** This fork of [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum)
-> adds fixes and optimizations for the Switch homebrew — see [SWITCH_PORT.md](SWITCH_PORT.md).
-> To port other 3DS games reusing these techniques, see the [3DS → Switch porting guide](docs/PORTING_GUIDE_3DS_SWITCH.md).
-> All credit for the project goes to the original author and the projects credited below. No ROM is distributed.
+> **Nintendo Switch port, in English.** This fork of
+> [GustavoHenriqueRocha/TriAevum-Switch](https://github.com/GustavoHenriqueRocha/TriAevum-Switch), the Switch port of
+> [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum), translates the port into English and adds gyro aiming,
+> touchscreen controls, a performance overlay, in-game updates and a first-launch import of your own cartridge dump.
+> All credit for the recompilation, runtime and renderer goes to those projects and the ones credited below.
+> No ROM or game data is distributed. Port notes: [SWITCH_PORT.md](SWITCH_PORT.md); 3DS → Switch porting
+> guide: [docs/PORTING_GUIDE_3DS_SWITCH.md](docs/PORTING_GUIDE_3DS_SWITCH.md).
+
+## Nintendo Switch
+
+**You need** a Switch running Atmosphère and a decrypted dump of your own *Ocarina of Time 3D* cartridge
+(`.3ds` or `.cci`): USA Rev 1 (En, Fr, Es) or European (original or Rev 1). GodMode9 on a modded 3DS can
+dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
+
+1. Download `oot3dre-<version>-switch.zip` from [Releases](https://github.com/JohnUzoka/TriAevum-Switch/releases)
+   and extract it to the root of the SD card. It creates `switch/oot3dre/`.
+2. Copy your dump into `switch/oot3dre/`.
+3. Start the game with a game's memory: hold R while starting any game, then open it from the homebrew menu.
+   The first start turns your dump into the game files (about a minute), then asks whether to keep (A) or
+   delete (Y) the dump.
+
+- **Menu:** press both sticks in (L3+R3) for settings, the performance overlay, updates and Exit game.
+  Touch works in the menu too.
+- **Controls:** gyro aiming with the console, a Pro Controller or a pair of Joy-Cons; tap the on-screen
+  item, X/Y and D-pad icons; drag a finger on empty screen to aim.
+- **Updates:** L3+R3 → Updates → Check for updates. Saves, settings and game files are kept.
+- **Performance:** at stock clocks lighter areas run at full speed and busy ones slow down (the CPU is
+  the limit); a higher CPU clock with sys-clk helps.
+- **Defaults:** 60 fps interpolation (delete `switch/oot3dre/config/fps60` for 30 fps) and Master Quest
+  unlocked from the start (delete `switch/oot3dre/config/unlock_master_quest`).
+- **Not included:** the TopScreen HUD texture pack by rlgcarrot; its license does not allow redistribution.
 
 # TriAevum — Echoes of Time
 
