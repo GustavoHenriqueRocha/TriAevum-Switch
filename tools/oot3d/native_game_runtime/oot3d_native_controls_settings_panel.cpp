@@ -610,6 +610,17 @@ class NativeControlsSettingsPanel final
           &mControlDraft.ControllerAccelerometerSensitivity,
           0.1F, 4.0F, "%.2fx");
     }
+#if defined(__SWITCH__)
+    // Console build: a finger that lands outside the HUD controls in
+    // gameplay aims (Automatic, Mouse, Right stick and Digital look sources).
+    changed |= ImGui::Checkbox("Touchscreen drag aim",
+                               &mControlDraft.TouchAimEnabled);
+    if (mControlDraft.TouchAimEnabled) {
+      changed |= ControlWidgets::SliderFloat(
+          "Touch aim sensitivity", &mControlDraft.TouchAimDegreesPerPixel,
+          0.02F, 1.0F, "%.2f deg/px", ImGuiSliderFlags_Logarithmic);
+    }
+#endif
     changed |= ImGui::Checkbox(
         "Invert native aim X", &mControlDraft.NativeAimInvertX);
     changed |= ImGui::Checkbox(

@@ -248,10 +248,14 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
                           const TopScreenTouchPollContext &context,
                           bool guestRefreshWillConsume) noexcept {
   auto fingers = tracker.Fingers();
-  bool pageOwned = std::any_of(
-      fingers.begin(), fingers.end(), [](const TopScreenTouchFinger &finger) {
-        return finger.Active && finger.Owner == TopScreenTouchOwner::Page;
-      });
+  const auto owned = [&](TopScreenTouchOwner owner) {
+    return std::any_of(fingers.begin(), fingers.end(),
+                       [owner](const TopScreenTouchFinger &finger) {
+                         return finger.Active && finger.Owner == owner;
+                       });
+  };
+  bool pageOwned = owned(TopScreenTouchOwner::Page);
+  bool aimOwned = owned(TopScreenTouchOwner::Aim);
   for (auto &finger : fingers) {
     if (!finger.Active || finger.Owner != TopScreenTouchOwner::Unassigned) {
       continue;
@@ -268,21 +272,41 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
       }
       continue;
     }
-    if (context.Targets == nullptr) {
-      continue;
+    if (context.Targets != nullptr) {
+      finger.Control = HitTestTopScreenHudTouch(
+          *context.Targets,
+          finger.DownX * static_cast<float>(context.WindowWidth),
+          finger.DownY * static_cast<float>(context.WindowHeight));
     }
-    finger.Control = HitTestTopScreenHudTouch(
-        *context.Targets,
-        finger.DownX * static_cast<float>(context.WindowWidth),
-        finger.DownY * static_cast<float>(context.WindowHeight));
     if (finger.Control != TopScreenHudTouchControl::None) {
       finger.Owner = TopScreenTouchOwner::Hud;
       finger.PendingPolls =
           std::max(finger.PendingPolls, kTopScreenHudMinimumPressPolls);
+    } else if (context.AimEnabled && !aimOwned) {
+      // One aim finger at a time; its motion counts from where it landed.
+      finger.Owner = TopScreenTouchOwner::Aim;
+      finger.AimX = finger.DownX;
+      finger.AimY = finger.DownY;
+      aimOwned = true;
     }
   }
 
   TopScreenTouchPollResult result;
+  for (auto &finger : fingers) {
+    // A lifted aim finger still delivers its last motion; pages and host UI
+    // drop the motion made while they own the screen.
+    if (!finger.Active || finger.Owner != TopScreenTouchOwner::Aim ||
+        !guestRefreshWillConsume) {
+      continue;
+    }
+    if (!context.PageTouchEnabled && !context.HostUiVisible) {
+      result.AimDeltaX += (finger.X - finger.AimX) * kTopScreenTouchPanelWidth;
+      result.AimDeltaY += (finger.Y - finger.AimY) * kTopScreenTouchPanelHeight;
+    }
+    finger.AimX = finger.X;
+    finger.AimY = finger.Y;
+  }
+
   for (const auto &finger : fingers) {
     if (!finger.Active || (!finger.Held && finger.PendingPolls == 0U)) {
       continue;
@@ -305,7 +329,9 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
     if (guestRefreshWillConsume && finger.PendingPolls != 0U) {
       --finger.PendingPolls;
     }
-    if (!finger.Held && finger.PendingPolls == 0U) {
+    const bool aimDelivered = finger.Owner != TopScreenTouchOwner::Aim ||
+                              (finger.AimX == finger.X && finger.AimY == finger.Y);
+    if (!finger.Held && finger.PendingPolls == 0U && aimDelivered) {
       finger = {};
     }
   }

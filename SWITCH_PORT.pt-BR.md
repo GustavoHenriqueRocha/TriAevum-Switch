@@ -78,9 +78,15 @@ Desempenho e usabilidade:
   e as páginas de pausa Itens/Mapa/Equipamento do TopScreen). No jogo em movimento, tocar num
   controle do HUD do TopScreen aperta o controle que ele mostra enquanto o dedo está na tela: X, Y,
   Item I (ZR), Item II (ZL), B e a direção do D-pad dos ícones de ação em volta da cruz
-  (Visão/Navi, Ocarina, botas...). Cada dedo é testado onde encosta (vários dedos ao mesmo tempo);
-  um toque que começa fora de um controle é ignorado. Toques curtos ficam retidos até o jogo ler.
-  Teste de acerto e encaixe: `oot3d_top_screen_hud_touch.h`, `oot3d_top_screen_hud_touch_tests.cpp`.
+  (Visão/Navi, Ocarina, botas...). Cada dedo é testado onde encosta (vários dedos ao mesmo tempo).
+  O primeiro dedo que encosta fora de todos os controles mira arrastando (estilingue, arco, gancho,
+  visão em primeira pessoa), somado ao analógico direito e ao giroscópio como a mira do mouse no
+  PC: `aim.touch_enabled` (padrão ligado) e `aim.touch_degrees_per_pixel` (padrão 0,14: meia tela,
+  640 px, gira cerca de 90°) no `oot3d_controls.json`, também em L3+R3 → Controls → Aiming;
+  `aim.invert_x`/`invert_y` valem. Ele alimenta o giroscópio do jogo, que o jogo só lê mirando,
+  então arrastar em terceira pessoa não faz nada. Outros dedos fora de um controle são ignorados.
+  Toques curtos ficam retidos até o jogo ler. Teste de acerto, encaixe e posse:
+  `oot3d_top_screen_hud_touch.h`, `oot3d_top_screen_hud_touch_tests.cpp`.
 - **Gerador AOT**: helpers quentes com caminho rápido inline e lento frio; LDM/STM por bloco;
   literais PC-relativos dobrados; shards sem `-ffast-math` (exatidão do VFP).
 - **Orçamento de blocos** 2048 (era 128) no Switch.

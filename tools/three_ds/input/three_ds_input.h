@@ -388,6 +388,10 @@ struct PhysicalInputState {
     double SamplePeriodSeconds = 1.0 / 60.0;
     MotionObservation ControllerMotion;
     NormalizedTouch ControllerTouch;
+    // Touchscreen drag aiming: the aim finger's motion since the last
+    // consumed poll, in touch-panel pixels (1280x720 on the Switch).
+    float TouchAimDeltaX = 0.0F;
+    float TouchAimDeltaY = 0.0F;
 };
 
 struct MappingConfig {
@@ -405,6 +409,7 @@ struct MappingConfig {
     bool NativeMotionInvertY = false;
     std::array<float, 3> GyroscopeBiasDegreesPerSecond{};
     std::array<float, 3> AccelerometerNeutral{0.0F, -1.0F, 0.0F};
+    float TouchMotionDegreesPerPixel = 0.14F;
 };
 
 struct AimTransform {
@@ -507,6 +512,20 @@ InputFrame ResolveInput(const MappingConfig& config,
                         CStickFilterState* cStickFilter = nullptr,
                         bool advanceCStickFilter = true,
                         VirtualMotionState* virtualMotion = nullptr) noexcept;
+
+struct AimRates {
+    float PitchDegreesPerSecond = 0.0F;
+    float YawDegreesPerSecond = 0.0F;
+};
+
+// A touch drag as virtual pitch/yaw rates over the sample period, with the
+// mouse's convention (drag right turns right, drag down looks down) and the
+// aim inversion. The native aim sources add it to their own virtual rates
+// (Automatic, Mouse, RightStick, DigitalLook); a source of physical sensors
+// only ignores it.
+[[nodiscard]] AimRates ResolveTouchAimRates(const MappingConfig& config,
+                                            float deltaX, float deltaY,
+                                            double samplePeriodSeconds) noexcept;
 
 std::int16_t ConvertHostAxisToNative(std::int16_t value,
                                      std::int32_t deadZonePercent) noexcept;

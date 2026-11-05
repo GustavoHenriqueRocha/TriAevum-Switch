@@ -329,6 +329,213 @@ void TestTracker() {
           "a reused finger id starts a new touch");
 }
 
+void TestAimOwnership() {
+  const auto hud = BuildHud(SwitchConfig(), 1.0F);
+  const auto targets = ResolveTopScreenHudTouchTargets(hud, kWidth, kHeight);
+  const TopScreenTouchPollContext aim{false, false, &targets, kWidth, kHeight,
+                                      true};
+  const auto &x = targets.Buttons[0];
+  const auto &itemI = targets.Buttons[2];
+  TopScreenTouchTracker tracker;
+
+  // A finger landing on empty screen aims; its motion is reported in panel
+  // pixels on consuming polls only, accumulated across the others.
+  const std::array land{At(1, 640, 360)};
+  tracker.ObserveSample(land);
+  auto result = ResolveTopScreenTouchPoll(tracker, aim, true);
+  Require(result.AimDeltaX == 0 && result.AimDeltaY == 0 &&
+              result.HudButtons == 0U,
+          "landing does not move the aim");
+  const std::array moved{At(1, 700, 340)};
+  tracker.ObserveSample(moved);
+  result = ResolveTopScreenTouchPoll(tracker, aim, false);
+  Require(result.AimDeltaX == 0 && result.AimDeltaY == 0,
+          "motion waits for a consuming poll");
+  const std::array further{At(1, 740, 350)};
+  tracker.ObserveSample(further);
+  result = ResolveTopScreenTouchPoll(tracker, aim, true);
+  Require(Near(result.AimDeltaX, 100) && Near(result.AimDeltaY, -10),
+          "the drag since the last consuming poll is delivered once");
+  Require(Near(ResolveTopScreenTouchPoll(tracker, aim, true).AimDeltaX, 0),
+          "a still finger does not aim");
+
+  // The aim finger never presses a control it slides over; a second finger
+  // on a control still taps, one on empty screen does not aim.
+  const std::array overX{At(1, CenterX(x), CenterY(x)),
+                         At(2, CenterX(itemI), CenterY(itemI)),
+                         At(3, 640, 600)};
+  tracker.ObserveSample(overX);
+  result = ResolveTopScreenTouchPoll(tracker, aim, true);
+  Require(result.HudButtons == ButtonMask(Button::Zr),
+          "a sliding aim finger presses nothing; a second finger taps");
+  Require(Near(result.AimDeltaX, CenterX(x) - 740) &&
+              Near(result.AimDeltaY, CenterY(x) - 350),
+          "only the first aim finger moves the aim");
+
+  // A lifted aim finger delivers its last motion, then a new finger aims.
+  const std::array lastMove{At(1, CenterX(x) + 20, CenterY(x))};
+  tracker.ObserveSample(lastMove);
+  tracker.ObserveSample({});
+  result = ResolveTopScreenTouchPoll(tracker, aim, false);
+  Require(result.AimDeltaX == 0, "the last motion waits for a refresh");
+  result = ResolveTopScreenTouchPoll(tracker, aim, true);
+  // (Item I, lifted in the same sample, still owes its second refresh.)
+  Require(Near(result.AimDeltaX, 20) &&
+              result.HudButtons == ButtonMask(Button::Zr),
+          "a lifted aim finger delivers its last motion");
+  const std::array next{At(4, 300, 300)};
+  tracker.ObserveSample(next);
+  (void)ResolveTopScreenTouchPoll(tracker, aim, true);
+  const std::array nextMoved{At(4, 290, 330)};
+  tracker.ObserveSample(nextMoved);
+  result = ResolveTopScreenTouchPoll(tracker, aim, true);
+  Require(Near(result.AimDeltaX, -10) && Near(result.AimDeltaY, 30),
+          "the next finger on empty screen aims");
+
+  // A HUD finger never aims.
+  tracker.Reset();
+  const std::array tapX{At(5, CenterX(x), CenterY(x))};
+  tracker.ObserveSample(tapX);
+  (void)ResolveTopScreenTouchPoll(tracker, aim, true);
+  const std::array dragX{At(5, CenterX(x) - 200, CenterY(x) + 100)};
+  tracker.ObserveSample(dragX);
+  result = ResolveTopScreenTouchPoll(tracker, aim, true);
+  Require(result.AimDeltaX == 0 && result.AimDeltaY == 0 &&
+              result.HudButtons == ButtonMask(Button::X),
+          "a finger that landed on X keeps pressing X and never aims");
+
+  // Drag aim off, pages and host UI: no aim finger.
+  for (const auto &context :
+       {TopScreenTouchPollContext{false, false, &targets, kWidth, kHeight,
+                                  false},
+        TopScreenTouchPollContext{true, false, &targets, kWidth, kHeight,
+                                  true},
+        TopScreenTouchPollContext{false, true, &targets, kWidth, kHeight,
+                                  true}}) {
+    tracker.Reset();
+    tracker.ObserveSample(land);
+    (void)ResolveTopScreenTouchPoll(tracker, context, true);
+    tracker.ObserveSample(further);
+    result = ResolveTopScreenTouchPoll(tracker, context, true);
+    Require(result.AimDeltaX == 0 && result.AimDeltaY == 0,
+            "no aim without drag aim, or under a page or host UI");
+    // The finger keeps its owner after the page or host UI closes.
+    tracker.ObserveSample(land);
+    result = ResolveTopScreenTouchPoll(tracker, aim, true);
+    Require(result.AimDeltaX == 0 && result.AimDeltaY == 0,
+            "a finger that landed elsewhere never starts aiming");
+  }
+
+  // An aim finger under a page that opens mid-drag: the motion made under
+  // the page is dropped, not replayed when it closes.
+  const TopScreenTouchPollContext page{true, false, &targets, kWidth, kHeight,
+                                       true};
+  tracker.Reset();
+  tracker.ObserveSample(land);
+  (void)ResolveTopScreenTouchPoll(tracker, aim, true);
+  tracker.ObserveSample(further);
+  Require(ResolveTopScreenTouchPoll(tracker, page, true).AimDeltaX == 0,
+          "a page owns the screen");
+  Require(ResolveTopScreenTouchPoll(tracker, aim, true).AimDeltaX == 0,
+          "motion under a page is not replayed");
+}
+
+void TestAimRates() {
+  using namespace ThreeDsRecomp::Input;
+  MappingConfig config;
+  Require(config.TouchMotionDegreesPerPixel == 0.14F,
+          "default touch sensitivity");
+  // Integrated over the sample period, half the 1280-pixel screen turns
+  // about 90 degrees.
+  constexpr double kSeconds = 1.0 / 30.0;
+  auto rates = ResolveTouchAimRates(config, 640.0F, 0.0F, kSeconds);
+  Require(std::abs(rates.YawDegreesPerSecond * kSeconds + 89.6) < 0.01 &&
+              rates.PitchDegreesPerSecond == 0.0F,
+          "a half-screen drag right turns 89.6 degrees right");
+  rates = ResolveTouchAimRates(config, 0.0F, 100.0F, kSeconds);
+  Require(std::abs(rates.PitchDegreesPerSecond * kSeconds - 14.0) < 0.01,
+          "a drag down looks down like the mouse");
+  config.TouchMotionDegreesPerPixel = 0.28F;
+  rates = ResolveTouchAimRates(config, 640.0F, 100.0F, kSeconds);
+  Require(std::abs(rates.YawDegreesPerSecond * kSeconds + 179.2) < 0.02 &&
+              std::abs(rates.PitchDegreesPerSecond * kSeconds - 28.0) < 0.01,
+          "sensitivity scales the turn");
+  config.NativeMotionInvertX = true;
+  config.NativeMotionInvertY = true;
+  rates = ResolveTouchAimRates(config, 640.0F, 100.0F, kSeconds);
+  Require(rates.YawDegreesPerSecond > 0.0F &&
+              rates.PitchDegreesPerSecond < 0.0F,
+          "aim inversion applies to touch");
+  rates = ResolveTouchAimRates(config, std::nanf(""), 1.0F, kSeconds);
+  Require(rates.YawDegreesPerSecond == 0.0F &&
+              rates.PitchDegreesPerSecond == 0.0F,
+          "a broken sample does not aim");
+}
+
+void TestAimThroughMotionSources() {
+  using namespace ThreeDsRecomp::Input;
+  const DigitalState digital;
+  MappingConfig config;
+  config.NativeMotionSource = MotionSource::Automatic;
+  config.MouseMotionDegreesPerPixel = config.TouchMotionDegreesPerPixel;
+  PhysicalInputState physical;
+  physical.SamplePeriodSeconds = 1.0 / 30.0;
+
+  // Without a sensor, a touch drag aims exactly like the same mouse motion.
+  auto touch = physical;
+  touch.TouchAimDeltaX = 50.0F;
+  touch.TouchAimDeltaY = -20.0F;
+  auto mouse = physical;
+  mouse.MouseDeltaX = 50;
+  mouse.MouseDeltaY = -20;
+  VirtualMotionState touchState;
+  VirtualMotionState mouseState;
+  const auto byTouch =
+      ResolveInput(config, touch, digital, {}, nullptr, true, &touchState);
+  const auto byMouse =
+      ResolveInput(config, mouse, digital, {}, nullptr, true, &mouseState);
+  for (std::size_t axis = 0; axis < 3; ++axis)
+    Require(std::abs(byTouch.Hid.GyroscopeDegreesPerSecond[axis] -
+                     byMouse.Hid.GyroscopeDegreesPerSecond[axis]) < 0.01F,
+            "touch aims like the mouse at equal sensitivity");
+  Require(std::abs(byTouch.Hid.GyroscopeDegreesPerSecond[1] + 210.0F) < 0.1F,
+          "50 px right at 0.14 deg/px over 1/30 s is -210 deg/s of yaw");
+  Require(byTouch.CStick.X == 0 && byTouch.CStick.Y == 0,
+          "touch aim never moves the camera stick");
+
+  // With the gyro owning the aim, touch adds to it and does not take over.
+  auto gyro = physical;
+  gyro.ControllerMotion.GyroscopeValid = true;
+  gyro.ControllerMotion.AccelerometerValid = true;
+  gyro.ControllerMotion.GyroscopeDegreesPerSecond = {0.0F, 30.0F, 0.0F};
+  gyro.ControllerPressed = 1U;
+  VirtualMotionState gyroState;
+  const auto gyroOnly =
+      ResolveInput(config, gyro, digital, {}, nullptr, false, &gyroState);
+  auto gyroTouch = gyro;
+  gyroTouch.TouchAimDeltaX = 50.0F;
+  const auto combined =
+      ResolveInput(config, gyroTouch, digital, {}, nullptr, true, &gyroState);
+  Require(std::abs(combined.Hid.GyroscopeDegreesPerSecond[1] -
+                   (gyroOnly.Hid.GyroscopeDegreesPerSecond[1] - 210.0F)) < 0.1F,
+          "touch adds its yaw to the gyro");
+  Require(gyroState.AutomaticOwner == VirtualMotionState::Owner::Controller,
+          "a touch drag leaves the controller (gyro) as owner");
+
+  // A physical-sensor-only source ignores touch.
+  config.NativeMotionSource = MotionSource::ControllerGyroscope;
+  const auto sensor = ResolveInput(config, gyro, digital);
+  const auto sensorTouch = ResolveInput(config, gyroTouch, digital);
+  Require(sensor.Hid.GyroscopeDegreesPerSecond ==
+              sensorTouch.Hid.GyroscopeDegreesPerSecond,
+          "controller_gyroscope ignores touch");
+  // A virtual source adds it.
+  config.NativeMotionSource = MotionSource::RightStick;
+  const auto stick = ResolveInput(config, gyroTouch, digital);
+  Require(std::abs(stick.Hid.GyroscopeDegreesPerSecond[1] + 210.0F) < 0.1F,
+          "right_stick adds touch");
+}
+
 } // namespace
 
 int main() {
@@ -337,6 +544,9 @@ int main() {
   TestDpadIcons();
   TestHiddenControls();
   TestTracker();
+  TestAimOwnership();
+  TestAimRates();
+  TestAimThroughMotionSources();
   std::cout << "oot3d_top_screen_hud_touch_tests: ok\n";
   return 0;
 }
