@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Backup dos saves do TriAevum no Switch para o PC (e, opcional, para o VPS).
+# Backup dos saves do TriAevum no Switch para o PC (e, só se pedido, para o VPS).
 #
-#   scripts/switch/backup-saves.sh                  descobre o Switch (FTP do Sphaira), copia e manda pro VPS
-#   scripts/switch/backup-saves.sh --no-remote      só no PC
+#   scripts/switch/backup-saves.sh                  descobre o Switch (FTP do Sphaira) e copia só para o PC
+#   scripts/switch/backup-saves.sh --remote vps     também manda pro VPS (nunca vai sem este argumento)
 #   scripts/switch/backup-saves.sh --host 192.168.3.54
 #   scripts/switch/backup-saves.sh --source <pasta> lê uma pasta local com o layout do SD (teste)
 #
@@ -12,23 +12,25 @@
 #
 # Snapshot: <dest>/<AAAAMMDD-HHMMSS>/ com os arquivos no mesmo caminho do SD, SHA256SUMS e manifest.txt.
 # Só cria snapshot quando o SHA256SUMS difere do último; arquivo igual ao do snapshot anterior vira
-# hardlink (não ocupa espaço de novo). Nunca apaga snapshot: passando de --warn-after, só avisa.
+# hardlink (não ocupa espaço de novo), mas só se ainda confere com o SHA256SUMS do anterior; senão
+# vai cópia nova e sai "AVISO: snapshot ... corrompido". Nunca apaga snapshot: passando de
+# --warn-after, só avisa.
 #
 # Nunca usa o FTP com o jogo aberto: o FTP do Sphaira só existe com o Sphaira aberto (o jogo fecha o
 # Sphaira). Se nenhum host responde, sai com 0 e "Switch indisponível".
 #
 # Códigos de saída: 0 ok / sem mudança / Switch indisponível; 1 erro na cópia local (nada gravado);
-# 2 snapshot local ok mas o VPS falhou (tenta de novo na próxima rodada); 64 uso errado.
+# 2 (só com --remote) snapshot local ok mas o VPS falhou (tenta de novo na próxima rodada); 64 uso errado.
 set -euo pipefail
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
 hosts=()
 port=5000
 source_dir=""
 dest="$HOME/oot3d-work/saves-backup"
-remote=1
-remote_host="vps"
+remote=0  # VPS desligado por padrão: o usuário não quer nada enviado sem pedir (--remote <host>)
+remote_host=""
 remote_dir="backups/oot3dre-save"
 warn_after=200
 max_depth=8
@@ -39,8 +41,8 @@ while (($#)); do
         --port) port="${2:?}"; shift 2 ;;
         --source) source_dir="${2:?}"; shift 2 ;;
         --dest) dest="${2:?}"; shift 2 ;;
-        --no-remote) remote=0; shift ;;
-        --remote-host) remote_host="${2:?}"; shift 2 ;;
+        --remote) remote=1; remote_host="${2:?--remote precisa do host ssh, ex. --remote vps}"; shift 2 ;;
+        --no-remote) remote=0; remote_host=""; shift ;;
         --remote-dir) remote_dir="${2:?}"; shift 2 ;;
         --warn-after) warn_after="${2:?}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -256,23 +258,40 @@ fi
     > "$work/SHA256SUMS"
 
 previous="$(list_snapshots | tail -n 1)"
-if [[ -n "$previous" ]] && cmp -s "$work/SHA256SUMS" "$dest/$previous/SHA256SUMS"; then
+
+# Mudanças em relação ao snapshot anterior (tipo<TAB>sha256<TAB>caminho). Arquivo igual só vira
+# hardlink se o do anterior ainda confere com o SHA256SUMS dele; senão fica a cópia nova (arquivo
+# podre no anterior não pode travar os backups seguintes nem passar para o snapshot novo).
+: > "$work/changes"
+declare -A corrupt=()  # caminho -> 1, arquivos do anterior que não conferem
+if [[ -n "$previous" ]]; then
+    LC_ALL=C awk 'NR == FNR { old[substr($0, 67)] = substr($0, 1, 64); next }
+        { path = substr($0, 67); hash = substr($0, 1, 64); seen[path] = 1
+          if (!(path in old)) print "novo\t" hash "\t" path
+          else if (old[path] != hash) print "mudou\t" hash "\t" path
+          else print "igual\t" hash "\t" path }
+        END { for (path in old) if (!(path in seen)) print "sumiu\t-\t" path }' \
+        "$dest/$previous/SHA256SUMS" "$work/SHA256SUMS" | LC_ALL=C sort -t $'\t' -k3 > "$work/changes"
+    while IFS=$'\t' read -r kind hash path; do
+        [[ "$kind" == igual ]] || continue
+        actual="$(sha256sum < "$dest/$previous/$path" 2> /dev/null | cut -c1-64 || true)"
+        [[ "$actual" == "$hash" ]] || corrupt["$path"]=1
+    done < "$work/changes"
+fi
+for path in "${!corrupt[@]}"; do
+    echo "AVISO: snapshot $previous corrompido: $path não confere com o SHA256SUMS dele;" \
+         "vai uma cópia nova da origem no snapshot novo" >&2
+done
+
+if [[ -n "$previous" ]] && ((${#corrupt[@]} == 0)) && cmp -s "$work/SHA256SUMS" "$dest/$previous/SHA256SUMS"; then
     echo "sem mudança desde $previous ($count arquivos conferidos por SHA-256); nenhum snapshot novo"
     finish 0
 fi
 
-# Mudanças em relação ao snapshot anterior; arquivo igual vira hardlink do anterior.
-: > "$work/changes"
 if [[ -n "$previous" ]]; then
-    LC_ALL=C awk 'NR == FNR { old[substr($0, 67)] = substr($0, 1, 64); next }
-        { path = substr($0, 67); hash = substr($0, 1, 64); seen[path] = 1
-          if (!(path in old)) print "novo\t" path
-          else if (old[path] != hash) print "mudou\t" path
-          else print "igual\t" path }
-        END { for (path in old) if (!(path in seen)) print "sumiu\t" path }' \
-        "$dest/$previous/SHA256SUMS" "$work/SHA256SUMS" | LC_ALL=C sort -k2 > "$work/changes"
-    while IFS=$'\t' read -r kind path; do
+    while IFS=$'\t' read -r kind hash path; do
         if [[ "$kind" == igual ]]; then
+            [[ -n "${corrupt[$path]:-}" ]] && continue
             ln -f "$dest/$previous/$path" "$work/snap/$path" 2> /dev/null || true
         elif [[ "$kind" == sumiu ]]; then
             echo "AVISO: sumiu do Switch: $path (continua guardado em $dest/$previous)"
@@ -295,10 +314,13 @@ while [[ -e "$dest/$name" ]]; do name="$stamp-$n"; n=$((n + 1)); done
     echo "bytes=$(awk -F'\t' '{ s += $1 } END { print s + 0 }' "$work/files.tsv")"
     echo "# mudanças em relação ao anterior (novo/mudou/sumiu)"
     if [[ -n "$previous" ]]; then
-        grep -v '^igual' "$work/changes" || true
+        grep -v '^igual' "$work/changes" | cut -f1,3 || true
     else
         echo "primeiro snapshot"
     fi
+    for path in "${!corrupt[@]}"; do
+        printf 'corrompido_no_anterior\t%s\n' "$path"
+    done
     echo "# tamanho<TAB>caminho (relativo ao sdmc:/)"
     LC_ALL=C sort -t $'\t' -k2 "$work/files.tsv"
 } > "$work/snap/manifest.txt"
@@ -312,6 +334,6 @@ find "$work/snap" -type f -exec chmod a-w {} +
 mv -T "$work/snap" "$dest/$name"
 echo "snapshot novo: $dest/$name ($count arquivos)"
 if [[ -n "$previous" ]]; then
-    grep -v '^igual' "$work/changes" | sed 's/^/  /' || true
+    grep -v '^igual' "$work/changes" | cut -f1,3 | sed 's/^/  /' || true
 fi
 finish 0

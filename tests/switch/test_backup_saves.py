@@ -4,11 +4,12 @@
 Pedido (05/11/2026): "melhora o sistema de saves pra não perder nada". O save do
 OoT3D só existia no SD do Switch (sdmc:/switch/oot3dre/savedata) e numa cópia feita
 à mão. O script copia os saves para o PC só quando algo mudou (SHA-256 contra o
-último snapshot), nunca apaga snapshot e opcionalmente manda para o VPS conferindo o
-SHA-256 do outro lado.
+último snapshot), nunca apaga snapshot e, só com --remote <host> explícito, manda
+para o VPS conferindo o SHA-256 do outro lado.
 
 Dados sintéticos: um "SD" falso montado em pasta temporária e lido com --source; o
-VPS é um ssh falso que roda o comando localmente.
+VPS é um ssh falso que roda o comando localmente. Todo teste roda com um ssh-armadilha
+no PATH (registra a chamada e falha), então nenhum teste chega ao VPS de verdade.
 """
 from __future__ import annotations
 
@@ -58,6 +59,12 @@ class BackupSavesTest(unittest.TestCase):
         self.sd = self.scratch / "sd"
         self.dest = self.scratch / "dest"
         build_sd(self.sd)
+        # ssh-armadilha: qualquer chamada fica registrada e falha (nunca chega ao VPS real).
+        self.trap_bin = self.scratch / "trap-bin"
+        self.trap_bin.mkdir()
+        self.ssh_log = self.scratch / "ssh-chamado.log"
+        (self.trap_bin / "ssh").write_text(f'#!/bin/sh\necho "$*" >> "{self.ssh_log}"\nexit 255\n')
+        (self.trap_bin / "ssh").chmod(0o755)
 
     def cleanup(self) -> None:
         for path in self.scratch.rglob("*"):
@@ -71,10 +78,9 @@ class BackupSavesTest(unittest.TestCase):
         if source:
             args += ["--source", str(self.sd)]
         args += list(extra)
-        if "--remote-host" not in extra:
-            args.append("--no-remote")
-        return subprocess.run(args, capture_output=True, text=True, timeout=120,
-                              env=env or dict(os.environ))
+        if env is None:
+            env = dict(os.environ, PATH=f"{self.trap_bin}:{os.environ['PATH']}")
+        return subprocess.run(args, capture_output=True, text=True, timeout=120, env=env)
 
     def snapshots(self) -> list[Path]:
         if not self.dest.is_dir():
@@ -219,7 +225,7 @@ class BackupSavesTest(unittest.TestCase):
         # Snapshot feito sem remoto fica pendente e sobe na próxima rodada com remoto.
         self.assert_ok(self.run_backup())
         (self.sd / "switch/oot3dre/savedata/save00.bin").write_bytes(SAVE[::-1])
-        result = self.run_backup("--remote-host", "vps", env=env)
+        result = self.run_backup("--remote", "vps", env=env)
         self.assert_ok(result)
         local = [p.name for p in self.snapshots()]
         self.assertEqual(sorted(p.name for p in remote.iterdir() if SNAPSHOT_RE.match(p.name)), local)
@@ -230,18 +236,92 @@ class BackupSavesTest(unittest.TestCase):
             self.assertEqual(check.returncode, 0, check.stdout)
         self.assertEqual([p.name for p in remote.iterdir() if not SNAPSHOT_RE.match(p.name)], [])
         remote_state = {str(p.relative_to(remote)): p.read_bytes() for p in remote.rglob("*") if p.is_file()}
-        self.assert_ok(self.run_backup("--remote-host", "vps", env=env))
+        self.assert_ok(self.run_backup("--remote", "vps", env=env))
         self.assertEqual({str(p.relative_to(remote)): p.read_bytes()
                           for p in remote.rglob("*") if p.is_file()}, remote_state)
 
     def test_remote_failure_keeps_local_snapshot_and_returns_error(self) -> None:
         env, _ = self.fake_ssh_env(fail=True)
-        result = self.run_backup("--remote-host", "vps", env=env)
+        result = self.run_backup("--remote", "vps", env=env)
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertEqual(len(self.snapshots()), 1)
         check = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=self.snapshots()[0],
                                capture_output=True, text=True)
         self.assertEqual(check.returncode, 0)
+
+    def test_vps_is_off_by_default(self) -> None:
+        """Pedido do usuário (05/11): nada vai ao VPS sem ele pedir (--remote vps)."""
+        result = self.run_backup()
+        self.assert_ok(result)
+        self.assertEqual(len(self.snapshots()), 1)
+        self.assertFalse(self.ssh_log.exists(),
+                         "ssh chamado sem --remote: " + (self.ssh_log.read_text() if self.ssh_log.exists() else ""))
+        self.assertNotIn("VPS", result.stdout + result.stderr)
+        # Mesmo com snapshots pendentes e mais rodadas (com e sem mudança), continua sem ssh.
+        (self.sd / "switch/oot3dre/savedata/save00.bin").write_bytes(SAVE[::-1])
+        self.assert_ok(self.run_backup())
+        self.assert_ok(self.run_backup())
+        self.assertEqual(len(self.snapshots()), 2)
+        self.assertFalse(self.ssh_log.exists())
+
+    def corrupt_in_place(self, path: Path) -> None:
+        """Simula bit podre no disco: muda 1 byte sem trocar o inode (pega os hardlinks)."""
+        path.chmod(0o644)
+        data = bytearray(path.read_bytes())
+        data[len(data) // 2] ^= 0xFF
+        with path.open("r+b") as handle:
+            handle.write(bytes(data))
+        path.chmod(0o444)
+
+    def assert_snapshot_ok(self, snap: Path) -> None:
+        check = subprocess.run(["sha256sum", "--strict", "-c", "SHA256SUMS"], cwd=snap,
+                               capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, f"{snap.name}: {check.stdout}{check.stderr}")
+
+    def test_corrupted_previous_snapshot_does_not_block_new_backups(self) -> None:
+        """Verificação adversarial (05/11): 1 byte podre no snapshot anterior fazia o ln ligar o
+        arquivo ruim e todas as rodadas seguintes saírem com rc=1, sem guardar o save novo."""
+        self.assert_ok(self.run_backup())
+        first = self.snapshots()[0]
+        bad = "switch/oot3dre/savedata/save03.bin"
+        self.corrupt_in_place(first / bad)
+        changed = bytearray(SAVE)
+        changed[7] ^= 0x01
+        (self.sd / "switch/oot3dre/savedata/save00.bin").write_bytes(bytes(changed))
+        result = self.run_backup()
+        self.assert_ok(result)
+        snaps = self.snapshots()
+        self.assertEqual(len(snaps), 2, result.stdout + result.stderr)
+        new = snaps[1]
+        self.assert_snapshot_ok(new)
+        self.assertEqual(self.files_of(new)["switch/oot3dre/savedata/save00.bin"], bytes(changed))
+        self.assertEqual(self.files_of(new)[bad], SAVE)  # copiado de novo da origem
+        self.assertFalse((new / bad).samefile(first / bad), "hardlink para o arquivo corrompido")
+        # Arquivo íntegro do anterior continua virando hardlink.
+        self.assertTrue((new / "switch/oot3dre/savedata/save04.bin").samefile(
+            first / "switch/oot3dre/savedata/save04.bin"))
+        self.assertRegex(result.stderr, rf"AVISO.*{first.name}.*corrompido.*save03\.bin")
+        self.assertIn(f"corrompido_no_anterior\t{bad}", (new / "manifest.txt").read_text())
+        # A rodada seguinte, sem mudança, não cria nada nem dá erro.
+        again = self.run_backup()
+        self.assert_ok(again)
+        self.assertEqual(len(self.snapshots()), 2, again.stdout + again.stderr)
+        self.assertIn("sem mudança", again.stdout)
+
+    def test_corrupted_previous_snapshot_without_change_publishes_good_copy(self) -> None:
+        """Se nada mudou no Switch mas o arquivo guardado apodreceu, o "sem mudança" deixaria o
+        save sem nenhuma cópia boa no PC: publica um snapshot novo com a cópia boa."""
+        self.assert_ok(self.run_backup())
+        first = self.snapshots()[0]
+        bad = "switch/oot3dre/savedata/system.dat"
+        self.corrupt_in_place(first / bad)
+        result = self.run_backup()
+        self.assert_ok(result)
+        snaps = self.snapshots()
+        self.assertEqual(len(snaps), 2, result.stdout + result.stderr)
+        self.assert_snapshot_ok(snaps[1])
+        self.assertEqual(self.files_of(snaps[1])[bad], SYSTEM)
+        self.assertRegex(result.stderr, rf"AVISO.*{first.name}.*corrompido.*system\.dat")
 
 
 if __name__ == "__main__":
