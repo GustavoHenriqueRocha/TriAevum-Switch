@@ -394,4 +394,73 @@ TEST_F(Oot3dAzaharTexturePackTest, RejectsEscapingMaterialPathsAndNormalAlbedoCo
     EXPECT_EQ(runtime.Snapshot().LoadedMaterials, 0U);
 }
 
+TEST_F(Oot3dAzaharTexturePackTest, CapsMipmapsAndReleasesReplacementsOnTheWorker) {
+    using namespace Oot3d::Renderer;
+    std::array<uint8_t, 256> native{};
+    for (size_t index = 0; index < native.size(); ++index) native[index] = static_cast<uint8_t>(index * 7U);
+    const uint64_t hash = AzaharCityHash64(native);
+    const auto pack = Root / "capped";
+    std::filesystem::create_directories(pack);
+    {
+        std::ofstream output(pack / "pack.json");
+        output << nlohmann::json{{"options", {{"skip_mipmap", true}, {"flip_png_files", true}, {"use_new_hash", true}}}};
+    }
+    // A 32x32 image (4x) for an 8x8 native texture: left half red, right half blue.
+    std::vector<uint8_t> large(32U * 32U * 4U);
+    for (size_t texel = 0; texel < 32U * 32U; ++texel) {
+        const bool right = texel % 32U >= 16U;
+        large[texel * 4U] = right ? 0U : 255U;
+        large[texel * 4U + 2U] = right ? 255U : 0U;
+        large[texel * 4U + 3U] = 255U;
+    }
+    WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, hash, 0U, 0U), 32U, 32U, large);
+    const AzaharTextureRequest request{8U, 8U, 0U, 0U, native, {}};
+
+    AzaharTexturePackRuntime runtime;
+    runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack,
+                       .MaxReplacementScale = 2U, .GenerateMipmaps = true});
+    runtime.WaitForPendingLoads();
+    EXPECT_EQ(runtime.ResolveOrQueue(request).State, AzaharTextureResolveState::Pending);
+    runtime.WaitForPendingLoads();
+    const auto capped = runtime.PollQueued(hash);
+    ASSERT_EQ(capped.State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(capped.Replacement->Width, 16U);
+    EXPECT_EQ(capped.Replacement->Height, 16U);
+    ASSERT_EQ(capped.Replacement->Rgba8->size(), 16U * 16U * 4U);
+    EXPECT_EQ((*capped.Replacement->Rgba8)[0], 255U);          // still red on the left
+    EXPECT_EQ((*capped.Replacement->Rgba8)[15U * 4U + 2U], 255U); // blue on the right
+    ASSERT_EQ(capped.Replacement->Mips.size(), 4U);              // 8x8 4x4 2x2 1x1
+    EXPECT_EQ(capped.Replacement->Mips[0].size(), 8U * 8U * 4U);
+    EXPECT_EQ(capped.Replacement->Mips[3].size(), 4U);
+    EXPECT_EQ(capped.Replacement->Mips[3][0], 128U); // half red, half blue
+
+    // A renderer that holds the image on the GPU drops the decoded copy; the
+    // next poll decodes it again.
+    runtime.ReleaseDecoded(hash, capped.Replacement->Generation);
+    EXPECT_EQ(runtime.Snapshot().LoadedTextures, 0U);
+    EXPECT_EQ(runtime.PollQueued(hash).State, AzaharTextureResolveState::Missing);
+    EXPECT_EQ(runtime.PollOrQueue(hash, 8U, 8U).State, AzaharTextureResolveState::Pending);
+    runtime.WaitForPendingLoads();
+    const auto again = runtime.PollOrQueue(hash, 8U, 8U);
+    ASSERT_EQ(again.State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(again.Replacement->Width, 16U);
+
+    // Cap 0 keeps the pack's own size; no mipmaps unless asked for.
+    runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack});
+    runtime.WaitForPendingLoads();
+    (void)runtime.ResolveOrQueue(request);
+    runtime.WaitForPendingLoads();
+    const auto full = runtime.PollQueued(hash);
+    ASSERT_EQ(full.State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(full.Replacement->Width, 32U);
+    EXPECT_TRUE(full.Replacement->Mips.empty());
+    EXPECT_EQ(*full.Replacement->Rgba8, large);
+
+    // Turning loading off drops the decoded images.
+    runtime.Configure({.LoadCustomTextures = false, .UserDirectory = Root, .LoadDirectory = pack});
+    runtime.WaitForPendingLoads();
+    EXPECT_EQ(runtime.Snapshot().LoadedTextures, 0U);
+    EXPECT_EQ(runtime.PollOrQueue(hash, 8U, 8U).State, AzaharTextureResolveState::Disabled);
+}
+
 } // namespace

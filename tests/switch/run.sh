@@ -45,6 +45,7 @@ UNIT_TESTS=(
     oot3d_rom_import_tests
     oot3d_switch_motion_tests
     oot3d_switch_thread_layout_tests
+    oot3d_texture_pack_scale_tests
     oot3d_top_screen_hud_touch_tests
     oot3d_top_screen_mod_profile_tests
     oot3d_top_screen_pause_transaction_tests

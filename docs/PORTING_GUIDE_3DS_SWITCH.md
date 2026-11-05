@@ -1049,10 +1049,14 @@ romfs, reusing the `AzaharTexturePackRuntime` that already existed for Vulkan:
 - **Enabled by file:** `config/texture_pack` exists → `Configure` with `LoadCustomTextures`; the
   first line is the folder (default `sdmc:/switch/oot3dre/textures`). The scan is **recursive**:
   an optional subfolder (item icons) is turned on/off by moving the folder over FTP (`RNFR`/`RNTO`).
+  L3+R3 → Video turns it on/off and sets the size cap (`config/texture_pack_scale`) at once
+  (`LiveTexturePackSettings`, applied in `BeginFrame` by retiring entries of the earlier epoch).
 - **Without stalling the frame:** on a cache miss, only color textures call `ResolveOrQueue`; if the PNG
-  hasn't loaded yet, the native one is uploaded with `PackPending` and, on later hits, `PollQueued` swaps it
-  when it's ready. Cap of **16 MiB of replacement per frame** (reset in `BeginFrame`). The
-  replacement has its own key (fixed salt) and sampler `MakePicaSamplerKey(view, 1)` (a single level, RGBA8).
+  hasn't loaded yet, the native one is uploaded with `PackPending` and, on later hits, `PollOrQueue` swaps it
+  when it's ready (the native one is then retired). Cap of **16 MiB of replacement per frame** (reset in
+  `BeginFrame`). The replacement has its own key (fixed salt), is reduced to native x N on the pack worker
+  (default 2) with its mip chain made there, and gets mip levels when the native texture has them (sampler
+  LOD range moved down by the extra levels). After the upload the worker's decoded copy is released.
 - **Pitfalls:** reference to the native `Texture`, not to the iterator (the replacement's `emplace` may
   rehash); inside `namespace Fast` the name `Oot3d::Renderer` resolves to `Fast::Oot3d` — use
   `::Oot3d::Renderer::`. The loader thread is `join()`ed, never `detach()`ed.

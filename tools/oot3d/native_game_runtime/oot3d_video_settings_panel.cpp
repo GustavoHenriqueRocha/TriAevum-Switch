@@ -1,6 +1,7 @@
 #include "oot3d_video_settings_panel.h"
 #include "oot3d_video_settings.h"
 #include "oot3d_fps_counter.h"
+#include "oot3d/renderer/azahar_texture_pack_settings.h"
 #include <imgui.h>
 #include <array>
 #include <cstdio>
@@ -24,6 +25,16 @@ constexpr std::array<ScaleOption, 5> kHandheld{{{1.0F, "1x (400x240)"},
                                                 {2.0F, "2x (800x480)"},
                                                 {2.5F, "2,5x (1000x600)"},
                                                 {3.0F, "3x (720p)"}}};
+// Texture pack size cap, as a multiple of the original texture.
+struct PackScaleOption {
+  uint32_t Scale;
+  const char *Label;
+};
+constexpr std::array<PackScaleOption, 5> kPackScales{{{1U, "1x (original size)"},
+                                                      {2U, "2x (default)"},
+                                                      {3U, "3x"},
+                                                      {4U, "4x (full 1080p pack)"},
+                                                      {0U, "No limit"}}};
 
 bool ScaleCombo(const char *label, float &value, std::span<const ScaleOption> options) {
   std::string current;
@@ -52,10 +63,12 @@ bool ScaleCombo(const char *label, float &value, std::span<const ScaleOption> op
 class VideoSettingsPanel final : public Fast::Oot3d::GraphicsSettingsPanelTab {
 public:
   explicit VideoSettingsPanel(std::filesystem::path config)
-      : mConfig(std::move(config)), mBoot(VideoSettings::Load(mConfig)), mSettings(mBoot) {
+      : mConfig(std::move(config)), mBoot(VideoSettings::Load(mConfig)), mSettings(mBoot),
+        mPack(::Oot3d::Renderer::TexturePackSettings::Load(mConfig)) {
     std::error_code error;
     PerfOverlayEnabled().store(std::filesystem::exists(mConfig / kPerfOverlayConfigName, error),
                                std::memory_order_relaxed);
+    mPackFound = PackFolderExists();
   }
   const char *Label() const noexcept override { return "Video"; }
   void Draw() override {
@@ -97,6 +110,7 @@ public:
     }
     if (!mOverlayError.empty())
       ImGui::TextWrapped("Could not write config/%s.", mOverlayError.c_str());
+    DrawTexturePack();
   }
 
 private:
@@ -112,11 +126,52 @@ private:
     return static_cast<bool>(file);
   }
 
+  // HD textures (config/texture_pack) and their size cap
+  // (config/texture_pack_scale): saved, and applied by the deko3d renderer at
+  // the start of its next frame.
+  void DrawTexturePack() {
+    ImGui::Separator();
+    bool changed = ImGui::Checkbox("HD textures (texture pack)", &mPack.Enabled);
+    const char *current = "Custom";
+    for (const auto &option : kPackScales)
+      if (option.Scale == mPack.MaxScale) current = option.Label;
+    if (ImGui::BeginCombo("HD texture size", current)) {
+      for (const auto &option : kPackScales) {
+        const bool selected = option.Scale == mPack.MaxScale;
+        if (ImGui::Selectable(option.Label, selected)) {
+          changed |= !selected;
+          mPack.MaxScale = option.Scale;
+        }
+        if (selected) ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
+    }
+    if (changed) {
+      mPackError = mPack.Save(mConfig);
+      ::Oot3d::Renderer::LiveTexturePackSettings().Publish(mPack);
+      mPackFound = PackFolderExists();
+    }
+    if (!mPackFound)
+      ImGui::TextWrapped("No texture pack found in %s.",
+                         ::Oot3d::Renderer::TexturePackDisplayFolder(mPack.Folder).c_str());
+    if (!mPackError.empty())
+      ImGui::TextWrapped("Could not write config/%s.", mPackError.c_str());
+    ImGui::TextDisabled("Applies at once. Larger sizes use more memory and GPU time.");
+  }
+
+  bool PackFolderExists() const {
+    std::error_code error;
+    return std::filesystem::is_directory(mPack.Folder, error);
+  }
+
   std::filesystem::path mConfig;
   VideoSettings mBoot;
   VideoSettings mSettings;
   std::string mError;
   std::string mOverlayError;
+  ::Oot3d::Renderer::TexturePackSettings mPack;
+  bool mPackFound = false;
+  std::string mPackError;
 };
 } // namespace
 std::shared_ptr<Fast::Oot3d::GraphicsSettingsPanelTab>

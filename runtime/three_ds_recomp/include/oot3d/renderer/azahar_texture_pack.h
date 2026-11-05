@@ -23,6 +23,11 @@ struct AzaharTexturePackConfiguration {
     std::filesystem::path UserDirectory;
     std::filesystem::path LoadDirectory;
     std::filesystem::path DumpDirectory;
+    // Pack images larger than native x MaxReplacementScale on an axis are
+    // reduced to it on the pack worker (azahar_texture_scale.h); 0 = no cap.
+    uint32_t MaxReplacementScale = 0;
+    // The pack worker also makes the image's mip chain (Mips below).
+    bool GenerateMipmaps = false;
 
     bool operator==(const AzaharTexturePackConfiguration&) const = default;
 };
@@ -43,6 +48,8 @@ struct AzaharTextureReplacement {
     uint64_t PixelContentHash = 0;
     uint64_t Generation = 0;
     std::shared_ptr<const std::vector<uint8_t>> Rgba8;
+    // With GenerateMipmaps: levels 1.. of Rgba8, each max(1, previous / 2).
+    std::vector<std::vector<uint8_t>> Mips;
     std::filesystem::path SourcePath;
 };
 
@@ -167,6 +174,13 @@ class AzaharTexturePackRuntime final {
     ResolveOrQueue(const AzaharTextureRequest& request);
     [[nodiscard]] AzaharTextureResolveResult
     PollQueued(uint64_t nativeHash) const;
+    // PollQueued that queues the decode again when the image was released
+    // (ReleaseDecoded) or never queued; native size as in the request.
+    [[nodiscard]] AzaharTextureResolveResult
+    PollOrQueue(uint64_t nativeHash, uint16_t nativeWidth, uint16_t nativeHeight);
+    // Drops the decoded image of `nativeHash` from the cache once a renderer
+    // holds it on the GPU; a later request decodes it again.
+    void ReleaseDecoded(uint64_t nativeHash, uint64_t generation);
     [[nodiscard]] AzaharMaterialResolveResult
     ResolveMaterialOrQueue(uint64_t nativeHash, uint64_t expectedGeneration);
     void ReportMaterialUploadFailure(uint64_t nativeHash, uint64_t generation, std::string error);

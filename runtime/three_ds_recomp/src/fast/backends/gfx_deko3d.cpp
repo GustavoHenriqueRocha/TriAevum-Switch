@@ -394,7 +394,8 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
     const auto& resources = mResources.Stats();
     Deko3d::Log("resources (%s): draws prepared=%llu rejected=%llu; textures created=%llu evicted=%llu "
                 "live=%llu MiB predecoded=%llu failures=%llu shadow_fallbacks=%llu unsupported_wraps=%llu "
-                "luts=%llu samplers=%llu; streamed vertex=%llu index=%llu uniform=%llu KiB, uniform reuses=%llu, "
+                "luts=%llu samplers=%llu; pack images=%llu uploaded=%llu MiB live=%llu MiB; "
+                "streamed vertex=%llu index=%llu uniform=%llu KiB, uniform reuses=%llu, "
                 "stream failures=%llu",
                 when, static_cast<unsigned long long>(mCounters.PicaDrawsPrepared),
                 static_cast<unsigned long long>(mCounters.PicaDrawsRejected),
@@ -407,6 +408,9 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(resources.UnsupportedWraps),
                 static_cast<unsigned long long>(resources.LutsCreated),
                 static_cast<unsigned long long>(resources.Samplers),
+                static_cast<unsigned long long>(resources.TextureReplacements),
+                static_cast<unsigned long long>(resources.TextureReplacementBytes >> 20),
+                static_cast<unsigned long long>(resources.TextureReplacementLiveBytes >> 20),
                 static_cast<unsigned long long>(resources.VertexBytes >> 10),
                 static_cast<unsigned long long>(resources.IndexBytes >> 10),
                 static_cast<unsigned long long>(resources.UniformBytes >> 10),

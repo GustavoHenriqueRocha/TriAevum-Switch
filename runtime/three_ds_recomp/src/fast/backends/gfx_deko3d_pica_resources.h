@@ -16,7 +16,7 @@
 #include "fast/backends/gfx_deko3d_pica_plan.h"
 #include "fast/backends/gfx_rendering_api.h"
 #include "gfx_deko3d_device.h"
-#include "oot3d/renderer/azahar_texture_pack.h"
+#include "oot3d/renderer/azahar_texture_pack_settings.h"
 
 #include <array>
 #include <cstdint>
@@ -45,6 +45,7 @@ struct PicaResourceStats {
     uint64_t StreamFailures = 0;
     uint64_t TextureReplacements = 0;    // texture pack images uploaded at their own size
     uint64_t TextureReplacementBytes = 0;
+    uint64_t TextureReplacementLiveBytes = 0; // pack images resident now (part of TextureBytes)
 };
 
 // What one draw binds: texture handles for bindings 1..3 and 13, the vertex
@@ -118,6 +119,8 @@ class PicaResources {
         uint64_t LastUsedFrame = 0;
         uint64_t PackHash = 0;          // texture pack identity while its image is still being decoded
         bool PackPending = false;
+        bool Replacement = false;       // a texture pack image (under the replacement key)
+        uint32_t PackEpoch = 0;         // mPackEpoch when made
     };
 
     struct LastUniforms {
@@ -135,6 +138,13 @@ class PicaResources {
     // The texture pack image (larger than the native one) under the replacement key; 0 when not now.
     DkResHandle UploadReplacement(const Renderer3ds::PicaTextureView& view, const PicaTextureKey& key,
                                   const ::Oot3d::Renderer::AzaharTextureReplacement& replacement);
+    // Applies a texture pack change published by the Video tab (BeginFrame).
+    void ApplyTexturePackSettings();
+    // Takes an entry out of the cache; its memory goes in Evict once no
+    // frame in flight can read it.
+    void Retire(Texture& texture);
+    // Destroys an entry already out of mTextures and takes it off the totals.
+    void Forget(Texture& texture) noexcept;
     void Evict();
 
     Device* mDevice = nullptr;
@@ -150,7 +160,13 @@ class PicaResources {
     DkGpuAddr mConstantGpu = DK_GPU_ADDR_INVALID;
     DescriptorSlots<kMaxImages> mImageSlots{kReservedImages};
     std::unordered_map<PicaSamplerKey, uint32_t, PicaSamplerKeyHash> mSamplers;
-    bool mTexturePack = false;                 // config/texture_pack present
+    bool mTexturePack = false;                 // HD textures on (config/texture_pack, Video tab)
+    ::Oot3d::Renderer::TexturePackSettings mTexturePackSettings;
+    uint64_t mTexturePackRevision = 0;         // LiveTexturePackSettings revision applied
+    uint32_t mPackEpoch = 1;                   // grows on every pack change (TexturePackEntryActionFor)
+    bool mReleaseStalePack = false;            // pack images of earlier settings may still be cached
+    bool mPackConfigured = false;              // the pack runtime was configured (the pack was on once)
+    std::vector<Texture> mRetired;
     uint64_t mReplacementBytesThisFrame = 0;   // pack uploads are spread over frames
     std::unordered_map<PicaTextureKey, Texture, PicaTextureKeyHash> mTextures;
     std::unordered_map<uint64_t, Texture> mLuts;

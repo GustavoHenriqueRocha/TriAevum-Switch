@@ -1,4 +1,5 @@
 #include "oot3d/renderer/azahar_texture_pack.h"
+#include "oot3d/renderer/azahar_texture_scale.h"
 #include "fast/renderer/content_hash.h"
 #include "azahar_pbr_materials.h"
 
@@ -431,8 +432,16 @@ std::unordered_map<uint64_t, IndexedTexture> IndexTexturePack(const std::filesys
     return index;
 }
 
+// What the worker does to a pack image after decoding it (the job's copy of
+// the configuration and the native texture's size; zero = unknown).
+struct DecodeOptions {
+    TextureSize Native;
+    uint32_t MaxScale = 0;
+    bool Mipmaps = false;
+};
+
 std::shared_ptr<const AzaharTextureReplacement> DecodeReplacement(
-    const IndexedTexture& indexed, uint64_t hash, uint64_t generation) {
+    const IndexedTexture& indexed, uint64_t hash, uint64_t generation, const DecodeOptions& options = {}) {
     const auto input = ReadBinaryFile(indexed.Path);
     int width = 0;
     int height = 0;
@@ -462,12 +471,21 @@ std::shared_ptr<const AzaharTextureReplacement> DecodeReplacement(
         FlipRows(*pixels, static_cast<uint32_t>(width), static_cast<uint32_t>(height), 4U);
     }
 
+    TextureSize size{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    if (const TextureSize capped = CappedReplacementSize(options.Native, size, options.MaxScale); capped != size) {
+        pixels = std::make_shared<std::vector<uint8_t>>(DownscaleRgba8(*pixels, size, capped));
+        size = capped;
+    }
+
     auto replacement = std::make_shared<AzaharTextureReplacement>();
-    replacement->Width = static_cast<uint32_t>(width);
-    replacement->Height = static_cast<uint32_t>(height);
+    replacement->Width = size.Width;
+    replacement->Height = size.Height;
     replacement->NativeHash = hash;
     replacement->PixelContentHash = AzaharCityHash64(*pixels);
     replacement->Generation = generation;
+    if (options.Mipmaps) {
+        replacement->Mips = BuildRgba8MipChain(*pixels, size, FullMipLevelCount(size));
+    }
     replacement->Rgba8 = std::move(pixels);
     replacement->SourcePath = indexed.Path;
     return replacement;
@@ -485,6 +503,7 @@ struct LoadJob {
     uint64_t Hash = 0;
     uint64_t Generation = 0;
     IndexedTexture Texture;
+    DecodeOptions Options;
     std::optional<IndexedAzaharPbrMaterial> Material;
     AzaharMaterialIdentity Identity;
     std::shared_ptr<std::promise<AzaharImageLoadResult>> EditorImage;
@@ -611,26 +630,27 @@ class AzaharTexturePackRuntime::Impl {
         if (!loadEnabled) return {AzaharTextureResolveState::Disabled, hash, nullptr, true, loadUsesNewHash};
         std::scoped_lock lock(mMutex);
         if (generation != mGeneration || !mConfiguration.LoadCustomTextures) return {};
-        const auto indexed = mIndex.find(hash);
-        if (indexed == mIndex.end()) return {AzaharTextureResolveState::Missing, hash, nullptr, true, mPack.UseNewHash};
-        const auto cached = mReplacementCache.find(hash);
-        if ((cached == mReplacementCache.end() || cached->second->Generation != mGeneration) &&
-            !mFailedLoadHashes.contains(hash) && !mPendingLoadGenerations.contains(hash)) {
-            mPendingLoadGenerations.emplace(hash, mGeneration);
-            LoadJob job;
-            job.Hash = hash;
-            job.Generation = mGeneration;
-            job.Texture = indexed->second;
-            mLoadJobs.push_back(std::move(job));
-            ++mPendingLoads;
-            mWorkAvailable.notify_one();
-        }
-        return PollLocked(hash);
+        return QueueOrPollLocked(hash, {request.Width, request.Height});
     }
 
     AzaharTextureResolveResult PollQueued(uint64_t hash) const {
         std::scoped_lock lock(mMutex);
         return PollLocked(hash);
+    }
+
+    AzaharTextureResolveResult PollOrQueue(uint64_t hash, TextureSize native) {
+        std::scoped_lock lock(mMutex);
+        if (!mConfigured || !mConfiguration.LoadCustomTextures) return {};
+        if (!mIndexReady) return {AzaharTextureResolveState::Pending, hash, nullptr, false, mPack.UseNewHash};
+        return QueueOrPollLocked(hash, native);
+    }
+
+    void ReleaseDecoded(uint64_t hash, uint64_t generation) {
+        std::scoped_lock lock(mMutex);
+        if (const auto cached = mReplacementCache.find(hash);
+            cached != mReplacementCache.end() && cached->second->Generation == generation) {
+            mReplacementCache.erase(cached);
+        }
     }
 
     AzaharMaterialResolveResult ResolveMaterialOrQueue(uint64_t hash, uint64_t expectedGeneration) {
@@ -753,6 +773,26 @@ class AzaharTexturePackRuntime::Impl {
     }
 
   private:
+    // Queues the decode of an indexed image that is neither cached, failed
+    // nor already queued, then reports its state.
+    AzaharTextureResolveResult QueueOrPollLocked(uint64_t hash, TextureSize native) {
+        const auto indexed = mIndex.find(hash);
+        if (indexed == mIndex.end()) return {AzaharTextureResolveState::Missing, hash, nullptr, true, mPack.UseNewHash};
+        const auto cached = mReplacementCache.find(hash);
+        if ((cached == mReplacementCache.end() || cached->second->Generation != mGeneration) &&
+            !mFailedLoadHashes.contains(hash) && !mPendingLoadGenerations.contains(hash)) {
+            mPendingLoadGenerations.emplace(hash, mGeneration);
+            LoadJob job;
+            job.Hash = hash;
+            job.Generation = mGeneration;
+            job.Texture = indexed->second;
+            job.Options = {native, mConfiguration.MaxReplacementScale, mConfiguration.GenerateMipmaps};
+            mLoadJobs.push_back(std::move(job));
+            ++mPendingLoads;
+            mWorkAvailable.notify_one();
+        }
+        return PollLocked(hash);
+    }
     AzaharTextureResolveResult PollLocked(uint64_t hash) const {
         if (!mConfigured || !mConfiguration.LoadCustomTextures) return {};
         if (const auto cached = mReplacementCache.find(hash); cached != mReplacementCache.end())
@@ -886,7 +926,7 @@ class AzaharTexturePackRuntime::Impl {
                 }
                 material = std::move(decoded);
             } else {
-                replacement = DecodeReplacement(job.Texture, job.Hash, job.Generation);
+                replacement = DecodeReplacement(job.Texture, job.Hash, job.Generation, job.Options);
             }
         } catch (const std::exception& exception) { failure = exception.what(); }
         std::scoped_lock lock(mMutex);
@@ -1022,6 +1062,15 @@ AzaharTextureResolveResult
 AzaharTexturePackRuntime::PollQueued(
     uint64_t nativeHash) const {
     return mImpl->PollQueued(nativeHash);
+}
+
+AzaharTextureResolveResult AzaharTexturePackRuntime::PollOrQueue(uint64_t nativeHash, uint16_t nativeWidth,
+                                                                  uint16_t nativeHeight) {
+    return mImpl->PollOrQueue(nativeHash, {nativeWidth, nativeHeight});
+}
+
+void AzaharTexturePackRuntime::ReleaseDecoded(uint64_t nativeHash, uint64_t generation) {
+    mImpl->ReleaseDecoded(nativeHash, generation);
 }
 
 AzaharMaterialResolveResult AzaharTexturePackRuntime::ResolveMaterialOrQueue(

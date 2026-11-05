@@ -1,0 +1,230 @@
+// Texture pack size cap, mipmaps and the HD textures setting
+// (azahar_texture_scale.h, azahar_texture_pack_settings.h).
+#include "oot3d/renderer/azahar_texture_pack_settings.h"
+#include "oot3d/renderer/azahar_texture_scale.h"
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
+
+namespace {
+
+using namespace Oot3d::Renderer;
+
+void Require(bool condition, const char *message) {
+  if (!condition) {
+    std::fprintf(stderr, "FAIL: %s\n", message);
+    std::exit(1);
+  }
+}
+
+std::vector<uint8_t> Solid(TextureSize size, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+  std::vector<uint8_t> pixels(static_cast<size_t>(size.Width) * size.Height * 4U);
+  for (size_t i = 0; i < pixels.size(); i += 4U) {
+    pixels[i] = r;
+    pixels[i + 1U] = g;
+    pixels[i + 2U] = b;
+    pixels[i + 3U] = a;
+  }
+  return pixels;
+}
+
+const uint8_t *Texel(const std::vector<uint8_t> &pixels, TextureSize size, uint32_t x, uint32_t y) {
+  return pixels.data() + (static_cast<size_t>(y) * size.Width + x) * 4U;
+}
+
+void CapSizes() {
+  // The 1080p pack is 4x the native texture: the default cap halves it.
+  Require(CappedReplacementSize({128, 128}, {512, 512}, 2) == TextureSize{256, 256}, "4x pack at cap 2 -> 2x");
+  Require(CappedReplacementSize({128, 64}, {1024, 512}, 2) == TextureSize{256, 128}, "8x (4K) pack at cap 2 -> 2x");
+  Require(CappedReplacementSize({256, 32}, {1024, 128}, 3) == TextureSize{768, 96}, "cap 3: 3x, not a power of two");
+  Require(CappedReplacementSize({128, 128}, {512, 512}, 0) == TextureSize{512, 512}, "cap 0 keeps the image");
+  Require(CappedReplacementSize({128, 128}, {256, 256}, 2) == TextureSize{256, 256}, "at the cap: unchanged");
+  Require(CappedReplacementSize({128, 128}, {192, 192}, 2) == TextureSize{192, 192}, "1.5x below the cap: unchanged");
+  Require(CappedReplacementSize({128, 128}, {64, 64}, 2) == TextureSize{64, 64}, "never enlarged");
+  Require(CappedReplacementSize({64, 32}, {512, 512}, 2) == TextureSize{128, 64}, "each axis capped on its own");
+  Require(CappedReplacementSize({64, 64}, {512, 100}, 2) == TextureSize{128, 100}, "only the axis above the cap");
+  Require(CappedReplacementSize({0, 0}, {512, 512}, 2) == TextureSize{512, 512}, "unknown native size: no cap");
+  Require(CappedReplacementSize({128, 128}, {512, 512}, 1) == TextureSize{128, 128}, "cap 1: native size");
+}
+
+void DownscaleRatios() {
+  // 2x2 -> 1x1 is the plain average for opaque texels.
+  {
+    const std::vector<uint8_t> source{10, 20, 30, 255, 30, 40, 50, 255, 50, 60, 70, 255, 70, 80, 90, 255};
+    const auto out = DownscaleRgba8(source, {2, 2}, {1, 1});
+    Require(out.size() == 4U, "2x2 -> 1x1 size");
+    Require(out[0] == 40 && out[1] == 50 && out[2] == 60 && out[3] == 255, "2x2 -> 1x1 averages");
+  }
+  // 3 -> 2 (ratio 1.5): output 0 covers texel 0 and half of texel 1.
+  {
+    const std::vector<uint8_t> source{0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255};
+    const auto out = DownscaleRgba8(source, {3, 1}, {2, 1});
+    Require(out.size() == 8U, "3 -> 2 size");
+    Require(out[0] == 85 && out[4] == 85, "3 -> 2 weights the half texel by its area");
+  }
+  // 4x4 -> 2x2 keeps each quadrant apart.
+  {
+    std::vector<uint8_t> source = Solid({4, 4}, 0, 0, 0, 255);
+    for (uint32_t y = 0; y < 2; ++y)
+      for (uint32_t x = 2; x < 4; ++x) source[(y * 4U + x) * 4U] = 200;
+    const auto out = DownscaleRgba8(source, {4, 4}, {2, 2});
+    Require(Texel(out, {2, 2}, 1, 0)[0] == 200 && Texel(out, {2, 2}, 0, 0)[0] == 0 &&
+                Texel(out, {2, 2}, 1, 1)[0] == 0,
+            "4x4 -> 2x2 quadrants");
+  }
+  // A constant image stays constant at any ratio (weights sum to 1).
+  {
+    const auto source = Solid({7, 5}, 13, 77, 201, 99);
+    const auto out = DownscaleRgba8(source, {7, 5}, {3, 2});
+    bool same = out.size() == 3U * 2U * 4U;
+    for (size_t i = 0; same && i < out.size(); i += 4U)
+      same = out[i] == 13 && out[i + 1] == 77 && out[i + 2] == 201 && out[i + 3] == 99;
+    Require(same, "7x5 -> 3x2 keeps a constant image");
+  }
+  // Same size on one axis.
+  {
+    const std::vector<uint8_t> source{0, 0, 0, 255, 100, 100, 100, 255, 10, 10, 10, 255, 30, 30, 30, 255};
+    const auto out = DownscaleRgba8(source, {2, 2}, {2, 1});
+    Require(out[0] == 5 && out[4] == 65, "2x2 -> 2x1 averages rows only");
+  }
+  Require(DownscaleRgba8(std::vector<uint8_t>(16), {2, 2}, {4, 4}).empty(), "never enlarges");
+  Require(DownscaleRgba8(std::vector<uint8_t>(12), {2, 2}, {1, 1}).empty(), "wrong byte count rejected");
+}
+
+void DownscaleAlpha() {
+  // A transparent red texel beside an opaque blue one: the colour is the
+  // blue (no red fringe), the coverage is half.
+  {
+    const std::vector<uint8_t> source{255, 0, 0, 0, 0, 0, 255, 255};
+    const auto out = DownscaleRgba8(source, {2, 1}, {1, 1});
+    Require(out[0] == 0 && out[1] == 0 && out[2] == 255, "transparent texels do not tint");
+    Require(out[3] == 128, "alpha is the plain average");
+  }
+  // Partial alpha weights the colour by coverage: (200*255 + 0*85) / 340 = 150.
+  {
+    const std::vector<uint8_t> source{200, 0, 0, 255, 0, 0, 0, 85};
+    const auto out = DownscaleRgba8(source, {2, 1}, {1, 1});
+    Require(out[0] == 150 && out[3] == 170, "colour weighted by alpha");
+  }
+  // Fully transparent: keep the plain colour average (a later bilinear
+  // fetch next to opaque texels then blends towards a sensible colour).
+  {
+    const std::vector<uint8_t> source{100, 0, 0, 0, 200, 0, 0, 0};
+    const auto out = DownscaleRgba8(source, {2, 1}, {1, 1});
+    Require(out[0] == 150 && out[3] == 0, "transparent area keeps its colour");
+  }
+}
+
+void MipChain() {
+  Require(FullMipLevelCount({256, 256}) == 9U, "256x256 has 9 levels");
+  Require(FullMipLevelCount({8, 2}) == 4U, "8x2 has 4 levels");
+  Require(FullMipLevelCount({0, 4}) == 0U, "empty image has no levels");
+  const auto level0 = Solid({8, 2}, 40, 80, 120, 255);
+  const auto chain = BuildRgba8MipChain(level0, {8, 2}, 16);
+  Require(chain.size() == 3U, "8x2 -> 4x1, 2x1, 1x1");
+  Require(chain[0].size() == 4U * 1U * 4U && chain[1].size() == 2U * 4U && chain[2].size() == 4U,
+          "levels are max(1, previous / 2)");
+  Require(chain[2][0] == 40 && chain[2][1] == 80 && chain[2][2] == 120 && chain[2][3] == 255,
+          "constant image through the chain");
+  Require(BuildRgba8MipChain(level0, {8, 2}, 2).size() == 1U, "levels counts level 0");
+  Require(BuildRgba8MipChain(level0, {8, 2}, 1).empty(), "one level: no chain");
+  // Odd size: 3x3 -> 1x1 averages all nine texels.
+  std::vector<uint8_t> odd = Solid({3, 3}, 0, 0, 0, 255);
+  odd[4 * 4] = 90; // centre texel
+  const auto oddChain = BuildRgba8MipChain(odd, {3, 3}, 2);
+  Require(oddChain.size() == 1U && oddChain[0].size() == 4U && oddChain[0][0] == 10, "3x3 -> 1x1 area average");
+}
+
+void SettingsFiles() {
+  Require(ParseTexturePackMaxScale("2", 9) == 2U, "parse 2");
+  Require(ParseTexturePackMaxScale(" 0 \r\n", 9) == 0U, "parse 0 with spaces and line end");
+  Require(ParseTexturePackMaxScale("8", 9) == 8U, "parse the largest cap");
+  Require(ParseTexturePackMaxScale("9", 2) == 2U, "above 8 falls back");
+  Require(ParseTexturePackMaxScale("2x", 2) == 2U && ParseTexturePackMaxScale("", 3) == 3U &&
+              ParseTexturePackMaxScale("-1", 2) == 2U,
+          "garbage falls back");
+
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("oot3d_texture_pack_settings_" +
+                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  const auto config = root / "config";
+  // No files: off, 2x, the default folder (an existing setup without the pack).
+  const auto defaults = TexturePackSettings::Load(config);
+  Require(!defaults.Enabled && defaults.MaxScale == 2U && defaults.Folder == kTexturePackDefaultFolder,
+          "defaults without files");
+  // The existing convention: an empty config/texture_pack turns the pack on.
+  std::filesystem::create_directories(config);
+  { std::ofstream file(config / "texture_pack"); }
+  const auto existing = TexturePackSettings::Load(config);
+  Require(existing.Enabled && existing.Folder == kTexturePackDefaultFolder, "empty texture_pack = on, default folder");
+  { std::ofstream file(config / "texture_pack"); file << "sdmc:/packs/oot3d \r\n"; }
+  auto custom = TexturePackSettings::Load(config);
+  Require(custom.Enabled && custom.Folder == "sdmc:/packs/oot3d", "first line is the folder, trimmed");
+
+  // Off removes the file; on writes it back with the custom folder.
+  custom.Enabled = false;
+  Require(custom.Save(config).empty() && !std::filesystem::exists(config / "texture_pack"), "off removes the file");
+  custom.Enabled = true;
+  custom.MaxScale = 0U;
+  Require(custom.Save(config).empty(), "save on, no cap");
+  Require(TexturePackSettings::Load(config) == custom, "custom folder and cap 0 round trip");
+  // The default cap leaves no scale file.
+  custom.MaxScale = 2U;
+  custom.Folder = kTexturePackDefaultFolder;
+  Require(custom.Save(config).empty() && !std::filesystem::exists(config / "texture_pack_scale"),
+          "default cap: no file");
+  std::string line = "x";
+  { std::ifstream file(config / "texture_pack"); std::getline(file, line); }
+  Require(line.empty(), "default folder: empty texture_pack");
+  Require(TexturePackSettings::Load(config) == custom, "default round trip");
+  std::filesystem::remove_all(root);
+
+  Require(TexturePackDisplayFolder(kTexturePackDefaultFolder) == "switch/oot3dre/textures", "display folder");
+  const auto configuration = MakeTexturePackConfiguration(custom);
+  Require(configuration.LoadCustomTextures && configuration.MaxReplacementScale == 2U &&
+              configuration.GenerateMipmaps && configuration.LoadDirectory == kTexturePackDefaultFolder,
+          "runtime configuration");
+  custom.Enabled = false;
+  Require(!MakeTexturePackConfiguration(custom).LoadCustomTextures, "off configures no loading");
+}
+
+void ToggleCache() {
+  using Action = TexturePackEntryAction;
+  // Same epoch: nothing changed.
+  Require(TexturePackEntryActionFor(false, 3, 3, true) == Action::Keep, "current native kept");
+  Require(TexturePackEntryActionFor(true, 3, 3, true) == Action::Keep, "current pack image kept");
+  // Turned off: pack images go, native textures stay.
+  Require(TexturePackEntryActionFor(true, 3, 4, false) == Action::Release, "off releases pack images");
+  Require(TexturePackEntryActionFor(false, 3, 4, false) == Action::Keep, "off keeps native textures");
+  // Turned on (or another cap): native textures resolve through the pack again.
+  Require(TexturePackEntryActionFor(false, 4, 5, true) == Action::Rebuild, "on rebuilds native textures");
+  Require(TexturePackEntryActionFor(true, 4, 5, true) == Action::Release, "new cap releases old pack images");
+
+  // The Video tab publishes; the renderer sees a new revision.
+  auto &live = LiveTexturePackSettings();
+  const uint64_t before = live.Revision.load();
+  TexturePackSettings settings;
+  settings.Enabled = true;
+  settings.MaxScale = 4U;
+  live.Publish(settings);
+  Require(live.Revision.load() == before + 1U && live.Enabled.load() && live.MaxScale.load() == 4U,
+          "publish bumps the revision");
+}
+
+} // namespace
+
+int main() {
+  CapSizes();
+  DownscaleRatios();
+  DownscaleAlpha();
+  MipChain();
+  SettingsFiles();
+  ToggleCache();
+  std::puts("oot3d_texture_pack_scale_tests: ok");
+  return 0;
+}

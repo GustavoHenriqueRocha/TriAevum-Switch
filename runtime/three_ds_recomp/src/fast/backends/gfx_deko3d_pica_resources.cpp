@@ -16,10 +16,9 @@ namespace {
 constexpr uint32_t kDescriptorBytes = 32U;
 constexpr uint32_t kStagingAlignment = 256U;
 constexpr const char* kBudgetPath = "sdmc:/switch/oot3dre/config/gl_texture_budget_mb";
-// Present = load the Azahar-style texture pack (tex1_WxH_HASH_fmt_mip0.png). First line: its folder.
-constexpr const char* kTexturePackPath = "sdmc:/switch/oot3dre/config/texture_pack";
-constexpr const char* kTexturePackDefaultFolder = "sdmc:/switch/oot3dre/textures";
-// Pack images are big (4x a native one); more than this per frame waits for the next frames.
+// config/texture_pack and texture_pack_scale (azahar_texture_pack_settings.h).
+constexpr const char* kConfigDirectory = "sdmc:/switch/oot3dre/config";
+// Pack images are big (4x a native one at the 2x cap); more than this per frame waits for the next frames.
 constexpr uint64_t kReplacementBytesPerFrame = 16ULL << 20;
 // The replacement lives under the native key with this mixed into the content hash.
 constexpr uint64_t kReplacementKeySalt = 0x5245504C41434531ULL; // "REPLACE1"
@@ -119,19 +118,16 @@ bool PicaResources::Init(Device& device) {
     std::ifstream budget(kBudgetPath);
     const std::string text((std::istreambuf_iterator<char>(budget)), std::istreambuf_iterator<char>());
     mBudgetBytes = PicaGlResidency::ParseBudgetBytes(text, PicaGlResidency::Policy{}.BudgetBytes);
-    if (std::ifstream pack(kTexturePackPath); pack) {
-        std::string folder;
-        std::getline(pack, folder);
-        while (!folder.empty() && (folder.back() == '\r' || folder.back() == ' ')) {
-            folder.pop_back();
-        }
-        ::Oot3d::Renderer::AzaharTexturePackConfiguration configuration;
-        configuration.LoadCustomTextures = true;
-        configuration.LoadDirectory = folder.empty() ? kTexturePackDefaultFolder : folder;
-        ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Configure(configuration);
-        mTexturePack = true;
-        Log("resources: texture pack from %s", configuration.LoadDirectory.string().c_str());
+    mTexturePackSettings = ::Oot3d::Renderer::TexturePackSettings::Load(kConfigDirectory);
+    mTexturePackRevision = ::Oot3d::Renderer::LiveTexturePackSettings().Revision.load(std::memory_order_acquire);
+    mTexturePack = mTexturePackSettings.Enabled;
+    if (mTexturePack) {
+        ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Configure(
+            ::Oot3d::Renderer::MakeTexturePackConfiguration(mTexturePackSettings));
+        mPackConfigured = true;
     }
+    Log("resources: texture pack %s (%s, cap %ux)", mTexturePack ? "on" : "off", mTexturePackSettings.Folder.c_str(),
+        mTexturePackSettings.MaxScale);
     Log("resources: %u image / %u sampler descriptors, texture budget %llu MiB", kMaxImages, kMaxSamplers,
         static_cast<unsigned long long>(mBudgetBytes >> 20));
     return true;
@@ -142,6 +138,10 @@ void PicaResources::Shutdown() noexcept {
         Destroy(texture);
     }
     mTextures.clear();
+    for (auto& texture : mRetired) {
+        Destroy(texture);
+    }
+    mRetired.clear();
     for (auto& [key, lut] : mLuts) {
         Destroy(lut);
     }
@@ -258,6 +258,48 @@ void PicaResources::Destroy(Texture& texture) noexcept {
     texture.ImageSlot = 0U;
 }
 
+void PicaResources::Retire(Texture& texture) {
+    mRetired.push_back(texture);
+    texture = Texture{}; // the caller erases the entry; nothing is destroyed twice
+}
+
+void PicaResources::Forget(Texture& texture) noexcept {
+    mTextureBytes -= std::min(mTextureBytes, texture.Bytes);
+    if (texture.Replacement) {
+        mStats.TextureReplacementLiveBytes -= std::min(mStats.TextureReplacementLiveBytes, texture.Bytes);
+    }
+    Destroy(texture);
+    ++mStats.TexturesEvicted;
+}
+
+void PicaResources::ApplyTexturePackSettings() {
+    auto& live = ::Oot3d::Renderer::LiveTexturePackSettings();
+    const uint64_t revision = live.Revision.load(std::memory_order_acquire);
+    if (revision == mTexturePackRevision) {
+        return;
+    }
+    mTexturePackRevision = revision;
+    auto settings = mTexturePackSettings;
+    settings.Enabled = live.Enabled.load(std::memory_order_relaxed);
+    settings.MaxScale = live.MaxScale.load(std::memory_order_relaxed);
+    if (settings == mTexturePackSettings) {
+        return;
+    }
+    mTexturePackSettings = settings;
+    mTexturePack = settings.Enabled;
+    // Every cached entry is now of an earlier epoch: pack images are released
+    // (Evict) and, with the pack on, native textures resolve again (TextureHandle).
+    ++mPackEpoch;
+    mReleaseStalePack = true;
+    if (settings.Enabled || mPackConfigured) {
+        // Off: the runtime drops its decoded images and pending decodes.
+        ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Configure(
+            ::Oot3d::Renderer::MakeTexturePackConfiguration(settings));
+        mPackConfigured = true;
+    }
+    Log("resources: texture pack %s (cap %ux)", mTexturePack ? "on" : "off", settings.MaxScale);
+}
+
 void PicaResources::BeginFrame(uint64_t frame) {
     mFrame = frame;
     mReplacementBytesThisFrame = 0U;
@@ -282,21 +324,48 @@ void PicaResources::BeginFrame(uint64_t frame) {
     dkCmdBufBindImageDescriptorSet(cmd, mImageDescriptorsGpu, kMaxImages);
     dkCmdBufBindSamplerDescriptorSet(cmd, mSamplerDescriptorsGpu, kMaxSamplers);
     mInvalidate = true;
+    ApplyTexturePackSettings();
     Evict();
 }
 
 void PicaResources::Evict() {
     const PicaGlResidency::Policy policy{mBudgetBytes};
+    const auto idle = [&](const Texture& texture) {
+        return mFrame > texture.LastUsedFrame ? mFrame - texture.LastUsedFrame : 0U;
+    };
+    std::erase_if(mRetired, [&](Texture& texture) {
+        if (idle(texture) < policy.MinIdleFrames) {
+            return false;
+        }
+        Forget(texture);
+        return true;
+    });
+    if (mReleaseStalePack) {
+        bool stale = false;
+        for (auto entry = mTextures.begin(); entry != mTextures.end();) {
+            Texture& texture = entry->second;
+            if (::Oot3d::Renderer::TexturePackEntryActionFor(texture.Replacement, texture.PackEpoch, mPackEpoch,
+                                                             mTexturePack) ==
+                ::Oot3d::Renderer::TexturePackEntryAction::Release) {
+                if (idle(texture) >= policy.MinIdleFrames) {
+                    Forget(texture);
+                    entry = mTextures.erase(entry);
+                    continue;
+                }
+                stale = true;
+            }
+            ++entry;
+        }
+        mReleaseStalePack = stale;
+    }
     PicaGlResidency::CollectEvictions(mTextures, mFrame, mTextureBytes, policy, mTextureEvictions);
     for (const auto& key : mTextureEvictions) {
         const auto found = mTextures.find(key);
         if (found == mTextures.end()) {
             continue;
         }
-        mTextureBytes -= std::min(mTextureBytes, found->second.Bytes);
-        Destroy(found->second);
+        Forget(found->second);
         mTextures.erase(found);
-        ++mStats.TexturesEvicted;
     }
     PicaGlResidency::Policy lutPolicy;
     lutPolicy.BudgetBytes = 8ULL << 20;
@@ -321,26 +390,44 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
     replacementKey.ContentHash ^= kReplacementKeySalt;
     if (mTexturePack) {
         if (const auto found = mTextures.find(replacementKey); found != mTextures.end()) {
-            found->second.LastUsedFrame = mFrame;
-            return dkMakeTextureHandle(found->second.ImageSlot, found->second.SamplerSlot);
+            if (found->second.PackEpoch == mPackEpoch) {
+                found->second.LastUsedFrame = mFrame;
+                return dkMakeTextureHandle(found->second.ImageSlot, found->second.SamplerSlot);
+            }
+            Retire(found->second); // made at an earlier size cap
+            mTextures.erase(found);
         }
     }
     if (const auto found = mTextures.find(key); found != mTextures.end()) {
         Texture& native = found->second;
         native.LastUsedFrame = mFrame;
-        if (native.PackPending) {
-            // The pack worker was still decoding the image when the native texture was made.
-            const auto polled = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().PollQueued(native.PackHash);
-            if (polled.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready && polled.Replacement != nullptr) {
-                if (const DkResHandle handle = UploadReplacement(view, replacementKey, *polled.Replacement)) {
-                    native.PackPending = false; // emplace may rehash: the reference stays valid, `found` not
-                    return handle;
+        if (::Oot3d::Renderer::TexturePackEntryActionFor(false, native.PackEpoch, mPackEpoch, mTexturePack) ==
+            ::Oot3d::Renderer::TexturePackEntryAction::Rebuild) {
+            // Made while the pack was off or at another cap: resolve it again below.
+            Retire(native);
+            mTextures.erase(found);
+        } else {
+            if (native.PackPending && mTexturePack) {
+                // The pack worker was still decoding the image when the native texture was made.
+                const auto polled = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().PollOrQueue(
+                    native.PackHash, static_cast<uint16_t>(view.Width), static_cast<uint16_t>(view.Height));
+                if (polled.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready &&
+                    polled.Replacement != nullptr) {
+                    if (const DkResHandle handle = UploadReplacement(view, replacementKey, *polled.Replacement)) {
+                        // emplace may rehash: the reference stays valid, `found` not. The native
+                        // texture is never drawn again.
+                        Retire(native);
+                        mTextures.erase(key);
+                        return handle;
+                    }
+                } else if (polled.State != ::Oot3d::Renderer::AzaharTextureResolveState::Pending) {
+                    native.PackPending = false;
                 }
-            } else if (polled.State != ::Oot3d::Renderer::AzaharTextureResolveState::Pending) {
+            } else {
                 native.PackPending = false;
             }
+            return dkMakeTextureHandle(native.ImageSlot, native.SamplerSlot);
         }
-        return dkMakeTextureHandle(native.ImageSlot, native.SamplerSlot);
     }
     const uint32_t levels = Oot3d::PicaTextureMipCount(view.Width, view.Height, view.MaxMipLevel);
     std::array<PicaMipPlan, kMaxPicaMipLevels> mips{};
@@ -352,6 +439,7 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
         failed.ImageSlot = kFallbackColorImage;
         failed.SamplerSlot = kNearestSampler;
         failed.LastUsedFrame = mFrame;
+        failed.PackEpoch = mPackEpoch;
         mTextures.emplace(key, failed);
         return fallback;
     };
@@ -401,6 +489,7 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
     texture.PackHash = pack.NativeHash;
     texture.PackPending = pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Pending ||
                           pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready;
+    texture.PackEpoch = mPackEpoch;
     if (!CreateImage(texture, DkImageFormat_RGBA8_Unorm, view.Width, view.Height, levels)) {
         if (mStats.TextureFailures++ < 10U) {
             Log("resources: no memory/slot for a %ux%u texture (%llu MiB live)", view.Width, view.Height,
@@ -441,40 +530,83 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
 DkResHandle PicaResources::UploadReplacement(const Renderer3ds::PicaTextureView& view, const PicaTextureKey& key,
                                              const ::Oot3d::Renderer::AzaharTextureReplacement& replacement) {
     const auto& rgba = replacement.Rgba8;
-    const uint64_t bytes = static_cast<uint64_t>(replacement.Width) * replacement.Height * 4U;
-    if (rgba == nullptr || rgba->size() < bytes || bytes > UINT32_MAX) {
+    const uint64_t baseBytes = static_cast<uint64_t>(replacement.Width) * replacement.Height * 4U;
+    if (rgba == nullptr || rgba->size() < baseBytes || baseBytes > UINT32_MAX) {
         return 0U;
     }
-    if (mReplacementBytesThisFrame != 0U && mReplacementBytesThisFrame + bytes > kReplacementBytesPerFrame) {
+    // Mip levels only where the game samples mips: the native chain plus the
+    // levels the larger image adds on top (`extra`: 1 at 2x, 2 at 4x).
+    uint32_t levels = 1U;
+    uint32_t extra = 0U;
+    const uint32_t nativeLevels = Oot3d::PicaTextureMipCount(view.Width, view.Height, view.MaxMipLevel);
+    if (nativeLevels > 1U && !replacement.Mips.empty()) {
+        while ((static_cast<uint64_t>(view.Width) << (extra + 1U)) <= replacement.Width &&
+               (static_cast<uint64_t>(view.Height) << (extra + 1U)) <= replacement.Height) {
+            ++extra;
+        }
+        levels = std::min<uint32_t>({static_cast<uint32_t>(replacement.Mips.size()) + 1U, nativeLevels + extra,
+                                     kMaxPicaMipLevels});
+    }
+    std::array<PicaMipPlan, kMaxPicaMipLevels> mips{};
+    uint32_t stagingBytes = PlanPicaRgba8Mips(replacement.Width, replacement.Height, levels, kStagingAlignment, mips);
+    for (uint32_t level = 1U; level < levels; ++level) {
+        if (replacement.Mips[level - 1U].size() != mips[level].Bytes) {
+            levels = level; // not the chain the plan expects: stop above it
+            stagingBytes = mips[level].Offset;
+            break;
+        }
+    }
+    if (stagingBytes == 0U) {
+        return 0U;
+    }
+    if (mReplacementBytesThisFrame != 0U && mReplacementBytesThisFrame + stagingBytes > kReplacementBytesPerFrame) {
         return 0U; // the native texture is drawn this frame; the next frames upload it
     }
-    const StreamSpan staging = mDevice->Stream(static_cast<uint32_t>(bytes), kStagingAlignment);
+    const StreamSpan staging = mDevice->Stream(stagingBytes, kStagingAlignment);
     if (staging.Cpu == nullptr) {
         ++mStats.StreamFailures;
         return 0U;
     }
     Texture texture;
-    // One level: the pack image replaces the whole native mip chain (as in the Vulkan backend).
-    if (!CreateImage(texture, DkImageFormat_RGBA8_Unorm, replacement.Width, replacement.Height, 1U)) {
+    if (!CreateImage(texture, DkImageFormat_RGBA8_Unorm, replacement.Width, replacement.Height, levels)) {
         return 0U;
     }
-    std::memcpy(staging.Cpu, rgba->data(), bytes);
-    UploadLevel(texture, 0U, replacement.Width, replacement.Height, staging.Gpu);
-    texture.SamplerSlot = SamplerSlot(MakePicaSamplerKey(view, 1U));
+    for (uint32_t level = 0U; level < levels; ++level) {
+        const auto& mip = mips[level];
+        std::memcpy(static_cast<uint8_t*>(staging.Cpu) + mip.Offset,
+                    level == 0U ? rgba->data() : replacement.Mips[level - 1U].data(), mip.Bytes);
+        UploadLevel(texture, level, mip.Width, mip.Height, staging.Gpu + mip.Offset);
+    }
+    // The native sampler, its LOD range moved down by the levels the larger image adds.
+    PicaSamplerKey samplerKey = MakePicaSamplerKey(view, levels);
+    if (levels > 1U) {
+        samplerKey.MaxLevel = static_cast<uint8_t>(std::min<uint32_t>(view.MaxMipLevel + extra, levels - 1U));
+        samplerKey.MinLevel = static_cast<uint8_t>(
+            view.MinMipLevel == 0U ? 0U : std::min<uint32_t>(view.MinMipLevel + extra, samplerKey.MaxLevel));
+    }
+    texture.SamplerSlot = SamplerSlot(samplerKey);
     DkImageView imageView;
     dkImageViewDefaults(&imageView, &texture.Image);
+    imageView.mipLevelOffset = samplerKey.MinLevel;
+    imageView.mipLevelCount = static_cast<uint8_t>(samplerKey.MaxLevel - samplerKey.MinLevel + 1U);
     DkImageDescriptor descriptor;
     dkImageDescriptorInitialize(&descriptor, &imageView, false, false);
     std::memcpy(&mImageDescriptors[texture.ImageSlot], &descriptor, sizeof(descriptor));
     mInvalidate = true;
     texture.LastUsedFrame = mFrame;
+    texture.Replacement = true;
+    texture.PackEpoch = mPackEpoch;
     mTextureBytes += texture.Bytes;
-    mReplacementBytesThisFrame += bytes;
+    mReplacementBytesThisFrame += stagingBytes;
     mStats.TextureBytes = mTextureBytes;
-    mStats.TextureUploadBytes += bytes;
-    mStats.TextureReplacementBytes += bytes;
+    mStats.TextureUploadBytes += stagingBytes;
+    mStats.TextureReplacementBytes += stagingBytes;
+    mStats.TextureReplacementLiveBytes += texture.Bytes;
     ++mStats.TextureReplacements;
     const auto inserted = mTextures.emplace(key, texture).first;
+    // The GPU copy is the one drawn now; the worker decodes the file again if it is ever evicted.
+    ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ReleaseDecoded(replacement.NativeHash,
+                                                                          replacement.Generation);
     return dkMakeTextureHandle(inserted->second.ImageSlot, inserted->second.SamplerSlot);
 }
 

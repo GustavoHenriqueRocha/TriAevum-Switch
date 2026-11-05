@@ -887,6 +887,74 @@ loads).
   window closes (`oot3d_fps_counter.h`, tests in `oot3d_fps_counter_tests.cpp`).
 - Needs ImGui on the window: with deko3d and `config/serial_presentation` nothing ImGui draws shows.
 
+### HD texture packs: L3+R3 > Video (`config/texture_pack`, `config/texture_pack_scale`)
+- **Which pack:** Azahar/Citra packs load as they are. For HenrikoMagnifico's *Ocarina of Time 3D 4K*
+  pack use the **1080p** download (`OOT3D 4K 5.0a (1080p).zip`, 1.8 GB; its images are 4x the native
+  textures); the game reduces it to 2x. The 4K download (8x, 3.7 GB) works too but takes twice the SD
+  space and four times the decode work for the same result.
+- **Install:** in the zip, copy the *contents* of `user/load/textures/0004000000033500/` (the
+  `CHARACTERS`, `CREATURES`, `EFFECTS`, `ENVIRONMENT`, `LINK`, `MAPS` and `UI` folders and
+  `pack.json`) to `switch/oot3dre/textures/` on the SD card, so that `pack.json` ends up at
+  `switch/oot3dre/textures/pack.json`. Then L3+R3 → Video → "HD textures". The region folder name
+  does not matter: the game reads `switch/oot3dre/textures/` whatever the dump, and the pack's
+  texture names are hashes of the texture data, which is the same in a USA Rev 1 dump and in the
+  converted game files (checked: the 5,039 distinct textures of the RomFS's models and menus hash the
+  same; 1,943 of the pack's 2,161 images match one of them, the rest are textures this check does
+  not reach or that only exist with the pack's own mods). `user/load/mods/` (code patches and RomFS
+  files of other mods) and the ReShade files are not used.
+- **`pack.json`** is read from the folder's root: `use_new_hash` (Henriko's pack: `false`, Azahar's
+  legacy hash of the decoded texture), `flip_png_files` and the `textures` name map are honoured.
+  `skip_mipmap` is not needed: mipmaps are always made from the image (what Azahar does with
+  `skip_mipmap: true`, the pack's setting); `mipN` files are not read. The scan is recursive and
+  only `.png` is decoded.
+- **Settings:** `config/texture_pack` present = HD textures on (first line, optional: another
+  folder). `config/texture_pack_scale`: the size cap as a multiple of the native texture, `0` = no
+  cap, `1`–`8`; absent = 2. The Video tab writes both ("HD textures", "HD texture size": 1x, 2x
+  default, 3x, 4x, No limit) and says when `switch/oot3dre/textures/` (or the configured folder)
+  does not exist. Turning HD textures off deletes `config/texture_pack`; a custom folder line comes
+  back when they are turned on again in the same session, but not after a restart while off.
+- **Applies at once:** the tab publishes the values (`LiveTexturePackSettings`), and the deko3d
+  renderer applies them at the start of its next frame (`PicaResources::ApplyTexturePackSettings`):
+  every cached texture becomes an earlier "epoch". Off: draws use native textures from that frame
+  on (made from the draw's own bytes where missing), pack images leave GPU memory once no frame in
+  flight can read them (two frames, the eviction rule), and the pack worker drops its decoded
+  images and queued decodes. On, or another size: each native texture is retired and made again on
+  its next draw, so it resolves through the pack; the pack is scanned again and images decode
+  lazily, as at start. Only the deko3d renderer loads packs.
+- **Size cap (pack worker):** after the PNG decode, an image wider or taller than native x N is
+  reduced to at most native x N on each axis (`azahar_texture_scale.cpp`): every output texel is
+  the area-weighted average of the source texels it covers (any ratio, e.g. 3 → 2, not only
+  halving), colour weighted by alpha so transparent texels do not leave dark fringes on cut-out art,
+  plain colour average where nothing is opaque. Values are averaged as stored, like the GPU's own
+  filtering of these UNORM textures. Never enlarged; cap 0 keeps the file's size.
+- **Mipmaps (pack worker):** the full chain is made from the reduced image with the same filter.
+  The renderer uploads levels only for textures the game samples with mipmaps: the native chain
+  plus the levels the larger image adds (one at 2x), with the native sampler's LOD range moved down
+  by those levels. Textures without native mipmaps stay single-level. Cost: +33% memory and upload
+  for mipmapped textures; in exchange distant surfaces read small levels instead of the full 2x
+  image, which saves texture bandwidth on a GPU that is already at its limit and stops shimmering.
+- **Memory:** pack images count against the texture budget (`config/gl_texture_budget_mb`, default
+  96 MiB) like native ones, and a native texture is retired as soon as its pack image is uploaded.
+  A 2x image is 16 bytes per native texel (4x a native texture, +33% with mipmaps); the 1080p pack
+  uncapped would be 64. From the RomFS (models of each scene, all rooms together, every texture the
+  pack replaces): Jabu-Jabu's Belly 35.6 MiB at 2x (142 MiB at 4x), Deku Tree 25.2 (101), Forest
+  Temple 21.9 (88), Kokiri Forest 15.5 (62), Hyrule Field 11.5 (46), Link 2.2 (8.9); with mipmaps at
+  most a third more. A scene at 2x plus actors, effects and the HUD fits in 96 MiB, so the default
+  stays. With "No limit" or 4x a dungeon no longer fits: textures not drawn for two frames are
+  evicted and decoded from the SD again when seen (pop-in); raise `gl_texture_budget_mb` (e.g. 256)
+  for those sizes. Decoded images are kept in RAM only until the renderer uploads them
+  (`AzaharTexturePackRuntime::ReleaseDecoded`; an evicted image is decoded again,
+  `PollOrQueue`); before, every image decoded in a session stayed in RAM (the whole matched pack is
+  806 MiB at 2x, 3.2 GiB at 4x, for a ~3.1 GiB heap).
+- **Expected cost:** more GPU memory traffic per texture (2x = 4x the texels of a native texture),
+  the pack worker's PNG decodes (on its own thread; a 512x512 image of the 1080p pack is decoded and
+  reduced to 256x256), and uploads capped at 16 MiB per frame (a texture shows native for a few
+  frames before its pack image). `logs/deko3d.txt` reports `pack images=` (uploaded), `uploaded=`
+  and `live=` MiB in each `resources (frame)` line. Not yet measured on the console.
+- Logic: `azahar_texture_scale.{h,cpp}`, `azahar_texture_pack_settings.h`; host tests
+  `oot3d_texture_pack_scale_tests` (sizes, ratios, alpha, cap 0, mip chain, settings files, the
+  on/off cache rule) and the runtime's `CapsMipmapsAndReleasesReplacementsOnTheWorker`.
+
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
   field; default `0.1.0-dev`) and `OOT3D_RELEASE_BUILD` (monotonic integer; default 0). Both go

@@ -34,6 +34,14 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
   GameBanana (56 MB) and build the textures and HD text font from your game files: A downloads, B asks
   again next time, X never asks (L3+R3 → Updates turns the offer back on). Without internet, download
   `singlescreen_321.zip` from that page on a PC and copy it into `switch/oot3dre/`.
+- **HD textures (optional):** download the **1080p** version of HenrikoMagnifico's
+  [Ocarina of Time 3D 4K texture pack](https://www.henrikomagnifico.com/zelda-ocarina-of-time-3d-4k), copy the
+  contents of its `user/load/textures/0004000000033500/` folder (including `pack.json`) to
+  `switch/oot3dre/textures/` on the SD card, whatever your dump's region, and turn on L3+R3 → Video →
+  HD textures. The game reduces the pack to 2x the original textures, enough for the 720p screen
+  ("HD texture size" changes it). Expect some GPU and memory cost: each texture is four times the original
+  (about 10–50 MB of textures per area), and on/off applies at once, so compare in the same spot with the
+  performance overlay.
 
 # TriAevum — Echoes of Time
 
