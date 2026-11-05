@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -1379,6 +1380,8 @@ int main() {
         "oot3d_native_a32_ctr_host_test_savedata";
     std::error_code cleanupError;
     std::filesystem::remove_all(saveDataPath, cleanupError);
+    // Backups do diário do save (<save>-backups, ao lado da pasta).
+    std::filesystem::remove_all(saveDataPath.string() + "-backups", cleanupError);
     constexpr std::array<uint8_t, 16> romFsBytes{
         0x49, 0x56, 0x46, 0x43, 0x00, 0x01, 0x02, 0x03,
         0x10, 0x11, 0x12, 0x13, 0x20, 0x21, 0x22, 0x23,
@@ -1584,23 +1587,28 @@ int main() {
                 memory.Read32(0x1FF82088, &response) &&
                 response == writeBytes.size(),
             "SaveData File:Write did not persist the mapped payload");
-    std::array<uint8_t, 4> persistedBytes{};
-    {
-        std::ifstream persisted(saveDataPath / "test.dat",
-                                std::ios::binary);
-        persisted.read(reinterpret_cast<char*>(persistedBytes.data()),
-                       static_cast<std::streamsize>(persistedBytes.size()));
-    }
-    Require(persistedBytes == std::array<uint8_t, 4>{1, 9, 8, 7},
-            "SaveData File:Write changed the wrong host byte range");
+    // 05/11 (saves à prova de perda): o backend de pasta deixou de ser
+    // write-through. Write e SetSize vão para <arquivo>.triaevum-tmp e só
+    // trocam o arquivo no Flush/Close/ControlArchive, como o save transacional
+    // do 3DS; uma queda no meio não deixa mais o save metade novo. As mesmas
+    // asserções de bytes e tamanho valem no ponto de confirmação (Flush).
+    const auto persisted = [&]() {
+        std::ifstream input(saveDataPath / "test.dat", std::ios::binary);
+        return std::vector<uint8_t>((std::istreambuf_iterator<char>(input)),
+                                    std::istreambuf_iterator<char>());
+    };
+    const auto beforeCommit = persisted();
     Require(memory.Write32(0x1FF82080, 0x08050080) &&
                 memory.Write64(0x1FF82084, 6, &faultAddress),
             "cannot write SaveData File:SetSize request");
     state.r[0] = saveFileSession;
     Require(host.HandleSvc(0x32, state, memory, context).Action ==
                     NativeA32HostAction::Resume &&
-                std::filesystem::file_size(saveDataPath / "test.dat") == 6,
-            "SaveData File:SetSize did not resize the host file");
+                memory.Read32(0x1FF82080, &response) &&
+                response == 0x08050040,
+            "SaveData File:SetSize did not resume");
+    Require(persisted() == beforeCommit,
+            "SaveData File:Write/SetSize reached the host file before Flush");
     Require(memory.Write32(0x1FF82080, 0x08090000),
             "cannot write SaveData File:Flush request");
     state.r[0] = saveFileSession;
@@ -1609,6 +1617,13 @@ int main() {
                 memory.Read32(0x1FF82080, &response) &&
                 response == 0x08090040,
             "SaveData File:Flush did not resume");
+    const auto committed = persisted();
+    Require(committed.size() >= 4U &&
+                std::equal(committed.begin(), committed.begin() + 4,
+                           std::array<uint8_t, 4>{1, 9, 8, 7}.begin()),
+            "SaveData File:Write changed the wrong host byte range");
+    Require(std::filesystem::file_size(saveDataPath / "test.dat") == 6,
+            "SaveData File:SetSize did not resize the host file");
     Require(memory.Write32(0x1FF82080, 0x08080000),
             "cannot write SaveData File:Close request");
     state.r[0] = saveFileSession;
@@ -2926,6 +2941,7 @@ int main() {
     std::error_code removeError;
     std::filesystem::remove(romFsPath, removeError);
     std::filesystem::remove_all(saveDataPath, removeError);
+    std::filesystem::remove_all(saveDataPath.string() + "-backups", removeError);
 
     std::cout << "oot3d_native_a32_ctr_host_tests: ok\n";
     return 0;

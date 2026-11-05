@@ -1061,6 +1061,29 @@ romfs, reaproveitando o `AzaharTexturePackRuntime` que já existia para o Vulkan
 - **Fonte HD** não precisa do pack: `config/font_coverage.zip` já é neutro de backend; gerar a
   cobertura para a região da ROM (`message/eu/` na EU; o zip pronto cobria só `message/us`).
 
+### 4.14 Saves sem perda no SD (escrita atômica sem rename por cima)
+
+O NRO usa o backend de pasta do PC sobre o devoptab da libnx (`SaveDataDirectory`, sem
+`Filesystem`). Receita (`oot3d_native_a32_ctr_save_safety.h`, pesquisa
+`docs/pesquisas/2026-11-05-saves-seguros.md`):
+
+- **Transação por arquivo:** a primeira escrita copia `<nome>` para `<nome>.triaevum-tmp`; Read,
+  Write, GetSize e SetSize usam a cópia; Flush, Close e ControlArchive confirmam. É a semântica do
+  save do 3DS (nada é durável antes do commit), não write-through.
+- **Troca no Horizon:** `rename` por cima de arquivo existente dá EEXIST. Confirmar em dois passos:
+  `tmp -> <nome>.triaevum-new` (destino não existe) e depois `new -> <nome>` com fallback
+  remove + rename. A recuperação no primeiro OpenArchive instala um `.triaevum-new` que sobrou
+  (está completo por construção) e tira de dentro do save um `.triaevum-tmp` sem confirmação
+  (vai para `<save>-backups/incompleto-*`).
+- **Backups:** antes da primeira escrita (ou do DeleteFile) de cada arquivo na execução,
+  `<save>-backups/<AAAAMMDD-HHMMSS>/`; ficam 20 gerações, mas nunca some a última cópia de um
+  arquivo. FormatSaveData move a pasta para `<save>-backups/format-*` em vez de `remove_all`, e
+  save legado (arquivos sem `.format`) recebe formato sintetizado em vez de NotFormatted.
+- **Caminho `sdmc:/` não é absoluto para o `std::filesystem`:** nada de `absolute`, `canonical` ou
+  `weakly_canonical` no FS do host (concatenam o cwd); contenção lexical (`CtrArchivePathContained`).
+- **Pasta por título:** o OoT3D fica em `sdmc:/switch/oot3dre/savedata`; outro título vai para
+  `sdmc:/switch/triaevum/<title id>/savedata` (`ResolveCtrTitleSaveDataDirectory`).
+
 ## 5. Medição e diagnóstico
 
 ### 5.1 Arquivos no SD (`sdmc:/switch/oot3dre/`)
