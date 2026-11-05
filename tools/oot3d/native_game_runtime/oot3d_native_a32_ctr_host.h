@@ -19,6 +19,7 @@
 
 namespace Oot3dNativeGame {
 
+class CtrSaveJournal;
 class Oot3dNativePicaFrontend;
 class Oot3dPicaCommandListCompositionProvider;
 struct Oot3dGspCommandPacket;
@@ -533,6 +534,11 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     std::vector<SynchronizationWaiter> mSynchronizationWaiters;
     std::vector<SleepWaiter> mSleepWaiters;
     std::vector<ArchiveRecord> mArchives;
+    // Diário do save no backend de pasta (oot3d_native_a32_ctr_save_safety.h):
+    // escrita atômica, backups e recuperação. Uma vez por execução; o restore
+    // de savestate repassa o mesmo objeto.
+    std::shared_ptr<CtrSaveJournal> mSaveJournal;
+    CtrSaveJournal* SaveJournal();
     uint16_t mNextSlot = 0;
     uint16_t mNextGeneration = 1;
     uint32_t mFallbackPc = 0;

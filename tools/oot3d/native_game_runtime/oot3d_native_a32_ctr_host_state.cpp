@@ -1,7 +1,48 @@
 // CTR host services: savestate capture and restore of the host service state.
 #include "oot3d_native_a32_ctr_host_internal.h"
+#include "oot3d_native_a32_ctr_save_safety.h"
 
 namespace Oot3dNativeGame {
+
+namespace {
+
+// Savestate portátil: arquivos e archives do save/extdata (backend de pasta)
+// são guardados relativos à raiz ("savedata" ou "extdata"), não como caminho
+// absoluto do host, e religados à pasta configurada no restore (um savestate
+// do PC restaura no Switch). Estados antigos (caminho absoluto) continuam
+// aceitos pelo caminho de sempre.
+std::optional<std::pair<std::string, std::string>> PortableCtrSavePath(
+    const std::filesystem::path& saveDirectory, const std::filesystem::path& path) {
+    if (saveDirectory.empty() || path.empty()) return std::nullopt;
+    const std::pair<const char*, std::filesystem::path> roots[] = {
+        {"savedata", CtrLexicalDirectory(saveDirectory)},
+        {"extdata", CtrExtDataBaseDirectory(saveDirectory)}};
+    for (const auto& [base, root] : roots) {
+        if (CtrLexicalDirectory(path) == root)
+            return std::make_pair(std::string(base), std::string("."));
+        if (CtrPathWithin(root, path))
+            return std::make_pair(std::string(base),
+                                  path.lexically_normal().lexically_relative(root).generic_string());
+    }
+    return std::nullopt;
+}
+
+std::filesystem::path RebindCtrSavePath(const std::filesystem::path& saveDirectory, const std::string& base,
+                                        const std::string& encoded) {
+    const std::filesystem::path relative(encoded);
+    if (saveDirectory.empty() || relative.empty() || relative.has_root_name() ||
+        relative.has_root_directory() ||
+        std::any_of(relative.begin(), relative.end(), [](const auto& part) { return part == ".."; })) {
+        throw std::runtime_error("relative save path is invalid");
+    }
+    std::filesystem::path root;
+    if (base == "savedata") root = saveDirectory;
+    else if (base == "extdata") root = CtrExtDataBaseDirectory(saveDirectory);
+    else throw std::runtime_error("relative save path base is unknown");
+    return relative == "." ? root : root / relative;
+}
+
+} // namespace
 
 nlohmann::json NativeA32CtrHostServices::CaptureState() const {
     std::unordered_map<const KernelObject*, uint32_t> objectIds;
@@ -52,7 +93,7 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
     nlohmann::json encodedObjects = nlohmann::json::array();
     for (size_t index = 0; index < objects.size(); ++index) {
         const auto& object = *objects[index];
-        encodedObjects.push_back({
+        auto& encodedObject = encodedObjects.emplace_back(nlohmann::json{
             {"id", index + 1U},
             {"type", object.Type},
             {"thread_id", object.ThreadId.has_value()
@@ -73,6 +114,12 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
                                    ? nlohmann::json(*object.MappedAddress)
                                    : nlohmann::json(nullptr)},
         });
+        if (mConfig.Filesystem == nullptr && object.Type == "client_session:file:savedata") {
+            if (const auto portable = PortableCtrSavePath(mConfig.SaveDataDirectory, object.FilePath)) {
+                encodedObject["file_path"] = portable->second;
+                encodedObject["file_path_base"] = portable->first;
+            }
+        }
     }
     nlohmann::json handles = nlohmann::json::array();
     for (const auto& handle : mHandles) {
@@ -108,11 +155,17 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
     }
     nlohmann::json archives = nlohmann::json::array();
     for (const auto& archive : mArchives) {
-        archives.push_back({
+        auto& encodedArchive = archives.emplace_back(nlohmann::json{
             {"handle", archive.Handle},
             {"id", archive.Id},
             {"root", archive.Root.string()},
         });
+        if (mConfig.Filesystem == nullptr) {
+            if (const auto portable = PortableCtrSavePath(mConfig.SaveDataDirectory, archive.Root)) {
+                encodedArchive["root"] = portable->second;
+                encodedArchive["root_base"] = portable->first;
+            }
+        }
     }
     nlohmann::json screens = nlohmann::json::array();
     for (const auto& screen : mGspScreens) {
@@ -270,10 +323,14 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             if (path.empty()) {
                 return true;
             }
+            // Extdata (<pai do save>/extdata) também: com um arquivo de
+            // extdata aberto (Play Coins) o restore falhava.
             return (!mConfig.RomFsImagePath.empty() &&
                     normalizedAbsolute(path) ==
                         normalizedAbsolute(mConfig.RomFsImagePath)) ||
-                   pathIsWithin(mConfig.SaveDataDirectory, path);
+                   pathIsWithin(mConfig.SaveDataDirectory, path) ||
+                   (!mConfig.SaveDataDirectory.empty() &&
+                    pathIsWithin(CtrExtDataBaseDirectory(mConfig.SaveDataDirectory), path));
         };
         std::vector<std::shared_ptr<KernelObject>> objects;
         const auto& encodedObjects = state.at("kernel_objects");
@@ -302,6 +359,12 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             object->ResetType = encoded.at("reset_type").get<uint32_t>();
             object->FilePath = std::filesystem::path(
                 encoded.at("file_path").get<std::string>());
+            if (const auto base = encoded.value("file_path_base", std::string{}); !base.empty()) {
+                if (mConfig.Filesystem != nullptr)
+                    throw std::runtime_error("relative save path on a module backend");
+                object->FilePath = RebindCtrSavePath(mConfig.SaveDataDirectory, base,
+                                                     encoded.at("file_path").get<std::string>());
+            }
             const bool isRomFsFile =
                 object->Type == "client_session:file:romfs";
             const bool isSaveFile =
@@ -429,6 +492,12 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
                 encoded.at("handle").get<uint64_t>(),
                 encoded.at("id").get<uint32_t>(),
                 std::filesystem::path(encoded.at("root").get<std::string>())};
+            if (const auto base = encoded.value("root_base", std::string{}); !base.empty()) {
+                if (mConfig.Filesystem != nullptr)
+                    throw std::runtime_error("relative archive root on a module backend");
+                archive.Root = RebindCtrSavePath(mConfig.SaveDataDirectory, base,
+                                                 encoded.at("root").get<std::string>());
+            }
             const auto expectedRoot = mConfig.Filesystem != nullptr
                                           ? std::filesystem::path("save")
                                           : mConfig.SaveDataDirectory;
@@ -659,6 +728,9 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             state.at("ndm_scheduler_runs_in_background").get<bool>();
 
         staged.mRuntimeProfile.FsUnservedRequests = mRuntimeProfile.FsUnservedRequests;
+        // O diário do save é da execução, não do savestate: escritas pendentes,
+        // backups já feitos e a recuperação continuam valendo.
+        staged.mSaveJournal = mSaveJournal;
         *this = std::move(staged);
         return true;
     } catch (const std::exception& exception) {

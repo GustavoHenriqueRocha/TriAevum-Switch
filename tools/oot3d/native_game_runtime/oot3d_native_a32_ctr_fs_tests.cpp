@@ -1,5 +1,6 @@
 #include "oot3d_native_a32_ctr_host.h"
 #include "oot3d_native_master_quest_unlock.h"
+#include "oot3d_native_a32_ctr_save_safety.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -8,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <nlohmann/json.hpp>
 namespace {
 using namespace Oot3dNativeGame;
@@ -708,16 +710,649 @@ void TestSharedExtDataPlayCoins() {
     std::filesystem::remove_all(root);
 }
 
-int main() {
-    TestFullHistoryIntentionalWait();
-    TestFsFailuresAndRestore();
-    TestFsRootedRoundTrip();
-    TestMasterQuestUnlockPolicy();
-    TestMasterQuestUnlockThroughFs();
+// ---------------------------------------------------------------------------
+// 05/11: saves à prova de perda (docs/pesquisas/2026-11-05-saves-seguros.md).
+// Backend de pasta (o do NRO do Switch: SaveDataDirectory sem Filesystem).
+// Layout sintético que imita o save real do Zelda no Switch: save00.bin,
+// save03.bin e save04.bin de 5340 bytes, system.dat de 34 bytes, sem .format.
+namespace {
+namespace fs = std::filesystem;
+constexpr size_t kZeldaSaveSize = 5340U;
+
+std::vector<uint8_t> ReadAll(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+void WriteAll(const fs::path& path, const std::vector<uint8_t>& bytes) {
+    fs::create_directories(path.parent_path());
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    Require(static_cast<bool>(output), "fixture write");
+}
+std::vector<uint8_t> Pattern(size_t size, uint8_t seed) {
+    std::vector<uint8_t> bytes(size);
+    for (size_t index = 0; index < size; ++index)
+        bytes[index] = static_cast<uint8_t>(seed + index * 31U + (index >> 7U));
+    return bytes;
+}
+// Arquivos (relativos, com '/') de uma árvore; vazio se não existe.
+std::vector<std::string> ListTree(const fs::path& root) {
+    std::vector<std::string> names;
+    std::error_code error;
+    if (!fs::exists(root, error)) return names;
+    for (const auto& entry : fs::recursive_directory_iterator(root))
+        names.push_back(entry.path().lexically_relative(root).generic_string() +
+                        (entry.is_directory() ? "/" : ""));
+    std::sort(names.begin(), names.end());
+    return names;
+}
+struct ZeldaSave {
+    std::vector<uint8_t> Save00 = Pattern(kZeldaSaveSize, 0x11U);
+    std::vector<uint8_t> Save03 = Pattern(kZeldaSaveSize, 0x33U);
+    std::vector<uint8_t> Save04 = Pattern(kZeldaSaveSize, 0x44U);
+    std::vector<uint8_t> System = MakeSystemData(0U, 0U);
+    void Write(const fs::path& directory) const {
+        WriteAll(directory / "save00.bin", Save00);
+        WriteAll(directory / "save03.bin", Save03);
+        WriteAll(directory / "save04.bin", Save04);
+        WriteAll(directory / "system.dat", System);
+    }
+};
+fs::path FreshRoot(std::string_view name) {
+    const auto root = fs::temp_directory_path() / ("triaevum_saves_seguros_" + std::string(name));
+    fs::remove_all(root);
+    fs::create_directories(root);
+    return root;
+}
+// Gerações de backup (AAAAMMDD-HHMMSS[-n]) dentro de <save>-backups.
+std::vector<fs::path> Generations(const fs::path& backups) {
+    std::vector<fs::path> found;
+    std::error_code error;
+    if (!fs::is_directory(backups, error)) return found;
+    for (const auto& entry : fs::directory_iterator(backups)) {
+        const auto name = entry.path().filename().string();
+        if (entry.is_directory() && name.size() >= 15U && name[8] == '-' &&
+            std::all_of(name.begin(), name.begin() + 8, [](char c) { return c >= '0' && c <= '9'; }))
+            found.push_back(entry.path());
+    }
+    std::sort(found.begin(), found.end());
+    return found;
+}
+std::vector<fs::path> DirectoriesStartingWith(const fs::path& backups, std::string_view prefix) {
+    std::vector<fs::path> found;
+    std::error_code error;
+    if (!fs::is_directory(backups, error)) return found;
+    for (const auto& entry : fs::directory_iterator(backups))
+        if (entry.is_directory() && entry.path().filename().string().starts_with(prefix))
+            found.push_back(entry.path());
+    std::sort(found.begin(), found.end());
+    return found;
+}
+
+// fs:USER sobre uma pasta de save, pelo mesmo caminho de IPC do jogo.
+struct DirFs {
+    static constexpr uint32_t Tls = FsFixture::Tls, Cmd = FsFixture::Cmd, Path = FsFixture::Buffer;
+    static constexpr uint32_t Data = 0x10000000U, DataSize = 0x4000U;
+    static NativeA32CtrHostConfig Config(const fs::path& save) {
+        auto config = MakeConfig();
+        config.SaveDataDirectory = save;
+        return config;
+    }
+    explicit DirFs(const fs::path& save) : Host(Config(save)), Process(Registry, Host) {
+        std::string error;
+        Require(Memory.MapRegion({"tls", Tls, 0x1000U, true, false, {}}, &error), error);
+        Require(Memory.MapRegion({"data", Data, DataSize, true, false, {}}, &error), error);
+        State.thread_pointer = Tls;
+        const std::array<uint8_t, 5> port{'s', 'r', 'v', ':', 0};
+        Require(Memory.WriteBytes(Path, port), "port");
+        State.r[1] = Path;
+        NativeA32HostContext context{Process, 0U};
+        Require(Host.HandleSvc(0x2D, State, Memory, context).Action == NativeA32HostAction::Resume,
+                "srv open");
+        Call(State.r[1], {0x00050100U, 0x553A7366U, 0x00524553U, 7U});
+        Fs = Word(3);
+    }
+    void Call(uint32_t handle, std::initializer_list<uint32_t> words) {
+        uint32_t address = Cmd;
+        for (const uint32_t word : words) {
+            Require(Memory.Write32(address, word), "request");
+            address += 4;
+        }
+        State.r[0] = handle;
+        NativeA32HostContext context{Process, 0U};
+        Require(Host.HandleSvc(0x32U, State, Memory, context).Action == NativeA32HostAction::Resume,
+                "FS request did not resume");
+    }
+    uint32_t Word(unsigned index) {
+        uint32_t value = 0U;
+        Require(Memory.Read32(Cmd + index * 4U, &value), "reply word");
+        return value;
+    }
+    uint32_t PutPath(std::string_view name) {  // ASCII com '/' inicial e NUL
+        std::vector<uint8_t> bytes{'/'};
+        bytes.insert(bytes.end(), name.begin(), name.end());
+        bytes.push_back(0U);
+        Require(Memory.Fill(Path, 0x40U, 0U) && Memory.WriteBytes(Path, bytes), "path");
+        return static_cast<uint32_t>(bytes.size());
+    }
+    uint32_t OpenArchive() {
+        Require(Memory.Fill(Path, 16U, 0U), "empty path");
+        Call(Fs, {0x080C00C2U, 4U, 1U, 1U, 0x4002U, Path});
+        Require(Word(1) == 0U && Word(2) != 0U, "OpenArchive(SaveData)");
+        return Word(2);
+    }
+    uint32_t OpenFile(uint32_t archive, std::string_view name, uint32_t mode) {
+        const uint32_t size = PutPath(name);
+        Call(Fs, {0x080201C2U, 0U, archive, 0U, 3U, size, mode, 0U, (size << 14U) | 2U, Path});
+        Require(Word(1) == 0U && Word(3) != 0U, "OpenFile");
+        return Word(3);
+    }
+    uint32_t DeleteFile(uint32_t archive, std::string_view name) {
+        const uint32_t size = PutPath(name);
+        Call(Fs, {0x08040142U, 0U, archive, 0U, 3U, size, (size << 14U) | 2U, Path});
+        return Word(1);
+    }
+    // Escreve em pedaços de 1 KiB, como um jogo que salva por partes.
+    void Write(uint32_t file, uint64_t offset, const std::vector<uint8_t>& bytes) {
+        Require(bytes.size() <= DataSize, "write too large");
+        Require(Memory.WriteBytes(Data, bytes), "write payload");
+        for (size_t done = 0; done < bytes.size(); done += 1024U) {
+            const uint32_t length = static_cast<uint32_t>(std::min<size_t>(1024U, bytes.size() - done));
+            const uint64_t at = offset + done;
+            Call(file, {0x08030102U, static_cast<uint32_t>(at), static_cast<uint32_t>(at >> 32U), length, 1U,
+                        (length << 4U) | 0xAU, Data + static_cast<uint32_t>(done)});
+            Require(Word(1) == 0U && Word(2) == length, "Write");
+        }
+    }
+    std::vector<uint8_t> Read(uint32_t file, uint64_t offset, uint32_t length) {
+        Require(length <= DataSize, "read too large");
+        Call(file, {0x080200C2U, static_cast<uint32_t>(offset), static_cast<uint32_t>(offset >> 32U), length,
+                    (length << 4U) | 0xCU, Data});
+        Require(Word(1) == 0U, "Read");
+        std::vector<uint8_t> bytes(Word(2));
+        Require(Memory.ReadBytes(Data, bytes), "read bytes");
+        return bytes;
+    }
+    uint64_t Size(uint32_t file) {
+        Call(file, {0x08040000U});
+        Require(Word(1) == 0U, "GetSize");
+        return Word(2) | (static_cast<uint64_t>(Word(3)) << 32U);
+    }
+    void Flush(uint32_t file) { Call(file, {0x08090000U}); Require(Word(1) == 0U, "Flush"); }
+    void Close(uint32_t file) { Call(file, {0x08080000U}); Require(Word(1) == 0U, "Close"); }
+    void Commit(uint32_t archive) {  // ControlArchive(commit), como o OoT3D faz ao salvar
+        Call(Fs, {0x080D0144U, archive, 0U, 0U, 1U, 1U, 0x1AU, Path + 0x40U, 0x1CU, Path + 0x44U});
+        Require(Word(1) == 0U, "ControlArchive");
+    }
+    uint32_t GetFormatInfo() {
+        Require(Memory.Fill(Path, 16U, 0U), "empty path");
+        Call(Fs, {0x084500C2U, 4U, 1U, 1U, 0x4002U, Path});
+        return Word(1);
+    }
+    uint32_t FormatSaveData() {
+        Require(Memory.Fill(Path, 16U, 0U), "empty path");
+        Call(Fs, {0x084C0242U, 4U, 1U, 1U, 0x10U, 8U, 16U, 8U, 16U, 1U, 0x4002U, Path});
+        return Word(1);
+    }
+    NativeA32CtrHostServices Host;
+    const oot3d::recomp::a32::Registry Registry{};
+    NativeA32Process Process;
+    NativeA32Memory Memory;
+    GuestState State{};
+    uint32_t Fs = 0U;
+};
+} // namespace
+
+// Compatibilidade: o save existente do Zelda (sem .format) abre e é lido byte
+// a byte igual, e abrir/ler não cria nada dentro nem ao lado da pasta.
+void TestLegacyZeldaSaveOpensUnchanged() {
+    SetMasterQuestUnlockOptionForTesting(false);
+    const auto root = FreshRoot("legado");
+    const auto save = root / "savedata";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    const auto before = ListTree(root);
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        const std::pair<const char*, const std::vector<uint8_t>*> files[] = {
+            {"save00.bin", &zelda.Save00}, {"save03.bin", &zelda.Save03},
+            {"save04.bin", &zelda.Save04}, {"system.dat", &zelda.System}};
+        for (const auto& [name, bytes] : files) {
+            const uint32_t file = f.OpenFile(archive, name, 1U);
+            Require(f.Size(file) == bytes->size(), "legacy file size");
+            Require(f.Read(file, 0U, static_cast<uint32_t>(bytes->size())) == *bytes,
+                    "legacy file not read byte for byte");
+            f.Close(file);
+        }
+        // O OoT3D abre os slots para leitura e escrita (modo 3) no menu.
+        const uint32_t slot = f.OpenFile(archive, "save00.bin", 3U);
+        Require(f.Read(slot, 0U, kZeldaSaveSize) == zelda.Save00, "mode 3 read");
+        f.Close(slot);
+    }
+    Require(ListTree(root) == before, "opening/reading the legacy save changed files on disk");
+    Require(ReadAll(save / "save00.bin") == zelda.Save00 && ReadAll(save / "system.dat") == zelda.System,
+            "legacy bytes changed");
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
+// Escrita atômica: o jogo escreve por partes; até o Flush/Close/ControlArchive
+// o save no disco continua o antigo, e uma queda no meio não deixa o arquivo
+// meio novo meio velho. Durante a sessão o Read vê as escritas.
+void TestSaveWriteIsAtomic() {
+    SetMasterQuestUnlockOptionForTesting(false);
+    const auto root = FreshRoot("atomico");
+    const auto save = root / "savedata";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    const auto fresh = Pattern(kZeldaSaveSize, 0xA0U);
+    const std::vector<uint8_t> firstHalf(fresh.begin(), fresh.begin() + 2048);
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        const uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
+        f.Write(file, 0U, firstHalf);
+        Require(ReadAll(save / "save00.bin") == zelda.Save00,
+                "a partial write reached save00.bin before Flush/Close (not atomic)");
+        auto expected = zelda.Save00;
+        std::copy(firstHalf.begin(), firstHalf.end(), expected.begin());
+        Require(f.Size(file) == kZeldaSaveSize, "size during the session");
+        Require(f.Read(file, 0U, kZeldaSaveSize) == expected, "Read did not see the session writes");
+        // Outro handle no mesmo arquivo também vê as escritas.
+        const uint32_t other = f.OpenFile(archive, "save00.bin", 1U);
+        Require(f.Read(other, 0U, kZeldaSaveSize) == expected, "second handle did not see the writes");
+        // "Queda": o host morre sem Flush/Close.
+    }
+    Require(ReadAll(save / "save00.bin") == zelda.Save00, "crash left save00.bin changed");
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        // A recuperação tira o temporário de dentro do save (sem apagar: vai para os backups).
+        Require(ListTree(save) == std::vector<std::string>{"save00.bin", "save03.bin", "save04.bin", "system.dat"},
+                "journal files left inside the save after recovery");
+        Require(DirectoriesStartingWith(save.parent_path() / "savedata-backups", "incompleto-").size() == 1U,
+                "the interrupted write was not kept aside");
+        const uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
+        Require(f.Read(file, 0U, kZeldaSaveSize) == zelda.Save00, "recovered save is not the old one");
+        f.Write(file, 0U, fresh);
+        f.Flush(file);
+        Require(ReadAll(save / "save00.bin") == fresh, "Flush did not commit");
+        // ControlArchive também confirma (sequência do OoT3D: escreve, flush, commit).
+        const auto again = Pattern(kZeldaSaveSize, 0xB7U);
+        f.Write(file, 0U, again);
+        f.Commit(archive);
+        Require(ReadAll(save / "save00.bin") == again, "ControlArchive did not commit");
+        const auto last = Pattern(kZeldaSaveSize, 0xC9U);
+        f.Write(file, 0U, last);
+        f.Close(file);
+        Require(ReadAll(save / "save00.bin") == last, "Close did not commit");
+        Require(ListTree(save) == std::vector<std::string>{"save00.bin", "save03.bin", "save04.bin", "system.dat"},
+                "journal files left inside the save after commit");
+    }
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
+// Queda entre "temporário completo" e "trocar o arquivo": no Switch o rename
+// não sobrescreve (EEXIST), então a troca é remove + rename; quem abre depois
+// termina a troca com a versão completa.
+void TestInterruptedCommitIsFinished() {
+    SetMasterQuestUnlockOptionForTesting(false);
+    const auto root = FreshRoot("troca");
+    const auto save = root / "savedata";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    const auto committed = Pattern(kZeldaSaveSize, 0x5AU);
+    // (a) caiu depois de apagar o antigo e antes do rename final.
+    fs::remove(save / "save00.bin");
+    WriteAll(save / "save00.bin.triaevum-new", committed);
+    // (b) caiu antes de apagar o antigo.
+    WriteAll(save / "save03.bin.triaevum-new", committed);
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        Require(ReadAll(save / "save00.bin") == committed, "interrupted commit (old removed) was not finished");
+        Require(ReadAll(save / "save03.bin") == committed, "interrupted commit (old kept) was not finished");
+        Require(ListTree(save) == std::vector<std::string>{"save00.bin", "save03.bin", "save04.bin", "system.dat"},
+                "commit leftovers inside the save");
+        const uint32_t file = f.OpenFile(archive, "save00.bin", 1U);
+        Require(f.Read(file, 0U, kZeldaSaveSize) == committed, "finished commit not visible");
+    }
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
+// Backup rotativo: antes da primeira escrita de cada arquivo numa execução, a
+// versão anterior vai para <save>-backups/<AAAAMMDD-HHMMSS>/.
+void TestSaveBackupBeforeFirstWrite() {
+    SetMasterQuestUnlockOptionForTesting(false);
+    const auto root = FreshRoot("backup");
+    const auto save = root / "savedata";
+    const auto backups = root / "savedata-backups";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    const auto first = Pattern(kZeldaSaveSize, 0x01U), second = Pattern(kZeldaSaveSize, 0x02U);
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        const uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
+        f.Write(file, 0U, first);
+        f.Flush(file);
+        f.Write(file, 0U, second);
+        f.Close(file);
+        const uint32_t system = f.OpenFile(archive, "system.dat", 3U);
+        auto data = zelda.System;
+        data[kSystemDataModeOffset] = 0xEFU;
+        StoreSystemDataChecksum(data);
+        f.Write(system, 0U, data);
+        f.Close(system);
+    }
+    auto generations = Generations(backups);
+    Require(generations.size() == 1U, "one backup generation per run");
+    Require(ReadAll(generations[0] / "save00.bin") == zelda.Save00,
+            "backup does not hold the version before the run");
+    Require(ReadAll(generations[0] / "system.dat") == zelda.System, "system.dat backup");
+    Require(!fs::exists(generations[0] / "save03.bin"), "untouched file was backed up");
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        const uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
+        f.Write(file, 0U, first);
+        f.Close(file);
+    }
+    generations = Generations(backups);
+    Require(generations.size() == 2U && ReadAll(generations[1] / "save00.bin") == second,
+            "second run did not back up the first run's result");
+    Require(ReadAll(generations[0] / "save00.bin") == zelda.Save00, "older generation changed");
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
+// Formatação sem perda: save legado (arquivos, sem .format) não responde
+// NotFormatted, e FormatSaveData move a pasta para os backups antes de recriar.
+void TestFormatNeverDeletesSave() {
+    const auto root = FreshRoot("formato");
+    const auto save = root / "savedata";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    {
+        DirFs f(save);
+        Require(f.GetFormatInfo() == 0U, "legacy save answered NotFormatted (the game would format it)");
+        Require(!fs::exists(save / ".format") && !fs::exists(root / "savedata.format"),
+                "GetFormatInfo wrote a .format");
+        Require(f.FormatSaveData() == 0U, "FormatSaveData");
+        Require(fs::is_directory(save) && fs::is_empty(save), "format did not leave an empty save");
+        const auto moved = DirectoriesStartingWith(root / "savedata-backups", "format-");
+        Require(moved.size() == 1U && ReadAll(moved[0] / "save00.bin") == zelda.Save00 &&
+                    ReadAll(moved[0] / "save04.bin") == zelda.Save04 &&
+                    ReadAll(moved[0] / "system.dat") == zelda.System,
+                "FormatSaveData deleted the save instead of moving it to the backups");
+        Require(f.GetFormatInfo() == 0U && f.Word(2) == 0x10U * 512U && f.Word(4) == 16U,
+                "formatted layout");
+    }
+    // Pasta vazia continua NotFormatted (como o Azahar).
+    const auto empty = root / "vazio";
+    fs::create_directories(empty);
+    {
+        DirFs f(empty);
+        Require(f.GetFormatInfo() == 0xC8A04554U, "empty save must stay NotFormatted");
+    }
+    // --save-data com '/' no fim: o .format fica fora da pasta, sem barra.
+    const auto slash = root / "barra";
+    {
+        DirFs f(fs::path(slash.string() + "/"));
+        Require(f.FormatSaveData() == 0U, "format with trailing slash");
+        Require(!fs::exists(slash / ".format") && fs::exists(root / "barra.format"),
+                ".format must be beside the save folder, never inside it");
+    }
+    fs::remove_all(root);
+}
+
+// DeleteFile (Erase file do OoT3D): o arquivo apagado fica nos backups.
+void TestDeleteFileKeepsBackup() {
+    const auto root = FreshRoot("apagar");
+    const auto save = root / "savedata";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        Require(f.DeleteFile(archive, "save03.bin") == 0U, "DeleteFile");
+        Require(!fs::exists(save / "save03.bin"), "file not deleted");
+        Require(f.DeleteFile(archive, "save03.bin") == 0xC8804470U, "second delete must be FileNotFound");
+    }
+    const auto generations = Generations(root / "savedata-backups");
+    Require(generations.size() == 1U && ReadAll(generations[0] / "save03.bin") == zelda.Save03,
+            "deleted save file was not kept in the backups");
+    Require(ReadAll(save / "save00.bin") == zelda.Save00, "other slots changed");
+    fs::remove_all(root);
+}
+
+// Savestate: arquivo de save aberto é guardado relativo à raiz do save
+// (restaura com outra pasta, ex.: PC -> Switch), e arquivo de extdata aberto
+// não impede o restore.
+void TestSavestateSavePathsAreRelative() {
+    SetMasterQuestUnlockOptionForTesting(false);
+    const auto root = FreshRoot("savestate");
+    const ZeldaSave zelda;
+    zelda.Write(root / "a" / "savedata");
+    zelda.Write(root / "b" / "savedata");
+    WriteAll(root / "b" / "savedata" / "save00.bin", Pattern(kZeldaSaveSize, 0x77U));
+    nlohmann::json snapshot;
+    uint32_t file = 0U, archive = 0U;
+    {
+        DirFs f(root / "a" / "savedata");
+        archive = f.OpenArchive();
+        file = f.OpenFile(archive, "save00.bin", 3U);
+        snapshot = f.Host.CaptureState();
+    }
+    bool relative = false;
+    for (const auto& object : snapshot.at("kernel_objects"))
+        relative = relative || object.at("file_path") == "save00.bin";
+    Require(relative, "save file path was serialized as an absolute host path");
+    {
+        DirFs f(root / "b" / "savedata");
+        std::string error;
+        const bool restored = f.Host.RestoreState(snapshot, f.Process, &error);
+        Require(restored, "restore with another save folder: " + error);
+        Require(f.Read(file, 0U, kZeldaSaveSize) == Pattern(kZeldaSaveSize, 0x77U),
+                "restored handle does not read the new folder");
+    }
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
+// Restore de savestate com arquivo de extdata (Play Coins) aberto falhava:
+// validFilePath só aceitava caminhos dentro do save.
+void TestSavestateWithExtDataFileOpen() {
+    const auto root = FreshRoot("savestate_extdata");
+    {
+        DirFs f(root / "a" / "savedata");
+        f.OpenArchive();
+        Require(f.Memory.Write32(DirFs::Path, 0U) && f.Memory.Write32(DirFs::Path + 4U, 0xF000000BU) &&
+                    f.Memory.Write32(DirFs::Path + 8U, 0U),
+                "extdata path");
+        f.Call(f.Fs, {0x080C00C2U, 7U, 2U, 12U, (12U << 14U) | 2U, DirFs::Path});
+        const uint32_t coins = f.Word(2);
+        Require(f.Word(1) == 0U && coins != 0U, "Play Coins open");
+        const uint32_t coin = f.OpenFile(coins, "gamecoin.dat", 1U);
+        auto state = f.Host.CaptureState();
+        std::string error;
+        const bool restored = f.Host.RestoreState(state, f.Process, &error);
+        Require(restored, "restore with an extdata file open: " + error);
+        Require(f.Read(coin, 0U, 4U).size() == 4U, "restored extdata handle");
+    }
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
+// Contenção do DeleteFile sem absolute/canonical: com raiz "sdmc:/..." o
+// std::filesystem do devkitA64 trata o caminho como relativo e canonical
+// concatenava o cwd (DeleteFile/Erase respondia CommandNotAllowed no Switch).
+void TestArchiveContainmentLexical() {
+    for (const fs::path root : {fs::path("sdmc:/switch/x/savedata"), fs::path("sdmc:/switch/x/savedata/")}) {
+        Require(CtrArchivePathContained(root, "save03.bin") && CtrArchivePathContained(root, "sub/a.bin"),
+                "file inside a sdmc:/ root rejected");
+        Require(!CtrArchivePathContained(root, "../savedata-backups/a.bin") &&
+                    !CtrArchivePathContained(root, "a/../../x.bin") && !CtrArchivePathContained(root, "") &&
+                    !CtrArchivePathContained(root, ".") && !CtrArchivePathContained(root, "/etc/passwd"),
+                "path escaping a sdmc:/ root accepted");
+    }
+    Require(CtrPathWithin("sdmc:/switch/x/savedata", "sdmc:/switch/x/savedata/save00.bin") &&
+                !CtrPathWithin("sdmc:/switch/x/savedata", "sdmc:/switch/x/savedata-backups/a") &&
+                !CtrPathWithin("sdmc:/switch/x/savedata", "sdmc:/switch/x/extdata/a"),
+            "CtrPathWithin");
+    // PC: subdiretório-symlink apontando para fora continua barrado.
+    const auto root = FreshRoot("contencao");
+    fs::create_directories(root / "save");
+    fs::create_directories(root / "fora");
+    std::error_code error;
+    fs::create_directory_symlink(root / "fora", root / "save" / "link", error);
+    if (!error)
+        Require(!CtrArchivePathContained(root / "save", "link/a.bin"), "symlinked subdirectory accepted");
+    // Ponta a ponta pelo IPC com raiz literal "sdmc:/switch/x/savedata" (no
+    // PC é relativa ao cwd, que aponta para uma pasta temporária).
+    const auto previous = fs::current_path();
+    fs::current_path(root);
+    const ZeldaSave zelda;
+    zelda.Write("sdmc:/switch/x/savedata");
+    {
+        DirFs f(fs::path("sdmc:/switch/x/savedata"));
+        const uint32_t archive = f.OpenArchive();
+        Require(f.DeleteFile(archive, "save03.bin") == 0U, "DeleteFile with a sdmc:/ root");
+        Require(f.DeleteFile(archive, "save03.bin") == 0xC8804470U, "missing file with a sdmc:/ root");
+        const uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
+        f.Write(file, 0U, Pattern(kZeldaSaveSize, 0x99U));
+        f.Close(file);
+    }
+    Require(!fs::exists("sdmc:/switch/x/savedata/save03.bin") &&
+                ReadAll("sdmc:/switch/x/savedata/save00.bin") == Pattern(kZeldaSaveSize, 0x99U) &&
+                Generations("sdmc:/switch/x/savedata-backups").size() == 1U,
+            "sdmc:/ root end to end");
+    fs::current_path(previous);
+    fs::remove_all(root);
+}
+
+// Troca no Switch: o rename não sobrescreve (EEXIST); o commit faz remove + rename.
+void TestHorizonRenameCommit() {
+    SetMasterQuestUnlockOptionForTesting(false);
+    SetCtrSaveRenameFailsOnExistingForTesting(true);
+    const auto root = FreshRoot("horizon");
+    const auto save = root / "savedata";
+    const ZeldaSave zelda;
+    zelda.Write(save);
+    WriteAll(root / "origem.bin", {1, 2, 3});
+    WriteAll(root / "destino.bin", {9});
+    Require(ReplaceCtrSaveFile(root / "origem.bin", root / "destino.bin") &&
+                ReadAll(root / "destino.bin") == std::vector<uint8_t>{1, 2, 3} && !fs::exists(root / "origem.bin"),
+            "replace with Horizon rename semantics");
+    const auto fresh = Pattern(kZeldaSaveSize, 0x3CU);
+    {
+        DirFs f(save);
+        const uint32_t archive = f.OpenArchive();
+        const uint32_t file = f.OpenFile(archive, "save04.bin", 3U);
+        f.Write(file, 0U, fresh);
+        f.Close(file);
+    }
+    Require(ReadAll(save / "save04.bin") == fresh, "commit with Horizon rename semantics");
+    Require(ListTree(save) == std::vector<std::string>{"save00.bin", "save03.bin", "save04.bin", "system.dat"},
+            "journal leftovers with Horizon rename semantics");
+    SetCtrSaveRenameFailsOnExistingForTesting(false);
+    fs::remove_all(root);
+    SetMasterQuestUnlockOptionForTesting(std::nullopt);
+}
+
+// Rotação: ficam as últimas N gerações, mas a mais antiga com a única cópia
+// de um arquivo nunca é apagada; format-* e incompleto-* não entram na conta.
+void TestBackupPruneKeepsOnlyCopies() {
+    const auto root = FreshRoot("rotacao");
+    std::vector<std::string> names;
+    for (int index = 0; index < 24; ++index) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "202601%02d-120000", index + 1);
+        names.push_back(name);
+    }
+    names.push_back("20260124-120000-2");  // mesma hora, segunda execução
+    for (const auto& name : names) WriteAll(root / name / "save00.bin", {1});
+    WriteAll(root / names[0] / "save04.bin", {4});  // única cópia
+    WriteAll(root / "format-20250101-000000" / "save00.bin", {7});
+    WriteAll(root / "incompleto-20250101-000000" / "save00.bin.triaevum-tmp", {8});
+    PruneCtrSaveBackups(root, 20U);
+    const auto generations = Generations(root);
+    Require(generations.size() == 20U, "kept generation count");
+    Require(fs::exists(root / names[0] / "save04.bin"), "oldest generation with the only copy was deleted");
+    for (int index = 1; index <= 5; ++index)
+        Require(!fs::exists(root / names[index]), "old generation not pruned");
+    Require(fs::exists(root / names[6]) && fs::exists(root / "20260124-120000-2"), "recent generations pruned");
+    Require(fs::exists(root / "format-20250101-000000") && fs::exists(root / "incompleto-20250101-000000"),
+            "format/incompleto backups pruned");
+    fs::remove_all(root);
+}
+
+// Pasta por título: o OoT3D fica em sdmc:/switch/oot3dre/savedata; nenhum
+// outro título resolve para lá (o argv padrão do NRO passa esse caminho).
+void TestTitleSaveLayout() {
+    const fs::path oot3d("sdmc:/switch/oot3dre/savedata");
+    for (const uint64_t id : {0x0004000000033400ULL, 0x0004000000033500ULL, 0x0004000000033600ULL}) {
+        Require(IsOot3dTitleId(id) && CtrSwitchSaveDataDirectory(true, id) == oot3d, "OoT3D save path changed");
+        Require(ResolveCtrTitleSaveDataDirectory(oot3d, true, id) == oot3d, "OoT3D save path redirected");
+    }
+    Require(CtrSwitchSaveDataDirectory(false, 0x0004000000053F00ULL) ==
+                fs::path("sdmc:/switch/triaevum/0004000000053f00/savedata"),
+            "generic title layout");
+    for (const uint64_t id : {0x0004000000053F00ULL, 0ULL, 0x0004000000033500ULL, 0xFFFFFFFFFFFFFFFFULL}) {
+        for (const fs::path requested : {oot3d, fs::path("sdmc:/switch/oot3dre/savedata/"),
+                                         fs::path("sdmc:/switch/oot3dre/savedata/sub"),
+                                         fs::path("sdmc:/switch/oot3dre"),
+                                         fs::path("sdmc:/switch/oot3dre/./savedata")}) {
+            const auto resolved = ResolveCtrTitleSaveDataDirectory(requested, false, id);
+            Require(resolved == CtrSwitchSaveDataDirectory(false, id), "generic title kept the OoT3D folder");
+            Require(!CtrPathWithin(oot3d, resolved) && CtrLexicalDirectory(resolved) != oot3d &&
+                        !CtrPathWithin(resolved, oot3d),
+                    "generic title resolves into the OoT3D save");
+        }
+    }
+    Require(ResolveCtrTitleSaveDataDirectory("/home/x/save", false, 1U) == fs::path("/home/x/save") &&
+                ResolveCtrTitleSaveDataDirectory("sdmc:/switch/oot3dre/savedata-mario", false, 1U) ==
+                    fs::path("sdmc:/switch/oot3dre/savedata-mario"),
+            "unrelated folders must not be redirected");
+    Require(CtrSaveFormatPath("sdmc:/switch/oot3dre/savedata/") == fs::path("sdmc:/switch/oot3dre/savedata.format") &&
+                CtrSaveBackupRoot("sdmc:/switch/oot3dre/savedata/") ==
+                    fs::path("sdmc:/switch/oot3dre/savedata-backups"),
+            "format/backup paths");
+}
+
+int main(int argc, char** argv) {
+    // Sem argumento: todos. Com nomes: só esses (para ver um teste falhar sozinho).
+    const std::vector<std::pair<std::string_view, void (*)()>> tests{
+        {"TestFullHistoryIntentionalWait", TestFullHistoryIntentionalWait},
+        {"TestFsFailuresAndRestore", TestFsFailuresAndRestore},
+        {"TestFsRootedRoundTrip", TestFsRootedRoundTrip},
+        {"TestMasterQuestUnlockPolicy", TestMasterQuestUnlockPolicy},
+        {"TestMasterQuestUnlockThroughFs", TestMasterQuestUnlockThroughFs},
+        {"TestSaveDataFormatInfo", TestSaveDataFormatInfo},
+        {"TestSharedExtDataPlayCoins", TestSharedExtDataPlayCoins},
 #if !defined(_WIN32)
-    TestSlotEraseWithRelativeSaveRoot();
+        {"TestSlotEraseWithRelativeSaveRoot", TestSlotEraseWithRelativeSaveRoot},
 #endif
-    TestSaveDataFormatInfo();
-    TestSharedExtDataPlayCoins();
+        {"TestLegacyZeldaSaveOpensUnchanged", TestLegacyZeldaSaveOpensUnchanged},
+        {"TestSaveWriteIsAtomic", TestSaveWriteIsAtomic},
+        {"TestInterruptedCommitIsFinished", TestInterruptedCommitIsFinished},
+        {"TestSaveBackupBeforeFirstWrite", TestSaveBackupBeforeFirstWrite},
+        {"TestFormatNeverDeletesSave", TestFormatNeverDeletesSave},
+        {"TestDeleteFileKeepsBackup", TestDeleteFileKeepsBackup},
+        {"TestSavestateSavePathsAreRelative", TestSavestateSavePathsAreRelative},
+        {"TestSavestateWithExtDataFileOpen", TestSavestateWithExtDataFileOpen},
+        {"TestArchiveContainmentLexical", TestArchiveContainmentLexical},
+        {"TestHorizonRenameCommit", TestHorizonRenameCommit},
+        {"TestBackupPruneKeepsOnlyCopies", TestBackupPruneKeepsOnlyCopies},
+        {"TestTitleSaveLayout", TestTitleSaveLayout},
+    };
+    for (const auto& [name, test] : tests) {
+        bool selected = argc <= 1;
+        for (int index = 1; index < argc; ++index) selected = selected || name == argv[index];
+        if (selected) test();
+    }
     std::cout << "oot3d_native_a32_ctr_fs_tests: ok\n";
 }
