@@ -432,7 +432,17 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             const auto expectedRoot = mConfig.Filesystem != nullptr
                                           ? std::filesystem::path("save")
                                           : mConfig.SaveDataDirectory;
-            if (archive.Root.lexically_normal() !=
+            // Extdata (backend de pasta): raiz <extdata>/<mídia>/<id alto>/<id baixo>.
+            const auto extDataRelative =
+                archive.Root.lexically_normal().lexically_relative(
+                    CtrExtDataBaseDirectory(mConfig.SaveDataDirectory));
+            const bool extDataRoot =
+                IsCtrExtDataArchiveId(archive.Id) && mConfig.Filesystem == nullptr &&
+                !mConfig.SaveDataDirectory.empty() &&
+                std::distance(extDataRelative.begin(), extDataRelative.end()) == 3 &&
+                std::none_of(extDataRelative.begin(), extDataRelative.end(),
+                             [](const auto& part) { return part == ".." || part == "."; });
+            if (!extDataRoot && archive.Root.lexically_normal() !=
                 expectedRoot.lexically_normal()) {
                 throw std::runtime_error("archive root is incompatible");
             }

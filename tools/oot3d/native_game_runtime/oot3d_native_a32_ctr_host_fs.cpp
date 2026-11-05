@@ -8,6 +8,44 @@
 
 namespace Oot3dNativeGame {
 
+namespace {
+
+// gamecoin.dat padrão do extdata compartilhado 0xF000000B, como o PTM do
+// Azahar (default_game_coin): magic 0x4F00, 42 Play Coins, 0 moedas no dia,
+// passos 0/0, data 2014-12-29. 0x14 bytes, little-endian.
+constexpr uint16_t kDefaultPlayCoins = 42U;
+
+bool CreateDefaultPlayCoinsExtData(const std::filesystem::path& directory) {
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) return false;
+    std::array<uint8_t, 0x14> data{};
+    const auto put = [&data](size_t offset, uint32_t value, size_t bytes) {
+        for (size_t index = 0; index < bytes; ++index)
+            data[offset + index] = static_cast<uint8_t>(value >> (8U * index));
+    };
+    put(0x00, 0x4F00U, 4);           // magic
+    put(0x04, kDefaultPlayCoins, 2); // total de moedas
+    put(0x06, 0U, 2);                // moedas obtidas na data abaixo
+    put(0x08, 0U, 4);                // passos quando ganhou a última moeda
+    put(0x0C, 0U, 4);                // passos do dia da última moeda
+    put(0x10, 2014U, 2);             // ano
+    data[0x12] = 12U;                // mês
+    data[0x13] = 29U;                // dia
+    std::ofstream output(directory / "gamecoin.dat", std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    return static_cast<bool>(output);
+}
+
+// Path binário de ExtSaveData/SharedExtSaveData: u32 mídia, u32 id baixo, u32 id alto.
+bool ReadExtDataLowPath(NativeA32Memory& memory, uint32_t type, uint32_t size, uint32_t address,
+                        uint32_t* media, uint32_t* low, uint32_t* high) {
+    return type == 2U && size == 12U && memory.Read32(address, media) &&
+           memory.Read32(address + 4U, low) && memory.Read32(address + 8U, high);
+}
+
+} // namespace
+
 void NativeA32CtrHostServices::WriteFsRequestSummary() const {
     std::fprintf(stderr, "TRIAEVUM_FS_REQUEST_SUMMARY unserved=%llu\n",
                  static_cast<unsigned long long>(mRuntimeProfile.FsUnservedRequests));
@@ -464,7 +502,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                 bool success = false;
                 if (archive->Id == kFsSaveDataArchiveId && mConfig.Filesystem) {
                     success = mConfig.Filesystem->RemoveFile(relative->generic_string(), &removed);
-                } else if (archive->Id == kFsSaveDataArchiveId) {
+                } else if (archive->Id == kFsSaveDataArchiveId ||
+                           IsCtrExtDataArchiveId(archive->Id)) {
                     // archive->Root / *relative, as in OpenFile and CreateFile: the
                     // decoded path has no root and no "..". No canonical() or
                     // absolute(): the console's root "sdmc:/switch/oot3dre/savedata"
@@ -544,7 +583,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             if (archive != mArchives.end() &&
                 relativePath.has_value()) {
                 result = kFsBackendFailure;
-                if (archive->Id != kFsSaveDataArchiveId) result = kFsCommandNotAllowed;
+                if (archive->Id != kFsSaveDataArchiveId && !IsCtrExtDataArchiveId(archive->Id))
+                    result = kFsCommandNotAllowed;
                 else if (fileSize > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) result = kFsOutOfRange;
                 else if (mConfig.Filesystem != nullptr) {
                     const std::string logicalPath =
@@ -755,6 +795,53 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             (descriptor & 0x3FFU) == 2U &&
             (descriptor >> 14U) == pathSize &&
             memory.IsMapped(pathAddress, pathSize);
+        // ExtSaveData / SharedExtSaveData: só no backend de pasta, uma pasta
+        // por (mídia, id). O 0xF000000B (Play Coins) nasce com o gamecoin.dat
+        // padrão, como o PTM faz no console/Azahar.
+        if (validStaticBuffer && IsCtrExtDataArchiveId(archiveId)) {
+            const bool shared = archiveId == kFsSharedExtSaveDataArchiveId;
+            event.Name += shared ? ":OpenArchive:SharedExtSaveData:" : ":OpenArchive:ExtSaveData:";
+            event.Name += DescribeLowPath(memory, pathType, pathSize, pathAddress);
+            uint32_t media = 0, low = 0, high = 0;
+            if (!ReadExtDataLowPath(memory, pathType, pathSize, pathAddress, &media, &low, &high)) {
+                return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                                     kFsInvalidPath, "unsupported-extdata-path");
+            }
+            if (mConfig.Filesystem != nullptr) {
+                return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                                     kFsExtDataNotFound, "extdata-unsupported-on-switch-backend");
+            }
+            if (mConfig.SaveDataDirectory.empty()) {
+                return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                                     kFsExtDataNotFound, "extdata-without-save-directory");
+            }
+            const auto directory = CtrExtDataDirectory(mConfig.SaveDataDirectory, media, low, high);
+            std::error_code error;
+            if (shared && media == 0U && low == kPlayCoinsExtDataLow && high == 0U &&
+                !std::filesystem::exists(directory, error) && !error &&
+                !CreateDefaultPlayCoinsExtData(directory)) {
+                return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                                     kFsBackendFailure, "play-coins-extdata-create-failed");
+            }
+            const bool exists = std::filesystem::is_directory(directory, error) && !error;
+            const uint32_t result = exists ? kResultSuccess : kFsExtDataNotFound;
+            const uint64_t archiveHandle = exists ? mNextArchiveHandle++ : 0U;
+            if (exists) mArchives.push_back({archiveHandle, archiveId, directory});
+            uint32_t faultAddress = 0;
+            if (memory.Write32(commandBuffer, kFsOpenArchiveResponse) &&
+                memory.Write32(commandBuffer + 4U, result) &&
+                memory.Write64(commandBuffer + 8U, archiveHandle, &faultAddress)) {
+                state.r[0] = kResultSuccess;
+                if (!exists) event.Name += ":NotFound";
+                event.Detail = result;
+                event.Handled = true;
+                mSvcEvents.push_back(std::move(event));
+                return {NativeA32HostAction::Resume};
+            }
+            if (exists) mArchives.pop_back();
+            return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                                 kFsBackendFailure, "extdata-reply-failed");
+        }
         if (validStaticBuffer && archiveId == kFsSaveDataArchiveId &&
             pathType == 1U && pathSize == 1U &&
             (mConfig.Filesystem != nullptr ||
@@ -794,6 +881,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                                  kFsBackendFailure, "save-root-open-failed");
         }
         if (validStaticBuffer) {
+            std::ostringstream archiveDetail;
+            archiveDetail << ":OpenArchive:id=0x" << std::hex << archiveId;
+            event.Name += archiveDetail.str();
             return FailFsRequest(state, memory, commandBuffer, sessionType, event,
                                  kFsInvalidPath, "unsupported-archive-path");
         }
@@ -879,6 +969,95 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                 handleDetail << std::hex << archiveHandle
                              << ":result=0x" << result;
                 event.Name += handleDetail.str();
+                event.Detail = result;
+                event.Handled = true;
+                mSvcEvents.push_back(std::move(event));
+                return {NativeA32HostAction::Resume};
+            }
+        }
+    }
+    // GetFormatInfo de ExtSaveData/SharedExtSaveData (backend de pasta): o
+    // layout pedido no CreateExtSaveData fica em <pasta>.format; extdata sem
+    // esse arquivo (ex.: Play Coins criado pelo host) responde zeros.
+    if (event.Detail == kFsGetFormatInfoRequest && sessionType == "client_session:fs:USER") {
+        uint32_t archiveId = 0, pathType = 0, pathSize = 0, descriptor = 0, pathAddress = 0;
+        uint32_t media = 0, low = 0, high = 0;
+        if (memory.Read32(commandBuffer + 4U, &archiveId) && IsCtrExtDataArchiveId(archiveId) &&
+            memory.Read32(commandBuffer + 8U, &pathType) &&
+            memory.Read32(commandBuffer + 12U, &pathSize) &&
+            memory.Read32(commandBuffer + 16U, &descriptor) &&
+            memory.Read32(commandBuffer + 20U, &pathAddress) &&
+            (descriptor & 0x3FFU) == 2U && (descriptor >> 14U) == pathSize &&
+            ReadExtDataLowPath(memory, pathType, pathSize, pathAddress, &media, &low, &high)) {
+            event.Name += ":GetFormatInfo:ExtData:" +
+                          DescribeLowPath(memory, pathType, pathSize, pathAddress);
+            if (mConfig.Filesystem != nullptr || mConfig.SaveDataDirectory.empty()) {
+                return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                                     kFsExtDataNotFound, "extdata-unsupported-on-this-backend");
+            }
+            const auto directory = CtrExtDataDirectory(mConfig.SaveDataDirectory, media, low, high);
+            std::error_code error;
+            const bool exists = std::filesystem::is_directory(directory, error) && !error;
+            std::array<uint32_t, 4> info{};
+            if (exists) {
+                std::ifstream input(directory.string() + ".format");
+                if (!(input >> info[0] >> info[1] >> info[2] >> info[3])) info = {};
+            }
+            const uint32_t result = exists ? kResultSuccess : kFsExtDataNotFound;
+            bool written = memory.Write32(commandBuffer, kFsGetFormatInfoResponse) &&
+                           memory.Write32(commandBuffer + 4U, result);
+            for (size_t index = 0; index < info.size(); ++index)
+                written = written && memory.Write32(commandBuffer + 8U + 4U * index, info[index]);
+            if (written) {
+                state.r[0] = kResultSuccess;
+                event.Detail = result;
+                event.Handled = true;
+                mSvcEvents.push_back(std::move(event));
+                return {NativeA32HostAction::Resume};
+            }
+        }
+    }
+    // CreateExtSaveData (backend de pasta): ExtSaveDataInfo (u8 mídia, u8, u16,
+    // u64 id, u32), dirs, arquivos, u64 limite, tamanho do ícone + buffer mapeado.
+    if (event.Detail == kFsCreateExtSaveDataRequest && sessionType == "client_session:fs:USER") {
+        std::array<uint32_t, 12> words{};
+        bool readable = true;
+        for (size_t index = 0; index < words.size(); ++index)
+            readable = readable && memory.Read32(commandBuffer + 4U * index, &words[index]);
+        const uint32_t media = words[1] & 0xFFU, low = words[2], high = words[3];
+        const uint32_t iconSize = words[9];
+        readable = readable && words[10] == ((iconSize << 4U) | 0xAU) &&
+                   memory.IsMapped(words[11], iconSize) && iconSize <= 0x10000U;
+        if (readable) {
+            if (mConfig.Filesystem != nullptr || mConfig.SaveDataDirectory.empty()) {
+                return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                                     kFsNotImplemented, "create-extdata-unsupported-on-this-backend");
+            }
+            const auto directory = CtrExtDataDirectory(mConfig.SaveDataDirectory, media, low, high);
+            std::error_code error;
+            std::filesystem::create_directories(directory, error);
+            std::vector<uint8_t> icon(iconSize);
+            bool ok = !error && (iconSize == 0U || memory.ReadBytes(words[11], icon));
+            if (ok) {
+                const uint64_t sizeLimit = words[7] | (static_cast<uint64_t>(words[8]) << 32U);
+                std::ofstream format(directory.string() + ".format", std::ios::trunc);
+                format << static_cast<uint32_t>(std::min<uint64_t>(sizeLimit, 0xFFFFFFFFU)) << ' '
+                       << words[5] << ' ' << words[6] << " 0\n";
+                std::ofstream iconFile(directory.string() + ".icon", std::ios::binary | std::ios::trunc);
+                iconFile.write(reinterpret_cast<const char*>(icon.data()),
+                               static_cast<std::streamsize>(icon.size()));
+                ok = static_cast<bool>(format) && static_cast<bool>(iconFile);
+            }
+            const uint32_t result = ok ? kResultSuccess : kFsBackendFailure;
+            if (memory.Write32(commandBuffer, kFsCreateExtSaveDataResponse) &&
+                memory.Write32(commandBuffer + 4U, result) &&
+                memory.Write32(commandBuffer + 8U, words[10]) &&
+                memory.Write32(commandBuffer + 12U, words[11])) {
+                state.r[0] = kResultSuccess;
+                std::ostringstream detail;
+                detail << ":CreateExtSaveData:media=" << media << ":id=0x" << std::hex
+                       << high << '_' << low;
+                event.Name += detail.str();
                 event.Detail = result;
                 event.Handled = true;
                 mSvcEvents.push_back(std::move(event));
