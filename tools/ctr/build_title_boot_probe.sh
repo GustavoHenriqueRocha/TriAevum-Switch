@@ -10,6 +10,7 @@
 #       --romfs ~/oot3d-work/jogos/sm3dl/extract/romfs.bin \
 #       [--build ~/oot3d-work/build-ctr-sm3dl] [--jobs 2] [--run] \
 #       [--vblanks 2] [--title-profile auto|oot3d|generic] [--configure-only]
+#       [--complete-gpu-work]
 #
 # O que faz:
 #  1. configura um build Ninja Debug só com o whole-AOT do título
@@ -22,7 +23,9 @@
 #     ExHeader, program id que escolhe o perfil de título, janela da RomFS);
 #  3. com --run, roda o probe: relatório JSON em <build>/title/report.json e o
 #     stderr (serviços sem HLE, SVCs não implementados, falhas) em
-#     <build>/title/stderr.log.
+#     <build>/title/stderr.log. O resumo traz as fronteiras de quadro
+#     (ctr_frame_boundary.h); com --complete-gpu-work o probe conclui o
+#     trabalho adiado para a GPU (P3D/PSC/PPF) e o jogo passa do 1º quadro.
 #
 # Variáveis: OPT (flags de C++, padrão "-O0"), DEPS_FROM (diretório _deps de
 # um build host já configurado, para não baixar as dependências de novo;
@@ -34,7 +37,7 @@ set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 SHARDS="" CODE_BIN="" EXHEADER="" ROMFS=""
 BUILD="$HOME/oot3d-work/build-ctr-title"
-JOBS=2 RUN=0 VBLANKS=2 PROFILE=auto CONFIGURE_ONLY=0
+JOBS=2 RUN=0 VBLANKS=2 PROFILE=auto CONFIGURE_ONLY=0 GPU_WORK=0
 OPT=${OPT:--O0}
 DEPS_FROM=${DEPS_FROM:-$HOME/oot3d-work/build-host-tests/_deps}
 # Prefixo com nlohmann_json, tinyxml2 e cabeçalhos Vulkan (o host-deps do
@@ -43,7 +46,7 @@ HOST_DEPS=${HOST_DEPS:-$HOME/oot3d-work/host-deps}
 LIMITE=${LIMITE:-85}
 RETOMA=${RETOMA:-75}
 
-usage() { sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-64}"; }
+usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-64}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -57,6 +60,7 @@ while [ $# -gt 0 ]; do
     --title-profile) PROFILE=$2; shift 2 ;;
     --run) RUN=1; shift ;;
     --configure-only) CONFIGURE_ONLY=1; shift ;;
+    --complete-gpu-work) GPU_WORK=1; shift ;;
     -h|--help) usage 0 ;;
     *) echo "opção desconhecida: $1" >&2; usage ;;
   esac
@@ -150,6 +154,7 @@ python3 -I "$REPO/tools/oot3d/native_a32_runtime/build_process_manifest.py" \
 CMD=("$BUILD/ctr_title_boot_probe" --manifest "$OUT/process.json"
      --output "$OUT/report.json" --save-data "$OUT/savedata"
      --vblanks "$VBLANKS" --title-profile "$PROFILE")
+[ "$GPU_WORK" = 1 ] && CMD+=(--complete-gpu-work)
 if [ "$RUN" = 1 ]; then
   echo "rodando: ${CMD[*]}"
   set +e

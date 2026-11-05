@@ -19,6 +19,7 @@
 
 namespace Oot3dNativeGame {
 
+class FrameBoundaryProvider;
 class Oot3dNativePicaFrontend;
 class Oot3dPicaCommandListCompositionProvider;
 struct Oot3dGspCommandPacket;
@@ -260,6 +261,10 @@ struct NativeA32CtrHostConfig {
     bool KernelWaitTimeouts = false;
     // Desbloqueio do Master Quest no /system.dat (só existe no OoT3D).
     bool MasterQuestUnlock = true;
+    // Fronteira de quadro por GSP (ctr_frame_boundary.h): recebe cada commit
+    // de framebuffer (SetBufferSwap ou info "dirty" da shared memory) e cada
+    // VBlank. Nulo (padrão, o Zelda): o host não chama nada.
+    FrameBoundaryProvider* FrameBoundary = nullptr;
 };
 
 class NativeA32CtrHostServices final : public NativeA32HostServices {

@@ -542,9 +542,16 @@ bool NativeA32CtrHostServices::ApplyGspFramebufferUpdate(
             return false;
         }
     }
-    return SetGspFramebuffer(screenId, info[0], info[1], info[2], info[3],
-                             info[4], info[5]) &&
-           memory.Write8(updateAddress + 1U, static_cast<uint8_t>(dirty & ~1U));
+    if (!SetGspFramebuffer(screenId, info[0], info[1], info[2], info[3],
+                           info[4], info[5]) ||
+        !memory.Write8(updateAddress + 1U, static_cast<uint8_t>(dirty & ~1U))) {
+        return false;
+    }
+    if (mConfig.FrameBoundary != nullptr) {
+        mConfig.FrameBoundary->ObserveFramebufferCommit(
+            screenId, FrameBoundaryCommitKind::SharedMemoryInfo);
+    }
+    return true;
 }
 
 bool NativeA32CtrHostServices::CloseHandle(uint32_t handle) {
@@ -1946,8 +1953,16 @@ bool NativeA32CtrHostServices::SignalDspInterrupt(uint32_t type,
 }
 
 bool NativeA32CtrHostServices::SignalVBlank(NativeA32Memory& memory) {
-    return SignalPicaInterrupt(memory, Oot3dPicaInterruptId::Pdc0) &&
-           SignalPicaInterrupt(memory, Oot3dPicaInterruptId::Pdc1);
+    if (!SignalPicaInterrupt(memory, Oot3dPicaInterruptId::Pdc0) ||
+        !SignalPicaInterrupt(memory, Oot3dPicaInterruptId::Pdc1)) {
+        return false;
+    }
+    // Depois dos dois PDC: commits de topo e de baixo deste VBlank já
+    // entraram e contam como um quadro só.
+    if (mConfig.FrameBoundary != nullptr) {
+        mConfig.FrameBoundary->ObserveVBlank();
+    }
+    return true;
 }
 
 std::optional<NativeA32CtrFramebufferState>

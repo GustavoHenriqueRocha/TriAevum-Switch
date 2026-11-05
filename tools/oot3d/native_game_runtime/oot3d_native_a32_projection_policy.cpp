@@ -491,6 +491,9 @@ void ApplyNativeWidescreenProjectionPolicy(
       }
     }
   }
+  if (runtime.FrameBoundary != nullptr) {
+    runtime.FrameBoundary->ObserveGuestBlock(pc);
+  }
   if (pc == kGameStateUpdate && runtime.FrameRatePolicy != nullptr &&
       !runtime.FrameRatePolicy->ApplyNativeTimeScaleAtGameStateUpdate(
           state.r[0], memory)) {

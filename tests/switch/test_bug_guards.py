@@ -534,6 +534,36 @@ GUARDS = [
     Guard("timers do kernel não entravam no relógio do host (SetTimer nunca disparava)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
           r'WakeSleepWaiters\(\);\s+// Ambos.*?FireKernelTimers\(\);\s+ExpireSynchronizationTimeouts\(\);'),
+    # --- 05/11: fronteira de quadro genérica (commit de framebuffer no GSP) ---
+    # O executável achava o fim do quadro só pelos PCs do OoT3D (GameState_Update
+    # 0x00417014 + limitador 0x003FD27C/3A8/3B8). Outro título usa o provedor GSP;
+    # o Zelda tem de continuar nos PCs, sem provedor no host (byte a byte igual).
+    Guard("perfil OoT3D deixou de usar a fronteira de quadro pelos PCs do code.bin",
+          "tools/oot3d/native_game_runtime/ctr_title_profile.h",
+          r'CtrFrameBoundarySource FrameBoundary =\s+CtrFrameBoundarySource::Oot3dGuestPcs;'
+          r'.*?GenericTitleProfile.*?profile\.FrameBoundary = CtrFrameBoundarySource::GspPresent;',
+          "oot3d_native_a32_ctr_host_tests (TestFrameBoundaryProviderSelection)"),
+    Guard("ganchos da fronteira do OoT3D mudaram (GameState_Update + limitador)",
+          "tools/oot3d/native_game_runtime/ctr_frame_boundary.h",
+          r'kOot3dFrameBoundaryGameStateUpdatePc = 0x00417014U;\s+'
+          r'inline constexpr uint32_t kOot3dFrameBoundaryPacingBeginPc = 0x003FD27CU;\s+'
+          r'inline constexpr uint32_t kOot3dFrameBoundaryPacingDecisionPc = 0x003FD3A8U;\s+'
+          r'inline constexpr uint32_t kOot3dFrameBoundaryPacingCommitPc = 0x003FD3B8U;'
+          r'.*?if \(pc != kOot3dFrameBoundaryGameStateUpdatePc\) \{\s+return false;',
+          "oot3d_native_a32_ctr_host_tests (TestOot3dFrameBoundaryMatchesGsp)"),
+    Guard("Zelda passou a entregar commits/VBlanks a um provedor de fronteira no host",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'if \(frameBoundaryProvider->Source\(\) ==\s+'
+          r'Oot3dNativeGame::CtrFrameBoundarySource::GspPresent\) \{\s+'
+          r'hostConfig\.FrameBoundary = frameBoundaryProvider\.get\(\);'),
+    Guard("host passou a ter provedor de fronteira por padrão (Zelda mudaria)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.h",
+          r'FrameBoundaryProvider\* FrameBoundary = nullptr;',
+          "oot3d_native_a32_ctr_host_tests (TestHostReportsGspFrameBoundaries)"),
+    Guard("os ganchos do limitador do OoT3D sumiram da janela (fronteira por PCs)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'const auto frameBoundaryHooks = frameBoundaryProvider->GuestHookPcs\(\);\s+'
+          r'blockEntryHooks\.insert\(blockEntryHooks\.end\(\), frameBoundaryHooks\.begin\(\),'),
     Guard("ctr_title_boot_probe ligava núcleos manuais do OoT3D sem olhar o perfil",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_boot_probe.cpp",
           r'dispatch != nullptr && dispatch->ManualCompiledFunctions, true, 0U\);'),

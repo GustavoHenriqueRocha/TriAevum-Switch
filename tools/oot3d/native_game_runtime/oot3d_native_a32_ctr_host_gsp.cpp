@@ -79,6 +79,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleGspRequest(
             memory.Write32(commandBuffer, kGspSetBufferSwapResponse) &&
             memory.Write32(commandBuffer + 4U, kResultSuccess)) {
             state.r[0] = kResultSuccess;
+            if (mConfig.FrameBoundary != nullptr) {
+                mConfig.FrameBoundary->ObserveFramebufferCommit(
+                    words[0], FrameBoundaryCommitKind::SetBufferSwap);
+            }
             event.Name +=
                 ":SetBufferSwap:screen=" + std::to_string(words[0]) +
                 ":shown=" + std::to_string(words[6]);

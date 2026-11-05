@@ -2445,6 +2445,13 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
     throw std::runtime_error(
         "native VBlank could not enter the GSP relay queue");
   }
+  // O provedor GSP já contou o VBlank dentro do host; o dos PCs conta aqui
+  // (só estatística de ritmo, não muda o jogo).
+  if (frameBoundaryProvider != nullptr &&
+      frameBoundaryProvider->Source() !=
+          Oot3dNativeGame::CtrFrameBoundarySource::GspPresent) {
+    frameBoundaryProvider->ObserveVBlank();
+  }
   ++vblankCount;
   return true;
 }

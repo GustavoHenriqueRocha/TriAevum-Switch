@@ -240,6 +240,14 @@ void NativeA32WindowSession::Setup() {
   };
   hostConfig.DetailedSvcDiagnostics = launch.ExtendedDiagnostics;
   hostConfig.ProfileRuntime = launch.ProfileA32Runtime;
+  // Fronteira de quadro pelo perfil de título. O OoT3D segue nos PCs de
+  // sempre e o host não recebe provedor (FrameBoundary nulo): Zelda igual.
+  frameBoundaryProvider = Oot3dNativeGame::MakeFrameBoundaryProvider(
+      Oot3dNativeGame::SelectCtrTitleProfile(manifest->TitleId));
+  if (frameBoundaryProvider->Source() ==
+      Oot3dNativeGame::CtrFrameBoundarySource::GspPresent) {
+    hostConfig.FrameBoundary = frameBoundaryProvider.get();
+  }
   auto &hostServices = hostServicesStorage.emplace(std::move(hostConfig));
   frameRateContract =
       Oot3dNativeGame::ResolveNativeFrameRateContract(
@@ -255,6 +263,7 @@ void NativeA32WindowSession::Setup() {
   auto &frameRatePolicy = frameRatePolicyStorage.emplace(frameRateContract);
   widescreenProjection.HdFonts = hdFontsLoaded ? &hdFonts : nullptr;
   widescreenProjection.FrameRatePolicy = &frameRatePolicy;
+  widescreenProjection.FrameBoundary = frameBoundaryProvider.get();
   widescreenProjection.SceneViewProbe = &sceneViewProbe;
   widescreenProjection.PlayerTimingProbe = &playerTimingProbe;
   widescreenProjection.TemporalEventLedger = &temporalEventLedger;
@@ -349,13 +358,23 @@ void NativeA32WindowSession::Setup() {
   blockEntryHooks = std::vector<uint32_t>{
       kMtx4x4BuildFrustum,
       kMtx4x4BuildOrthographicProjectionRotated,
-      kGameStateUpdate,
       Oot3dNativeGame::kOot3dPlayerUpdateEntry,
-      Oot3dNativeGame::kOot3dFramePacingBeginEntry,
-      Oot3dNativeGame::kOot3dFramePacingDecisionEntry,
-      Oot3dNativeGame::kOot3dFramePacingCommitEntry,
       Oot3dNativeGame::kOot3dMeshCommandPacketSubmitEntry,
   };
+  // GameState_Update e o limitador (0x00417014, 0x003FD27C/3A8/3B8) vêm do
+  // provedor de fronteira do OoT3D; o do GSP não pede gancho nenhum.
+  static_assert(Oot3dNativeGame::kOot3dFrameBoundaryGameStateUpdatePc ==
+                    kGameStateUpdate &&
+                Oot3dNativeGame::kOot3dFrameBoundaryPacingBeginPc ==
+                    Oot3dNativeGame::kOot3dFramePacingBeginEntry &&
+                Oot3dNativeGame::kOot3dFrameBoundaryPacingDecisionPc ==
+                    Oot3dNativeGame::kOot3dFramePacingDecisionEntry &&
+                Oot3dNativeGame::kOot3dFrameBoundaryPacingCommitPc ==
+                    Oot3dNativeGame::kOot3dFramePacingCommitEntry,
+                "OoT3D frame boundary hooks must match the frame-rate policy");
+  const auto frameBoundaryHooks = frameBoundaryProvider->GuestHookPcs();
+  blockEntryHooks.insert(blockEntryHooks.end(), frameBoundaryHooks.begin(),
+                         frameBoundaryHooks.end());
   const auto actorVisibilityHooks =
       Oot3dNativeGame::NativeActorVisibilityHookPcs();
   blockEntryHooks.insert(blockEntryHooks.end(), actorVisibilityHooks.begin(),

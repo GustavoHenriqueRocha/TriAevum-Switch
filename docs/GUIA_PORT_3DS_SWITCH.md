@@ -1475,6 +1475,25 @@ sem recompilação prévia, as etapas 2–4 dominam e são **a medir**.
 | 15 | Coleta PGO final com tudo integrado → build final | NRO final + `.elf` guardados | meio dia (+ build) |
 | 16 | Documentar no guia o que mudou (genérico vs. específico) | este arquivo atualizado | horas |
 
+### 8.1 Fronteira de quadro de outro título (GSP, não PCs)
+
+O OoT3D acha o fim do quadro por PCs do próprio `code.bin` (GameState_Update `0x00417014`, limitador
+`0x003FD27C/3A8/3B8`, contador de vsync `0x0054CC3C`). Em outro título isso não existe. O perfil de
+título (`ctr_title_profile.h`, pelo program id do ExHeader) escolhe a fonte em `ctr_frame_boundary.h`:
+
+- **OoT3D**: `Oot3dGuestPcFrameBoundaryProvider` (os PCs de sempre; o host não recebe provedor);
+- **qualquer outro**: `GspPresentFrameBoundaryProvider` — um quadro termina quando o jogo publica um
+  framebuffer (info "dirty" na shared memory do GSP, caminho do nngx/SDK; ou `SetBufferSwap`, caminho
+  do libctru) e o VBlank seguinte o apresenta. Topo e baixo no mesmo VBlank contam um quadro só.
+
+Não usar como fronteira: espera do evento de VBlank (jogo a 30 Hz espera 2; loading espera sem
+apresentar), `TriggerCmdReqQueue`/`FlushDataCache` (vários por quadro), `DisplayTransfer` (pode haver
+vários por quadro). Medir no probe: `tools/ctr/build_title_boot_probe.sh ... --run --vblanks 600
+--complete-gpu-work` — sem `--complete-gpu-work` o probe (sem GPU) nunca conclui a P3D dos draws e o
+jogo para no primeiro quadro. O resumo do stderr e o `report.json` (`frame_boundary`) trazem
+fronteiras, VBlanks e o histograma de intervalos (1 = 60 quadros/s, 2 = 30). Super Mario 3D Land
+(05/11): 127 fronteiras em 130 VBlanks, todas com intervalo 1 (60 quadros/s no boot).
+
 ---
 
 ## 9. Lacunas conhecidas deste guia

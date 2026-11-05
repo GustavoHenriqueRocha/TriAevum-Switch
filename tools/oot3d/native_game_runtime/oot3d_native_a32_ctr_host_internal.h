@@ -3,6 +3,7 @@
 // Private to the oot3d_native_a32_ctr_host*.cpp units: their includes, the service constants and
 // helpers they share (file-local to each unit) and the RomFS backing file.
 #include "oot3d_native_a32_ctr_host.h"
+#include "ctr_frame_boundary.h"
 #include "oot3d_cpu_phase_probe.h"
 
 #if !defined(OOT3D_CTR_HOST_SERVICE_PICA_ONLY)

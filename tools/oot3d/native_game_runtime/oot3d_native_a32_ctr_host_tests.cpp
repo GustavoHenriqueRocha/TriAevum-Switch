@@ -1,3 +1,5 @@
+#include "ctr_frame_boundary.h"
+#include "ctr_title_profile.h"
 #include "oot3d_native_a32_ctr_host.h"
 #include "oot3d_native_a32_dsp_hle.h"
 #include "oot3d_native_pica_frontend.h"
@@ -12,6 +14,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -951,6 +954,196 @@ void TestUnknownServicesAreLoggedStubs() {
             "the OoT3D profile stubbed an unknown service");
 }
 
+// --- Fronteira de quadro (ctr_frame_boundary.h) ---------------------------
+// O executável detectava o fim do quadro só por PCs do OoT3D (0x00417014...),
+// que não existem em outro code.bin. O provedor genérico usa o commit de
+// framebuffer no GSP apresentado no VBlank; o OoT3D continua nos PCs.
+void TestFrameBoundaryProviderSelection() {
+    for (const std::optional<uint64_t> titleId :
+         {std::optional<uint64_t>{}, std::optional<uint64_t>{0x0004000000033400ULL},
+          std::optional<uint64_t>{0x0004000000033500ULL},
+          std::optional<uint64_t>{0x0004000000033600ULL}}) {
+        const auto profile = SelectCtrTitleProfile(titleId);
+        Require(profile.FrameBoundary == CtrFrameBoundarySource::Oot3dGuestPcs &&
+                    MakeFrameBoundaryProvider(profile)->Source() ==
+                        CtrFrameBoundarySource::Oot3dGuestPcs,
+                "the OoT3D profile stopped using the guest-PC frame boundary");
+    }
+    // Super Mario 3D Land (EUR).
+    const auto mario = SelectCtrTitleProfile(0x0004000000053F00ULL);
+    Require(mario.FrameBoundary == CtrFrameBoundarySource::GspPresent &&
+                MakeFrameBoundaryProvider(mario)->Source() ==
+                    CtrFrameBoundarySource::GspPresent &&
+                MakeFrameBoundaryProvider(mario)->GuestHookPcs().empty(),
+            "a generic title did not get the GSP frame boundary");
+
+    const auto oot = MakeFrameBoundaryProvider(Oot3dTitleProfile());
+    const auto hooks = oot->GuestHookPcs();
+    Require(hooks.size() == 4U && hooks[0] == 0x00417014U &&
+                hooks[1] == 0x003FD27CU && hooks[2] == 0x003FD3A8U &&
+                hooks[3] == 0x003FD3B8U,
+            "the OoT3D frame boundary hooks changed");
+}
+
+void TestGspFrameBoundaryProvider() {
+    GspPresentFrameBoundaryProvider gsp;
+    // Sem commit: VBlank não fecha quadro (loading, espera de VBlank).
+    Require(!gsp.ObserveVBlank() && !gsp.ObserveVBlank() &&
+                gsp.Stats().Boundaries == 0U && gsp.Stats().VBlanks == 2U,
+            "a VBlank without a framebuffer commit closed a frame");
+    Require(!gsp.ObserveGuestBlock(0x00417014U),
+            "the GSP provider reacted to an OoT3D guest PC");
+    // Topo e baixo no mesmo VBlank: um quadro só.
+    gsp.ObserveFramebufferCommit(0U, FrameBoundaryCommitKind::SharedMemoryInfo);
+    gsp.ObserveFramebufferCommit(1U, FrameBoundaryCommitKind::SharedMemoryInfo);
+    Require(gsp.ObserveVBlank() && gsp.Stats().Boundaries == 1U &&
+                gsp.Stats().FirstBoundaryVBlank == 3U &&
+                gsp.Stats().ScreenCommits[0] == 1U &&
+                gsp.Stats().ScreenCommits[1] == 1U,
+            "top and bottom commits of one VBlank were not one frame");
+    // 60 quadros/s: um commit por VBlank.
+    for (int frame = 0; frame < 4; ++frame) {
+        gsp.ObserveFramebufferCommit(0U, FrameBoundaryCommitKind::SharedMemoryInfo);
+        Require(gsp.ObserveVBlank(), "a 60 Hz commit did not close a frame");
+    }
+    // 30 quadros/s: um commit a cada dois VBlanks (SetBufferSwap direto).
+    for (int frame = 0; frame < 3; ++frame) {
+        Require(!gsp.ObserveVBlank(), "an idle VBlank closed a frame");
+        gsp.ObserveFramebufferCommit(0U, FrameBoundaryCommitKind::SetBufferSwap);
+        Require(gsp.ObserveVBlank(), "a 30 Hz commit did not close a frame");
+    }
+    const auto& stats = gsp.Stats();
+    Require(stats.Boundaries == 8U && stats.VBlanks == 13U &&
+                stats.MinimumIntervalVBlanks == 1U &&
+                stats.MaximumIntervalVBlanks == 2U &&
+                stats.IntervalHistogram[0] == 4U &&
+                stats.IntervalHistogram[1] == 3U &&
+                stats.SetBufferSwapCommits == 3U &&
+                stats.SharedMemoryCommits == 6U &&
+                stats.LastBoundaryVBlank == 13U,
+            "the GSP frame boundary rhythm statistics are wrong");
+    // Pausa longa (5+ VBlanks sem quadro) cai no último balde.
+    for (int idle = 0; idle < 6; ++idle) {
+        gsp.ObserveVBlank();
+    }
+    gsp.ObserveFramebufferCommit(0U, FrameBoundaryCommitKind::SetBufferSwap);
+    Require(gsp.ObserveVBlank() && gsp.Stats().IntervalHistogram[4] == 1U &&
+                gsp.Stats().MaximumIntervalVBlanks == 7U,
+            "a long frame did not reach the 5+ interval bucket");
+}
+
+void TestOot3dFrameBoundaryMatchesGsp() {
+    // Ritmo do Zelda (30 quadros/s): GameState_Update, limitador e o swap do
+    // nngx a cada dois VBlanks. Os dois provedores precisam concordar.
+    Oot3dGuestPcFrameBoundaryProvider oot;
+    GspPresentFrameBoundaryProvider gsp;
+    for (int frame = 0; frame < 30; ++frame) {
+        Require(oot.ObserveGuestBlock(0x00417014U) &&
+                    !oot.ObserveGuestBlock(0x003FD27CU) &&
+                    !oot.ObserveGuestBlock(0x003FD3B8U) &&
+                    !oot.ObserveGuestBlock(0x003FD3A8U),
+                "only GameState_Update may close an OoT3D frame");
+        gsp.ObserveFramebufferCommit(0U, FrameBoundaryCommitKind::SharedMemoryInfo);
+        gsp.ObserveFramebufferCommit(1U, FrameBoundaryCommitKind::SharedMemoryInfo);
+        for (int vblank = 0; vblank < 2; ++vblank) {
+            Require(!oot.ObserveVBlank(), "an OoT3D VBlank closed a frame");
+            gsp.ObserveVBlank();
+        }
+    }
+    Require(oot.Stats().Boundaries == 30U && gsp.Stats().Boundaries == 30U &&
+                oot.Stats().VBlanks == 60U && gsp.Stats().VBlanks == 60U &&
+                oot.Stats().IntervalHistogram[1] == 29U &&
+                gsp.Stats().IntervalHistogram[1] == 29U &&
+                oot.Stats().BoundariesPerVBlank() == 0.5 &&
+                gsp.Stats().BoundariesPerVBlank() == 0.5,
+            "the OoT3D and GSP frame boundaries disagree on a 30 Hz frame");
+}
+
+void TestHostReportsGspFrameBoundaries() {
+    GspPresentFrameBoundaryProvider frameBoundary;
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.FrameBoundary = &frameBoundary;
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    auto& memory = process.Memory();
+    const uint32_t srv = OpenSrv(guest);
+    uint32_t gsp = 0;
+    Require(GetServiceHandle(guest, srv, "gsp::Gpu", &gsp) ==
+                    NativeA32HostAction::Resume &&
+                gsp != 0,
+            "gsp::Gpu was not opened");
+    guest.State(0).r[1] = 0;
+    Require(guest.Svc(0, 0x17) == NativeA32HostAction::Resume,
+            "cannot create the GSP interrupt event");
+    const uint32_t interruptEvent = guest.State(0).r[1];
+    Require(memory.Write32(0x1FF82080, 0x00130042) &&
+                memory.Write32(0x1FF82084, 1) &&
+                memory.Write32(0x1FF82088, 0) &&
+                memory.Write32(0x1FF8208C, interruptEvent),
+            "cannot write GSP:RegisterInterruptRelayQueue");
+    guest.State(0).r[0] = gsp;
+    uint32_t sharedMemory = 0;
+    Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume &&
+                memory.Read32(0x1FF82090, &sharedMemory) && sharedMemory != 0,
+            "GSP:RegisterInterruptRelayQueue failed");
+    auto& state = guest.State(0);
+    state.r[0] = sharedMemory;
+    state.r[1] = 0x10000000;
+    state.r[2] = 3;
+    state.r[3] = 0x10000000;
+    Require(guest.Svc(0, 0x1F) == NativeA32HostAction::Resume &&
+                memory.IsWritable(0x10000000, 0x1000),
+            "cannot map the GSP shared memory");
+
+    // VBlank sem commit: nenhuma fronteira.
+    Require(host.SignalVBlank(memory) && frameBoundary.Stats().VBlanks == 1U &&
+                frameBoundary.Stats().Boundaries == 0U,
+            "a VBlank without a framebuffer commit closed a frame");
+    // nngx: framebuffer info "dirty" na shared memory (topo e baixo).
+    const auto publish = [&](uint32_t screen) {
+        const uint32_t update = 0x10000200U + screen * 0x40U;
+        const uint32_t info = update + 4U + 0x1CU;
+        Require(memory.Write8(update, 1) && memory.Write8(update + 1U, 1) &&
+                    memory.Write32(info, 1) &&
+                    memory.Write32(info + 4U, 0x14002000) &&
+                    memory.Write32(info + 8U, 0x14002000) &&
+                    memory.Write32(info + 12U, 720) &&
+                    memory.Write32(info + 16U, 2) &&
+                    memory.Write32(info + 20U, 1),
+                "cannot publish a shared framebuffer update");
+    };
+    publish(0U);
+    publish(1U);
+    Require(host.SignalVBlank(memory) && frameBoundary.Stats().Boundaries == 1U &&
+                frameBoundary.Stats().SharedMemoryCommits == 2U &&
+                frameBoundary.Stats().LastBoundaryVBlank == 2U,
+            "the shared-memory framebuffer commit did not close one frame");
+    Require(host.SignalVBlank(memory) && frameBoundary.Stats().Boundaries == 1U,
+            "an acknowledged framebuffer update closed a second frame");
+    // libctru: gsp::Gpu SetBufferSwap, apresentado no VBlank seguinte.
+    Require(memory.Write32(0x1FF82080, 0x00050200) &&
+                memory.Write32(0x1FF82084, 0) &&
+                memory.Write32(0x1FF82088, 0) &&
+                memory.Write32(0x1FF8208C, 0x14001000) &&
+                memory.Write32(0x1FF82090, 0x14001000) &&
+                memory.Write32(0x1FF82094, 960) &&
+                memory.Write32(0x1FF82098, 0) &&
+                memory.Write32(0x1FF8209C, 0) &&
+                memory.Write32(0x1FF820A0, 0),
+            "cannot write GSP:SetBufferSwap");
+    guest.State(0).r[0] = gsp;
+    Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume &&
+                frameBoundary.Stats().SetBufferSwapCommits == 1U &&
+                frameBoundary.Stats().Boundaries == 1U,
+            "GSP:SetBufferSwap was not seen as a framebuffer commit");
+    Require(host.SignalVBlank(memory) && frameBoundary.Stats().Boundaries == 2U &&
+                frameBoundary.Stats().MaximumIntervalVBlanks == 2U,
+            "the SetBufferSwap commit did not close a frame at the VBlank");
+}
+
 // Super Mario 3D Land: CreateMemoryBlock de uma página do próprio .bss
 // (depois de 3365 SVCs).
 void TestCreateMemoryBlockOfGuestMemory() {
@@ -1023,6 +1216,10 @@ void TestThreadQueries() {
 }
 
 int main() {
+    TestFrameBoundaryProviderSelection();
+    TestGspFrameBoundaryProvider();
+    TestOot3dFrameBoundaryMatchesGsp();
+    TestHostReportsGspFrameBoundaries();
     TestSharedPageDateTime();
     TestGuestMutexSemaphoreAndTimeouts();
     TestGuestKernelTimers();

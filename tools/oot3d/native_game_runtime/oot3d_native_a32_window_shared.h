@@ -44,6 +44,7 @@
 #include "oot3d_native_a32_timing_probe.h"
 #include "oot3d_native_compiled_functions.h"
 #include "oot3d_native_controls_settings_panel.h"
+#include "ctr_frame_boundary.h"
 #include "oot3d_native_frame_rate.h"
 #include "oot3d_native_game_bootstrap.h"
 #include "oot3d_native_mass_aot.h"
@@ -522,6 +523,9 @@ struct NativeWidescreenProjectionState {
   std::optional<Oot3dNativeGame::TopScreenPauseChildState>
       PendingTopScreenPauseChildRestore;
   Oot3dNativeGame::NativeFrameRatePolicy *FrameRatePolicy = nullptr;
+  // Fronteira de quadro do perfil de título (ctr_frame_boundary.h). No
+  // OoT3D: os PCs (GameState_Update fecha o quadro).
+  Oot3dNativeGame::FrameBoundaryProvider *FrameBoundary = nullptr;
   Oot3dNativeGame::NativeA32SceneViewProbe *SceneViewProbe = nullptr;
   // The developer free camera owns Camera_Update while it is active.
   const Oot3dNativeGame::DevFreeCamera *DevFreeCamera = nullptr;

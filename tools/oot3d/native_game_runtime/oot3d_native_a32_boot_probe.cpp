@@ -9,6 +9,11 @@
 //    (shards oot3d_whole_aot_shard_*.cpp de qualquer título), sem registro de
 //    blocos. PC fora das funções traduzidas vira falha "MissingBlock" com o PC.
 // O perfil de título (ctr_title_profile.h) vem do program id do ExHeader.
+// Fronteira de quadro (ctr_frame_boundary.h): o provedor do perfil é o
+// principal; o provedor GSP roda sempre (como sombra quando o perfil usa os
+// PCs do OoT3D) para comparar contagem e ritmo. Sai em report.json
+// ("frame_boundary") e no resumo do stderr.
+#include "ctr_frame_boundary.h"
 #include "ctr_title_profile.h"
 #include "oot3d_native_a32_ctr_host.h"
 #include "oot3d_native_a32_process_image.h"
@@ -30,6 +35,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -52,19 +58,31 @@ struct Arguments {
     uint32_t VblankCount = 2;
     // auto (program id do manifesto), oot3d ou generic.
     std::string TitleProfile = "auto";
+    // --complete-gpu-work: o probe não tem GPU; sem isto, DisplayTransfer,
+    // MemoryFill e P3D adiados para a GPU nunca concluem e o jogo para no
+    // primeiro quadro esperando a interrupção (PPF/PSC/P3D). Ligado, antes de
+    // cada VBlank o probe conclui o trabalho pendente (sem pixels: só as
+    // interrupções, na ordem PSC, P3D, PPF) e deixa o jogo seguir, para
+    // medir a fronteira de quadro. Os primeiros 512 draws ficam no relatório.
+    bool CompleteGpuWork = false;
 };
 
 void PrintUsage() {
     std::cerr << "usage: oot3d_native_a32_boot_probe --manifest <process.json> "
                  "[--code-bin <code.bin>] [--output <report.json>] "
                  "[--save-data <directory>] [--vblanks <count>] "
-                 "[--title-profile auto|oot3d|generic]\n";
+                 "[--title-profile auto|oot3d|generic] "
+                 "[--complete-gpu-work]\n";
 }
 
 std::optional<Arguments> ParseArguments(int argc, char** argv) {
     Arguments result;
     for (int index = 1; index < argc; ++index) {
         const std::string option = argv[index];
+        if (option == "--complete-gpu-work") {
+            result.CompleteGpuWork = true;
+            continue;
+        }
         if (index + 1 >= argc) {
             return std::nullopt;
         }
@@ -167,6 +185,65 @@ void AdvanceGuestClockTo(
     }
 }
 
+struct GpuWorkCompletionStats {
+    uint64_t Rounds = 0;
+    uint64_t Draws = 0;
+    uint64_t MemoryFills = 0;
+    uint64_t Completions = 0;
+    uint64_t DisplayTransfers = 0;
+    uint64_t InterruptsSignaled = 0;
+};
+
+// Conclui o trabalho que o frontend adiou para a GPU: só as interrupções que
+// o jogo espera (a imagem não importa para o probe). true = sinalizou algo.
+bool CompleteDeferredGpuWork(
+    Oot3dNativeGame::Oot3dNativePicaSubmissionQueue& queue,
+    Oot3dNativeGame::NativeA32CtrHostServices& hostServices,
+    Oot3dNativeGame::NativeA32Memory& memory,
+    std::vector<Oot3dNativeGame::Oot3dPicaDrawSubmission>& retainedDraws,
+    GpuWorkCompletionStats& stats) {
+    constexpr size_t kRetainedDraws = 512U;
+    auto batch = queue.TakePendingBatch();
+    if (batch.Empty()) {
+        return false;
+    }
+    ++stats.Rounds;
+    stats.Draws += batch.Draws.size();
+    for (auto& draw : batch.Draws) {
+        if (retainedDraws.size() >= kRetainedDraws) {
+            break;
+        }
+        retainedDraws.push_back(std::move(draw));
+    }
+    bool signaled = false;
+    const auto signal = [&](Oot3dNativeGame::Oot3dPicaInterruptId interrupt) {
+        if (!hostServices.SignalPicaInterrupt(memory, interrupt)) {
+            throw std::runtime_error(
+                "deferred GPU completion could not enter the GSP relay queue");
+        }
+        ++stats.InterruptsSignaled;
+        signaled = true;
+    };
+    for (const auto& fill : batch.MemoryFills) {
+        ++stats.MemoryFills;
+        if (fill.Interrupt.has_value()) {
+            signal(*fill.Interrupt);
+        }
+    }
+    for (const auto& completion : batch.Completions) {
+        ++stats.Completions;
+        signal(completion.Interrupt);
+    }
+    for (const auto& transfer : batch.DisplayTransfers) {
+        ++stats.DisplayTransfers;
+        if (transfer.SignalInterrupt &&
+            transfer.Transfer.TextureCopyBytes == 0U) {
+            signal(Oot3dNativeGame::Oot3dPicaInterruptId::Ppf);
+        }
+    }
+    return signaled;
+}
+
 void WriteReport(const nlohmann::json& report,
                  const std::filesystem::path& output) {
     if (!output.empty()) {
@@ -222,9 +299,38 @@ bool CompileFragmentShader(const std::string& source, std::string& error) {
 #endif
 }
 
+// Ganchos de entrada de bloco do provedor por PCs (registro A32) e, no
+// whole-AOT, as entradas despachadas pelo callback abaixo.
+void ObserveFrameBoundaryBlock(uint32_t pc, oot3d::recomp::a32::GuestState&,
+                               oot3d::recomp::a32::MemoryBus&, void* user) {
+    static_cast<Oot3dNativeGame::FrameBoundaryProvider*>(user)
+        ->ObserveGuestBlock(pc);
+}
+
+nlohmann::json DescribeFrameBoundary(
+    const Oot3dNativeGame::FrameBoundaryProvider& provider) {
+    const auto& stats = provider.Stats();
+    return {
+        {"source", Oot3dNativeGame::FrameBoundarySourceName(provider.Source())},
+        {"boundaries", stats.Boundaries},
+        {"vblanks", stats.VBlanks},
+        {"boundaries_per_vblank", stats.BoundariesPerVBlank()},
+        {"first_boundary_vblank", stats.FirstBoundaryVBlank},
+        {"last_boundary_vblank", stats.LastBoundaryVBlank},
+        {"minimum_interval_vblanks", stats.MinimumIntervalVBlanks},
+        {"maximum_interval_vblanks", stats.MaximumIntervalVBlanks},
+        {"interval_histogram_1_2_3_4_5plus", stats.IntervalHistogram},
+        {"top_screen_commits", stats.ScreenCommits[0]},
+        {"bottom_screen_commits", stats.ScreenCommits[1]},
+        {"set_buffer_swap_commits", stats.SetBufferSwapCommits},
+        {"shared_memory_commits", stats.SharedMemoryCommits},
+    };
+}
+
 #if defined(OOT3D_BOOT_PROBE_WHOLE_AOT)
 struct WholeAotDispatch {
     bool ManualCompiledFunctions = false;
+    Oot3dNativeGame::FrameBoundaryProvider* GuestPcFrameBoundary = nullptr;
 };
 
 // Sem registro de blocos: todo PC passa por aqui. Fora das funções
@@ -235,6 +341,9 @@ bool ExecuteTitleWholeAot(uint32_t pc, oot3d::recomp::a32::GuestState& state,
                           uint32_t blockBudget, uint32_t* blocksConsumed,
                           void* user) {
     const auto* dispatch = static_cast<const WholeAotDispatch*>(user);
+    if (dispatch != nullptr && dispatch->GuestPcFrameBoundary != nullptr) {
+        dispatch->GuestPcFrameBoundary->ObserveGuestBlock(pc);
+    }
     auto& nativeMemory = static_cast<Oot3dNativeGame::NativeA32Memory&>(memory);
     return Oot3dNativeGame::ExecuteOot3dCompiledFunction(
         pc, state, nativeMemory, result, blockBudget, blocksConsumed, nullptr,
@@ -321,6 +430,18 @@ int main(int argc, char** argv) {
         hostConfig.StubUnknownServices = profile.StubUnknownServices;
         hostConfig.KernelWaitTimeouts = profile.KernelWaitTimeouts;
         hostConfig.MasterQuestUnlock = profile.MasterQuestUnlock;
+        // Fronteira de quadro: a do perfil e, sempre, a do GSP.
+        auto frameBoundary = Oot3dNativeGame::MakeFrameBoundaryProvider(profile);
+        std::unique_ptr<Oot3dNativeGame::FrameBoundaryProvider>
+            gspShadowFrameBoundary;
+        if (frameBoundary->Source() !=
+            Oot3dNativeGame::CtrFrameBoundarySource::GspPresent) {
+            gspShadowFrameBoundary = Oot3dNativeGame::MakeFrameBoundaryProvider(
+                Oot3dNativeGame::CtrFrameBoundarySource::GspPresent);
+        }
+        Oot3dNativeGame::FrameBoundaryProvider& gspFrameBoundary =
+            gspShadowFrameBoundary ? *gspShadowFrameBoundary : *frameBoundary;
+        hostConfig.FrameBoundary = &gspFrameBoundary;
         Oot3dNativeGame::NativeA32CtrHostServices hostServices(
             std::move(hostConfig));
 #if defined(OOT3D_BOOT_PROBE_WHOLE_AOT)
@@ -330,7 +451,10 @@ int main(int argc, char** argv) {
         }
         Oot3dNativeGame::SetOot3dGuestOverridesActive(profile.GuestOverrides);
         static const oot3d::recomp::a32::Registry emptyRegistry{};
-        WholeAotDispatch wholeAotDispatch{profile.ManualCompiledFunctions};
+        WholeAotDispatch wholeAotDispatch{
+            profile.ManualCompiledFunctions,
+            frameBoundary->GuestHookPcs().empty() ? nullptr
+                                                   : frameBoundary.get()};
         Oot3dNativeGame::NativeA32Process process(emptyRegistry, hostServices);
         process.SetNativeBlockCallback(&ExecuteTitleWholeAot,
                                        &wholeAotDispatch);
@@ -338,6 +462,12 @@ int main(int argc, char** argv) {
         Oot3dNativeGame::NativeA32Process process(
             oot3d::recomp::GetA32GeneratedRegistry(), hostServices);
 #endif
+        if (!frameBoundary->GuestHookPcs().empty()) {
+            const auto hookPcs = frameBoundary->GuestHookPcs();
+            process.SetBlockEntryCallback(
+                &ObserveFrameBoundaryBlock, frameBoundary.get(),
+                std::vector<uint32_t>(hookPcs.begin(), hookPcs.end()));
+        }
         if (!Oot3dNativeGame::MountNativeA32ProcessImage(
                 process, *manifest, arguments->CodeBin, &error)) {
             throw std::runtime_error(error);
@@ -359,6 +489,23 @@ int main(int argc, char** argv) {
         picaFrontend.SetPacketSink(&submissionQueue);
 
         auto result = RunUntilGuestWait(process);
+        std::vector<Oot3dNativeGame::Oot3dPicaDrawSubmission> retainedDraws;
+        GpuWorkCompletionStats gpuWork;
+        const auto completeGpuWork = [&]() {
+            // Concluir pode liberar mais trabalho (o jogo submete a próxima
+            // lista ao ver a P3D): algumas rodadas por VBlank.
+            for (uint32_t round = 0;
+                 arguments->CompleteGpuWork && round < 16U &&
+                 result.Kind !=
+                     Oot3dNativeGame::NativeA32ProcessRunKind::Faulted &&
+                 CompleteDeferredGpuWork(submissionQueue, hostServices,
+                                         process.Memory(), retainedDraws,
+                                         gpuWork);
+                 ++round) {
+                result = RunUntilGuestWait(process);
+            }
+        };
+        completeGpuWork();
         uint32_t vblanksDelivered = 0;
         uint64_t refreshTickRemainder = 0;
         uint64_t nextVblankTick = 0;
@@ -376,11 +523,17 @@ int main(int argc, char** argv) {
                 Oot3dNativeGame::NativeA32ProcessRunKind::Faulted) {
                 break;
             }
+            completeGpuWork();
             if (!hostServices.SignalVBlank(process.Memory())) {
                 break;
             }
+            if (gspShadowFrameBoundary) {
+                // O provedor por PCs também conta os VBlanks (ritmo).
+                frameBoundary->ObserveVBlank();
+            }
             ++vblanksDelivered;
             result = RunUntilGuestWait(process);
+            completeGpuWork();
         }
         const auto& state = process.PrimaryThreadState();
         nlohmann::json registers = nlohmann::json::array();
@@ -537,7 +690,10 @@ int main(int argc, char** argv) {
             compiledVertexShaders;
         std::unordered_map<uint64_t, std::pair<bool, std::string>>
             compiledFragmentShaders;
-        for (const auto& submission : submissionQueue.PendingDraws()) {
+        const auto pendingDraws = submissionQueue.PendingDraws();
+        retainedDraws.insert(retainedDraws.end(), pendingDraws.begin(),
+                             pendingDraws.end());
+        for (const auto& submission : retainedDraws) {
             nlohmann::json resources = nlohmann::json::array();
             for (const auto& resource : submission.Resources) {
                 resources.push_back({
@@ -708,6 +864,46 @@ int main(int argc, char** argv) {
 #else
         const nlohmann::json wholeAot = nullptr;
 #endif
+        nlohmann::json frameBoundaryReport = DescribeFrameBoundary(*frameBoundary);
+        frameBoundaryReport["gsp_shadow"] =
+            gspShadowFrameBoundary
+                ? DescribeFrameBoundary(*gspShadowFrameBoundary)
+                : nlohmann::json(nullptr);
+        {
+            const auto& stats = frameBoundary->Stats();
+            const auto& gspStats = gspFrameBoundary.Stats();
+            std::fprintf(
+                stderr,
+                "[boot-probe] fronteiras de quadro (%s): %llu em %llu vblanks "
+                "(%.3f/vblank, intervalo %llu..%llu vblanks, histograma "
+                "1/2/3/4/5+ = %llu/%llu/%llu/%llu/%llu); commits GSP "
+                "topo=%llu baixo=%llu (SetBufferSwap=%llu, shared mem=%llu)",
+                Oot3dNativeGame::FrameBoundarySourceName(
+                    frameBoundary->Source()),
+                static_cast<unsigned long long>(stats.Boundaries),
+                static_cast<unsigned long long>(stats.VBlanks),
+                stats.BoundariesPerVBlank(),
+                static_cast<unsigned long long>(stats.MinimumIntervalVBlanks),
+                static_cast<unsigned long long>(stats.MaximumIntervalVBlanks),
+                static_cast<unsigned long long>(stats.IntervalHistogram[0]),
+                static_cast<unsigned long long>(stats.IntervalHistogram[1]),
+                static_cast<unsigned long long>(stats.IntervalHistogram[2]),
+                static_cast<unsigned long long>(stats.IntervalHistogram[3]),
+                static_cast<unsigned long long>(stats.IntervalHistogram[4]),
+                static_cast<unsigned long long>(gspStats.ScreenCommits[0]),
+                static_cast<unsigned long long>(gspStats.ScreenCommits[1]),
+                static_cast<unsigned long long>(gspStats.SetBufferSwapCommits),
+                static_cast<unsigned long long>(gspStats.SharedMemoryCommits));
+            if (gspShadowFrameBoundary) {
+                std::fprintf(stderr,
+                             "; sombra gsp_present: %llu fronteiras "
+                             "(%.3f/vblank)",
+                             static_cast<unsigned long long>(
+                                 gspStats.Boundaries),
+                             gspStats.BoundariesPerVBlank());
+            }
+            std::fprintf(stderr, "\n");
+        }
         std::fprintf(stderr,
                      "[boot-probe] fim: run=%s vblanks=%u/%u svcs=%llu "
                      "ultimo_svc=\"%s\" pc=0x%08x%s%s\n",
@@ -731,6 +927,18 @@ int main(int argc, char** argv) {
               {"stub_unknown_services", profile.StubUnknownServices},
               {"kernel_wait_timeouts", profile.KernelWaitTimeouts}}},
             {"whole_aot", wholeAot},
+            {"frame_boundary", std::move(frameBoundaryReport)},
+            {"gpu_work_completion",
+             arguments->CompleteGpuWork
+                 ? nlohmann::json{{"rounds", gpuWork.Rounds},
+                                  {"draws", gpuWork.Draws},
+                                  {"memory_fills", gpuWork.MemoryFills},
+                                  {"completions", gpuWork.Completions},
+                                  {"display_transfers",
+                                   gpuWork.DisplayTransfers},
+                                  {"interrupts_signaled",
+                                   gpuWork.InterruptsSignaled}}
+                 : nlohmann::json(nullptr)},
             {"process",
              {{"name", manifest->ProcessName},
               {"entrypoint", manifest->EntryAddress},

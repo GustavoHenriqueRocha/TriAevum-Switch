@@ -25,6 +25,14 @@ enum class CtrTitleKind : uint8_t {
     Generic,
 };
 
+// Como o runtime acha a fronteira de quadro do jogo (ctr_frame_boundary.h).
+enum class CtrFrameBoundarySource : uint8_t {
+    // PCs do code.bin do OoT3D (GameState_Update 0x00417014 + limitador).
+    Oot3dGuestPcs,
+    // Commit de framebuffer no GSP apresentado no VBlank: qualquer título.
+    GspPresent,
+};
+
 struct CtrTitleProfile {
     CtrTitleKind Kind = CtrTitleKind::Oot3d;
     std::optional<uint64_t> TitleId;
@@ -50,6 +58,9 @@ struct CtrTitleProfile {
     // RTC fixo do probe (ms desde a época CTR "1900"; ver
     // NativeA32CtrHostConfig::FixedDateTimeMilliseconds).
     uint64_t ProbeDateTimeMilliseconds = 3517257600000ULL; // 2011-06-16
+    // Fronteira de quadro: no OoT3D, pelos PCs de sempre (Zelda não muda).
+    CtrFrameBoundarySource FrameBoundary =
+        CtrFrameBoundarySource::Oot3dGuestPcs;
 };
 
 // Program ids conhecidos do OoT3D (JPN, USA, EUR).
@@ -84,6 +95,7 @@ inline CtrTitleProfile GenericTitleProfile(std::optional<uint64_t> titleId) {
     profile.StubUnknownServices = true;
     profile.KernelWaitTimeouts = true;
     profile.ProbeDateTimeMilliseconds = 3530649600000ULL; // 2011-11-18
+    profile.FrameBoundary = CtrFrameBoundarySource::GspPresent;
     return profile;
 }
 

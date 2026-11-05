@@ -429,6 +429,9 @@ private:
   std::optional<Oot3dNativeGame::NativeA32CtrHostServices> hostServicesStorage;
   Oot3dNativeGame::NativeFrameRateContract frameRateContract{};
   std::optional<Oot3dNativeGame::NativeFrameRatePolicy> frameRatePolicyStorage;
+  // Escolhida pelo program id do manifesto (ctr_title_profile.h): OoT3D =
+  // PCs do code.bin; outro título = commit de framebuffer no GSP.
+  std::unique_ptr<Oot3dNativeGame::FrameBoundaryProvider> frameBoundaryProvider;
   Oot3dNativeGame::NativeA32SceneViewProbe sceneViewProbe;
   Oot3dNativeGame::NativeA32PlayerTimingProbe playerTimingProbe;
   Oot3dNativeGame::NativeTemporalEventLedger temporalEventLedger;

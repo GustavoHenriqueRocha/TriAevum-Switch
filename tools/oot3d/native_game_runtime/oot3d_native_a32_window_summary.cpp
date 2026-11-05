@@ -827,6 +827,27 @@ void WriteNativeA32WindowRuntimeSummary(const NativeA32WindowSummaryInputs &in) 
                         : nlohmann::json(nullptr)},
                };
              }()},
+            {"frame_boundary",
+             [&]() -> nlohmann::json {
+               const auto *provider = widescreenProjection.FrameBoundary;
+               if (provider == nullptr) {
+                 return nullptr;
+               }
+               const auto &stats = provider->Stats();
+               return {
+                   {"source", Oot3dNativeGame::FrameBoundarySourceName(
+                                  provider->Source())},
+                   {"boundaries", stats.Boundaries},
+                   {"vblanks", stats.VBlanks},
+                   {"boundaries_per_vblank", stats.BoundariesPerVBlank()},
+                   {"minimum_interval_vblanks", stats.MinimumIntervalVBlanks},
+                   {"maximum_interval_vblanks", stats.MaximumIntervalVBlanks},
+                   {"interval_histogram_1_2_3_4_5plus",
+                    stats.IntervalHistogram},
+                   {"set_buffer_swap_commits", stats.SetBufferSwapCommits},
+                   {"shared_memory_commits", stats.SharedMemoryCommits},
+               };
+             }()},
             {"temporal_event_ledger",
              [&]() {
                const auto &stats = temporalEventLedger.Stats();
