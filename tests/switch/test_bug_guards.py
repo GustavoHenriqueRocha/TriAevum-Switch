@@ -495,6 +495,10 @@ GUARDS = [
     Guard("handler de exceção grava logs/hang.txt sem alocar e devolve (crash report do Atmosphère continua)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'void __libnx_exception_handler\(ThreadExceptionDump\* context\) \{\s+HandleException\(context\);\s+\}'),
+    Guard("deko3d.pack previsto dos CMB (~7,5 MiB) lido byte a byte atrasava o boot",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
+          r'std::ios::binary \| std::ios::ate\);.*?file\.read\(reinterpret_cast<char\*>\(bytes\.data\(\)\)',
+          forbid=r'std::vector<uint8_t> bytes\(\(std::istreambuf_iterator'),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

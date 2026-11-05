@@ -23,12 +23,19 @@ bool ShaderStore::Init(Device& device) {
     if (mCode == nullptr) {
         return false;
     }
-    std::ifstream file(kPackPath, std::ios::binary);
+    std::ifstream file(kPackPath, std::ios::binary | std::ios::ate);
     if (!file) {
         Log("shaders: %s not found (every program will be missing)", kPackPath);
         return true;
     }
-    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    // One read: the pack predicted from the CMB materials is several MiB, and a
+    // per-byte istreambuf_iterator copy over the SD card delays the boot.
+    std::vector<uint8_t> bytes(static_cast<size_t>(file.tellg()));
+    file.seekg(0);
+    if (!file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()))) {
+        Log("shaders: %s could not be read", kPackPath);
+        return true;
+    }
     std::string error;
     if (!mPack.Parse(std::move(bytes), &error)) {
         Log("shaders: %s rejected: %s", kPackPath, error.c_str());

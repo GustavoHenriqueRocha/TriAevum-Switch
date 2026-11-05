@@ -56,7 +56,7 @@ def material_registers(c: bytes, base: int, combs: list[bytes]) -> dict[int, int
     return regs
 
 
-def scan(d: bytes, out: dict[tuple, dict[int, int]], errors: list[str], name: str) -> None:
+def scan(d: bytes, out: dict[tuple, dict[int, int]], lit: set[tuple], errors: list[str], name: str) -> None:
     i = d.find(b'cmb ')
     while i >= 0:
         try:
@@ -72,7 +72,10 @@ def scan(d: bytes, out: dict[tuple, dict[int, int]], errors: list[str], name: st
                     except KeyError as missing:
                         errors.append(f'{name}: enum desconhecido 0x{missing.args[0]:x}')
                         continue
-                    out.setdefault(tuple(sorted(regs.items())), regs)
+                    key = tuple(sorted(regs.items()))
+                    out.setdefault(key, regs)
+                    if c[mats + 0xC + m * 0x15C]:
+                        lit.add(key)
         except struct.error:
             pass
         i = d.find(b'cmb ', i + 4)
@@ -82,15 +85,19 @@ def main() -> int:
     root, output = sys.argv[1], sys.argv[2]
     unique: dict[tuple, dict[int, int]] = {}
     errors: list[str] = []
+    lit: set[tuple] = set()
     for directory, _, files in os.walk(root):
         for name in sorted(files):
             if name.endswith(('.zar', '.zsi', '.gar', '.cmb')):
                 with open(os.path.join(directory, name), 'rb') as f:
-                    scan(f.read(), unique, errors, name)
-    with open(output, 'w') as f:
-        for index, regs in enumerate(unique.values()):
+                    scan(f.read(), unique, lit, errors, name)
+    # <saida>.luz: ids dos materiais com luz de fragmento ligada em algum CMB.
+    with open(output, 'w') as f, open(output + '.luz', 'w') as luz:
+        for index, (key, regs) in enumerate(unique.items()):
             f.write(f'm{index:04d} ' + ' '.join(f'{r:x}={v:x}' for r, v in sorted(regs.items())) + '\n')
-    print(f'{len(unique)} materiais únicos, {len(errors)} com enum desconhecido')
+            if key in lit:
+                luz.write(f'm{index:04d}\n')
+    print(f'{len(unique)} materiais únicos ({len(lit)} com luz de fragmento), {len(errors)} com enum desconhecido')
     for line in sorted(set(errors))[:10]:
         print(' ', line)
     return 0
