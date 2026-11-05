@@ -48,6 +48,7 @@ UNIT_TESTS=(
     oot3d_pica_texture_predecode_tests
     oot3d_switch_motion_tests
     oot3d_rom_import_tests
+    oot3d_host_menu_touch_tests
     oot3d_switch_thread_layout_tests
     oot3d_top_screen_hud_touch_tests
     oot3d_top_screen_mod_profile_tests

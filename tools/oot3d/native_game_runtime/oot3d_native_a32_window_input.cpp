@@ -4,6 +4,7 @@
 #if defined(__SWITCH__)
 #include "fast/oot3d/debug_menu.h"
 #include "oot3d_switch_motion.h"
+#include "oot3d_host_menu_touch.h"
 #include "oot3d_top_screen_hud_touch.h"
 
 #include <cfloat>
@@ -101,10 +102,54 @@ void ScrollHostMenuUnderPointer(float scrollY) {
   }
 }
 
+// The title-bar close buttons of the ImGui windows drawn this frame, where a
+// landing finger snaps (oot3d_host_menu_touch.h): ImGui draws the X a font
+// height wide (17 px at 720p, under 2 mm on a Switch Lite), so a finger
+// mostly lands beside it. A button under a window in front (a popup) within
+// the snap radius is left out. Docked windows close from their tab instead.
+std::size_t CollectHostMenuCloseButtons(
+    std::span<Oot3dNativeGame::HostMenuTouchRect> out, float radius) {
+  const ImGuiContext &g = *ImGui::GetCurrentContext();
+  const ImGuiStyle &style = g.Style;
+  const auto shown = [](const ImGuiWindow *window) {
+    return window->Active && !window->Hidden &&
+           (window->Flags & ImGuiWindowFlags_NoMouseInputs) == 0;
+  };
+  std::size_t count = 0;
+  for (int index = 0; index < g.Windows.Size && count < out.size(); ++index) {
+    const ImGuiWindow *window = g.Windows[index];
+    if (!shown(window) || !window->HasCloseButton || window->DockIsActive ||
+        (window->Flags & (ImGuiWindowFlags_NoTitleBar |
+                          ImGuiWindowFlags_ChildWindow)) != 0) {
+      continue;
+    }
+    // RenderWindowTitleBarContents' layout.
+    const ImRect title = window->TitleBarRect();
+    const float size = window->FontRefSize;
+    const ImVec2 min(title.Max.x - style.FramePadding.x - size,
+                     title.Min.y + style.FramePadding.y);
+    const ImRect button(min, ImVec2(min.x + size, min.y + size));
+    ImRect zone = button;
+    zone.Expand(radius);
+    bool covered = false;
+    // g.Windows runs back to front.
+    for (int front = index + 1; front < g.Windows.Size && !covered; ++front) {
+      const ImGuiWindow *other = g.Windows[front];
+      covered = shown(other) && other->RootWindow != window &&
+                other->Rect().Overlaps(zone);
+    }
+    if (!covered) {
+      out[count++] = {button.Min.x, button.Min.y, button.Max.x, button.Max.y};
+    }
+  }
+  return count;
+}
+
 // The host menu finger as a touch-screen mouse for ImGui (no platform
-// backend on deko3d). Runs on the game thread inside the ImGui frame; the
-// events apply at the next ImGui::NewFrame, and ImGui's input trickling
-// spreads a press and its release over separate frames.
+// backend on deko3d). Runs on the game thread inside the ImGui frame, after
+// the windows were drawn; the events apply at the next ImGui::NewFrame, and
+// ImGui's input trickling spreads a press and its release over separate
+// frames.
 void FeedHostMenuTouch(Oot3dNativeGame::HostMenuTouchGesture &gesture,
                        const Oot3dNativeGame::TopScreenTouchPollResult &touch) {
   if (ImGui::GetCurrentContext() == nullptr ||
@@ -112,9 +157,21 @@ void FeedHostMenuTouch(Oot3dNativeGame::HostMenuTouchGesture &gesture,
     return;
   }
   ImGuiIO &io = ImGui::GetIO();
-  const auto events = gesture.Update(
-      {touch.MenuPressed, touch.MenuX * io.DisplaySize.x,
-       touch.MenuY * io.DisplaySize.y, ImGui::IsAnyItemHovered()});
+  // Distances in 720p pixels (the handheld panel), scaled to the display.
+  const float unit = io.DisplaySize.y / 720.0F;
+  Oot3dNativeGame::HostMenuTouchSample sample{
+      touch.MenuPressed, touch.MenuX * io.DisplaySize.x,
+      touch.MenuY * io.DisplaySize.y, ImGui::IsAnyItemHovered()};
+  sample.TapSlop = 16.0F * unit;
+  std::array<Oot3dNativeGame::HostMenuTouchRect, 8> closeButtons{};
+  // Snap targets are only read when the finger lands.
+  if (gesture.Idle()) {
+    sample.SnapRadius = 24.0F * unit;
+    sample.SnapTargets = std::span(closeButtons.data(),
+                                   CollectHostMenuCloseButtons(
+                                       closeButtons, sample.SnapRadius));
+  }
+  const auto events = gesture.Update(sample);
   if (events.MovePointer || events.Press || events.Release ||
       events.ClearPointer) {
     io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);

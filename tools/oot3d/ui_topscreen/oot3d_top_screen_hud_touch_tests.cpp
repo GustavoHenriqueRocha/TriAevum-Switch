@@ -587,72 +587,6 @@ void TestMenuOwnership() {
           "a gameplay finger is not the menu pointer");
 }
 
-void TestMenuGesture() {
-  using Gesture = HostMenuTouchGesture;
-  const auto sample = [](bool pressed, float x, float y, bool hovered) {
-    return HostMenuTouchSample{pressed, x, y, hovered};
-  };
-
-  // On an item: the pointer first, the press once ImGui hovered it, the drag
-  // follows, and the lift releases and clears the pointer.
-  Gesture gesture;
-  auto events = gesture.Update(sample(true, 100, 200, false));
-  Require(events.MovePointer && events.PointerX == 100 &&
-              events.PointerY == 200 && !events.Press,
-          "landing only moves the pointer");
-  for (std::uint8_t poll = 1; poll < Gesture::kHoverSettlePolls; ++poll) {
-    events = gesture.Update(sample(true, 100, 200, false));
-    Require(!events.Press && !events.MovePointer && events.ScrollY == 0,
-            "waiting for ImGui's hover of the new pointer");
-  }
-  events = gesture.Update(sample(true, 101, 200, true));
-  Require(events.Press && !events.Release && events.ScrollY == 0,
-          "a hovered item is pressed");
-  events = gesture.Update(sample(true, 160, 205, true));
-  Require(events.MovePointer && events.PointerX == 160 && !events.Press &&
-              events.ScrollY == 0,
-          "dragging a pressed item (a slider) moves the pointer");
-  events = gesture.Update(sample(false, 160, 205, false));
-  Require(events.Release && events.ClearPointer && !events.Press,
-          "lifting releases and clears the pointer");
-  Require(gesture.Idle(), "the gesture ends with the finger");
-
-  // On empty space: vertical motion scrolls 1:1, nothing is pressed.
-  events = gesture.Update(sample(true, 300, 400, false));
-  for (std::uint8_t poll = 1; poll < Gesture::kHoverSettlePolls; ++poll)
-    events = gesture.Update(sample(true, 300, 390, false));
-  events = gesture.Update(sample(true, 300, 380, false));
-  Require(!events.Press && Near(events.ScrollY, -20) && events.MovePointer,
-          "a drag on empty space scrolls by its motion since landing");
-  events = gesture.Update(sample(true, 302, 330, true));
-  Require(!events.Press && Near(events.ScrollY, -50),
-          "scrolling follows the finger, even over items");
-  events = gesture.Update(sample(false, 302, 330, false));
-  Require(!events.Press && !events.Release && events.ClearPointer,
-          "a scroll ends without a click");
-
-  // A tap on empty space is still a click (closes popups), as is a tap
-  // that lifts before ImGui's hover is known.
-  events = gesture.Update(sample(true, 500, 500, false));
-  for (std::uint8_t poll = 1; poll < Gesture::kHoverSettlePolls; ++poll)
-    events = gesture.Update(sample(true, 503, 498, false));
-  events = gesture.Update(sample(true, 503, 498, false));
-  events = gesture.Update(sample(false, 503, 498, false));
-  Require(events.MovePointer && events.PointerX == 500 && events.Press &&
-              events.Release && events.ClearPointer,
-          "a tap on empty space clicks where it landed");
-  events = gesture.Update(sample(true, 50, 60, false));
-  events = gesture.Update(sample(false, 50, 60, false));
-  Require(events.Press && events.Release && events.ClearPointer &&
-              events.PointerX == 50 && events.PointerY == 60,
-          "a quick tap clicks");
-  Require(gesture.Idle(), "a tap ends the gesture");
-  events = gesture.Update(sample(false, 0, 0, false));
-  Require(!events.MovePointer && !events.Press && !events.Release &&
-              !events.ClearPointer,
-          "no finger, no events");
-}
-
 } // namespace
 
 int main() {
@@ -665,7 +599,6 @@ int main() {
   TestAimRates();
   TestAimThroughMotionSources();
   TestMenuOwnership();
-  TestMenuGesture();
   std::cout << "oot3d_top_screen_hud_touch_tests: ok\n";
   return 0;
 }

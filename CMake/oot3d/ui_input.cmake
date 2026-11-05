@@ -10,6 +10,7 @@ add_library(oot3d_ui_topscreen STATIC EXCLUDE_FROM_ALL
     tools/oot3d/ui_topscreen/oot3d_top_screen_controls.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_gameplay_actions.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_presentation.cpp
+    tools/oot3d/ui_topscreen/oot3d_host_menu_touch.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_items_hint.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_camera.cpp
@@ -62,6 +63,12 @@ add_executable(oot3d_top_screen_hud_touch_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_top_screen_hud_touch_tests PRIVATE
     oot3d_ui_topscreen)
 oot3d_target_defaults(oot3d_top_screen_hud_touch_tests FOLDER Tests)
+
+add_executable(oot3d_host_menu_touch_tests EXCLUDE_FROM_ALL
+    tools/oot3d/ui_topscreen/oot3d_host_menu_touch.cpp
+    tools/oot3d/ui_topscreen/oot3d_host_menu_touch_tests.cpp
+)
+oot3d_target_defaults(oot3d_host_menu_touch_tests FOLDER Tests)
 
 add_executable(oot3d_top_screen_items_hint_tests EXCLUDE_FROM_ALL
     tools/oot3d/ui_topscreen/oot3d_top_screen_items_hint_tests.cpp

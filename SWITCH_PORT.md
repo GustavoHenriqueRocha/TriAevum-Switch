@@ -86,9 +86,14 @@ Desempenho e usabilidade:
   Toques curtos ficam retidos até o jogo ler. Com o menu L3+R3 (ou outra janela ImGui) aberto, o
   primeiro dedo que encosta é um mouse de toque do ImGui: toque em botões, caixas, abas e itens de
   combo, arraste sliders e barras de rolagem, arraste espaço vazio para rolar; o controle continua
-  navegando. Esse dedo nunca chega ao jogo, e dedos que encostaram antes de o menu abrir ficam fora
-  dele. Teste de acerto, encaixe, posse e o gesto do menu: `oot3d_top_screen_hud_touch.h`,
-  `oot3d_top_screen_hud_touch_tests.cpp`.
+  navegando. Um toque (dedo que sai da tela a até 16 px de onde encostou, em 720p) sempre clica
+  onde encostou, por mais curto que seja: o ponteiro apertado fica parado até o dedo sair dessa
+  folga, então um dedo que rola ao levantar não leva a soltura para fora de um botão pequeno. Um
+  dedo que encosta a até 24 px do X da barra de título de uma janela (17 px, menos de 2 mm no Lite)
+  aperta o X, que fecha o menu como o L3+R3. Esse dedo nunca chega ao jogo, e dedos que encostaram
+  antes de o menu abrir ficam fora dele. Teste de acerto, encaixe e posse:
+  `oot3d_top_screen_hud_touch.h`, `oot3d_top_screen_hud_touch_tests.cpp`; o gesto do menu:
+  `oot3d_host_menu_touch.h`, `oot3d_host_menu_touch_tests.cpp`.
 - **Gerador AOT**: helpers quentes com caminho rápido inline e lento frio; LDM/STM por bloco;
   literais PC-relativos dobrados; shards sem `-ffast-math` (exatidão do VFP).
 - **Orçamento de blocos** 2048 (era 128) no Switch.
