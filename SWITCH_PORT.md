@@ -73,7 +73,13 @@ Desempenho e usabilidade:
     `gl_widescreen_menu_policy.h`, `tests/gl_widescreen_menu_policy_tests.cpp`.
 - **Tela de toque**: lida do HID (libnx `hidGetTouchScreenStates`), já que o SDL não reporta dedos
   sem janela (deko3d). Tocar funciona onde o mouse funciona no PC (tela de título/seleção de arquivo
-  e as páginas de pausa Itens/Mapa/Equipamento do TopScreen). No jogo em movimento, tocar num
+  e as páginas de pausa Itens/Mapa/Equipamento do TopScreen). Um toque nessas páginas cai no
+  elemento sob o dedo: o TopScreen desenha as páginas de 320 de largura da tela de baixo pixel por
+  pixel na tela de cima de 400 em X + 40 (a grade da página Itens alargada em X + 63, a sexta
+  coluna em X + 80), e o toque inverte isso (`oot3d_top_screen_page_layout.h`, que os planos de
+  alvo das páginas e o desenho da Itens alargada também leem; teste `oot3d_native_a32_input_tests`).
+  Antes o toque reduzia 400 para 320, e no lado esquerdo da página Itens um toque selecionava o
+  item à direita (primeira coluna: X nativo 76 em vez de 32). No jogo em movimento, tocar num
   controle do HUD do TopScreen aperta o controle que ele mostra enquanto o dedo está na tela: X, Y,
   Item I (ZR), Item II (ZL), B e a direção do D-pad dos ícones de ação em volta da cruz
   (Visão/Navi, Ocarina, botas...). Cada dedo é testado onde encosta (vários dedos ao mesmo tempo).

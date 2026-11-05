@@ -379,6 +379,9 @@ add_executable(oot3d_native_a32_input_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(oot3d_native_a32_input_tests PRIVATE
     oot3d_native_a32_input)
+# The Switch page-touch test places a page with the renderer's own plans.
+target_include_directories(oot3d_native_a32_input_tests PRIVATE
+    runtime/three_ds_recomp/include)
 oot3d_target_defaults(oot3d_native_a32_input_tests FOLDER Tests)
 
 # Seis eixos do Switch -> movimento do 3DS: conversão e média (oot3d_switch_motion.h).

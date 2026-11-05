@@ -1,6 +1,7 @@
 // TopScreen mod profile: quest and system menu geometry, model transforms and the pause
 // projection.
 #include "oot3d_top_screen_mod_profile_internal.h"
+#include "oot3d_top_screen_page_layout.h"
 
 namespace Oot3dNativeGame {
 
@@ -1032,9 +1033,9 @@ ResolveTopScreenPauseTargetCommand(const TopScreenPauseTargetCommand &command,
   } else if (command.NativeCommand == 0x401U) {
     result.BindTopTarget = true;
     result.FramebufferBindingOffset = 0x38U;
-    result.ViewportY = 40U;
+    result.ViewportY = kTopScreenCentredPageX;
     result.ViewportWidth = command.HalfHeightMode ? 240U : 480U;
-    result.ViewportHeight = 320U;
+    result.ViewportHeight = kTopScreenPageWidthPixels;
   }
   return result;
 }
@@ -1043,9 +1044,9 @@ TopScreenPauseTargetPlan ResolveTopScreenPausePageRedrawTargetCommand(
     const TopScreenPauseTargetCommand &command) noexcept {
   auto result = ResolveTopScreenPauseTargetCommand(command, true);
   if (result.BindTopTarget && command.NativeCommand == 0x400U) {
-    result.ViewportY = 40U;
+    result.ViewportY = kTopScreenCentredPageX;
     result.ViewportWidth = 480U;
-    result.ViewportHeight = 320U;
+    result.ViewportHeight = kTopScreenPageWidthPixels;
   }
   return result;
 }
@@ -1053,10 +1054,11 @@ TopScreenPauseTargetPlan ResolveTopScreenPausePageRedrawTargetCommand(
 void WidenTopScreenPauseTargetForPage(TopScreenPauseTargetPlan &plan,
                                       bool widePage) noexcept {
   if (!widePage || !plan.BindTopTarget || plan.ViewportWidth != 480U ||
-      plan.ViewportY != 40U || plan.ViewportHeight != 320U)
+      plan.ViewportY != kTopScreenCentredPageX ||
+      plan.ViewportHeight != kTopScreenPageWidthPixels)
     return;
   plan.ViewportY = 0U;
-  plan.ViewportHeight = 400U;
+  plan.ViewportHeight = kTopScreenPresentedWidthPixels;
 }
 
 TopScreenPauseTargetPlan ResolveTopScreenPauseCompositionTargetCommand(

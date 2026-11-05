@@ -1086,6 +1086,20 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
           r'if \(!failure\.empty\(\)\) \{.*?return false;\s+\}.*?if \(\*button & HidNpadButton_Y\) \{\s+try \{\s+ri::RemoveSource\(plan->Input\);',
           forbid=r'RemoveSource\((?!plan->Input\);)'),
+    # --- 05/11: toque no inventário uma casa ao lado (pausa Itens/Equip./Mapa, TopScreen) ---
+    # O toque reduzia a tela de cima de 400 de largura à tela de toque de 320,
+    # mas o TopScreen desenha a página pixel por pixel em X + 40 (a grade da
+    # página Itens alargada em X + 63, a sexta coluna em X + 80): um toque na
+    # primeira coluna de Itens caía na segunda.
+    Guard("tocar num item do inventário da pausa selecionava o bloco à direita (lado esquerdo da página)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_input.cpp",
+          r'MapPresentationPointToTouch\(\s+TopScreenPresentedToPageX\(topScreen\.X, layout\), topScreen\.Y,',
+          "oot3d_native_a32_input_tests (TestSwitchPageTouchLandsOnTheTappedElement)",
+          forbid=r'TopScreen400x240'),
+    Guard("toque no inventário: a página Itens alargada mapeia com o próprio layout (grade X + 63, sexta coluna X + 80)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'ReadTopScreenWidePageState\(memory, &page\) &&\s+page\.ItemsActive\s+'
+          r'\? NativeA32TouchPresentation::TopScreenWideItemsPage'),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

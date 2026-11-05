@@ -1,4 +1,5 @@
 #include "oot3d_top_screen_wide_items_runtime.h"
+#include "oot3d_top_screen_page_layout.h"
 
 #include <algorithm>
 #include <array>
@@ -25,11 +26,14 @@ constexpr std::uint32_t kUploadUniformBlock4 = 0x003246BCU;
 constexpr std::uint32_t kAccumulateWriter = 0x002F9C74U;
 constexpr std::uint32_t kItemsPageDraw = 0x00434C80U;
 constexpr std::uint32_t kQuadGroupDraw = 0x002FB934U;
-// Payload literals: -0.005, and the offsets 0.8 (0x005E219C), 0.6, 0.685.
-constexpr std::uint32_t kWideScale = 0xBBA3D70AU;
-constexpr std::uint32_t kPageOffset = 0x3F4CCCCDU;
-constexpr std::uint32_t kItemsOffset = 0x3F19999AU;
-constexpr std::uint32_t kCursorOffset = 0x3F2F5C29U;
+// Payload literals: -0.005, and the offsets 0.8 (0x005E219C), 0.6, 0.685
+// (oot3d_top_screen_page_layout.h, which the touch mapping inverts).
+constexpr std::uint32_t kWideScale = std::bit_cast<std::uint32_t>(kTopScreenWidePageScale);
+constexpr std::uint32_t kPageOffset = std::bit_cast<std::uint32_t>(kTopScreenWidePageOffset);
+constexpr std::uint32_t kItemsOffset = std::bit_cast<std::uint32_t>(kTopScreenWideItemsOffset);
+constexpr std::uint32_t kCursorOffset = std::bit_cast<std::uint32_t>(kTopScreenWideItemsCursorOffset);
+static_assert(kWideScale == 0xBBA3D70AU && kPageOffset == 0x3F4CCCCDU &&
+              kItemsOffset == 0x3F19999AU && kCursorOffset == 0x3F2F5C29U);
 // 0x20 outgoing, then three 64-byte matrices.
 constexpr std::uint32_t kScratch = 0xE0U;
 constexpr std::uint32_t kQuadBytes = 48U;
@@ -87,7 +91,7 @@ bool ShiftGroup(NativeA32Memory &memory, std::uint32_t groupAddress, std::uint32
     float x = 0.0F;
     const std::uint32_t address = stream + quad * kQuadBytes;
     if (!ReadFloat(memory, address, &x)) return false;
-    if (x < 256.0F && !AddQuadX(memory, address, delta)) return false;
+    if (x < kTopScreenWideItemsLeftRegionEnd && !AddQuadX(memory, address, delta)) return false;
   }
   return true;
 }
@@ -153,14 +157,15 @@ bool ApplyTopScreenWideItemsGeometry(NativeA32Memory &memory) {
   }
   if (stream != 0U) {
     for (const auto quad : kBackgroundQuads)
-      if (!AddQuadX(memory, stream + quad * kQuadBytes, -40.0F)) return false;
+      if (!AddQuadX(memory, stream + quad * kQuadBytes, kTopScreenWideItemsBackgroundShift))
+        return false;
     for (const auto quad : kGridQuads)
-      if (!AddQuadX(memory, stream + quad * kQuadBytes, -17.0F)) return false;
+      if (!AddQuadX(memory, stream + quad * kQuadBytes, kTopScreenWideItemsGridShift)) return false;
   }
   // 0x005D1A54..0x005D1A80: the icon groups.
-  if (!ShiftGroup(memory, kItemsIconGroup, 24U, -17.0F) ||
-      !ShiftGroup(memory, kItemsIconGroupB, 1U, -17.0F) ||
-      !ShiftGroup(memory, kItemsIconGroupC, 1U, -17.0F))
+  if (!ShiftGroup(memory, kItemsIconGroup, 24U, kTopScreenWideItemsGridShift) ||
+      !ShiftGroup(memory, kItemsIconGroupB, 1U, kTopScreenWideItemsGridShift) ||
+      !ShiftGroup(memory, kItemsIconGroupC, 1U, kTopScreenWideItemsGridShift))
     return false;
   // 0x005D1A84..0x005D1B84: the visible assignment icons' origins left of
   // X 200 are set to -17.

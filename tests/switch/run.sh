@@ -54,6 +54,7 @@ UNIT_TESTS=(
     oot3d_top_screen_mod_profile_tests
     oot3d_top_screen_pause_transaction_tests
     oot3d_top_screen_texture_overrides_tests
+    oot3d_top_screen_wide_items_runtime_tests
     triaevum_audio_service_tests
     three_ds_recomp_input_tests
 )

@@ -696,6 +696,9 @@ void ApplyNativeWidescreenProjectionPolicy(
 Oot3dNativeGame::NativeA32InputFrame
 PollNativeA32Input(Fast::Fast3dWindow &window,
                    bool nativeFrontendTouchEnabled,
+                   // Where the page that owns the touch is drawn.
+                   Oot3dNativeGame::NativeA32TouchPresentation
+                       nativeTouchPresentation,
                    bool hostGuiVisible,
                    bool topScreenUiProfile,
                    bool topScreenFreeCameraEnabled,
@@ -726,5 +729,12 @@ bool ResolveNativeA32TouchInputEnabled(
     Oot3dNativeGame::NativeA32Memory &memory,
     const Oot3dNativeGame::Oot3dNativeUiLifecycleBridge &uiLifecycleBridge,
     bool topScreenUiProfile);
+
+// The default profile's lower screen, or the TopScreen page on the top
+// screen: the widened Items page while Items is open (the predicate the
+// wide-page draw uses, ReadTopScreenWidePageState), else a centred page.
+// O PiP de um título genérico tem precedência em PollNativeA32Input.
+Oot3dNativeGame::NativeA32TouchPresentation ResolveNativeA32TouchPresentation(
+    Oot3dNativeGame::NativeA32Memory &memory, bool topScreenUiProfile);
 
 } // namespace Oot3dA32Window

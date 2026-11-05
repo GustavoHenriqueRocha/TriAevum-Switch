@@ -191,6 +191,8 @@ void FeedHostMenuTouch(Oot3dNativeGame::HostMenuTouchGesture &gesture,
 Oot3dNativeGame::NativeA32InputFrame
 PollNativeA32Input(Fast::Fast3dWindow &window,
                    bool nativeFrontendTouchEnabled,
+                   Oot3dNativeGame::NativeA32TouchPresentation
+                       nativeTouchPresentation,
                    bool hostGuiVisible,
                    bool topScreenUiProfile,
                    bool topScreenFreeCameraEnabled,
@@ -509,10 +511,7 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
         lowerScreenPictureInPicture
             ? Oot3dNativeGame::NativeA32TouchPresentation::
                   LowerScreenPictureInPicture
-        : topScreenUiProfile
-            ? Oot3dNativeGame::NativeA32TouchPresentation::TopScreen400x240
-            : Oot3dNativeGame::NativeA32TouchPresentation::
-                  NativeLowerScreen320x240);
+            : nativeTouchPresentation);
     frame.Hid.TouchX = touch.X;
     frame.Hid.TouchY = touch.Y;
     frame.Hid.TouchPressed = touch.Pressed;
@@ -576,6 +575,19 @@ bool ResolveNativeA32TouchInputEnabled(
       uiLifecycleBridge.NativeFrontendPresentationActive() ||
           uiLifecycleBridge.NativeVersionChoiceAwaitingReveal(),
       nativePausePageActive);
+}
+
+Oot3dNativeGame::NativeA32TouchPresentation ResolveNativeA32TouchPresentation(
+    Oot3dNativeGame::NativeA32Memory &memory, bool topScreenUiProfile) {
+  using Oot3dNativeGame::NativeA32TouchPresentation;
+  if (!topScreenUiProfile) {
+    return NativeA32TouchPresentation::NativeLowerScreen320x240;
+  }
+  Oot3dNativeGame::TopScreenWidePageState page;
+  return Oot3dNativeGame::ReadTopScreenWidePageState(memory, &page) &&
+                 page.ItemsActive
+             ? NativeA32TouchPresentation::TopScreenWideItemsPage
+             : NativeA32TouchPresentation::TopScreenCentredPage;
 }
 
 } // namespace Oot3dA32Window

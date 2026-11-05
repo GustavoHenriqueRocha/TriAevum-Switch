@@ -906,6 +906,9 @@ bool NativeA32WindowSession::RunFrame() {
   auto physicalInputFrame =
       PollNativeA32Input(window,
                          nativeFrontendTouchEnabled || lowerScreenPictureInPicture,
+                         ResolveNativeA32TouchPresentation(
+                             process.Memory(),
+                             nativeCandidateDispatch.TopScreenUiProfile),
                          hostGuiVisible,
                          nativeCandidateDispatch.TopScreenUiProfile,
                          activeTopScreenConfig.FreeCameraEnabled,
