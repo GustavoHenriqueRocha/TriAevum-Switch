@@ -97,6 +97,12 @@ add_executable(oot3d_native_pica_cache_inventory EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_native_pica_cache_inventory PRIVATE oot3d_native_pica_frontend)
 # deko3d: GLSL 4.3 dos 4 programas paramétricos (uber) para o deko3d.pack
 # (tools/oot3d/deko3d_shader_pack.py --glsl).
+add_executable(oot3d_deko3d_register_glsl_dump EXCLUDE_FROM_ALL
+    tools/oot3d/deko3d_register_glsl_dump.cpp
+)
+target_compile_features(oot3d_deko3d_register_glsl_dump PRIVATE cxx_std_20)
+target_link_libraries(oot3d_deko3d_register_glsl_dump PRIVATE oot3d_native_pica_frontend)
+
 add_executable(oot3d_deko3d_parametric_glsl_dump EXCLUDE_FROM_ALL
     tools/oot3d/deko3d_parametric_glsl_dump.cpp
     runtime/three_ds_recomp/src/fast/renderer3ds/pica_gl_shader_dialect.cpp)
