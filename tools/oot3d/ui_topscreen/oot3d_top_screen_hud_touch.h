@@ -10,9 +10,10 @@
 // cross), so every existing consumer decides what happens.
 //
 // Each finger gets an owner when it lands and keeps it until it lifts: the
-// native page touch (title, file select, pause pages), one HUD control, or
-// nothing. A finger that lands outside a control never reaches gameplay and
-// never becomes a control by sliding onto one.
+// native page touch (title, file select, pause pages), one HUD control, the
+// aim (drag aiming, when enabled: the first finger that lands outside every
+// control), or nothing. A finger that lands outside a control never presses
+// one, even if it slides onto it, and a HUD finger never aims.
 
 #include "oot3d_ui/ui_primitives.h"
 
@@ -80,6 +81,7 @@ enum class TopScreenTouchOwner : std::uint8_t {
   Unassigned,
   Page,
   Hud,
+  Aim,
   Ignored,
 };
 
@@ -103,6 +105,9 @@ struct TopScreenTouchFinger {
   float DownY = 0.0F;
   float X = 0.0F;
   float Y = 0.0F;
+  // Aim fingers: the position already delivered as aim motion.
+  float AimX = 0.0F;
+  float AimY = 0.0F;
   TopScreenTouchOwner Owner = TopScreenTouchOwner::Unassigned;
   TopScreenHudTouchControl Control = TopScreenHudTouchControl::None;
 };
@@ -134,7 +139,14 @@ struct TopScreenTouchPollContext {
   const TopScreenHudTouchTargets *Targets = nullptr;
   std::uint32_t WindowWidth = 0;
   std::uint32_t WindowHeight = 0;
+  // Drag aiming (aim.touch_enabled).
+  bool AimEnabled = false;
 };
+
+// The touch panel in pixels, the unit of aim motion (and of
+// aim.touch_degrees_per_pixel), whatever the window size.
+inline constexpr float kTopScreenTouchPanelWidth = 1280.0F;
+inline constexpr float kTopScreenTouchPanelHeight = 720.0F;
 
 struct TopScreenTouchPollResult {
   // The page pointer: the first page-owned finger, as before (one pointer).
@@ -143,6 +155,10 @@ struct TopScreenTouchPollResult {
   float PageY = 0.0F;
   // Pad bits of every HUD control held by a finger, outside pages and host UI.
   std::uint32_t HudButtons = 0;
+  // Aim finger motion since the last consuming poll, in panel pixels; only
+  // on consuming polls, outside pages and host UI.
+  float AimDeltaX = 0.0F;
+  float AimDeltaY = 0.0F;
 };
 
 // A HUD press lasts at least this many consuming polls (guest refreshes):

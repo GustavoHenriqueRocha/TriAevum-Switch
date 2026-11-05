@@ -417,6 +417,38 @@ int main(int argc, char** argv) {
                     parsedControls == config,
                 "control persistence changed combined defaults or an explicit keyboard-only preference");
     }
+    // Touch drag aim: files from before it get the defaults (on, 0.14
+    // deg/px); a changed setting round-trips; out-of-range is rejected.
+    Require(ParseNativeControlConfigText(
+                R"({"schema":"oot3d_native_controls_v1","profile":"controller","aim":{"source":"automatic","invert_x":true}})",
+                &parsedControls, &controlsError) &&
+                parsedControls.TouchAimEnabled &&
+                parsedControls.TouchAimDegreesPerPixel == 0.14F &&
+                parsedControls.NativeAimInvertX,
+            "an aim block without touch keys did not get the touch defaults");
+    {
+        auto touchConfig = controllerConfig;
+        touchConfig.TouchAimEnabled = false;
+        touchConfig.TouchAimDegreesPerPixel = 0.3F;
+        Require(SerializeNativeControlConfigText(touchConfig, &serializedControls, &controlsError) &&
+                    serializedControls.find("\"touch_enabled\": false") != std::string::npos &&
+                    ParseNativeControlConfigText(serializedControls, &parsedControls, &controlsError) &&
+                    !parsedControls.TouchAimEnabled &&
+                    parsedControls.TouchAimDegreesPerPixel == 0.3F,
+                "touch aim settings did not round-trip");
+        touchConfig.TouchAimDegreesPerPixel = 0.0F;
+        Require(!ValidateNativeControlConfig(touchConfig, &controlsError),
+                "a zero touch sensitivity was accepted");
+        const auto mapped = [&](float deltaX) {
+            NativeControlHostInputState host;
+            host.SamplePeriodSeconds = 1.0 / 30.0;
+            host.TouchAimDeltaX = deltaX;
+            return MapNativeControlInput(controllerConfig, host)
+                .Hid.GyroscopeDegreesPerSecond[1];
+        };
+        Require(std::abs(mapped(50.0F) + 210.0F) < 0.1F && mapped(0.0F) == 0.0F,
+                "a touch drag did not reach the automatic aim at 0.14 deg/px");
+    }
 
     Require(ParseNativeControlConfigText(
                 R"({"schema":"oot3d_native_controls_v1","profile":"controller","free_camera":{"source":"controller_motion","motion_sensitivity":4}})",

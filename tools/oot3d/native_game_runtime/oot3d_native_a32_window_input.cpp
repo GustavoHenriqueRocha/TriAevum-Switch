@@ -336,14 +336,10 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
     pollingState.PendingMouseDeltaY = 0;
   }
 
-  auto frame = MapNativeControlInput(config, host, aimTransform,
-                                     &pollingState.RightStickProfile,
-                                     guestRefreshWillConsume,
-                                     &pollingState.VirtualMotion);
 #if defined(__SWITCH__)
   // Sampled every poll: each finger gets its owner when it lands (the native
-  // page touch, a gameplay HUD control, or nothing), so a press that landed
-  // outside a touch-enabled page is never replayed when one opens.
+  // page touch, a gameplay HUD control, the aim, or nothing), so a press that
+  // landed outside a touch-enabled page is never replayed when one opens.
   const bool hudTouchEligible =
       topScreenUiProfile && !nativeFrontendTouchEnabled && !hostGuiVisible;
   const auto hudTargets =
@@ -357,8 +353,18 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
   const auto switchTouch = ResolveTopScreenTouchPoll(
       touchScreen.Tracker,
       {nativeFrontendTouchEnabled, hostGuiVisible, &hudTargets,
-       window.GetWidth(), window.GetHeight()},
+       window.GetWidth(), window.GetHeight(), config.TouchAimEnabled},
       guestRefreshWillConsume);
+  // A drag aims through the native aim sources, next to the right stick and
+  // the gyro (aim.touch_degrees_per_pixel; nonzero only on consuming polls).
+  host.TouchAimDeltaX = switchTouch.AimDeltaX;
+  host.TouchAimDeltaY = switchTouch.AimDeltaY;
+#endif
+  auto frame = MapNativeControlInput(config, host, aimTransform,
+                                     &pollingState.RightStickProfile,
+                                     guestRefreshWillConsume,
+                                     &pollingState.VirtualMotion);
+#if defined(__SWITCH__)
   // A tapped HUD control presses the physical control it pictures.
   frame.Hid.Buttons |= switchTouch.HudButtons;
 #endif

@@ -342,6 +342,11 @@ bool DecodeNativeControlConfig(const nlohmann::json& document,
         aim.value("invert_x", parsed.NativeAimInvertX);
     parsed.NativeAimInvertY =
         aim.value("invert_y", parsed.NativeAimInvertY);
+    // Absent in files written before touch aim: the defaults apply.
+    parsed.TouchAimEnabled =
+        aim.value("touch_enabled", parsed.TouchAimEnabled);
+    parsed.TouchAimDegreesPerPixel =
+        aim.value("touch_degrees_per_pixel", parsed.TouchAimDegreesPerPixel);
   }
 
   if (document.contains("free_camera")) {
@@ -597,7 +602,8 @@ bool ValidateNativeControlConfig(const NativeControlConfig& config,
                      1080.0F) ||
       !FiniteInRange(config.ControllerGyroscopeSensitivity, 0.01F, 10.0F) ||
       !FiniteInRange(config.ControllerAccelerometerSensitivity, 0.01F,
-                     10.0F)) {
+                     10.0F) ||
+      !FiniteInRange(config.TouchAimDegreesPerPixel, 0.01F, 20.0F)) {
     SetError(error, "native control sensitivity is outside its valid range");
     return false;
   }
@@ -693,7 +699,9 @@ bool SerializeNativeControlConfigText(const NativeControlConfig& config,
         {"accelerometer_sensitivity",
          config.ControllerAccelerometerSensitivity},
         {"invert_x", config.NativeAimInvertX},
-        {"invert_y", config.NativeAimInvertY}}},
+        {"invert_y", config.NativeAimInvertY},
+        {"touch_enabled", config.TouchAimEnabled},
+        {"touch_degrees_per_pixel", config.TouchAimDegreesPerPixel}}},
       {"free_camera",
        {{"source", NativeMotionSourceName(ThreeDsRecomp::Input::NormalizeCameraSource(config.FreeCameraSource))},
         {"mouse_units_per_pixel",
