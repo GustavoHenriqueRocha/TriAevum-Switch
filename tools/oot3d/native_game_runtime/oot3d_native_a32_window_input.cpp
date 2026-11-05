@@ -6,6 +6,8 @@
 #include "oot3d_switch_motion.h"
 #include "oot3d_top_screen_hud_touch.h"
 
+#include <cfloat>
+#include <imgui_internal.h>
 #include <switch.h>
 #endif
 
@@ -26,6 +28,7 @@ namespace {
 // guest refresh has consumed it.
 struct SwitchTouchScreen {
   Oot3dNativeGame::TopScreenTouchTracker Tracker;
+  Oot3dNativeGame::HostMenuTouchGesture MenuGesture;
   std::array<HidTouchScreenState, 17> States{};
   std::uint64_t LastSample = 0;
   bool Started = false;
@@ -78,6 +81,51 @@ void ObserveSwitchTouchScreen(SwitchTouchScreen &touch) {
     }
     touch.Tracker.ObserveSample(std::span(contacts.data(), touches));
   }
+}
+
+// Scrolls the window under the pointer (or the nearest scrollable parent, as
+// ImGui's mouse wheel picks it) so its content follows the finger.
+void ScrollHostMenuUnderPointer(float scrollY) {
+  ImGuiWindow *target = ImGui::GetCurrentContext()->HoveredWindow;
+  const auto scrollable = [](const ImGuiWindow *window) {
+    return window->ScrollMax.y != 0.0F &&
+           (window->Flags & (ImGuiWindowFlags_NoScrollWithMouse |
+                             ImGuiWindowFlags_NoMouseInputs)) == 0;
+  };
+  while (target != nullptr && !scrollable(target) &&
+         (target->Flags & ImGuiWindowFlags_ChildWindow) != 0) {
+    target = target->ParentWindow;
+  }
+  if (target != nullptr && scrollable(target)) {
+    ImGui::SetScrollY(target, target->Scroll.y - scrollY);
+  }
+}
+
+// The host menu finger as a touch-screen mouse for ImGui (no platform
+// backend on deko3d). Runs on the game thread inside the ImGui frame; the
+// events apply at the next ImGui::NewFrame, and ImGui's input trickling
+// spreads a press and its release over separate frames.
+void FeedHostMenuTouch(Oot3dNativeGame::HostMenuTouchGesture &gesture,
+                       const Oot3dNativeGame::TopScreenTouchPollResult &touch) {
+  if (ImGui::GetCurrentContext() == nullptr ||
+      (gesture.Idle() && !touch.MenuPressed)) {
+    return;
+  }
+  ImGuiIO &io = ImGui::GetIO();
+  const auto events = gesture.Update(
+      {touch.MenuPressed, touch.MenuX * io.DisplaySize.x,
+       touch.MenuY * io.DisplaySize.y, ImGui::IsAnyItemHovered()});
+  if (events.MovePointer || events.Press || events.Release ||
+      events.ClearPointer) {
+    io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
+  }
+  if (events.MovePointer) io.AddMousePosEvent(events.PointerX, events.PointerY);
+  if (events.Press) io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
+  if (events.Release) io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+  // Off-screen after a lift: no hover or held item is left to block the
+  // controller's navigation.
+  if (events.ClearPointer) io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+  if (events.ScrollY != 0.0F) ScrollHostMenuUnderPointer(events.ScrollY);
 }
 
 } // namespace
@@ -338,8 +386,9 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
 
 #if defined(__SWITCH__)
   // Sampled every poll: each finger gets its owner when it lands (the native
-  // page touch, a gameplay HUD control, the aim, or nothing), so a press that
-  // landed outside a touch-enabled page is never replayed when one opens.
+  // page touch, a gameplay HUD control, the aim, the host menu, or nothing),
+  // so a press that landed outside a touch-enabled page is never replayed
+  // when one opens.
   const bool hudTouchEligible =
       topScreenUiProfile && !nativeFrontendTouchEnabled && !hostGuiVisible;
   const auto hudTargets =
@@ -355,6 +404,7 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
       {nativeFrontendTouchEnabled, hostGuiVisible, &hudTargets,
        window.GetWidth(), window.GetHeight(), config.TouchAimEnabled},
       guestRefreshWillConsume);
+  FeedHostMenuTouch(touchScreen.MenuGesture, switchTouch);
   // A drag aims through the native aim sources, next to the right stick and
   // the gyro (aim.touch_degrees_per_pixel; nonzero only on consuming polls).
   host.TouchAimDeltaX = switchTouch.AimDeltaX;

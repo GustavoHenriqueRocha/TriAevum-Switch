@@ -256,12 +256,18 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
   };
   bool pageOwned = owned(TopScreenTouchOwner::Page);
   bool aimOwned = owned(TopScreenTouchOwner::Aim);
+  bool menuOwned = owned(TopScreenTouchOwner::Menu);
   for (auto &finger : fingers) {
     if (!finger.Active || finger.Owner != TopScreenTouchOwner::Unassigned) {
       continue;
     }
     finger.Owner = TopScreenTouchOwner::Ignored;
     if (context.HostUiVisible) {
+      // One menu pointer; it stays the menu's until it lifts.
+      if (!menuOwned) {
+        finger.Owner = TopScreenTouchOwner::Menu;
+        menuOwned = true;
+      }
       continue;
     }
     if (context.PageTouchEnabled) {
@@ -319,6 +325,11 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
     } else if (finger.Owner == TopScreenTouchOwner::Hud &&
                !context.PageTouchEnabled && !context.HostUiVisible) {
       result.HudButtons |= TopScreenHudTouchButtons(finger.Control);
+    } else if (finger.Owner == TopScreenTouchOwner::Menu &&
+               !result.MenuPressed && context.HostUiVisible) {
+      result.MenuPressed = true;
+      result.MenuX = finger.X;
+      result.MenuY = finger.Y;
     }
   }
 
@@ -326,7 +337,10 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
     if (!finger.Active) {
       continue;
     }
-    if (guestRefreshWillConsume && finger.PendingPolls != 0U) {
+    // The menu keeps running while the game (and its refreshes) may not.
+    if ((guestRefreshWillConsume ||
+         finger.Owner == TopScreenTouchOwner::Menu) &&
+        finger.PendingPolls != 0U) {
       --finger.PendingPolls;
     }
     const bool aimDelivered = finger.Owner != TopScreenTouchOwner::Aim ||
@@ -336,6 +350,89 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
     }
   }
   return result;
+}
+
+HostMenuTouchEvents
+HostMenuTouchGesture::Update(const HostMenuTouchSample &sample) noexcept {
+  HostMenuTouchEvents events;
+  const auto click = [&](float x, float y) {
+    events.MovePointer = true;
+    events.PointerX = x;
+    events.PointerY = y;
+    events.Press = true;
+    events.Release = true;
+  };
+  const auto release = [&] {
+    events.ClearPointer = true;
+    mPhase = Phase::Idle;
+  };
+  if (sample.Pressed && mPhase != Phase::Idle &&
+      std::max(std::abs(sample.X - mStartX), std::abs(sample.Y - mStartY)) >
+          kTapSlop) {
+    mMoved = true;
+  }
+  switch (mPhase) {
+  case Phase::Idle:
+    if (sample.Pressed) {
+      events.MovePointer = true;
+      events.PointerX = mStartX = mLastX = sample.X;
+      events.PointerY = mStartY = mLastY = sample.Y;
+      mSettle = kHoverSettlePolls;
+      mMoved = false;
+      mPhase = Phase::Settling;
+    }
+    break;
+  case Phase::Settling:
+    if (!sample.Pressed) {
+      click(mStartX, mStartY);
+      release();
+      break;
+    }
+    if (--mSettle != 0U) {
+      break;
+    }
+    if (sample.ItemHovered) {
+      // Pressed where ImGui saw the item; the drag follows from here.
+      events.Press = true;
+      mPhase = Phase::Pressing;
+    } else {
+      // Motion made while settling scrolls too.
+      events.ScrollY = sample.Y - mStartY;
+      events.MovePointer = true;
+      events.PointerX = mLastX = sample.X;
+      events.PointerY = mLastY = sample.Y;
+      mPhase = Phase::Scrolling;
+    }
+    break;
+  case Phase::Pressing:
+    if (sample.Pressed) {
+      if (sample.X != mLastX || sample.Y != mLastY) {
+        events.MovePointer = true;
+        events.PointerX = mLastX = sample.X;
+        events.PointerY = mLastY = sample.Y;
+      }
+    } else {
+      events.Release = true;
+      release();
+    }
+    break;
+  case Phase::Scrolling:
+    if (sample.Pressed) {
+      events.ScrollY = sample.Y - mLastY;
+      if (sample.X != mLastX || sample.Y != mLastY) {
+        events.MovePointer = true;
+        events.PointerX = mLastX = sample.X;
+        events.PointerY = mLastY = sample.Y;
+      }
+    } else {
+      if (!mMoved) {
+        click(mStartX, mStartY);
+      }
+      release();
+    }
+    break;
+  }
+  return events;
 }
 
 } // namespace Oot3dNativeGame
