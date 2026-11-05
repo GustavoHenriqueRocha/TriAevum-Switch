@@ -4,10 +4,9 @@
 #if defined(__SWITCH__)
 #include "fast/oot3d/debug_menu.h"
 #include "oot3d_switch_motion.h"
-#endif
+#include "oot3d_top_screen_hud_touch.h"
 
-#if defined(__SWITCH__)
-#include <mutex>
+#include <switch.h>
 #endif
 
 namespace Oot3dA32Window {
@@ -15,74 +14,70 @@ namespace Oot3dA32Window {
 #if defined(__SWITCH__)
 namespace {
 
-// The console's touch screen. SDL reports it as finger events normalised to
-// the window (the panel is 1280x720; docked there is no touch device). The
-// PC path reads the mouse as the pointer; here the first finger is the
-// pointer instead, and SDL's synthetic touch->mouse events are disabled so a
-// touch never reaches mouse-bound gameplay actions or mouse aim.
+// The console's touch screen, read from HID shared memory (libnx). With the
+// deko3d renderer SDL has no window, and its Switch driver reports no finger
+// events without one, so SDL cannot be the source. The panel is 1280x720 in
+// handheld; docked there are no touches. SDL's synthetic touch->mouse events
+// stay disabled so a touch never reaches mouse-bound actions or mouse aim.
 //
-// Polling alone would miss a tap that goes down and up between two polls
-// (the guest samples at most 30-60 times a second), so an event watch
-// latches every press until a guest refresh has consumed it, like the
-// pending button presses of PollNativeA32Input.
-struct SwitchTouchLatch {
-  std::mutex Mutex;
-  SDL_FingerID Finger = 0;
-  bool Down = false;
-  bool PendingPress = false;
-  float X = 0.0F;
-  float Y = 0.0F;
+// Polling the current state alone would miss a tap that lands and lifts
+// between two polls, so every sample of the HID history (17 entries) newer
+// than the last poll is fed to the tracker, which latches each press until a
+// guest refresh has consumed it.
+struct SwitchTouchScreen {
+  Oot3dNativeGame::TopScreenTouchTracker Tracker;
+  std::array<HidTouchScreenState, 17> States{};
+  std::uint64_t LastSample = 0;
+  bool Started = false;
 };
 
-SwitchTouchLatch &SwitchTouch() {
-  static SwitchTouchLatch latch;
-  return latch;
+SwitchTouchScreen &SwitchTouch() {
+  static SwitchTouchScreen touch;
+  return touch;
 }
 
-int ObserveSwitchTouchEvent(void *, SDL_Event *event) {
-  if (event->type != SDL_FINGERDOWN && event->type != SDL_FINGERMOTION &&
-      event->type != SDL_FINGERUP) {
-    return 0;
-  }
-  auto &touch = SwitchTouch();
-  std::lock_guard lock(touch.Mutex);
-  const auto &finger = event->tfinger;
-  if (event->type == SDL_FINGERDOWN) {
-    if (touch.Down && finger.fingerId != touch.Finger) {
-      return 0; // a second finger does not move the pointer
-    }
-    touch.Finger = finger.fingerId;
-    touch.Down = true;
-    touch.PendingPress = true;
-  } else if (!touch.Down || finger.fingerId != touch.Finger) {
-    return 0;
-  } else if (event->type == SDL_FINGERUP) {
-    touch.Down = false;
-  }
-  touch.X = std::clamp(finger.x, 0.0F, 1.0F);
-  touch.Y = std::clamp(finger.y, 0.0F, 1.0F);
-  return 0;
-}
-
-struct SwitchTouchSample {
-  bool Pressed = false;
-  float X = 0.0F;
-  float Y = 0.0F;
-};
-
-SwitchTouchSample SampleSwitchTouch(bool guestRefreshWillConsume) {
-  static std::once_flag installed;
-  std::call_once(installed, [] {
+void ObserveSwitchTouchScreen(SwitchTouchScreen &touch) {
+  constexpr float kPanelWidth = 1280.0F;
+  constexpr float kPanelHeight = 720.0F;
+  if (!touch.Started) {
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
-    SDL_AddEventWatch(&ObserveSwitchTouchEvent, nullptr);
-  });
-  auto &touch = SwitchTouch();
-  std::lock_guard lock(touch.Mutex);
-  SwitchTouchSample sample{touch.Down || touch.PendingPress, touch.X, touch.Y};
-  if (guestRefreshWillConsume) {
-    touch.PendingPress = false;
+    hidInitializeTouchScreen();
   }
-  return sample;
+  auto &states = touch.States;
+  const std::size_t count = std::min(
+      hidGetTouchScreenStates(states.data(), states.size()), states.size());
+  // The oldest sample newer than the last one fed, or null.
+  const auto nextSample = [&]() -> const HidTouchScreenState * {
+    const HidTouchScreenState *next = nullptr;
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto &state = states[index];
+      if (state.sampling_number > touch.LastSample &&
+          (next == nullptr || state.sampling_number < next->sampling_number))
+        next = &state;
+    }
+    return next;
+  };
+  if (!touch.Started) {
+    // History from before launch (the tap that started the app) is not a press.
+    touch.Started = true;
+    while (const auto *state = nextSample())
+      touch.LastSample = state->sampling_number;
+    return;
+  }
+  std::array<Oot3dNativeGame::TopScreenTouchContact, 16> contacts{};
+  while (const auto *state = nextSample()) {
+    touch.LastSample = state->sampling_number;
+    const std::size_t touches = std::min<std::size_t>(
+        static_cast<std::size_t>(std::max(state->count, 0)), contacts.size());
+    for (std::size_t index = 0; index < touches; ++index) {
+      const auto &contact = state->touches[index];
+      contacts[index] = {contact.finger_id,
+                         static_cast<float>(contact.x) / kPanelWidth,
+                         static_cast<float>(contact.y) / kPanelHeight,
+                         (contact.attributes & HidTouchAttribute_End) != 0U};
+    }
+    touch.Tracker.ObserveSample(std::span(contacts.data(), touches));
+  }
 }
 
 } // namespace
@@ -101,6 +96,8 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                    bool guestRefreshWillConsume,
                    NativeControlPollingState &pollingState,
                    [[maybe_unused]] bool switchConsoleMotion,
+                   [[maybe_unused]] std::span<const oot3d::ui::UiPrimitive>
+                       topScreenHudPrimitives,
                    bool widescreenMenuCorners,
                    bool lowerScreenPictureInPicture) {
   using namespace Oot3dNativeGame;
@@ -344,9 +341,26 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                                      guestRefreshWillConsume,
                                      &pollingState.VirtualMotion);
 #if defined(__SWITCH__)
-  // Sampled every poll so a press latched outside a touch-enabled page is
-  // consumed (and so never replayed when one opens).
-  const auto switchTouch = SampleSwitchTouch(guestRefreshWillConsume);
+  // Sampled every poll: each finger gets its owner when it lands (the native
+  // page touch, a gameplay HUD control, or nothing), so a press that landed
+  // outside a touch-enabled page is never replayed when one opens.
+  const bool hudTouchEligible =
+      topScreenUiProfile && !nativeFrontendTouchEnabled && !hostGuiVisible;
+  const auto hudTargets =
+      hudTouchEligible
+          ? ResolveTopScreenHudTouchTargets(topScreenHudPrimitives,
+                                            window.GetWidth(),
+                                            window.GetHeight())
+          : TopScreenHudTouchTargets{};
+  auto &touchScreen = SwitchTouch();
+  ObserveSwitchTouchScreen(touchScreen);
+  const auto switchTouch = ResolveTopScreenTouchPoll(
+      touchScreen.Tracker,
+      {nativeFrontendTouchEnabled, hostGuiVisible, &hudTargets,
+       window.GetWidth(), window.GetHeight()},
+      guestRefreshWillConsume);
+  // A tapped HUD control presses the physical control it pictures.
+  frame.Hid.Buttons |= switchTouch.HudButtons;
 #endif
   if (nativeFrontendTouchEnabled && !hostGuiVisible) {
     if (window.IsMouseCaptured()) {
@@ -356,11 +370,11 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
     auto pointer = window.GetMousePos();
     bool pointerPressed = window.GetMouseState(Ship::LUS_MOUSE_BTN_LEFT);
 #if defined(__SWITCH__)
-    if (switchTouch.Pressed) {
+    if (switchTouch.PagePressed) {
       pointer.x = static_cast<int32_t>(
-          switchTouch.X * static_cast<float>(window.GetWidth()));
+          switchTouch.PageX * static_cast<float>(window.GetWidth()));
       pointer.y = static_cast<int32_t>(
-          switchTouch.Y * static_cast<float>(window.GetHeight()));
+          switchTouch.PageY * static_cast<float>(window.GetHeight()));
       pointerPressed = true;
     }
 #endif

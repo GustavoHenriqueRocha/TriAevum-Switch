@@ -71,9 +71,14 @@ Desempenho e usabilidade:
     cujo frustum o hook alargou (anisotropia medida = 1/fator) têm o viewport alargado pelo mesmo
     fator em torno do centro, recortado ao quadro (não ficam espremidos). Política e testes:
     `gl_widescreen_menu_policy.h`, `tests/gl_widescreen_menu_policy_tests.cpp`.
-- **Tela de toque**: tocar funciona onde o mouse funciona no PC (tela de título/seleção de arquivo e
-  as páginas de pausa Itens/Mapa/Equipamento do TopScreen); no jogo em movimento o toque é ignorado,
-  como o mouse no PC. Toques curtos ficam retidos até o jogo ler.
+- **Tela de toque**: lida do HID (libnx `hidGetTouchScreenStates`), já que o SDL não reporta dedos
+  sem janela (deko3d). Tocar funciona onde o mouse funciona no PC (tela de título/seleção de arquivo
+  e as páginas de pausa Itens/Mapa/Equipamento do TopScreen). No jogo em movimento, tocar num
+  controle do HUD do TopScreen aperta o controle que ele mostra enquanto o dedo está na tela: X, Y,
+  Item I (ZR), Item II (ZL), B e a direção do D-pad dos ícones de ação em volta da cruz
+  (Visão/Navi, Ocarina, botas...). Cada dedo é testado onde encosta (vários dedos ao mesmo tempo);
+  um toque que começa fora de um controle é ignorado. Toques curtos ficam retidos até o jogo ler.
+  Teste de acerto e encaixe: `oot3d_top_screen_hud_touch.h`, `oot3d_top_screen_hud_touch_tests.cpp`.
 - **Gerador AOT**: helpers quentes com caminho rápido inline e lento frio; LDM/STM por bloco;
   literais PC-relativos dobrados; shards sem `-ffast-math` (exatidão do VFP).
 - **Orçamento de blocos** 2048 (era 128) no Switch.
