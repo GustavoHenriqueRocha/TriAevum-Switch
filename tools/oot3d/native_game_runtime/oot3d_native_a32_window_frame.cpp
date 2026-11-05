@@ -50,6 +50,12 @@ namespace Oot3dA32Window {
 
 namespace {
 
+// The performance overlay (L3+R3 > Video, config/fps_counter); game thread only.
+Oot3dNativeGame::PerfOverlay &PerfOverlayState() {
+  static Oot3dNativeGame::PerfOverlay overlay;
+  return overlay;
+}
+
 uint64_t HashDiagnosticBytes(std::span<const uint8_t> bytes) noexcept {
   uint64_t hash = 14695981039346656037ULL;
   for (const uint8_t byte : bytes) {
@@ -818,23 +824,44 @@ bool NativeA32WindowSession::RunFrame() {
   hostStartSteps.Mark("mouse");
   gui->StartDraw();
   hostStartSteps.Mark("gui_start_draw");
-  // config/fps_counter: FPS of the presented frames (including the fps60
-  // interpolated ones) and the worst interval of the last half window, in the screen corner.
-  static const bool fpsCounterEnabled =
-      std::ifstream("sdmc:/switch/oot3dre/config/fps_counter").good();
-  if (fpsCounterEnabled) {
-    static Oot3dNativeGame::FpsCounter fpsCounter;
-    fpsCounter.Observe(std::chrono::duration<double>(
-                           std::chrono::steady_clock::now().time_since_epoch())
-                           .count());
-    const float fontSize = std::max(16.0F, static_cast<float>(height) / 24.0F);
+  // Performance overlay (L3+R3 > Video, config/fps_counter): FPS of the
+  // presented frames (including the fps60 interpolated ones), the worst
+  // interval and the game speed of the last half second, and the clocks,
+  // in the top-left corner. The flag is read every frame (the menu was drawn
+  // just above, so a toggle shows in this frame); the text only changes when
+  // a window closes, and the clocks come from the reader thread's cache.
+  static bool perfOverlayShown = false;
+  const bool perfOverlayEnabled =
+      Oot3dNativeGame::PerfOverlayEnabled().load(std::memory_order_relaxed);
+  if (!perfOverlayEnabled) {
+    if (perfOverlayShown) {
+      // Off: the next start measures from scratch (no interval spanning the
+      // time it was hidden).
+      PerfOverlayState() = Oot3dNativeGame::PerfOverlay{};
+      perfOverlayShown = false;
+    }
+  } else {
+    perfOverlayShown = true;
+    auto &overlay = PerfOverlayState();
+    if (overlay.ObserveFrame(std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now().time_since_epoch())
+                                 .count())) {
+      overlay.SetClocks(Oot3dNativeGame::SwitchClockLatest());
+    }
+    // ProggyClean (13 px) scaled to a 32nd of the height: 22.5 px at 720p,
+    // 34 px at 1080p; the longest line is about a third of the width.
+    const float fontSize = std::max(16.0F, static_cast<float>(height) / 32.0F);
     const ImVec2 position(fontSize * 0.5F, fontSize * 0.4F);
+    const float lineStep = fontSize * 1.1F;
     auto *drawList = ImGui::GetForegroundDrawList();
-    drawList->AddText(ImGui::GetFont(), fontSize,
-                      ImVec2(position.x + 2.0F, position.y + 2.0F),
-                      IM_COL32(0, 0, 0, 200), fpsCounter.Text());
-    drawList->AddText(ImGui::GetFont(), fontSize, position,
-                      IM_COL32(255, 255, 80, 255), fpsCounter.Text());
+    const char *const lines[] = {overlay.FrameLine(), overlay.ClockLine()};
+    for (size_t line = 0; line < 2U; ++line) {
+      const ImVec2 at(position.x, position.y + lineStep * static_cast<float>(line));
+      drawList->AddText(ImGui::GetFont(), fontSize, ImVec2(at.x + 2.0F, at.y + 2.0F),
+                        IM_COL32(0, 0, 0, 200), lines[line]);
+      drawList->AddText(ImGui::GetFont(), fontSize, at, IM_COL32(255, 255, 80, 255),
+                        lines[line]);
+    }
   }
   renderStream.Submit([&] {
     window.StartFrame();
@@ -1040,6 +1067,7 @@ bool NativeA32WindowSession::RunFrame() {
   phaseTiming.FrameStartSeconds += SecondsSince(phaseStart);
   const uint32_t guestRefreshIterations =
       std::max<uint32_t>(1U, guestRefreshesDue);
+  uint32_t guestRefreshesRun = 0U;
   for (uint32_t guestRefreshIndex = 0;
        guestRefreshIndex < guestRefreshIterations; ++guestRefreshIndex) {
     const bool advanceGuest = guestRefreshIndex < guestRefreshesDue;
@@ -1071,11 +1099,18 @@ bool NativeA32WindowSession::RunFrame() {
       Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PresentVisual);
       PresentVisualFrame(presentationElapsedSeconds, visualInterpolationAlpha);
     }
+    guestRefreshesRun += advanceGuest ? 1U : 0U;
     frameCount += advanceGuest ? 1U : 0U;
   }
   if (deferredDspAudioFrames != 0U) {
     Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::GuestRefresh);
     DeliverDspAudioFrames(std::exchange(deferredDspAudioFrames, 0U));
+  }
+  if (perfOverlayEnabled) {
+    // Game speed: refreshes run out of those owed this frame (the planned
+    // ones plus the ones the scheduler dropped because the game fell behind).
+    PerfOverlayState().ObserveRefreshes(guestRefreshesRun, guestRefreshesDue,
+                                        presentationStep.DroppedGuestRefreshes);
   }
 
   if (launch.ExtendedDiagnostics) {

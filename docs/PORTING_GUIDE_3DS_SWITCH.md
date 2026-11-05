@@ -1088,7 +1088,8 @@ romfs, reusing the `AzaharTexturePackRuntime` that already existed for Vulkan:
   (always stable in a long session); GL `gl_textures_live`, `gl_tex_mb`, `gl_programs`,
   `gl_buffers_live`, `gl_oom`, `gl_draws_skipped`.
 - `clocks:` `cpu_mhz gpu_mhz mem_mhz` (real clock measured by sys-clk; `clk_src=sysclk_real`, or
-  `sysclk` = target, `none` = sys-clk absent → MHz -1), `op_mode=handheld|docked`,
+  `sysclk` = target, `stock perf_cfg=0x…` = sys-clk absent, stock clocks of the HOS performance
+  configuration, `none` = neither answered → MHz -1), `op_mode=handheld|docked`,
   `perf_mode=normal|boost`, `sysclk_profile`, `sysclk_enabled`, `sysclk_api`, `clk_ipc_us`. Read
   only: one `GetCurrentContext` call to `sys:clk` per window, session opened once; the app
   never opens clkrst/pcv nor changes clocks (SwitchWakerHD issue #33).
