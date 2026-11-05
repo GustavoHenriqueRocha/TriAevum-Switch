@@ -102,6 +102,8 @@ Performance and usability:
   in first person; `aim.invert_x`/`invert_y` and the gyro sensitivity apply as on PC, and
   "Calibrate controller motion" (L3+R3 menu, Controls) removes drift. The sensor is stopped out of
   focus and restarted on return (HOME, sleep) or when its data stalls.
+  Stick, touch and gyro add up in the same aim; turning with the stick or a touch drag never
+  changes how the gyro maps afterwards (it used to invert pitch after ~180° of stick/touch turn).
 - **TopScreen 3.0**: 2.1.1 was removed from GameBanana; the importer now accepts the 3.0 package.
 - **USA ROM** accepted in the build (the project's own canonical USA→EUR adapter).
 - **Input paths** configurable via `OOT3D_OPERATIONAL_<variable>` (previously hardcoded to the author's Windows).

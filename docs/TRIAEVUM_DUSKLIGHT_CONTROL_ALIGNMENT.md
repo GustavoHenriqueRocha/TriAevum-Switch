@@ -226,11 +226,15 @@ Findings from that review (first two addressed by the composition work below):
 
 `three_ds_motion_composition.{h,cpp}` is a title-neutral input component, not a
 renderer effect or title patch. Automatic controller aim composes physical gyro
-with stick pitch/yaw through a persistent sensor-to-virtual rotation. Both the
-body-space rates and acceleration vector use that rotation. Releasing the stick
-retains its orientation offset instead of restoring unrelated physical gravity.
-Local pitch and gravity-axis yaw are factored separately to preserve gravity
-under simultaneous yaw/pitch. Explicit mouse-only/stick-only/sensor-only choices
+with stick, mouse and touch pitch/yaw. A persistent sensor-to-virtual rotation
+holds only the body-fixed offset (synthetic pitch about the virtual device's own
+X, plus the handoff alignment); both the body-space rates and the acceleration
+vector use it. Releasing the stick retains that offset instead of restoring
+unrelated physical gravity. Synthetic yaw turns the virtual device about world
+up, which changes neither body-space gravity nor body-space rates, so it is
+emitted as a rate and never stored: physical pitch and yaw map the same way
+however far the stick or touch has turned (storing it flipped physical pitch
+after 180 degrees of stick yaw). Explicit mouse-only/stick-only/sensor-only choices
 retain their semantics. No sensor can enter the free-camera/C-stick route.
 
 Automatic aim ownership persists. Mouse movement selects mouse; controller
