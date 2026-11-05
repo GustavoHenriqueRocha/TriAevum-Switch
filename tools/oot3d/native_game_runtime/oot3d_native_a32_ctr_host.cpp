@@ -2,7 +2,9 @@
 // framebuffers and interrupts, memory, timing. Services: oot3d_native_a32_ctr_host_*.cpp.
 #include "oot3d_native_a32_ctr_host_internal.h"
 #include "oot3d_native_a32_second_core.h"
+#include "oot3d_native_a32_ctr_save_safety.h"
 
+#include <algorithm>
 #include <cstdio>
 
 #if !defined(OOT3D_CTR_HOST_SERVICE_PICA_ONLY)
@@ -536,8 +538,20 @@ bool NativeA32CtrHostServices::ApplyGspFramebufferUpdate(
 bool NativeA32CtrHostServices::CloseHandle(uint32_t handle) {
     for (auto record = mHandles.begin(); record != mHandles.end(); ++record) {
         if (record->Value == handle) {
+            const auto object = record->Object;
             mHandles.erase(record);
             ++mHandlesVersion;
+            // svcCloseHandle do último handle de um arquivo do save sem
+            // FSFILE_Close: conta como Close (confirma se era o último
+            // escritor da transação; oot3d_native_a32_ctr_save_safety.h).
+            if (object && object->Type == "client_session:file:savedata" && !object->FileClosed &&
+                object->SaveJournalWriter != 0U &&
+                std::none_of(mHandles.begin(), mHandles.end(),
+                             [&](const HandleRecord& other) { return other.Object == object; })) {
+                if (auto* journal = SaveJournal(); journal != nullptr && journal->Covers(object->FilePath))
+                    journal->Close(object->FilePath, object->SaveJournalWriter);
+                object->FileClosed = true;
+            }
             return true;
         }
     }
