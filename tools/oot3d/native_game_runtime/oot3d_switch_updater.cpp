@@ -1,6 +1,5 @@
 #include "oot3d_switch_updater.h"
 
-#include "fast/oot3d/debug_menu.h"
 #include "oot3d_build_version.h"
 
 #include <curl/curl.h>
@@ -423,18 +422,6 @@ void SwitchUpdater::RunInstall() {
   }
   Finish(Phase::Installed, "Installed " + release.Release.Tag + " (build " + std::to_string(manifest.Build) +
                                "). It starts with the next launch.");
-}
-
-bool CanChainloadNro() { return envHasNextLoad(); }
-
-bool RestartIntoInstalledNro(const std::filesystem::path &root) {
-  if (!envHasNextLoad()) return false;
-  // The loader copies both strings; argv[0] is the NRO's path, as hbmenu
-  // passes it, so the restarted game takes its default arguments.
-  const std::string path = (root / kNroPath).string();
-  if (R_FAILED(envSetNextLoad(path.c_str(), path.c_str()))) return false;
-  Fast::Oot3d::RequestExitGame();
-  return true;
 }
 
 } // namespace Oot3dNativeGame

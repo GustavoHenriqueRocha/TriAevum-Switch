@@ -931,9 +931,9 @@ bool NativeA32WindowSession::RunFrame() {
                          lastTopScreenPrimitivesBySubsystem[static_cast<
                              std::size_t>(oot3d::ui::UiSubsystem::GameplayHud)],
                          WidescreenMenuCornersActive());
-  // Exit game / Restart now in the L3+R3 menu leave like an exit input:
-  // the window closes and Finish discards the frames still queued, as for
-  // HOME > Close.
+  // Exit game / Close game in the L3+R3 menu leave like an exit input: the
+  // window closes and Finish discards the frames still queued, as for HOME >
+  // Close (main then ends the application).
   if (physicalInputFrame.Exit || devLabQuit || Fast::Oot3d::ExitGameRequested()) {
     if (devLabQuit) scriptedExit = true;
     window.Close();

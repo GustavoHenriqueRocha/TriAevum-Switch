@@ -68,12 +68,4 @@ private:
   std::thread mWorker;
 };
 
-// Whether the homebrew loader can start another NRO when this one exits
-// (hbmenu/hbloader can; some forwarders cannot).
-bool CanChainloadNro();
-// Asks the loader to start the installed NRO (`root`/oot3d_native_game.nro)
-// next, then asks the game to close the way Exit game does. False, with
-// nothing requested, when the loader cannot chainload.
-bool RestartIntoInstalledNro(const std::filesystem::path &root);
-
 } // namespace Oot3dNativeGame

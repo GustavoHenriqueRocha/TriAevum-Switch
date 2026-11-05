@@ -5,6 +5,7 @@
 #include "oot3d_rom_import.h"
 
 #include <switch.h>
+#include <sys/iosupport.h>
 
 #include <chrono>
 #include <cstdio>
@@ -27,15 +28,23 @@ constexpr const char* kGame = "sdmc:/switch/oot3dre/game";
 class ImportCancelled : public std::exception {};
 
 // libnx text console on the default window; released before SDL/deko3d
-// take the window over.
+// take the window over. consoleInit points stdout and stderr at the console
+// and consoleExit does not point them back: the first write after the import
+// (spdlog's console sink, as the game starts) drew into the freed console and
+// crashed (ConsoleSwRenderer_drawChar, null write). The previous devoptabs
+// are put back on exit.
 class Screen {
 public:
-    Screen() {
+    Screen() : mStdout(devoptab_list[STD_OUT]), mStderr(devoptab_list[STD_ERR]) {
         consoleInit(nullptr);
         padConfigureInput(1, HidNpadStyleSet_NpadStandard);
         padInitializeDefault(&mPad);
     }
-    ~Screen() { consoleExit(nullptr); }
+    ~Screen() {
+        consoleExit(nullptr);
+        devoptab_list[STD_OUT] = mStdout;
+        devoptab_list[STD_ERR] = mStderr;
+    }
     Screen(const Screen&) = delete;
     Screen& operator=(const Screen&) = delete;
 
@@ -59,6 +68,8 @@ public:
 
 private:
     PadState mPad{};
+    const devoptab_t* mStdout;
+    const devoptab_t* mStderr;
 };
 
 std::string Where() {

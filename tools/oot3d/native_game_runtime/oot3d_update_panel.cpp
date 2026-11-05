@@ -1,5 +1,6 @@
 #include "oot3d_update_panel.h"
 
+#include "fast/oot3d/debug_menu.h"
 #include "oot3d_build_version.h"
 #include "oot3d_switch_updater.h"
 #include "oot3d_update_release.h"
@@ -151,22 +152,21 @@ private:
     }
   }
 
+  // Exit game ends the application (oot3d_native_game.cpp): the homebrew loader
+  // cannot start the new NRO from here, so the player starts it again.
   void DrawInstalled(const SwitchUpdater::Status &status) {
-    constexpr const char *kConfirm = "Restart now?";
+    constexpr const char *kConfirm = "Close the game?";
     ImGui::TextWrapped("%s", status.Message.c_str());
-    if (!CanChainloadNro()) {
-      ImGui::TextWrapped("This loader cannot restart the game by itself: exit and start it again.");
-      return;
-    }
-    if (ImGui::Button("Restart now")) ImGui::OpenPopup(kConfirm);
+    ImGui::TextWrapped("Close the game and start it again to play the new version.");
+    if (ImGui::Button("Close game")) ImGui::OpenPopup(kConfirm);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5F, 0.5F));
     if (ImGui::BeginPopupModal(kConfirm, nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
                                    ImGuiWindowFlags_NoMove)) {
       ImGui::SetWindowFontScale(std::max(1.0F, ImGui::GetMainViewport()->WorkSize.y / 540.0F));
       ImGui::TextUnformatted("Progress since your last save will be lost.");
-      if (ImGui::Button("Restart now")) {
-        if (!RestartIntoInstalledNro(mRoot)) mRestartFailed = true;
+      if (ImGui::Button("Close game")) {
+        Fast::Oot3d::RequestExitGame();
         ImGui::CloseCurrentPopup();
       }
       ImGui::SameLine();
@@ -174,8 +174,6 @@ private:
       ImGui::SetItemDefaultFocus();
       ImGui::EndPopup();
     }
-    if (mRestartFailed)
-      ImGui::TextWrapped("The loader refused the restart: exit and start the game again.");
   }
 
   std::filesystem::path mRoot;
@@ -183,7 +181,6 @@ private:
   SwitchUpdater mUpdater;
   Channel mChannel = Channel::Stable;
   bool mChannelError = false;
-  bool mRestartFailed = false;
 };
 } // namespace
 

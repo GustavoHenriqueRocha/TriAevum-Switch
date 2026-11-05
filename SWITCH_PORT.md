@@ -842,7 +842,10 @@ loads).
   (`1.0.0-test.1 (build 5)`). The build number orders releases across channels.
 - "Exit game" (end of the menu's first line) asks for confirmation ("Progress since your last save
   will be lost.") and then closes the window from the game thread, the path HOME > Close takes:
-  the render stream discards queued frames, `Finish` runs and `main` returns.
+  the render stream discards queued frames and `Finish` runs. `main` then ends the application
+  with `svcExitProcess` instead of returning to the homebrew loader: on return hbl maps the next
+  NRO into memory this process's services still hold and aborts (crash report on the console:
+  `hbl + 0x3810`, 2001-0106 InvalidCurrentMemory).
 - Updates tab: installed version and build; channel Stable (releases only) or Test (also
   pre-releases), saved in `config/update_channel` (default: Test for a pre-release build);
   repository `JohnUzoka/TriAevum-Switch`, or `config/update_repo` (`owner/name`). "Check for
@@ -865,8 +868,12 @@ loads).
   be open (`resources.o2r` is), so the next start swaps them before anything opens them
   (`FinishPendingUpdate` in `main`; a journal for another build is dropped). Cancel or any failure
   removes the `.new` files and leaves the installed version as it was. Log: `logs/update.txt`.
-- "Restart now" (confirmation) sets `envSetNextLoad` to the NRO and exits like Exit game. Rollback:
+- After an install the tab offers "Close game" (confirmation), which exits like Exit game; the new
+  version runs at the next launch. The loader cannot start it directly (see Exit game). Rollback:
   rename `oot3d_native_game.nro.old` back to `oot3d_native_game.nro`.
+- The first-launch import screen (`oot3d_switch_rom_import.cpp`) puts stdout and stderr back after
+  `consoleExit`: libnx left them on the freed console, so the game's first log line crashed
+  (`ConsoleSwRenderer_drawChar`, null write) right after the import.
 - Without `config/atlas_overrides.o3tu` (built from the third-party TopScreen mod, CC BY-NC-ND,
   not shippable) the game now starts without TopScreen texture overrides instead of refusing.
 - Logic and install steps: `oot3d_update_release.{h,cpp}`, tests `oot3d_update_release_tests`.

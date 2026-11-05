@@ -29,9 +29,12 @@
 #endif
 
 #if defined(__SWITCH__)
+#include "fast/oot3d/debug_menu.h"
 #include "oot3d_update_panel.h"
 #include "oot3d_whole_aot_gcov.h"
 #include "oot3d_switch_rom_import.h"
+#include <switch.h>
+#include <cstdio>
 void PlaceSwitchMainThread(); // oot3d_switch_threads.cpp
 #endif
 
@@ -286,6 +289,15 @@ int main(int argc, char** argv) {
         DestroyContextForDemo();
 #if defined(__SWITCH__)
         WriteSwitchBootStatus("completed");
+        // Exit game (L3+R3) ends the application here instead of returning to
+        // the homebrew loader. On return hbl maps the next NRO into memory this
+        // process's services still hold and aborts (Atmosphère crash report:
+        // hbl + 0x3810, 2001-0106 InvalidCurrentMemory). The teardown above
+        // has run; flush what stdio still buffers before leaving.
+        if (Fast::Oot3d::ExitGameRequested()) {
+            std::fflush(nullptr);
+            svcExitProcess();
+        }
 #endif
         return 0;
 #else

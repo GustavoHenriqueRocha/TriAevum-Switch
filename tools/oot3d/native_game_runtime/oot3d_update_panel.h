@@ -7,8 +7,8 @@ namespace Oot3dNativeGame {
 // update channel (config/update_channel: stable or test), the repository
 // (config/update_repo, default JohnUzoka/TriAevum-Switch), checking GitHub
 // Releases, the release notes, download and install with progress and
-// cancel, and "Restart now" into the installed NRO. `root` is
-// sdmc:/switch/oot3dre.
+// cancel, and "Close game" so the installed version runs at the next launch.
+// `root` is sdmc:/switch/oot3dre.
 std::shared_ptr<Fast::Oot3d::GraphicsSettingsPanelTab>
 CreateUpdatePanel(std::filesystem::path root);
 // At start-up, before anything opens the managed files: finishes an update

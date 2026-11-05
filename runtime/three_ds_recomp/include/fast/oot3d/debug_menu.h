@@ -44,9 +44,9 @@ inline std::atomic<const char*>& DebugMenuTitleText() noexcept {
     return text;
 }
 
-// "Exit game" in the menu, and the updater's "Restart now": the game thread
-// sees the request at its next frame and closes the window, which ends the
-// run the same way HOME > Close does.
+// "Exit game" in the menu, and the updater's "Close game": the game thread
+// sees the request at its next frame and closes the window the way HOME >
+// Close does; main then ends the application (oot3d_native_game.cpp).
 inline std::atomic<bool>& ExitGameRequestedFlag() noexcept {
     static std::atomic<bool> requested{false};
     return requested;
