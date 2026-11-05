@@ -962,10 +962,11 @@ loads).
   replaces the same name elsewhere. `--parts hud,models,world` selects folders (models =
   `CHARACTERS`, `CREATURES`, `LINK`). Measured on chubbycubby's Vanilla UI/HUD 3.2 (8x HUD art,
   64 HUD textures, 398.8 MiB): 97.9 MiB at 4x, 58.7 MiB at 3x, 27.9 MiB at 2x, about 5 s on 16
-  cores. Henriko's 1080p pack holds 1,238 MiB of `ENVIRONMENT`, 231 MiB of English HUD and maps
-  and 82 MiB of models at 4x; with those ratios the default output is about 520 MiB (HUD and
-  models only: about 160 MiB). `tools/switch/test_shrink_texture_pack.py` covers sizes, alpha
-  edges, parts and languages.
+  cores. On Henriko's 1080p pack 5.0a (2,161 PNGs, extracted) the default run writes 2,009 files,
+  352 MiB, in 11 s: HUD and maps 231.8 to 43.7 MiB, models 82.3 to 21.2 MiB, world 1,250 to 287
+  MiB, 153 other-language textures left out. That "1080p" pack is not uniformly 4x: its HUD images
+  run 4x to 16x and some world images 8x to 32x the native size.
+  `tools/switch/test_shrink_texture_pack.py` covers sizes, alpha edges, parts and languages.
 - **`pack.json`** is read from the folder's root: `use_new_hash` (Henriko's pack: `false`, Azahar's
   legacy hash of the decoded texture), `flip_png_files` and the `textures` name map are honoured.
   `skip_mipmap` is not needed: mipmaps are always made from the image (what Azahar does with

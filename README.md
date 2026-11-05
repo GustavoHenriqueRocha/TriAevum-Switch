@@ -46,10 +46,10 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
   performance overlay.
   - **Smaller copy:** on a PC with Python 3 and Pillow (`pip install pillow`),
     [`tools/switch/shrink_texture_pack.py`](tools/switch/shrink_texture_pack.py) turns the downloaded zip
-    into a folder at the sizes the Switch uses (world 2x, HUD 3x), about a quarter of the 1.9 GB:
+    into a folder at the sizes the Switch uses (world 2x, HUD 3x): 352 MB instead of 1.9 GB.
     `python3 shrink_texture_pack.py "OOT3D 4K 5.0a (1080p).zip" textures`, then copy the contents of
     `textures` to `switch/oot3dre/textures/`. `--parts hud,models` leaves out the world (scenery)
-    textures, `--world 1`/`--hud 2` makes it smaller still.
+    textures (65 MB left), `--world 1`/`--hud 2` makes it smaller still.
 
 # TriAevum — Echoes of Time
 
