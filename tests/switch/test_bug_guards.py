@@ -503,6 +503,24 @@ GUARDS = [
     Guard("exception handler writes logs/hang.txt without allocating and returns (Atmosphère crash report still happens)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'void __libnx_exception_handler\(ThreadExceptionDump\* context\) \{\s+HandleException\(context\);\s+\}'),
+    # --- 04/11: OTA updater and Exit game (release) ---
+    # Horizon cannot rename over a file or touch an open one: the updater
+    # moves the target aside first and swaps the files other than the NRO at
+    # the next start, before resources.o2r is opened.
+    Guard("OTA install: rename over an existing file fails on Horizon (move the target to .old first)",
+          "tools/oot3d/native_game_runtime/oot3d_update_release.cpp",
+          r'std::filesystem::rename\(target, backup, code\);.*?std::filesystem::rename\(staged, target, code\);',
+          "oot3d_update_release_tests (TestInstall)"),
+    Guard("OTA install: files swapped at the next start before anything opens them",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'Oot3dNativeGame::FinishPendingUpdate\("sdmc:/switch/oot3dre"\);.*?homebrewArguments\{'),
+    Guard("release zip has no TopScreen mod payload: a missing atlas_overrides.o3tu must not stop the game",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(!std::filesystem::is_regular_file\(homebrewArguments\[14\]\)\) \{\s+'
+          r'homebrewArgv\.erase\(homebrewArgv\.begin\(\) \+ 13, homebrewArgv\.begin\(\) \+ 15\);'),
+    Guard("Exit game / Restart now (L3+R3) close the window like HOME > Close",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(physicalInputFrame\.Exit \|\| devLabQuit \|\| Fast::Oot3d::ExitGameRequested\(\)\) \{'),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay

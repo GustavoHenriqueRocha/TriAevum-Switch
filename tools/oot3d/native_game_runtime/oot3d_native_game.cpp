@@ -29,6 +29,7 @@
 #endif
 
 #if defined(__SWITCH__)
+#include "oot3d_update_panel.h"
 #include "oot3d_whole_aot_gcov.h"
 void PlaceSwitchMainThread(); // oot3d_switch_threads.cpp
 #endif
@@ -178,6 +179,9 @@ int main(int argc, char** argv) {
         // GLSL and nvc0 code here; the stock devkitPro Mesa ignores these.
         setenv("MESA_SHADER_CACHE_DIR", "sdmc:/switch/oot3dre/mesacache", 0);
         setenv("MESA_GLSL_CACHE_MAX_SIZE", "128M", 0);
+        // An update installed by the previous run swaps its remaining files
+        // now, before anything opens them (oot3d_update_release.h).
+        Oot3dNativeGame::FinishPendingUpdate("sdmc:/switch/oot3dre");
         // SDL's positional face-button convention is useful for portable PC
         // layouts, but the Switch build should follow the labels printed on
         // Joy-Con and Pro Controllers: A is A, B is B, and so on.
@@ -219,9 +223,16 @@ int main(int argc, char** argv) {
             homebrewArguments[18] = const_cast<char*>("native30_interpolated");
             homebrewArguments[20] = const_cast<char*>("60");
         }
+        // config/atlas_overrides.o3tu is built from the third-party TopScreen
+        // mod, which a release cannot ship: without it the TopScreen UI runs
+        // without texture overrides instead of refusing to start.
+        std::vector<char*> homebrewArgv(homebrewArguments.begin(), homebrewArguments.end());
+        if (!std::filesystem::is_regular_file(homebrewArguments[14])) {
+            homebrewArgv.erase(homebrewArgv.begin() + 13, homebrewArgv.begin() + 15);
+        }
         if (argc <= 1) {
-            argc = static_cast<int>(homebrewArguments.size());
-            argv = homebrewArguments.data();
+            argc = static_cast<int>(homebrewArgv.size());
+            argv = homebrewArgv.data();
         }
 #else
         preparedArguments = PrepareNativeGameArguments(argc, argv);
