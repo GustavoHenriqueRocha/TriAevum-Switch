@@ -78,6 +78,13 @@ Desempenho e usabilidade:
   literais PC-relativos dobrados; shards sem `-ffast-math` (exatidão do VFP).
 - **Orçamento de blocos** 2048 (era 128) no Switch.
 - **Perfil no console**: `logs/perf.txt` a cada 150 quadros (ms por fase + contadores do Mesa).
+- **Mira por giroscópio**: o sensor de seis eixos do próprio console alimenta o movimento de controle
+  que o SDL do devkitPro não informa (`oot3d_switch_motion.cpp`): Pro Controller do jogador 1, senão
+  o Joy-Con direito de um par (o esquerdo se só ele estiver conectado), senão Handheld (o Switch Lite).
+  Joy-Con sozinho na horizontal não é suportado. Com `aim.source` `automatic` (o padrão), inclinar o
+  console mira em primeira pessoa; `aim.invert_x`/`invert_y` e a sensibilidade do giroscópio valem como
+  no PC, e "Calibrate controller motion" (menu L3+R3, Controls) remove o desvio. O sensor para fora de
+  foco e reinicia na volta (HOME, sleep) ou quando os dados param de chegar.
 - **TopScreen 3.0**: a 2.1.1 saiu do GameBanana; o importador agora aceita o pacote 3.0.
 - **ROM USA** aceita no build (adaptador USA→EUR canônico do próprio projeto).
 - **Caminhos de entrada** configuráveis por `OOT3D_OPERATIONAL_<variável>` (antes fixos no Windows do autor).
