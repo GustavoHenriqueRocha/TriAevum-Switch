@@ -20,6 +20,33 @@ começar uma investigação nova, gaste 2 minutos procurando se ela já existe:
 Registre o que descobrir no mesmo lugar: mensagem de commit com causa e número,
 guarda/teste de regressão, e técnica nova em `docs/GUIA_PORT_3DS_SWITCH.md`.
 
+## Escreva tudo o que não virou código
+
+Pesquisa que fica só na conversa some no fim da sessão. Toda investigação,
+pesquisa de referência (Azahar, 3dbrew, outros projetos) ou decisão de design
+vira um arquivo em `docs/pesquisas/AAAA-MM-DD-<assunto>.md`, mesmo quando não
+gerou código. Modelo em `docs/pesquisas/README.md`. O essencial:
+
+- **Pergunta**: o que se queria saber e por quê.
+- **Fontes**: arquivo:linha, commit, link do Azahar/3dbrew, comando que reproduz.
+- **Conclusão**: o que é verdade, com número quando houver.
+- **Decisão e alternativas rejeitadas**: o que se escolheu, o que foi descartado
+  e por que (é o que evita refazer a mesma pesquisa daqui a um mês).
+- **Em aberto**: o que não se conseguiu confirmar.
+
+Relatório de agente/workflow também vai para lá, depois de verificado.
+
+## Regras de trabalho
+
+- **Teste de regressão antes da correção.** Escreva o teste, veja ele falhar
+  pelo motivo certo, depois corrija. Teste que nunca falhou não prova nada.
+- **Alegação não é fato.** Achado de agente, comentário antigo, nome de função
+  ou doc desatualizado é hipótese até ser conferido no código, no log ou na
+  fonte de verdade. Por isso os workflows têm etapa de verificação adversarial.
+- **Comportamento do OoT3D não muda por acidente.** Tudo que for genérico passa
+  pelo perfil de título (`ctr_title_profile.h`) e ganha guarda em
+  `tests/switch/test_bug_guards.py`.
+
 ## Método de investigação
 
 1. **Reproduza por comando, 100% das vezes.** Sem repro determinística é caça a
