@@ -420,8 +420,7 @@ void SwitchUpdater::RunInstall() {
     Finish(Phase::Failed, "Could not install: " + error + ". The installed version is unchanged.");
     return;
   }
-  Finish(Phase::Installed, "Installed " + release.Release.Tag + " (build " + std::to_string(manifest.Build) +
-                               "). It starts with the next launch.");
+  Finish(Phase::Installed, "Installed " + release.Release.Tag + ". It starts with the next launch.");
 }
 
 } // namespace Oot3dNativeGame

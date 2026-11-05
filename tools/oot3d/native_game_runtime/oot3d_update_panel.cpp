@@ -52,7 +52,7 @@ public:
   const char *Label() const noexcept override { return "Updates"; }
 
   void Draw() override {
-    ImGui::Text("Installed: %s", BuildVersionLabel());
+    ImGui::Text("Installed: %s", BuildVersion());
     DrawChannel();
     ImGui::TextDisabled("Releases from github.com/%s", mUpdater.Repository().c_str());
     ImGui::Separator();
@@ -108,20 +108,20 @@ private:
       return;
     }
     const auto &offer = *status.Offer;
-    ImGui::Text("Latest on %s: %s (build %llu), %s", ChannelName(mChannel), offer.Manifest.Version.c_str(),
-                static_cast<unsigned long long>(offer.Manifest.Build), Megabytes(offer.TotalBytes()).c_str());
+    ImGui::Text("Latest on %s: %s, %s", ChannelName(mChannel), offer.Manifest.Version.c_str(),
+                Megabytes(offer.TotalBytes()).c_str());
     const char *action = "Download and install";
     switch (status.Kind) {
     case OfferKind::Update:
-      ImGui::TextUnformatted("A newer build is available.");
+      ImGui::TextUnformatted("A newer version is available.");
       break;
     case OfferKind::Reinstall:
-      ImGui::TextUnformatted("You have this build. Reinstall it to repair damaged or missing files.");
+      ImGui::TextUnformatted("You have this version. Reinstall it to repair damaged or missing files.");
       action = "Reinstall (repair)";
       break;
     case OfferKind::Older:
-      ImGui::TextUnformatted("This build is older than the installed one (e.g. a newer test build).");
-      action = "Install this older build";
+      ImGui::TextUnformatted("This version is older than the installed one (e.g. a newer test version).");
+      action = "Install this older version";
       break;
     }
     if (status.Message.rfind("Download cancelled", 0) == 0) ImGui::TextDisabled("%s", status.Message.c_str());

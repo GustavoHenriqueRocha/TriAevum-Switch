@@ -3,7 +3,7 @@
 #include <filesystem>
 #include <memory>
 namespace Oot3dNativeGame {
-// Debug menu tab "Updates" (Switch): the installed version and build, the
+// Debug menu tab "Updates" (Switch): the installed version, the
 // update channel (config/update_channel: stable or test), the repository
 // (config/update_repo, default JohnUzoka/TriAevum-Switch), checking GitHub
 // Releases, the release notes, download and install with progress and

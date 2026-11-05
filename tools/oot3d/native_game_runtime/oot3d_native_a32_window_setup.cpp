@@ -990,9 +990,9 @@ void NativeA32WindowSession::Setup() {
       Oot3dNativeGame::CreateVideoSettingsPanel("sdmc:/switch/oot3dre/config"));
 #endif
 #if defined(__SWITCH__)
-  // OTA updates from GitHub Releases, and the build at the top of the menu.
+  // OTA updates from GitHub Releases, and the version at the top of the menu.
   applicationSettingsTabs.push_back(Oot3dNativeGame::CreateUpdatePanel("sdmc:/switch/oot3dre"));
-  Fast::Oot3d::DebugMenuTitleText().store(Oot3dNativeGame::BuildVersionLabel(),
+  Fast::Oot3d::DebugMenuTitleText().store(Oot3dNativeGame::BuildVersion(),
                                           std::memory_order_relaxed);
 #endif
 #if defined(TRIAEVUM_DEVELOPER_TOOLS)

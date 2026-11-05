@@ -838,8 +838,9 @@ loads).
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
   field; default `0.1.0-dev`) and `OOT3D_RELEASE_BUILD` (monotonic integer; default 0). Both go
-  into `oot3d_build_version.cpp` only, the NACP `VERSION` and the first line of the L3+R3 menu
-  (`1.0.0-test.1 (build 5)`). The build number orders releases across channels.
+  into `oot3d_build_version.cpp` only. Players see the version alone (NACP `VERSION`, the first
+  line of the L3+R3 menu, the Updates tab); the build number orders releases across channels for
+  the updater and appears only in `release.json` and `logs/update.txt`.
 - "Exit game" (end of the menu's first line) asks for confirmation ("Progress since your last save
   will be lost.") and then closes the window from the game thread, the path HOME > Close takes:
   the render stream discards queued frames and `Finish` runs. `main` then sets libnx's
@@ -848,14 +849,14 @@ loads).
   next NRO into memory this process's services still hold and aborts (crash report on the console:
   `hbl + 0x3810`, 2001-0106 InvalidCurrentMemory). Ending the process with `svcExitProcess`
   (1.0.0-test.2) avoided that, but the console still reported a crash on exit.
-- Updates tab: installed version and build; channel Stable (releases only) or Test (also
+- Updates tab: installed version; channel Stable (releases only) or Test (also
   pre-releases), saved in `config/update_channel` (default: Test for a pre-release build);
   repository `JohnUzoka/TriAevum-Switch`, or `config/update_repo` (`owner/name`). "Check for
   updates" reads `GET /repos/{repo}/releases` (unauthenticated: 60 requests an hour per address)
   and offers the highest-version release tagged `v<version>` whose `release.json` is valid and
   whose files are all assets of the listed size (and of GitHub's `digest`, when listed). A newer
   build is "Download and install", the same build "Reinstall (repair)", an older one "Install this
-  older build". Release notes are the release body.
+  older version". Release notes are the release body.
 - `release.json`: `{"format": "oot3dre_switch_release_v1", "version", "build" (> 0), "channel"
   ("stable" for a full release, "test" for a pre-release), "files": [{"path", "size", "sha256"}]}`.
   Paths are relative to `sdmc:/switch/oot3dre/`, `[A-Za-z0-9._-]` components, never under
