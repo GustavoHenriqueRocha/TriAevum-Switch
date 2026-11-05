@@ -90,7 +90,8 @@ NRO `~/oot3d-work/oot3d_native_game.deko3d-p5c.nro` (md5 `4bed0f7bd238baa2299663
   samplers), tested in `TestUiPlan`.
 - ImGui: `Fast3dGui::ImGuiRenderDrawData` sends a copy to `Deko3dRenderImGuiDrawData` on the render thread;
   only the font atlas (TexID 0) is sampled → the `config/fps_counter` shows up. Images from other ImGui textures
-  are skipped and counted. No input (touch/mouse) in ImGui yet.
+  are skipped and counted. Input: the controller (`FeedDeko3dGamepad`) and, since the touch work, the
+  touchscreen as a touch-screen mouse (`FeedHostMenuTouch` in `oot3d_native_a32_window_input.cpp`).
 - Log: `ui (...)` line with draws, textures and ImGui commands.
 
 **p6 on the console (10/25):** got into gameplay, HUD and FPS counter show (56–60 fps), but the UI was upside

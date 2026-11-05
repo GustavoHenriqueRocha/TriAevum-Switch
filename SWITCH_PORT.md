@@ -85,7 +85,11 @@ Performance and usability:
   `oot3d_controls.json`, also in L3+R3 → Controls → Aiming; `aim.invert_x`/`invert_y` apply. It
   feeds the game's gyro, which the game reads only while aiming, so a drag in third-person play
   does nothing. Other fingers outside a control are ignored. Short taps are held until the game
-  reads them. Hit-test, fit and ownership: `oot3d_top_screen_hud_touch.h`,
+  reads them. While the L3+R3 menu (or another ImGui window) is open, the first finger that lands
+  is an ImGui touch-screen mouse: tap buttons, checkboxes, tabs and combo items, drag sliders and
+  scrollbars, drag empty space to scroll; the controller keeps navigating. That finger never
+  reaches the game, and fingers that landed before the menu opened stay out of it. Hit-test, fit,
+  ownership and the menu gesture: `oot3d_top_screen_hud_touch.h`,
   `oot3d_top_screen_hud_touch_tests.cpp`.
 - **AOT generator**: hot helpers with an inline fast path and cold slow path; per-block LDM/STM;
   PC-relative literals folded; shards without `-ffast-math` (VFP exactness).

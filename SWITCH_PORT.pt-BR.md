@@ -85,8 +85,12 @@ Desempenho e usabilidade:
   640 px, gira cerca de 90°) no `oot3d_controls.json`, também em L3+R3 → Controls → Aiming;
   `aim.invert_x`/`invert_y` valem. Ele alimenta o giroscópio do jogo, que o jogo só lê mirando,
   então arrastar em terceira pessoa não faz nada. Outros dedos fora de um controle são ignorados.
-  Toques curtos ficam retidos até o jogo ler. Teste de acerto, encaixe e posse:
-  `oot3d_top_screen_hud_touch.h`, `oot3d_top_screen_hud_touch_tests.cpp`.
+  Toques curtos ficam retidos até o jogo ler. Com o menu L3+R3 (ou outra janela ImGui) aberto, o
+  primeiro dedo que encosta é um mouse de toque do ImGui: toque em botões, caixas, abas e itens de
+  combo, arraste sliders e barras de rolagem, arraste espaço vazio para rolar; o controle continua
+  navegando. Esse dedo nunca chega ao jogo, e dedos que encostaram antes de o menu abrir ficam fora
+  dele. Teste de acerto, encaixe, posse e o gesto do menu: `oot3d_top_screen_hud_touch.h`,
+  `oot3d_top_screen_hud_touch_tests.cpp`.
 - **Gerador AOT**: helpers quentes com caminho rápido inline e lento frio; LDM/STM por bloco;
   literais PC-relativos dobrados; shards sem `-ffast-math` (exatidão do VFP).
 - **Orçamento de blocos** 2048 (era 128) no Switch.

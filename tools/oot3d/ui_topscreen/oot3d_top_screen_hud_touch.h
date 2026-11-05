@@ -12,8 +12,10 @@
 // Each finger gets an owner when it lands and keeps it until it lifts: the
 // native page touch (title, file select, pause pages), one HUD control, the
 // aim (drag aiming, when enabled: the first finger that lands outside every
-// control), or nothing. A finger that lands outside a control never presses
-// one, even if it slides onto it, and a HUD finger never aims.
+// control), the host menu (L3+R3 or another ImGui window: the first finger
+// that lands while it is open), or nothing. A finger that lands outside a
+// control never presses one, even if it slides onto it, a HUD finger never
+// aims, and a menu finger never reaches the game.
 
 #include "oot3d_ui/ui_primitives.h"
 
@@ -82,6 +84,7 @@ enum class TopScreenTouchOwner : std::uint8_t {
   Page,
   Hud,
   Aim,
+  Menu,
   Ignored,
 };
 
@@ -159,6 +162,10 @@ struct TopScreenTouchPollResult {
   // on consuming polls, outside pages and host UI.
   float AimDeltaX = 0.0F;
   float AimDeltaY = 0.0F;
+  // The host menu pointer (normalised), while host UI is visible.
+  bool MenuPressed = false;
+  float MenuX = 0.0F;
+  float MenuY = 0.0F;
 };
 
 // A HUD press lasts at least this many consuming polls (guest refreshes):
@@ -171,5 +178,58 @@ inline constexpr std::uint8_t kTopScreenHudMinimumPressPolls = 2;
 ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
                           const TopScreenTouchPollContext &context,
                           bool guestRefreshWillConsume) noexcept;
+
+// The host menu finger as ImGui input. ImGui gets a touch-screen mouse: the
+// pointer goes to where the finger landed, and two polls later (once ImGui
+// has drawn a frame with it, so its hover test is current) the gesture
+// either presses there (an item is under the finger: buttons, checkboxes,
+// tabs, combo items, sliders and scrollbars then drag as usual) or turns the
+// finger's vertical motion into scrolling of the window under it. A tap on
+// empty space is still a click (it closes a popup). When the finger lifts
+// the pointer leaves the screen, so no hover or held state is left behind
+// for controller navigation.
+struct HostMenuTouchSample {
+  bool Pressed = false;
+  // ImGui display coordinates.
+  float X = 0.0F;
+  float Y = 0.0F;
+  // ImGui::IsAnyItemHovered() for the pointer sent so far.
+  bool ItemHovered = false;
+};
+
+// Applied in this order: pointer, press, release, clear, scroll.
+struct HostMenuTouchEvents {
+  bool MovePointer = false;
+  float PointerX = 0.0F;
+  float PointerY = 0.0F;
+  bool Press = false;
+  bool Release = false;
+  // Pointer off-screen (AddMousePosEvent(-FLT_MAX, -FLT_MAX)).
+  bool ClearPointer = false;
+  // Display pixels the content under the finger follows (down positive).
+  float ScrollY = 0.0F;
+};
+
+class HostMenuTouchGesture {
+public:
+  // Polls between sending the pointer and reading ImGui's hover for it.
+  static constexpr std::uint8_t kHoverSettlePolls = 2;
+  // A drag on empty space shorter than this is a tap.
+  static constexpr float kTapSlop = 12.0F;
+
+  [[nodiscard]] HostMenuTouchEvents
+  Update(const HostMenuTouchSample &sample) noexcept;
+  [[nodiscard]] bool Idle() const noexcept { return mPhase == Phase::Idle; }
+
+private:
+  enum class Phase : std::uint8_t { Idle, Settling, Pressing, Scrolling };
+  Phase mPhase = Phase::Idle;
+  std::uint8_t mSettle = 0;
+  bool mMoved = false;
+  float mStartX = 0.0F;
+  float mStartY = 0.0F;
+  float mLastX = 0.0F;
+  float mLastY = 0.0F;
+};
 
 } // namespace Oot3dNativeGame
