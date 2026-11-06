@@ -480,6 +480,18 @@ void NativeA32WindowSession::Setup() {
     blockEntryHooks.insert(blockEntryHooks.end(), diagnosticHooks.begin(),
                            diagnosticHooks.end());
   }
+#if defined(__SWITCH__)
+  // Actor cost profile (config/actor_profile; off by default): its hooks
+  // exist only while it is on (oot3d_native_actor_profile.h).
+  if (std::error_code profileError;
+      std::filesystem::exists("sdmc:/switch/oot3dre/config/actor_profile", profileError)) {
+    actorProfile.emplace(Oot3dNativeGame::NativeProfileTicksPerMs());
+    widescreenProjection.ActorProfile = &*actorProfile;
+    const auto profileHooks = Oot3dNativeGame::NativeActorProfile::HookPcs();
+    blockEntryHooks.insert(blockEntryHooks.end(), profileHooks.begin(), profileHooks.end());
+    std::fprintf(stderr, "TRIAEVUM_ACTOR_PROFILE enabled=1 hooks=%zu\n", profileHooks.size());
+  }
+#endif
   std::sort(blockEntryHooks.begin(), blockEntryHooks.end());
   if (hdFontsLoaded) blockEntryHooks.push_back(Oot3dNativeGame::kNativeQbfA4Blit);
   std::sort(blockEntryHooks.begin(), blockEntryHooks.end());

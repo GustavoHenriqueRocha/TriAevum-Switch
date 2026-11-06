@@ -1,5 +1,7 @@
 #pragma once
 
+#include "oot3d_native_area.h"
+
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -10,9 +12,9 @@ namespace Oot3dNativeGame {
 
 // Hitch log (logs/hitches.txt): every presentation that takes longer
 // than `threshold` times the target interval becomes a line with what happened
-// in that frame, to find the cause of each hitch (perf.txt only has 5 s
-// averages). Runs on the render thread, on every presentation; only formats text when
-// there is a hitch.
+// in that frame and where the game was (scene, room), to find the cause of
+// each hitch (perf.txt only has 5 s averages). Runs on the render thread, on
+// every presentation; only formats text when there is a hitch.
 enum class HitchCause : uint8_t { Shader, Textures, Logic, Render, Count };
 
 inline const char *HitchCauseName(HitchCause cause) {
@@ -30,6 +32,7 @@ struct HitchSample {
   double GameBusyMs = 0.0; // game thread busy (not waiting for the renderer)
   uint64_t TexturesCreated = 0U; // accumulated backend counters
   uint64_t ProgramsLive = 0U;
+  NativeArea Area{}; // the game's area after the last game frame
 };
 
 class HitchRecorder {
@@ -57,12 +60,15 @@ public:
         char text[224];
         std::snprintf(text, sizeof(text),
                       "frame=%llu t=%.3f dt_ms=%.1f late_ms=%.1f cause=%s guest_ms=%.1f "
-                      "game_ms=%.1f tex_new=%llu prog_new=%llu\n",
+                      "game_ms=%.1f tex_new=%llu prog_new=%llu ",
                       static_cast<unsigned long long>(hostFrame), nowSeconds, dtMs,
                       dtMs - targetMs, HitchCauseName(cause), sample.GuestMs,
                       sample.GameBusyMs, static_cast<unsigned long long>(textures),
                       static_cast<unsigned long long>(programs));
-        line.emplace(text);
+        std::string entry(text);
+        entry += FormatNativeArea(sample.Area);
+        entry += '\n';
+        line.emplace(std::move(entry));
       }
     }
     mHasPrevious = true;

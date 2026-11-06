@@ -104,7 +104,11 @@ const SwitchThreadLayoutConfig& Layout() {
 struct ThreadRecord {
     Handle ThreadHandle = INVALID_HANDLE;  // INVALID_HANDLE: free slot
     SwitchThreadRole Role = SwitchThreadRole::Service;
-    uint64_t LastTicks = 0;   // summary reader only
+    // CPU ticks of the thread and the system tick when they were read, from
+    // its registration on, so its first perf window already has a share
+    // (before, every thread printed "na" in the first window of a session).
+    uint64_t LastTicks = 0;
+    uint64_t LastSampleTick = 0;
     bool HasLastTicks = false;
     // Written only by the owning thread (load + store, no RMW); read by the
     // summary. Reset by the summary under the registry lock is not needed:
@@ -115,8 +119,13 @@ struct ThreadRecord {
 
 std::mutex gRegistryMutex;
 std::array<ThreadRecord, 48> gRecords;
-uint64_t gLastSummaryTick = 0;
 thread_local ThreadRecord* tRecord = nullptr;
+
+// CPU time of a thread in system ticks, on all cores.
+bool ReadThreadTicks(Handle thread, uint64_t* ticks) {
+    return R_SUCCEEDED(svcGetInfo(ticks, InfoType_ThreadTickCount, thread, UINT64_MAX)) ||
+           R_SUCCEEDED(svcGetInfo(ticks, InfoType_ThreadTickCountDeprecated, thread, UINT64_MAX));
+}
 
 void RegisterCurrentThread(SwitchThreadRole role) {
     const Handle self = threadGetCurHandle();
@@ -125,7 +134,8 @@ void RegisterCurrentThread(SwitchThreadRole role) {
         for (auto& record : gRecords) {
             if (record.ThreadHandle == INVALID_HANDLE) {
                 record.ThreadHandle = self;
-                record.HasLastTicks = false;
+                record.LastSampleTick = armGetSystemTick();
+                record.HasLastTicks = ReadThreadTicks(self, &record.LastTicks);
                 for (size_t core = 0; core < 3; ++core) {
                     record.CoreSeen[core].store(0, std::memory_order_relaxed);
                     record.LastCoreSeen[core] = 0;
@@ -244,8 +254,6 @@ std::string SwitchThreadPerfSummary() {
     const uint64_t now = armGetSystemTick();
     {
         std::lock_guard lock(gRegistryMutex);
-        const uint64_t window = gLastSummaryTick != 0 ? now - gLastSummaryTick : 0;
-        gLastSummaryTick = now;
         for (auto& record : gRecords) {
             if (record.ThreadHandle == INVALID_HANDLE) {
                 continue;
@@ -253,19 +261,16 @@ std::string SwitchThreadPerfSummary() {
             auto& role = totals[static_cast<size_t>(record.Role)];
             ++role.Threads;
             uint64_t ticks = 0;
-            Result result = svcGetInfo(&ticks, InfoType_ThreadTickCount, record.ThreadHandle,
-                                       UINT64_MAX);
-            if (R_FAILED(result)) {
-                result = svcGetInfo(&ticks, InfoType_ThreadTickCountDeprecated,
-                                    record.ThreadHandle, UINT64_MAX);
-            }
-            if (R_SUCCEEDED(result)) {
+            if (ReadThreadTicks(record.ThreadHandle, &ticks)) {
+                // 0 for a thread registered after `now` was read.
+                const uint64_t window = now > record.LastSampleTick ? now - record.LastSampleTick : 0;
                 if (record.HasLastTicks && window != 0 && ticks >= record.LastTicks) {
                     role.Percent += static_cast<double>(ticks - record.LastTicks) * 100.0 /
                                     static_cast<double>(window);
                     ++role.Measured;
                 }
                 record.LastTicks = ticks;
+                record.LastSampleTick = now;
                 record.HasLastTicks = true;
             }
             for (size_t core = 0; core < 3; ++core) {

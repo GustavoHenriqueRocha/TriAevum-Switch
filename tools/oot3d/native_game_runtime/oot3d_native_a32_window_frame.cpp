@@ -459,7 +459,7 @@ void NativeA32WindowSession::ObservePresentCadence(uint8_t frameKind) {
   if (hitchWriter.has_value()) {
     const auto gpu = apiPointer->GetNativePicaBackendStats();
     const Oot3dNativeGame::HitchSample sample{hitchGuestMs, hitchGameBusyMs,
-                                              gpu.TexturesCreated, gpu.ProgramsLive};
+                                              gpu.TexturesCreated, gpu.ProgramsLive, hitchArea};
     const uint32_t rateHz = cadenceGovernor.DropsInBetween()
                                 ? 30U
                                 : std::max<uint32_t>(interpolationPacingRateHz, 1U);
@@ -746,6 +746,12 @@ bool NativeA32WindowSession::RunFrame() {
                                                         lastPresentationTime)
                               .count());
   lastPresentationTime = std::max(lastPresentationTime, refreshClock);
+#if defined(__SWITCH__)
+  // Where the game is after the previous host frame (scene, room): for the
+  // hitch of that frame and the perf.txt window (both Switch logs).
+  if (processStorage) frameArea = Oot3dNativeGame::ReadNativeArea(processStorage->Memory());
+  perfAreaWindow.Observe(frameArea);
+#endif
   // Presentation cadence (config/fps60_mode): the previous host frame's
   // game-thread cost (its duration minus the waits for the renderer) goes
   // to the render thread's governor.
@@ -764,12 +770,13 @@ bool NativeA32WindowSession::RunFrame() {
       const double busyMs = std::max(0.0, frameMs - waitMs);
       const double guestMs =
           (phaseTiming.GuestSeconds - previous.GuestSeconds) * 1000.0;
-      renderStream.Submit([&, busyMs, guestMs,
+      renderStream.Submit([&, busyMs, guestMs, area = frameArea,
                            refreshes = previous.Refreshes,
                            step = hostFrameCompletedStep] {
         cadenceGovernor.ObserveGameFrame(busyMs, guestMs, refreshes, step);
         hitchGameBusyMs = busyMs;
         hitchGuestMs = guestMs;
+        hitchArea = area;
       });
     }
     previous.Valid = true;
@@ -1312,6 +1319,7 @@ bool NativeA32WindowSession::RunFrame() {
     static std::array<double, 15> windowValues{};
     static uint64_t windowHostFrames = 0U;
     static uint64_t windowGuestFrames = 0U;
+    static double windowGuestInPica = 0.0;
     if (runFrameCount - windowHostFrames >= 150U) {
       Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PerfWindow);
       const auto now = std::chrono::steady_clock::now();
@@ -1332,8 +1340,15 @@ bool NativeA32WindowSession::RunFrame() {
         perf << ' ' << kNames[index] << '='
              << ((values[index] - windowValues[index]) * 1000.0 / hostFrames);
       }
-      perf << " guest_in_pica=" << phaseTiming.GuestInsidePicaSubmitSeconds
+      // The guest resumed inside the PICA submissions (part of `guest`).
+      perf << " guest_in_pica="
+           << ((phaseTiming.GuestInsidePicaSubmitSeconds - windowGuestInPica) * 1000.0 / hostFrames)
            << " total_ms=" << (seconds * 1000.0 / hostFrames);
+      // Where the game spent most of the window (oot3d_native_area.h).
+      const auto area = perfAreaWindow.Dominant();
+      const std::string areaText = Oot3dNativeGame::FormatNativeArea(area.Area);
+      perf << ' ' << areaText << " scene_changes=" << area.SceneChanges;
+      perfAreaWindow.Reset();
       // Clocks of this window (sys-clk IPC, read only; -1 when unknown): one
       // IPC per window, after `now`, so it is not billed to this window.
       {
@@ -1918,6 +1933,8 @@ bool NativeA32WindowSession::RunFrame() {
         }
       }
       perf << '\n';
+      // config/actor_profile: actor costs over the same window (its own line).
+      if (actorProfile.has_value()) perf << actorProfile->TakeLine(areaText);
       // config/gpu_timing: GPU/CPU per render-thread stage and GL call
       // counts over the same window (empty when off).
       if (Fast::GlPerf::Enabled()) {
@@ -1940,6 +1957,7 @@ bool NativeA32WindowSession::RunFrame() {
       windowValues = values;
       windowHostFrames = runFrameCount;
       windowGuestFrames = frameCount;
+      windowGuestInPica = phaseTiming.GuestInsidePicaSubmitSeconds;
       Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameEnd);
     }
   }

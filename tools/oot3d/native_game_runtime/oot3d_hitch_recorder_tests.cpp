@@ -65,6 +65,21 @@ int main() {
     auto line = recorder.Observe(0.1, 1, kTarget, sample);
     Require(line && line->find("cause=render") != std::string::npos, "program drop");
   }
+  {
+    // Each line ends with the area of its frame: Kokiri Forest room 0, then
+    // outside gameplay.
+    HitchRecorder recorder;
+    HitchSample sample;
+    sample.Area = {0x55, 0};
+    recorder.Observe(0.0, 0, kTarget, sample);
+    auto line = recorder.Observe(0.1, 1, kTarget, sample);
+    Require(line && line->find("prog_new=0 scene=0x55:spot04 room=0\n") != std::string::npos,
+            "hitch area");
+    sample.Area = {};
+    line = recorder.Observe(0.2, 2, kTarget, sample);
+    Require(line && line->find("prog_new=0 scene=- room=-\n") != std::string::npos,
+            "hitch outside gameplay");
+  }
   std::puts("hitch recorder: PASS");
   return 0;
 }

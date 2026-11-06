@@ -57,7 +57,9 @@ GENERATOR_REVISION = 4
 # A merged light names at most this many surfaces.
 MAX_SURFACES = 2
 
-# Scene file stems by scene id (the title's scene table order).
+# Scene file stems by scene id (the title's scene table order). The runtime's
+# copy is kNativeSceneStems (oot3d_native_area.h); oot3d_native_perf_diagnostics_tests
+# fails when the two differ.
 SCENE_NAMES = {
     0: "ydan", 1: "ddan", 2: "bdan", 3: "bmori1", 4: "hidan", 5: "mizusin", 6: "jyasinzou", 7: "hakadan",
     8: "hakadan_ch", 9: "ice_doukutu", 10: "ganon", 11: "men", 12: "gerudoway", 13: "ganontika",

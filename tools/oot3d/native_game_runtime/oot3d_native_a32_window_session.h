@@ -665,8 +665,15 @@ private:
   uint64_t hitchPresents = 0U;
   double hitchGameBusyMs = 0.0;
   double hitchGuestMs = 0.0;
+  Oot3dNativeGame::NativeArea hitchArea{};
   std::array<std::atomic<uint64_t>, static_cast<size_t>(Oot3dNativeGame::HitchCause::Count)>
       hitchCounts{};
+  // The game's scene and room, read once per host frame on the game thread
+  // (hitches.txt lines, perf.txt windows; oot3d_native_area.h).
+  Oot3dNativeGame::NativeArea frameArea{};
+  Oot3dNativeGame::NativeAreaWindow perfAreaWindow;
+  // Actor cost profile (config/actor_profile; oot3d_native_actor_profile.h).
+  std::optional<Oot3dNativeGame::NativeActorProfile> actorProfile;
   // Frame spikes (oot3d_frame_spike_log.h): config/frame_spikes or
   // config/gpu_timing. Render-thread scratch below is written by
   // FinishRenderFrameCost and the scene lambda, read at the present.

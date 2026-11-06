@@ -273,7 +273,9 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
 ## On-console diagnostics
 
 - `sdmc:/switch/oot3dre/boot-status.txt` — startup stage and readable error.
-- `logs/perf.txt` — FPS and ms per phase; `logs/oot3d_native_game.log`; `logs/glthread.txt`.
+- `logs/perf.txt` — FPS and ms per phase, the area of each window and, with `config/actor_profile`,
+  the cost of the actors (format below, "Area ids and actor costs"); `logs/hitches.txt` — one line
+  per late presentation, with its area; `logs/oot3d_native_game.log`; `logs/glthread.txt`.
 - Crashes: `atmosphere/crash_reports/` (the `.nro` is loaded by hbloader; the base can be
   found by aligning the return addresses with `bl/blr` instructions in the ELF).
 - Hangs (frozen image, no crash report): `logs/hang.txt`, from the hang watchdog
@@ -919,6 +921,53 @@ loads).
   (values cached by libnx, no IPC) and work even without sys-clk.
 - `perf_report.py` shows each session's clock; if it changes midway, it warns (window, before → after) and
   splits fps/`total_ms` by clock; `--windows` lists `cpu/gpu/mem mode` per window.
+
+### Area ids and actor costs in `perf.txt` and `hitches.txt` (2026-11-05)
+- **Area, always on.** Once per host frame the game thread reads the current game state
+  (`0x005043E0`); when it is the PlayState (u8 `+0x100` = 3) it reads the scene id (s16 `+0x104`)
+  and the current room (s8 `+0x4C30`) (`oot3d_native_area.h`). Cost: four guest reads per frame.
+  - Each `hitches.txt` line ends with the area of its frame:
+    `frame=8123 t=271.204 dt_ms=58.4 late_ms=41.7 cause=logic guest_ms=29.8 game_ms=31.0 tex_new=0
+    prog_new=0 scene=0x51:spot00 room=0`.
+  - Each `host_frames=` line gains, after `total_ms`, the window's area and its scene changes:
+    `scene=0x51:spot00 room=0 scene_changes=0`. The area is the scene with the most frames in the
+    window (frames outside gameplay count as `scene=-`) and that scene's most frequent room;
+    `scene_changes` counts switches between two gameplay scenes, including one at the window's
+    start.
+  - Format: the scene id in hex, then `:` and the scene's file stem when the title's scene table
+    names it (`kNativeSceneStems`, the table of `tools/triaevum_release/scene_lights.py`):
+    `0x00:ydan` Deku Tree, `0x0D:ganontika` Ganon's Castle, `0x20:market_day` Market, `0x2A:kakariko`
+    Kakariko Village, `0x51:spot00` Hyrule Field, `0x55:spot04` Kokiri Forest, `0x05:mizusin` Water
+    Temple. `room=-` without a room, `scene=- room=-` outside gameplay (title, file select).
+- **Actor costs, `config/actor_profile` (file exists, content ignored; off by default).** Times
+  game-logic calls with the host counter (`cntpct_el0`, 19.2 MHz; `oot3d_native_actor_profile.h`)
+  at block-entry hooks of the policy (`oot3d_native_a32_projection_policy.cpp`), added to the hook
+  list only when the file exists:
+  - Actor_UpdateAll `0x00461344` until its return `0x002E4058` in Gameplay_Update; each actor's
+    update from block `0x00461784` (r4 = actor; the block calls `Actor+0x13C`) to `0x004617B4`;
+    CollisionCheck_AT `0x00460548` → `0x002E401C` and CollisionCheck_OC `0x0045DC34` → `0x002E4028`;
+    Actor_DrawAll `0x00461904` → `0x002E2CE0`; each actor's draw at Actor_Draw `0x002D5F68` (r1 =
+    actor) → `0x00461BB8` (or `0x00461D2C`, lens pass). Every PC is an emitted whole-AOT block label;
+    an entry whose return address is another caller is not timed.
+  - Each window gains a line after the `host_frames=` line:
+    `actors: scene=0x51:spot00 room=0 steps=75 draws=75 n=41.0 update_ms=6.12 actor_update_ms=5.30
+    collide_ms=2.05 at_ms=0.61 oc_ms=1.44 draw_ms=3.80 actor_draw_ms=3.02 hooks=172 overhead_ms=0.015
+    dropped=0 by_cat=enemy:3.10,player:2.40,prop:0.90 top=Player/player:2.40x1,En_Skb/enemy:1.20x4,...`
+    (example values).
+  - Fields: `steps` Actor_UpdateAll calls (one per game step), `draws` Actor_DrawAll calls, `n` actor
+    updates per step. `update_ms`, `actor_update_ms` (the sum of the actors' own updates),
+    `collide_ms` (`at_ms` + `oc_ms`) are ms per step; `draw_ms` and `actor_draw_ms` ms per draw pass.
+    `by_cat` sums update + draw per actor category (`switch bg player explosive npc enemy prop
+    itemaction misc boss door chest`), `top` the 8 actor ids with the most time:
+    `name/category:ms x instances per step`. Names come from the decomp's actor ids
+    (`oot3d_native_actor_names.h`); unnamed ids print as `0x01D7`, ids past the table as `other`.
+  - Cost: `hooks` per step (~4 per actor) and `overhead_ms`, the profile's own time per step. Each
+    hook also costs the guest register flush/reload and the policy call, which `overhead_ms` does
+    not include; measure the whole cost by comparing `guest` with and without the file at the same
+    spot. `dropped` counts intervals that could not be paired or took over 250 ms.
+- **Other fixes.** `guest_in_pica` is now ms per host frame of the window like the other phases
+  (it was the running total in seconds since the start). `threads:` CPU shares are measured from each
+  thread's registration, so the first window of a session no longer shows `na`.
 
 ### Performance overlay: L3+R3 > Video (`config/fps_counter`)
 - "Performance overlay" checkbox in the Video tab; applies in the same frame and creates/removes

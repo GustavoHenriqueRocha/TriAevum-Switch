@@ -7,6 +7,12 @@ void ApplyNativeWidescreenProjectionPolicy(
     uint32_t pc, oot3d::recomp::a32::GuestState &state,
     oot3d::recomp::a32::MemoryBus &memory, void *user) {
   auto &runtime = *static_cast<NativeWidescreenProjectionState *>(user);
+  // First, so the timed intervals carry as little of this policy as possible.
+  if (runtime.ActorProfile != nullptr) [[unlikely]] {
+    const uint64_t begin = Oot3dNativeGame::NativeProfileTicks();
+    if (runtime.ActorProfile->Observe(pc, state.r[1], state.r[4], state.r[14], memory, begin))
+      runtime.ActorProfile->AddHookOverhead(Oot3dNativeGame::NativeProfileTicks() - begin);
+  }
   (void)Oot3dNativeGame::ApplyNativeActorVisibilityHook(
       pc, state, memory, runtime.ActorVisibility);
   if (pc == Oot3dNativeGame::kNativeQbfA4Blit && runtime.HdFonts && runtime.TraceMemory)

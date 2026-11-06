@@ -40,6 +40,8 @@
 #include "oot3d_native_a32_scene_view.h"
 #include "oot3d_native_actor_interactions.h"
 #include "oot3d_native_a32_actor_visibility.h"
+#include "oot3d_native_actor_profile.h"
+#include "oot3d_native_area.h"
 #include "fast/oot3d/grass_interaction_bridge.h"
 #include "oot3d_native_a32_timing_probe.h"
 #include "oot3d_native_compiled_functions.h"
@@ -529,6 +531,8 @@ struct NativeWidescreenProjectionState {
   Oot3dNativeGame::NativeTemporalEventLedger *TemporalEventLedger = nullptr;
   Oot3dNativeGame::NativeA32PlayerTemporalBridge *PlayerTemporalBridge =
       nullptr;
+  // Actor cost profile (config/actor_profile); null when off.
+  Oot3dNativeGame::NativeActorProfile *ActorProfile = nullptr;
   nlohmann::json PlayerTimingEvents = nlohmann::json::array();
   bool PlayerTimingEventsTruncated = false;
 };

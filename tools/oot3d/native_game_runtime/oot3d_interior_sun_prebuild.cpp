@@ -1,4 +1,5 @@
 #include "oot3d_interior_sun_prebuild.h"
+#include "oot3d_native_area.h"
 #include "oot3d_native_room_shadow_shell.h"
 #include "recomp/a32_runtime.h"
 #include <algorithm>
@@ -488,111 +489,9 @@ PrebuildInteriorSun(const std::filesystem::path &romfs,
           {"entries", std::move(entries)}};
 }
 nlohmann::json ListNativeEnvironmentGroups(const std::filesystem::path& romfs) {
-  // Names/IDs only, from scene_lights.py's title table. Groups are exclusively
-  // decoded from each resource's selected authored command lists below.
-  static const std::map<std::string, uint16_t> sceneIds{
-      {"ydan", 0},
-      {"ddan", 1},
-      {"bdan", 2},
-      {"bmori1", 3},
-      {"hidan", 4},
-      {"mizusin", 5},
-      {"jyasinzou", 6},
-      {"hakadan", 7},
-      {"hakadan_ch", 8},
-      {"ice_doukutu", 9},
-      {"ganon", 10},
-      {"men", 11},
-      {"gerudoway", 12},
-      {"ganontika", 13},
-      {"ganon_sonogo", 14},
-      {"ganontikasonogo", 15},
-      {"takaraya", 16},
-      {"ydan_boss", 17},
-      {"ddan_boss", 18},
-      {"bdan_boss", 19},
-      {"moriboss", 20},
-      {"fire_bs", 21},
-      {"mizusin_boss", 22},
-      {"jyasinzou_boss", 23},
-      {"hakadan_boss", 24},
-      {"ganon_boss", 25},
-      {"ganon_final", 26},
-      {"entra_day", 27},
-      {"entra_night", 28},
-      {"entra_ruins", 29},
-      {"market_alley", 30},
-      {"market_alley_n", 31},
-      {"market_day", 32},
-      {"market_night", 33},
-      {"market_ruins", 34},
-      {"shrine", 35},
-      {"shrine_n", 36},
-      {"shrine_r", 37},
-      {"k_home", 38},
-      {"k_home3", 39},
-      {"k_home4", 40},
-      {"k_home5", 41},
-      {"kakariko", 42},
-      {"kakariko_home3", 43},
-      {"shop", 44},
-      {"kokiri", 45},
-      {"shop_golon", 46},
-      {"zoora", 47},
-      {"shop_drag", 48},
-      {"shop_alley", 49},
-      {"shop_night", 50},
-      {"shop_face", 51},
-      {"link", 52},
-      {"kakariko_impa", 53},
-      {"stable", 54},
-      {"labo", 55},
-      {"hylia_labo", 56},
-      {"tent", 57},
-      {"hut", 58},
-      {"daiyousei_izumi", 59},
-      {"yousei_izumi_tate", 60},
-      {"yousei_izumi_yoko", 61},
-      {"kakusiana", 62},
-      {"hakaana", 63},
-      {"hakaana2", 64},
-      {"hakaana_ouke", 65},
-      {"syatekijyou", 66},
-      {"tokinoma", 67},
-      {"kenjyanoma", 68},
-      {"hairal_niwa", 69},
-      {"hairal_niwa_n", 70},
-      {"hiral_demo", 71},
-      {"hakasitarelay", 72},
-      {"turibori", 73},
-      {"nakaniwa", 74},
-      {"bowling", 75},
-      {"souko", 76},
-      {"miharigoya", 77},
-      {"mahouya", 78},
-      {"ganon_demo", 79},
-      {"kinsuta", 80},
-      {"spot00", 81},
-      {"spot01", 82},
-      {"spot02", 83},
-      {"spot03", 84},
-      {"spot04", 85},
-      {"spot05", 86},
-      {"spot06", 87},
-      {"spot07", 88},
-      {"spot08", 89},
-      {"spot09", 90},
-      {"spot10", 91},
-      {"spot11", 92},
-      {"spot12", 93},
-      {"spot13", 94},
-      {"spot15", 95},
-      {"spot16", 96},
-      {"spot17", 97},
-      {"spot18", 98},
-      {"spot20", 99},
-      {"ganon_tou", 100},
-      {"spot99", 107}};
+  // Names/IDs only, from the title's scene table (kNativeSceneStems, the same
+  // as scene_lights.py's). Groups are exclusively decoded from each
+  // resource's selected authored command lists below.
   Romfs source(romfs);
   const std::regex roomName(R"(^(.+)_([0-9]+)(_dd)?_info\.zsi$)");
   std::map<std::pair<std::string,uint32_t>, nlohmann::json> rows;
@@ -606,7 +505,7 @@ nlohmann::json ListNativeEnvironmentGroups(const std::filesystem::path& romfs) {
       if (row.is_null()) {
         row = {{"scene",stem},{"variant",variant.empty()?"standard":"master-quest"},{"setup",setup},
                {"policy","first-installed-room-per-visit"},{"rooms",nlohmann::json::array()}};
-        if (const auto id=sceneIds.find(stem); id!=sceneIds.end()) row["sceneId"]=id->second;
+        if (const int id=NativeSceneIdByStem(stem); id>=0) row["sceneId"]=id;
       }
       const auto header=ReadNativeSunHeader(0x10,setup,room);
       const auto group=ClassifyNativeEnvironmentGroup(header,ReadNativeSunHeader(0x10,setup,scene));

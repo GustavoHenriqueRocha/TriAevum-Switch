@@ -28,6 +28,32 @@ class Guard:
 
 
 GUARDS = [
+    # --- 05/11: console logs could not name the slow area nor the actors' cost ---
+    # Area (scene, room) read once per host frame into hitches.txt and perf.txt;
+    # the actor cost profile adds its block-entry hooks only with
+    # config/actor_profile, so the default game observes nothing new.
+    Guard("hitches.txt and perf.txt lines did not say which area was slow",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'frameArea = Oot3dNativeGame::ReadNativeArea\(processStorage->Memory\(\)\).*?'
+          r'hitchArea = area;.*?perf << \' \' << areaText << " scene_changes="',
+          test="oot3d_native_perf_diagnostics_tests"),
+    Guard("hitches.txt lines must end with the area of their frame",
+          "tools/oot3d/native_game_runtime/oot3d_hitch_recorder.h",
+          r'entry \+= FormatNativeArea\(sample\.Area\);',
+          test="oot3d_hitch_recorder_tests"),
+    Guard("the actor profile's hooks must stay opt-in (config/actor_profile): each hook costs a guest flush and a policy call",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'exists\("sdmc:/switch/oot3dre/config/actor_profile", profileError\)\) \{.*?'
+          r'NativeActorProfile::HookPcs\(\);\s+blockEntryHooks\.insert',
+          test="oot3d_native_perf_diagnostics_tests"),
+    Guard("perf.txt guest_in_pica was the running total in seconds, not ms per frame",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'guest_in_pica="\s*<< \(\(phaseTiming\.GuestInsidePicaSubmitSeconds - windowGuestInPica\) \* 1000\.0 / hostFrames\)',
+          forbid=r'guest_in_pica=" << phaseTiming\.GuestInsidePicaSubmitSeconds'),
+    Guard("perf.txt threads: printed na for every thread in a session's first window",
+          "tools/oot3d/native_game_runtime/oot3d_switch_threads.cpp",
+          r'record\.HasLastTicks = ReadThreadTicks\(self, &record\.LastTicks\);',
+          forbid=r'gLastSummaryTick'),
     # --- 04/11: dungeon map (pause, TopScreen) stuck on the floor it opens on ---
     # 0x00442F38 (PauseDungeonMap_HandleCursorInput) is the floor cursor for
     # D-pad/analog stick (Up/Down change the floor via SetSelectedFloor); touch is

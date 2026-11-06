@@ -35,6 +35,7 @@ UNIT_TESTS=(
     oot3d_native_dynamic_resolution_tests
     oot3d_native_interpolation_pacing_tests
     oot3d_native_offload_tests
+    oot3d_native_perf_diagnostics_tests
     oot3d_native_pica_deferred_plan_tests
     oot3d_native_pica_visual_cull_tests
     oot3d_native_pica_visual_frame_equivalence_tests
