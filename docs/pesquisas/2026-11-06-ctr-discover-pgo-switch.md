@@ -84,12 +84,25 @@ Este registro cobre a primeira etapa (build instrumentada enviada ao Switch).
   checagem que recusa o módulo (`oot3d_native_a32_window_setup.cpp:732-761`) só existe com
   `OOT3D_WHOLE_AOT_PRODUCT_MODE`, por isso o boot probe de host (produto OFF) passou. A causa é
   o programa descoberto, não o `-fprofile-generate`: a instrumentada do revisado abria.
-- **Correção proposta (hipótese, não feita):** `discover_functions.py` passa
-  `observed_sites=load_observed_sites(DEFAULT_OBSERVED_SITES, code)` (o catálogo só vale para o
-  code.bin do OoT3D, pelo SHA, então os genéricos não mudam), com teste de regressão antes;
-  refazer programa (~10 min), contrato, C++ e build instrumentada (ccache já tem os shards
-  que não mudarem). Vale também um probe de host com produto ON, ou a checagem dos 47 pcs no
-  `derivar.py`, para pegar isso sem o Switch.
+- **Correção (f03290ef):** `discover()` passa
+  `observed_sites=load_observed_sites(DEFAULT_OBSERVED_SITES, code)`. O catálogo é amarrado ao
+  SHA do code.bin do OoT3D, então os genéricos não mudam. Teste
+  `test_observed_sites_of_this_code_image_start_blocks` visto falhar antes (`0x100004 not
+  found`), guarda nova vista falhar por mutação (186/187). O `derivar.py` agora recusa o
+  programa se algum dos 47 pcs não começa bloco; com o programa antigo ele lista os 47.
+- **Rodada 2:** descoberta no Ryzen (2 min 24 s, capstone 5.0.7): 14582 funções, 924535
+  instruções, 0 blocos sem dono; blocos 162942 → 162989 (+47), seleção idêntica (mesmo md5).
+  Faltam 0 dos 47 pcs nos blocos do programa e no despacho do C++ gerado. Dos blocos do
+  revisado, 16 não começam bloco no descoberto (0x00161654 … 0x0048A4A8, as entradas do
+  inventário que caem no meio de bloco); nenhum aparece no código do runtime (grep em
+  `native_game_runtime`, `runtime` e nos JSONs do `native_a32_runtime`).
+- Build instrumentada 2: 28 shards recompilados, 3 min (13:38 → 13:41); auditoria `14579
+  compiled functions, 3 host boundaries, 0 residual A32 entries`. NRO 279582271 bytes, md5
+  `1e4cb56366cb88b70fc5f5cbaea33025` (build e out iguais); rotulada 279576589 bytes, md5
+  `75ba328b7be9497c1a17e5f5015a2a0c`. A rodada 1 ficou em `~/oot3d-work/nro-descoberto/v1-nao-abre/`.
+- Envio 2 (por cima do mesmo nome): o primeiro caiu no meio às 13:4x (FTP fechou; ficaram
+  69967792 bytes no SD); o segundo, às 13:47, fechou em 58,6 s: 279576589 bytes no Switch e
+  local. `pgo/` vazia. Não deu para confirmar no Switch que a NRO abre: depende do Gustavo.
 
 ## Decisão
 
