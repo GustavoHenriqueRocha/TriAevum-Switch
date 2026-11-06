@@ -771,6 +771,10 @@ GUARDS = [
           r'LatestSnapshotCompletion\(.*?bottomSelection\.CompletionId = \*executed;.*?'
           r'PicaPresentationMode::\s*PictureInPicture\)',
           "oot3d_native_pica_vulkan_bridge_tests (modo PictureInPicture e LatestSnapshotCompletion)"),
+    Guard("seleção descoberta mantém externos os nativos do título (OoT3D: 447 chamadas a Mtx3x4/PicaCommandWriter sumiam)",
+          "tools/oot3d/native_a32_runtime/discover_functions.py",
+          r'native = set\(keep_external\) & set\(records\).*?if record\.get\("closed_static_cfg"\)\}\s*-\s*native.*?\|\s*native',
+          "test_discover_functions (test_selection_keeps_title_native_entries_external)"),
     Guard("clique no PiP da tela de baixo vira toque do 3DS (F7 esconde/mostra), só no título genérico",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'LUS_KB_F7\);.*?const bool lowerScreenPictureInPicture =\s*titleProfile\.BottomScreenPictureInPicture &&\s*'

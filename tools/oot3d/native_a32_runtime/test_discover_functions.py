@@ -82,6 +82,24 @@ class DiscoverFunctionsTest(unittest.TestCase):
         blocks = result.to_manifest(False)["blocks"]
         self.assertIn(0x10000C, {int(block["pc"]) for block in blocks})
 
+    def test_selection_keeps_title_native_entries_external(self) -> None:
+        # OoT3D (06/11/2026): com a seleção descoberta o boot probe ficou
+        # idêntico ao do inventário revisado (2238 SVCs, memória igual), mas
+        # sem nenhuma das 447 chamadas aos nativos do título: Mtx3x4_Multiply
+        # e companhia viraram C++ traduzido. As externas da seleção revisada
+        # continuam externas; entrada que nem é função descoberta é ignorada.
+        manifest = {"functions": [
+            {"entry": 0x100000, "name": "a", "closed_static_cfg": True,
+             "direct_calls": [{"target": 0x100020}]},
+            {"entry": 0x100020, "name": "nativo", "closed_static_cfg": True, "direct_calls": []},
+        ]}
+        selection = discover.closed_selection(manifest, keep_external={0x100020, 0x999990})
+        self.assertEqual([item["entry"] for item in selection["functions"]], [0x100000])
+        self.assertEqual([item["entry"] for item in selection["external_functions"]], [0x100020])
+        plain = discover.closed_selection(manifest)
+        self.assertEqual(len(plain["functions"]), 2)
+        self.assertEqual(plain["external_functions"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,8 @@ left open become external functions).
 
   discover_functions.py --code code.bin --exheader exheader.bin --output inventory.csv
       [--compare reviewed_inventory.csv --profile eur_rev0]
-      [--program-output aot_program.json --selection-output functions.json]
+      [--program-output aot_program.json --selection-output functions.json
+       [--external-from whole_aot_functions.json]]
 
 OoT3D EUR (2026-11-05): 14580 functions, 924525 instructions (same as the
 reviewed inventory), 0 unclaimed blocks, 0 unresolved edges; 10307 of the
@@ -153,16 +154,24 @@ def discover(code: bytes, exheader: bytes, profile: str) -> tuple[program.AotPro
     return result, pointers | seeds
 
 
-def closed_selection(manifest: dict) -> dict:
-    """Every closed-CFG function; open direct-call targets become external."""
+def closed_selection(manifest: dict, keep_external: set[int] = frozenset()) -> dict:
+    """Every closed-CFG function; open direct-call targets become external.
+
+    keep_external: entries the title runs natively (OoT3D's host overrides, the
+    reviewed selection's external_functions); discovered functions among them
+    stay external so the generated C++ calls the native, not a translation."""
     records = {int(item["entry"]): item for item in manifest["functions"]}
-    selected = {entry for entry, record in records.items() if record.get("closed_static_cfg")}
-    external = {int(call["target"]) for entry in selected
-                for call in records[entry].get("direct_calls", [])} - selected
+    native = set(keep_external) & set(records)
+    selected = {entry for entry, record in records.items()
+                if record.get("closed_static_cfg")} - native
+    external = ({int(call["target"]) for entry in selected
+                 for call in records[entry].get("direct_calls", [])} - selected) | native
     return {"format": SELECTION_FORMAT, "selection_mode": "all_lowerable",
             "functions": [{"entry": entry, "name": records[entry]["name"],
                            "reason": "discovered closed CFG"} for entry in sorted(selected)],
-            "external_functions": [{"entry": entry, "reason": "open CFG"} for entry in sorted(external)],
+            "external_functions": [{"entry": entry,
+                                    "reason": "title native" if entry in native else "open CFG"}
+                                   for entry in sorted(external)],
             "performance_exclusions": [], "selection_conflicts": [], "closure_groups": []}
 
 
@@ -175,6 +184,8 @@ def main() -> int:
     parser.add_argument("--compare", type=Path, help="reviewed inventory to measure recall against")
     parser.add_argument("--program-output", type=Path, help="whole-AOT program manifest (JSON)")
     parser.add_argument("--selection-output", type=Path, help="whole-AOT function selection (JSON)")
+    parser.add_argument("--external-from", type=Path,
+                        help="selection whose external_functions stay external (the title's natives)")
     args = parser.parse_args()
     code = args.code.read_bytes()
     result, pointers = discover(code, args.exheader.read_bytes(), args.profile)
@@ -192,7 +203,11 @@ def main() -> int:
     if args.program_output:
         args.program_output.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
     if args.selection_output:
-        selection = closed_selection(manifest)
+        keep = set()
+        if args.external_from:
+            reviewed = json.loads(args.external_from.read_text())
+            keep = {int(item["entry"]) for item in reviewed.get("external_functions", [])}
+        selection = closed_selection(manifest, keep)
         args.selection_output.write_text(json.dumps(selection, indent=2) + "\n")
         print(f"seleção: {len(selection['functions'])} funções com CFG fechado, "
               f"{len(selection['external_functions'])} externas")
