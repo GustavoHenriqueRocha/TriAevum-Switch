@@ -20,6 +20,10 @@
 #include "fast/backends/gl_frame_profiler.h"
 #include "fast/backends/gl_pica_dynamic_scale.h"
 #include "fast/backends/gfx_deko3d.h"
+#include "fast/backends/gfx_deko3d_lighting.h"
+#include "ship/resource/File.h"
+#include "ship/resource/ResourceManager.h"
+#include "ship/resource/archive/ArchiveManager.h"
 #if defined(__SWITCH__)
 namespace Fast {
 // gfx_opengl.h (its GL headers stay out).
@@ -4208,6 +4212,38 @@ void NativeA32WindowSession::UpdateDevFreeCamera(Oot3dNativeGame::NativeA32Input
 }
 #endif
 
+namespace {
+// deko3d config/lighting perpixel reads the scene's environment profile; the
+// release defaults are in resources.o2r (environments/, staged by
+// scripts/switch/stage-product.sh), not in a folder on the card. Installed
+// only while that mode is on; render stream only.
+std::optional<std::string> ReadArchivedEnvironmentDefault(const std::string &fileName) {
+  auto *context = Ship::Context::GetRawInstance();
+  auto resources = context != nullptr ? context->GetResourceManager() : nullptr;
+  auto archives = resources != nullptr ? resources->GetArchiveManager() : nullptr;
+  const std::string path = "environments/" + fileName;
+  // HasFile first: LoadFile(path) adds an index entry on a miss.
+  if (archives == nullptr || !archives->HasFile(path)) return std::nullopt;
+  const auto file = archives->LoadFile(path);
+  if (file == nullptr || file->Buffer == nullptr || file->BufferOffset > file->Buffer->size()) return std::nullopt;
+  return std::string(file->Buffer->begin() + static_cast<std::ptrdiff_t>(file->BufferOffset), file->Buffer->end());
+}
+
+void ApplyLightingEnvironmentDefaults(Oot3dNativeGame::SceneEnvironmentRuntime &environment) {
+  static uint64_t seenRevision = 0;
+  static bool installed = false;
+  const auto &live = Fast::Deko3d::LiveLightingSettings();
+  const uint64_t revision = live.Revision.load(std::memory_order_acquire);
+  if (revision == seenRevision) return;
+  seenRevision = revision;
+  const bool perPixel = live.Current() == Fast::Deko3d::LightingMode::PerPixel;
+  if (perPixel == installed) return;
+  installed = perPixel;
+  environment.SetDefaultsReader(perPixel ? ReadArchivedEnvironmentDefault
+                                         : Oot3dNativeGame::SceneEnvironmentRuntime::DefaultsReader{});
+}
+} // namespace
+
 void NativeA32WindowSession::PublishNativeSceneView() {
   auto &process = *processStorage;
   // Guest memory is read here; the scene environment, the duplicate check
@@ -4254,6 +4290,7 @@ void NativeA32WindowSession::PublishNativeSceneView() {
       spikeSceneChangePresent = spikePresents;
     spikeLastScene = scene;
   }
+  ApplyLightingEnvironmentDefaults(*sceneEnvironment);
   sceneEnvironment->ObserveScene(snapshot ? snapshot->SceneId : std::nullopt,
       environmentTime.value_or(Oot3dNativeGame::SceneEnvironmentTime{}), player);
   sceneEnvironment->PollProfileFiles();

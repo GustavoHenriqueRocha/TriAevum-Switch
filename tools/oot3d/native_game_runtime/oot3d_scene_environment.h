@@ -191,6 +191,11 @@ public:
   // changes between them). No-op outside developer builds.
   void PollProfileFiles();
   void PollProfileFiles(std::chrono::steady_clock::time_point now);
+  // The release defaults from somewhere other than `defaults` on disk (the
+  // Switch's resources.o2r, environments/<file name>); nothing: absent. Set
+  // or cleared, the scene's slots without unsaved edits resolve again.
+  using DefaultsReader = std::function<std::optional<std::string>(const std::string &fileName)>;
+  void SetDefaultsReader(DefaultsReader reader);
 
 private:
   bool LoadSlotLocked(bool night);
@@ -204,6 +209,7 @@ private:
   void SelectLocked(std::optional<uint16_t> scene);
   std::filesystem::path mDirectory;
   std::filesystem::path mDefaults;
+  DefaultsReader mDefaultsReader;
   Publisher mPublish;
   mutable std::mutex mMutex;
   SceneEnvironmentSnapshot mState;

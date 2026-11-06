@@ -143,6 +143,19 @@ void SceneEnvironmentRuntime::SyncSelectionLocked() {
   mState.Dirty = mState.DirtyTabs[mState.EditingNight ? 1 : 0];
   mState.Path = mState.SceneId ? ProfilePathLocked(mState.EditingNight) : std::filesystem::path{};
 }
+void SceneEnvironmentRuntime::SetDefaultsReader(DefaultsReader reader) {
+  std::scoped_lock lock(mMutex);
+  mDefaultsReader = std::move(reader);
+  if (!mState.SceneId) return;
+  for (bool night : {false, true}) {
+    auto& draft = mDrafts[night ? 1 : 0];
+    if (draft.Profile == draft.Saved) LoadSlotLocked(night);
+  }
+  mState.Revision = ++mRevision; ++mContinuityEpoch;
+  AcknowledgeFilesLocked();
+  SyncSelectionLocked();
+  PublishLocked();
+}
 SceneEnvironmentSnapshot SceneEnvironmentRuntime::Snapshot() const {
   std::scoped_lock lock(mMutex);
   return mState;
@@ -298,8 +311,16 @@ bool SceneEnvironmentRuntime::LoadSlotLocked(bool night) {
   // group standard, the release's group default.
   const auto fallBackTo = [&](const std::filesystem::path& candidate, SceneEnvironmentSource kind, bool group) {
     if (file.Exists || candidate.empty()) return;
-    auto next = group ? LoadSceneEnvironmentFile(candidate, std::nullopt, night, mState.Group)
-                      : LoadSceneEnvironmentFile(candidate, *mState.SceneId, night);
+    const bool releaseFile = kind == SceneEnvironmentSource::DefaultScene || kind == SceneEnvironmentSource::DefaultGroup;
+    SceneEnvironmentFile next;
+    if (releaseFile && mDefaultsReader) {
+      if (auto text = mDefaultsReader(candidate.filename().string()))
+        next = group ? ParseSceneEnvironmentText(std::move(*text), std::nullopt, night, mState.Group)
+                     : ParseSceneEnvironmentText(std::move(*text), *mState.SceneId, night);
+    } else {
+      next = group ? LoadSceneEnvironmentFile(candidate, std::nullopt, night, mState.Group)
+                   : LoadSceneEnvironmentFile(candidate, *mState.SceneId, night);
+    }
     if (!next.Exists) return;
     path = candidate;
     file = std::move(next);

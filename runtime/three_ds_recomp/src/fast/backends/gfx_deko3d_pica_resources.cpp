@@ -698,38 +698,45 @@ bool PicaResources::Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources
 
     // Uniform blocks; a block equal to the stage's previous one this frame is
     // bound again instead of copied (draws of one object share matrices).
-    const auto uniforms = [&](std::span<const uint8_t> bytes, LastUniforms& last, DkGpuAddr& address,
-                              uint32_t& size) {
-        if (bytes.empty()) {
-            return true;
-        }
-        size = PicaUniformBindBytes(bytes.size());
-        if (last.Frame == mFrame && last.Address != DK_GPU_ADDR_INVALID && last.Bytes.size() == bytes.size() &&
-            std::memcmp(last.Bytes.data(), bytes.data(), bytes.size()) == 0) {
-            address = last.Address;
-            ++mStats.UniformReuses;
-            return true;
-        }
-        const StreamSpan stream = mDevice->Stream(size, kDekoUniformAlignment);
-        if (stream.Cpu == nullptr) {
-            ++mStats.StreamFailures;
-            return false;
-        }
-        const size_t copy = std::min<size_t>(bytes.size(), size);
-        std::memcpy(stream.Cpu, bytes.data(), copy);
-        address = stream.Gpu;
-        last.Frame = mFrame;
-        last.Address = stream.Gpu;
-        last.Bytes.assign(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(copy));
-        mStats.UniformBytes += size;
-        return true;
-    };
-    if (!uniforms(draw.VertexUniformBytes, mLastVertexUniforms, out.VertexUniforms, out.VertexUniformBytes) ||
-        !uniforms(draw.FragmentUniformBytes, mLastFragmentUniforms, out.FragmentUniforms,
-                  out.FragmentUniformBytes)) {
+    out.SurfaceLighting = DK_GPU_ADDR_INVALID;
+    out.SurfaceLightingBytes = 0;
+    if (!StreamUniforms(draw.VertexUniformBytes, mLastVertexUniforms, out.VertexUniforms, out.VertexUniformBytes) ||
+        !StreamUniforms(draw.FragmentUniformBytes, mLastFragmentUniforms, out.FragmentUniforms,
+                        out.FragmentUniformBytes)) {
         return fail("deko3d uniform stream memory");
     }
     return true;
+}
+
+bool PicaResources::StreamUniforms(std::span<const uint8_t> bytes, LastUniforms& last, DkGpuAddr& address,
+                                   uint32_t& size) {
+    if (bytes.empty()) {
+        return true;
+    }
+    size = PicaUniformBindBytes(bytes.size());
+    if (last.Frame == mFrame && last.Address != DK_GPU_ADDR_INVALID && last.Bytes.size() == bytes.size() &&
+        std::memcmp(last.Bytes.data(), bytes.data(), bytes.size()) == 0) {
+        address = last.Address;
+        ++mStats.UniformReuses;
+        return true;
+    }
+    const StreamSpan stream = mDevice->Stream(size, kDekoUniformAlignment);
+    if (stream.Cpu == nullptr) {
+        ++mStats.StreamFailures;
+        return false;
+    }
+    const size_t copy = std::min<size_t>(bytes.size(), size);
+    std::memcpy(stream.Cpu, bytes.data(), copy);
+    address = stream.Gpu;
+    last.Frame = mFrame;
+    last.Address = stream.Gpu;
+    last.Bytes.assign(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(copy));
+    mStats.UniformBytes += size;
+    return true;
+}
+
+bool PicaResources::PrepareSurfaceLighting(std::span<const uint8_t> bytes, PicaDrawResources& out) {
+    return StreamUniforms(bytes, mLastSurfaceLighting, out.SurfaceLighting, out.SurfaceLightingBytes);
 }
 
 } // namespace Fast::Deko3d

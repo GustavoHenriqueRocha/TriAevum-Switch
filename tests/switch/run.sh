@@ -17,6 +17,7 @@ JOBS="${JOBS:-3}"
 # Switch runtime unit tests (host CMake targets).
 UNIT_TESTS=(
     oot3d_deko3d_backend_tests
+    oot3d_deko3d_lighting_tests
     oot3d_graphics_settings_schedule_tests
     oot3d_grass_switch_tests
     oot3d_debug_menu_tests

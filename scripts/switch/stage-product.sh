@@ -84,9 +84,14 @@ trap 'rm -rf -- "${resource_work}"' EXIT
 mkdir -p "${resource_work}/shaders/opengl"
 install -m 0644 "${shader}" \
     "${resource_work}/shaders/opengl/default.shader.glsl"
+# The release's scene environment profiles: read from the archive by the
+# deko3d per-pixel lighting option (config/lighting perpixel).
+mkdir -p "${resource_work}/environments"
+install -m 0644 "${repo_root}"/runtime/triaevum_resources/environments/*.environment.json \
+    "${resource_work}/environments/"
 (
     cd -- "${resource_work}"
-    cmake -E tar cf resources.o2r --format=zip shaders
+    cmake -E tar cf resources.o2r --format=zip shaders environments
 )
 install -m 0644 "${resource_work}/resources.o2r" \
     "${install_root}/resources.o2r"

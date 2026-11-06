@@ -75,6 +75,16 @@ target_include_directories(oot3d_deko3d_backend_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime/three_ds_recomp/include)
 oot3d_target_defaults(oot3d_deko3d_backend_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# deko3d toon / per-pixel lighting variants (config/lighting; pure parts).
+add_executable(oot3d_deko3d_lighting_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_deko3d_lighting_tests.cpp
+    runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting.cpp
+    runtime/three_ds_recomp/src/fast/oot3d/pica_toon_shader.cpp
+)
+target_compile_features(oot3d_deko3d_lighting_tests PRIVATE cxx_std_20)
+target_link_libraries(oot3d_deko3d_lighting_tests PRIVATE ThreeDsRecomp::Renderer3dsPicaCore)
+oot3d_target_defaults(oot3d_deko3d_lighting_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # On-screen FPS counter (config/fps_counter; header-only).
 add_executable(oot3d_fps_counter_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_fps_counter_tests.cpp

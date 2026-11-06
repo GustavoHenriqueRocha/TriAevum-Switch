@@ -10,6 +10,7 @@
 // ImGui (the FPS counter) drawn on the window (gfx_deko3d_ui.cpp).
 
 #if defined(__SWITCH__)
+#include "fast/backends/gfx_deko3d_lighting.h"
 #include "fast/backends/gfx_deko3d_programs.h"
 #include "fast/backends/gfx_rendering_api.h"
 #include "fast/renderer3ds/pica_program_preparation.h"
@@ -22,6 +23,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <unordered_map>
@@ -189,11 +191,25 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
         Deko3d::PicaProgramPick Pick = Deko3d::PicaProgramPick::NoVertex;
         const DkShader* Vertex = nullptr;
         const DkShader* Fragment = nullptr;
+        // config/lighting perpixel: the draw binds mSurfaceLighting at
+        // Deko3d::kSurfaceLightingBinding.
+        bool SurfaceLighting = false;
     };
     // The shaders of a draw (package 3); no draw ever compiles.
     PicaProgram ResolvePicaProgram(const GfxNativePicaDrawView& draw);
     const DkShader* ResolvePicaStage(Deko3d::ShaderStage stage, std::string_view canonical,
                                      Renderer3ds::PicaShaderSourceIdentity identity);
+    // config/lighting (gfx_deko3d_lighting.h): applies a new mode at the
+    // start of a frame, swaps an eligible draw's shaders for the mode's
+    // variants when the pack has them, and logs the mode and counters.
+    void ApplyLightingSettings();
+    void ApplyPicaLighting(const GfxNativePicaDrawView& draw, std::string_view fragmentSource,
+                           Renderer3ds::PicaShaderSourceIdentity fragmentIdentity, PicaProgram& program);
+    const DkShader* ResolveLightingFragment(Deko3d::LightingMode mode, std::string_view canonical,
+                                            Renderer3ds::PicaShaderSourceIdentity identity);
+    const DkShader* ResolvePerPixelVertex(const GfxNativePicaDrawView& draw);
+    bool BuildSurfaceLighting(const GfxNativePicaDrawView& draw);
+    void LogLightingCounters(const char* when);
     void LogPicaProgramCounters(const char* when);
     // Package 5 (gfx_deko3d_pica_draw.cpp).
     void InitPica();
@@ -274,6 +290,24 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     Deko3d::PicaStageCache<DkShader> mVertexStages;
     Deko3d::PicaStageCache<DkShader> mFragmentStages;
     uint64_t mTranslationFailures = 0;
+    // config/lighting: the mode in use, the live settings revision applied,
+    // the variants per native fragment identity (one cache per mode) and per
+    // vertex identity and hooks, the frame's environment profile (per-pixel)
+    // and the block of the draw being prepared.
+    Deko3d::LightingMode mLightingMode = Deko3d::LightingMode::Off;
+    uint64_t mLightingRevision = 0;
+    Deko3d::LightingCounters mLightingCounters{};
+    Deko3d::PicaStageCache<DkShader> mToonFragments;
+    Deko3d::PicaStageCache<DkShader> mPerPixelFragments;
+    struct PerPixelVertex {
+        Renderer3ds::PicaShaderSourceIdentity Identity;
+        Renderer3ds::PicaVertexShaderHookLayout Hooks;
+        const DkShader* Shader = nullptr;
+    };
+    std::vector<PerPixelVertex> mPerPixelVertices;
+    Renderer3ds::PicaEnvironmentLighting mLightingEnvironment{};
+    std::optional<Renderer3ds::PicaSurfaceLightingView> mLightingView;
+    Renderer3ds::PicaSurfaceLightingUniforms mSurfaceLighting{};
     bool mDeviceReady = false;
     std::vector<Deko3dFramebuffer> mFramebuffers;
     std::vector<std::unique_ptr<Deko3dShaderProgram>> mShaderPrograms;

@@ -1,6 +1,7 @@
 #include "oot3d_video_settings_panel.h"
 #include "oot3d_video_settings.h"
 #include "oot3d_fps_counter.h"
+#include "fast/backends/gfx_deko3d_lighting.h"
 #include "oot3d/renderer/azahar_texture_pack_settings.h"
 #include "fast/oot3d/grass_switch_profile.h"
 #include <imgui.h>
@@ -65,7 +66,8 @@ class VideoSettingsPanel final : public Fast::Oot3d::GraphicsSettingsPanelTab {
 public:
   explicit VideoSettingsPanel(std::filesystem::path config)
       : mConfig(std::move(config)), mBoot(VideoSettings::Load(mConfig)), mSettings(mBoot),
-        mPack(::Oot3d::Renderer::TexturePackSettings::Load(mConfig)) {
+        mPack(::Oot3d::Renderer::TexturePackSettings::Load(mConfig)),
+        mLighting(Fast::Deko3d::LoadLightingMode(mConfig)) {
     std::error_code error;
     PerfOverlayEnabled().store(std::filesystem::exists(mConfig / kPerfOverlayConfigName, error),
                                std::memory_order_relaxed);
@@ -114,6 +116,7 @@ public:
       ImGui::TextWrapped("Could not write config/%s.", mOverlayError.c_str());
     DrawTexturePack();
     DrawGrass();
+    DrawLighting();
   }
 
 private:
@@ -183,6 +186,23 @@ private:
                         "with 30 FPS it reaches farther.");
   }
 
+  // config/lighting: native (no file), toon bands or trimmed per-pixel
+  // lighting; saved, and applied by the deko3d renderer at the start of its
+  // next frame. A shader the pack lacks keeps its native look.
+  void DrawLighting() {
+    ImGui::Separator();
+    const char *const modes[] = {"Native (default)", "Toon bands", "Per-pixel (for 30 FPS)"};
+    int mode = static_cast<int>(mLighting);
+    if (ImGui::Combo("Lighting", &mode, modes, 3)) {
+      mLighting = static_cast<Fast::Deko3d::LightingMode>(mode);
+      mLightingError = Fast::Deko3d::SaveLightingMode(mConfig, mLighting);
+      Fast::Deko3d::LiveLightingSettings().Publish(mLighting);
+    }
+    if (!mLightingError.empty())
+      ImGui::TextWrapped("Could not write config/%s.", mLightingError.c_str());
+    ImGui::TextDisabled("Applies at once. Per-pixel costs more GPU time: use it at 30 FPS.");
+  }
+
   bool PackFolderExists() const {
     std::error_code error;
     return std::filesystem::is_directory(mPack.Folder, error);
@@ -199,6 +219,8 @@ private:
   Fast::Oot3d::GrassSwitchMode mGrassBoot = Fast::Oot3d::GrassSwitchMode::Off;
   Fast::Oot3d::GrassSwitchMode mGrass = Fast::Oot3d::GrassSwitchMode::Off;
   bool mGrassError = false;
+  Fast::Deko3d::LightingMode mLighting = Fast::Deko3d::LightingMode::Off;
+  std::string mLightingError;
 };
 } // namespace
 std::shared_ptr<Fast::Oot3d::GraphicsSettingsPanelTab>

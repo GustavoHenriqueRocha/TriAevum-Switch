@@ -4,7 +4,12 @@
 
 #if defined(__SWITCH__)
 #include "gfx_deko3d_api.h"
+#include "fast/oot3d/directional_shadows.h"
+#include "fast/oot3d/graphics_settings_runtime.h"
+#include "fast/oot3d/pica_toon_shader.h"
+#include "fast/oot3d/pica_uniform_layout.h"
 #include "fast/renderer3ds/pica_gl_shader_dialect.h"
+#include "fast/renderer3ds/pica_surface_appearance.h"
 
 #include <switch.h>
 
@@ -57,6 +62,10 @@ void GfxRenderingAPIDeko3d::Init() {
     if (!mShaders.Init(mDevice)) {
         throw std::runtime_error("deko3d: shader code memory");
     }
+    // config/lighting (off when absent): published for the Video tab and the
+    // scene environment, applied from the first frame.
+    Deko3d::LiveLightingSettings().Publish(Deko3d::LoadLightingMode("sdmc:/switch/oot3dre/config"));
+    ApplyLightingSettings();
     if (!mResources.Init(mDevice)) {
         Deko3d::Log("init failed: descriptor/fallback memory");
         throw std::runtime_error("deko3d: descriptor/fallback memory");
@@ -76,6 +85,9 @@ void GfxRenderingAPIDeko3d::Shutdown() {
         ShutdownUi();
         mVertexStages.Clear();
         mFragmentStages.Clear();
+        mToonFragments.Clear();
+        mPerPixelFragments.Clear();
+        mPerPixelVertices.clear();
         mTargets.Shutdown();
         mPendingFills.clear();
         mBoundTarget = nullptr;
@@ -106,6 +118,7 @@ void GfxRenderingAPIDeko3d::EnsureFrame() {
         mResources.BeginFrame(mResourcesFrame);
         mTargets.BeginFrame(mResourcesFrame);
         CollectUiRetired();
+        ApplyLightingSettings();
         // A new command list: nothing is known to be bound.
         mBoundTarget = nullptr;
         // config/grass = draw: configured once after Init, before the game.
@@ -380,7 +393,191 @@ GfxRenderingAPIDeko3d::PicaProgram GfxRenderingAPIDeko3d::ResolvePicaProgram(con
     program.Pick = Deko3d::PickPicaProgram(program.Vertex != nullptr, specialized != nullptr, uber != nullptr);
     program.Fragment = specialized != nullptr ? specialized : uber;
     mCounters.Programs.Count(program.Pick);
+    if (mLightingMode != Deko3d::LightingMode::Off && program.Vertex != nullptr && program.Fragment != nullptr) {
+        // The variant of the text the native draw uses (specialized or uber).
+        if (specialized != nullptr) {
+            ApplyPicaLighting(draw, draw.FragmentShaderSource, draw.FragmentShaderSourceIdentity, program);
+        } else {
+            ApplyPicaLighting(draw, draw.UberFragmentShaderSource, draw.UberFragmentShaderSourceIdentity, program);
+        }
+    }
     return program;
+}
+
+// ---- config/lighting: toon and trimmed per-pixel variants (gfx_deko3d_lighting.h) ----
+
+void GfxRenderingAPIDeko3d::ApplyLightingSettings() {
+    auto& live = Deko3d::LiveLightingSettings();
+    const uint64_t revision = live.Revision.load(std::memory_order_acquire);
+    if (revision != mLightingRevision) {
+        mLightingRevision = revision;
+        const Deko3d::LightingMode mode = live.Current();
+        if (mode != mLightingMode || revision == 1U) {
+            Deko3d::Log("lighting: mode %s (config/lighting)", Deko3d::LightingModeName(mode));
+        }
+        mLightingMode = mode;
+    }
+    if (mLightingMode == Deko3d::LightingMode::PerPixel) {
+        // The scene's environment profile (resources.o2r environments/ and
+        // the user's own files), as the scene environment last published it.
+        mLightingEnvironment = Oot3d::GraphicsSettingsRuntime::Instance().PublishedSceneEnvironment();
+    }
+}
+
+const DkShader* GfxRenderingAPIDeko3d::ResolveLightingFragment(Deko3d::LightingMode mode, std::string_view canonical,
+                                                               Renderer3ds::PicaShaderSourceIdentity identity) {
+    if (canonical.empty()) {
+        return nullptr;
+    }
+    if (!identity.Available()) {
+        identity = Renderer3ds::IdentifyPicaShaderSource(canonical);
+    }
+    auto& cache = mode == Deko3d::LightingMode::Toon ? mToonFragments : mPerPixelFragments;
+    return cache.Get(identity, [&]() -> const DkShader* {
+        std::string translated;
+        std::string error;
+        std::optional<std::string> variant;
+        if (Renderer3ds::TranslatePicaShaderToOpenGl43(canonical, translated, &error)) {
+            variant = Deko3d::LightingFragmentVariant(mode, translated);
+        }
+        return Deko3d::ResolveLightingVariant<DkShader>(
+            Deko3d::ShaderStage::Fragment, variant,
+            [&](uint64_t key, std::string_view text) {
+                return mShaders.FindKey(Deko3d::ShaderStage::Fragment, key, text);
+            },
+            mLightingCounters);
+    });
+}
+
+const DkShader* GfxRenderingAPIDeko3d::ResolvePerPixelVertex(const GfxNativePicaDrawView& draw) {
+    auto identity = draw.VertexShaderSourceIdentity;
+    if (!identity.Available()) {
+        identity = Renderer3ds::IdentifyPicaShaderSource(draw.VertexShaderSource);
+    }
+    const auto& hooks = draw.TemporalVertexProgram.Hooks;
+    for (const auto& known : mPerPixelVertices) {
+        if (known.Identity == identity && known.Hooks == hooks) {
+            return known.Shader;
+        }
+    }
+    std::optional<std::string> translated;
+    if (const auto variant = Deko3d::PerPixelVertexVariant(draw.VertexShaderSource, hooks)) {
+        std::string text;
+        std::string error;
+        if (Renderer3ds::TranslatePicaShaderToOpenGl43(*variant, text, &error)) {
+            translated = std::move(text);
+        }
+    }
+    const DkShader* shader = Deko3d::ResolveLightingVariant<DkShader>(
+        Deko3d::ShaderStage::Vertex, translated,
+        [&](uint64_t key, std::string_view text) { return mShaders.FindKey(Deko3d::ShaderStage::Vertex, key, text); },
+        mLightingCounters);
+    // One title vertex program in a handful of skinning layouts: a short list.
+    if (mPerPixelVertices.size() >= 64U) {
+        mPerPixelVertices.clear();
+    }
+    mPerPixelVertices.push_back({identity, hooks, shader});
+    return shader;
+}
+
+// Upstream's per-pixel admission (gfx_vulkan_pica_draw.cpp, surfaceCandidate
+// and the authored-appearance test), then its block, trimmed.
+bool GfxRenderingAPIDeko3d::BuildSurfaceLighting(const GfxNativePicaDrawView& draw) {
+    const auto& hooks = draw.TemporalVertexProgram.Hooks;
+    const auto* surface = hooks.SurfaceProgram();
+    if (draw.CompositionDomain != Renderer3ds::PicaCompositionDomain::Scene ||
+        !Renderer3ds::PicaCompositionReceivesSurfaceLighting(draw.Composition.Layer) ||
+        draw.FragmentOperationMode != 0U || surface == nullptr || hooks.TransformProgram() == nullptr ||
+        draw.VertexUniformBytes.size() < Oot3d::kPicaPackedVertexFloatOffset ||
+        !Oot3d::UsesPicaPerspectiveProjection(draw.VertexUniformBytes)) {
+        return false;
+    }
+    uint32_t booleans = 0U;
+    std::memcpy(&booleans, draw.VertexUniformBytes.data() + Oot3d::kPicaPackedVertexBooleanMaskOffset,
+                sizeof(booleans));
+    const bool vertexLit = ((booleans >> surface->LightingBooleanUniform) & 1U) != 0U;
+    if (Renderer3ds::ClassifyPicaSurfaceAppearance(draw.Blend, vertexLit, draw.FragmentFeatures.FragmentLightingEnabled) !=
+        Renderer3ds::PicaSurfaceAppearance::Relightable) {
+        return false;
+    }
+    const auto* worldToView = draw.LightBinding.WorldToView ? &*draw.LightBinding.WorldToView : nullptr;
+    if (worldToView != nullptr && (!mLightingView || mLightingView->WorldToView != *worldToView)) {
+        mLightingView = Renderer3ds::BuildPicaSurfaceLightingView(*worldToView);
+    }
+    // A draw the title lights on its own keeps its native environment.
+    auto isolated = mLightingEnvironment;
+    isolated.Enabled = false;
+    const auto uniforms = Renderer3ds::BuildPicaSurfaceLightingUniforms(
+        hooks, booleans, draw.VertexUniformBytes.subspan(Oot3d::kPicaPackedVertexFloatOffset), draw.LightBinding,
+        draw.Composition.IsolatedLighting ? isolated : mLightingEnvironment,
+        worldToView != nullptr && mLightingView ? &*mLightingView : nullptr);
+    if (!uniforms) {
+        return false;
+    }
+    mSurfaceLighting = *uniforms;
+    if (draw.Composition.IsolatedLighting || draw.FragmentFeatures.FragmentLightingEnabled) {
+        mSurfaceLighting.BakedReferenceUp = {};
+    }
+    Deko3d::TrimSurfaceLighting(mSurfaceLighting);
+    return true;
+}
+
+void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw, std::string_view fragmentSource,
+                                              Renderer3ds::PicaShaderSourceIdentity fragmentIdentity,
+                                              PicaProgram& program) {
+    if (mLightingMode == Deko3d::LightingMode::Toon) {
+        Oot3d::PicaToonDrawInfo info;
+        info.CompositionDomain = draw.CompositionDomain;
+        info.DepthTestEnabled = draw.DepthTestEnabled;
+        info.DepthWriteEnabled = draw.DepthWriteEnabled;
+        info.BlendEnabled = draw.Blend.Enabled;
+        info.ColorWriteMask = draw.ColorWriteMask;
+        if (Oot3d::ClassifyPicaToonDraw(info, Oot3d::ToonMode::PicaMaterial) != Oot3d::PicaToonEligibility::Eligible) {
+            ++mLightingCounters.DrawsIneligible;
+            return;
+        }
+        const DkShader* fragment = ResolveLightingFragment(Deko3d::LightingMode::Toon, fragmentSource, fragmentIdentity);
+        const auto choice = Deko3d::ChooseLightingProgram<DkShader>(program.Vertex, program.Fragment, program.Vertex,
+                                                                    fragment, mLightingCounters);
+        program.Vertex = choice.Vertex;
+        program.Fragment = choice.Fragment;
+        return;
+    }
+    // Per-pixel: both variants, then the block (only for a draw that uses them).
+    const auto& hooks = draw.TemporalVertexProgram.Hooks;
+    if (draw.CompositionDomain != Renderer3ds::PicaCompositionDomain::Scene ||
+        !Renderer3ds::PicaCompositionReceivesSurfaceLighting(draw.Composition.Layer) ||
+        hooks.SurfaceProgram() == nullptr || hooks.TransformProgram() == nullptr) {
+        ++mLightingCounters.DrawsIneligible;
+        return;
+    }
+    const DkShader* vertex = ResolvePerPixelVertex(draw);
+    const DkShader* fragment =
+        vertex != nullptr ? ResolveLightingFragment(Deko3d::LightingMode::PerPixel, fragmentSource, fragmentIdentity)
+                          : nullptr;
+    if (vertex != nullptr && fragment != nullptr && !BuildSurfaceLighting(draw)) {
+        ++mLightingCounters.DrawsIneligible;
+        return;
+    }
+    const auto choice =
+        Deko3d::ChooseLightingProgram<DkShader>(program.Vertex, program.Fragment, vertex, fragment, mLightingCounters);
+    program.Vertex = choice.Vertex;
+    program.Fragment = choice.Fragment;
+    program.SurfaceLighting = choice.Lit;
+}
+
+void GfxRenderingAPIDeko3d::LogLightingCounters(const char* when) {
+    const auto& c = mLightingCounters;
+    if (mLightingMode == Deko3d::LightingMode::Off && c.VariantsFound == 0U && c.VariantsMissing == 0U &&
+        c.VariantsUnsupported == 0U) {
+        return;
+    }
+    Deko3d::Log("lighting (%s): mode=%s variants found=%llu missing=%llu unsupported=%llu; draws lit=%llu "
+                "native=%llu ineligible=%llu",
+                when, Deko3d::LightingModeName(mLightingMode), static_cast<unsigned long long>(c.VariantsFound),
+                static_cast<unsigned long long>(c.VariantsMissing),
+                static_cast<unsigned long long>(c.VariantsUnsupported), static_cast<unsigned long long>(c.DrawsLit),
+                static_cast<unsigned long long>(c.DrawsNative), static_cast<unsigned long long>(c.DrawsIneligible));
 }
 
 void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
@@ -393,6 +590,7 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(programs.NoFragment), mVertexStages.Size(), mFragmentStages.Size(),
                 static_cast<unsigned long long>(shaders.Loaded), static_cast<unsigned long long>(shaders.Missing),
                 static_cast<unsigned long long>(shaders.CodeBytes >> 10));
+    LogLightingCounters(when);
     const auto& resources = mResources.Stats();
     Deko3d::Log("resources (%s): draws prepared=%llu rejected=%llu; textures created=%llu evicted=%llu "
                 "live=%llu MiB predecoded=%llu failures=%llu shadow_fallbacks=%llu unsupported_wraps=%llu "

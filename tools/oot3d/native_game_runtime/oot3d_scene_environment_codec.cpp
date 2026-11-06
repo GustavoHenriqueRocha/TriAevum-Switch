@@ -491,7 +491,19 @@ SceneEnvironmentFile LoadSceneEnvironmentFile(const std::filesystem::path &path,
     file.Document.Errors.push_back({"", "cannot be read"});
     return file;
   }
-  file.Text = text.str();
+  return ParseSceneEnvironmentText(text.str(), expectedScene, expectedNight, expectedGroup);
+}
+
+SceneEnvironmentFile ParseSceneEnvironmentText(std::string text, std::optional<uint16_t> expectedScene,
+                                               std::optional<bool> expectedNight,
+                                               std::optional<SceneEnvironmentGroup> expectedGroup) {
+  SceneEnvironmentFile file;
+  file.Exists = true;
+  if (text.size() > kMaximumSceneEnvironmentFileBytes) {
+    file.Document.Errors.push_back({"", "exceeds 64 KiB"});
+    return file;
+  }
+  file.Text = std::move(text);
   try {
     file.Document = DecodeSceneEnvironment(Json::parse(file.Text), expectedScene, expectedNight, expectedGroup);
   } catch (const Json::parse_error &parse) {

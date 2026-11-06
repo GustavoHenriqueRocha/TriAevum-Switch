@@ -1373,6 +1373,65 @@ loads).
   `oot3d_texture_pack_scale_tests` (sizes, ratios, alpha, cap 0, mip chain, settings files, the
   on/off cache rule) and the runtime's `CapsMipmapsAndReleasesReplacementsOnTheWorker`.
 
+### Toon and per-pixel lighting (deko3d): L3+R3 > Video > Lighting (`config/lighting`, off by default)
+- **Switch:** `sdmc:/switch/oot3dre/config/lighting`, first word `toon` or `perpixel`; absent, empty or
+  anything else = off (native PICA lighting, as before). The Video tab's "Lighting" combo (Native,
+  Toon bands, Per-pixel (for 30 FPS)) writes or deletes the file and publishes the mode; the deko3d
+  renderer applies it at the start of its next frame. Off: the variant code is not reached
+  (`ResolvePicaProgram` checks the mode once per draw), the native shader keys and the pack's existing
+  entries are unchanged, and nothing new runs on the game thread.
+- **Toon:** upstream's Toon "PICA material" banding (`pica_toon_shader.cpp`, default style: 4 bands,
+  shadow tint, rim) as a text mutation of the draw's GLSL 4.3 fragment text: the toon declarations
+  (constants baked in, no extra uniform block) before `main()` and one banding line before the depth.
+  Only opaque scene draws that test and write depth and write RGB (`ClassifyPicaToonDraw`); the vertex
+  stage stays native. Meant to fit at 60 fps at stock clocks.
+- **Per-pixel:** a trimmed copy of upstream's per-pixel surface lighting: the draw's native lights,
+  ambient, the sun (scene and environment directionals), at most 4 scene point lights (Navi, fairies,
+  flames; the first 4 the selector keeps) and the baked-surface branch (outdoor vertex colour
+  redistributed by the light, a horizontal face keeps its native colour). No placed lights, water
+  optics, rim, GI or shadows. Admission is upstream's (`surfaceCandidate`: scene domain, world layer,
+  perspective, relightable appearance, a typed surface vertex program). The vertex variant adds
+  upstream's surface normal and tint outputs (`BuildPicaVertexSurfaceShader`, locations 9 and 10); the
+  fragment variant reads upstream's 2992-byte `PicaSurfaceLighting` block, member for member, bound at
+  fragment slot **5** instead of upstream's 16 (deko3d has 0-15; slot 4 is the PICA fragment uniforms).
+  The block is built per draw on the render thread (`BuildPicaSurfaceLightingUniforms`, then
+  `TrimSurfaceLighting`) and streamed like the PICA uniforms (an equal block is bound again). Its
+  environment profile is the scene environment's (`GraphicsSettingsRuntime::PublishedSceneEnvironment`);
+  the release profiles (`runtime/triaevum_resources/environments/`) ship inside `resources.o2r`
+  (`environments/`, `scripts/switch/stage-product.sh`) and are read from it only while per-pixel is on
+  (`SceneEnvironmentRuntime::SetDefaultsReader`). Meant for `config/fps60` off (30 fps).
+- **Variants come from the pack:** a variant is the deterministic mutation of the text the native draw
+  uses (specialized or parametric), looked up by its own `ShaderTextKey`. Offline,
+  `oot3d_deko3d_lighting_variants` (the console's own mutation code) writes the toon and per-pixel
+  variants of every known fragment text and `tools/oot3d/deko3d_shader_pack.py --lighting-variants
+  <tool>` compiles them with the other texts. A variant the pack lacks is recorded like any missing
+  stage (`logs/deko3d_shaders/{vert,frag}_<key>.glsl`) and that draw keeps both native shaders (never
+  a mixed pair). The per-pixel **vertex** variant depends on the draw's vertex hooks, which exist only
+  at run time: the first per-pixel run records it (one title vertex program, a few skinning layouts),
+  `deko3d_shader_pack.py --glsl logs/deko3d_shaders --pack deko3d.pack -o deko3d.pack` adds it, and the
+  second run draws per-pixel. Both mutations are idempotent, so recorded variant texts can go back
+  through the tool unchanged.
+- **Pack (05/11, reference p7b + bases + console-missing):** 287 fragment texts, all 287 toon and 287
+  per-pixel variants compile with uam; 1.77 MB before, 8.14 MB after (toon +1.97 MB, about 6.9 KB
+  each; per-pixel +4.54 MB, about 15.8 KB each; native fragments average 5.0 KB). Scratch per warp:
+  at most 4096 bytes (3 variants per mode use some, like 3 native stages), under the queue's 8 KiB;
+  the tool now refuses any stage above it. Existing entries stay byte for byte.
+- **Log (`logs/deko3d.txt`):** `lighting: mode <off|toon|perpixel> (config/lighting)` at start and on
+  each change, and with every `programs (frame)` line while a mode is on (or was):
+  `lighting (frame): mode=… variants found=… missing=… unsupported=…; draws lit=… native=…
+  ineligible=…` (variants: distinct shaders resolved; draws: cumulative). `missing` > 0 means the pack
+  did not cover the scene: the texts are in `logs/deko3d_shaders/`.
+- **Expected cost [not measured]:** game thread 0 (the per-draw work runs in `SubmitPicaDraw` on the
+  render thread; only the rare dependency flushes run it on core 0). Toon: about 0.2-0.5 ms of GPU per
+  frame at the 2.25x floor. Per-pixel: about 1-2.5 ms of GPU per frame, plus about 0.3-0.8 ms of render
+  thread (the block per lit draw, 3 KB streamed each). Measure: `busy_ms` in the `dkperf` lines of
+  `logs/perf.txt` and `rt_ms_*`, same scene and save, mode off against on.
+- Code: `gfx_deko3d_lighting.{h,cpp}` (mode, mutations, lookup and fallback), `gfx_deko3d.cpp`
+  (`ApplyPicaLighting`, `BuildSurfaceLighting`), `gfx_deko3d_pica_draw.cpp` (binding),
+  `tools/oot3d/deko3d_lighting_variants.cpp`. Host tests `oot3d_deko3d_lighting_tests` (config, both
+  mutations stable/idempotent/only the intended lines, off = native, lookup and fallback, block layout
+  against upstream's and binding); guards in `tests/switch/test_bug_guards.py`.
+
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
   field; default `0.1.0-dev`) and `OOT3D_RELEASE_BUILD` (monotonic integer; default 0). Both go

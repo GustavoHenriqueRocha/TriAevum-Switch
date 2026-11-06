@@ -47,6 +47,12 @@ struct SceneEnvironmentFile {
   std::string Text;
   SceneEnvironmentDocument Document;
 };
+// A profile's bytes from elsewhere (the release defaults in resources.o2r):
+// at most 64 KiB, then decoded, like a file that exists.
+[[nodiscard]] SceneEnvironmentFile ParseSceneEnvironmentText(std::string text,
+                                                             std::optional<uint16_t> expectedScene = std::nullopt,
+                                                             std::optional<bool> expectedNight = std::nullopt,
+                                                             std::optional<SceneEnvironmentGroup> expectedGroup = std::nullopt);
 [[nodiscard]] SceneEnvironmentFile LoadSceneEnvironmentFile(const std::filesystem::path &path,
                                                             std::optional<uint16_t> expectedScene = std::nullopt,
                                                             std::optional<bool> expectedNight = std::nullopt,

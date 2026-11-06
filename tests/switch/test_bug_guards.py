@@ -28,6 +28,26 @@ class Guard:
 
 
 GUARDS = [
+    # --- 05/11: optional deko3d lighting, config/lighting (gfx_deko3d_lighting.h) ---
+    Guard("[decision] deko3d lighting off: native keys and shaders untouched (the variant path only runs with a mode on)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'mCounters\.Programs\.Count\(program\.Pick\);\s*'
+          r'if \(mLightingMode != Deko3d::LightingMode::Off && program\.Vertex != nullptr && program\.Fragment != nullptr\)',
+          test="oot3d_deko3d_lighting_tests (TestOffIsNative)"),
+    Guard("[decision] deko3d lighting: a variant missing from the pack is recorded and the draw keeps both native shaders (never a stall, never a mixed pair)",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_lighting.h",
+          r'const T\* shader = lookup\(ShaderTextKey\(stage, \*variant\).*?'
+          r'if \(variantVertex != nullptr && variantFragment != nullptr\).*?'
+          r'\+\+counters\.DrawsNative;\s*return \{nativeVertex, nativeFragment, false\};',
+          test="oot3d_deko3d_lighting_tests (TestLookupAndFallback)"),
+    Guard("[decision] deko3d per-pixel lighting: upstream's surface block at binding 16 is remapped to fragment slot 5 (deko3d has 0-15)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting.cpp",
+          r'layout\(binding=5, std140\) uniform PicaSurfaceLighting \{',
+          test="oot3d_deko3d_lighting_tests (TestBlockLayoutAndBinding)",
+          forbid=r'binding\s*=\s*16'),
+    Guard("deko3d per-pixel lighting: the draw binds the surface block at kSurfaceLightingBinding (5)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'dkCmdBufBindUniformBuffer\(cmd, DkStage_Fragment, Deko3d::kSurfaceLightingBinding, res\.SurfaceLighting,'),
     # --- 05/11: a guest memory fault in the final battle said only "kind=4 pc=0x004C0A8C" ---
     # The text parser (TextTokenUtf8_ParseNext) met 7f + a code past its table and copied argument words
     # over the stack; the log could not tell which thread, which text or which caller.

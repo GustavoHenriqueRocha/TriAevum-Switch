@@ -480,6 +480,10 @@ void GraphicsSettingsRuntime::PublishSceneEnvironment(
     std::scoped_lock lock(mMutex);
     mSceneEnvironment = environment;
 }
+Renderer3ds::PicaEnvironmentLighting GraphicsSettingsRuntime::PublishedSceneEnvironment() const {
+    std::scoped_lock lock(mMutex);
+    return mSceneEnvironment;
+}
 bool GraphicsSettingsRuntime::NativePresentationOverrideActive() const {
     std::scoped_lock lock(mMutex);
     return mNativePresentation.Active();

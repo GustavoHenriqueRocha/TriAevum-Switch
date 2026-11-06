@@ -61,6 +61,10 @@ struct PicaDrawResources {
     uint32_t VertexUniformBytes = 0;
     DkGpuAddr FragmentUniforms = DK_GPU_ADDR_INVALID;
     uint32_t FragmentUniformBytes = 0;
+    // config/lighting perpixel: the PicaSurfaceLighting block
+    // (Deko3d::kSurfaceLightingBinding); invalid otherwise.
+    DkGpuAddr SurfaceLighting = DK_GPU_ADDR_INVALID;
+    uint32_t SurfaceLightingBytes = 0;
 };
 
 class PicaResources {
@@ -83,6 +87,9 @@ class PicaResources {
     // Everything a draw reads, recorded into the frame (uploads included).
     // False with an error on a draw the GL backend rejects too.
     bool Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources& out, std::string* error);
+    // The per-pixel lighting block of the draw Prepare just made ready
+    // (config/lighting perpixel), deduplicated like the PICA uniforms.
+    bool PrepareSurfaceLighting(std::span<const uint8_t> bytes, PicaDrawResources& out);
 
     // True once after new descriptors or images were written: the caller
     // issues dkCmdBufBarrier(..., DkInvalidateFlags_Descriptors |
@@ -129,6 +136,9 @@ class PicaResources {
         std::vector<uint8_t> Bytes;
     };
 
+    // A uniform block in this frame's stream; one equal to `last` (this
+    // frame) is bound again instead of copied.
+    bool StreamUniforms(std::span<const uint8_t> bytes, LastUniforms& last, DkGpuAddr& address, uint32_t& size);
     DkResHandle TextureHandle(const Renderer3ds::PicaTextureView& texture);
     DkResHandle LightingLutHandle(const Renderer3ds::PicaLightingLutView& lut);
     // A sampled 2D image with its own memory block, its descriptor in `slot`.
@@ -180,6 +190,7 @@ class PicaResources {
     bool mFallbacksUploaded = false;
     LastUniforms mLastVertexUniforms;
     LastUniforms mLastFragmentUniforms;
+    LastUniforms mLastSurfaceLighting;
     PicaResourceStats mStats{};
 };
 

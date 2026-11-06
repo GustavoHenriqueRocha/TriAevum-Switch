@@ -430,6 +430,15 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         }
         return true;
     }
+    if (program.SurfaceLighting &&
+        !mResources.PrepareSurfaceLighting(
+            std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&mSurfaceLighting), sizeof(mSurfaceLighting)),
+            mDrawResources)) {
+        if (mCounters.PicaDrawsRejected++ < 10U) {
+            Deko3d::Log("draw rejected: deko3d surface lighting stream memory");
+        }
+        return true;
+    }
     ++mCounters.PicaDrawsPrepared;
     mDevice.Checkpoint("prepare", mCalls.Draws, draw.VertexCount);
     if (RecordPicaDraw(draw, program, key, *target)) {
@@ -476,6 +485,11 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     }
     dkCmdBufBindTextures(cmd, DkStage_Fragment, 1, res.Textures.data(), static_cast<uint32_t>(res.Textures.size()));
     dkCmdBufBindTexture(cmd, DkStage_Fragment, 13, res.LightingLut);
+    if (program.SurfaceLighting && res.SurfaceLighting != DK_GPU_ADDR_INVALID) {
+        // config/lighting perpixel: upstream's binding 16, remapped.
+        dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, Deko3d::kSurfaceLightingBinding, res.SurfaceLighting,
+                                  res.SurfaceLightingBytes);
+    }
     mDevice.Checkpoint("draw.uniforms");
 
     // Vertices: every binding in the draw's stream block, absent attributes
