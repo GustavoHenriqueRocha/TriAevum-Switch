@@ -69,6 +69,28 @@ Este registro cobre a primeira etapa (build instrumentada enviada ao Switch).
   ficou. No Switch os caminhos do jogo são fixos (`sdmc:/switch/oot3dre/...`,
   `oot3d_native_game.cpp:188`), então o nome diferente da NRO não muda config nem saves.
 
+## A NRO não abre (06/11, 13:2x)
+
+- **Observado:** o Gustavo disse que a `descoberto-pgogen` não abre. `boot-status.txt` do SD
+  (baixado em `~/oot3d-work/bug-cancao-tempo/20261106_132426/`): `status=failed`,
+  `detail=the title module does not start a block at the TopScreen sites 0x002D84C8 …
+  0x00478EBC; rebuild it with whole_aot_observed_sites.json`.
+- **Esperado:** abrir como a instrumentada do `pgo5` (a coleta de 22/10 gravou os 258 `.gcda`).
+- **Diagnóstico (confirmado):** `whole_aot_program.py` começa um bloco em cada um dos 47 pcs de
+  `whole_aot_observed_sites.json` (29d03751; ganchos e retomadas do TopScreen) quando recebe
+  `observed_sites`. O `generate_whole_aot.py` do revisado passa o catálogo; o
+  `discover_functions.py` chama `build_program` sem ele. Conferido nos JSONs: faltam 0 dos 47
+  pcs nos blocos do `gen/aot_program.json` (revisado) e faltam os 47 no programa descoberto. A
+  checagem que recusa o módulo (`oot3d_native_a32_window_setup.cpp:732-761`) só existe com
+  `OOT3D_WHOLE_AOT_PRODUCT_MODE`, por isso o boot probe de host (produto OFF) passou. A causa é
+  o programa descoberto, não o `-fprofile-generate`: a instrumentada do revisado abria.
+- **Correção proposta (hipótese, não feita):** `discover_functions.py` passa
+  `observed_sites=load_observed_sites(DEFAULT_OBSERVED_SITES, code)` (o catálogo só vale para o
+  code.bin do OoT3D, pelo SHA, então os genéricos não mudam), com teste de regressão antes;
+  refazer programa (~10 min), contrato, C++ e build instrumentada (ccache já tem os shards
+  que não mudarem). Vale também um probe de host com produto ON, ou a checagem dos 47 pcs no
+  `derivar.py`, para pegar isso sem o Switch.
+
 ## Decisão
 
 - PGO refeito, não reaproveitado: o `pgo5` é do C++ revisado; com outro corte em funções os
