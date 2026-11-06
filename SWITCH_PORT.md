@@ -960,7 +960,8 @@ loads).
   files of other mods) and the ReShade files are not used.
 - **Smaller copy** (`tools/switch/shrink_texture_pack.py`, Python 3 + Pillow, on the PC): reads the
   zip or an extracted folder, keeps only `load/textures/<title id>/`, and writes each texture at
-  most `--world` (2) or `--hud` (3, the `UI` and `MAPS` folders) times its native size, the caps
+  most `--world` (2), `--models` (as `--world`; `CHARACTERS`, `CREATURES`, `LINK`) or `--hud` (3,
+  the `UI` and `MAPS` folders) times its native size, the caps
   the console applies anyway, so the SD card holds less and the Switch decodes smaller PNGs.
   Area-averaged (`BOX`) with premultiplied alpha; textures already within their size are copied
   byte for byte; `mipN` files, other-language `UI/<folder>`s (`--language`, default English, whose
@@ -969,7 +970,8 @@ loads).
   `CHARACTERS`, `CREATURES`, `LINK`). Measured on chubbycubby's Vanilla UI/HUD 3.2 (8x HUD art,
   64 HUD textures, 398.8 MiB): 97.9 MiB at 4x, 58.7 MiB at 3x, 27.9 MiB at 2x, about 5 s on 16
   cores. On Henriko's 1080p pack 5.0a (2,161 PNGs, extracted) the default run writes 2,009 files,
-  352 MiB, in 11 s: HUD and maps 231.8 to 43.7 MiB, models 82.3 to 21.2 MiB, world 1,250 to 287
+  352 MiB, in 11 s: HUD and maps 231.8 to 43.7 MiB, models 82.3 to 21.2 MiB (38.3 MiB with
+  `--models 3`, which needs "HD texture size" 3x on the console), world 1,250 to 287
   MiB, 153 other-language textures left out. That "1080p" pack is not uniformly 4x: its HUD images
   run 4x to 16x and some world images 8x to 32x the native size.
   `tools/switch/test_shrink_texture_pack.py` covers sizes, alpha edges, parts and languages.

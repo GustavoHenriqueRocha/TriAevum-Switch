@@ -44,6 +44,7 @@ class ShrinkTexturePackTest(unittest.TestCase):
             ROOT + "ENVIRONMENT/tex1_32x32_00000000000000B1_0_mip1.png": png(64, 64),
             ROOT + "ENVIRONMENT/readme.txt": b"not a texture",
             ROOT + "CHARACTERS/tex1_16x16_00000000000000C1_0_mip0.png": png(32, 32),     # already 2x
+            ROOT + "LINK/tex1_16x16_00000000000000C2_0_mip0.png": png(64, 64),           # 4x model
             "OOT3D 4K (1080p)/reshade-shaders/Textures/noise.png": png(16, 16),
         }
 
@@ -74,7 +75,17 @@ class ShrinkTexturePackTest(unittest.TestCase):
         out = self.run_tool("--world", "1", "--hud", "2")
         self.assertEqual(size_of(out / "UI/tex1_64x32_00000000000000A1_4_mip0.png"), (128, 64))
         self.assertEqual(size_of(out / "ENVIRONMENT/tex1_32x32_00000000000000B1_0_mip0.png"), (32, 32))
+        # --models follows --world unless given.
         self.assertEqual(size_of(out / "CHARACTERS/tex1_16x16_00000000000000C1_0_mip0.png"), (16, 16))
+        self.assertEqual(size_of(out / "LINK/tex1_16x16_00000000000000C2_0_mip0.png"), (16, 16))
+
+    def test_models_apart_from_the_world(self):
+        out = self.run_tool("--models", "3")
+        self.assertEqual(size_of(out / "LINK/tex1_16x16_00000000000000C2_0_mip0.png"), (48, 48))
+        self.assertEqual(size_of(out / "ENVIRONMENT/tex1_32x32_00000000000000B1_0_mip0.png"), (64, 64))
+        self.assertEqual(size_of(out / "UI/tex1_64x32_00000000000000A1_4_mip0.png"), (192, 96))
+        # Never enlarged: a 2x source stays 2x.
+        self.assertEqual(size_of(out / "CHARACTERS/tex1_16x16_00000000000000C1_0_mip0.png"), (32, 32))
 
     def test_parts(self):
         out = self.run_tool("--parts", "hud")
@@ -83,7 +94,8 @@ class ShrinkTexturePackTest(unittest.TestCase):
         self.assertFalse((out / "CHARACTERS").exists())
         out = self.run_tool("--parts", "models")
         self.assertEqual(sorted(p.relative_to(out).as_posix() for p in out.rglob("*.png")),
-                         ["CHARACTERS/tex1_16x16_00000000000000C1_0_mip0.png"])
+                         ["CHARACTERS/tex1_16x16_00000000000000C1_0_mip0.png",
+                          "LINK/tex1_16x16_00000000000000C2_0_mip0.png"])
 
     def test_language_folder_kept_and_wins(self):
         # The same texture in UI/ and UI/GERMAN/: the German art is the one kept.

@@ -12,7 +12,10 @@ the SD card holds a fraction of the pack and the Switch decodes smaller PNGs.
 PACK is the downloaded zip or a folder extracted from it. OUTPUT must be new or
 empty; copy its contents (the folders and pack.json) to switch/oot3dre/textures/.
 
-  --world N      world, character and effect textures, N x the original (2)
+  --world N      world and effect textures, N x the original (2)
+  --models N     character, creature and Link textures, N x the original
+                 (same as --world); above 2, set L3+R3 > Video > HD texture
+                 size to match, or the console reduces them back to 2x
   --hud N        HUD, menus and maps (UI, MAPS folders), N x the original (3)
   --parts LIST   comma-separated: hud, models, world, or all (all)
                  hud = UI, MAPS; models = CHARACTERS, CREATURES, LINK;
@@ -146,7 +149,7 @@ def plan(names: list[str], root: str, args: argparse.Namespace) -> tuple[list[Jo
             skipped["mip levels"] += 1
             continue
         native = (int(match.group(1)), int(match.group(2))) if match else None
-        scale = (args.hud if part == "hud" else args.world) if native else None
+        scale = {"hud": args.hud, "models": args.models}.get(part, args.world) if native else None
         jobs.append(Job(str(relative), name, native, scale))
     # A kept language folder's art replaces the same texture elsewhere (the
     # Switch would otherwise pick either).
@@ -184,7 +187,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pack", type=Path, help="the downloaded zip, or a folder extracted from it")
     parser.add_argument("output", type=Path, help="new folder for the small pack")
-    parser.add_argument("--world", type=int, default=2, help="world/model size, x the original (2)")
+    parser.add_argument("--world", type=int, default=2, help="world/effect size, x the original (2)")
+    parser.add_argument("--models", type=int, default=None, help="character/creature/Link size (as --world)")
     parser.add_argument("--hud", type=int, default=3, help="HUD/menu/map size, x the original (3)")
     parser.add_argument("--parts", default="all", help="hud,models,world or all (all)")
     parser.add_argument("--language", default="english", help="UI language folder to keep, or all (english)")
@@ -193,8 +197,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args.parts = set(PARTS) if args.parts == "all" else {p.strip() for p in args.parts.split(",")}
     if not args.parts <= set(PARTS):
         parser.error(f"--parts takes {', '.join(PARTS)} or all")
-    if args.world < 1 or args.hud < 1:
-        parser.error("--world and --hud are at least 1")
+    if args.models is None:
+        args.models = args.world
+    if min(args.world, args.models, args.hud) < 1:
+        parser.error("--world, --models and --hud are at least 1")
     return args
 
 

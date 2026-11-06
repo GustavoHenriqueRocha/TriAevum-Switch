@@ -54,6 +54,8 @@ HenrikoMagnifico's texture pack replaces the world, character and HUD textures w
 
    It writes a `textures` folder of about 350 MB instead of 1.9 GB (world 2x the original, HUD 3x), so
    the Switch also loads it faster. Add `--parts hud,models` for the HUD and characters only (65 MB).
+   `--models 3` keeps characters, creatures and Link at 3x (38 MB instead of 21 MB); then set
+   "HD texture size" to 3x in the game, or it draws them at 2x.
    Skipping this step works too: copy the contents of the zip's `user/load/textures/0004000000033500/`
    folder instead, and the game reduces each texture as it loads it.
 3. Copy the contents of `textures` (the folders and `pack.json`) to `switch/oot3dre/textures/` on the SD
