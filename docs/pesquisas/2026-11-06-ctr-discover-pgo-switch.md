@@ -104,6 +104,24 @@ Este registro cobre a primeira etapa (build instrumentada enviada ao Switch).
   69967792 bytes no SD); o segundo, às 13:47, fechou em 58,6 s: 279576589 bytes no Switch e
   local. `pgo/` vazia. Não deu para confirmar no Switch que a NRO abre: depende do Gustavo.
 
+## Etapa final preparada (não rodada)
+
+- `~/oot3d-work/discover-nro/etapa-final.sh`: baixa os `.gcda` (5 MB/s) para
+  `~/oot3d-work/pgo-descoberto-<data>/`, confere tamanhos contra a listagem do SD e os 258 nomes
+  esperados (um por `.cpp` do C++ instrumentado + substituições; para se faltar ou se houver
+  `.gcda` de outra build), confere por md5 os 260 arquivos do C++ no Ryzen contra
+  `cpp-instrumentada.md5`, roda a build `use` (`VAR=use`, build dir próprio
+  `build-switch-descoberto-use`, `PROFILE_FILE=/home/gustavo/oot3d-work/pgo-descoberto`
+  montado de `agentes/discover-nro/pgo`), conta `coverage-mismatch`, rotula `descoberto-pgo`,
+  envia como `oot3d_native_game.descoberto-pgo.nro` conferindo o tamanho e apaga a
+  `descoberto-pgogen`. Dry-run com pasta falsa: passa com os 258; para com um `.gcda` do
+  `cpp-lean` e com um faltando. Build dir `use` já configurado (258 regras com `-fprofile-use`,
+  launcher `ccache-pgo.sh`).
+- `~/oot3d-work/discover-nro/tour.sh enviar|baixar`: roteiro do tour27 (o da p7e) em
+  `lab/script.jsonl`; depois baixa para `bench/descoberto-pgo` e roda `lab_tour_report.py` na
+  p7e e na nova. A lista de `config/` do SD é a mesma do backup de 05/11 15:55 (o tour p7e foi
+  às 10:55 de 05/11; não há backup entre os dois).
+
 ## Decisão
 
 - PGO refeito, não reaproveitado: o `pgo5` é do C++ revisado; com outro corte em funções os
