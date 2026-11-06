@@ -85,6 +85,7 @@ NativeA32HostResult NativeA32CtrHostServices::FailFsRequest(
         case kFsDeleteFileRequest: typeOffset = 16U; addressOffset = 28U; break;
         case kFsOpenFileDirectlyRequest: typeOffset = 20U; addressOffset = 48U; break;
         case kFsOpenArchiveRequest: typeOffset = 8U; addressOffset = 20U; break;
+        case kFsOpenDirectoryRequest: typeOffset = 12U; addressOffset = 24U; break;
         default: break;
         }
         uint32_t type = 0U, size = 0U, address = 0U;
@@ -135,7 +136,8 @@ NativeA32HostResult NativeA32CtrHostServices::FailFsRequest(
                (!file && header == kFsOpenArchiveRequest)) {
         reply[0] = (header & 0xFFFF0000U) | 0xC0U;
         words = 4U;
-    } else if (!file && (header == kFsOpenFileRequest || header == kFsOpenFileDirectlyRequest)) {
+    } else if (!file && (header == kFsOpenFileRequest || header == kFsOpenFileDirectlyRequest ||
+                         header == kFsOpenDirectoryRequest)) {
         reply[0] = (header & 0xFFFF0000U) | 0x42U;
         reply[2] = kMoveHandleDescriptor;
         words = 4U;
@@ -576,6 +578,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
     // Validate before opening, creating, deleting, or resizing host files.
     const uint32_t replyBytes = event.Detail == kFsOpenFileRequest ||
                                 event.Detail == kFsOpenFileDirectlyRequest ||
+                                event.Detail == kFsOpenDirectoryRequest ||
                                 event.Detail == kFsOpenArchiveRequest ? 16U : 8U;
     if (!memory.IsWritable(commandBuffer, replyBytes)) {
         return FailFsRequest(state, memory, commandBuffer, sessionType, event,
@@ -593,6 +596,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Resume};
         }
+    }
+    if (event.Detail == kFsOpenDirectoryRequest) {
+        return OpenFsDirectory(state, memory, sessionType, commandBuffer, std::move(event));
     }
     if (event.Detail == kFsOpenFileDirectlyRequest) {
         std::array<uint32_t, 12> words{};

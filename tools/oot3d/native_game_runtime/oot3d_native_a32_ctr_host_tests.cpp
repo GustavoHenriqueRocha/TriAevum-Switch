@@ -1548,6 +1548,153 @@ void TestAptLibraryAppletMiiSelector() {
             "the Mii selector cannot be preloaded again after closing");
 }
 
+// --- fs:USER OpenDirectory e a sessão de diretório ------------------------
+// Depois do seletor de Mii o SM3DL abre um diretório (0x080B0102) e caía no
+// err:f com "comando sem suporte". Semântica do Azahar (SaveDataArchive::
+// OpenDirectory, DiskDirectory::Read, entrada de 0x228 bytes); os arquivos do
+// diário de saves (.triaevum-*) não aparecem e o tamanho é o do arquivo
+// ativo do diário (o mesmo do GetSize).
+void TestFsOpenDirectory() {
+    const auto directory = std::filesystem::temp_directory_path() /
+                           "oot3d_native_a32_ctr_host_test_directory";
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    const auto save = directory / "save";
+    std::filesystem::create_directories(save / "zz");
+    const auto writeFile = [](const std::filesystem::path& path, size_t size) {
+        std::ofstream out(path, std::ios::binary);
+        out << std::string(size, 'x');
+        Require(out.good(), "cannot write a directory fixture");
+    };
+    writeFile(save / "b.bin", 5);
+    writeFile(save / "LongFileName.dat", 3);
+    writeFile(save / "c.sav", 7);
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.SaveDataDirectory = save;
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    auto& memory = process.Memory();
+    const uint32_t srv = OpenSrv(guest);
+    uint32_t fs = 0;
+    Require(GetServiceHandle(guest, srv, "fs:USER", &fs) == NativeA32HostAction::Resume && fs != 0,
+            "fs:USER was not opened");
+    constexpr uint32_t command = 0x1FF82080;
+    const auto call = [&](uint32_t session, std::vector<uint32_t> words) {
+        for (size_t i = 0; i < words.size(); ++i) {
+            Require(memory.Write32(command + static_cast<uint32_t>(i * 4U), words[i]),
+                    "cannot write FS command");
+        }
+        guest.State(0).r[0] = session;
+        Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume, "an FS request did not resume");
+    };
+    const auto word = [&](uint32_t index) {
+        uint32_t value = 0;
+        Require(memory.Read32(command + index * 4U, &value), "cannot read FS reply");
+        return value;
+    };
+    call(fs, {0x08010002U, 0x20U, 0U});
+    Require(word(1) == 0U, "FS:Initialize failed");
+    constexpr uint32_t pathAddress = 0x0FF00200;
+    Require(memory.Write32(pathAddress, 0), "cannot write the empty path");
+    call(fs, {0x080C00C2U, 4U, 1U, 1U, (1U << 14U) | 2U, pathAddress});
+    Require(word(1) == 0U, "OpenArchive(SaveData) failed");
+    const uint32_t archiveLow = word(2), archiveHigh = word(3);
+    const auto writePath = [&](std::string_view path) {
+        std::vector<uint8_t> bytes(path.begin(), path.end());
+        bytes.push_back(0);
+        Require(memory.WriteBytes(pathAddress, bytes), "cannot write an FS path");
+        return static_cast<uint32_t>(bytes.size());
+    };
+    const auto openDirectory = [&](std::string_view path) {
+        const uint32_t size = writePath(path);
+        call(fs, {0x080B0102U, archiveLow, archiveHigh, 3U, size, (size << 14U) | 2U, pathAddress});
+        return word(1);
+    };
+    // Diário no meio da execução (a recuperação já rodou no OpenArchive): uma
+    // sobra .triaevum-old e uma escrita sem flush em b.bin.triaevum-tmp.
+    writeFile(save / "b.bin.triaevum-old", 2);
+    const uint32_t pathSize = writePath("/b.bin");
+    call(fs, {0x080201C2U, 0U, archiveLow, archiveHigh, 3U, pathSize, 3U, 0U, (pathSize << 14U) | 2U,
+              pathAddress});
+    Require(word(0) == 0x08020042U && word(1) == 0U && word(3) != 0U, "OpenFile(/b.bin) failed");
+    const uint32_t file = word(3);
+    constexpr uint32_t data = 0x0FF00400;
+    Require(memory.WriteBytes(data, std::vector<uint8_t>(4U, 0x55U)), "cannot write the file data");
+    call(file, {0x08030102U, 5U, 0U, 4U, 0U, (4U << 4U) | 0xAU, data});
+    Require(word(0) == 0x08030082U && word(1) == 0U && word(2) == 4U, "File:Write failed");
+    Require(std::filesystem::exists(save / "b.bin.triaevum-tmp") &&
+                std::filesystem::file_size(save / "b.bin") == 5U,
+            "the pending write did not go through the save journal");
+    Require(openDirectory("/nope") == 0xC8804471U, "OpenDirectory of a missing path is not PathNotFound");
+    Require(openDirectory("/b.bin") == 0xE0C04702U,
+            "OpenDirectory of a file is not UnexpectedFileOrDirectory");
+    Require(openDirectory("/") == 0U && word(0) == 0x080B0042U && word(2) == 0x10U && word(3) != 0U,
+            "OpenDirectory(/) of the save archive failed");
+    const uint32_t session = word(3);
+
+    constexpr uint32_t entries = 0x0FF00800;
+    struct Entry {
+        std::u16string Name;
+        std::string ShortName;
+        std::string Extension;
+        bool Directory = false;
+        bool Archive = false;
+        uint64_t Size = 0;
+    };
+    const auto read = [&](uint32_t count) {
+        Require(memory.WriteBytes(entries, std::vector<uint8_t>(count * 0x228U, 0xAAU)),
+                "cannot clear the entry buffer");
+        call(session, {0x08010042U, count, ((count * 0x228U) << 4U) | 0xCU, entries});
+        Require(word(0) == 0x08010082U && word(1) == 0U, "Directory:Read failed");
+        std::vector<Entry> result;
+        for (uint32_t i = 0; i < word(2); ++i) {
+            std::vector<uint8_t> raw(0x228U);
+            Require(memory.ReadBytes(entries + i * 0x228U, raw), "cannot read an entry");
+            Entry entry;
+            for (size_t c = 0; c < 0x20CU; c += 2U) {
+                const char16_t value = static_cast<char16_t>(raw[c] | (raw[c + 1U] << 8U));
+                if (value == 0) break;
+                entry.Name.push_back(value);
+            }
+            entry.ShortName.assign(reinterpret_cast<const char*>(&raw[0x20C]), 8);
+            entry.Extension.assign(reinterpret_cast<const char*>(&raw[0x216]), 3);
+            Require(raw[0x214] == 0U && raw[0x219] == 0U, "8.3 names are not NUL-terminated");
+            entry.Directory = raw[0x21C] != 0U;
+            entry.Archive = raw[0x21E] != 0U;
+            std::memcpy(&entry.Size, &raw[0x220], sizeof(entry.Size));
+            result.push_back(entry);
+        }
+        return result;
+    };
+    auto first = read(2);
+    Require(first.size() == 2 && first[0].Name == u"LongFileName.dat" &&
+                first[0].ShortName == "LONGFI~1" && first[0].Extension == "DAT" &&
+                !first[0].Directory && first[0].Archive && first[0].Size == 3 &&
+                first[1].Name == u"b.bin" && first[1].ShortName == "B       " &&
+                first[1].Extension == "BIN" && first[1].Size == 9,
+            "the first directory entries are wrong (b.bin has the size the game sees)");
+    // Savestate no meio da listagem: volta do mesmo ponto.
+    const auto saved = host.CaptureState();
+    auto second = read(4);
+    Require(second.size() == 2 && second[0].Name == u"c.sav" && second[0].Size == 7 &&
+                second[1].Name == u"zz" && second[1].Directory && !second[1].Archive &&
+                second[1].Extension == "   " && second[1].Size == 0,
+            "the remaining directory entries are wrong (journal files must stay hidden)");
+    Require(read(4).empty(), "a finished directory listing returned more entries");
+    std::string error;
+    Require(host.RestoreState(saved, process, &error),
+            "a savestate with an open directory did not restore: " + error);
+    auto again = read(4);
+    Require(again.size() == 2 && again[0].Name == u"c.sav",
+            "the restored directory listing did not resume at its cursor");
+    call(session, {0x08020000U});
+    Require(word(0) == 0x08020040U && word(1) == 0U, "Directory:Close failed");
+    std::filesystem::remove_all(directory, ignored);
+}
+
 // --- Despejo periódico do estado do guest (TRIAEVUM_GUEST_STATE_DUMP) -------
 // O Mario parava no logo sem erro; para saber em que cada thread espera, o
 // despejo mostra PC/LR, o último SVC de cada thread e os IPC que mudaram.
@@ -1889,6 +2036,7 @@ int main() {
     TestCreateMemoryBlockOfGuestMemory();
     TestAptGetSharedFont();
     TestAptLibraryAppletMiiSelector();
+    TestFsOpenDirectory();
     TestDeferredDeviceMemory();
     TestDeferredDeviceFailureAndOverwrite();
     TestGpuMemoryWriteOwnership();

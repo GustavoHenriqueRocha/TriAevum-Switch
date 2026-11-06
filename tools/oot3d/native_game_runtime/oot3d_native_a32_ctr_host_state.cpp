@@ -123,7 +123,8 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
                                    ? nlohmann::json(*object.MappedAddress)
                                    : nlohmann::json(nullptr)},
         });
-        if (mConfig.Filesystem == nullptr && object.Type == "client_session:file:savedata") {
+        if (mConfig.Filesystem == nullptr &&
+            (object.Type == "client_session:file:savedata" || object.Type == kFsDirectoryType)) {
             if (const auto portable = PortableCtrSavePath(mConfig.SaveDataDirectory, object.FilePath)) {
                 encodedObject["file_path"] = portable->second;
                 encodedObject["file_path_base"] = portable->first;

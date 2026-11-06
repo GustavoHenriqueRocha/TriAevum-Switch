@@ -38,6 +38,7 @@ set(_oot3d_native_a32_ctr_host_sources
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_system.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_applet.cpp
+    tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_directory.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_hid.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_gsp.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_dsp.cpp

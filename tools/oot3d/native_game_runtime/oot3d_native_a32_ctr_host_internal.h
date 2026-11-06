@@ -146,6 +146,17 @@ constexpr uint32_t kFsDeleteFileResponse = 0x08040040U;
 constexpr uint32_t kFsInvalidPath = 0xE0E046BEU;
 constexpr uint32_t kFsCommandNotAllowed = 0xD9004676U;
 constexpr uint32_t kFsCreateFileResponse = 0x08080040U;
+constexpr uint32_t kFsOpenDirectoryRequest = 0x080B0102U;
+constexpr uint32_t kFsOpenDirectoryResponse = 0x080B0042U;
+constexpr uint32_t kDirectoryReadRequest = 0x08010042U;
+constexpr uint32_t kDirectoryReadResponse = 0x08010082U;
+constexpr uint32_t kDirectoryCloseRequest = 0x08020000U;
+constexpr uint32_t kDirectoryCloseResponse = 0x08020040U;
+// Entrada de diretório do FS (Azahar file_sys/directory_backend.h).
+constexpr uint32_t kDirectoryEntrySize = 0x228U;
+constexpr uint32_t kFsPathNotFound = 0xC8804471U;
+constexpr uint32_t kFsUnexpectedFileOrDirectory = 0xE0C04702U;
+constexpr std::string_view kFsDirectoryType = "client_session:directory";
 constexpr uint32_t kFsOpenArchiveRequest = 0x080C00C2U;
 constexpr uint32_t kFsOpenArchiveResponse = 0x080C00C0U;
 constexpr uint32_t kFsControlArchiveRequest = 0x080D0144U;
@@ -446,9 +457,11 @@ std::string DescribeLowPath(NativeA32Memory& memory, uint32_t type,
     return result.str();
 }
 
+// allowRoot: "/" vira o caminho vazio (a própria raiz do archive), como o
+// OpenDirectory aceita; arquivos continuam exigindo um nome.
 std::optional<std::filesystem::path>
 DecodeArchiveRelativePath(NativeA32Memory& memory, uint32_t type, uint32_t size,
-                          uint32_t address) {
+                          uint32_t address, bool allowRoot = false) {
     if ((type != 3U && type != 4U) || size == 0U || size > 0x1000U ||
         (type == 4U && (size & 1U) != 0U)) {
         return std::nullopt;
@@ -480,10 +493,14 @@ DecodeArchiveRelativePath(NativeA32Memory& memory, uint32_t type, uint32_t size,
         }
         path = std::filesystem::path(text);
     }
+    const bool rooted = path.has_root_directory();
     while (path.has_root_directory()) {
         path = path.relative_path();
     }
     path = path.lexically_normal();
+    if (allowRoot && rooted && (path.empty() || path == ".")) {
+        return std::filesystem::path{};
+    }
     if (path.empty() || path.has_root_name() || path.has_root_directory()) {
         return std::nullopt;
     }

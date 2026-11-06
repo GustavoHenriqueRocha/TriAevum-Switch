@@ -707,6 +707,15 @@ GUARDS = [
           r'if \(appletBlock && memoryBlock->Object->FileSize == 0 &&.*?'
           r'case 0x20: \{.*?event\.Name \+= ":applet-capture-empty";',
           "oot3d_native_a32_ctr_host_tests (TestAptLibraryAppletMiiSelector)"),
+    Guard("SM3DL: fs:USER OpenDirectory sem HLE (err:f no VBlank ~1080)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'if \(event\.Detail == kFsOpenDirectoryRequest\) \{\s+return OpenFsDirectory\(',
+          "oot3d_native_a32_ctr_host_tests (TestFsOpenDirectory)"),
+    Guard("Listagem de diretório do save mostrava os arquivos do diário (.triaevum-*) ao jogo",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_directory.cpp",
+          r'if \(journal != nullptr && IsSaveJournalName\(name\.string\(\)\)\) continue;.*?'
+          r'journal->ActivePath\(it->path\(\)\)',
+          "oot3d_native_a32_ctr_host_tests (TestFsOpenDirectory)"),
     Guard("SM3DL: janela sem leitor de command buffer (salto da PICA vira erro)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'picaFrontend\.SetCommandBufferReader\(\s+Oot3dNativeGame::MakeOot3dPicaCommandBufferReader\(picaMemoryView\)\);',

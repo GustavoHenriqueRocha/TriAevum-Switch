@@ -570,6 +570,16 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
         NativeA32HostContext& context, const std::optional<std::string>& sessionType,
         uint32_t commandBuffer, NativeA32CtrSvcEvent event);
+    // fs:USER OpenDirectory e a sessão de diretório (Read/Close), só no
+    // backend de pasta (oot3d_native_a32_ctr_host_directory.cpp).
+    NativeA32HostResult OpenFsDirectory(
+        oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
+        const std::optional<std::string>& sessionType, uint32_t commandBuffer,
+        NativeA32CtrSvcEvent event);
+    NativeA32HostResult HandleDirectoryRequest(
+        oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
+        const std::optional<std::string>& sessionType, uint32_t commandBuffer,
+        NativeA32CtrSvcEvent event);
     bool WriteHidSample(NativeA32Memory& memory, const NativeA32HidState& state,
                         uint64_t sampleTick);
     bool WriteHidAccelerometerSample(NativeA32Memory& memory,

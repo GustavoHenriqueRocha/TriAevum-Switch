@@ -1652,6 +1652,12 @@ Armadilhas do SM3DL (05/11), todas genéricas:
   (pode ter tamanho 0) → `StartLibraryApplet` → `WakeupByExit` com o Mii padrão. Para ver os IPC
   *atendidos* (o stub só loga os sem HLE), use o despejo do item 2; recusa do `SendParameter` grava
   o motivo no nome do evento.
+- **Listar pasta do save (fs:USER OpenDirectory)** (`docs/pesquisas/2026-11-05-sm3dl-opendirectory.md`):
+  `oot3d_native_a32_ctr_host_directory.cpp` segue o `DiskDirectory` do Azahar (entrada de 0x228,
+  8.3 do `SplitFilename83`). Se o port tem diário/arquivos auxiliares dentro da pasta do save, a
+  listagem precisa escondê-los e dar o tamanho do arquivo *ativo* (o que o GetSize vê), senão o jogo
+  vê nomes que não criou. Cursor no `FileOffset` + releitura em ordem de nome deixa o savestate só com
+  caminho e posição.
 
 ---
 

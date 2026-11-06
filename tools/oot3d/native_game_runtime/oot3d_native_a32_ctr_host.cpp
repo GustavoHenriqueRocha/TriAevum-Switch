@@ -1247,6 +1247,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             return HandleFsRequest(state, memory, context, sessionType,
                                    commandBuffer, std::move(event));
         }
+        if (*sessionType == kFsDirectoryType) {
+            return HandleDirectoryRequest(state, memory, sessionType,
+                                          commandBuffer, std::move(event));
+        }
         if (sessionType->starts_with("client_session:stub:")) {
             return HandleStubServiceRequest(state, memory, *sessionType,
                                             commandBuffer, std::move(event));
