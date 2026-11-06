@@ -300,11 +300,19 @@ private:
   void StartSecondCore();
   void StopSecondCore() noexcept;
   // Between two yielded Run() calls of the game thread: one deferred DSP
-  // frame, once the work the previous one woke is done.
+  // frame, once the work the previous one woke is done (the second core on
+  // without the host audio stream).
   void PumpDspAudioFrame();
-  // The pump for RunUntilGuestWait (null with the second core off).
+  // The second core's idle work (dspOnSecondCore): one deferred DSP frame on
+  // its host thread, kernel lock held.
+  void DeliverDspAudioFrameOnSecondCore();
+  // Statistics, PCM dump and host output of mixed DSP samples.
+  void AccountDspSamples(const std::vector<int16_t> &samples);
+  // The pump for RunUntilGuestWait (null with the second core off, or when
+  // the second core delivers the DSP frames itself).
   const std::function<void()> *SecondCorePump() const noexcept {
-    return secondCoreThread.joinable() ? &secondCorePump : nullptr;
+    return secondCoreThread.joinable() && !dspOnSecondCore ? &secondCorePump
+                                                           : nullptr;
   }
   void RunGuestRefresh();
   void PresentVisualFrame(const double &presentationElapsedSeconds, const float &visualInterpolationAlpha);
@@ -733,12 +741,17 @@ private:
   bool deferDspAudio = false;
   uint32_t deferredDspAudioFrames = 0U;
   uint64_t dspAudioInRenderWait = 0U;
-  // config/second_core: the second core's host thread and its DSP pump.
-  // With it on every DSP frame is deferred and delivered by the pump while
-  // the game thread runs guest code, or at the deferred points above after a
-  // bounded wait for the second core to go idle.
+  // config/second_core: the second core's host thread. With the host audio
+  // stream (dspOnSecondCore) every DSP frame is deferred and the second core
+  // delivers it as its idle work, as soon as it is pending and its threads
+  // are parked; the game thread only adds frames. Without it a pump delivers
+  // them while the game thread runs guest code, or the deferred points above
+  // after a bounded wait for the second core to go idle.
   std::thread secondCoreThread;
   std::function<void()> secondCorePump;
+  bool dspOnSecondCore = false;
+  // Second core's DSP frame storage (its host thread only).
+  std::vector<int16_t> secondCoreDspSamples;
   struct SecondCoreDspStats {
     uint64_t Pumped = 0U;    // delivered by the pump
     uint64_t Flushed = 0U;   // delivered at a deferred point
@@ -746,6 +759,7 @@ private:
     double WaitSeconds = 0.0; // game thread waiting for the second core
   } secondCoreDsp;
   SecondCoreDspStats secondCoreDspWindowStart;
+  Oot3dNativeGame::NativeA32GuestThreadProfile secondCoreProfileWindowStart;
   // Kind of the frame the render thread is drawing (RenderFrameKind) and
   // its render-thread milliseconds so far.
   uint8_t renderFrameKind = 0U;

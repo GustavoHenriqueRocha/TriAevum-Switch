@@ -992,12 +992,17 @@ scheduler. Absent = the previous single-thread code paths exactly (nothing below
 - **Kernel lock** (`oot3d_native_a32_second_core.h`): one recursive lock for the guest kernel and
   the host emulation — SVCs and scheduling of both cores, thread records, waits, handles, the host
   services, the DSP HLE, savestates and every out-of-line `NativeA32Memory` path (slow paths, byte
-  and pointer APIs, page table, deferred writes, observers). The game thread holds it for all its
-  host work and releases it only around guest code (`Run`'s dispatch) and while blocked on the
-  render stream (`HostWaitRelease`, frame-loop level only). The second core
-  (`NativeA32Process::RunSecondCore`) takes it for its SVCs and scheduling and sleeps on its
-  condition variable while none of its threads is ready; `ResumeThread` (signals, arbitration,
-  timers, DSP/GSP interrupts from either side) wakes it.
+  and pointer APIs, page table, deferred writes, observers). The game thread holds it for its
+  host work and releases it around guest code (`Run`'s dispatch), while blocked on the render
+  stream, and around the frame loop's host work that touches no kernel, thread or host-service
+  state (`HostWaitRelease`, frame-loop level only): the host frame start after the menus'
+  `StartDraw` (overlay, input polling, savestate requests, settings schedule, renderer frame
+  begin) and the UI submission plus presentation hand-off; their guest memory reads take the
+  lock themselves. The PICA submission is not released: its draw loop signals GSP interrupts
+  through the host services between draws, and `PresentVisualFrame` reads the GSP framebuffer
+  state. The second core (`NativeA32Process::RunSecondCore`) takes it for its SVCs, scheduling
+  and DSP frames and sleeps on its condition variable while it has nothing to do;
+  `ResumeThread` (signals, arbitration, timers, DSP/GSP interrupts from either side) wakes it.
 - **Guest memory** is shared; plain loads and stores stay plain (inline header paths unchanged).
 - **Exclusive monitor** (`memory.cpp`): with the switch on, LDREX marks the core's 8-byte granule
   and returns the value as the token; STREX succeeds only while the mark survives (another core's
@@ -1014,33 +1019,58 @@ scheduler. Absent = the previous single-thread code paths exactly (nothing below
 - **World stop**: page-table rebuilds (`MapRegion`, TLS page of a 9th thread, assignments) and
   savestates wait until the other core is at a dispatch boundary (it then holds no page pointer)
   and outside an SVC; one core owns a stop at a time.
-- **DSP**: with the switch on every DSP frame is deferred; a pump (`PumpDspAudioFrame`) delivers
-  them one at a time between the game thread's `Run()` calls, each once the sound thread is back
-  in its wait and no thread above the main thread's priority is ready, so the in-place HLE mix
-  never meets its writes and its work overlaps the main thread. Frames left at the deferred points
-  are delivered after a bounded (50 ms) wait for the second core to go idle (`dsp_late` counts the
-  timeouts).
+- **DSP** (since 06/11 b; logs13sc: core 0 waited 6-7 ms per frame in the Forest Temple's rooms
+  for the sound thread to park before each frame, and the time-stretch fill and conceals went
+  up): with the host audio stream (the console's default) the **second core delivers the DSP
+  frames itself**, as its idle work (`NativeA32Process::SetSecondCoreIdleWork`,
+  `DeliverDspAudioFrameOnSecondCore`): one frame each time it has nothing else ready — the
+  sound thread back in its wait, no thread above the main thread's priority ready or running on
+  core 0, a frame pending — so the in-place HLE mix never meets the sound thread and each
+  frame's interrupt is consumed before the next (a frame waits, never drops). It mixes, signals
+  the DSP interrupt, updates the DSP statistics and submits to the host audio stream with the
+  kernel lock held throughout (the mix is ~0.1 ms, and its region and sample reads take the lock
+  anyway); a mix error becomes the game thread's next `Run()` fault. The game thread only adds
+  the refresh's frames and notifies (no pump, no flush, no wait: `dsp_wait_ms` 0); a core-0
+  thread above the main thread's priority that waits or exits notifies too. The frames go out as
+  soon as they are pending, where the switch-off path delivers them at the same point (or, with
+  `config/audio_deferred`, after the presentation). Without the host audio stream (SDL player
+  and its resampler on the game thread) the previous pump stays: frames delivered between the
+  game thread's `Run()` calls once the second core is idle, the rest at the deferred points
+  after a bounded (50 ms) wait (`dsp_late` counts the timeouts).
 - **Per thread**: each host thread builds its own `Oot3dWholeAotContext`; the compiled-function
   and whole-AOT stats are `thread_local` (the game thread's are reported). The second core runs
   with no block-entry hook, product mod or native-function callback: the projection policy, the
   guest profiler, TopScreen routing and `--profile-a32-runtime` stay on core 0 (the guest profile
   no longer includes thread 6). Faults on the second core are returned by the next `Run()`.
-- **Placement** (`oot3d_switch_thread_layout.h`, role `guest_core1`): core 1 at 0x2F, below host
-  and SDL audio (0x2B), the PICA plan worker (0x2E) and render (0x2D), above the time-sliced
+- **Placement** (`oot3d_switch_thread_layout.h`, role `guest_core1`): core 1 at **0x2D**, below
+  host and SDL audio (0x2B), above the PICA plan worker (0x2E: it was preempting the sound thread,
+  whose wall time on core 1 was 8.0-8.4 ms per frame for ~4.2 ms of CPU time, while the plan
+  worker idles 26-31 ms per frame), at render's priority (on core 2), above the time-sliced
   service threads (0x3B). Game 0/0x2C, render 2/0x2D, plan 1/0x2E, audio 1/0x2B unchanged.
 - **Savestates** made with the switch on carry `processor_id` per thread (others unchanged); a
   thread saved inside an SVC restarts it.
 - **perf.txt**: `guest_threads:` charges thread 6's host-thread time (guest code + its SVCs) to
   its id and adds `core1_ms=` (all second-core time) and `core1_lock_ms=` (its waits for the
   kernel lock); `run_ms` stays the game thread's time inside `Run()`. Own line
-  `second_core: dsp_pumped= dsp_flushed= dsp_late= dsp_wait_ms=` per host frame.
+  `second_core: dsp_pumped= dsp_flushed= dsp_late= dsp_wait_ms= dsp_core1= dsp_core1_ms=
+  core1_lock_wait_ms= core1_preempted_ms= core0_saved_ms=` per host frame: `dsp_core1` the
+  frames the second core delivered and their ms; `core1_lock_wait_ms` every wait of its host
+  thread for the kernel lock (after dispatches, in SVCs and memory paths); `core1_preempted_ms`
+  its busy wall time minus those waits minus its thread CPU time (`svcGetInfo`
+  `InfoType_ThreadTickCount`, sampled each time it goes to sleep; `CLOCK_THREAD_CPUTIME_ID` on the
+  host; `na` where unknown or in the first window): time other threads of core 1 took from it;
+  `core0_saved_ms` its CPU time minus `dsp_wait_ms`, the work taken off core 0.
 - **Not made safe** (inline header paths, no shard rebuild): a page-pointer flip on core 0
   (`ObserveWrites`, `DeferWrites`) can meet a second-core store through the old pointer; store
   marks from both cores share the `mWritten` byte (plain stores, cache-line traffic); the guest
   override call counters and `config/indirect_profile` are not atomic (diagnostics only).
 - **Tests**: `oot3d_native_a32_second_core_tests` (monitor rules and two host threads, guest
   LDREX/STREX counter, event ping-pong, arbitration, sleep timeout, fault, savestate, scheduler
-  exclusion, switch absent); `--stress` for the long runs. TSan: configure a host tree with
+  exclusion, switch absent; DSP frames on the second core: never with the sound thread running,
+  each consumed (none merged), the game thread running guest code meanwhile, the delay of each
+  frame after its refresh never above the switch-off schedule's with a slow main thread and host
+  work in between, switch absent the idle work never runs; an idle-work error reaches `Run()`;
+  the `second_core:` line); `--stress` for the long runs. TSan: configure a host tree with
   `-DCMAKE_CXX_FLAGS='-fsanitize=thread -O1' -DCMAKE_C_FLAGS=… -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread`
   and run the target with `--stress`.
 

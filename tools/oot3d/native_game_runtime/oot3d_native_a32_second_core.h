@@ -75,8 +75,29 @@ inline void SetActive(bool active) noexcept {
 [[nodiscard]] inline bool KernelHeld() noexcept { return tKernelDepth != 0U; }
 [[nodiscard]] inline uint8_t Processor() noexcept { return tProcessor; }
 
+// Every wait of the second core's host thread for the kernel lock (after
+// its dispatches and DSP frames, in its SVCs and memory paths), in
+// nanoseconds: the perf line's core1_lock_wait_ms. The game thread's
+// acquisitions are not timed.
+inline std::atomic<uint64_t> gCore1LockWaitNanoseconds{0};
+
+inline void AcquireKernelMutex() {
+    if (tProcessor == 0U) {
+        gKernelMutex.lock();
+        return;
+    }
+    if (gKernelMutex.try_lock()) return;
+    const auto start = std::chrono::steady_clock::now();
+    gKernelMutex.lock();
+    gCore1LockWaitNanoseconds.fetch_add(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now() - start)
+                                  .count()),
+        std::memory_order_relaxed);
+}
+
 inline void LockKernel() {
-    if (tKernelDepth == 0U) gKernelMutex.lock();
+    if (tKernelDepth == 0U) AcquireKernelMutex();
     ++tKernelDepth;
 }
 
@@ -112,7 +133,7 @@ class KernelRelease final {
     }
     ~KernelRelease() {
         if (mDepth != 0U) {
-            gKernelMutex.lock();
+            AcquireKernelMutex();
             tKernelDepth = mDepth;
         }
     }
@@ -126,8 +147,11 @@ class KernelRelease final {
 // A blocking host wait of the game thread at the frame loop's own level
 // (holding only its base level of the kernel lock: not inside an SVC, a
 // memory path or a world stop) releases the lock for the scope, so the
-// second core keeps its SVCs while the game thread waits for the renderer.
-// Anywhere else it does nothing.
+// second core keeps its SVCs while the game thread waits for the renderer;
+// so does host work of the frame loop that touches no kernel, thread or
+// host-service state (frame start, UI submission, presentation hand-off),
+// whose guest memory accesses take the lock themselves. Anywhere else it
+// does nothing.
 class HostWaitRelease final {
   public:
     HostWaitRelease() noexcept

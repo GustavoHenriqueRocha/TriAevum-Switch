@@ -61,6 +61,29 @@ GUARDS = [
           r'renderStream\.Drain\(\);.*?const Oot3dNativeGame::SecondCore::WorldStop secondCoreStop;.*?'
           r'renderStream\.Drain\(\);.*?const Oot3dNativeGame::SecondCore::WorldStop secondCoreStop;',
           test="oot3d_native_a32_second_core_tests (TestSavestate)"),
+    # 06/11 (logs13sc): core 0 waited 6-7 ms per frame in the Forest Temple for the sound
+    # thread to park before each DSP frame, and audio got worse; the second core now delivers
+    # the frames itself, only with its threads parked and nothing an interrupt woke still ready.
+    Guard("second core: DSP frames run on the second core only while its threads are parked and no auxiliary work is ready",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'SecondCoreIdleWorkDue\(\) const \{.*?SecondCore::gStopRequests == 0U && !mSecondCoreFault\.has_value\(\) &&\s+'
+          r'!AuxiliaryWorkPending\(\) && mSecondCoreIdleWork\.Pending\(\);.*?'
+          r'thread = SelectSecondCoreThread\(\);\s+idleWork = thread == nullptr && SecondCoreIdleWorkDue\(\);',
+          test="oot3d_native_a32_second_core_tests (TestDspOnSecondCore)"),
+    Guard("second core: with the host audio stream the game thread only adds DSP frames (no pump, no flush wait)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(deferredDspAudioFrames != 0U && !dspOnSecondCore &&.*?'
+          r'if \(deferredDspAudioFrames != 0U && !dspOnSecondCore\) \{.*?'
+          r'if \(dspOnSecondCore && dspAudioFrames != 0U\)\s+Oot3dNativeGame::SecondCore::NotifyKernel\(\);',
+          test="oot3d_native_a32_second_core_tests (TestDspOnSecondCore)"),
+    Guard("second core: the DSP frames go to the second core only with the host audio stream",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window.cpp",
+          r'dspOnSecondCore = hostAudioStream != nullptr;\s+if \(dspOnSecondCore\) \{\s+'
+          r'process\.SetSecondCoreIdleWork\('),
+    Guard("second core: a core-0 thread above the main thread parking wakes the second core's idle work",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'case NativeA32HostAction::Wait:\s+state\.r\[15\] = resumePc;\s+status = NativeA32ThreadStatus::Waiting;\s+'
+          r'NoteCore0ThreadParked\(\);'),
     # --- 06/11: L3+R3 > Video > FPS (30 <-> 60 interpolated) applied only after a restart ---
     # Both choices simulate at 30 Hz; the launch fixed the pacing mode and the 30 FPS launch's
     # native30_no_interpolation contract forbade interpolation, so the menu only wrote config/fps60.
@@ -671,10 +694,10 @@ GUARDS = [
           forbid=r'deferDspAudio = !audioDeferredFile\.good\(\)'),
     Guard("Deferred audio: pending DSP frames delivered at the end of RunFrame (nothing is left behind)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
-          r'frameCount \+= advanceGuest \? 1U : 0U;\s*\}\s*if \(deferredDspAudioFrames != 0U\)'),
+          r'frameCount \+= advanceGuest \? 1U : 0U;\s*\}\s*if \(deferredDspAudioFrames != 0U && !dspOnSecondCore\)'),
     Guard("Deferred audio after presentation delayed the next frame (tour24): it goes into the render wait",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
-          r'deferredDspAudioFrames != 0U && renderStream\.FrameSlotsFull\(\)',
+          r'deferredDspAudioFrames != 0U && !dspOnSecondCore &&\s+renderStream\.FrameSlotsFull\(\)',
           test="oot3d_native_render_command_stream_tests"),
     Guard("Crash at startup with config/gpu_timing (pgo5e): cntvct_el0 gives Data Abort at Horizon's EL0",
           "runtime/three_ds_recomp/include/fast/backends/gl_pica_draw_phases.h",

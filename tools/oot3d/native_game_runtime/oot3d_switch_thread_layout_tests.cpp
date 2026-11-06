@@ -130,8 +130,8 @@ void TestProcessMask() {
 }
 
 // config/second_core: the guest's second core never shares core 0 with the
-// game thread, never preempts audio, the plan worker or render, and stays
-// above the time-sliced service threads, in every layout.
+// game thread, never preempts audio or render, preempts the plan worker of
+// its core and stays above the time-sliced service threads, in every layout.
 void TestGuestCore1() {
     for (const auto layout : {SwitchThreadLayout::Fixed, SwitchThreadLayout::Float,
                               SwitchThreadLayout::Legacy}) {
@@ -139,10 +139,10 @@ void TestGuestCore1() {
         Require(core1.CoreMask == 0x2U && core1.IdealCore == 1,
                 "second guest core pinned to core 1");
         Require(core1.Priority > Place(layout, SwitchThreadRole::HostAudio).Priority &&
-                    core1.Priority > Place(layout, SwitchThreadRole::PicaPlan).Priority &&
-                    core1.Priority > Place(layout, SwitchThreadRole::Render).Priority &&
+                    core1.Priority < Place(layout, SwitchThreadRole::PicaPlan).Priority &&
+                    core1.Priority >= Place(layout, SwitchThreadRole::Render).Priority &&
                     core1.Priority < kSwitchServicePriority,
-                "second guest core below audio, plan and render, above services");
+                "second guest core below audio and render, above the plan worker and services");
     }
     Require(std::string_view(SwitchThreadRoleName(SwitchThreadRole::GuestCore1)) ==
                 "guest_core1",

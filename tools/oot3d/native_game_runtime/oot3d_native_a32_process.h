@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -125,7 +126,13 @@ struct NativeA32ProcessTimingStats {
 // one at exit, so the core-0 thread totals add up to RunTicks exactly. Always on.
 // Threads on the second core (EnableSecondCore) are charged their host
 // thread's time in guest code and in their SVCs, which SecondCoreTicks sums;
-// SecondCoreLockTicks is the time it then waited for the kernel lock.
+// SecondCoreLockTicks is the time it then waited for the kernel lock,
+// SecondCoreIdleWorkTicks its idle work (the DSP frames) and
+// SecondCoreCpuTicks the CPU time its host thread got (0 where the platform
+// cannot tell: SecondCoreCpuKnown false). SecondCoreLockWaitNanoseconds is
+// every wait of that host thread for the kernel lock (also the ones inside
+// its SVCs and memory paths). Busy wall time minus lock waits minus CPU time
+// is the time other host threads of its core preempted it.
 // Ticks are the ARM system counter on the Switch, nanoseconds on the host.
 // Threads with an id at or above the last slot share it ("other").
 inline constexpr size_t kNativeA32GuestThreadSlots = 32U;
@@ -140,6 +147,11 @@ struct NativeA32GuestThreadProfile {
     uint64_t Switches = 0;
     uint64_t SecondCoreTicks = 0;
     uint64_t SecondCoreLockTicks = 0;
+    uint64_t SecondCoreIdleWorkTicks = 0;
+    uint64_t SecondCoreIdleWorkUnits = 0;
+    uint64_t SecondCoreCpuTicks = 0;
+    bool SecondCoreCpuKnown = false;
+    uint64_t SecondCoreLockWaitNanoseconds = 0;
 };
 uint64_t NativeA32ProfileTicksToNanoseconds(uint64_t ticks) noexcept;
 // The perf.txt line for one window: "guest_threads: host_frames=<n>
@@ -154,6 +166,37 @@ std::string FormatNativeA32GuestThreadsLine(
 std::string FormatNativeA32GuestThreadCreated(
     uint32_t id, uint32_t entryAddress, uint32_t priority, int32_t processorId,
     uint32_t stackTopAddress);
+// The DSP side of one perf window with the second core on (window session).
+struct NativeA32SecondCoreDspWindow {
+    uint64_t Pumped = 0;       // delivered by the game thread's pump
+    uint64_t Flushed = 0;      // delivered at a deferred point
+    uint64_t Late = 0;         // ... after the idle wait timed out
+    double WaitSeconds = 0.0;  // game thread waiting for the second core
+};
+// The perf.txt line "second_core: dsp_pumped= dsp_flushed= dsp_late=
+// dsp_wait_ms= dsp_core1= dsp_core1_ms= core1_lock_wait_ms=
+// core1_preempted_ms= core0_saved_ms=", per host frame of the window:
+// dsp_core1 the frames the second core delivered (idle work) and their ms;
+// core1_lock_wait_ms all its waits for the kernel lock; core1_preempted_ms
+// its busy wall time (guest code, SVCs, DSP frames) minus those waits minus
+// its host thread's CPU time ("na" where unknown); core0_saved_ms the CPU
+// time it worked (busy wall time minus lock waits where unknown) minus
+// dsp_wait_ms.
+std::string FormatNativeA32SecondCoreLine(const NativeA32GuestThreadProfile& now,
+                                          const NativeA32GuestThreadProfile& windowStart,
+                                          const NativeA32SecondCoreDspWindow& dsp,
+                                          uint64_t windowHostFrames);
+
+// config/second_core: what the second core's host thread does while none of
+// its guest threads is ready and no work an interrupt woke is pending
+// (AuxiliaryWorkPending): the window session's DSP frames. Both run there
+// with the kernel lock held. Pending is part of its wait predicate (whatever
+// changes it notifies the kernel condition); Run does one unit of work and
+// keeps the lock.
+struct NativeA32SecondCoreIdleWork {
+    std::function<bool()> Pending;
+    std::function<void()> Run;
+};
 
 class NativeA32Process {
   public:
@@ -232,17 +275,22 @@ class NativeA32Process {
     }
     // The second core's host thread: runs the ready second-core guest
     // threads (highest priority first, each dispatch at most
-    // blockLimitPerDispatch blocks) and waits on the kernel lock's condition
-    // while none is ready, until RequestSecondCoreStop(). A fault of one of
-    // them is returned by the next Run() on the game thread.
+    // blockLimitPerDispatch blocks); while none is ready it does its idle
+    // work when due (SetSecondCoreIdleWork) and otherwise waits on the kernel
+    // lock's condition, until RequestSecondCoreStop(). A fault of one of
+    // them or of the idle work is returned by the next Run() on the game
+    // thread.
     void RunSecondCore(uint32_t blockLimitPerDispatch);
     // Kernel lock held (or the second core not running).
     void RequestSecondCoreStop();
+    // Before the second core's host thread starts: what it does while none
+    // of its threads is ready (the window session's DSP frames).
+    void SetSecondCoreIdleWork(NativeA32SecondCoreIdleWork work);
     // Kernel lock held. A second-core thread is ready or running.
     [[nodiscard]] bool SecondCoreBusy() const;
     // Kernel lock held. Work an interrupt woke is still runnable: the second
     // core is busy, or a core-0 thread above the primary thread's priority is
-    // ready (the DSP pump delivers the next frame only once both are done).
+    // ready or running (the next DSP frame goes out only once both are done).
     [[nodiscard]] bool AuxiliaryWorkPending() const;
     // Kernel lock held. Waits (releasing it) until the second core is idle,
     // stopped or faulted; false when it is still busy at the timeout.
@@ -340,6 +388,12 @@ class NativeA32Process {
                                    uint32_t defaultResumePc);
     void ChargeSecondCore(uint32_t threadId, uint64_t busyTicks,
                           uint64_t lockTicks) noexcept;
+    // Kernel lock held: the second core's idle work is due (its threads all
+    // waiting, no stop or fault, no auxiliary work, the work pending).
+    [[nodiscard]] bool SecondCoreIdleWorkDue() const;
+    // Kernel lock held: the current core-0 thread stopped running; when it
+    // was auxiliary work, the second core's idle work may be due now.
+    void NoteCore0ThreadParked() noexcept;
 
     const oot3d::recomp::a32::Registry& mRegistry;
     NativeA32HostServices& mHostServices;
@@ -385,6 +439,13 @@ class NativeA32Process {
         mSecondCoreThreadTicks{};
     std::atomic<uint64_t> mSecondCoreTicks{0};
     std::atomic<uint64_t> mSecondCoreLockTicks{0};
+    NativeA32SecondCoreIdleWork mSecondCoreIdleWork;
+    std::atomic<uint64_t> mSecondCoreIdleWorkTicks{0};
+    std::atomic<uint64_t> mSecondCoreIdleWorkUnits{0};
+    // CPU time of the second core's host thread since RunSecondCore began,
+    // sampled each time it goes to sleep.
+    std::atomic<uint64_t> mSecondCoreCpuTicks{0};
+    std::atomic<bool> mSecondCoreCpuKnown{false};
     // Regions this process mapped (segments, stacks, TLS), named in the
     // guest fault report; host-service mappings are not listed.
     struct RegionName {

@@ -865,6 +865,14 @@ bool NativeA32WindowSession::RunFrame() {
   hostStartSteps.Mark("mouse");
   gui->StartDraw();
   hostStartSteps.Mark("gui_start_draw");
+  // config/second_core: the host frame start below (overlay, input polling,
+  // savestate requests, settings schedule, renderer frame begin) touches no
+  // kernel, thread or host-service state, and its guest memory reads take
+  // the kernel lock themselves: the second core keeps its SVCs meanwhile
+  // (HostWaitRelease; nothing with the second core off). The menus drawn
+  // by StartDraw above stay under the lock.
+  std::optional<Oot3dNativeGame::SecondCore::HostWaitRelease> hostWorkRelease;
+  hostWorkRelease.emplace();
   // Performance overlay (L3+R3 > Video, config/fps_counter): FPS of the
   // presented frames (including the fps60 interpolated ones), the worst
   // interval and the game speed of the last half second, and the clocks,
@@ -1115,6 +1123,7 @@ bool NativeA32WindowSession::RunFrame() {
   phaseTiming.RendererFrameStartSeconds += SecondsSince(rendererFrameStart);
   cpuRendererStart.Stop();
   phaseTiming.FrameStartSeconds += SecondsSince(phaseStart);
+  hostWorkRelease.reset();
   const uint32_t guestRefreshIterations =
       std::max<uint32_t>(1U, guestRefreshesDue);
   uint32_t guestRefreshesRun = 0U;
@@ -1141,7 +1150,8 @@ bool NativeA32WindowSession::RunFrame() {
     }
     // Deferred DSP frames go into the renderer wait when there is one
     // (tour24: after the presentation they delayed the next host frame).
-    if (deferredDspAudioFrames != 0U && renderStream.FrameSlotsFull()) {
+    if (deferredDspAudioFrames != 0U && !dspOnSecondCore &&
+        renderStream.FrameSlotsFull()) {
       ++dspAudioInRenderWait;
       DeliverDspAudioFrames(std::exchange(deferredDspAudioFrames, 0U));
     }
@@ -1152,7 +1162,7 @@ bool NativeA32WindowSession::RunFrame() {
     guestRefreshesRun += advanceGuest ? 1U : 0U;
     frameCount += advanceGuest ? 1U : 0U;
   }
-  if (deferredDspAudioFrames != 0U) {
+  if (deferredDspAudioFrames != 0U && !dspOnSecondCore) {
     Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::GuestRefresh);
     DeliverDspAudioFrames(std::exchange(deferredDspAudioFrames, 0U));
   }
@@ -1167,6 +1177,10 @@ bool NativeA32WindowSession::RunFrame() {
     inputConsumerDiagnostics.Observe(process.Memory(), frameCount);
   }
 
+  // config/second_core: the UI submission and the presentation hand-off
+  // read guest memory only (through paths that take the kernel lock) and
+  // talk to the render thread: released as the frame start.
+  hostWorkRelease.emplace();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::UiSubmit);
   for (std::size_t subsystemIndex = 0;
        subsystemIndex < oot3d::ui::kUiSubsystemCount; ++subsystemIndex) {
@@ -1307,6 +1321,7 @@ bool NativeA32WindowSession::RunFrame() {
       presentationFrameCount, frameCount, guestRefreshesDue != 0U);
   phaseTiming.PresentSeconds += SecondsSince(phaseStart);
   cpuPresent.Stop();
+  hostWorkRelease.reset();
   ++presentationFrameCount;
   ++runFrameCount;
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameEnd);
@@ -1964,26 +1979,21 @@ bool NativeA32WindowSession::RunFrame() {
              << '\n';
         previousThreads = process.GuestThreadProfile();
       }
-      // config/second_core: how the DSP frames went out and how long the
-      // game thread waited for the second core, per host frame (its own line).
+      // config/second_core: how the DSP frames went out, the second core's
+      // lock waits and preemption, and how long the game thread waited for
+      // it, per host frame (its own line).
       if (process.SecondCoreEnabled()) {
-        const double frames =
-            hostFrames != 0U ? static_cast<double>(hostFrames) : 1.0;
-        char line[192];
-        std::snprintf(
-            line, sizeof(line),
-            "second_core: dsp_pumped=%.2f dsp_flushed=%.2f dsp_late=%llu "
-            "dsp_wait_ms=%.3f\n",
-            static_cast<double>(secondCoreDsp.Pumped -
-                                secondCoreDspWindowStart.Pumped) / frames,
-            static_cast<double>(secondCoreDsp.Flushed -
-                                secondCoreDspWindowStart.Flushed) / frames,
-            static_cast<unsigned long long>(secondCoreDsp.Late -
-                                            secondCoreDspWindowStart.Late),
-            (secondCoreDsp.WaitSeconds - secondCoreDspWindowStart.WaitSeconds) *
-                1000.0 / frames);
-        perf << line;
+        const auto now = process.GuestThreadProfile();
+        perf << Oot3dNativeGame::FormatNativeA32SecondCoreLine(
+                    now, secondCoreProfileWindowStart,
+                    {secondCoreDsp.Pumped - secondCoreDspWindowStart.Pumped,
+                     secondCoreDsp.Flushed - secondCoreDspWindowStart.Flushed,
+                     secondCoreDsp.Late - secondCoreDspWindowStart.Late,
+                     secondCoreDsp.WaitSeconds - secondCoreDspWindowStart.WaitSeconds},
+                    hostFrames)
+             << '\n';
         secondCoreDspWindowStart = secondCoreDsp;
+        secondCoreProfileWindowStart = now;
       }
       // config/actor_profile: actor costs over the same window (its own line).
       if (actorProfile.has_value()) perf << actorProfile->TakeLine(areaText);
@@ -2562,12 +2572,18 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
   // config/audio_deferred: the DSP frames of this refresh (HLE mix and the
   // guest sound thread they wake) run after the host frame is presented,
   // off the path to the render thread's handoff (DeliverDspAudioFrames).
-  // With the second core on they are always deferred: its pump delivers them
-  // during the guest runs (PumpDspAudioFrame), the rest go out as deferred.
-  if (deferDspAudio || SecondCorePump() != nullptr)
+  // With the second core on they are always deferred: the second core
+  // delivers them itself as soon as its threads are parked
+  // (DeliverDspAudioFrameOnSecondCore; the game thread never waits for it),
+  // or, without the host audio stream, its pump during the guest runs
+  // (PumpDspAudioFrame) and the deferred points.
+  if (deferDspAudio || SecondCorePump() != nullptr || dspOnSecondCore) {
     deferredDspAudioFrames += dspAudioFrames;
-  else
+    if (dspOnSecondCore && dspAudioFrames != 0U)
+      Oot3dNativeGame::SecondCore::NotifyKernel();
+  } else {
     DeliverDspAudioFrames(dspAudioFrames);
+  }
   if (!hostServices.SignalVBlank(process.Memory())) {
     throw std::runtime_error(
         "native VBlank could not enter the GSP relay queue");
@@ -2628,21 +2644,7 @@ void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames,
     phaseTiming.GuestSeconds += SecondsSince(phaseStart);
     RequireRunnableGuest(processResult);
   }
-  for (const int16_t sample : audioSamples) {
-    const int32_t magnitude = std::abs(static_cast<int32_t>(sample));
-    dspStats.PeakMagnitude = std::max(dspStats.PeakMagnitude, magnitude);
-    dspStats.NonzeroSamples += sample != 0 ? 1U : 0U;
-    const uint16_t bits = static_cast<uint16_t>(sample);
-    dspStats.PcmFnv1a64 ^= static_cast<uint8_t>(bits);
-    dspStats.PcmFnv1a64 *= 1099511628211ULL;
-    dspStats.PcmFnv1a64 ^= static_cast<uint8_t>(bits >> 8U);
-    dspStats.PcmFnv1a64 *= 1099511628211ULL;
-  }
-  dspStats.SamplesMixed += audioSamples.size() / 2U;
-  if (!launch.AudioPcmDumpPath.empty()) {
-    pcmDumpSamples.insert(pcmDumpSamples.end(), audioSamples.begin(),
-                          audioSamples.end());
-  }
+  AccountDspSamples(audioSamples);
   if (hostAudioStream != nullptr && !audioSamples.empty()) {
     // Stretch, resampling and the device queue run on the audio worker.
     const auto audioOutputStart = std::chrono::steady_clock::now();
@@ -2683,6 +2685,56 @@ void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames,
         outputSamples->size() / 2U, audioPlayer->GetDesiredBuffered());
     phaseTiming.AudioOutputSeconds += SecondsSince(audioOutputStart);
   }
+}
+
+void NativeA32WindowSession::AccountDspSamples(
+    const std::vector<int16_t> &samples) {
+  for (const int16_t sample : samples) {
+    const int32_t magnitude = std::abs(static_cast<int32_t>(sample));
+    dspStats.PeakMagnitude = std::max(dspStats.PeakMagnitude, magnitude);
+    dspStats.NonzeroSamples += sample != 0 ? 1U : 0U;
+    const uint16_t bits = static_cast<uint16_t>(sample);
+    dspStats.PcmFnv1a64 ^= static_cast<uint8_t>(bits);
+    dspStats.PcmFnv1a64 *= 1099511628211ULL;
+    dspStats.PcmFnv1a64 ^= static_cast<uint8_t>(bits >> 8U);
+    dspStats.PcmFnv1a64 *= 1099511628211ULL;
+  }
+  dspStats.SamplesMixed += samples.size() / 2U;
+  if (!launch.AudioPcmDumpPath.empty()) {
+    pcmDumpSamples.insert(pcmDumpSamples.end(), samples.begin(), samples.end());
+  }
+}
+
+// config/second_core with the host audio stream: one deferred DSP frame, as
+// the second core's idle work (NativeA32Process::RunSecondCore), on its host
+// thread. It runs only while every second-core thread (the sound thread) is
+// parked in its wait and no thread above the main thread's priority is ready
+// on the game thread, so the in-place mix never meets the sound thread's
+// writes and each frame's interrupt is consumed before the next one. The
+// kernel lock stays held for the whole frame: the mix is ~0.1 ms, and its
+// memory paths (BeginHostUpdate, sample reads, EndHostUpdate) take the lock
+// anyway, so releasing it would make each of them wait for the game
+// thread's host work. The session state below is the game thread's under
+// the same lock. A mix failure becomes the game thread's next Run() fault.
+void NativeA32WindowSession::DeliverDspAudioFrameOnSecondCore() {
+  auto &hostServices = *hostServicesStorage;
+  auto &process = *processStorage;
+  auto &dspHle = *dspHleStorage;
+  --deferredDspAudioFrames;
+  std::vector<int16_t> &samples = secondCoreDspSamples;
+  samples.clear();
+  std::string mixError;
+  if (!dspHle.ProcessFrame(process.Memory(), samples, &mixError)) {
+    throw std::runtime_error("native DSP HLE mix failed: " + mixError);
+  }
+  pcmContinuityDiagnostics.ObserveFrame(dspStats.FramesMixed,
+                                        std::span<const int16_t>(samples));
+  ++dspStats.FramesMixed;
+  dspStats.FramesSuppressed += launch.DisableAudio ? 1U : 0U;
+  // As the game thread's batch: with the DSP stopped the rest is dropped.
+  if (!hostServices.SignalDspAudioFrame()) deferredDspAudioFrames = 0U;
+  AccountDspSamples(samples);
+  if (!samples.empty()) hostAudioStream->Submit(samples);
 }
 
 // Runs the guest until it waits and drains the PICA work it submitted during the refresh.

@@ -157,7 +157,17 @@ void NativeA32WindowSession::StartSecondCore() {
   auto &process = *processStorage;
   process.EnableSecondCore();
   Oot3dNativeGame::SecondCore::LockKernel();
-  secondCorePump = [this] { PumpDspAudioFrame(); };
+  // With the host audio stream the DSP frames run on the second core's host
+  // thread (DeliverDspAudioFrameOnSecondCore); without it (SDL player and
+  // its resampler on the game thread) the game thread's pump delivers them.
+  dspOnSecondCore = hostAudioStream != nullptr;
+  if (dspOnSecondCore) {
+    process.SetSecondCoreIdleWork(
+        {[this] { return deferredDspAudioFrames != 0U; },
+         [this] { DeliverDspAudioFrameOnSecondCore(); }});
+  } else {
+    secondCorePump = [this] { PumpDspAudioFrame(); };
+  }
   const uint32_t budget = launch.WholeAotBlockBudget;
   secondCoreThread = std::thread([&process, budget] {
     Oot3dNativeGame::PlaceSwitchThread(Oot3dNativeGame::SwitchThreadRole::GuestCore1);
@@ -174,6 +184,8 @@ void NativeA32WindowSession::StopSecondCore() noexcept {
     const Oot3dNativeGame::SecondCore::KernelRelease release;
     secondCoreThread.join();
   }
+  process.SetSecondCoreIdleWork({});
+  dspOnSecondCore = false;
   process.DisableSecondCore();
   Oot3dNativeGame::SecondCore::UnlockKernel();
 }

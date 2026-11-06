@@ -19,7 +19,7 @@
 //            (log, Mesa shader cache, resources, loaders) at 0x3B
 //            with mask 1|2: they never take the place of what draws or plays sound.
 //            The second guest core (config/second_core) is pinned to 1
-//            below the plan worker, in every layout.
+//            above the plan worker, in every layout.
 // - float  : like fixed, but render thread and plan worker with mask
 //            1|2 (ideal core 2 and 1): the kernel can move them to the free core.
 //            (StevensND/nfsmw-nx: pinning the render thread made the worst case worse.)
@@ -51,10 +51,13 @@ enum class SwitchThreadRole : uint8_t {
 inline constexpr int kSwitchGamePriority = 0x2C;
 inline constexpr int kSwitchRenderPriority = 0x2D;
 inline constexpr int kSwitchPicaPlanPriority = 0x2E;
-// The second guest core (the game's sound thread): on core 1 under the
-// audio threads (0x2B preempt it) and the plan worker (0x2E, which feeds
-// the render thread), above the time-sliced service threads.
-inline constexpr int kSwitchGuestCore1Priority = 0x2F;
+// The second guest core (the game's sound thread and the DSP frames): on
+// core 1 under the audio threads (0x2B preempt it), above the plan worker
+// (0x2E, 26-31 ms idle per 40 ms frame: thread 6's ~1 ms bursts per DSP
+// frame leave it ample time, while its preemption had doubled thread 6's
+// wall time), at the render thread's priority (on core 2), above the
+// time-sliced service threads.
+inline constexpr int kSwitchGuestCore1Priority = 0x2D;
 inline constexpr int kSwitchAudioPriority = 0x2B;
 // The only priority with time-slicing; below all the others.
 inline constexpr int kSwitchServicePriority = 0x3B;

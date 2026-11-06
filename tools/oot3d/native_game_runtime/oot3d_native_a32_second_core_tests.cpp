@@ -11,6 +11,7 @@
 #include "oot3d_native_a32_ctr_host.h"
 #include "oot3d_native_a32_second_core.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -20,6 +21,8 @@
 #include <deque>
 #include <functional>
 #include <iostream>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -51,6 +54,7 @@ struct Sizes {
     uint32_t GuestIncrements = 20'000U;  // per guest thread, process level
     uint32_t PingPongRounds = 20'000U;
     uint32_t ArbitrationItems = 20'000U;
+    uint32_t DspRefreshes = 10U;  // DSP frames on the second core: 3 each
 };
 
 // --- A few ARM words ---------------------------------------------------------
@@ -78,6 +82,12 @@ constexpr uint32_t CmpImm(uint32_t rn, uint32_t imm) {
 }
 constexpr uint32_t MovImm(uint32_t rd, uint32_t imm) {
     return 0xE3A00000U | rd << 12U | imm;
+}
+constexpr uint32_t MvnZero(uint32_t rd) {  // rd = -1
+    return 0xE3E00000U | rd << 12U;
+}
+constexpr uint32_t Str(uint32_t rd, uint32_t rn, uint32_t imm) {
+    return 0xE5800000U | rn << 16U | rd << 12U | imm;
 }
 
 // One instruction per block, so every address is a branch target.
@@ -219,10 +229,11 @@ struct Guest {
 // core's host thread runs RunSecondCore.
 class TwoCores {
   public:
-    explicit TwoCores(NativeA32Process& process) : mProcess(process) {
+    explicit TwoCores(NativeA32Process& process, uint32_t budget = kBudget)
+        : mProcess(process) {
         mProcess.EnableSecondCore();
         SecondCore::LockKernel();
-        mRunner = std::thread([this] { mProcess.RunSecondCore(kBudget); });
+        mRunner = std::thread([this, budget] { mProcess.RunSecondCore(budget); });
     }
     ~TwoCores() { Stop(); }
 
@@ -810,6 +821,317 @@ void TestSavestate() {
             "switch absent: thread records are unchanged");
 }
 
+// --- DSP frames on the second core (window session's idle work) --------------
+//
+// A stand-in for the game's sound thread (processor 1, prio 0x18) and its
+// main thread. r9 = kData: [0] = DSP interrupt event, [4] = VBlank event,
+// [8] = sound work per frame, [12] = main-thread work per refresh (a slow
+// guest), [16] = frames the sound thread consumed, [20] = 1 while it works.
+struct DspGuestProgram {
+    uint32_t Sound = 0U;
+    uint32_t Main = 0U;
+};
+
+// WaitSynchronizationN on the handle at r9 + offset, no timeout.
+void EmitWait(Program& program, uint32_t offset) {
+    program.Op(AddImm(1, 9, offset));
+    program.Op(MovImm(2, 1));
+    program.Op(MovImm(3, 0));
+    program.Op(MvnZero(0));
+    program.Op(MvnZero(4));
+    program.Svc(kSvcWaitSynchronizationN);
+}
+
+DspGuestProgram EmitDspGuest(Program& program) {
+    DspGuestProgram entries;
+    entries.Sound = program.Here();
+    program.Op(AddImm(9, 0, 0));
+    const uint32_t soundLoop = program.Here();
+    program.Op(MovImm(5, 0));
+    program.Op(Str(5, 9, 20));
+    EmitWait(program, 0);
+    program.Op(MovImm(5, 1));
+    program.Op(Str(5, 9, 20));
+    program.Op(Ldr(8, 9, 8));
+    const uint32_t soundSpin = program.Here();
+    program.Op(SubsImm(8, 8, 1));
+    program.Branch(Condition::Ne, soundSpin);
+    program.Op(Ldr(5, 9, 16));
+    program.Op(AddImm(5, 5, 1));
+    program.Op(Str(5, 9, 16));
+    program.Branch(Condition::Al, soundLoop);
+    entries.Main = program.Here();
+    program.Op(Ldr(8, 9, 12));
+    const uint32_t mainSpin = program.Here();
+    program.Op(SubsImm(8, 8, 1));
+    program.Branch(Condition::Ne, mainSpin);
+    EmitWait(program, 4);
+    program.Branch(Condition::Al, entries.Main);
+    return entries;
+}
+
+struct DspGuest {
+    DspGuest() {
+        Program& program = Programs().emplace_back(kText);
+        entries = EmitDspGuest(program);
+        guest = std::make_unique<Guest>(program.Seal());
+        guest->Boot(entries.Main, kData);
+    }
+    // After EnableSecondCore when the sound thread is to run there.
+    void Create(uint32_t soundWork, uint32_t mainWork) {
+        guest->Write32(kData + 0U, guest->CreateEvent());
+        guest->Write32(kData + 4U, guest->CreateEvent());
+        guest->Write32(kData + 8U, soundWork);
+        guest->Write32(kData + 12U, mainWork);
+        sound = guest->CreateThread(entries.Sound, 1, kData);
+    }
+    void Signal(uint32_t offset) {
+        GuestState state{};
+        state.r[0] = guest->Read32(kData + offset);
+        guest->Svc(kSvcSignalEvent, state);
+    }
+    bool SoundParked() {
+        return guest->process.ThreadStatus(sound) == NativeA32ThreadStatus::Waiting &&
+               guest->Read32(kData + 20U) == 0U;
+    }
+
+    DspGuestProgram entries;
+    std::unique_ptr<Guest> guest;
+    uint32_t sound = 0U;
+};
+
+// The DSP schedules dispatch as the game does: thousands of blocks between
+// exits (SVCs), not the 64 of the lock stress tests above.
+constexpr uint32_t kDspBudget = 4096U;
+
+// Runs the game thread's cooperative scheduler until none of its threads is
+// ready (the switch-off guest run, RunUntilGuestWait).
+void RunCore0UntilWait(NativeA32Process& process) {
+    for (;;) {
+        const auto result = process.Run(kDspBudget);
+        Require(result.Kind != NativeA32ProcessRunKind::Faulted, "unexpected fault: " + result.Error);
+        if (result.Kind != NativeA32ProcessRunKind::Yielded) return;
+    }
+}
+
+using Clock = std::chrono::steady_clock;
+
+struct DspSchedule {
+    // Per delivered frame: what it waited for besides the sound thread's
+    // work: the time from its refresh's pending point minus the sound
+    // thread's busy time since then (its own pace, which differs between
+    // host cores, is not the schedule's).
+    std::vector<double> WaitsMs;
+    uint32_t Consumed = 0U;
+    uint32_t Overlaps = 0U;
+    uint64_t Core0RunsWhileSoundBusy = 0U;
+    std::string Line;  // the run's per-refresh perf line
+};
+
+constexpr uint32_t kDspFramesPerRefresh = 3U;
+
+// The window session's refresh, R times: the refresh's DSP frames become
+// pending, VBlank wakes the main thread (a slow guest: mainWork), then host
+// work (render, presentation) of hostWork.
+// - Switch off (the session's immediate path, the earliest of its
+//   schedules; config/audio_deferred delivers later still): each frame is
+//   mixed, its interrupt signaled and the guest run until it waits, then
+//   VBlank and the main thread's run, then the host work.
+// - Switch on: the frames are added and the kernel condition notified; the
+//   second core delivers them as its idle work while the game thread runs
+//   the main thread and does its host work.
+// Switch off, idle work is installed too and must never run.
+DspSchedule RunDspSchedule(bool secondCore, uint32_t refreshes, uint32_t soundWork,
+                           uint32_t mainWork, std::chrono::milliseconds hostWork) {
+    DspGuest dsp;
+    NativeA32Process& process = dsp.guest->process;
+    DspSchedule schedule;
+    uint32_t pending = 0U;
+    uint32_t delivered = 0U;
+    Clock::time_point refreshStart{};
+    uint64_t refreshSoundTicks = 0U;
+    uint32_t refreshPending = 0U;  // frames of the refresh still to deliver
+    // Kernel lock held (or the switch off).
+    const auto soundTicks = [&] {
+        return NativeA32ProfileTicksToNanoseconds(
+            process.GuestThreadProfile().Ticks[dsp.sound]);
+    };
+    const auto recordWait = [&](bool leftOver) {
+        const double sinceRefresh =
+            std::chrono::duration<double, std::milli>(Clock::now() - refreshStart).count();
+        const double soundMs = static_cast<double>(soundTicks() - refreshSoundTicks) / 1.0e6;
+        // A frame of an earlier refresh waited for a whole refresh.
+        schedule.WaitsMs.push_back(sinceRefresh - soundMs + (leftOver ? 1.0e6 : 0.0));
+    };
+    process.SetSecondCoreIdleWork(
+        {[&] { return pending != 0U; },
+         [&] {
+             Require(secondCore, "switch absent: the idle work ran");
+             Require(SecondCore::Processor() == 1U && SecondCore::KernelHeld(),
+                     "idle work on the second core with the kernel lock");
+             if (!dsp.SoundParked()) ++schedule.Overlaps;
+             recordWait(pending > refreshPending);
+             --pending;
+             if (refreshPending != 0U) --refreshPending;
+             ++delivered;
+             dsp.Signal(0);
+         }});
+    std::unique_ptr<TwoCores> cores;
+    if (secondCore) cores = std::make_unique<TwoCores>(process, kDspBudget);
+    NativeA32GuestThreadProfile profileStart = process.GuestThreadProfile();
+    profileStart.SecondCoreCpuKnown = true;  // its CPU time counts from 0
+    dsp.Create(soundWork, mainWork);
+    // The main thread runs its first frame and waits for VBlank.
+    RunCore0UntilWait(process);
+    for (uint32_t refresh = 0; refresh < refreshes; ++refresh) {
+        refreshStart = Clock::now();
+        refreshSoundTicks = soundTicks();
+        if (!secondCore) {
+            for (uint32_t frame = 0; frame < kDspFramesPerRefresh; ++frame) {
+                recordWait(false);
+                ++delivered;
+                dsp.Signal(0);
+                RunCore0UntilWait(process);
+            }
+            dsp.Signal(4);
+            RunCore0UntilWait(process);
+            std::this_thread::sleep_for(hostWork);
+            continue;
+        }
+        // The game thread never waits for the second core: it adds the
+        // frames and goes on.
+        refreshPending = kDspFramesPerRefresh;
+        pending += kDspFramesPerRefresh;
+        SecondCore::NotifyKernel();
+        dsp.Signal(4);
+        for (;;) {
+            // Thread records are read under the kernel lock (guest memory
+            // would race with the second core's plain stores).
+            const auto soundStatus = process.ThreadStatus(dsp.sound);
+            if (soundStatus == NativeA32ThreadStatus::Ready ||
+                soundStatus == NativeA32ThreadStatus::Running) {
+                ++schedule.Core0RunsWhileSoundBusy;
+            }
+            const auto result = process.Run(kDspBudget);
+            Require(result.Kind != NativeA32ProcessRunKind::Faulted,
+                    "unexpected fault: " + result.Error);
+            if (result.Kind != NativeA32ProcessRunKind::Yielded) break;
+        }
+        const SecondCore::KernelRelease release;
+        std::this_thread::sleep_for(hostWork);
+    }
+    if (secondCore) {
+        Require(SecondCore::WaitKernelFor(std::chrono::seconds(600),
+                                          [&] { return pending == 0U && dsp.SoundParked(); }),
+                "the second core did not deliver every frame");
+        cores->Stop();
+        // One "host frame" per refresh.
+        schedule.Line = FormatNativeA32GuestThreadsLine(process, {}, refreshes, refreshes) +
+                        "\n    " +
+                        FormatNativeA32SecondCoreLine(process.GuestThreadProfile(),
+                                                      profileStart, {}, refreshes);
+    } else {
+        RunCore0UntilWait(process);
+        schedule.Line = FormatNativeA32GuestThreadsLine(process, {}, refreshes, refreshes);
+    }
+    schedule.Consumed = dsp.guest->Read32(kData + 16U);
+    Require(delivered == refreshes * kDspFramesPerRefresh, "every frame delivered");
+    return schedule;
+}
+
+// DSP frames on the second core: each waits (never drops) until the sound
+// thread is parked, never overlaps it, and the game thread runs guest code
+// meanwhile instead of waiting; their cadence never lags the switch-off
+// schedule (a frame waits for nothing but the sound thread's work), with a
+// slow guest and host work in between; switch absent, the idle work never
+// runs and the schedule is the cooperative one.
+void TestDspOnSecondCore(uint32_t refreshes) {
+    constexpr uint32_t kSoundWork = 20'000U;   // per frame
+    constexpr uint32_t kMainWork = 400'000U;   // per refresh: a slow guest
+    constexpr auto kHostWork = std::chrono::milliseconds(10);
+    const auto off = RunDspSchedule(false, refreshes, kSoundWork, kMainWork, kHostWork);
+    Require(!SecondCore::Active(), "switch absent: the kernel lock stays inert");
+    Require(off.Consumed == refreshes * kDspFramesPerRefresh,
+            "switch off: the sound thread consumed every frame");
+    const auto on = RunDspSchedule(true, refreshes, kSoundWork, kMainWork, kHostWork);
+    Require(on.Overlaps == 0U, "a DSP frame met a running sound thread");
+    Require(on.Consumed == refreshes * kDspFramesPerRefresh,
+            "a DSP frame went out before the sound thread parked (frames merged)");
+    Require(on.Core0RunsWhileSoundBusy != 0U,
+            "the game thread did not run guest code while the second core worked");
+    double worstLag = 0.0;
+    std::string waits;
+    for (size_t frame = 0; frame < on.WaitsMs.size(); ++frame) {
+        worstLag = std::max(worstLag, on.WaitsMs[frame] - off.WaitsMs[frame]);
+        waits += " " + std::to_string(off.WaitsMs[frame]) + "/" +
+                 std::to_string(on.WaitsMs[frame]);
+    }
+    // One cross-thread wake-up for the refresh's first frame (0.1-0.5 ms in
+    // a WSL2 container, more under TSan) and scheduling noise; a frame held
+    // behind the main thread or the host work would wait 30 ms or more.
+    if (worstLag > 5.0) {
+        Fail("DSP frames lag the switch-off schedule (ms waited besides the sound thread's "
+             "work, off/on):" + waits + "\n    " + off.Line + "\n    " + on.Line);
+    }
+    std::cout << "  DSP on the second core: " << on.WaitsMs.size()
+              << " frames, worst lag vs switch off " << worstLag << " ms\n    " << off.Line
+              << "\n    " << on.Line << '\n';
+}
+
+// A failure of the idle work (a DSP mix error) is the game thread's next
+// Run() result; the second core then stops doing it.
+void TestIdleWorkFault() {
+    DspGuest dsp;
+    NativeA32Process& process = dsp.guest->process;
+    uint32_t pending = 1U;
+    uint32_t runs = 0U;
+    process.SetSecondCoreIdleWork({[&] { return pending != 0U; },
+                                   [&] {
+                                       ++runs;
+                                       throw std::runtime_error("mix failed");
+                                   }});
+    TwoCores cores(process);
+    dsp.Create(1U, 1U);
+    SecondCore::NotifyKernel();
+    const auto deadline = Clock::now() + std::chrono::seconds(60);
+    for (;;) {
+        const auto result = process.Run(kBudget);
+        if (result.Kind == NativeA32ProcessRunKind::Faulted) {
+            Require(result.Error.find("second-core idle work: mix failed") != std::string::npos,
+                    "the idle work's error must reach Run(): " + result.Error);
+            break;
+        }
+        Require(Clock::now() < deadline, "the idle work's fault never reached Run()");
+        const SecondCore::KernelRelease release;
+        std::this_thread::yield();
+    }
+    Require(runs == 1U, "the idle work ran again after its fault");
+}
+
+// The second_core: perf line (host units: nanoseconds).
+void TestSecondCoreLine() {
+    NativeA32GuestThreadProfile start;
+    start.SecondCoreCpuKnown = true;
+    NativeA32GuestThreadProfile now = start;
+    now.SecondCoreTicks = 8'000'000U;          // 8 ms busy (guest + SVCs)
+    now.SecondCoreLockTicks = 1'000'000U;      // 1 ms after dispatches
+    now.SecondCoreIdleWorkTicks = 1'000'000U;  // 1 ms of DSP frames
+    now.SecondCoreIdleWorkUnits = 7U;
+    now.SecondCoreLockWaitNanoseconds = 2'000'000U;
+    now.SecondCoreCpuTicks = 5'000'000U;
+    const std::string line =
+        FormatNativeA32SecondCoreLine(now, start, {0U, 0U, 0U, 0.0005}, 1U);
+    Require(line ==
+                "second_core: dsp_pumped=0.00 dsp_flushed=0.00 dsp_late=0 dsp_wait_ms=0.500 "
+                "dsp_core1=7.00 dsp_core1_ms=1.000 core1_lock_wait_ms=2.000 "
+                "core1_preempted_ms=3.000 core0_saved_ms=4.500",
+            "second_core line: " + line);
+    now.SecondCoreCpuKnown = false;
+    Require(FormatNativeA32SecondCoreLine(now, start, {}, 1U).find("core1_preempted_ms=na") !=
+                std::string::npos,
+            "unknown CPU time: preemption na");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -821,6 +1143,7 @@ int main(int argc, char** argv) {
         // WSL2 container, more under TSan): 200k of each in minutes.
         sizes.PingPongRounds = 200'000U;
         sizes.ArbitrationItems = 200'000U;
+        sizes.DspRefreshes = 100U;
     }
     TestMonitorInactive();
     TestMonitorSemantics();
@@ -833,6 +1156,9 @@ int main(int argc, char** argv) {
     TestSleepTimeout();
     TestSecondCoreFault();
     TestSavestate();
+    TestSecondCoreLine();
+    TestIdleWorkFault();
+    TestDspOnSecondCore(sizes.DspRefreshes);
     std::cout << "oot3d_native_a32_second_core_tests: ok\n";
     return 0;
 }
