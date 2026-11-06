@@ -5,6 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from conv import convert
 from export import text
 from importer import to_bytes
+from msgs import grammar_error
 
 
 class Converter(unittest.TestCase):
@@ -17,9 +18,34 @@ class Converter(unittest.TestCase):
         self.assertEqual(convert(b'a\x04b\x02', b''), b'a\x7f\x01\x7f\x1cb\x7f\x00')
 
     def test_sound_uses_3ds_argument(self):
-        # N64 0x12 (sound) → 7f0e with the 6 argument bytes from the 3DS English message
-        en = b'x\x7f\x0e' + bytes(range(1, 7)) + b'\x7f\x00'
-        self.assertEqual(convert(b'\x12\x28\x0e' + b'y\x02', en), b'\x7f\x0e' + bytes(range(1, 7)) + b'y\x7f\x00')
+        # N64 0x12 (sound) → 7f0e with the 5 argument bytes from the 3DS English message (the game's table)
+        en = b'x\x7f\x0e' + bytes(range(1, 6)) + b'z\x7f\x00'
+        self.assertEqual(convert(b'\x12\x28\x0e' + b'y\x02', en), b'\x7f\x0e' + bytes(range(1, 6)) + b'y\x7f\x00')
+
+    def test_sound_followed_by_a_code_stays_parsable(self):
+        # With 6 argument bytes the 7f of the next English code ended up in the PT-BR sound code, and the game read
+        # the following letter as a code ("7f 4f"), past its table.
+        en = b'\x7f\x0e' + bytes(range(1, 6)) + b'\x7f\x1d\x41Hey\x7f\x1d\x00\x7f\x00'
+        out = convert(b'\x12\x28\x0eOi\x02', en)
+        self.assertEqual(out, b'\x7f\x0e' + bytes(range(1, 6)) + b'Oi\x7f\x00')
+        self.assertIsNone(grammar_error(out))
+
+    def test_persistent_takes_3ds_argument(self):
+        # N64 0x0a has no argument; the 3DS 7f06 reads one byte, taken from the English message
+        self.assertEqual(convert(b'\x0ac\x02', b'a\x7f\x06\x00b\x7f\x00'), b'\x7f\x06\x00c\x7f\x00')
+
+
+class Grammar(unittest.TestCase):
+    def test_parsable_messages(self):
+        self.assertIsNone(grammar_error(b'ok\x7f\x00'))
+        self.assertIsNone(grammar_error(b'\x7f\x0d\x01\x02\x03\x04\x05\x7f\x1b' + bytes(6) + b'\x7f\x00'))
+
+    def test_what_the_game_cannot_parse(self):
+        self.assertIn('unknown code 7f41', grammar_error(b'\x7f\x0e\x01\x02\x03\x04\x05\x7f\x41b\x7f\x00'))
+        self.assertIn('unknown code 7f7f', grammar_error(b'\x7f\x7f\x1c\x7f\x00'))
+        self.assertIn('without its 5 argument bytes', grammar_error(b'\x7f\x0e\x01\x02'))
+        self.assertEqual(grammar_error(b'ok'), 'no 7f00 at the end')
+        self.assertIn('bytes after 7f00', grammar_error(b'\x7f\x00x'))
 
 
 class RoundTrip(unittest.TestCase):
@@ -27,6 +53,13 @@ class RoundTrip(unittest.TestCase):
         b = 'Olá,'.encode() + b'\x7f\x1c' + 'Link! '.encode() + b'\x7f\x24\x07' + 'Pegue a espada.'.encode() + b'\x7f\x00'
         s = text(b)
         self.assertIn('⟦7f2407⟧', s)
+        self.assertEqual(to_bytes(s), b)
+
+    def test_sound_then_code_round_trip(self):
+        # The export shows the code after a sound as a code, not as stray characters
+        b = b'\x7f\x0e' + bytes(range(1, 6)) + b'\x7f\x1d\x41Hey\x7f\x1d\x00\x7f\x00'
+        s = text(b)
+        self.assertEqual(s, '⟦7f0e0102030405⟧⟦7f1d41⟧Hey⟦7f1d00⟧')
         self.assertEqual(to_bytes(s), b)
 
 

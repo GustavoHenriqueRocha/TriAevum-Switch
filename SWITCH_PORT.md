@@ -1114,8 +1114,15 @@ loads).
   code byte, r2 the read position, r8 the token start in `TextCommandStream_ExecuteUtf8`), the
   stack dump holds that function's frame (text start and length at sp+0x2C/+0x30) and the
   backtrace names its caller. Cost: none until a fault; the perf trail is one copy per perf window.
+- **PT-BR patch tools.** `tools/oot3d/ptbr/msgs.py` guessed 6 argument bytes for `7f0e` (sound) and
+  none for `7f0d`; the game reads 5 for both. A PT-BR sound code then took the `7f` of the next
+  English code as its sixth byte, and the game read the following letter as a code past its table:
+  the crash above, for any message where that happens. The table is now the game's, `7f06` takes its
+  argument from the 3DS message like the other codes the N64 text lacks, and `assemble.py` refuses
+  to write a message the game cannot parse (`grammar_error`; every message of the original eu.qm
+  passes). Whether the player used a PT-BR romfs is unknown; the report above shows the text bytes.
 - Tests: `oot3d_native_guest_fault_report_tests`, `oot3d_native_a32_process_tests`
-  (TestFallbackBoundary); guards in `tests/switch/test_bug_guards.py`.
+  (TestFallbackBoundary), `tools/oot3d/ptbr/test_ptbr.py`; guards in `tests/switch/test_bug_guards.py`.
 
 ### Game code on 2 MB pages (`config/no_code_hugepages`, 2026-11-05)
 - **What.** Ported from sa2-nx (`sdk/src/ui/switch_code_blocks.cpp`, from kameo-nx and the Torchlight

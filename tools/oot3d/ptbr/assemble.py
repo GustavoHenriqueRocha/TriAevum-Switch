@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from paths import ROMFS_ORIGINAL, ROMFS_PTBR, WORK_DIR
 from conv import convert
 from importer import load
-from msgs import qm, soh
+from msgs import qm, soh, grammar_error
 from romfs import locate
 
 
@@ -30,15 +30,23 @@ def assemble_qm():
         while len(blob) % 4: blob.append(0)
         seen[b] = len(blob); blob.extend(b); return seen[b], len(b)
 
+    unparsable = []
     for i, r in enumerate(recs):
         pl = [d[o:o + s] if s else b'' for o, s in ((r[w], r[w + 1]) for w in range(4, 22, 2))]
         mid = r[0]
         new_payload = convert(pt[mid][2], pl[1]) if mid in pt else new_texts.get(mid)
         if new_payload:
+            # The game's parser has no recovery: a code without its argument bytes shifts the rest of the
+            # message and an unknown code crashes the game when the message is shown (msgs.T_ARGS).
+            error = grammar_error(new_payload)
+            if error:
+                unparsable.append(f'{mid:#06x}: {error}')
             pl[6] = pl[7] = new_payload                   # 06_EU_SPANISH and 07_US_SPANISH
         for s, b in enumerate(pl):
             r[4 + 2 * s], r[5 + 2 * s] = store(b)
         struct.pack_into('<24I', blob, 0x10 + i * 96, *r)
+    if unparsable:
+        raise SystemExit(f'{len(unparsable)} PT-BR messages the game cannot parse: {unparsable[:5]}')
     if len(blob) > len(d):
         raise SystemExit(f'PT-BR eu.qm ended up larger than the original ({len(blob)} > {len(d)})')
     return bytes(blob), len(d)

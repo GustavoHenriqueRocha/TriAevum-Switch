@@ -2,7 +2,7 @@
 import json, re, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from msgs import soh, qm
+from msgs import soh, qm, grammar_error
 from export import text
 from conv import convert
 
@@ -37,7 +37,10 @@ def load():
         if COD.findall(en) != COD.findall(pt): problems.append((k, 'codes differ')); continue
         missing = {c for c in COD.sub('', pt) if c != '\n' and ord(c) not in glyph_set}
         if missing: problems.append((k, 'no glyph: ' + ''.join(sorted(missing)))); continue
-        ready[mid] = to_bytes(pt)
+        payload = to_bytes(pt)
+        error = grammar_error(payload)
+        if error: problems.append((k, 'the game cannot parse it: ' + error)); continue
+        ready[mid] = payload
     return ready, problems
 
 
