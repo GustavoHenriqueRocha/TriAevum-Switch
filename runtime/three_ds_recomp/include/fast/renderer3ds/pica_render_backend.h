@@ -130,6 +130,9 @@ BuildPicaCompositionDrawReference(const PicaDrawView& draw) noexcept {
 enum class PicaPresentationMode : uint8_t {
     Replace,
     AlphaOverlay,
+    // Over the presented frame in a corner of the window (a generic title's
+    // 3DS lower screen; PlaceUiPictureInPicture). Never the last presentation.
+    PictureInPicture,
 };
 
 struct PicaDisplayTransferView {
@@ -151,6 +154,9 @@ struct PicaDisplayTransferView {
     // plus guarded CPU materialization; it need not mean copying into RAM now.
     // Replays/restored transfers leave this false and never complete twice.
     bool MaterializeGuest = false;
+    // Native lines from the start of the render target at
+    // InputPhysicalAddress to the source (a sub-rectangle of that target).
+    uint16_t InputLineOffset = 0;
 };
 
 struct PicaPhysicalMemoryWrite {

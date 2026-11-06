@@ -102,15 +102,28 @@ bool GfxRenderingAPIVulkan::SubmitPicaDisplayTransfer(
                 throw std::runtime_error(
                     "native PICA display transfer exceeds its Vulkan render target");
             }
+            // A source inside the target (InputLineOffset) reads only its
+            // rows; the host image may hold the target at a render scale.
+            const auto sourceRows = Oot3d::PicaDisplayTransferSourceRowsFor(
+                source->Key.Height, transfer.InputHeight, transfer.InputLineOffset);
+            if (!sourceRows.has_value()) {
+                throw std::runtime_error(
+                    "native PICA display transfer starts past its Vulkan render target");
+            }
+            const auto hostRows = [&](uint32_t nativeRows) {
+                return static_cast<uint32_t>(
+                    uint64_t{nativeRows} * source->Height / source->Key.Height);
+            };
+            const uint32_t sourceFirstRow = hostRows(sourceRows->First);
             std::string transferPlanError;
             const auto transferPlan =
                 Oot3d::BuildPicaDisplayTransferPlan({
                     transfer.InputWidth,
-                    transfer.InputHeight,
+                    transfer.InputLineOffset != 0U ? sourceRows->Count : transfer.InputHeight,
                     transfer.OutputWidth,
                     transfer.OutputHeight,
                     source->Width,
-                    source->Height,
+                    hostRows(sourceRows->Count),
                     transfer.Flags,
                     // Target extents follow this policy for the acquired
                     // swapchain (stale targets are rebuilt at frame start).
@@ -123,7 +136,8 @@ bool GfxRenderingAPIVulkan::SubmitPicaDisplayTransfer(
                     "native PICA display transfer plan failed: " +
                     transferPlanError);
             }
-            if (source->Key.Width == Oot3d::kNativeTopScreenPhysicalWidth &&
+            if (transfer.InputLineOffset == 0U &&
+                source->Key.Width == Oot3d::kNativeTopScreenPhysicalWidth &&
                 source->Key.Height == Oot3d::kNativeTopScreenPhysicalHeight) {
                 Oot3d::GraphicsSettingsRuntime::Instance().PublishSceneExtent(
                     transferPlan->DestinationHeight, transferPlan->DestinationWidth);
@@ -216,7 +230,8 @@ bool GfxRenderingAPIVulkan::SubmitPicaDisplayTransfer(
                 Oot3d::GpuProfileScope::DisplayTransfer,
                 mCommandBuffers[mCurrentFrame]);
             const VkImage displayCopySource = source->ColorImage;
-            const bool nriDisplayCopy =
+            // The NRI pass reads from row 0; a lower origin takes the blit.
+            const bool nriDisplayCopy = sourceFirstRow == 0U &&
                 mNriPicaDisplayCopyPass.Execute({
                     mCurrentFrame,
                     mFrameCounter,
@@ -280,11 +295,13 @@ bool GfxRenderingAPIVulkan::SubmitPicaDisplayTransfer(
                 blit.srcSubresource.aspectMask =
                     VK_IMAGE_ASPECT_COLOR_BIT;
                 blit.srcSubresource.layerCount = 1;
+                blit.srcOffsets[0] = {
+                    0, static_cast<int32_t>(sourceFirstRow), 0};
                 blit.srcOffsets[1] = {
                     static_cast<int32_t>(
                         transferPlan->BlitSourceWidth()),
                     static_cast<int32_t>(
-                        transferPlan->BlitSourceHeight()),
+                        sourceFirstRow + transferPlan->BlitSourceHeight()),
                     1};
                 blit.dstSubresource.aspectMask =
                     VK_IMAGE_ASPECT_COLOR_BIT;
@@ -435,9 +452,15 @@ bool GfxRenderingAPIVulkan::ExecuteNativePicaDisplayGraph(
             CreateNativePicaScanoutPipeline();
             descriptor = AllocateNativePicaScanoutDescriptorSet();
         }
-        const bool alphaOverlay = !copyBoundary &&
+        // Picture-in-picture loads the presented frame like an overlay and
+        // draws in a corner of it (a generic title's lower screen).
+        const bool pictureInPicture = !copyBoundary &&
             transfer.PresentationMode ==
-                GfxNativePicaPresentationMode::AlphaOverlay;
+                GfxNativePicaPresentationMode::PictureInPicture;
+        const bool alphaOverlay = !copyBoundary &&
+            (transfer.PresentationMode ==
+                 GfxNativePicaPresentationMode::AlphaOverlay ||
+             pictureInPicture);
         const auto environmentEnabled = [](const char* name) {
             const char* value = std::getenv(name);
             return value != nullptr && std::string_view(value) == "1";
@@ -3769,10 +3792,15 @@ bool GfxRenderingAPIVulkan::ExecuteNativePicaDisplayGraph(
                                static_cast<uint32_t>(descriptorWrites.size()),
                                descriptorWrites.data(), 0, nullptr);
 
-        const auto presentation = FitNativePicaPresentation(
-            mSwapchainExtent.width, mSwapchainExtent.height,
-            static_cast<float>(display.Height),
-            static_cast<float>(display.Width));
+        const auto presentation = pictureInPicture
+            ? ::Oot3d::Renderer::PlaceUiPictureInPicture(
+                  mSwapchainExtent.width, mSwapchainExtent.height,
+                  static_cast<float>(display.Height),
+                  static_cast<float>(display.Width))
+            : FitNativePicaPresentation(
+                  mSwapchainExtent.width, mSwapchainExtent.height,
+                  static_cast<float>(display.Height),
+                  static_cast<float>(display.Width));
         const VkViewport viewport{
             presentation.X, presentation.Y, presentation.Width,
             presentation.Height, 0.0F, 1.0F};

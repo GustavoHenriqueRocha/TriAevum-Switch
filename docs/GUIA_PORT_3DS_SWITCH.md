@@ -1675,6 +1675,14 @@ Armadilhas do SM3DL (05/11), todas genéricas:
   No SM3DL era o próprio save: ele grava a imagem de cada alvo de render conhecido por cima da memória,
   e um alvo abandonado já era heap. Só grave de volta alvo que a CPU não escreveu depois do último draw
   (geração de escrita carimbada no draw, `RenderTargetWrittenSinceDraw`).
+- **Tela de baixo que não aparece (ou sai de cor sólida)** (`docs/pesquisas/2026-11-06-sm3dl-tela-de-baixo.md`):
+  rode com `--extended-diagnostics` e olhe os `TriggerCmdReqQueue:...id=3` (DisplayTransfer) que vão para o
+  framebuffer de baixo. Se a origem (`p0`) cai *dentro* de um alvo de render conhecido e não no começo dele,
+  o jogo desenha as duas telas no mesmo alvo e copia um sub-retângulo (o SM3DL: 80 linhas dentro do alvo de
+  cima 240x400). Trate como sub-retângulo do alvo (`SubRectDisplayTransfers` no perfil, linhas da origem por
+  `PicaDisplayTransferSourceRowsFor`), como o cache de superfícies do Citra faz. Com interpolação visual, o
+  sample executado está um quadro atrás: apresente o último snapshot executado da saída
+  (`LatestSnapshotCompletion`), não o do último transfer capturado.
 
 ---
 

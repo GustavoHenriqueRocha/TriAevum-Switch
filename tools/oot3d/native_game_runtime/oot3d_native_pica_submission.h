@@ -162,6 +162,9 @@ struct Oot3dPicaDisplayTransferSubmission {
     // A restored render target may need one GPU replay after its portable CPU
     // fallback already delivered the guest PPF interrupt.
     bool SignalInterrupt = true;
+    // Native lines from the start of the render target at
+    // InputPhysicalAddress to the transfer's source (SetSubRectDisplayTransfers).
+    uint16_t InputLineOffset = 0;
 };
 
 struct Oot3dPicaMemoryFillSubmission {
@@ -231,6 +234,11 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     // ranges remembered with the cached index bytes. Same snapshots, same
     // hashes; false keeps the previous passes.
     void SetLeanCapture(bool enabled) noexcept { mLeanCapture = enabled; }
+    // A display transfer from inside a known color target, at the start of
+    // one of its tile rows, is that target's sub-rectangle and goes to the
+    // GPU with InputLineOffset (SM3DL draws its bottom screen into the lower
+    // lines of the top target). Off: such a source stays on the CPU path.
+    void SetSubRectDisplayTransfers(bool enabled) noexcept { mSubRectDisplayTransfers = enabled; }
     [[nodiscard]] bool LeanCapture() const noexcept { return mLeanCapture; }
     // Always counted, cumulative (logs/perf.txt): time inside the draw
     // submissions (the guest's GX command, on the guest thread) and the bytes
@@ -436,6 +444,8 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     struct RenderTargetStamp {
         size_t ByteCount = 0;
         std::optional<uint64_t> Generation;
+        uint32_t Width = 0;
+        uint32_t BytesPerPixel = 0;
     };
     std::unordered_map<uint32_t, RenderTargetStamp> mRenderTargetStamps;
     std::vector<Oot3dPicaDisplayTransferSubmission>
@@ -443,6 +453,7 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     std::vector<RawCopyProducer> mRawCopyProducers;
     GuestWriteRegistrar mGuestWriteRegistrar;
     bool mDeferGpuBackedDisplayTransfers = false;
+    bool mSubRectDisplayTransfers = false;
     bool mRuntimeProfilingEnabled = false;
     bool mLeanCapture = false;
     CaptureCounters mCounters;

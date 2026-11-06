@@ -65,6 +65,9 @@ struct NativeA32PicaSubmissionStats {
     uint64_t MaximumPicaDrainPassesPerRefresh = 0;
     uint64_t SelectedTopTransferCount = 0;
     uint64_t NativeBottomFrontendPresentationCount = 0;
+    uint64_t BottomScreenPictureInPictureCount = 0;
+    uint64_t BottomScreenTransferHitCount = 0;
+    uint64_t BottomScreenSnapshotMissCount = 0;
     uint64_t NativeMenuBackdropDrawOmissionCount = 0;
     uint64_t NativeMenuClearDrawOmissionCount = 0;
     uint64_t NativeFrontendPresentationActiveCount = 0;

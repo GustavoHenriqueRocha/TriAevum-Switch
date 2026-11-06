@@ -1007,6 +1007,7 @@ void NativeA32WindowSession::Setup() {
   // Work off the game thread (config/offload_*, oot3d_native_offload.h).
   offload = Oot3dNativeGame::ReadNativeOffloadOptions();
   submissionQueue.SetLeanCapture(offload.Capture);
+  submissionQueue.SetSubRectDisplayTransfers(titleProfile.SubRectDisplayTransfers);
   picaFrontend.SetInPlaceDrawPackets(offload.Capture);
   picaPresentationScheduler.SetMoveFreeFinish(offload.Plan);
 #if defined(__SWITCH__)

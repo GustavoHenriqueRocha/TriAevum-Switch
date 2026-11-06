@@ -1039,7 +1039,8 @@ bool Oot3dNativePicaSubmissionQueue::SubmitDrawLocked(
     const auto stampTarget = [&](uint32_t address, uint32_t bytesPerPixel) {
         if (address == 0U || pixels == 0U || bytesPerPixel == 0U) return;
         const size_t byteCount = pixels * bytesPerPixel;
-        mRenderTargetStamps[address] = {byteCount, mMemory.RangeWriteGeneration(address, byteCount)};
+        mRenderTargetStamps[address] = {byteCount, mMemory.RangeWriteGeneration(address, byteCount),
+                                        framebuffer.Width, bytesPerPixel};
     };
     stampTarget(colorTarget, Fast::Renderer3ds::PicaColorFormatBytes(framebuffer.ColorFormat));
     stampTarget(framebuffer.DepthPhysicalAddress,
@@ -1122,8 +1123,26 @@ bool Oot3dNativePicaSubmissionQueue::SubmitDisplayTransfer(
         }
         return true;
     }
+    uint32_t inputTarget = inputPhysical.value_or(0U);
+    uint16_t inputLineOffset = 0U;
+    if (mSubRectDisplayTransfers && inputPhysical.has_value() && transfer.TextureCopyBytes == 0U &&
+        !mKnownColorRenderTargets.contains(*inputPhysical)) {
+        // The source must start a tile row (8 lines) of a known color target
+        // of the same width; the transfer then reads that target from there.
+        for (const uint32_t target : mKnownColorRenderTargets) {
+            const auto stamp = mRenderTargetStamps.find(target);
+            if (target > *inputPhysical || stamp == mRenderTargetStamps.end()) continue;
+            const uint64_t offset = *inputPhysical - target;
+            const uint64_t lineBytes = uint64_t{stamp->second.Width} * stamp->second.BytesPerPixel;
+            if (lineBytes == 0U || offset >= stamp->second.ByteCount || offset % (lineBytes * 8U) != 0U ||
+                (transfer.InputSize & 0xFFFFU) != stamp->second.Width) continue;
+            inputTarget = target;
+            inputLineOffset = static_cast<uint16_t>(offset / lineBytes);
+            break;
+        }
+    }
     if (!mDeferGpuBackedDisplayTransfers || !inputPhysical.has_value() ||
-        (!mKnownColorRenderTargets.contains(*inputPhysical) &&
+        (!mKnownColorRenderTargets.contains(inputTarget) &&
          !(transfer.TextureCopyBytes != 0U && mInvalidatedColorRenderTargets.contains(*inputPhysical)))) {
         return true;
     }
@@ -1161,8 +1180,8 @@ bool Oot3dNativePicaSubmissionQueue::SubmitDisplayTransfer(
     }
     ++mNextCompletionId;
     mPendingDisplayTransfers.push_back(
-        {completionId, afterDrawSubmissionId, *inputPhysical,
-         *outputPhysical, transfer});
+        {completionId, afterDrawSubmissionId, inputTarget,
+         *outputPhysical, transfer, true, inputLineOffset});
     if (deferredToGpu != nullptr) {
         *deferredToGpu = true;
     }

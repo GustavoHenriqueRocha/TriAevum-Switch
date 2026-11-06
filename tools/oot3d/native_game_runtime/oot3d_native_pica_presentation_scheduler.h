@@ -124,10 +124,18 @@ public:
   bool PresentExisting(Oot3d::Renderer::PicaRenderBackend &backend,
                        const Oot3dPicaDisplayTransferSubmission &transfer,
                        uint64_t renderTargetNamespace,
-                       std::string *error = nullptr);
+                       std::string *error = nullptr,
+                       Oot3d::Renderer::PicaPresentationMode mode =
+                           Oot3d::Renderer::PicaPresentationMode::Replace);
 
   bool HasSnapshot(const Oot3dPicaDisplayTransferSubmission &transfer,
                    uint64_t renderTargetNamespace) const;
+  // Completion id of the last snapshot executed into this transfer's output,
+  // whichever transfer it was (the lower-screen picture-in-picture shows the
+  // one the delayed visual sample executed).
+  std::optional<uint64_t>
+  LatestSnapshotCompletion(const Oot3dPicaDisplayTransferSubmission &transfer,
+                           uint64_t renderTargetNamespace) const;
 
   void SetTimingEnabled(bool enabled) noexcept;
   // config/skip_bottom_screen (TopScreen profile): presentation samples

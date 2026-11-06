@@ -690,6 +690,54 @@ int main() {
                 "a new draw did not make the target the GPU's again");
     }
 
+    {
+        // SM3DL, 2026-11-06: the bottom screen is drawn into the lower lines
+        // of the top render target and transferred from 80 lines in. A source
+        // inside a known target is that target's sub-rectangle (Citra's
+        // surface cache does the same); without the profile option it stays
+        // on the CPU path, as before (OoT3D).
+        auto subRectPacket = packet;
+        subRectPacket.Registers[0x11E] = (15U << 12U) | 8U;  // 8x16 RGBA8
+        subRectPacket.Registers[0x11C] = 0x04000300U;        // depth 0x20001800
+        const Oot3dNativeGame::Oot3dPicaDisplayTransfer lowerLines{
+            0x14000300U, 0x14000600U, 0x00100008U, 0x00080008U, 4U};
+        for (const bool subRect : {false, true}) {
+            Oot3dNativeGame::Oot3dNativePicaSubmissionQueue subRectQueue(
+                Oot3dNativeGame::Oot3dPicaPhysicalMemoryView(
+                    memory, {{0x20000000U, 0x14000000U, 0x2000U}}),
+                true);
+            subRectQueue.SetSubRectDisplayTransfers(subRect);
+            Require(subRectQueue.SubmitDrawPacket(subRectPacket, &error), error);
+            bool deferred = !subRect;
+            Require(subRectQueue.SubmitDisplayTransfer(lowerLines, &deferred, &error), error);
+            if (!subRect) {
+                Require(!deferred && subRectQueue.PendingDisplayTransfers().empty(),
+                        "a sub-rectangle transfer left the CPU path without the option");
+                continue;
+            }
+            Require(deferred && subRectQueue.PendingDisplayTransfers().size() == 1U &&
+                        subRectQueue.PendingDisplayTransfers()[0].InputPhysicalAddress ==
+                            0x20000200U &&
+                        subRectQueue.PendingDisplayTransfers()[0].InputLineOffset == 8U,
+                    "a transfer 8 lines into a known target was not its sub-rectangle");
+            subRectQueue.TakePendingDisplayTransfers();
+            // Inside a tile row, past the target, or another width: no line
+            // of the target starts there, so the CPU path keeps it.
+            for (const auto& odd : {
+                     Oot3dNativeGame::Oot3dPicaDisplayTransfer{
+                         0x14000220U, 0x14000600U, 0x00100008U, 0x00080008U, 4U},
+                     Oot3dNativeGame::Oot3dPicaDisplayTransfer{
+                         0x14000400U, 0x14000600U, 0x00100008U, 0x00080008U, 4U},
+                     Oot3dNativeGame::Oot3dPicaDisplayTransfer{
+                         0x14000300U, 0x14000600U, 0x00100010U, 0x00080010U, 4U}}) {
+                deferred = true;
+                Require(subRectQueue.SubmitDisplayTransfer(odd, &deferred, &error) &&
+                            !deferred && subRectQueue.PendingDisplayTransfers().empty(),
+                        "a source that is no line of a known target left the CPU path");
+            }
+        }
+    }
+
     std::cout << "oot3d_native_pica_submission_tests: ok\n";
     return 0;
 }

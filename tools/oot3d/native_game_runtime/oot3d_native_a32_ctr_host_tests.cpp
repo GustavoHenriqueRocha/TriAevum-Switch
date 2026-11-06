@@ -1024,6 +1024,11 @@ void TestWindowProfileGatesOot3dHooks() {
         Require(profile.Oot3dGuestHooks && profile.TopScreenUi &&
                     profile.ManualCompiledFunctions && profile.GuestOverrides,
                 "the OoT3D window lost its guest hooks or TopScreen UI");
+        // OoT3D presents its lower screen through its own UI lifecycle.
+        Require(!profile.BottomScreenPictureInPicture,
+                "the OoT3D window must not show the lower screen as picture-in-picture");
+        Require(!profile.SubRectDisplayTransfers,
+                "the OoT3D window must keep transfers from inside a target on the CPU path");
     }
     // Super Mario 3D Land (EUR) e um title id qualquer.
     for (const uint64_t titleId : {0x0004000000053F00ULL, 0x0004000000123400ULL}) {
@@ -1032,6 +1037,10 @@ void TestWindowProfileGatesOot3dHooks() {
                     !profile.ManualCompiledFunctions && !profile.GuestOverrides &&
                     profile.StubUnknownServices && profile.KernelWaitTimeouts,
                 "a generic title window kept OoT3D guest hooks");
+        Require(profile.BottomScreenPictureInPicture,
+                "a generic title window must show its lower screen (picture-in-picture)");
+        Require(profile.SubRectDisplayTransfers,
+                "a generic title window must transfer from inside a target on the GPU (SM3DL's lower screen)");
     }
 }
 

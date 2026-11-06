@@ -51,6 +51,24 @@ struct PicaDisplayTransferPlan {
     }
 };
 
+struct PicaDisplayTransferSourceRows {
+    uint32_t First = 0;
+    uint32_t Count = 0;
+};
+
+// Native attachment rows a transfer reads from a target targetHeight lines
+// tall, starting lineOffset lines into it (a sub-rectangle source). Memory
+// line y is attachment row targetHeight - 1 - y (pica_framebuffer_encode.h).
+// No offset keeps the whole target, as transfers always did.
+[[nodiscard]] inline std::optional<PicaDisplayTransferSourceRows>
+PicaDisplayTransferSourceRowsFor(uint32_t targetHeight, uint32_t inputHeight,
+                                 uint32_t lineOffset) {
+    if (lineOffset == 0U) return PicaDisplayTransferSourceRows{0U, targetHeight};
+    if (lineOffset >= targetHeight || inputHeight == 0U) return std::nullopt;
+    const uint32_t count = std::min(inputHeight, targetHeight - lineOffset);
+    return PicaDisplayTransferSourceRows{targetHeight - lineOffset - count, count};
+}
+
 // Builds the GPU-image equivalent of the native PICA display transfer. The
 // output dimensions preserve renderer supersampling while crop and 2:1 box
 // filtering continue to operate in native PICA coordinates; a source at the

@@ -59,6 +59,33 @@ struct UiPresentationPoint {
     };
 }
 
+// A second screen shown as picture-in-picture over the main one: a third of
+// the target height at native proportions, bottom-right, with a margin of 2%
+// of the height (the 3DS lower screen in non-OoT3D titles).
+[[nodiscard]] inline UiPresentationRect PlaceUiPictureInPicture(
+    std::uint32_t targetWidth, std::uint32_t targetHeight, float logicalWidth,
+    float logicalHeight) noexcept {
+    if (targetWidth == 0U || targetHeight == 0U ||
+        !(logicalWidth > 0.0F) || !(logicalHeight > 0.0F)) {
+        return {};
+    }
+    const float width = static_cast<float>(targetWidth);
+    const float height = static_cast<float>(targetHeight);
+    const float margin = height * 0.02F;
+    float presentHeight = height / 3.0F;
+    float presentWidth = presentHeight * logicalWidth / logicalHeight;
+    if (presentWidth > width - 2.0F * margin) {
+        presentWidth = std::max(width - 2.0F * margin, 1.0F);
+        presentHeight = presentWidth * logicalHeight / logicalWidth;
+    }
+    return {
+        std::max(width - margin - presentWidth, 0.0F),
+        std::max(height - margin - presentHeight, 0.0F),
+        presentWidth,
+        presentHeight,
+    };
+}
+
 [[nodiscard]] inline UiPresentationRect FillUiPresentation(
     std::uint32_t targetWidth, std::uint32_t targetHeight, float logicalWidth,
     float logicalHeight) noexcept {

@@ -66,6 +66,13 @@ struct CtrTitleProfile {
     bool Oot3dGuestHooks = true;
     // --ui-profile topscreen (HUD/16:9 do OoT3D) só existe no OoT3D.
     bool TopScreenUi = true;
+    // Tela de baixo como picture-in-picture no canto da janela. O OoT3D
+    // apresenta a dele pelo próprio ciclo de vida da UI (frontend nativo).
+    bool BottomScreenPictureInPicture = false;
+    // Transferência de dentro de um alvo de render (sub-retângulo) vai para a
+    // GPU: o SM3DL desenha a tela de baixo nas linhas de baixo do alvo de cima.
+    // O OoT3D não faz isso; fica no caminho de CPU de sempre.
+    bool SubRectDisplayTransfers = false;
     // Fronteira de quadro: no OoT3D, pelos PCs de sempre (Zelda não muda).
     CtrFrameBoundarySource FrameBoundary =
         CtrFrameBoundarySource::Oot3dGuestPcs;
@@ -106,6 +113,8 @@ inline CtrTitleProfile GenericTitleProfile(std::optional<uint64_t> titleId) {
     profile.FrameBoundary = CtrFrameBoundarySource::GspPresent;
     profile.Oot3dGuestHooks = false;
     profile.TopScreenUi = false;
+    profile.BottomScreenPictureInPicture = true;
+    profile.SubRectDisplayTransfers = true;
     return profile;
 }
 

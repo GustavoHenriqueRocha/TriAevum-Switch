@@ -574,14 +574,15 @@ bool Oot3dPicaPresentationScheduler::Execute(
 bool Oot3dPicaPresentationScheduler::PresentExisting(
     Oot3d::Renderer::PicaRenderBackend &backend,
     const Oot3dPicaDisplayTransferSubmission &transfer,
-    uint64_t renderTargetNamespace, std::string *error) {
+    uint64_t renderTargetNamespace, std::string *error,
+    Oot3d::Renderer::PicaPresentationMode mode) {
   OptionalTimer timer(mTimings.Enabled, mTimings.PresentExistingSeconds);
   if (!HasSnapshot(transfer, renderTargetNamespace)) {
     SetError(error, "PICA display snapshot has not been executed");
     return false;
   }
   if (!SubmitOot3dPicaVulkanDisplayTransfer(backend, transfer, true, error,
-                                            renderTargetNamespace)) {
+                                            renderTargetNamespace, false, mode)) {
     return false;
   }
   ++mStats.PresentedTransfers;
@@ -596,6 +597,15 @@ bool Oot3dPicaPresentationScheduler::HasSnapshot(
       MakeSnapshotTarget(transfer, renderTargetNamespace));
   return found != mSnapshotCompletions.end() &&
          found->second == transfer.CompletionId;
+}
+
+std::optional<uint64_t> Oot3dPicaPresentationScheduler::LatestSnapshotCompletion(
+    const Oot3dPicaDisplayTransferSubmission &transfer,
+    uint64_t renderTargetNamespace) const {
+  const auto found = mSnapshotCompletions.find(
+      MakeSnapshotTarget(transfer, renderTargetNamespace));
+  if (found == mSnapshotCompletions.end()) return std::nullopt;
+  return found->second;
 }
 
 void Oot3dPicaPresentationScheduler::SetTimingEnabled(bool enabled) noexcept {

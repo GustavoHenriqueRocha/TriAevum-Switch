@@ -752,9 +752,34 @@ GUARDS = [
           "oot3d_native_pica_submission_tests (alvo escrito pela CPU depois do draw)"),
     Guard("alvo de render escrito pela CPU depois do draw tem de ser notado (carimbo por draw)",
           "tools/oot3d/native_game_runtime/oot3d_native_pica_submission.cpp",
-          r'mRenderTargetStamps\[address\] = \{byteCount, mMemory\.RangeWriteGeneration\(address, byteCount\)\};.*?'
+          r'mRenderTargetStamps\[address\] = \{byteCount, mMemory\.RangeWriteGeneration\(address, byteCount\),.*?'
           r'return now\.has_value\(\) && now != stamp->second\.Generation;',
           "oot3d_native_pica_submission_tests (alvo escrito pela CPU depois do draw)"),
+    Guard("tela de baixo de título genérico nunca aparecia na janela (SM3DL): PiP no canto, OoT3D fora",
+          "tools/oot3d/native_game_runtime/ctr_title_profile.h",
+          r'bool BottomScreenPictureInPicture = false;.*?GenericTitleProfile.*?'
+          r'profile\.BottomScreenPictureInPicture = true;',
+          "oot3d_native_a32_ctr_host_tests (TestWindowProfileGatesOot3dHooks)"),
+    Guard("PiP da tela de baixo: o Vulkan desenha no canto (PlaceUiPictureInPicture) sobre o quadro",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_vulkan_pica_display.cpp",
+          r'GfxNativePicaPresentationMode::AlphaOverlay \|\|\s*pictureInPicture\);.*?'
+          r'const auto presentation = pictureInPicture\s*\? ::Oot3d::Renderer::PlaceUiPictureInPicture\(',
+          "oot3d_native_pica_vulkan_bridge_tests (TestBottomScreenPictureInPictureLayout)"),
+    Guard("PiP da tela de baixo: a janela apresenta o transfer de baixo depois do de cima",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(titleProfile\.BottomScreenPictureInPicture &&.*?'
+          r'LatestSnapshotCompletion\(.*?bottomSelection\.CompletionId = \*executed;.*?'
+          r'PicaPresentationMode::\s*PictureInPicture\)',
+          "oot3d_native_pica_vulkan_bridge_tests (modo PictureInPicture e LatestSnapshotCompletion)"),
+    Guard("tela de baixo do SM3DL vinha de 80 linhas dentro do alvo de cima e ia pela CPU (azul): sub-retângulo só no genérico",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'submissionQueue\.SetSubRectDisplayTransfers\(titleProfile\.SubRectDisplayTransfers\);',
+          "oot3d_native_pica_submission_tests (sub-retângulo) + oot3d_native_a32_ctr_host_tests (perfil)"),
+    Guard("transfer de sub-retângulo: o Vulkan copia das linhas do alvo (origem no blit, NRI só da linha 0)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_vulkan_pica_display.cpp",
+          r'PicaDisplayTransferSourceRowsFor\(.*?const bool nriDisplayCopy = sourceFirstRow == 0U &&.*?'
+          r'blit\.srcOffsets\[0\] = \{\s*0, static_cast<int32_t>\(sourceFirstRow\), 0\};',
+          "oot3d_native_pica_vulkan_bridge_tests (TestDisplayTransferSourceRows)"),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

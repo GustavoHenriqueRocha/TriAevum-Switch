@@ -4,9 +4,12 @@
 #include "fast/oot3d/pica_uniform_layout.h"
 #include "fast/renderer3ds/pica_texture_copy_pins.h"
 #include "fast/renderer3ds/pica_vulkan_device_profile.h"
+#include "fast/oot3d/pica_display_transfer.h"
+#include "oot3d/renderer/ui_presentation_layout.h"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <iostream>
@@ -223,9 +226,49 @@ void TestPicaTextureCopyPinCoversLaterVersions() {
     Require(!pins.Declared() && !pins.Retains(2040U), "clearing must drop the pins");
 }
 
+// The 3DS lower screen of a non-OoT3D title (SM3DL, 2026-11-06) is shown as
+// picture-in-picture over the top screen: a third of the window height at
+// native proportions, bottom-right, with a margin of 2% of the height.
+void TestDisplayTransferSourceRows() {
+    // SM3DL, 2026-11-06: the bottom screen sits 80 lines into the 240x400 top
+    // target and the transfer crops 320 of them. Memory line y is attachment
+    // row height - 1 - y (pica_framebuffer_encode.h), so those are attachment
+    // rows [0, 320).
+    const auto bottom = Fast::Oot3d::PicaDisplayTransferSourceRowsFor(400U, 400U, 80U);
+    Require(bottom.has_value() && bottom->First == 0U && bottom->Count == 320U,
+            "the bottom screen's lines are not attachment rows [0, 320)");
+    const auto middle = Fast::Oot3d::PicaDisplayTransferSourceRowsFor(400U, 160U, 80U);
+    Require(middle.has_value() && middle->First == 160U && middle->Count == 160U,
+            "160 lines from line 80 are not attachment rows [160, 320)");
+    // No offset keeps the whole target, as before (OoT3D).
+    const auto whole = Fast::Oot3d::PicaDisplayTransferSourceRowsFor(400U, 240U, 0U);
+    Require(whole.has_value() && whole->First == 0U && whole->Count == 400U,
+            "a transfer from the target's start no longer reads the whole target");
+    Require(!Fast::Oot3d::PicaDisplayTransferSourceRowsFor(400U, 400U, 400U).has_value(),
+            "a source past the target's last line was accepted");
+}
+
+void TestBottomScreenPictureInPictureLayout() {
+    using Oot3d::Renderer::PlaceUiPictureInPicture;
+    const auto wide = PlaceUiPictureInPicture(1280U, 720U, 320.0F, 240.0F);
+    const auto near = [](float a, float b) { return std::abs(a - b) < 0.01F; };
+    Require(near(wide.Width, 320.0F) && near(wide.Height, 240.0F),
+            "the picture-in-picture must be a third of the window height at 4:3");
+    Require(near(wide.X, 1280.0F - 320.0F - 14.4F) && near(wide.Y, 720.0F - 240.0F - 14.4F),
+            "the picture-in-picture must sit bottom-right with a 2% margin");
+    const auto narrow = PlaceUiPictureInPicture(300U, 900U, 320.0F, 240.0F);
+    Require(narrow.Valid() && narrow.X >= 0.0F && narrow.X + narrow.Width <= 300.0F &&
+                near(narrow.Width / narrow.Height, 320.0F / 240.0F),
+            "a narrow window must keep the whole picture inside at its proportions");
+    Require(!PlaceUiPictureInPicture(0U, 720U, 320.0F, 240.0F).Valid(),
+            "an empty target has no picture-in-picture");
+}
+
 int main() {
     TestPicaDepthFormatKeepsStencil();
     TestPicaTextureCopyPinCoversLaterVersions();
+    TestDisplayTransferSourceRows();
+    TestBottomScreenPictureInPictureLayout();
     RecordingBackend backend;
     Oot3dNativeGame::Oot3dPicaVulkanDrawPlan plan;
     plan.SubmissionId = 17;
@@ -412,6 +455,7 @@ int main() {
     transfer.Transfer.InputSize = 240U | (400U << 16U);
     transfer.Transfer.OutputSize = 400U | (240U << 16U);
     transfer.Transfer.Flags = 1U << 24U;
+    transfer.InputLineOffset = 80U;
     Require(Oot3dNativeGame::SubmitOot3dPicaVulkanDisplayTransfer(
                 backend, transfer, true, &error, 11, false,
                 Oot3d::Renderer::PicaPresentationMode::AlphaOverlay),
@@ -420,6 +464,7 @@ int main() {
                 backend.Transfer.RenderTargetNamespace == 11 &&
                 backend.Transfer.OutputWidth == 200 &&
                 backend.Transfer.OutputHeight == 240 &&
+                backend.Transfer.InputLineOffset == 80U &&
                 !backend.Transfer.MaterializeGuest &&
                 backend.Transfer.PresentationMode ==
                     Oot3d::Renderer::PicaPresentationMode::AlphaOverlay,
@@ -553,6 +598,9 @@ int main() {
     Require(scheduler.PresentExisting(backend, topTransfer, 7U, &error) &&
                 backend.Operations.back() == "present:41",
             "presentation scheduler did not reuse an executed snapshot");
+    Require(backend.Transfer.PresentationMode ==
+                Oot3d::Renderer::PicaPresentationMode::Replace,
+            "the top screen must replace the window");
 
     auto replacementTransfer = topTransfer;
     replacementTransfer.CompletionId = 42U;
@@ -590,6 +638,25 @@ int main() {
                 schedulerStats.CompositionPublicationFailures == 0U &&
                 schedulerStats.PreparedDraws == 0U,
             "presentation scheduler exactly-once counters are incorrect");
+    // A generic title's lower screen goes over the frame as picture-in-picture.
+    Require(scheduler.PresentExisting(
+                backend, replacementTransfer, 7U, &error,
+                Oot3d::Renderer::PicaPresentationMode::PictureInPicture) &&
+                backend.Operations.back() == "present:42" &&
+                backend.Transfer.PresentationMode ==
+                    Oot3d::Renderer::PicaPresentationMode::PictureInPicture,
+            "the picture-in-picture presentation lost its mode");
+    // SM3DL, 2026-11-06: with visual interpolation the executed sample is a
+    // guest frame behind the latest captured transfer, so its completion id
+    // never matched and the lower screen was never shown (1564 misses in
+    // 1565 frames). The picture-in-picture shows the last executed one.
+    auto newerTransfer = replacementTransfer;
+    newerTransfer.CompletionId = replacementTransfer.CompletionId + 1U;
+    Require(!scheduler.HasSnapshot(newerTransfer, 7U) &&
+                scheduler.LatestSnapshotCompletion(newerTransfer, 7U) ==
+                    std::optional<uint64_t>{replacementTransfer.CompletionId} &&
+                !scheduler.LatestSnapshotCompletion(newerTransfer, 8U).has_value(),
+            "the last executed snapshot of an output was not found");
 
     // A backend that prepares receives the draws it selects after the sequence
     // is published and before it executes; each draw is still submitted once,

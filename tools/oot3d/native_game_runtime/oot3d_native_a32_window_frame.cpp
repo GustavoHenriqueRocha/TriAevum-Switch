@@ -3688,18 +3688,56 @@ void NativeA32WindowSession::PresentVisualFrame(
             launch.UiProfile,
             uiLifecycleBridge.NativeFrontendPresentationActive());
     const auto bottomFramebuffer = hostServices.BottomFramebuffer();
-    if (presentNativeBottomFrontend &&
-        bottomFramebuffer.has_value()) {
-      ++picaStats.NativeFrontendPresentationActiveCount;
-      auto selectedBottom =
+    const auto findBottomTransfer = [&] {
+      auto selected =
           displayTransfersByOutput.find(bottomFramebuffer->AddressLeft);
-      if (selectedBottom == displayTransfersByOutput.end() &&
+      if (selected == displayTransfersByOutput.end() &&
           bottomFramebuffer->AddressRight != 0U &&
           bottomFramebuffer->AddressRight !=
               bottomFramebuffer->AddressLeft) {
-        selectedBottom = displayTransfersByOutput.find(
+        selected = displayTransfersByOutput.find(
             bottomFramebuffer->AddressRight);
       }
+      return selected;
+    };
+    // A generic title's lower screen goes over the top one, in a corner
+    // (ctr_title_profile.h); OoT3D presents its own through the native
+    // frontend below.
+    if (titleProfile.BottomScreenPictureInPicture &&
+        bottomFramebuffer.has_value()) {
+      const auto selectedBottom = findBottomTransfer();
+      picaStats.BottomScreenTransferHitCount +=
+          selectedBottom != displayTransfersByOutput.end() ? 1U : 0U;
+      if (selectedBottom != displayTransfersByOutput.end()) {
+        renderStream.Submit(
+            [&, bottomSelection = selectedBottom->second]() mutable {
+              // The executed visual sample is a guest frame behind the
+              // latest transfer: show what it executed into this output.
+              const auto executed =
+                  picaPresentationScheduler.LatestSnapshotCompletion(
+                      bottomSelection, presentationRenderTargetNamespace);
+              if (rendererFrameSkipped || !executed.has_value()) {
+                ++picaStats.BottomScreenSnapshotMissCount;
+                return;
+              }
+              bottomSelection.CompletionId = *executed;
+              if (!picaPresentationScheduler.PresentExisting(
+                      api, bottomSelection,
+                      presentationRenderTargetNamespace, &renderError,
+                      Oot3d::Renderer::PicaPresentationMode::
+                          PictureInPicture)) {
+                throw std::runtime_error(
+                    "lower-screen picture-in-picture presentation "
+                    "failed: " + renderError);
+              }
+              ++picaStats.BottomScreenPictureInPictureCount;
+            });
+      }
+    }
+    if (presentNativeBottomFrontend &&
+        bottomFramebuffer.has_value()) {
+      ++picaStats.NativeFrontendPresentationActiveCount;
+      auto selectedBottom = findBottomTransfer();
       picaStats.NativeFrontendBottomTransferHitCount +=
           selectedBottom != displayTransfersByOutput.end() ? 1U : 0U;
       if (selectedBottom != displayTransfersByOutput.end()) {

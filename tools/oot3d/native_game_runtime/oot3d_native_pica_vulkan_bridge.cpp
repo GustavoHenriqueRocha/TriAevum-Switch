@@ -485,6 +485,7 @@ bool SubmitOot3dPicaVulkanDisplayTransfer(
     view.RenderTargetNamespace = renderTargetNamespace;
     view.InputPhysicalAddress = submission.InputPhysicalAddress;
     view.OutputPhysicalAddress = submission.OutputPhysicalAddress;
+    view.InputLineOffset = submission.InputLineOffset;
     view.InputWidth = static_cast<uint16_t>(transfer.InputSize & 0xFFFFU);
     view.InputHeight = static_cast<uint16_t>(transfer.InputSize >> 16U);
     const uint16_t declaredOutputWidth =
