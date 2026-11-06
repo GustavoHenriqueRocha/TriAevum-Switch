@@ -100,7 +100,8 @@ Oot3dNativeGame::NativeGuestClockDeadlineResolution AdvanceGuestClockTo(
     Oot3dNativeGame::NativeA32Process &process,
     Oot3dNativeGame::NativeA32CtrHostServices &hostServices,
     Oot3dNativeGame::NativeA32ProcessRunResult &processResult,
-    uint64_t deadline, uint32_t wholeAotBlockBudget) {
+    uint64_t deadline, uint32_t wholeAotBlockBudget,
+    const std::function<void()> *betweenRuns) {
   auto resolution = Oot3dNativeGame::ResolveNativeGuestClockDeadline(
       hostServices.SystemTicks(), deadline);
   if (resolution.OvershootTicks != 0U) {
@@ -115,7 +116,7 @@ Oot3dNativeGame::NativeGuestClockDeadlineResolution AdvanceGuestClockTo(
     const uint64_t currentTick = hostServices.SystemTicks();
     hostServices.AdvanceSystemTicks(
         *wakeTick > currentTick ? *wakeTick - currentTick : 0U);
-    processResult = RunUntilGuestWait(process, wholeAotBlockBudget);
+    processResult = RunUntilGuestWait(process, wholeAotBlockBudget, betweenRuns);
     RequireRunnableGuest(processResult);
     resolution = Oot3dNativeGame::ResolveNativeGuestClockDeadline(
         hostServices.SystemTicks(), deadline);
@@ -1960,6 +1961,27 @@ bool NativeA32WindowSession::RunFrame() {
              << '\n';
         previousThreads = process.GuestThreadProfile();
       }
+      // config/second_core: how the DSP frames went out and how long the
+      // game thread waited for the second core, per host frame (its own line).
+      if (process.SecondCoreEnabled()) {
+        const double frames =
+            hostFrames != 0U ? static_cast<double>(hostFrames) : 1.0;
+        char line[192];
+        std::snprintf(
+            line, sizeof(line),
+            "second_core: dsp_pumped=%.2f dsp_flushed=%.2f dsp_late=%llu "
+            "dsp_wait_ms=%.3f\n",
+            static_cast<double>(secondCoreDsp.Pumped -
+                                secondCoreDspWindowStart.Pumped) / frames,
+            static_cast<double>(secondCoreDsp.Flushed -
+                                secondCoreDspWindowStart.Flushed) / frames,
+            static_cast<unsigned long long>(secondCoreDsp.Late -
+                                            secondCoreDspWindowStart.Late),
+            (secondCoreDsp.WaitSeconds - secondCoreDspWindowStart.WaitSeconds) *
+                1000.0 / frames);
+        perf << line;
+        secondCoreDspWindowStart = secondCoreDsp;
+      }
       // config/actor_profile: actor costs over the same window (its own line).
       if (actorProfile.has_value()) perf << actorProfile->TakeLine(areaText);
       // config/indirect_profile: hottest indirect call pairs (its own line).
@@ -2506,7 +2528,7 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
   const auto clockStart = std::chrono::steady_clock::now();
   const auto clockResolution = AdvanceGuestClockTo(
       process, hostServices, processResult, nextVblankTick,
-      launch.WholeAotBlockBudget);
+      launch.WholeAotBlockBudget, SecondCorePump());
   const double clockSeconds = SecondsSince(clockStart);
   phaseTiming.GuestClockSeconds += clockSeconds;
   phaseTiming.GuestSeconds += clockSeconds;
@@ -2528,7 +2550,7 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
           Oot3dNativeGame::NativeA32ProcessRunKind::Terminated) {
     phaseStart = std::chrono::steady_clock::now();
     processResult =
-        RunUntilGuestWait(process, launch.WholeAotBlockBudget);
+        RunUntilGuestWait(process, launch.WholeAotBlockBudget, SecondCorePump());
     phaseTiming.GuestSeconds += SecondsSince(phaseStart);
     RequireRunnableGuest(processResult);
   }
@@ -2537,7 +2559,9 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
   // config/audio_deferred: the DSP frames of this refresh (HLE mix and the
   // guest sound thread they wake) run after the host frame is presented,
   // off the path to the render thread's handoff (DeliverDspAudioFrames).
-  if (deferDspAudio)
+  // With the second core on they are always deferred: its pump delivers them
+  // during the guest runs (PumpDspAudioFrame), the rest go out as deferred.
+  if (deferDspAudio || SecondCorePump() != nullptr)
     deferredDspAudioFrames += dspAudioFrames;
   else
     DeliverDspAudioFrames(dspAudioFrames);
@@ -2551,10 +2575,14 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
 
 // One DSP audio frame at a time: HLE mix, then the DSP interrupt and the
 // guest threads it wakes (the sound thread), then the host audio output.
-void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames) {
+// runGuest = false: the caller is the second core's pump, between two Run()
+// calls of a guest run that goes on.
+void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames,
+                                                   bool runGuest) {
   auto &hostServices = *hostServicesStorage;
   auto &process = *processStorage;
   auto &dspHle = *dspHleStorage;
+  const bool secondCore = process.SecondCoreEnabled();
   // Storage kept across refreshes (no allocation per refresh); the samples
   // are the same.
   std::vector<int16_t> &audioSamples = refreshAudioSamples;
@@ -2562,6 +2590,18 @@ void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames) {
   audioSamples.reserve(static_cast<size_t>(dspAudioFrames) * 320U);
   for (uint32_t audioFrame = 0; audioFrame < dspAudioFrames;
        ++audioFrame) {
+    if (secondCore && runGuest) {
+      // The sound thread finishes the previous frame first (the guest's
+      // interrupt protocol, as the real DSP's period leaves it), and stays
+      // parked in its wait while the mix below updates the shared regions
+      // in place. Bounded: a sound thread that never waits again cannot
+      // stall the game thread (the frame then goes out as the DSP would).
+      constexpr auto kSecondCoreDspWait = std::chrono::milliseconds(50);
+      const auto waitStart = std::chrono::steady_clock::now();
+      ++secondCoreDsp.Flushed;
+      if (!process.WaitSecondCoreIdle(kSecondCoreDspWait)) ++secondCoreDsp.Late;
+      secondCoreDsp.WaitSeconds += SecondsSince(waitStart);
+    }
     const size_t frameSampleOffset = audioSamples.size();
     const auto dspMixStart = std::chrono::steady_clock::now();
     CpuProbe::Scope cpuDsp(CpuProbe::Phase::Dsp);
@@ -2578,6 +2618,7 @@ void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames) {
     if (!hostServices.SignalDspAudioFrame()) {
       break;
     }
+    if (!runGuest) continue;
     phaseStart = std::chrono::steady_clock::now();
     processResult =
         RunUntilGuestWait(process, launch.WholeAotBlockBudget);
@@ -2654,7 +2695,7 @@ void NativeA32WindowSession::RunGuestRefresh() {
   (void)FlushNativeDependencies();
   phaseStart = std::chrono::steady_clock::now();
   processResult =
-      RunUntilGuestWait(process, launch.WholeAotBlockBudget);
+      RunUntilGuestWait(process, launch.WholeAotBlockBudget, SecondCorePump());
   phaseTiming.GuestSeconds += SecondsSince(phaseStart);
   RequireRunnableGuest(processResult);
 
@@ -3180,7 +3221,7 @@ void NativeA32WindowSession::RunGuestRefresh() {
     }
     phaseStart = std::chrono::steady_clock::now();
     processResult =
-        RunUntilGuestWait(process, launch.WholeAotBlockBudget);
+        RunUntilGuestWait(process, launch.WholeAotBlockBudget, SecondCorePump());
     const double resumedGuestSeconds = SecondsSince(phaseStart);
     phaseTiming.GuestSeconds += resumedGuestSeconds;
     phaseTiming.GuestInsidePicaSubmitSeconds += resumedGuestSeconds;

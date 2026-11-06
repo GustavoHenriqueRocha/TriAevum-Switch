@@ -38,6 +38,7 @@
 #include "oot3d_native_a32_process_image.h"
 #include "oot3d_native_a32_registry.h"
 #include "oot3d_native_a32_savestate.h"
+#include "oot3d_native_a32_second_core.h"
 #include "oot3d_native_a32_scene_view.h"
 #include "oot3d_native_actor_interactions.h"
 #include "fast/oot3d/grass_interaction_bridge.h"
@@ -189,9 +190,12 @@ inline double SecondsSince(std::chrono::steady_clock::time_point start) {
       .count();
 }
 
+// Runs the guest until it waits. `betweenRuns` (optional) runs between two
+// Run() calls that yielded: the second core's DSP pump.
 Oot3dNativeGame::NativeA32ProcessRunResult
 RunUntilGuestWait(Oot3dNativeGame::NativeA32Process &process,
-                  uint32_t wholeAotBlockBudget);
+                  uint32_t wholeAotBlockBudget,
+                  const std::function<void()> *betweenRuns = nullptr);
 
 void RequireRunnableGuest(
     const Oot3dNativeGame::NativeA32ProcessRunResult &result);
@@ -289,7 +293,19 @@ private:
   bool UpdateGuestServicesForRefresh(
       bool &topScreenStartRoutingEligible,
       Oot3dNativeGame::NativeA32InputFrame &inputFrame);
-  void DeliverDspAudioFrames(uint32_t dspAudioFrames);
+  // dspAudioFrames frames: HLE mix, DSP interrupt, then (runGuest) the guest
+  // threads it woke on the game thread, then the host audio output.
+  void DeliverDspAudioFrames(uint32_t dspAudioFrames, bool runGuest = true);
+  // config/second_core (SWITCH_PORT.md "Second guest core").
+  void StartSecondCore();
+  void StopSecondCore() noexcept;
+  // Between two yielded Run() calls of the game thread: one deferred DSP
+  // frame, once the work the previous one woke is done.
+  void PumpDspAudioFrame();
+  // The pump for RunUntilGuestWait (null with the second core off).
+  const std::function<void()> *SecondCorePump() const noexcept {
+    return secondCoreThread.joinable() ? &secondCorePump : nullptr;
+  }
   void RunGuestRefresh();
   void PresentVisualFrame(const double &presentationElapsedSeconds, const float &visualInterpolationAlpha);
   void Finish();
@@ -717,6 +733,19 @@ private:
   bool deferDspAudio = false;
   uint32_t deferredDspAudioFrames = 0U;
   uint64_t dspAudioInRenderWait = 0U;
+  // config/second_core: the second core's host thread and its DSP pump.
+  // With it on every DSP frame is deferred and delivered by the pump while
+  // the game thread runs guest code, or at the deferred points above after a
+  // bounded wait for the second core to go idle.
+  std::thread secondCoreThread;
+  std::function<void()> secondCorePump;
+  struct SecondCoreDspStats {
+    uint64_t Pumped = 0U;    // delivered by the pump
+    uint64_t Flushed = 0U;   // delivered at a deferred point
+    uint64_t Late = 0U;      // ... after the idle wait timed out
+    double WaitSeconds = 0.0; // game thread waiting for the second core
+  } secondCoreDsp;
+  SecondCoreDspStats secondCoreDspWindowStart;
   // Kind of the frame the render thread is drawing (RenderFrameKind) and
   // its render-thread milliseconds so far.
   uint8_t renderFrameKind = 0U;

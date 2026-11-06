@@ -129,6 +129,26 @@ void TestProcessMask() {
             "game without core 0: affinity left alone");
 }
 
+// config/second_core: the guest's second core never shares core 0 with the
+// game thread, never preempts audio, the plan worker or render, and stays
+// above the time-sliced service threads, in every layout.
+void TestGuestCore1() {
+    for (const auto layout : {SwitchThreadLayout::Fixed, SwitchThreadLayout::Float,
+                              SwitchThreadLayout::Legacy}) {
+        const auto core1 = Place(layout, SwitchThreadRole::GuestCore1);
+        Require(core1.CoreMask == 0x2U && core1.IdealCore == 1,
+                "second guest core pinned to core 1");
+        Require(core1.Priority > Place(layout, SwitchThreadRole::HostAudio).Priority &&
+                    core1.Priority > Place(layout, SwitchThreadRole::PicaPlan).Priority &&
+                    core1.Priority > Place(layout, SwitchThreadRole::Render).Priority &&
+                    core1.Priority < kSwitchServicePriority,
+                "second guest core below audio, plan and render, above services");
+    }
+    Require(std::string_view(SwitchThreadRoleName(SwitchThreadRole::GuestCore1)) ==
+                "guest_core1",
+            "second guest core is named in the threads: summary");
+}
+
 } // namespace
 
 int main() {
@@ -136,6 +156,7 @@ int main() {
     TestInvariants();
     TestLayouts();
     TestProcessMask();
+    TestGuestCore1();
     std::cout << "oot3d_switch_thread_layout_tests: ok\n";
     return 0;
 }

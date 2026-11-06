@@ -958,7 +958,8 @@ loads).
   and, in `float`, how often `render@…` appears on core 1.
 
 ### Guest threads: time per thread and the requested core (06/11)
-All guest threads run cooperatively on the game thread (`NativeA32Process::Run`, core 0). To
+All guest threads run cooperatively on the game thread (`NativeA32Process::Run`, core 0), unless
+`config/second_core` moves the processor-1 threads to their own host thread (next section). To
 see whether work (the game's sound engine, for instance) has its own guest thread and could move
 off the game thread, two things are always on:
 - **Game log**, one line per guest `svcCreateThread`, at warning level (the release logger drops
@@ -980,6 +981,68 @@ off the game thread, two things are always on:
   `thr_<entry>_us/_n` (`config/gpu_timing`/`config/thread_timing`), which read `steady_clock` twice
   per dispatch and twice per SVC. Test: `oot3d_native_a32_process_tests` (two threads switching:
   totals equal the time inside `Run()`; the line and log formats).
+
+### Second guest core: `config/second_core` (06/11, off by default)
+The game creates 7 threads; thread 6 (prio 0x18, the sound engine: reverb 0x4A0338, delay
+0x4A022C) asks for **processor 1**, the 3DS's second core, and took 3.4–4.5 ms per 60 Hz host
+frame (7–9 ms per 30 Hz step, ~25% of guest time) cooperatively on core 0. With the file
+`config/second_core` (desktop: `TRIAEVUM_SECOND_CORE=1`) every thread that asks for processor 1
+runs on its own host thread, pinned to Switch core 1, concurrently with the cooperative
+scheduler. Absent = the previous single-thread code paths exactly (nothing below takes a lock).
+- **Kernel lock** (`oot3d_native_a32_second_core.h`): one recursive lock for the guest kernel and
+  the host emulation — SVCs and scheduling of both cores, thread records, waits, handles, the host
+  services, the DSP HLE, savestates and every out-of-line `NativeA32Memory` path (slow paths, byte
+  and pointer APIs, page table, deferred writes, observers). The game thread holds it for all its
+  host work and releases it only around guest code (`Run`'s dispatch) and while blocked on the
+  render stream (`HostWaitRelease`, frame-loop level only). The second core
+  (`NativeA32Process::RunSecondCore`) takes it for its SVCs and scheduling and sleeps on its
+  condition variable while none of its threads is ready; `ResumeThread` (signals, arbitration,
+  timers, DSP/GSP interrupts from either side) wakes it.
+- **Guest memory** is shared; plain loads and stores stay plain (inline header paths unchanged).
+- **Exclusive monitor** (`memory.cpp`): with the switch on, LDREX marks the core's 8-byte granule
+  and returns the value as the token; STREX succeeds only while the mark survives (another core's
+  exclusive store clears it) and a host compare-and-swap still finds the value (dynarmic's
+  ExclusiveMonitor). Pages without a fast entry take the same steps through the checked paths.
+  A context switch on a core clears its reservation. `ArbitrateAddress` reads (and for
+  DecrementAndWaitIfLessThan decrements) the word with an exclusive pair. `WriteGeneration` and
+  `RangeWriteGeneration` take store cards with an atomic exchange.
+- **Barriers**: the 3DS's ARMv6K code uses the CP15 DMB/DSB, which the generator lowers to a
+  seq_cst fence; ARMv7 `dmb/dsb/isb` encodings are no-ops (the game cannot contain them). Every
+  STREX/LDREX/SWP is a seq_cst host atomic and every SVC crosses the kernel mutex
+  (acquire/release), so the orderings the game builds on (barrier, exclusive pair, kernel object)
+  hold on the host.
+- **World stop**: page-table rebuilds (`MapRegion`, TLS page of a 9th thread, assignments) and
+  savestates wait until the other core is at a dispatch boundary (it then holds no page pointer)
+  and outside an SVC; one core owns a stop at a time.
+- **DSP**: with the switch on every DSP frame is deferred; a pump (`PumpDspAudioFrame`) delivers
+  them one at a time between the game thread's `Run()` calls, each once the sound thread is back
+  in its wait and no thread above the main thread's priority is ready, so the in-place HLE mix
+  never meets its writes and its work overlaps the main thread. Frames left at the deferred points
+  are delivered after a bounded (50 ms) wait for the second core to go idle (`dsp_late` counts the
+  timeouts).
+- **Per thread**: each host thread builds its own `Oot3dWholeAotContext`; the compiled-function
+  and whole-AOT stats are `thread_local` (the game thread's are reported). The second core runs
+  with no block-entry hook, product mod or native-function callback: the projection policy, the
+  guest profiler, TopScreen routing and `--profile-a32-runtime` stay on core 0 (the guest profile
+  no longer includes thread 6). Faults on the second core are returned by the next `Run()`.
+- **Placement** (`oot3d_switch_thread_layout.h`, role `guest_core1`): core 1 at 0x2F, below host
+  and SDL audio (0x2B), the PICA plan worker (0x2E) and render (0x2D), above the time-sliced
+  service threads (0x3B). Game 0/0x2C, render 2/0x2D, plan 1/0x2E, audio 1/0x2B unchanged.
+- **Savestates** made with the switch on carry `processor_id` per thread (others unchanged); a
+  thread saved inside an SVC restarts it.
+- **perf.txt**: `guest_threads:` charges thread 6's host-thread time (guest code + its SVCs) to
+  its id and adds `core1_ms=` (all second-core time) and `core1_lock_ms=` (its waits for the
+  kernel lock); `run_ms` stays the game thread's time inside `Run()`. Own line
+  `second_core: dsp_pumped= dsp_flushed= dsp_late= dsp_wait_ms=` per host frame.
+- **Not made safe** (inline header paths, no shard rebuild): a page-pointer flip on core 0
+  (`ObserveWrites`, `DeferWrites`) can meet a second-core store through the old pointer; store
+  marks from both cores share the `mWritten` byte (plain stores, cache-line traffic); the guest
+  override call counters and `config/indirect_profile` are not atomic (diagnostics only).
+- **Tests**: `oot3d_native_a32_second_core_tests` (monitor rules and two host threads, guest
+  LDREX/STREX counter, event ping-pong, arbitration, sleep timeout, fault, savestate, scheduler
+  exclusion, switch absent); `--stress` for the long runs. TSan: configure a host tree with
+  `-DCMAKE_CXX_FLAGS='-fsanitize=thread -O1' -DCMAKE_C_FLAGS=… -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread`
+  and run the target with `--stress`.
 
 ### Real fps60 and GPU savings in the GL backend (2026-10-17)
 - **fps60 did not present at 60 Hz**: the pacer and sample cadence come from the `FrameRate` mode of the

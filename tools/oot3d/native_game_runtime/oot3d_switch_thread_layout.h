@@ -18,6 +18,8 @@
 //            worker, host audio and SDL audio on 1; service threads
 //            (log, Mesa shader cache, resources, loaders) at 0x3B
 //            with mask 1|2: they never take the place of what draws or plays sound.
+//            The second guest core (config/second_core) is pinned to 1
+//            below the plan worker, in every layout.
 // - float  : like fixed, but render thread and plan worker with mask
 //            1|2 (ideal core 2 and 1): the kernel can move them to the free core.
 //            (StevensND/nfsmw-nx: pinning the render thread made the worst case worse.)
@@ -42,12 +44,17 @@ enum class SwitchThreadRole : uint8_t {
     HostAudio,  // HostAudioStream: stretch, resampling, SDL queue
     SdlAudio,   // SDL audio thread (audren)
     Service,    // any other pthread (log, Mesa, resources, loaders)
+    GuestCore1, // config/second_core: the guest threads that asked for processor 1
     Count
 };
 
 inline constexpr int kSwitchGamePriority = 0x2C;
 inline constexpr int kSwitchRenderPriority = 0x2D;
 inline constexpr int kSwitchPicaPlanPriority = 0x2E;
+// The second guest core (the game's sound thread): on core 1 under the
+// audio threads (0x2B preempt it) and the plan worker (0x2E, which feeds
+// the render thread), above the time-sliced service threads.
+inline constexpr int kSwitchGuestCore1Priority = 0x2F;
 inline constexpr int kSwitchAudioPriority = 0x2B;
 // The only priority with time-slicing; below all the others.
 inline constexpr int kSwitchServicePriority = 0x3B;
@@ -86,6 +93,7 @@ struct SwitchThreadLayoutConfig {
     case SwitchThreadRole::HostAudio: return "audio";
     case SwitchThreadRole::SdlAudio: return "sdl_audio";
     case SwitchThreadRole::Service: return "service";
+    case SwitchThreadRole::GuestCore1: return "guest_core1";
     case SwitchThreadRole::Count: break;
     }
     return "?";
@@ -180,6 +188,9 @@ struct SwitchThreadLayoutConfig {
     case SwitchThreadRole::SdlAudio:
         placement = legacy ? SwitchThreadPlacement{kSwitchAudioPriority, -1, 0U}
                            : SwitchThreadPlacement{kSwitchAudioPriority, 1, 0x2U};
+        break;
+    case SwitchThreadRole::GuestCore1:
+        placement = {kSwitchGuestCore1Priority, 1, 0x2U};
         break;
     case SwitchThreadRole::Service:
     case SwitchThreadRole::Count:

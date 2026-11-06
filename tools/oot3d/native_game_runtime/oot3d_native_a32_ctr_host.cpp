@@ -1,6 +1,7 @@
 // CTR host services of the native A32 process: SVC dispatch, handles and kernel objects, GSP
 // framebuffers and interrupts, memory, timing. Services: oot3d_native_a32_ctr_host_*.cpp.
 #include "oot3d_native_a32_ctr_host_internal.h"
+#include "oot3d_native_a32_second_core.h"
 
 #include <cstdio>
 
@@ -638,9 +639,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
         }
-        // Which guest threads exist and the core each asked for (all run
-        // cooperatively on the game thread here); warning level, because the
-        // release logger drops info.
+        // Which guest threads exist and the core each asked for (processor 1
+        // runs on the second core's host thread with config/second_core, the
+        // rest on the game thread); warning level, because the release logger
+        // drops info.
         {
             const std::string line = FormatNativeA32GuestThreadCreated(
                 *threadId, state.r[1], priority, processorId, state.r[3]);
@@ -873,6 +875,53 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             return {NativeA32HostAction::Resume};
         }
 
+        const bool decrement = type == 2U || type == 4U;
+        if (SecondCore::Active()) {
+            // With the second core on, the other core may LDREX/STREX the
+            // word right now: read it atomically and, for
+            // DecrementAndWaitIfLessThan, compare and decrement as the CTR
+            // kernel does, with an exclusive pair on the calling core (the
+            // global monitor). The wake-up stays race-free because the
+            // check and the parking below both happen under the kernel lock,
+            // which a signal (type 0) needs as well.
+            for (;;) {
+                uint64_t loaded = 0U;
+                uint64_t token = 0U;
+                uint32_t faultAddress = address;
+                if (!memory.LoadExclusive(address, 4U, &loaded, &token,
+                                          &faultAddress)) {
+                    mSvcEvents.push_back(std::move(event));
+                    return {NativeA32HostAction::Wait};
+                }
+                const int32_t memoryValue = static_cast<int32_t>(loaded);
+                if (memoryValue >= value) {
+                    SecondCore::ClearExclusive();
+                    state.r[0] = kResultSuccess;
+                    event.Handled = true;
+                    mSvcEvents.push_back(std::move(event));
+                    return {NativeA32HostAction::Resume};
+                }
+                if (!decrement) {
+                    SecondCore::ClearExclusive();
+                    break;
+                }
+                const auto stored = memory.StoreExclusive(
+                    address, 4U, static_cast<uint32_t>(memoryValue - 1), token,
+                    &faultAddress);
+                if (stored == oot3d::recomp::a32::ExclusiveStoreResult::MemoryFault) {
+                    mSvcEvents.push_back(std::move(event));
+                    return {NativeA32HostAction::Wait};
+                }
+                if (stored == oot3d::recomp::a32::ExclusiveStoreResult::Success) {
+                    break;
+                }
+            }
+            mArbiterWaiters.push_back(
+                {record->Object, &context.Process, context.ThreadId, address});
+            event.Handled = true;
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Wait};
+        }
         uint32_t memoryValueRaw = 0;
         if (!memory.Read32(address, &memoryValueRaw)) {
             mSvcEvents.push_back(std::move(event));
@@ -880,7 +929,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         }
         const int32_t memoryValue = static_cast<int32_t>(memoryValueRaw);
         if (memoryValue < value) {
-            if ((type == 2U || type == 4U) &&
+            if (decrement &&
                 !memory.Write32(address,
                                 static_cast<uint32_t>(memoryValue - 1))) {
                 mSvcEvents.push_back(std::move(event));

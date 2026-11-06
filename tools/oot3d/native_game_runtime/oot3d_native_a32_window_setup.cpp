@@ -1326,6 +1326,25 @@ void NativeA32WindowSession::Setup() {
                    process.Memory().WatchedRangeCount());
     }
   }
+  // config/second_core (SWITCH_PORT.md "Second guest core"; desktop:
+  // TRIAEVUM_SECOND_CORE=1): guest threads that ask for processor 1 run on
+  // their own host thread on core 1. Absent = every guest thread on the game
+  // thread, as before. Started before the first guest code and before an
+  // initial savestate load, which then places its threads.
+  {
+    bool secondCore = false;
+#if defined(__SWITCH__)
+    std::error_code secondCoreError;
+    secondCore = std::filesystem::exists(
+        "sdmc:/switch/oot3dre/config/second_core", secondCoreError);
+#else
+    if (const char *value = std::getenv("TRIAEVUM_SECOND_CORE")) {
+      secondCore = std::string_view(value) != "0";
+    }
+#endif
+    std::fprintf(stderr, "TRIAEVUM_SECOND_CORE enabled=%d\n", secondCore ? 1 : 0);
+    if (secondCore) StartSecondCore();
+  }
   if (!launch.LoadStatePath.empty()) {
 #if defined(__SWITCH__)
     WriteSwitchBootStage("initial_savestate_loading");

@@ -269,6 +269,10 @@ NativeA32WindowSession::SaveState(const std::filesystem::path &path, bool withSe
   auto &presentationScheduler = *presentationSchedulerStorage;
   // Barrier: the savestate captures renderer-owned replay state.
   renderStream.Drain();
+  // config/second_core: the second core is held at a dispatch boundary for
+  // the whole capture (it cannot start another one or an SVC: the game
+  // thread holds the kernel lock); nothing while it is off.
+  const Oot3dNativeGame::SecondCore::WorldStop secondCoreStop;
   // Leaving the game: discarded render commands left that state incomplete.
   if (renderStream.ShutdownRequested()) return SaveStateOutcome::Deferred;
   // Host-owned continuation registers must never escape into a standalone savestate.
@@ -426,6 +430,8 @@ bool NativeA32WindowSession::LoadState(const std::filesystem::path &path,
   auto &realtimePacer = *realtimePacerStorage;
   // Barrier: loading resets renderer-owned state.
   renderStream.Drain();
+  // config/second_core: as in SaveState, for the whole restore.
+  const Oot3dNativeGame::SecondCore::WorldStop secondCoreStop;
   const auto started = std::chrono::steady_clock::now();
   Oot3dNativeGame::NativeA32SavestateRuntimeState runtime;
   Oot3dNativeGame::NativeA32SavestateIoResult ioResult;

@@ -3,6 +3,8 @@
 #include "oot3d_native_a32_memory.h"
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <optional>
@@ -74,8 +76,9 @@ struct NativeA32ThreadConfig {
     uint32_t InitialFpscr = 0;
     uint32_t Priority = 0;
     // svcCreateThread's processor id (r4): -2 = the process default, -1 =
-    // any core, 0..3 = that core. Profile only; every guest thread runs on
-    // the game thread here.
+    // any core, 0..3 = that core. Processor 1 selects the second core's host
+    // thread once EnableSecondCore() was called; every other thread runs on
+    // the game thread's cooperative scheduler.
     int32_t ProcessorId = -2;
 };
 
@@ -119,7 +122,10 @@ struct NativeA32ProcessTimingStats {
 // Host time each guest thread held the game thread inside Run(): its AOT
 // dispatch, the host services its SVCs ran (inline, on the same thread) and
 // the scheduler. One counter read at Run() entry, one per thread switch and
-// one at exit, so the thread totals add up to RunTicks exactly. Always on.
+// one at exit, so the core-0 thread totals add up to RunTicks exactly. Always on.
+// Threads on the second core (EnableSecondCore) are charged their host
+// thread's time in guest code and in their SVCs, which SecondCoreTicks sums;
+// SecondCoreLockTicks is the time it then waited for the kernel lock.
 // Ticks are the ARM system counter on the Switch, nanoseconds on the host.
 // Threads with an id at or above the last slot share it ("other").
 inline constexpr size_t kNativeA32GuestThreadSlots = 32U;
@@ -127,15 +133,19 @@ inline constexpr int32_t kNativeA32UnknownProcessor = INT32_MIN;
 struct NativeA32GuestThreadProfile {
     std::array<uint64_t, kNativeA32GuestThreadSlots> Ticks{};
     // Requested processor per thread id, from CreateThread (not saved state:
-    // kNativeA32UnknownProcessor for threads a restore brought in).
+    // kNativeA32UnknownProcessor for threads a restore brought in, unless the
+    // savestate was made with the second core on).
     std::array<int32_t, kNativeA32GuestThreadSlots> ProcessorIds{};
     uint64_t RunTicks = 0;
     uint64_t Switches = 0;
+    uint64_t SecondCoreTicks = 0;
+    uint64_t SecondCoreLockTicks = 0;
 };
 uint64_t NativeA32ProfileTicksToNanoseconds(uint64_t ticks) noexcept;
 // The perf.txt line for one window: "guest_threads: host_frames=<n>
 // run_ms=<ms/frame> switches=<per frame> <id>:<entry>:<prio>:<proc>=<ms/frame> ...",
-// threads that ran in the window only.
+// threads that ran in the window only; with the second core on, then
+// " core1_ms=<ms/frame> core1_lock_ms=<ms/frame>".
 std::string FormatNativeA32GuestThreadsLine(
     const NativeA32Process& process,
     const NativeA32GuestThreadProfile& windowStart, uint64_t hostFrameCount,
@@ -205,9 +215,41 @@ class NativeA32Process {
         void* user = nullptr);
     void SetTimingEnabled(bool enabled) noexcept;
     NativeA32ProcessTimingStats TimingStats() const noexcept;
-    const NativeA32GuestThreadProfile& GuestThreadProfile() const noexcept {
-        return mThreadProfile;
+    // A snapshot: the second core's per-thread time is folded in.
+    NativeA32GuestThreadProfile GuestThreadProfile() const noexcept;
+
+    // Second guest core (oot3d_native_a32_second_core.h, config/second_core).
+    // From here on threads that asked for processor 1 (also ones that already
+    // exist) belong to the second core: the cooperative scheduler never
+    // selects them, RunSecondCore runs them. Activates the kernel lock; call
+    // it before the second core's host thread starts, from the thread that
+    // then holds the lock for the host work (the game thread).
+    void EnableSecondCore();
+    // After RunSecondCore returned: back to one core (the lock goes inert).
+    void DisableSecondCore();
+    [[nodiscard]] bool SecondCoreEnabled() const noexcept {
+        return mSecondCoreEnabled;
     }
+    // The second core's host thread: runs the ready second-core guest
+    // threads (highest priority first, each dispatch at most
+    // blockLimitPerDispatch blocks) and waits on the kernel lock's condition
+    // while none is ready, until RequestSecondCoreStop(). A fault of one of
+    // them is returned by the next Run() on the game thread.
+    void RunSecondCore(uint32_t blockLimitPerDispatch);
+    // Kernel lock held (or the second core not running).
+    void RequestSecondCoreStop();
+    // Kernel lock held. A second-core thread is ready or running.
+    [[nodiscard]] bool SecondCoreBusy() const;
+    // Kernel lock held. Work an interrupt woke is still runnable: the second
+    // core is busy, or a core-0 thread above the primary thread's priority is
+    // ready (the DSP pump delivers the next frame only once both are done).
+    [[nodiscard]] bool AuxiliaryWorkPending() const;
+    // Kernel lock held. Waits (releasing it) until the second core is idle,
+    // stopped or faulted; false when it is still busy at the timeout.
+    bool WaitSecondCoreIdle(std::chrono::steady_clock::duration timeout);
+    // 1 for a second-core thread, else 0.
+    [[nodiscard]] uint8_t ThreadHostCore(uint32_t threadId) const;
+
     uint64_t StateFingerprint() const;
     nlohmann::json CaptureState() const;
     bool RestoreState(const nlohmann::json& state,
@@ -240,12 +282,24 @@ class NativeA32Process {
         const oot3d::recomp::a32::PackedOp& op,
         oot3d::recomp::a32::GuestState& state,
         oot3d::recomp::a32::MemoryBus& memory, void* user);
+    static oot3d::recomp::a32::ExecutionResult DispatchSecondCoreFallback(
+        oot3d::recomp::a32::FallbackReason reason, uint32_t pc,
+        const oot3d::recomp::a32::PackedOp& op,
+        oot3d::recomp::a32::GuestState& state,
+        oot3d::recomp::a32::MemoryBus& memory, void* user);
+    oot3d::recomp::a32::ExecutionResult HandleDispatchFallback(
+        PendingFallback& pending, oot3d::recomp::a32::FallbackReason reason,
+        uint32_t pc, const oot3d::recomp::a32::PackedOp& op,
+        oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory);
     NativeA32ProcessRunResult ApplyHostResult(
         NativeA32HostResult hostResult,
         const oot3d::recomp::a32::ExecutionResult& exit,
         uint32_t defaultResumePc, uint32_t hostTransitions);
     NativeA32ProcessRunResult Fault(
         const oot3d::recomp::a32::ExecutionResult& exit,
+        uint32_t hostTransitions, std::string error);
+    NativeA32ProcessRunResult FaultThread(
+        uint32_t threadId, const oot3d::recomp::a32::ExecutionResult& exit,
         uint32_t hostTransitions, std::string error);
     oot3d::recomp::a32::GuestState& CurrentThreadState();
     NativeA32ThreadStatus& CurrentThreadStatus();
@@ -263,7 +317,29 @@ class NativeA32Process {
         uint32_t Argument = 0;
         oot3d::recomp::a32::GuestState State;
         NativeA32ThreadStatus Status = NativeA32ThreadStatus::Empty;
+        // CreateThread's processor (kNativeA32UnknownProcessor if a restore
+        // could not tell) and the host core it runs on: 1 = the second core.
+        int32_t ProcessorId = kNativeA32UnknownProcessor;
+        uint8_t HostCore = 0;
     };
+
+    [[nodiscard]] uint8_t HostCoreFor(int32_t processorId) const noexcept {
+        return mSecondCoreEnabled && processorId == 1 ? 1U : 0U;
+    }
+    // Kernel lock held: the second core's next thread, or null.
+    SecondaryThread* SelectSecondCoreThread();
+    oot3d::recomp::a32::ExecutionResult DispatchGuest(
+        oot3d::recomp::a32::GuestState& state, uint32_t blockLimit,
+        bool secondCore);
+    // Kernel lock held: the exit of one second-core dispatch.
+    void CompleteSecondCoreDispatch(SecondaryThread& thread,
+                                    const oot3d::recomp::a32::ExecutionResult& exit);
+    void ApplySecondCoreHostResult(SecondaryThread& thread,
+                                   NativeA32HostResult hostResult,
+                                   const oot3d::recomp::a32::ExecutionResult& exit,
+                                   uint32_t defaultResumePc);
+    void ChargeSecondCore(uint32_t threadId, uint64_t busyTicks,
+                          uint64_t lockTicks) noexcept;
 
     const oot3d::recomp::a32::Registry& mRegistry;
     NativeA32HostServices& mHostServices;
@@ -295,6 +371,20 @@ class NativeA32Process {
     uint64_t mThreadProfileMark = 0;
     uint64_t mThreadProfileRunStart = 0;
     uint32_t mThreadProfileLastThread = 0;
+    // Second core. Flags and the fault under the kernel lock; the tick
+    // counters are written by its host thread and read by the game thread.
+    bool mSecondCoreEnabled = false;
+    bool mSecondCoreRunning = false;
+    bool mSecondCoreStopRequested = false;
+    // Bumped by RestoreState (kernel lock held): the thread records were
+    // replaced.
+    uint64_t mThreadRecordGeneration = 0;
+    std::optional<NativeA32ProcessRunResult> mSecondCoreFault;
+    PendingFallback mSecondCorePendingFallback;
+    std::array<std::atomic<uint64_t>, kNativeA32GuestThreadSlots>
+        mSecondCoreThreadTicks{};
+    std::atomic<uint64_t> mSecondCoreTicks{0};
+    std::atomic<uint64_t> mSecondCoreLockTicks{0};
     // Regions this process mapped (segments, stacks, TLS), named in the
     // guest fault report; host-service mappings are not listed.
     struct RegionName {

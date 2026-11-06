@@ -1,4 +1,5 @@
 #include "oot3d_native_render_command_stream.h"
+#include "oot3d_native_a32_second_core.h"
 #include "oot3d_switch_threads.h"
 #include "oot3d_hang_watchdog.h"
 #include "fast/backends/gl_frame_profiler.h"
@@ -128,6 +129,10 @@ void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
         return;
     }
     StartWorker();
+    // config/second_core: the game thread may block below for a frame slot;
+    // the second core keeps its SVCs meanwhile (only from the frame loop's
+    // own level, never inside an SVC or a world stop).
+    const SecondCore::HostWaitRelease kernelRelease;
     std::unique_lock lock(mMutex);
     RethrowPendingFailureLocked(lock);
     if (endsFrame) {
@@ -184,6 +189,7 @@ bool NativeRenderCommandStream::Run(Command command) {
 
 void NativeRenderCommandStream::Drain() {
     if (mMode == Mode::Inline || !mWorker.joinable()) return;
+    const SecondCore::HostWaitRelease kernelRelease;
     std::unique_lock lock(mMutex);
     CountedWait(mProgress, lock, mProgressWaiters, mWaitStats.DrainWaits,
                 mWaitStats.DrainWaitNanoseconds, HangWatch::Stage::WaitDrain, [&] {

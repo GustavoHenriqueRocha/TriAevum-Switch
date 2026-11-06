@@ -28,6 +28,39 @@ class Guard:
 
 
 GUARDS = [
+    # --- 06/11: second guest core, config/second_core (oot3d_native_a32_second_core.h) ---
+    # Switch absent must stay today's single-thread path; with it on, STREX must go through the
+    # global exclusive monitor (the write-generation token fails under a second writer).
+    Guard("second core, switch absent: LDREX/STREX keep the write-generation token of the single-thread path",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'LoadExclusive\(.*?if \(!SecondCore::Active\(\)\) \{.*?\*token = WriteGeneration\(\);.*?'
+          r'StoreExclusive\(.*?if \(!SecondCore::Active\(\)\) \{\s+if \(token != WriteGeneration\(\)\)',
+          test="oot3d_native_a32_second_core_tests (TestMonitorInactive), oot3d_native_a32_process_tests"),
+    Guard("second core: STREX is a compare-and-swap under the global exclusive monitor (reservation per host core)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'if \(gExclusiveGranule\[processor\] != granule\) \{.*?ClearExclusiveGranule\(granule\);\s+'
+          r'if \(!AtomicCompareExchangeGuest\(bytes, size, token, value\)\)',
+          test="oot3d_native_a32_second_core_tests (TestMonitorSemantics, TestMonitorTwoThreads)"),
+    Guard("second core: the cooperative scheduler never selects a second-core thread",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'thread\.HostCore == 0U && thread\.Priority < selectedPriority',
+          test="oot3d_native_a32_second_core_tests (TestSchedulerExclusion)"),
+    Guard("second core: only config/second_core starts it",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'"sdmc:/switch/oot3dre/config/second_core".*?if \(secondCore\) StartSecondCore\(\);'),
+    Guard("second core: Run() drops the kernel lock only for the dispatch",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'if \(concurrent\) SecondCore::EnterGuest\(\);.*?const SecondCore::KernelRelease release;\s+'
+          r'exit = DispatchGuest\(state, dispatchBudget, false\);\s+\}\s+if \(concurrent\) SecondCore::LeaveGuest\(\);'),
+    Guard("second core: the DSP mix updates the shared regions in place only while the sound thread is parked",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(secondCore && runGuest\) \{.*?process\.WaitSecondCoreIdle\(kSecondCoreDspWait\)',
+          test="oot3d_native_a32_second_core_tests (TestEventPingPong, TestSleepTimeout)"),
+    Guard("second core: savestates hold it at a dispatch boundary",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_savestate.cpp",
+          r'renderStream\.Drain\(\);.*?const Oot3dNativeGame::SecondCore::WorldStop secondCoreStop;.*?'
+          r'renderStream\.Drain\(\);.*?const Oot3dNativeGame::SecondCore::WorldStop secondCoreStop;',
+          test="oot3d_native_a32_second_core_tests (TestSavestate)"),
     # --- 06/11: L3+R3 > Video > FPS (30 <-> 60 interpolated) applied only after a restart ---
     # Both choices simulate at 30 Hz; the launch fixed the pacing mode and the 30 FPS launch's
     # native30_no_interpolation contract forbade interpolation, so the menu only wrote config/fps60.
@@ -209,7 +242,7 @@ GUARDS = [
           test="oot3d_native_a32_process_tests (TestMemoryStoreCards)"),
     Guard("WriteGeneration must step whenever a write happened since the last observation (LDREX/STREX token)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
-          r'if \(mWritten\.State != GuestCardState::Clean\) \{\s*mWritten\.State = GuestCardState::Clean;\s*\+\+mWriteGeneration;',
+          r'if \(TakeCard\(mWritten\)\) \{\s*__atomic_add_fetch\(&mWriteGeneration, 1U, __ATOMIC_RELAXED\);',
           test="oot3d_native_a32_process_tests (TestMemoryStoreCards, TestMemoryContract)"),
     # --- 05/11: dsp_mix 0.45 -> 1.3-1.6 ms per frame in battles (logs8, Forest Temple Wolfos) ---
     # The DSP frame runs on core 0 while the guest waits. The shared regions are

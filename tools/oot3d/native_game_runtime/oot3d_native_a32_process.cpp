@@ -1,5 +1,6 @@
 #include "oot3d_native_a32_process.h"
 #include "oot3d_cpu_phase_probe.h"
+#include "oot3d_native_a32_second_core.h"
 
 #include "oot3d_native_compiled_functions.h"
 #include "oot3d_native_guest_fault_report.h"
@@ -344,6 +345,10 @@ bool NativeA32Process::ResumeThread(
         state->r[15] = *resumePc;
     }
     *status = NativeA32ThreadStatus::Ready;
+    // A signal, arbitration, timer or interrupt from either core (kernel
+    // lock held) wakes the second core's host thread, or a game thread that
+    // waits on the kernel condition for one of its own threads.
+    if (SecondCore::Active()) SecondCore::NotifyKernel();
     return true;
 }
 
@@ -400,10 +405,14 @@ std::optional<uint32_t> NativeA32Process::CreateThread(
     thread.State.fpscr = config.InitialFpscr;
     thread.State.thread_pointer = threadPointer;
     thread.Status = NativeA32ThreadStatus::Ready;
+    thread.ProcessorId = config.ProcessorId;
+    thread.HostCore = HostCoreFor(config.ProcessorId);
     mNextTlsOffset += kTlsEntrySize;
     const uint32_t id = thread.Id;
+    const bool secondCore = thread.HostCore != 0U;
     mSecondaryThreads.push_back(std::move(thread));
     mThreadProfile.ProcessorIds[ThreadProfileSlot(id)] = config.ProcessorId;
+    if (secondCore) SecondCore::NotifyKernel();
     return id;
 }
 
@@ -421,12 +430,15 @@ NativeA32ThreadStatus& NativeA32Process::CurrentThreadStatus() {
     return mSecondaryThreads.at(mCurrentThreadId - 1U).Status;
 }
 
+// The cooperative scheduler's view: second-core threads (HostCore 1, only
+// with the second core enabled) are never its business.
 bool NativeA32Process::HasReadyThread() const {
     if (mPrimaryThreadStatus == NativeA32ThreadStatus::Ready) {
         return true;
     }
     for (const auto& thread : mSecondaryThreads) {
-        if (thread.Status == NativeA32ThreadStatus::Ready) {
+        if (thread.Status == NativeA32ThreadStatus::Ready &&
+            thread.HostCore == 0U) {
             return true;
         }
     }
@@ -438,6 +450,7 @@ bool NativeA32Process::OnlyBackgroundThreadsReady() const {
     for (const auto& thread : mSecondaryThreads) {
         if ((thread.Status == NativeA32ThreadStatus::Ready ||
              thread.Status == NativeA32ThreadStatus::Running) &&
+            thread.HostCore == 0U &&
             thread.Priority <= mPrimaryThreadPriority) return false;
     }
     return true;
@@ -463,7 +476,7 @@ bool NativeA32Process::SelectReadyThread() {
     }
     for (const auto& thread : mSecondaryThreads) {
         if (thread.Status == NativeA32ThreadStatus::Ready &&
-            thread.Priority < selectedPriority) {
+            thread.HostCore == 0U && thread.Priority < selectedPriority) {
             selectedId = thread.Id;
             selectedPriority = thread.Priority;
         }
@@ -471,6 +484,10 @@ bool NativeA32Process::SelectReadyThread() {
     if (mThreadProfileRunning && selectedId != mCurrentThreadId) {
         ChargeThreadProfile(mCurrentThreadId, ReadThreadProfileCounter());
         ++mThreadProfile.Switches;
+    }
+    // The kernel clears the exclusive monitor on a context switch.
+    if (selectedId != mCurrentThreadId && SecondCore::Active()) {
+        SecondCore::ClearExclusive();
     }
     mCurrentThreadId = selectedId;
     CurrentThreadStatus() = NativeA32ThreadStatus::Running;
@@ -498,16 +515,36 @@ oot3d::recomp::a32::ExecutionResult NativeA32Process::DispatchFallback(
     if (process == nullptr) {
         return {oot3d::recomp::a32::ExitKind::Fallback, pc, reason, op.raw};
     }
-    auto& nativeMemory = static_cast<NativeA32Memory&>(memory);
+    return process->HandleDispatchFallback(
+        process->mPendingFallback, reason, pc, op, state,
+        static_cast<NativeA32Memory&>(memory));
+}
 
-    const auto hostStart = process->mTimingEnabled
+oot3d::recomp::a32::ExecutionResult NativeA32Process::DispatchSecondCoreFallback(
+    oot3d::recomp::a32::FallbackReason reason, uint32_t pc,
+    const oot3d::recomp::a32::PackedOp& op,
+    oot3d::recomp::a32::GuestState& state,
+    oot3d::recomp::a32::MemoryBus& memory, void* user) {
+    auto* process = static_cast<NativeA32Process*>(user);
+    return process->HandleDispatchFallback(
+        process->mSecondCorePendingFallback, reason, pc, op, state,
+        static_cast<NativeA32Memory&>(memory));
+}
+
+oot3d::recomp::a32::ExecutionResult NativeA32Process::HandleDispatchFallback(
+    PendingFallback& pending, oot3d::recomp::a32::FallbackReason reason,
+    uint32_t pc, const oot3d::recomp::a32::PackedOp& op,
+    oot3d::recomp::a32::GuestState& state, NativeA32Memory& nativeMemory) {
+    // Reached from inside a dispatch, where the kernel lock is released.
+    const SecondCore::KernelGuard kernel;
+    const auto hostStart = mTimingEnabled
                                ? TimingClock::now()
                                : TimingClock::time_point{};
-    NativeA32HostResult hostResult = process->mHostServices.HandleFallback(
+    NativeA32HostResult hostResult = mHostServices.HandleFallback(
         reason, pc, op, state, nativeMemory);
-    if (process->mTimingEnabled) {
-        ++process->mTimingStats.FallbackCalls;
-        process->mTimingStats.FallbackNanoseconds +=
+    if (mTimingEnabled) {
+        ++mTimingStats.FallbackCalls;
+        mTimingStats.FallbackNanoseconds +=
             ElapsedNanoseconds(hostStart);
     }
     if (hostResult.Action == NativeA32HostAction::Resume) {
@@ -524,12 +561,12 @@ oot3d::recomp::a32::ExecutionResult NativeA32Process::DispatchFallback(
         }
     }
 
-    process->mPendingFallback.Active = true;
-    process->mPendingFallback.Result = std::move(hostResult);
-    process->mPendingFallback.Exit = {
+    pending.Active = true;
+    pending.Result = std::move(hostResult);
+    pending.Exit = {
         oot3d::recomp::a32::ExitKind::Wait, pc, reason,
         kFallbackBoundaryDetail};
-    return process->mPendingFallback.Exit;
+    return pending.Exit;
 }
 
 namespace {
@@ -551,18 +588,31 @@ const char* ThreadStatusName(NativeA32ThreadStatus status) {
 NativeA32ProcessRunResult NativeA32Process::Fault(
     const oot3d::recomp::a32::ExecutionResult& exit,
     uint32_t hostTransitions, std::string error) {
-    CurrentThreadStatus() = NativeA32ThreadStatus::Faulted;
+    return FaultThread(mCurrentThreadId, exit, hostTransitions, std::move(error));
+}
+
+NativeA32ProcessRunResult NativeA32Process::FaultThread(
+    uint32_t threadId, const oot3d::recomp::a32::ExecutionResult& exit,
+    uint32_t hostTransitions, std::string error) {
+    // The other core's registers are read below: stop it at its next dispatch
+    // boundary first (nothing while the second core is off).
+    const SecondCore::WorldStop stop;
+    if (threadId == 0U) {
+        mPrimaryThreadStatus = NativeA32ThreadStatus::Faulted;
+    } else if (threadId - 1U < mSecondaryThreads.size()) {
+        mSecondaryThreads[threadId - 1U].Status = NativeA32ThreadStatus::Faulted;
+    }
     NativeA32ProcessRunResult result{NativeA32ProcessRunKind::Faulted, exit,
                                      hostTransitions, std::move(error), {}};
     // Only here, on the way out: registers, backtrace and memory for the log.
     GuestFaultFacts facts;
-    facts.ThreadId = mCurrentThreadId;
-    facts.EntryAddress = ThreadEntryAddress(mCurrentThreadId);
-    facts.State = CurrentThreadState();
+    facts.ThreadId = threadId;
+    facts.EntryAddress = ThreadEntryAddress(threadId);
+    if (const auto* state = ThreadState(threadId)) facts.State = *state;
     facts.Exit = exit;
     for (uint32_t id = 0; id < ThreadCount(); ++id) {
         const auto* thread = ThreadState(id);
-        if (id == mCurrentThreadId || thread == nullptr) continue;
+        if (id == threadId || thread == nullptr) continue;
         facts.OtherThreads.push_back({id, ThreadEntryAddress(id), thread->r[15],
                                       thread->r[14], thread->r[13],
                                       ThreadStatusName(ThreadStatus(id))});
@@ -606,6 +656,13 @@ NativeA32ProcessRunResult NativeA32Process::ApplyHostResult(
 NativeA32ProcessRunResult NativeA32Process::Run(
     uint32_t blockLimitPerDispatch, uint32_t maxHostTransitions) {
     CpuPhaseProbe::Scope cpuRun(CpuPhaseProbe::Phase::GuestScheduler);
+    // The game thread already holds the kernel lock while the second core is
+    // on (recursive); it is released only around the guest code below.
+    const SecondCore::KernelGuard kernel;
+    const bool concurrent = SecondCore::Active();
+    if (concurrent && mSecondCoreFault.has_value()) {
+        return *mSecondCoreFault;
+    }
     if (mTimingEnabled) {
         ++mTimingStats.ProcessRunCalls;
     }
@@ -640,23 +697,13 @@ NativeA32ProcessRunResult NativeA32Process::Run(
         const auto dispatchStart = timed ? TimingClock::now()
                                          : TimingClock::time_point{};
         CpuPhaseProbe::Scope cpuDispatch(CpuPhaseProbe::Phase::Aot);
-        const auto exit =
-#if defined(OOT3D_WHOLE_AOT_PRODUCT_MODE)
-            DispatchWholeAotProduct(
-                state, mMemory, dispatchBudget,
-                mBlockEntryCallback, mBlockEntryUser,
-                mBlockEntryFilterPcs.data(), mBlockEntryFilterPcs.size(), std::nullopt,
-                mNativeBlockCallback, mNativeBlockUser);
-#else
-            oot3d::recomp::a32::Dispatch(
-            mRegistry, state.r[15], state, mMemory,
-            &NativeA32Process::DispatchFallback, this,
-            dispatchBudget, mBlockEntryCallback, mBlockEntryUser,
-            mBlockEntryFilterPcs.data(), mBlockEntryFilterPcs.size(),
-            mNativeFunctionCallback, mNativeFunctionUser,
-            mNativeFunctionPcs.data(), mNativeFunctionPcs.size(),
-            mNativeBlockCallback, mNativeBlockUser);
-#endif
+        if (concurrent) SecondCore::EnterGuest();
+        oot3d::recomp::a32::ExecutionResult exit;
+        {
+            const SecondCore::KernelRelease release;
+            exit = DispatchGuest(state, dispatchBudget, false);
+        }
+        if (concurrent) SecondCore::LeaveGuest();
         cpuDispatch.Stop();
         if (timed) {
             const uint64_t nanoseconds = ElapsedNanoseconds(dispatchStart);
@@ -789,6 +836,9 @@ bool NativeA32Process::InvokeFunctionWithState(
     uint32_t returnAddress, std::string* error,
     uint32_t blockLimitPerDispatch, uint32_t maxHostTransitions) {
     CpuPhaseProbe::Scope cpuInvoke(CpuPhaseProbe::Phase::GuestScheduler);
+    // Host-driven guest code (TopScreen routing and the like): it keeps the
+    // kernel lock for its whole run, so the second core sees it as host work.
+    const SecondCore::KernelGuard kernel;
     if (!mMemory.IsExecutable(entryAddress, 1U)) {
         SetError(error, "native A32 function entry is not executable");
         return false;
@@ -904,6 +954,7 @@ bool NativeA32Process::InvokeFunctionWithState(
 bool NativeA32Process::InvokeSvcWithState(
     uint32_t immediate, oot3d::recomp::a32::GuestState& state,
     std::string* error) {
+    const SecondCore::KernelGuard kernel;
     NativeA32HostContext context{*this, mCurrentThreadId};
     const auto svcStart =
         mTimingEnabled ? TimingClock::now() : TimingClock::time_point{};
@@ -1001,6 +1052,285 @@ void NativeA32Process::ChargeThreadProfile(uint32_t threadId,
     mThreadProfileMark = now;
 }
 
+NativeA32GuestThreadProfile NativeA32Process::GuestThreadProfile() const noexcept {
+    NativeA32GuestThreadProfile profile = mThreadProfile;
+    for (size_t slot = 0; slot < kNativeA32GuestThreadSlots; ++slot) {
+        profile.Ticks[slot] +=
+            mSecondCoreThreadTicks[slot].load(std::memory_order_relaxed);
+    }
+    profile.SecondCoreTicks = mSecondCoreTicks.load(std::memory_order_relaxed);
+    profile.SecondCoreLockTicks =
+        mSecondCoreLockTicks.load(std::memory_order_relaxed);
+    return profile;
+}
+
+void NativeA32Process::ChargeSecondCore(uint32_t threadId, uint64_t busyTicks,
+                                        uint64_t lockTicks) noexcept {
+    mSecondCoreThreadTicks[ThreadProfileSlot(threadId)].fetch_add(
+        busyTicks, std::memory_order_relaxed);
+    mSecondCoreTicks.fetch_add(busyTicks, std::memory_order_relaxed);
+    mSecondCoreLockTicks.fetch_add(lockTicks, std::memory_order_relaxed);
+}
+
+void NativeA32Process::EnableSecondCore() {
+    mSecondCoreEnabled = true;
+    mSecondCoreStopRequested = false;
+    mSecondCoreFault.reset();
+    for (auto& thread : mSecondaryThreads) {
+        thread.HostCore = HostCoreFor(thread.ProcessorId);
+    }
+    SecondCore::ResetExclusiveMonitor();
+    SecondCore::SetActive(true);
+}
+
+void NativeA32Process::DisableSecondCore() {
+    SecondCore::SetActive(false);
+    mSecondCoreEnabled = false;
+    for (auto& thread : mSecondaryThreads) {
+        thread.HostCore = 0U;
+        if (thread.Status == NativeA32ThreadStatus::Running) {
+            thread.Status = NativeA32ThreadStatus::Ready;
+        }
+    }
+}
+
+uint8_t NativeA32Process::ThreadHostCore(uint32_t threadId) const {
+    const SecondCore::KernelGuard kernel;
+    return threadId != 0U && threadId - 1U < mSecondaryThreads.size()
+               ? mSecondaryThreads[threadId - 1U].HostCore
+               : 0U;
+}
+
+bool NativeA32Process::SecondCoreBusy() const {
+    for (const auto& thread : mSecondaryThreads) {
+        if (thread.HostCore != 0U &&
+            (thread.Status == NativeA32ThreadStatus::Ready ||
+             thread.Status == NativeA32ThreadStatus::Running)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool NativeA32Process::AuxiliaryWorkPending() const {
+    for (const auto& thread : mSecondaryThreads) {
+        const bool runnable = thread.Status == NativeA32ThreadStatus::Ready ||
+                              thread.Status == NativeA32ThreadStatus::Running;
+        if (runnable && (thread.HostCore != 0U ||
+                         thread.Priority < mPrimaryThreadPriority)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool NativeA32Process::WaitSecondCoreIdle(
+    std::chrono::steady_clock::duration timeout) {
+    if (!SecondCore::Active()) return true;
+    return SecondCore::WaitKernelFor(timeout, [this] {
+        return !mSecondCoreRunning || mSecondCoreFault.has_value() ||
+               !SecondCoreBusy();
+    });
+}
+
+void NativeA32Process::RequestSecondCoreStop() {
+    const SecondCore::KernelGuard kernel;
+    mSecondCoreStopRequested = true;
+    SecondCore::NotifyKernel();
+}
+
+NativeA32Process::SecondaryThread* NativeA32Process::SelectSecondCoreThread() {
+    SecondaryThread* selected = nullptr;
+    for (auto& thread : mSecondaryThreads) {
+        if (thread.HostCore != 0U && thread.Status == NativeA32ThreadStatus::Ready &&
+            (selected == nullptr || thread.Priority < selected->Priority)) {
+            selected = &thread;
+        }
+    }
+    return selected;
+}
+
+oot3d::recomp::a32::ExecutionResult NativeA32Process::DispatchGuest(
+    oot3d::recomp::a32::GuestState& state, uint32_t blockLimit, bool secondCore) {
+    // The second core runs plain guest code: the block-entry hooks, the
+    // product mod and native function callbacks act on game-thread state
+    // (projection policy, guest profiler, TopScreen routing) and stay on the
+    // game thread.
+#if defined(OOT3D_WHOLE_AOT_PRODUCT_MODE)
+    if (secondCore) {
+        return DispatchWholeAotProduct(state, mMemory, blockLimit, nullptr,
+                                       nullptr, nullptr, 0U, std::nullopt,
+                                       nullptr, nullptr);
+    }
+    return DispatchWholeAotProduct(
+        state, mMemory, blockLimit,
+        mBlockEntryCallback, mBlockEntryUser,
+        mBlockEntryFilterPcs.data(), mBlockEntryFilterPcs.size(), std::nullopt,
+        mNativeBlockCallback, mNativeBlockUser);
+#else
+    if (secondCore) {
+        return oot3d::recomp::a32::Dispatch(
+            mRegistry, state.r[15], state, mMemory,
+            &NativeA32Process::DispatchSecondCoreFallback, this, blockLimit);
+    }
+    return oot3d::recomp::a32::Dispatch(
+        mRegistry, state.r[15], state, mMemory,
+        &NativeA32Process::DispatchFallback, this,
+        blockLimit, mBlockEntryCallback, mBlockEntryUser,
+        mBlockEntryFilterPcs.data(), mBlockEntryFilterPcs.size(),
+        mNativeFunctionCallback, mNativeFunctionUser,
+        mNativeFunctionPcs.data(), mNativeFunctionPcs.size(),
+        mNativeBlockCallback, mNativeBlockUser);
+#endif
+}
+
+void NativeA32Process::RunSecondCore(uint32_t blockLimitPerDispatch) {
+    SecondCore::tProcessor = 1U;
+    const SecondCore::KernelGuard kernel;
+    mSecondCoreRunning = true;
+    SecondCore::NotifyKernel();
+    const uint32_t budget = std::max(blockLimitPerDispatch, 1U);
+    uint32_t lastThread = 0U;
+    for (;;) {
+        SecondaryThread* thread = nullptr;
+        SecondCore::WaitKernel([&] {
+            if (mSecondCoreStopRequested) return true;
+            if (SecondCore::gStopRequests != 0U || mSecondCoreFault.has_value()) {
+                return false;
+            }
+            thread = SelectSecondCoreThread();
+            return thread != nullptr;
+        });
+        if (mSecondCoreStopRequested) break;
+        if (thread->Id != lastThread) {
+            // A context switch on this core clears its exclusive monitor.
+            SecondCore::ClearExclusive();
+            lastThread = thread->Id;
+        }
+        thread->Status = NativeA32ThreadStatus::Running;
+        mSecondCorePendingFallback = {};
+        ++SecondCore::gInGuest[1];
+        const uint64_t start = ReadThreadProfileCounter();
+        oot3d::recomp::a32::ExecutionResult exit{};
+        uint64_t dispatched = start;
+        std::string dispatchError;
+        try {
+            const SecondCore::KernelRelease release;
+            exit = DispatchGuest(thread->State, budget, true);
+            dispatched = ReadThreadProfileCounter();
+        } catch (const std::exception& exception) {
+            dispatchError = exception.what();
+        }
+        const uint64_t locked = ReadThreadProfileCounter();
+        SecondCore::LeaveGuest();
+        if (SecondCore::gStopRequests != 0U) {
+            // The game thread stops the world (savestate, page-table
+            // rebuild): the exit's SVC waits until it is over. A restore in
+            // between replaced the thread records; the restored thread then
+            // resumes from its saved state instead.
+            const uint64_t generation = mThreadRecordGeneration;
+            SecondCore::WaitKernel([this] {
+                return SecondCore::gStopRequests == 0U || mSecondCoreStopRequested;
+            });
+            if (generation != mThreadRecordGeneration || mSecondCoreStopRequested) {
+                continue;
+            }
+        }
+        {
+            // The thread record and registers stay ours until the exit is
+            // complete, even if an SVC below waits for a world stop.
+            const SecondCore::KernelSection section;
+            try {
+                if (!dispatchError.empty()) {
+                    mSecondCoreFault = FaultThread(thread->Id, exit, 0U,
+                                                   "second-core dispatch: " + dispatchError);
+                } else {
+                    CompleteSecondCoreDispatch(*thread, exit);
+                }
+            } catch (const std::exception& exception) {
+                mSecondCoreFault = FaultThread(thread->Id, exit, 1U,
+                                               std::string("second-core SVC: ") +
+                                                   exception.what());
+            }
+        }
+        const uint64_t end = ReadThreadProfileCounter();
+        ChargeSecondCore(thread->Id, (dispatched - start) + (end - locked),
+                         locked - dispatched);
+        if (thread->Status != NativeA32ThreadStatus::Ready) {
+            // Waiting, terminated or faulted: the second core may be idle.
+            SecondCore::NotifyKernel();
+        }
+    }
+    mSecondCoreRunning = false;
+    SecondCore::NotifyKernel();
+    SecondCore::tProcessor = 0U;
+}
+
+void NativeA32Process::CompleteSecondCoreDispatch(
+    SecondaryThread& thread, const oot3d::recomp::a32::ExecutionResult& exit) {
+    using oot3d::recomp::a32::ExitKind;
+    if (mSecondCorePendingFallback.Active) {
+        const uint32_t defaultResumePc =
+            mSecondCorePendingFallback.Result.ResumePc.value_or(exit.pc);
+        ApplySecondCoreHostResult(thread, std::move(mSecondCorePendingFallback.Result),
+                                  exit, defaultResumePc);
+        return;
+    }
+    switch (exit.kind) {
+    case ExitKind::Svc: {
+        NativeA32HostContext context{*this, thread.Id};
+        auto hostResult =
+            mHostServices.HandleSvc(exit.detail, thread.State, mMemory, context);
+        ApplySecondCoreHostResult(thread, std::move(hostResult), exit,
+                                  exit.pc + 4U);
+        return;
+    }
+    case ExitKind::BlockLimit:
+        thread.Status = NativeA32ThreadStatus::Ready;
+        return;
+    case ExitKind::Wait:
+        thread.Status = NativeA32ThreadStatus::Waiting;
+        return;
+    default: {
+        char encoded[96];
+        std::snprintf(encoded, sizeof(encoded),
+                      "native A32 second-core dispatch exited unexpectedly: "
+                      "kind=%u pc=0x%08X detail=%u",
+                      static_cast<unsigned>(exit.kind), static_cast<unsigned>(exit.pc),
+                      static_cast<unsigned>(exit.detail));
+        mSecondCoreFault = FaultThread(thread.Id, exit, 0U, encoded);
+        return;
+    }
+    }
+}
+
+void NativeA32Process::ApplySecondCoreHostResult(
+    SecondaryThread& thread, NativeA32HostResult hostResult,
+    const oot3d::recomp::a32::ExecutionResult& exit, uint32_t defaultResumePc) {
+    const uint32_t resumePc = hostResult.ResumePc.value_or(defaultResumePc);
+    switch (hostResult.Action) {
+    case NativeA32HostAction::Resume:
+        thread.State.r[15] = resumePc;
+        thread.Status = NativeA32ThreadStatus::Ready;
+        return;
+    case NativeA32HostAction::Wait:
+        thread.State.r[15] = resumePc;
+        thread.Status = NativeA32ThreadStatus::Waiting;
+        return;
+    case NativeA32HostAction::Terminate:
+        thread.State.r[15] = resumePc;
+        thread.Status = NativeA32ThreadStatus::Terminated;
+        return;
+    case NativeA32HostAction::Fault:
+        break;
+    }
+    mSecondCoreFault = FaultThread(
+        thread.Id, exit, 1U,
+        hostResult.Action == NativeA32HostAction::Fault && !hostResult.Error.empty()
+            ? std::move(hostResult.Error)
+            : std::string("native A32 host service failed"));
+}
+
 uint64_t NativeA32ProfileTicksToNanoseconds(uint64_t ticks) noexcept {
 #if defined(__SWITCH__) && defined(__aarch64__)
     constexpr uint64_t kFrequency = 19'200'000ULL; // Switch CNTFRQ
@@ -1052,6 +1382,14 @@ std::string FormatNativeA32GuestThreadsLine(
                       processor, ms);
         line += buffer;
     }
+    const uint64_t core1 = now.SecondCoreTicks - windowStart.SecondCoreTicks;
+    if (core1 != 0U) {
+        std::snprintf(buffer, sizeof(buffer), " core1_ms=%.3f core1_lock_ms=%.3f",
+                      msPerFrame(core1),
+                      msPerFrame(now.SecondCoreLockTicks -
+                                 windowStart.SecondCoreLockTicks));
+        line += buffer;
+    }
     return line;
 }
 
@@ -1069,6 +1407,8 @@ std::string FormatNativeA32GuestThreadCreated(
 }
 
 uint64_t NativeA32Process::StateFingerprint() const {
+    // Registers and memory of a second core held at a dispatch boundary.
+    const SecondCore::WorldStop stop;
     uint64_t hash = mMemory.StateFingerprint();
     const auto append = [&](const void* data, size_t size) {
         const auto* bytes = static_cast<const uint8_t*>(data);
@@ -1129,16 +1469,25 @@ uint64_t NativeA32Process::StateFingerprint() const {
 }
 
 nlohmann::json NativeA32Process::CaptureState() const {
+    // The second core is held at a dispatch boundary (nothing while it is off).
+    const SecondCore::WorldStop stop;
     nlohmann::json secondaryThreads = nlohmann::json::array();
     for (const auto& thread : mSecondaryThreads) {
-        secondaryThreads.push_back({
+        nlohmann::json record{
             {"id", thread.Id},
             {"priority", thread.Priority},
             {"entry_address", thread.EntryAddress},
             {"argument", thread.Argument},
             {"state", EncodeGuestState(thread.State)},
             {"status", static_cast<uint32_t>(thread.Status)},
-        });
+        };
+        // With the second core on, the requested processor travels with the
+        // thread, so a load places it on the same core (the record is
+        // unchanged with the switch absent).
+        if (mSecondCoreEnabled && thread.ProcessorId != kNativeA32UnknownProcessor) {
+            record["processor_id"] = thread.ProcessorId;
+        }
+        secondaryThreads.push_back(std::move(record));
     }
     nlohmann::json pendingFallback{
         {"active", mPendingFallback.Active},
@@ -1176,6 +1525,9 @@ nlohmann::json NativeA32Process::CaptureState() const {
 
 bool NativeA32Process::RestoreState(const nlohmann::json& state,
                                     std::string* error) {
+    // Thread records and the image are replaced: the second core must hold
+    // no reference into them (nothing while it is off).
+    const SecondCore::WorldStop stop;
     try {
         if (!state.is_object() ||
             state.value("format", std::string{}) !=
@@ -1221,6 +1573,14 @@ bool NativeA32Process::RestoreState(const nlohmann::json& state,
                          "native A32 secondary thread record is invalid");
                 return false;
             }
+            // Saved with the second core on, or else what this session's
+            // CreateThread recorded for the same thread id.
+            thread.ProcessorId =
+                encoded.contains("processor_id")
+                    ? encoded.at("processor_id").get<int32_t>()
+                    : (thread.Id < kNativeA32GuestThreadSlots - 1U
+                           ? mThreadProfile.ProcessorIds[thread.Id]
+                           : kNativeA32UnknownProcessor);
             secondaryThreads.push_back(std::move(thread));
         }
         const uint32_t currentThreadId =
@@ -1289,8 +1649,27 @@ bool NativeA32Process::RestoreState(const nlohmann::json& state,
         mTlsSize = tlsSize;
         mNextTlsOffset = nextTlsOffset;
         mSecondaryThreads = std::move(secondaryThreads);
+        ++mThreadRecordGeneration;
         mPendingFallback = std::move(pendingFallback);
         mTimingStats = {};
+        bool secondCoreReady = false;
+        for (auto& thread : mSecondaryThreads) {
+            if (thread.Id < kNativeA32GuestThreadSlots - 1U) {
+                mThreadProfile.ProcessorIds[thread.Id] = thread.ProcessorId;
+            }
+            thread.HostCore = HostCoreFor(thread.ProcessorId);
+            // A second-core thread saved inside an SVC restarts it.
+            if (thread.HostCore != 0U &&
+                thread.Status == NativeA32ThreadStatus::Running) {
+                thread.Status = NativeA32ThreadStatus::Ready;
+            }
+            secondCoreReady |= thread.HostCore != 0U &&
+                               thread.Status == NativeA32ThreadStatus::Ready;
+        }
+        if (SecondCore::Active()) {
+            SecondCore::ResetExclusiveMonitor();
+            if (secondCoreReady) SecondCore::NotifyKernel();
+        }
         return true;
     } catch (const std::exception& exception) {
         if (error != nullptr) {

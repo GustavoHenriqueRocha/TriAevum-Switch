@@ -1,13 +1,96 @@
 #include "oot3d_native_a32_memory.h"
+#include "oot3d_native_a32_second_core.h"
 
 #include <algorithm>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
 
 namespace Oot3dNativeGame {
 namespace {
+
+// Second core (oot3d_native_a32_second_core.h): every out-of-line path below
+// that reads or changes the image's bytes or bookkeeping holds the kernel lock
+// while it is active; nothing is taken otherwise.
+using KernelGuard = SecondCore::KernelGuard;
+
+// The global exclusive monitor: the reservation granule of each host core.
+// Granules are 8-byte aligned, so an odd value is never one.
+constexpr uint32_t kNoReservation = 1U;
+std::mutex gExclusiveMutex;
+std::array<uint32_t, SecondCore::kProcessors> gExclusiveGranule{
+    kNoReservation, kNoReservation};
+
+// Under gExclusiveMutex: an exclusive store to `granule` ends every core's
+// reservation of it.
+void ClearExclusiveGranule(uint32_t granule) noexcept {
+    for (auto& reserved : gExclusiveGranule) {
+        if (reserved == granule) reserved = kNoReservation;
+    }
+}
+
+uint64_t SizeMask(uint8_t size) noexcept {
+    return size >= 8U ? ~uint64_t{0} : (uint64_t{1} << (size * 8U)) - 1U;
+}
+
+// Host atomics on guest bytes, for an access the guest aligned to its size
+// on a host address with the same alignment.
+bool AtomicAccessible(uint32_t address, const uint8_t* bytes, uint8_t size) noexcept {
+    return (size == 1U || size == 2U || size == 4U || size == 8U) &&
+           (address & (size - 1U)) == 0U &&
+           (reinterpret_cast<uintptr_t>(bytes) & (size - 1U)) == 0U;
+}
+
+uint64_t AtomicLoadGuest(const uint8_t* bytes, uint8_t size) noexcept {
+    switch (size) {
+    case 1: return __atomic_load_n(bytes, __ATOMIC_SEQ_CST);
+    case 2: return __atomic_load_n(reinterpret_cast<const uint16_t*>(bytes), __ATOMIC_SEQ_CST);
+    case 4: return __atomic_load_n(reinterpret_cast<const uint32_t*>(bytes), __ATOMIC_SEQ_CST);
+    default: return __atomic_load_n(reinterpret_cast<const uint64_t*>(bytes), __ATOMIC_SEQ_CST);
+    }
+}
+
+template <typename T>
+bool AtomicCompareExchangeAs(uint8_t* bytes, uint64_t expected, uint64_t desired) noexcept {
+    T value = static_cast<T>(expected);
+    return __atomic_compare_exchange_n(reinterpret_cast<T*>(bytes), &value,
+                                       static_cast<T>(desired), false,
+                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+bool AtomicCompareExchangeGuest(uint8_t* bytes, uint8_t size, uint64_t expected,
+                                uint64_t desired) noexcept {
+    switch (size) {
+    case 1: return AtomicCompareExchangeAs<uint8_t>(bytes, expected, desired);
+    case 2: return AtomicCompareExchangeAs<uint16_t>(bytes, expected, desired);
+    case 4: return AtomicCompareExchangeAs<uint32_t>(bytes, expected, desired);
+    default: return AtomicCompareExchangeAs<uint64_t>(bytes, expected, desired);
+    }
+}
+
+uint64_t AtomicExchangeGuest(uint8_t* bytes, uint8_t size, uint32_t replacement) noexcept {
+    return size == 1U
+               ? __atomic_exchange_n(bytes, static_cast<uint8_t>(replacement), __ATOMIC_SEQ_CST)
+               : __atomic_exchange_n(reinterpret_cast<uint32_t*>(bytes), replacement,
+                                     __ATOMIC_SEQ_CST);
+}
+
+// A card or the written mark seen and cleared in one step, so a concurrent
+// store's mark (the inline path's plain byte store) is never lost between the
+// test and the clear. Same result as the test-and-clear when single-threaded.
+bool TakeCard(GuestCard& card) noexcept {
+    return __atomic_exchange_n(reinterpret_cast<unsigned char*>(&card.State),
+                               static_cast<unsigned char>(GuestCardState::Clean),
+                               __ATOMIC_ACQ_REL) !=
+           static_cast<unsigned char>(GuestCardState::Clean);
+}
+
+void MarkCard(GuestCard& card) noexcept {
+    __atomic_store_n(reinterpret_cast<unsigned char*>(&card.State),
+                     static_cast<unsigned char>(GuestCardState::Dirty), __ATOMIC_RELEASE);
+}
 
 bool RangeFits(uint32_t baseAddress, size_t size) {
     return size != 0 &&
@@ -64,6 +147,8 @@ NativeA32Memory::NativeA32Memory(const NativeA32Memory& other)
 
 NativeA32Memory& NativeA32Memory::operator=(const NativeA32Memory& other) {
     if (this != &other) {
+        // The old image's buffers and page groups are freed below.
+        const SecondCore::WorldStop stop;
         if (!other.MaterializeDeferredWrites())
             throw std::runtime_error("cannot copy deferred guest memory");
         mDeferredWrites.clear();
@@ -91,6 +176,8 @@ NativeA32Memory::NativeA32Memory(NativeA32Memory&& other) noexcept {
 
 NativeA32Memory& NativeA32Memory::operator=(NativeA32Memory&& other) noexcept {
     if (this == &other) return *this;
+    // The old image's buffers and page groups are freed below.
+    const SecondCore::WorldStop stop;
     const bool versionsValid = mRangeVersionsValid && other.mRangeVersionsValid;
     mWriteGeneration = other.WriteGeneration();
     mWritten.State = GuestCardState::Clean;
@@ -145,6 +232,8 @@ void NativeA32Memory::SetError(std::string* error, std::string_view message) {
 
 bool NativeA32Memory::MapRegion(const NativeA32MemoryRegionConfig& config,
                                 std::string* error) {
+    // A new region rebuilds the page table (RebuildPageTable).
+    const SecondCore::WorldStop stop;
     if (config.Name.empty()) {
         SetError(error, "guest memory region has no name");
         return false;
@@ -187,6 +276,9 @@ bool NativeA32Memory::MapRegion(const NativeA32MemoryRegionConfig& config,
 }
 
 void NativeA32Memory::RebuildPageTable() {
+    // Frees every page group: no other core may be in guest code, where it
+    // holds page pointers.
+    const SecondCore::WorldStop stop;
     mPageRegions.assign(PageCount, 0U);
     for (auto& group : mFastPageGroups) {
         group.reset();
@@ -313,37 +405,43 @@ const NativeA32Memory::Region* NativeA32Memory::FindRegion(
 }
 
 bool NativeA32Memory::IsMapped(uint32_t address, size_t size) const {
+    const KernelGuard kernel;
     return FindRegion(address, size) != nullptr;
 }
 
 bool NativeA32Memory::IsWritable(uint32_t address, size_t size) const {
+    const KernelGuard kernel;
     const auto* region = FindRegion(address, size);
     return region != nullptr && region->Writable;
 }
 
 bool NativeA32Memory::IsExecutable(uint32_t address, size_t size) const {
+    const KernelGuard kernel;
     const auto* region = FindRegion(address, size);
     return region != nullptr && region->Executable;
 }
 
 size_t NativeA32Memory::RegionCount() const {
+    const KernelGuard kernel;
     return mRegions.size();
 }
 
 uint64_t NativeA32Memory::WriteGeneration() const {
+    const KernelGuard kernel;
     // One step per observation that saw new writes: two observations differ
     // exactly when something was written between them, as with the per-write
-    // count this replaces (exclusive tokens compare for equality only).
-    if (mWritten.State != GuestCardState::Clean) {
-        mWritten.State = GuestCardState::Clean;
-        ++mWriteGeneration;
+    // count this replaces (exclusive tokens compare for equality only). The
+    // mark is taken atomically: a second core's store marks it concurrently.
+    if (TakeCard(mWritten)) {
+        __atomic_add_fetch(&mWriteGeneration, 1U, __ATOMIC_RELAXED);
     }
-    return mWriteGeneration;
+    return __atomic_load_n(&mWriteGeneration, __ATOMIC_RELAXED);
 }
 
 std::optional<uint64_t>
 NativeA32Memory::RangeWriteGeneration(uint32_t address,
                                       size_t size) const noexcept {
+  const KernelGuard kernel;
   if (!mRangeVersionsValid || FindRegion(address, size) == nullptr ||
       HasEscapedWritePointer(address, size)) return std::nullopt;
   uint64_t generation = 0;
@@ -354,12 +452,13 @@ NativeA32Memory::RangeWriteGeneration(uint32_t address,
       if (!group) return std::nullopt;
       auto& card = group->Cards[page & FastGroupPageMask];
       auto& stamp = group->Pages[page & FastGroupPageMask].WriteGeneration;
-      if (card.State != GuestCardState::Clean) {
+      // Seen and cleared in one step (TakeCard): a mark a second core sets
+      // meanwhile survives for the next certificate.
+      if (TakeCard(card)) {
           // Written since its last certificate: a value no earlier
           // certificate can equal (one per call is enough for the max).
           if (fresh == 0U) fresh = NextRangeGeneration();
           stamp = fresh;
-          card.State = GuestCardState::Clean;
       }
       if (!stamp) return std::nullopt;
       generation = std::max(generation, stamp);
@@ -369,6 +468,7 @@ NativeA32Memory::RangeWriteGeneration(uint32_t address,
 }
 
 void NativeA32Memory::EnableWriteTraceFingerprint(bool enabled) noexcept {
+    const KernelGuard kernel;
     const bool changed = mTraceWriteFingerprint != enabled;
     mTraceWriteFingerprint = enabled;
     mWriteTraceFingerprint = 14695981039346656037ULL;
@@ -378,6 +478,7 @@ void NativeA32Memory::EnableWriteTraceFingerprint(bool enabled) noexcept {
 }
 
 uint64_t NativeA32Memory::WriteTraceFingerprint() noexcept {
+    const KernelGuard kernel;
     FlushTracedPointerWrites();
     return mWriteTraceFingerprint;
 }
@@ -435,6 +536,7 @@ void NativeA32Memory::FlushTracedPointerWrites() noexcept {
 }
 
 uint64_t NativeA32Memory::ContentFingerprint() const {
+    const KernelGuard kernel;
     if (!MaterializeDeferredWrites())
         throw std::runtime_error("cannot fingerprint deferred guest memory");
     uint64_t hash = 14695981039346656037ULL;
@@ -458,6 +560,7 @@ uint64_t NativeA32Memory::ContentFingerprint() const {
 }
 
 uint64_t NativeA32Memory::StateFingerprint() const {
+    const KernelGuard kernel;
     if (!MaterializeDeferredWrites())
         throw std::runtime_error("cannot fingerprint deferred guest memory");
     uint64_t hash = 14695981039346656037ULL;
@@ -483,6 +586,7 @@ uint64_t NativeA32Memory::StateFingerprint() const {
 }
 
 nlohmann::json NativeA32Memory::CaptureState() const {
+    const KernelGuard kernel;
     if (!MaterializeDeferredWrites())
         throw std::runtime_error("cannot capture deferred guest memory");
     nlohmann::json regions = nlohmann::json::array();
@@ -504,6 +608,7 @@ nlohmann::json NativeA32Memory::CaptureState() const {
 
 bool NativeA32Memory::RestoreState(const nlohmann::json& state,
                                    std::string* error) {
+    const KernelGuard kernel;
     try {
         if (!state.is_object() ||
             state.value("format", std::string{}) !=
@@ -556,6 +661,7 @@ bool NativeA32Memory::RestoreState(const nlohmann::json& state,
 
 void NativeA32Memory::SetRangeWatch(
     std::span<const std::pair<uint32_t, uint32_t>> ranges) {
+    const KernelGuard kernel;
     mWatchRanges.assign(ranges.begin(), ranges.end());
     mWatchActive = !mWatchRanges.empty();
     std::vector<size_t> trapped;
@@ -582,6 +688,7 @@ void NativeA32Memory::SetRangeWatch(
 }
 
 void NativeA32Memory::ClearRangeWatch() {
+    const KernelGuard kernel;
     if (mWatchRanges.empty() && mTrappedPages.empty() && !mWatchActive) {
         return;
     }
@@ -595,6 +702,7 @@ void NativeA32Memory::ClearRangeWatch() {
 
 
 void NativeA32Memory::SetWriteObserver(WriteObserver observer) {
+    const KernelGuard kernel;
     mWriteObserver = std::move(observer);
     if (!mWriteObserver && !mObservedWritePages.empty()) {
         mObservedWriteRanges.clear();
@@ -604,11 +712,13 @@ void NativeA32Memory::SetWriteObserver(WriteObserver observer) {
 }
 
 bool NativeA32Memory::HasEscapedWritePointer(uint32_t address, size_t size) const noexcept {
+    const KernelGuard kernel;
     return std::any_of(mEscapedWritePointers.begin(), mEscapedWritePointers.end(),
         [&](const auto& range) { return RangesOverlap(address, size, range.first, range.second); });
 }
 
 bool NativeA32Memory::ObserveWrites(uint32_t address, size_t size) {
+    const KernelGuard kernel;
     if (!mWriteObserver || !RangeFits(address, size) ||
         !IsMapped(address, size) || HasEscapedWritePointer(address, size)) return false;
     const auto covered = std::lower_bound(mObservedWriteRanges.begin(), mObservedWriteRanges.end(),
@@ -642,6 +752,7 @@ void NativeA32Memory::NotifyObservedWrite(uint32_t address, size_t size) {
 }
 
 void NativeA32Memory::PreserveAccessObserversFrom(const NativeA32Memory& memory) {
+    const KernelGuard kernel;
     mWriteObserver = memory.mWriteObserver;
     mObservedWriteRanges = memory.mObservedWriteRanges;
     mObservedWritePages = memory.mObservedWritePages;
@@ -698,6 +809,7 @@ void NativeA32Memory::DiscardDeferredWrites(uint32_t address, size_t size) const
 
 bool NativeA32Memory::DeferWrites(
     std::span<const std::pair<uint32_t, size_t>> ranges, DeferredRead reader) {
+    const KernelGuard kernel;
     if (!reader || ranges.empty() || mTraceWriteFingerprint) return false;
     for (const auto& [address, size] : ranges) {
         if (!RangeFits(address, size) || !IsWritable(address, size) ||
@@ -756,6 +868,7 @@ bool NativeA32Memory::ResolveDeferredRead(uint32_t address, size_t size) const {
 }
 
 bool NativeA32Memory::MaterializeDeferredWrites() const {
+    const KernelGuard kernel;
     while (!mDeferredWrites.empty()) {
         const auto address = mDeferredWrites.front().Address;
         const auto size = mDeferredWrites.front().Size;
@@ -766,6 +879,7 @@ bool NativeA32Memory::MaterializeDeferredWrites() const {
 
 std::span<const uint8_t> NativeA32Memory::SynchronousReadView(
     uint32_t address, size_t size) const {
+    const KernelGuard kernel;
     const auto* region = FindRegion(address, size);
     if (!region || !ResolveDeferredRead(address, size)) return {};
     return {region->Bytes.data() + (address - region->BaseAddress), size};
@@ -773,6 +887,7 @@ std::span<const uint8_t> NativeA32Memory::SynchronousReadView(
 
 bool NativeA32Memory::ReadBytes(uint32_t address,
                                 std::span<uint8_t> bytes) const {
+    const KernelGuard kernel;
     if (bytes.empty()) {
         return true;
     }
@@ -792,6 +907,7 @@ bool NativeA32Memory::ReadBytes(uint32_t address,
 
 const uint8_t* NativeA32Memory::GetReadPointer(uint32_t address,
                                                size_t size) const {
+    const KernelGuard kernel;
     const auto* region = FindRegion(address, size);
     if (region == nullptr) {
         return nullptr;
@@ -808,6 +924,7 @@ const uint8_t* NativeA32Memory::GetReadPointer(uint32_t address,
 }
 
 uint8_t* NativeA32Memory::GetWritePointer(uint32_t address, size_t size) {
+    const KernelGuard kernel;
     auto* region = FindRegion(address, size);
     if (region == nullptr || !region->Writable) {
         return nullptr;
@@ -830,6 +947,7 @@ uint8_t* NativeA32Memory::GetWritePointer(uint32_t address, size_t size) {
 std::optional<uint32_t>
 NativeA32Memory::GetGuestAddress(const void* pointer,
                                  size_t size) const noexcept {
+    const KernelGuard kernel;
     if (pointer == nullptr || size == 0U) {
         return std::nullopt;
     }
@@ -859,6 +977,7 @@ NativeA32Memory::GetGuestAddress(const void* pointer,
 
 bool NativeA32Memory::WriteBytes(uint32_t address,
                                  std::span<const uint8_t> bytes) {
+    const KernelGuard kernel;
     if (bytes.empty()) {
         return true;
     }
@@ -890,6 +1009,7 @@ bool NativeA32Memory::WriteBytes(uint32_t address,
 
 bool NativeA32Memory::WriteHostBytes(
     uint32_t address, std::span<const uint8_t> bytes) {
+    const KernelGuard kernel;
     if (bytes.empty()) {
         return true;
     }
@@ -912,6 +1032,7 @@ bool NativeA32Memory::WriteHostBytes(
 }
 
 uint8_t* NativeA32Memory::BeginHostUpdate(uint32_t address, size_t size) {
+    const KernelGuard kernel;
     if (size == 0) {
         return nullptr;
     }
@@ -929,6 +1050,7 @@ uint8_t* NativeA32Memory::BeginHostUpdate(uint32_t address, size_t size) {
 }
 
 bool NativeA32Memory::EndHostUpdate(uint32_t address, size_t size) {
+    const KernelGuard kernel;
     if (size == 0) {
         return true;
     }
@@ -954,6 +1076,7 @@ bool NativeA32Memory::EndHostUpdate(uint32_t address, size_t size) {
 }
 
 bool NativeA32Memory::Fill(uint32_t address, size_t size, uint8_t value) {
+    const KernelGuard kernel;
     if (size == 0) {
         return true;
     }
@@ -980,6 +1103,7 @@ bool NativeA32Memory::Fill(uint32_t address, size_t size, uint8_t value) {
 bool NativeA32Memory::ReadSized(uint32_t address, uint8_t size,
                                 uint64_t* value,
                                 uint32_t* faultAddress) const {
+    const KernelGuard kernel;
     if (value == nullptr || !IsSupportedSize(size)) {
         if (faultAddress != nullptr) {
             *faultAddress = address;
@@ -1012,6 +1136,7 @@ bool NativeA32Memory::ReadSized(uint32_t address, uint8_t size,
 
 bool NativeA32Memory::WriteSized(uint32_t address, uint8_t size,
                                  uint64_t value, uint32_t* faultAddress) {
+    const KernelGuard kernel;
     if (!IsSupportedSize(size)) {
         if (faultAddress != nullptr) {
             *faultAddress = address;
@@ -1079,31 +1204,134 @@ bool NativeA32Memory::Write64(uint32_t address, uint64_t value,
     return WriteFast(address, value, faultAddress);
 }
 
+// Exclusives. With the second core inactive the token is the architectural
+// write generation (one core: any tracked write between LDREX and STREX fails
+// it), exactly as before. While it is active they go through the global
+// exclusive monitor (oot3d_native_a32_second_core.h): the token is the loaded
+// value, the reservation is the core's granule, and the store is a host
+// compare-and-swap on the guest word. A page without a fast entry (watched,
+// observed, deferred, traced) takes the same steps through the checked paths
+// under the kernel lock, which is always taken before the monitor's.
 bool NativeA32Memory::LoadExclusive(uint32_t address, uint8_t size,
                                     uint64_t* value, uint64_t* token,
                                     uint32_t* faultAddress) {
-    if (token == nullptr || !ReadSized(address, size, value, faultAddress)) {
+    if (!SecondCore::Active()) {
+        if (token == nullptr || !ReadSized(address, size, value, faultAddress)) {
+            return false;
+        }
+        *token = WriteGeneration();
+        return true;
+    }
+    if (token == nullptr || value == nullptr) {
+        if (faultAddress != nullptr) *faultAddress = address;
         return false;
     }
-    *token = WriteGeneration();
+    const uint32_t granule = address & SecondCore::kExclusiveGranuleMask;
+    const FastPage* page = FastPageFor(address, size);
+    const uint8_t* bytes = page != nullptr && page->Read != nullptr
+                               ? page->Read + (address & PageMask)
+                               : nullptr;
+    if (bytes != nullptr && AtomicAccessible(address, bytes, size)) {
+        const std::lock_guard monitor(gExclusiveMutex);
+        *value = AtomicLoadGuest(bytes, size);
+        gExclusiveGranule[SecondCore::Processor()] = granule;
+    } else {
+        const KernelGuard kernel;
+        const std::lock_guard monitor(gExclusiveMutex);
+        if (!ReadSized(address, size, value, faultAddress)) {
+            return false;
+        }
+        gExclusiveGranule[SecondCore::Processor()] = granule;
+    }
+    *token = *value;
     return true;
 }
 
 oot3d::recomp::a32::ExclusiveStoreResult NativeA32Memory::StoreExclusive(
     uint32_t address, uint8_t size, uint64_t value, uint64_t token,
     uint32_t* faultAddress) {
-    if (token != WriteGeneration()) {
-        return oot3d::recomp::a32::ExclusiveStoreResult::ReservationLost;
+    using oot3d::recomp::a32::ExclusiveStoreResult;
+    if (!SecondCore::Active()) {
+        if (token != WriteGeneration()) {
+            return ExclusiveStoreResult::ReservationLost;
+        }
+        if (!WriteSized(address, size, value, faultAddress)) {
+            return ExclusiveStoreResult::MemoryFault;
+        }
+        return ExclusiveStoreResult::Success;
+    }
+    const uint32_t granule = address & SecondCore::kExclusiveGranuleMask;
+    const uint8_t processor = SecondCore::Processor();
+    FastPageGroup* group = mFastPageGroups[size_t{address} >> FastGroupShift].get();
+    const size_t pageIndex = (address >> PageShift) & FastGroupPageMask;
+    uint8_t* bytes = group != nullptr && group->Pages[pageIndex].Write != nullptr
+                         ? group->Pages[pageIndex].Write + (address & PageMask)
+                         : nullptr;
+    if (bytes != nullptr && AtomicAccessible(address, bytes, size)) {
+        const std::lock_guard monitor(gExclusiveMutex);
+        if (gExclusiveGranule[processor] != granule) {
+            gExclusiveGranule[processor] = kNoReservation;
+            return ExclusiveStoreResult::ReservationLost;
+        }
+        ClearExclusiveGranule(granule);
+        if (!AtomicCompareExchangeGuest(bytes, size, token, value)) {
+            return ExclusiveStoreResult::ReservationLost;
+        }
+        // WriteFast's bookkeeping, as atomic byte stores.
+        MarkCard(group->Cards[pageIndex]);
+        MarkCard(mWritten);
+        return ExclusiveStoreResult::Success;
+    }
+    const KernelGuard kernel;
+    const std::lock_guard monitor(gExclusiveMutex);
+    if (gExclusiveGranule[processor] != granule) {
+        gExclusiveGranule[processor] = kNoReservation;
+        return ExclusiveStoreResult::ReservationLost;
+    }
+    ClearExclusiveGranule(granule);
+    uint64_t current = 0;
+    if (!ReadSized(address, size, &current, faultAddress)) {
+        return ExclusiveStoreResult::MemoryFault;
+    }
+    if (current != (token & SizeMask(size))) {
+        return ExclusiveStoreResult::ReservationLost;
     }
     if (!WriteSized(address, size, value, faultAddress)) {
-        return oot3d::recomp::a32::ExclusiveStoreResult::MemoryFault;
+        return ExclusiveStoreResult::MemoryFault;
     }
-    return oot3d::recomp::a32::ExclusiveStoreResult::Success;
+    return ExclusiveStoreResult::Success;
 }
 
 bool NativeA32Memory::AtomicSwap(uint32_t address, uint8_t size,
                                  uint32_t replacement, uint32_t* previous,
                                  uint32_t* faultAddress) {
+    if (SecondCore::Active() && previous != nullptr && (size == 1U || size == 4U)) {
+        // SWP/SWPB: one atomic exchange, an exclusive store for the monitor.
+        const uint32_t granule = address & SecondCore::kExclusiveGranuleMask;
+        FastPageGroup* group = mFastPageGroups[size_t{address} >> FastGroupShift].get();
+        const size_t pageIndex = (address >> PageShift) & FastGroupPageMask;
+        uint8_t* bytes = group != nullptr && group->Pages[pageIndex].Write != nullptr
+                             ? group->Pages[pageIndex].Write + (address & PageMask)
+                             : nullptr;
+        if (bytes != nullptr && AtomicAccessible(address, bytes, size)) {
+            const std::lock_guard monitor(gExclusiveMutex);
+            ClearExclusiveGranule(granule);
+            *previous = static_cast<uint32_t>(AtomicExchangeGuest(bytes, size, replacement));
+            MarkCard(group->Cards[pageIndex]);
+            MarkCard(mWritten);
+            return true;
+        }
+        const KernelGuard kernel;
+        const std::lock_guard monitor(gExclusiveMutex);
+        ClearExclusiveGranule(granule);
+        uint64_t oldValue = 0;
+        if (!ReadSized(address, size, &oldValue, faultAddress) ||
+            !WriteSized(address, size, replacement, faultAddress)) {
+            return false;
+        }
+        *previous = static_cast<uint32_t>(oldValue);
+        return true;
+    }
     uint64_t oldValue = 0;
     if (previous == nullptr || !ReadSized(address, size, &oldValue, faultAddress) ||
         !WriteSized(address, size, replacement, faultAddress)) {
@@ -1112,5 +1340,19 @@ bool NativeA32Memory::AtomicSwap(uint32_t address, uint8_t size,
     *previous = static_cast<uint32_t>(oldValue);
     return true;
 }
+
+namespace SecondCore {
+
+void ClearExclusive() noexcept {
+    const std::lock_guard monitor(gExclusiveMutex);
+    gExclusiveGranule[Processor()] = kNoReservation;
+}
+
+void ResetExclusiveMonitor() noexcept {
+    const std::lock_guard monitor(gExclusiveMutex);
+    gExclusiveGranule.fill(kNoReservation);
+}
+
+} // namespace SecondCore
 
 } // namespace Oot3dNativeGame

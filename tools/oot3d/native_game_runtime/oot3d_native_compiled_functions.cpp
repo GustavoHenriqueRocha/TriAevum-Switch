@@ -1,6 +1,7 @@
 #include "oot3d_native_compiled_functions.h"
 
 #include "oot3d_native_a32_memory.h"
+#include "oot3d_native_a32_second_core.h"
 #include "recomp/a32_vfp_scalar.h"
 #include "oot3d_native_whole_aot_runtime.h"
 #include "oot3d_native_mtx3x4_kernel.h"
@@ -54,8 +55,10 @@ constexpr std::array kCompiledFunctionEntryPoints{
     kAudioEffectProcessFourChannelDelay,
     kAudioEffectProcessStereoReverb,
 };
-Oot3dCompiledFunctionStats gStats;
-Oot3dWholeAotStats gWholeAotStats;
+// Per host thread: the second core's guest code (oot3d_native_a32_second_core.h)
+// counts into its own; the game thread's are the ones reported.
+thread_local Oot3dCompiledFunctionStats gStats;
+thread_local Oot3dWholeAotStats gWholeAotStats;
 constexpr uint32_t kProfileCodeBegin = 0x00100000U;
 constexpr uint32_t kProfileCodeEnd = 0x00500000U;
 constexpr size_t kProfileCodeSlots =
@@ -66,15 +69,17 @@ struct ExternalTargetCounts {
     uint32_t TimingSamples = 0;
     uint64_t TimingSampleNanoseconds = 0;
 };
+// --profile-a32-runtime only, and only the game thread records.
 std::vector<ExternalTargetCounts> gExternalTargetCounts;
-uint64_t gExternalTimingCounter = 0;
+thread_local uint64_t gExternalTimingCounter = 0;
 constexpr uint64_t kExternalTimingSampleMask = 63U;
 
 void RecordWholeAotExternalTarget(uint32_t entry,
                                   bool manualCompiled,
                                   uint64_t sampledNanoseconds) noexcept {
     if (gExternalTargetCounts.empty() || entry < kProfileCodeBegin ||
-        entry >= kProfileCodeEnd || (entry & 3U) != 0U) {
+        entry >= kProfileCodeEnd || (entry & 3U) != 0U ||
+        SecondCore::Processor() != 0U) {
         return;
     }
     auto& target =

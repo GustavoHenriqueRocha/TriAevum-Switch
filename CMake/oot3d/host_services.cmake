@@ -228,6 +228,16 @@ target_link_libraries(oot3d_native_a32_ctr_host_tests PRIVATE
     oot3d_native_a32_ctr_host)
 oot3d_target_defaults(oot3d_native_a32_ctr_host_tests FOLDER Tests)
 
+# Second guest core (config/second_core): exclusive monitor, cross-core waits
+# and the switch-absent path. `--stress` runs the long two-thread loops; the
+# TSan run builds this target in a -fsanitize=thread tree (SWITCH_PORT.md).
+add_executable(oot3d_native_a32_second_core_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_a32_second_core_tests.cpp
+)
+target_link_libraries(oot3d_native_a32_second_core_tests PRIVATE
+    oot3d_native_a32_ctr_host)
+oot3d_target_defaults(oot3d_native_a32_second_core_tests FOLDER Tests)
+
 # Exercise FS IPC through the same service-only host used by the product module.
 add_executable(oot3d_native_a32_ctr_fs_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_fs_tests.cpp
