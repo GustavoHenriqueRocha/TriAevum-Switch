@@ -446,6 +446,10 @@ Fluxo:
 2. Coleta no console: limpar a pasta `pgo/` do SD, jogar ~15 min nas cenas que importam (com as
    mesmas configs que o usuário vai usar, ex.: fps60 e escala 2). O jogo cria a pasta e grava os
    contadores a cada ~3 min (`__gcov_dump` + `__gcov_reset`, `oot3d_whole_aot_gcov.h`) e na saída.
+   **O pgo5 (22/10, base da p7e) foi coletado com o tour automático de 49 áreas do lab**
+   (`~/oot3d-work/bench/tour/script.jsonl` em `lab/script.jsonl`, com `config/dev_lab`): para uma coleta
+   comparável, use o mesmo roteiro, não jogo manual. Sessão curta (<3 min) fechada pelo HOME não
+   grava nada.
 3. Baixar os `.gcda` (FTP) para uma pasta da coleta.
 4. Build final: `-DOOT3D_WHOLE_AOT_PROFILE_MODE=use -DOOT3D_WHOLE_AOT_PROFILE_FILE=<pasta>`
    (`-fprofile-use -fprofile-partial-training -Wno-missing-profile -Wno-error=coverage-mismatch`).
