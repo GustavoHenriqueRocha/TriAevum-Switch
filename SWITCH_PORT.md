@@ -1290,7 +1290,12 @@ loads).
   (`LiveFrameRate`, `oot3d_native_launch_frame_rate.h`); `RunFrame` takes it at the next frame boundary,
   before the pacing policy is resolved, and the change goes through the path the F1 menu uses:
   - pacer (render thread): new target rate, deadline restarted (the switch frame is shown at once,
-    then one new period apart; nothing owed from the old rate);
+    then one new period apart; nothing owed from the old rate). With `config/pacer_vsync` (the release
+    zip ships it, so it is on) the deadlines sit on the display's vsync grid and a presentation now
+    lasts as many display periods as the target asks (`VsyncPeriodsPerPresentation`: 2 at 30 FPS, 1
+    at 60, read at every wait). It was always one period: a 30 FPS target on the anchored pacer
+    presented every vsync. Test: `oot3d_frame_spike_tests` (`TestAnchoredPacerHonoursTargetRate`:
+    2 periods at 30, 1 after the switch to 60, 2 again after switching back);
   - composition and visual sample cadence; turning interpolation on or off clears the interpolation
     history (previous/latest visual frame, prepared transition, continuity tracker), as a start does;
   - `EnsureInterpolationPacing` sees the new rate and calls `ConfigureRatePacing`

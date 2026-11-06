@@ -338,6 +338,41 @@ void TestPacerAnchorsToVsyncGrid() {
           "no reader doesn't anchor");
 }
 
+// config/pacer_vsync (shipped on) with the FPS of L3+R3 > Video: a 30 FPS
+// target waits two display periods per present, 60 one, and a live switch
+// (Configure) changes the stride at once. The anchored pacer used to wait one
+// period whatever the target, so 30 FPS presented every vsync.
+void TestAnchoredPacerHonoursTargetRate() {
+  Require(VsyncPeriodsPerPresentation(30U, kDisplayNs) == 2U, "30 FPS: two display periods");
+  Require(VsyncPeriodsPerPresentation(60U, kDisplayNs) == 1U, "60 FPS: one display period");
+  Require(VsyncPeriodsPerPresentation(90U, kDisplayNs) == 1U, "above the display: every vsync");
+  Require(VsyncPeriodsPerPresentation(0U, kDisplayNs) == 1U, "no target: one");
+  NativeRealtimeRefreshPacer pacer(true, 30U);
+  pacer.SetMaximumSpin(std::chrono::nanoseconds(0));
+  FakeVsync fake;
+  fake.LastNs = SteadyNs();
+  pacer.SetVsyncAnchor(&ReadFakeVsync, &fake, std::chrono::nanoseconds(0));
+  const auto strides = [&](int expected) {
+    pacer.WaitForNextRefresh(); // (re)starts the clock: at once
+    constexpr int kWaits = 10;
+    int64_t previous = SteadyNs();
+    int matching = 0;
+    for (int index = 0; index < kWaits; ++index) {
+      pacer.WaitForNextRefresh();
+      const int64_t now = SteadyNs();
+      const double periods = static_cast<double>(now - previous) / kDisplayNs;
+      previous = now;
+      if (std::abs(periods - expected) < 0.5) ++matching;
+    }
+    return matching >= kWaits - 2;
+  };
+  Require(strides(2), "anchored 30 FPS: presents two display periods apart");
+  pacer.Configure(true, 60U); // L3+R3 > Video > 60 FPS
+  Require(strides(1), "anchored 60 FPS after the switch: one display period");
+  pacer.Configure(true, 30U);
+  Require(strides(2), "anchored 30 FPS after switching back: two display periods");
+}
+
 // config/early_frame_slot: the pacer announces the deadline once per wait, before
 // sleeping (the frame slot is returned there); when off or late, the
 // announcement is "now" and is never skipped (otherwise the slot would only return at the end).
@@ -402,6 +437,7 @@ int main(int argc, char **argv) {
   TestClassificationRingAndFormat();
   TestDriftDisappearsWithVsyncPacer(report);
   TestPacerAnchorsToVsyncGrid();
+  TestAnchoredPacerHonoursTargetRate();
   TestPacerAnnouncesDeadlineBeforeWait();
   TestDeko3dPresentFieldsAtTheEnd();
   if (gFailures != 0) {

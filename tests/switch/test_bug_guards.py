@@ -63,6 +63,10 @@ GUARDS = [
           r'void Deko3dSetGrassFrameRate\(bool fps60\) \{.*?ApplyFrameRate\(\*state, fps60\);.*?'
           r'state->SlotInstances = Oot3d::GrassSwitchStreamCapacity\(\);',
           test="oot3d_grass_switch_tests (FrameRateSwitchesLiveAsAStartWould)"),
+    Guard("config/pacer_vsync (shipped on): the anchored pacer waited one display period whatever the target, so 30 FPS presented every vsync",
+          "tools/oot3d/native_game_runtime/oot3d_native_presentation_pacer.cpp",
+          r'std::max\(periods, 1U\) \*\s+VsyncPeriodsPerPresentation\(mTargetRateHz, vsync\.PeriodNs\);',
+          test="oot3d_frame_spike_tests (TestAnchoredPacerHonoursTargetRate)"),
     # --- 05/11: optional deko3d lighting, config/lighting (gfx_deko3d_lighting.h) ---
     Guard("0.1.2-test.2: Scene lights said 'needs the Modern lighting model' under deko3d per-pixel (the model lived outside the graphics settings)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",

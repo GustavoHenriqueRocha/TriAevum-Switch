@@ -38,6 +38,7 @@
 // Clock: armGetSystemTick (cntpct_el0); never cntvct_el0 (Data Abort on
 // Horizon).
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -153,6 +154,16 @@ private:
   const double grid = static_cast<double>(lastVsyncNs) + offsetNs;
   const double k = std::round((static_cast<double>(deadlineNs) - grid) / periodNs);
   return static_cast<int64_t>(std::llround(grid + k * periodNs));
+}
+
+// Display periods one presentation at `targetRateHz` lasts on the anchored
+// grid: 2 at 30 FPS on the 60 Hz display, 1 at 60. Never 0 (a target above
+// the display rate presents every vsync); no target or no period: 1.
+[[nodiscard]] inline uint32_t VsyncPeriodsPerPresentation(uint32_t targetRateHz,
+                                                          double periodNs) {
+  if (targetRateHz == 0U || !(periodNs > 0.0)) return 1U;
+  const double periods = 1.0e9 / static_cast<double>(targetRateHz) / periodNs;
+  return static_cast<uint32_t>(std::max<long long>(1, std::llround(periods)));
 }
 
 // Lock-free (seqlock) publication of the snapshot: written by one thread,

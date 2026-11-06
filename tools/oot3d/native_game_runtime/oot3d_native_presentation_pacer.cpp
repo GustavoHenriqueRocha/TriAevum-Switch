@@ -157,9 +157,16 @@ void NativeRealtimeRefreshPacer::WaitForNextRefresh(
     if (anchored) {
         // The display's period, and the deadline back on its grid: the
         // CPU clock's 1/60 s drifted against the display (~0.2% slower),
-        // and every lap of the phase put one frame past a vsync.
+        // and every lap of the phase put one frame past a vsync. One
+        // presentation lasts as many display periods as the target rate
+        // asks (2 at 30 FPS, 1 at 60; read every wait, so a live switch of
+        // the FPS applies at once). It was always one: with config/pacer_vsync
+        // (shipped on) a 30 FPS target presented every vsync.
+        const uint32_t displayPeriods =
+            std::max(periods, 1U) *
+            VsyncPeriodsPerPresentation(mTargetRateHz, vsync.PeriodNs);
         period = std::chrono::nanoseconds(static_cast<int64_t>(
-            std::llround(vsync.PeriodNs * static_cast<double>(std::max(periods, 1U)))));
+            std::llround(vsync.PeriodNs * static_cast<double>(displayPeriods))));
         mNextDeadline += period;
         const int64_t deadlineNs =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
