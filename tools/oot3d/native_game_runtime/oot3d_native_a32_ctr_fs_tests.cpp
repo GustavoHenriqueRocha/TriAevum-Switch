@@ -296,9 +296,32 @@ void TestFsSdkInitializeAndPriority() {
             "InitializeWithSdkVersion was not served");
     f.Call(f.Fs, {0x08610042U, 0x0F0001C8U, 0x4002U, 0U});
     Require(f.State.r[0] == 0xD9001830U, "InitializeWithSdkVersion without PID descriptor");
+    // GetPriority (0x0863) devolve o valor do SetPriority; sem SetPriority,
+    // 0xFFFFFFFF como no Azahar. O valor vai no savestate.
+    TestFs freshFs;
+    FsFixture fresh(freshFs);
+    fresh.Call(fresh.Fs, {0x08630000U});
+    Require(fresh.State.r[0] == 0U && fresh.Word(0) == 0x08630080U &&
+                fresh.Word(1) == 0U && fresh.Word(2) == 0xFFFFFFFFU,
+            "GetPriority before SetPriority");
     f.Call(f.Fs, {0x08620040U, 0x10U});
     Require(f.State.r[0] == 0U && f.Word(0) == 0x08620040U && f.Word(1) == 0U,
             "SetPriority was not served");
+    f.Call(f.Fs, {0x08630000U});
+    Require(f.State.r[0] == 0U && f.Word(0) == 0x08630080U && f.Word(1) == 0U &&
+                f.Word(2) == 0x10U,
+            "GetPriority did not return the SetPriority value");
+    const auto snapshot = f.Host.CaptureState();
+    f.Call(f.Fs, {0x08620040U, 0x20U});
+    std::string error;
+    Require(f.Host.RestoreState(snapshot, f.Process, &error), error);
+    f.Call(f.Fs, {0x08630000U});
+    Require(f.Word(2) == 0x10U, "FS priority was not restored from the savestate");
+    auto oldSnapshot = snapshot;
+    oldSnapshot.erase("fs_priority");
+    Require(f.Host.RestoreState(oldSnapshot, f.Process, &error), error);
+    f.Call(f.Fs, {0x08630000U});
+    Require(f.Word(2) == 0xFFFFFFFFU, "savestate without FS priority");
 }
 
 void TestFullHistoryIntentionalWait() {

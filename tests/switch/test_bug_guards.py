@@ -602,10 +602,11 @@ GUARDS = [
           r'\{CtrLibraryNative::AeabiF2lz, "__aeabi_f2lz", kRvctAeabiF2lzWords\}.*?'
           r'if \(negative \? bits > 0xDF000000U : exponent >= 0xBEU\)',
           "oot3d_native_a32_ctr_host_tests (TestRvctLibraryNatives)"),
-    Guard("MK7 caía no err:f: fs:USER InitializeWithSdkVersion/SetPriority sem HLE",
+    Guard("MK7 caía no err:f: fs:USER InitializeWithSdkVersion/SetPriority/GetPriority sem HLE",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
           r'if \(event\.Detail == kFsInitializeWithSdkVersionRequest\) \{.*?'
-          r'if \(event\.Detail == kFsSetPriorityRequest &&',
+          r'if \(event\.Detail == kFsSetPriorityRequest &&.*?mFsPriority = priority;.*?'
+          r'if \(event\.Detail == kFsGetPriorityRequest &&.*?Write32\(commandBuffer \+ 8U, mFsPriority\)',
           "oot3d_native_a32_ctr_fs_tests (TestFsSdkInitializeAndPriority)"),
     Guard("rotinas nativas da biblioteca do RVCT ligadas no OoT3D (só no título genérico)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",

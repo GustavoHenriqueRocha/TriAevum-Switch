@@ -252,6 +252,7 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
         {"gsp_shared_memory", objectId(mGspSharedMemory)},
         {"gsp_thread_id", mGspThreadId},
         {"gsp_priority", mGspPriority},
+        {"fs_priority", mFsPriority},
         {"gsp_priority_with_rights", mGspPriorityWithRights},
         {"gsp_screens", std::move(screens)},
         {"lcd_force_black", mLcdForceBlack},
@@ -656,6 +657,7 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
             object(state.at("gsp_shared_memory").get<uint32_t>());
         staged.mGspThreadId = state.at("gsp_thread_id").get<uint32_t>();
         staged.mGspPriority = state.at("gsp_priority").get<uint32_t>();
+        staged.mFsPriority = state.value("fs_priority", 0xFFFFFFFFU);
         staged.mGspPriorityWithRights =
             state.at("gsp_priority_with_rights").get<uint32_t>();
         const auto& screens = state.at("gsp_screens");
