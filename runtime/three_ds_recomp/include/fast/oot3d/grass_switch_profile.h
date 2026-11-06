@@ -62,10 +62,15 @@ struct GrassSwitchProfile {
     uint32_t MaxVisibleInstances = 8000U;
 };
 
-// 60 fps (config/fps60 on): ≤8k visible, full density to 700 units, thinning
-// to 3000. 30 fps: the frame has 33 ms, so 22k visible, full density to 1200,
-// thinning to 4000.
+// 60 fps (60 FPS presented): ≤8k visible, full density to 700 units,
+// thinning to 3000. 30 fps: the frame has 33 ms, so 22k visible, full density
+// to 1200, thinning to 4000. L3+R3 > Video > FPS switches between them while
+// the game runs (Deko3dSetGrassFrameRate).
 [[nodiscard]] GrassSwitchProfile SelectGrassSwitchProfile(bool fps60) noexcept;
+
+// Instances one stream slot holds: the larger visible cap of the two rates,
+// so a switch of the FPS never needs new stream memory.
+[[nodiscard]] uint32_t GrassSwitchStreamCapacity() noexcept;
 
 // The profile's generation and distances on top of the product preset (its
 // source rules and appearance stay). Quality becomes Custom.

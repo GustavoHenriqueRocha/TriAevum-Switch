@@ -244,16 +244,18 @@ int main(int argc, char** argv) {
             const_cast<char*>(
                 "sdmc:/switch/oot3dre/config/oot3d_controls.json"),
             const_cast<char*>("--gameplay-timing"),
-            const_cast<char*>("native30_no_interpolation"),
+            const_cast<char*>("native30_interpolated"),
             const_cast<char*>("--presentation-rate"),
             const_cast<char*>("30"),
         };
         // config/fps60: game logic stays at 30 steps per second and the
         // runtime interpolates an extra frame between steps (60 Hz output).
         // Doubles the GPU and render-thread work; pair it with a lower
-        // config/resolution_scale.
+        // config/resolution_scale. Both rates launch native30_interpolated
+        // (at 30 it presents Original30, nothing interpolated): the timing
+        // contract must allow interpolation so L3+R3 > Video > FPS can
+        // switch to 60 while the game runs (oot3d_native_launch_frame_rate.h).
         if (std::ifstream("sdmc:/switch/oot3dre/config/fps60")) {
-            homebrewArguments[18] = const_cast<char*>("native30_interpolated");
             homebrewArguments[20] = const_cast<char*>("60");
         }
         // config/atlas_overrides.o3tu is built on the console from the

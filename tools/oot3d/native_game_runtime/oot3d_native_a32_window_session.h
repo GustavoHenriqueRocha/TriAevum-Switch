@@ -51,6 +51,7 @@
 #include "oot3d_native_interpolation_pacing.h"
 #include "oot3d_native_reduced_replay.h"
 #include "oot3d_native_launch_frame_rate.h"
+#include "oot3d_native_rate_pacing.h"
 #include "oot3d_native_game_bootstrap.h"
 #include "oot3d_native_mass_aot.h"
 #include "oot3d_native_pcm_diagnostics.h"
@@ -558,7 +559,10 @@ private:
   Fast::Oot3d::PresentationPacingPolicy presentationPacingPolicy{};
   // Set on the Switch from the launch (ResolveLaunchFrameRateMode): it
   // replaces the graphics settings' FrameRate when pacing is resolved.
+  // L3+R3 > Video > FPS replaces it at a frame boundary (LiveFrameRate);
+  // liveFrameRateRevision is the last choice applied (game thread).
   std::optional<Fast::Oot3d::FrameRateMode> launchFrameRateMode;
+  uint64_t liveFrameRateRevision = 0U;
   Fast::Oot3d::FrameRateMode EffectiveFrameRateMode() const;
   Fast::Renderer3ds::PicaFrameCompositionPolicy frameCompositionPolicy{};
   std::optional<Oot3dNativeGame::NativeRealtimeRefreshPacer> realtimePacerStorage;
@@ -771,6 +775,11 @@ private:
     double CadenceHoldSeconds = 0.0;
     double GamePairP90Ms = 0.0;
     uint64_t SupersededFrames = 0;
+    // The rate the governors are configured for and the cadence mode in
+    // effect (config/fps60_mode at 60, legacy at 30): both change with
+    // L3+R3 > Video > FPS.
+    uint32_t RateHz = 0U;
+    Oot3dNativeGame::Fps60Mode CadenceMode = Oot3dNativeGame::Fps60Mode::Legacy;
     // Dynamic resolution (config/dynamic_resolution): on, current and lowest
     // scale, the controller's pair average and its changes.
     bool DrsActive = false;

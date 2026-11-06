@@ -47,6 +47,9 @@ add_executable(triaevum_presentation_clock_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_frame_rate_tests.cpp
     tools/triaevum_release/tests/presentation_clock_main.cpp)
 target_link_libraries(triaevum_presentation_clock_tests PRIVATE oot3d_native_game_runtime)
+# oot3d_native_launch_frame_rate.h reads the FrameRate modes of the graphics settings.
+target_include_directories(triaevum_presentation_clock_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/runtime/three_ds_recomp/include)
 oot3d_target_defaults(triaevum_presentation_clock_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
 # Paced 60 Hz interpolation (header-only governor).

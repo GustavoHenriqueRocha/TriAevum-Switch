@@ -962,8 +962,9 @@ loads).
   only entered the contract and never reached the pacer. With `config/fps60` the console kept presenting
   30 frames/s with two 60 Hz refreshes each and never drew the interpolated sample. Now, on
   Switch, `ResolveLaunchFrameRateMode` (`oot3d_native_launch_frame_rate.h`) converts the launch
-  timing+rate into the pacing mode (`native30_interpolated`+60 → `Interpolated2x`;
-  `native30_no_interpolation` → `Original30`, same as the previous default). Test:
+  timing+rate into the pacing mode (`native30_interpolated`+60 → `Interpolated2x`; +30 →
+  `Original30`, same as the previous default). Since 06/11 the 30 FPS launch is also
+  `native30_interpolated` (see "FPS: L3+R3 > Video, applied at once"). Test:
   `oot3d_native_frame_rate_tests.cpp` (`triaevum_presentation_clock_tests`).
   Caution: the interpolated sample redraws the whole frame (twice the GPU); at 720p it does not fit.
 - **`config/gl_lean`** (on by default; `0` disables for A/B), exact GL backend savings:
@@ -1275,6 +1276,51 @@ loads).
   presentation scheduler), `--` when none was owed (loading screens). Text formatted only when a
   window closes (`oot3d_fps_counter.h`, tests in `oot3d_fps_counter_tests.cpp`).
 - Needs ImGui on the window: with deko3d and `config/serial_presentation` nothing ImGui draws shows.
+
+### FPS: L3+R3 > Video, applied at once (`config/fps60`, 06/11)
+- **Was a bug, not a limit.** "30 FPS" and "60 FPS (interpolated)" both run the game at 30 steps a
+  second (60 guest refreshes, the A32 update rate 2, the same gameplay clock); only the presentation
+  differs (30 Hz `Original30`, or 60 Hz `Interpolated2x` with an interpolated picture between steps).
+  `Enhanced60` (60 Hz simulation) is a different mode, never chosen by the Switch launch. The pacing
+  mode was fixed at launch (`launchFrameRateMode`) and the 30 FPS launch used the
+  `native30_no_interpolation` contract, which forbids interpolation, so the menu could only write
+  `config/fps60`. The PC's F1 menu already changed the same mode while the game runs.
+- **Now:** the Switch launches `native30_interpolated` at both rates (30 → `Original30`, nothing
+  interpolated). The Video tab still creates/removes `config/fps60` and publishes the choice
+  (`LiveFrameRate`, `oot3d_native_launch_frame_rate.h`); `RunFrame` takes it at the next frame boundary,
+  before the pacing policy is resolved, and the change goes through the path the F1 menu uses:
+  - pacer (render thread): new target rate, deadline restarted (the switch frame is shown at once,
+    then one new period apart; nothing owed from the old rate);
+  - composition and visual sample cadence; turning interpolation on or off clears the interpolation
+    history (previous/latest visual frame, prepared transition, continuity tracker), as a start does;
+  - `EnsureInterpolationPacing` sees the new rate and calls `ConfigureRatePacing`
+    (`oot3d_native_rate_pacing.h`): in-between governor (pair budget 33.3 ms at 60, 66.7 at 30; learned
+    step cost and ratios forgotten), dynamic resolution (same pair budget, back to the top scale, the
+    hidden-GPU bias unchanged at 3 ms, render-busy average reset), cadence governor (`config/fps60_mode`
+    at 60, legacy at 30; lock, miss window, game pairs and the last present forgotten). Only the
+    cumulative perf counters carry on;
+  - grass (deko3d, `config/grass`): the other rate's profile (`Deko3dSetGrassFrameRate`: distances and
+    visible cap, through the same code as the start). The instance stream is sized for the larger
+    cap (22000, 2.75 MiB in 4 slots, was 1 MiB at 60).
+- **Unchanged by the switch:** the guest refresh clock (`NativePresentationScheduler`, 60 refreshes a
+  second at both rates, at most two per host frame: no catch-up burst), audio (DSP per guest refresh;
+  the stretch follows the queue, not the presentation), the A32 frame pacing writes, the save-state
+  timing field (`native30_interpolated`; a state loads at either FPS, only a 30/60 Hz simulation
+  mismatch is refused, as before).
+- **Logs:** a `TRIAEVUM_FRAME_RATE rate_hz= pair_budget_ms= decision_budget_ms= fps60_mode=
+  interpolation=` line at each switch; perf.txt windows show the new `pair_budget_ms`/
+  `decision_budget_ms` and, in `cadence:`, `fps60_mode` (the mode in effect: legacy at 30) and the new
+  `rate_hz`; hitches and spikes already use the live rate. `boot-status.txt` follows the current
+  `presentation_rate_hz`/`visual_interpolation`. A perf window that contains the switch mixes both rates.
+- Tests: `oot3d_native_cadence_governor_tests` (`TestLiveRateSwitchMatchesFreshStart`: a session that
+  ran heavy at one rate, switched, decides exactly as a fresh start at the other for light and heavy
+  loads, both ways; `TestLiveRateSwitchFirstPresents`), `triaevum_presentation_clock_tests` (the
+  choice, the simulation contract at both rates, no catch-up refreshes, pacer restart),
+  `oot3d_grass_switch_tests` (`FrameRateSwitchesLiveAsAStartWould`) and the `FPS in L3+R3 > Video`
+  guards.
+- To check on the console: switch back and forth in Kokiri Forest and in the first room of the Forest
+  Temple: the picture changes rate within a frame, no speed-up or stutter of the game or the music;
+  perf.txt windows after the switch show `decision_budget_ms` 33.3 (60) / 66.7 (30) and `rate_hz` 60/30.
 
 ### HD texture packs: L3+R3 > Video (`config/texture_pack`, `config/texture_pack_scale`)
 - **HUD:** while HD textures are on, the HUD's textures (drawn by the UI renderer, not PICA) resolve
@@ -1767,10 +1813,11 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   fragment shader) at 40/m2, 14-30 units tall; within 4 m (400 units) the tuft is drawn as its 5
   blades, one segment each. At most 96k tufts per placement and 12 MiB of placements kept (the least
   recently drawn go first; Hyrule Field at 40/m2 is ~11 MB).
-  - `config/fps60` on: at most 8000 visible; full density to 700 units, then thinning with distance
+  - 60 FPS: at most 8000 visible; full density to 700 units, then thinning with distance
     (a tuft stays while its stable visibility value is below (700 / distance)², about the same count
     per screen area) to none at 3000, shrinking from 2400.
   - 30 fps: at most 22000 visible; full density to 1200, thinning to 4000, shrinking from 3200.
+    The FPS in L3+R3 > Video switches the profile at once (the stream holds 22000 at both rates).
   - (0.1.2-test.2 cut at 1200/2000 units: the title demo's far camera drew nothing at 60 fps.)
 - **Threads:** sources are read on the render thread (as before). Placements build on one service
   worker. Culling per cluster and writing the 32-byte instances straight into GPU memory runs on
@@ -1986,7 +2033,8 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   `legacy` (exactly the previous behavior). Options after the mode: `adaptive misses=3 window=60
   hold=2 max_hold=16 relapse=10 game=0.9 gpu=0.9`.
 - **perf.txt**, new `cadence:` block (at the end of the line before `gl_textures_live`, without touching the
-  existing fields): `fps60_mode lock present_1/2/3/4p` (presentations N refreshes after the previous one)
+  existing fields): `fps60_mode lock present_1/2/3/4p` (presentations N refreshes after the previous one;
+  since 06/11 `fps60_mode` is the mode in effect, legacy at 30, followed by `rate_hz`)
   `hold_1/2/3/4p` (refreshes each new image stayed on screen) `repeats cadence_switches` (hold
   changes between consecutive images) `late_steps superseded_frames` (steps never shown) `lock_changes
   lock30_ms hold_s game_pair_ms game_pair_p90_ms`. `perf_report.py` summarizes the cadence and shows

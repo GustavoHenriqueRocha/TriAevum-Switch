@@ -6,8 +6,9 @@
 // fps60 (present: logic at 30, interpolated to 60); upscaler and sharpen
 // (FSR EASU + RCAS 0.2 without them) and anisotropy (4x without it,
 // gfx_opengl_pica_post.h). The debug menu's video
-// tab (oot3d_video_settings_panel.cpp) writes the same files; like any edit
-// of them, the change applies on the next start of the game.
+// tab (oot3d_video_settings_panel.cpp) writes the same files; the frame rate
+// applies at once (LiveFrameRate, oot3d_native_launch_frame_rate.h), the
+// rest, like any edit of the files, on the next start of the game.
 
 #include <algorithm>
 #include <cmath>

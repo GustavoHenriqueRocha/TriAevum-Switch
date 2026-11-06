@@ -158,8 +158,10 @@ The guest writes `sdmc:/switch/oot3dre/boot-status.txt`. A valid running receipt
 must report 12,419 whole-AOT functions, three host boundaries, zero residual A32
 entries and `stage=runtime_running`. The launcher additionally requires the
 effective Switch product contract: `ui_profile=topscreen`,
-`gameplay_timing=native30_no_interpolation`, `presentation_rate_hz=30`,
-`visual_interpolation=0`, `control_profile=controller` and
+`gameplay_timing=native30_interpolated` (30 Hz simulation that may
+interpolate: the FPS switches between 30 and 60 while the game runs),
+`presentation_rate_hz=30`, `visual_interpolation=0` (the default 30 FPS),
+`control_profile=controller` and
 `topscreen_211_assets=1`. The current runner also requires the 128-block
 whole-AOT budget to have produced block-limit exits and requires the OpenGL
 geometry cache to report at least one persistent draw, upload and resident

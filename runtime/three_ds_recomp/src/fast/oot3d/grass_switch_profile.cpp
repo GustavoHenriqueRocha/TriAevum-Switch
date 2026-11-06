@@ -62,6 +62,11 @@ GrassSwitchProfile SelectGrassSwitchProfile(bool fps60) noexcept {
     return profile;
 }
 
+uint32_t GrassSwitchStreamCapacity() noexcept {
+    return std::max(SelectGrassSwitchProfile(false).MaxVisibleInstances,
+                    SelectGrassSwitchProfile(true).MaxVisibleInstances);
+}
+
 void ApplyGrassSwitchProfile(const GrassSwitchProfile& profile, InteractiveGrassSettings& settings) noexcept {
     settings.Quality = GrassQuality::Custom;
     settings.MaxInstancesPerRoom = profile.MaxAnchorsPerPlacement;

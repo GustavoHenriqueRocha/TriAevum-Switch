@@ -89,7 +89,7 @@ if [[ ! -f ${receipt} ]] ||
    ! grep -qx 'host_boundaries=3' "${receipt}" ||
    ! grep -qx 'residual_a32=0' "${receipt}" ||
    ! grep -qx 'ui_profile=topscreen' "${receipt}" ||
-   ! grep -qx 'gameplay_timing=native30_no_interpolation' "${receipt}" ||
+   ! grep -qx 'gameplay_timing=native30_interpolated' "${receipt}" ||
    ! grep -qx 'presentation_rate_hz=30' "${receipt}" ||
    ! grep -qx 'visual_interpolation=0' "${receipt}" ||
    ! grep -qx 'control_profile=controller' "${receipt}" ||

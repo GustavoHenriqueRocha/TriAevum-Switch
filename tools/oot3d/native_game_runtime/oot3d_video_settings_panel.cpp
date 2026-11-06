@@ -1,6 +1,7 @@
 #include "oot3d_video_settings_panel.h"
 #include "oot3d_video_settings.h"
 #include "oot3d_fps_counter.h"
+#include "oot3d_native_launch_frame_rate.h"
 #include "fast/backends/gfx_deko3d_lighting.h"
 #include "fast/oot3d/graphics_settings_runtime.h"
 #include "oot3d/renderer/azahar_texture_pack_settings.h"
@@ -80,9 +81,10 @@ public:
     changed |= ScaleCombo("Handheld resolution", mSettings.HandheldScale, kHandheld);
     const char *const rates[] = {"30 FPS", "60 FPS (interpolated)"};
     int rate = mSettings.Fps60 ? 1 : 0;
+    bool rateChanged = false;
     if (ImGui::Combo("FPS", &rate, rates, 2)) {
       mSettings.Fps60 = rate == 1;
-      changed = true;
+      changed = rateChanged = true;
     }
     const char *const upscalers[] = {"FSR + sharpening (default)", "FSR without sharpening",
                                      "Linear (lightest)"};
@@ -98,12 +100,20 @@ public:
       changed = true;
     }
     if (changed) mError = mSettings.Save(mConfig);
+    // Both rates simulate at 30 Hz: the game applies the new one at its next
+    // frame (oot3d_native_launch_frame_rate.h); config/fps60 keeps it.
+    if (rateChanged) LiveFrameRate().Publish(mSettings.Fps60);
+    // The rest (resolution, upscaling, filter) is read at start.
+    VideoSettings atStart = mSettings;
+    atStart.Fps60 = mBoot.Fps60;
     if (!mError.empty())
       ImGui::TextWrapped("Could not write config/%s.", mError.c_str());
-    else if (mSettings != mBoot)
-      ImGui::TextUnformatted("Saved. Close and reopen the game to apply.");
+    else if (atStart != mBoot)
+      ImGui::TextUnformatted("Saved. Close and reopen the game to apply the resolution, "
+                             "upscaling and filter.");
     else
       ImGui::TextDisabled("Values in use.");
+    ImGui::TextDisabled("FPS applies at once; the game keeps 30 steps a second either way.");
     // Applies at once (RunFrame reads the flag every frame); the file keeps
     // it for the next start.
     ImGui::Separator();
@@ -167,7 +177,7 @@ private:
 
   // config/grass (SWITCH_PORT.md, "Grass on deko3d"): off, measure only
   // (placements and the grass: line, nothing drawn) or drawn. Read at start,
-  // so it applies on the next start, like the frame rate.
+  // so it applies on the next start (its budgets follow the FPS at once).
   void DrawGrass() {
     ImGui::Separator();
     using Fast::Oot3d::GrassSwitchMode;

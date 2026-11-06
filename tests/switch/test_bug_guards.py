@@ -28,6 +28,41 @@ class Guard:
 
 
 GUARDS = [
+    # --- 06/11: L3+R3 > Video > FPS (30 <-> 60 interpolated) applied only after a restart ---
+    # Both choices simulate at 30 Hz; the launch fixed the pacing mode and the 30 FPS launch's
+    # native30_no_interpolation contract forbade interpolation, so the menu only wrote config/fps60.
+    Guard("FPS in L3+R3 > Video applied only after restarting: the menu publishes it, the frame loop applies it at the next frame boundary",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'TakeLiveFrameRateMode\(\s*Oot3dNativeGame::LiveFrameRate\(\), liveFrameRateRevision,.*?'
+          r'launchFrameRateMode = \*live;.*?'
+          r'ResolvePresentationPacingPolicy\(EffectiveFrameRateMode\(\)\)',
+          test="triaevum_presentation_clock_tests (live frame rate choice, no catch-up across the switch)"),
+    Guard("FPS in L3+R3 > Video: the Switch launches native30_interpolated at both rates (30 FPS presents Original30)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'const_cast<char\*>\("--gameplay-timing"\),\s+const_cast<char\*>\("native30_interpolated"\),',
+          forbid=r'"native30_no_interpolation"'),
+    Guard("FPS in L3+R3 > Video: the menu publishes the choice (and still writes config/fps60)",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'if \(changed\) mError = mSettings\.Save\(mConfig\);.*?'
+          r'if \(rateChanged\) LiveFrameRate\(\)\.Publish\(mSettings\.Fps60\);'),
+    Guard("FPS switched live: every governor starts over at the new rate (no lock, estimate or interval of the old one)",
+          "tools/oot3d/native_game_runtime/oot3d_native_cadence_governor.h",
+          r'void Configure\(const Fps60ModeConfig &config, double refreshMs\) noexcept \{.*?'
+          r'mHasPresent = false;.*?mOverheadEmaMs = 0\.0;\s+\}',
+          test="oot3d_native_cadence_governor_tests (TestLiveRateSwitchMatchesFreshStart, TestLiveRateSwitchFirstPresents)"),
+    Guard("FPS switched live: the in-between governor forgets the step cost of the old rate",
+          "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
+          r'mMeasured = \{\};\s+mStepCostMs = 0\.0;',
+          test="oot3d_native_cadence_governor_tests (TestLiveRateSwitchMatchesFreshStart)"),
+    Guard("FPS switched live: the render thread reconfigures pacing, DRS and cadence through one function",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'drsRenderBusyAverageMs = 0\.0;.*?Oot3dNativeGame::ConfigureRatePacing\(rateHz, pacing, interpolationPacing,',
+          test="oot3d_native_cadence_governor_tests (TestLiveRateSwitchMatchesFreshStart)"),
+    Guard("FPS switched live: grass takes the new rate's budgets; its stream memory holds both caps",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'void Deko3dSetGrassFrameRate\(bool fps60\) \{.*?ApplyFrameRate\(\*state, fps60\);.*?'
+          r'state->SlotInstances = Oot3d::GrassSwitchStreamCapacity\(\);',
+          test="oot3d_grass_switch_tests (FrameRateSwitchesLiveAsAStartWould)"),
     # --- 05/11: optional deko3d lighting, config/lighting (gfx_deko3d_lighting.h) ---
     Guard("0.1.2-test.2: Scene lights said 'needs the Modern lighting model' under deko3d per-pixel (the model lived outside the graphics settings)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",

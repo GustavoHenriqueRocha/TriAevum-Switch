@@ -253,9 +253,10 @@ void NativeA32WindowSession::Setup() {
           launch.GameplayTiming, launch.PresentationRateHz);
   savestateCompatibility.GameplayTiming = frameRateContract.Mode;
 #if defined(__SWITCH__)
-  gSwitchVisualInterpolation = frameRateContract.VisualInterpolationAllowed;
   // The homebrew arguments always name the timing and presentation rate
   // (config/fps60); they, not the graphics settings, set the pacing here.
+  // L3+R3 > Video > FPS replaces it while the game runs (RunFrame,
+  // TakeLiveFrameRateMode).
   launchFrameRateMode = Oot3dNativeGame::ResolveLaunchFrameRateMode(
       launch.GameplayTiming, launch.PresentationRateHz);
 #endif
@@ -1509,6 +1510,11 @@ void NativeA32WindowSession::Setup() {
   // changes against its own copies.
   guestCompositionPolicy = frameCompositionPolicy;
   guestInterpolationEnabled = visualInterpolationEnabled;
+#if defined(__SWITCH__)
+  // The receipt's visual_interpolation: what the start presents (the launch
+  // contract allows it at both rates since the FPS switches live).
+  gSwitchVisualInterpolation = visualInterpolationEnabled;
+#endif
   lastPresentationTime = std::chrono::steady_clock::now();
   picaPresentationScheduler.SetTimingEnabled(launch.ExtendedDiagnostics);
 #if defined(__SWITCH__)

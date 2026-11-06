@@ -198,67 +198,74 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
     }
     return;
   }
+  // First call, or a new rate (L3+R3 > Video > FPS applied at a frame
+  // boundary, or the PC's F1 menu): every governor starts over as at a start
+  // at this rate (oot3d_native_rate_pacing.h).
   const bool firstConfiguration = !interpolationPacingConfigured;
   interpolationPacingConfigured = true;
   interpolationPacingRateHz = rateHz;
   const auto &options = interpolationPacingOptions;
-  const float baseScale =
+  Oot3dNativeGame::RatePacingConfig pacing;
+  pacing.BaseScale =
       api.PicaNamespaceResolutionScale(kVisualInterpolationRenderTargetNamespace);
-  Oot3dNativeGame::InterpolationPacingConfig config;
+  auto &config = pacing.Interpolation;
   config.KeepGameSpeed = options.KeepGameSpeed;
   config.ReducedScale = Oot3dNativeGame::ParseInterpolationReducedScale(
-      options.ReducedScaleText, baseScale);
+      options.ReducedScaleText, pacing.BaseScale);
   if (const auto margin =
           Oot3dNativeGame::ParseInterpolationMarginMs(options.MarginText))
     config.MarginMs = *margin;
   config.ReducedMode = options.ReducedAlways
                            ? Oot3dNativeGame::InterpolationReducedScaleMode::Always
                            : Oot3dNativeGame::InterpolationReducedScaleMode::Auto;
-  const bool reducedAvailable =
+  pacing.ReducedAvailable =
       config.ReducedScale > 0.0F &&
       api.SetPicaNamespaceResolutionScale(kReducedVisualRenderTargetNamespace,
                                           config.ReducedScale);
-  // Two presentation periods: one step frame and one in-between frame.
-  interpolationPacing.Configure(config, 2000.0 / static_cast<double>(rateHz),
-                                baseScale, reducedAvailable);
+  const bool reducedAvailable = pacing.ReducedAvailable;
+  const float baseScale = pacing.BaseScale;
   // Dynamic resolution (config/dynamic_resolution, off by default): between
   // the backend's scale and the configured lowest one, on the same pair
-  // budget (oot3d_native_dynamic_resolution.h).
+  // budget (oot3d_native_dynamic_resolution.h). Back at the top scale.
+  auto &backendScale = Fast::PicaGlDynamicScale::gState;
+  pacing.Resolution.MaxScale = backendScale.MaxScale;
+  pacing.Resolution.MinScale = Oot3dNativeGame::ParseDynamicResolutionMinScale(
+      options.DynamicResolutionText, pacing.Resolution.MaxScale);
+  dynamicResolutionActive = options.DynamicResolution &&
+                            backendScale.Supported &&
+                            pacing.Resolution.MinScale < pacing.Resolution.MaxScale;
+  backendScale.Requested = 0.0F;
+  drsRenderBusyAverageMs = 0.0;
+  // Presentation cadence (config/fps60_mode): legacy at any rate but 60.
+  pacing.Cadence = options.Fps60Mode;
+  Oot3dNativeGame::ConfigureRatePacing(rateHz, pacing, interpolationPacing,
+                                       dynamicResolution, cadenceGovernor);
+  cadenceGovernorConfigured = true;
+  cadenceLockedThirty.store(false, std::memory_order_relaxed);
+  if (options.DynamicResolution)
+    std::fprintf(stderr,
+                 "TRIAEVUM_DYNAMIC_RESOLUTION active=%d supported=%d "
+                 "max=%.2f min=%.2f budget_ms=%.1f\n",
+                 dynamicResolutionActive ? 1 : 0,
+                 backendScale.Supported ? 1 : 0, pacing.Resolution.MaxScale,
+                 dynamicResolution.Config().MinScale,
+                 dynamicResolution.BudgetMs());
   {
-    auto &backendScale = Fast::PicaGlDynamicScale::gState;
-    Oot3dNativeGame::DynamicResolutionConfig drsConfig;
-    drsConfig.MaxScale = backendScale.MaxScale;
-    drsConfig.MinScale = Oot3dNativeGame::ParseDynamicResolutionMinScale(
-        options.DynamicResolutionText, drsConfig.MaxScale);
-    dynamicResolutionActive = options.DynamicResolution &&
-                              backendScale.Supported &&
-                              drsConfig.MinScale < drsConfig.MaxScale;
-    dynamicResolution.Configure(drsConfig,
-                                2000.0 / static_cast<double>(rateHz));
-    backendScale.Requested = 0.0F;
-    if (options.DynamicResolution)
-      std::fprintf(stderr,
-                   "TRIAEVUM_DYNAMIC_RESOLUTION active=%d supported=%d "
-                   "max=%.2f min=%.2f\n",
-                   dynamicResolutionActive ? 1 : 0,
-                   backendScale.Supported ? 1 : 0, drsConfig.MaxScale,
-                   dynamicResolution.Config().MinScale);
     std::lock_guard lock(interpolationPerfMutex);
     interpolationPerf.DrsActive = dynamicResolutionActive;
     interpolationPerf.DrsMinScale = dynamicResolution.Config().MinScale;
+    interpolationPerf.RateHz = rateHz;
+    interpolationPerf.CadenceMode = cadenceGovernor.Config().Mode;
   }
-  // Presentation cadence (config/fps60_mode): its lock only means something
-  // at 60 (at 30 every picture holds two refreshes by design).
-  auto cadenceConfig = options.Fps60Mode;
-  if (rateHz != 60U)
-    cadenceConfig.Mode = Oot3dNativeGame::Fps60Mode::Legacy;
-  cadenceGovernor.Configure(cadenceConfig,
-                            1000.0 / static_cast<double>(rateHz));
-  cadenceGovernorConfigured = true;
-  cadenceLockedThirty.store(false, std::memory_order_relaxed);
-  // Single in-between frames are dropped only in legacy; adaptive drops
-  // them as a whole (the locked 30) and strict60 never.
-  interpolationPacing.SetDropAllowed(cadenceGovernor.PerFrameDropAllowed());
+  if (!firstConfiguration)
+    std::fprintf(stderr,
+                 "TRIAEVUM_FRAME_RATE rate_hz=%u pair_budget_ms=%.1f "
+                 "decision_budget_ms=%.1f fps60_mode=%s interpolation=%d\n",
+                 rateHz, interpolationPacing.PairBudgetMs(),
+                 interpolationPacing.DecisionBudgetMs(),
+                 Oot3dNativeGame::Fps60ModeName(cadenceGovernor.Config().Mode)
+                     .data(),
+                 visualInterpolationEnabled ? 1 : 0);
   if (firstConfiguration) {
 #if defined(__SWITCH__)
     // The window acquire's idle gap is not GPU work (gpu_frame_timer.h);
@@ -678,6 +685,18 @@ bool NativeA32WindowSession::RunFrame() {
   if (!PrepareNextWindowDemoFrame(hostArgs, window, timing, frameTiming)) {
     return true;
   }
+  // L3+R3 > Video > FPS (LiveFrameRate): a new choice replaces the launch's
+  // FrameRate mode here, at the frame boundary, before the policy below is
+  // resolved; the change then goes through the same path as the PC's F1
+  // menu (pacer, composition, interpolation history) and the render thread
+  // reconfigures its governors for the new rate (EnsureInterpolationPacing).
+  if (launchFrameRateMode.has_value()) {
+    if (const auto live = Oot3dNativeGame::TakeLiveFrameRateMode(
+            Oot3dNativeGame::LiveFrameRate(), liveFrameRateRevision,
+            frameRateContract.Mode)) {
+      launchFrameRateMode = *live;
+    }
+  }
   const auto requestedPresentationPolicy =
       Fast::Oot3d::ResolvePresentationPacingPolicy(EffectiveFrameRateMode());
   if (Fast::Oot3d::PresentationPacingPolicyChanged(
@@ -697,6 +716,10 @@ bool NativeA32WindowSession::RunFrame() {
     presentationPacingPolicy = requestedPresentationPolicy;
     guestCompositionPolicy = requestedCompositionPolicy;
     guestInterpolationEnabled = requestedInterpolationEnabled;
+#if defined(__SWITCH__)
+    gSwitchPresentationRateHz = requestedPresentationPolicy.TargetRateHz;
+    gSwitchVisualInterpolation = requestedInterpolationEnabled;
+#endif
     renderStream.Submit([&, requestedPresentationPolicy,
                          requestedCompositionPolicy,
                          requestedInterpolationEnabled,
@@ -722,6 +745,11 @@ bool NativeA32WindowSession::RunFrame() {
       latestVisualTransitionContinuous = false;
       visualSampleCadence.Reset();
     }
+#if defined(__SWITCH__)
+    // Grass budgets of the new rate (as a start at it would choose them).
+    if (Fast::Deko3dRendererSelected())
+      Fast::Deko3dSetGrassFrameRate(visualInterpolationEnabled);
+#endif
     });
   }
   const auto presentationTime = std::chrono::steady_clock::now();
@@ -1600,6 +1628,8 @@ bool NativeA32WindowSession::RunFrame() {
         double holdSeconds = 0.0;
         double gameP90 = 0.0;
         uint64_t superseded = 0U;
+        uint32_t cadenceRateHz = 0U;
+        auto cadenceMode = Oot3dNativeGame::Fps60Mode::Legacy;
         {
           std::lock_guard lock(interpolationPerfMutex);
           cadence = interpolationPerf.Cadence;
@@ -1607,16 +1637,18 @@ bool NativeA32WindowSession::RunFrame() {
           holdSeconds = interpolationPerf.CadenceHoldSeconds;
           gameP90 = interpolationPerf.GamePairP90Ms;
           superseded = interpolationPerf.SupersededFrames;
+          cadenceRateHz = interpolationPerf.RateHz;
+          cadenceMode = interpolationPerf.CadenceMode;
         }
         const auto delta = [](uint64_t now, uint64_t before) {
           return now - before;
         };
         static constexpr std::array<const char *, 4> kBuckets{"1", "2", "3",
                                                               "4p"};
-        perf << " cadence: fps60_mode="
-             << Oot3dNativeGame::Fps60ModeName(
-                    interpolationPacingOptions.Fps60Mode.Mode)
-             << " lock=" << (thirty ? 30 : 60);
+        // fps60_mode: the mode in effect (legacy at 30); rate_hz: the
+        // presentation rate at the end of the window (L3+R3 > Video > FPS).
+        perf << " cadence: fps60_mode=" << Oot3dNativeGame::Fps60ModeName(cadenceMode)
+             << " rate_hz=" << cadenceRateHz << " lock=" << (thirty ? 30 : 60);
         for (size_t bucket = 0U; bucket < kBuckets.size(); ++bucket)
           perf << " present_" << kBuckets[bucket] << '='
                << delta(cadence.Intervals[bucket],

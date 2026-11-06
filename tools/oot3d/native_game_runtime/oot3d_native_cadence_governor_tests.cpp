@@ -8,6 +8,7 @@
 #include "oot3d_native_cadence_governor.h"
 #include "oot3d_native_cadence_sim.h"
 #include "oot3d_native_interpolation_pacing.h"
+#include "oot3d_native_rate_pacing.h"
 
 #include <cmath>
 #include <cstdio>
@@ -782,6 +783,192 @@ void ReportFrameSlots() {
   }
 }
 
+// L3+R3 > Video > FPS applied while the game runs (oot3d_native_rate_pacing.h):
+// the in-between governor, dynamic resolution and the cadence governor of a
+// session that ran at one rate, reconfigured for the other at a frame
+// boundary, must behave exactly as a start at the new rate (same budgets,
+// interpolation level, scale, lock, holds), whatever they learned before.
+struct RateRig {
+  InterpolationPacingGovernor Pacing;
+  DynamicResolutionController Drs;
+  NativeCadenceGovernor Cadence;
+  double Now = 0.0;
+};
+
+RatePacingConfig LiveRateConfig() {
+  RatePacingConfig config;
+  config.Interpolation.KeepGameSpeed = true;
+  config.Interpolation.ReducedScale = 2.0F;
+  config.BaseScale = 3.0F;
+  config.ReducedAvailable = true;
+  config.Resolution.MaxScale = 3.0F;
+  config.Resolution.MinScale = 2.25F;
+  config.Cadence = AdaptiveConfig();
+  return config;
+}
+
+// `steps` guest steps at `rateHz` under a load (GPU ms of a step frame, ms
+// of the game thread's step pair), modelled like the console: at 60 a step
+// and an in-between picture (or the step again when the in-between is
+// dropped), at 30 one step picture per period. Returns every decision and
+// estimate in order, and the counters this drive added.
+std::vector<double> DriveRate(RateRig &rig, uint32_t rateHz, double stepMs,
+                              double gamePairMs, int steps) {
+  std::vector<double> trace;
+  const CadenceStats before = rig.Cadence.Stats();
+  const double period = 1.0 / static_cast<double>(rateHz);
+  const bool interpolating = rateHz == 60U;
+  const auto present = [&](PresentedPicture picture, uint32_t periods) {
+    rig.Now += periods * period;
+    const double gpuPair =
+        rig.Pacing.StepCostMs() > 0.0
+            ? rig.Pacing.StepCostMs() +
+                  rig.Pacing.Estimate(InterpolatedSampleLevel::Full)
+            : 0.0;
+    rig.Cadence.ObservePresent(picture, rig.Now, gpuPair);
+  };
+  uint32_t stepPeriods = 1U;
+  for (int step = 0; step < steps; ++step) {
+    rig.Cadence.ObserveGameFrame(gamePairMs / 2.0, gamePairMs / 2.0 - 2.5, 1U,
+                                 false);
+    rig.Cadence.ObserveGameFrame(gamePairMs / 2.0, gamePairMs / 2.0 - 2.5, 1U,
+                                 true);
+    rig.Pacing.ObserveStep(stepMs);
+    const bool shedding =
+        interpolating &&
+        (rig.Pacing.Level() != rig.Pacing.PreferredLevel() ||
+         rig.Cadence.DropsInBetween());
+    (void)rig.Drs.ObservePair(interpolating ? 2.0 * stepMs : stepMs, shedding);
+    // The scene gets cheaper with the scale (the controller's own model).
+    const double scaledStepMs =
+        stepMs * rig.Drs.CostRatio(rig.Drs.Config().MaxScale, rig.Drs.Scale());
+    present(PresentedPicture::Step, stepPeriods);
+    if (interpolating) {
+      const auto level = rig.Cadence.DropsInBetween()
+                             ? InterpolatedSampleLevel::Dropped
+                             : rig.Pacing.Decide();
+      const double inBetweenMs =
+          level == InterpolatedSampleLevel::Full      ? scaledStepMs
+          : level == InterpolatedSampleLevel::Reduced ? 0.6 * scaledStepMs
+                                                      : 0.5;
+      rig.Pacing.ObserveInterpolated(level, inBetweenMs);
+      present(level == InterpolatedSampleLevel::Dropped
+                  ? PresentedPicture::Repeat
+                  : PresentedPicture::InBetween,
+              1U);
+      // A pair over two periods pushes the next step a period late.
+      stepPeriods = scaledStepMs + inBetweenMs > 2000.0 / rateHz ? 2U : 1U;
+      trace.push_back(static_cast<double>(level));
+    } else {
+      stepPeriods = scaledStepMs > 1000.0 / rateHz ? 2U : 1U;
+    }
+    trace.push_back(rig.Pacing.StepCostMs());
+    trace.push_back(rig.Pacing.Estimate(InterpolatedSampleLevel::Full));
+    trace.push_back(rig.Pacing.Estimate(InterpolatedSampleLevel::Reduced));
+    trace.push_back(rig.Pacing.DropAllowed() ? 1.0 : 0.0);
+    trace.push_back(rig.Drs.Scale());
+    trace.push_back(rig.Drs.AveragePairMs());
+    trace.push_back(rig.Cadence.DropsInBetween() ? 1.0 : 0.0);
+    trace.push_back(rig.Cadence.HoldSeconds());
+    trace.push_back(rig.Cadence.GamePairMeanMs());
+  }
+  const CadenceStats &after = rig.Cadence.Stats();
+  for (size_t bucket = 0U; bucket < after.Intervals.size(); ++bucket) {
+    trace.push_back(static_cast<double>(after.Intervals[bucket] -
+                                        before.Intervals[bucket]));
+    trace.push_back(
+        static_cast<double>(after.Holds[bucket] - before.Holds[bucket]));
+  }
+  trace.push_back(static_cast<double>(after.Repeats - before.Repeats));
+  trace.push_back(
+      static_cast<double>(after.CadenceSwitches - before.CadenceSwitches));
+  trace.push_back(static_cast<double>(after.LateSteps - before.LateSteps));
+  trace.push_back(static_cast<double>(after.LockChanges - before.LockChanges));
+  return trace;
+}
+
+void CheckFreshRateState(const RateRig &rig, uint32_t rateHz) {
+  const double pair = 2000.0 / rateHz;
+  CHECK(std::abs(rig.Pacing.PairBudgetMs() - pair) < 1.0e-9);
+  CHECK(std::abs(rig.Pacing.DecisionBudgetMs() - pair) < 1.0e-9);
+  CHECK(std::abs(rig.Drs.BudgetMs() - pair) < 1.0e-9);
+  CHECK(rig.Pacing.StepCostMs() == 0.0);
+  CHECK(rig.Pacing.Level() == rig.Pacing.PreferredLevel());
+  CHECK(rig.Drs.Level() == 0U && rig.Drs.AveragePairMs() == 0.0);
+  CHECK(rig.Cadence.Cadence() == PresentCadence::Sixty);
+  CHECK(rig.Cadence.GamePairMeanMs() == 0.0);
+  CHECK(rig.Cadence.Config().Mode ==
+        (rateHz == 60U ? Fps60Mode::Adaptive : Fps60Mode::Legacy));
+  CHECK(rig.Pacing.DropAllowed() == (rateHz != 60U));
+}
+
+void TestLiveRateSwitchMatchesFreshStart() {
+  const auto config = LiveRateConfig();
+  struct Load {
+    double StepMs, GamePairMs;
+  };
+  // Kokiri Forest-like light load, and a heavy one that pushes every
+  // governor away from its start (DRS down, in-betweens shed, 30 locked).
+  const Load light{9.0, 20.0}, heavy60{21.0, 42.0}, heavy30{62.0, 40.0};
+  for (const uint32_t from : {30U, 60U}) {
+    const uint32_t to = from == 60U ? 30U : 60U;
+    RateRig switched;
+    ConfigureRatePacing(from, config, switched.Pacing, switched.Drs,
+                        switched.Cadence);
+    (void)DriveRate(switched, from, from == 60U ? heavy60.StepMs : heavy30.StepMs,
+                    from == 60U ? heavy60.GamePairMs : heavy30.GamePairMs, 600);
+    // The old rate really left state behind.
+    CHECK(switched.Drs.Level() > 0U);
+    CHECK(switched.Pacing.StepCostMs() > 0.0);
+    CHECK(switched.Cadence.GamePairMeanMs() > 0.0);
+    if (from == 60U)
+      CHECK(switched.Cadence.DropsInBetween());
+    // The frame boundary: L3+R3 > Video > FPS applied.
+    ConfigureRatePacing(to, config, switched.Pacing, switched.Drs,
+                        switched.Cadence);
+    CheckFreshRateState(switched, to);
+
+    RateRig fresh;
+    fresh.Now = switched.Now;
+    ConfigureRatePacing(to, config, fresh.Pacing, fresh.Drs, fresh.Cadence);
+    CheckFreshRateState(fresh, to);
+    for (const Load load : {light, to == 60U ? heavy60 : heavy30}) {
+      const auto expected = DriveRate(fresh, to, load.StepMs, load.GamePairMs, 400);
+      const auto actual = DriveRate(switched, to, load.StepMs, load.GamePairMs, 400);
+      CHECK(expected == actual);
+    }
+  }
+  // Back and forth: 30 -> 60 -> 30 ends as a start at 30.
+  RateRig rig;
+  ConfigureRatePacing(30U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  (void)DriveRate(rig, 30U, heavy30.StepMs, heavy30.GamePairMs, 300);
+  ConfigureRatePacing(60U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  (void)DriveRate(rig, 60U, heavy60.StepMs, heavy60.GamePairMs, 300);
+  ConfigureRatePacing(30U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  CheckFreshRateState(rig, 30U);
+}
+
+// The first presents after a switch are measured against the new period
+// only: no late step, hold change or lock from an interval of the old rate.
+void TestLiveRateSwitchFirstPresents() {
+  const auto config = LiveRateConfig();
+  RateRig rig;
+  ConfigureRatePacing(30U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  (void)DriveRate(rig, 30U, 9.0, 20.0, 120);
+  ConfigureRatePacing(60U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  const CadenceStats before = rig.Cadence.Stats();
+  // The previous picture was presented 33 ms ago (one 30 Hz period).
+  rig.Now += 1.0 / 30.0;
+  rig.Cadence.ObservePresent(PresentedPicture::Step, rig.Now, 0.0);
+  rig.Now += 1.0 / 60.0;
+  rig.Cadence.ObservePresent(PresentedPicture::InBetween, rig.Now, 0.0);
+  const CadenceStats &after = rig.Cadence.Stats();
+  CHECK(after.LateSteps == before.LateSteps);
+  CHECK(after.CadenceSwitches == before.CadenceSwitches);
+  CHECK(after.Intervals[1] == before.Intervals[1]);
+  CHECK(after.Intervals[0] == before.Intervals[0] + 1U);
+}
+
 void Report() {
   std::printf("\n== tour15: calibration of the hidden time (margin 0) ==\n");
   Calibrate();
@@ -835,6 +1022,8 @@ int main(int argc, char **argv) {
   TestRenderWaitIsNotCost();
   TestMarginKeepsTheRefresh();
   TestEarlyFrameSlotAbsorbsLongSteps();
+  TestLiveRateSwitchMatchesFreshStart();
+  TestLiveRateSwitchFirstPresents();
   if (argc > 1 && std::strcmp(argv[1], "--report") == 0)
     Report();
   if (gFailures != 0) {

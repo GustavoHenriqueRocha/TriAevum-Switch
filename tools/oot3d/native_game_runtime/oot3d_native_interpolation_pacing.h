@@ -204,6 +204,8 @@ class InterpolationPacingGovernor {
 public:
   // pairBudgetMs: two presentation periods (33.3 ms at 60 Hz).
   // reducedAvailable: the backend accepted the reduced scale.
+  // Everything but the cumulative Stats starts over (a new rate applied at
+  // once, oot3d_native_rate_pacing.h): as a start at that rate.
   void Configure(const InterpolationPacingConfig &config, double pairBudgetMs,
                  float baseScale, bool reducedAvailable) noexcept {
     mConfig = config;
@@ -225,7 +227,9 @@ public:
         0.35 + 0.65 * pixelRatio;
     mRatio[static_cast<size_t>(InterpolatedSampleLevel::Dropped)] = 0.1;
     mMeasured = {};
+    mStepCostMs = 0.0;
     mProbing.reset();
+    mProbeAge = 0U;
     mBelowPreferred = 0U;
     mOverBudget = 0U;
     mLevel = PreferredLevel();

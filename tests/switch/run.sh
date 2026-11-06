@@ -63,6 +63,7 @@ UNIT_TESTS=(
     oot3d_topscreen_import_tests
     oot3d_update_release_tests
     triaevum_audio_service_tests
+    triaevum_presentation_clock_tests
     three_ds_recomp_input_tests
 )
 

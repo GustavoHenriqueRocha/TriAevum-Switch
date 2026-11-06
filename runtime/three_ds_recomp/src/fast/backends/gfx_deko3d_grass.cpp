@@ -347,6 +347,17 @@ FramePlacement BuildFramePlacement(const Oot3d::PicaGrassDrawable& drawable, con
     return result;
 }
 
+// The budgets of one frame rate on top of the preset (at start and when the
+// FPS changes while the game runs): the same code both ways, so a switch
+// leaves what a start at that rate would. The placement fields (density,
+// per-placement cap, retained bytes) are the same at both rates.
+void ApplyFrameRate(GrassState& state, bool fps60) {
+    state.Fps60 = fps60;
+    state.Profile = Oot3d::SelectGrassSwitchProfile(fps60);
+    state.Stream = Oot3d::GrassStreamSettingsFromProfile(state.Profile);
+    Oot3d::ApplyGrassSwitchProfile(state.Profile, state.Settings);
+}
+
 } // namespace
 
 void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
@@ -359,9 +370,6 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
     }
     auto state = std::make_unique<GrassState>();
     state->Mode = mode;
-    state->Fps60 = fps60;
-    state->Profile = Oot3d::SelectGrassSwitchProfile(fps60);
-    state->Stream = Oot3d::GrassStreamSettingsFromProfile(state->Profile);
     try {
         auto document = Oot3d::SerializeGraphicsSettings(Oot3d::GraphicsSettings{});
         document.merge_patch(nlohmann::json::parse(graphicsJson));
@@ -374,7 +382,7 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
         Deko3d::Log("grass: the preset has no source rules; off");
         return;
     }
-    Oot3d::ApplyGrassSwitchProfile(state->Profile, state->Settings);
+    ApplyFrameRate(*state, fps60);
     state->Placements = std::make_unique<Oot3d::PicaGrassPlacements>(state->Profile.RetainedBytes);
     Deko3d::Log("grass: on (config/grass = %s), %zu rules, %.0f tufts/m2 of %u blades, at most %u per placement, "
                 "%.1f MiB retained | %s: full density to %.0f, thinning to %.0f (shrinking from %.0f), single blades within %.0f, "
@@ -388,6 +396,20 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
                 static_cast<double>(state->Stream.SingleBladeDistance), state->Stream.MaxInstances);
     gGrassWantsColliders = mode == Oot3d::GrassSwitchMode::Draw;
     gGrass.store(state.release(), std::memory_order_release);
+}
+
+void Deko3dSetGrassFrameRate(bool fps60) {
+    GrassState* state = gGrass.load(std::memory_order_acquire);
+    if (state == nullptr || state->Fps60 == fps60) {
+        return;
+    }
+    // Stream settings are copied into each cull job: the next job culls with
+    // the new distances and cap (the stream memory holds the larger cap).
+    ApplyFrameRate(*state, fps60);
+    Deko3d::Log("grass: %s: full density to %.0f, thinning to %.0f (shrinking from %.0f), at most %u visible",
+                fps60 ? "60 fps" : "30 fps", static_cast<double>(state->Stream.FullDensityDistance),
+                static_cast<double>(state->Stream.DrawDistance), static_cast<double>(state->Stream.FadeStart),
+                state->Stream.MaxInstances);
 }
 
 bool Deko3dGrassWantsColliders() {
@@ -650,7 +672,8 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
         state->Fragment = mShaders.Embedded(kGrassFragmentKey, std::span<const uint8_t>(kGrassFragmentDksh));
         state->FragmentDepth =
             mShaders.Embedded(kGrassFragmentDepthKey, std::span<const uint8_t>(kGrassFragmentDepthDksh));
-        state->SlotInstances = state->Stream.MaxInstances;
+        // Both rates' caps (L3+R3 > Video > FPS switches the profile live).
+        state->SlotInstances = Oot3d::GrassSwitchStreamCapacity();
         const uint32_t streamBytes =
             AlignUp(kStreamSlots * state->SlotInstances * static_cast<uint32_t>(sizeof(Oot3d::GrassStreamInstance)),
                     DK_MEMBLOCK_ALIGNMENT);
@@ -819,6 +842,7 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
 #else
 namespace Fast {
 void Deko3dConfigureGrass(std::string_view, bool) {}
+void Deko3dSetGrassFrameRate(bool) {}
 bool Deko3dGrassWantsColliders() {
     return false;
 }

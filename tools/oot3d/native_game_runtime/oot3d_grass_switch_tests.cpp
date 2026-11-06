@@ -234,6 +234,50 @@ TEST(Oot3dGrassSwitchProfile, AppliesOnTopOfThePresetRules) {
     EXPECT_EQ(stream.FullDensityDistance, profile.FullDensityDistance);
 }
 
+// L3+R3 > Video > FPS while the game runs (Deko3dSetGrassFrameRate): the
+// rates differ only in what the cull reads per job (distances, visible cap)
+// and the preset fields ApplyGrassSwitchProfile overwrites, so a switch
+// leaves the settings of a start at the new rate; the stream memory holds
+// either cap.
+TEST(Oot3dGrassSwitchProfile, FrameRateSwitchesLiveAsAStartWould) {
+    const auto sixty = SelectGrassSwitchProfile(true);
+    const auto thirty = SelectGrassSwitchProfile(false);
+    // Placement-time fields (generation, caps, memory) are the same.
+    EXPECT_EQ(sixty.TuftsPerSquareMeter, thirty.TuftsPerSquareMeter);
+    EXPECT_EQ(sixty.MinimumSpacing, thirty.MinimumSpacing);
+    EXPECT_EQ(sixty.TuftHeightMin, thirty.TuftHeightMin);
+    EXPECT_EQ(sixty.TuftHeightMax, thirty.TuftHeightMax);
+    EXPECT_EQ(sixty.BladeWidthMin, thirty.BladeWidthMin);
+    EXPECT_EQ(sixty.BladeWidthMax, thirty.BladeWidthMax);
+    EXPECT_EQ(sixty.BladesPerTuft, thirty.BladesPerTuft);
+    EXPECT_EQ(sixty.ClusterSize, thirty.ClusterSize);
+    EXPECT_EQ(sixty.MaxAnchorsPerPlacement, thirty.MaxAnchorsPerPlacement);
+    EXPECT_EQ(sixty.RetainedBytes, thirty.RetainedBytes);
+    for (const bool to : {false, true}) {
+        InteractiveGrassSettings switched;
+        switched.Rules.push_back(FullRule());
+        ApplyGrassSwitchProfile(SelectGrassSwitchProfile(!to), switched);
+        ApplyGrassSwitchProfile(SelectGrassSwitchProfile(to), switched);
+        InteractiveGrassSettings start;
+        start.Rules.push_back(FullRule());
+        ApplyGrassSwitchProfile(SelectGrassSwitchProfile(to), start);
+        EXPECT_EQ(switched.Rules.size(), start.Rules.size());
+        EXPECT_EQ(switched.MaxInstancesPerRoom, start.MaxInstancesPerRoom);
+        EXPECT_EQ(switched.DrawDistance, start.DrawDistance);
+        EXPECT_EQ(switched.LodReferenceDistance, start.LodReferenceDistance);
+        EXPECT_EQ(switched.CullingClusterSize, start.CullingClusterSize);
+        EXPECT_EQ(switched.FarTuftBladeCount, start.FarTuftBladeCount);
+        EXPECT_EQ(switched.Generation.InstancesPerSquareMeter, start.Generation.InstancesPerSquareMeter);
+        EXPECT_EQ(switched.Generation.BladeHeightMax, start.Generation.BladeHeightMax);
+        EXPECT_EQ(switched.Generation.BladeWidthMax, start.Generation.BladeWidthMax);
+        EXPECT_EQ(switched.Appearance.TextureColorInfluence, start.Appearance.TextureColorInfluence);
+        const auto stream = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(to));
+        EXPECT_EQ(stream.DrawDistance, switched.DrawDistance);
+        EXPECT_LE(stream.MaxInstances, GrassSwitchStreamCapacity());
+    }
+    EXPECT_EQ(GrassSwitchStreamCapacity(), std::max(sixty.MaxVisibleInstances, thirty.MaxVisibleInstances));
+}
+
 TEST(Oot3dGrassSwitchProfile, ConfigFileMeaning) {
     EXPECT_EQ(ParseGrassSwitchMode(std::nullopt), GrassSwitchMode::Off);
     EXPECT_EQ(ParseGrassSwitchMode(""), GrassSwitchMode::Placements); // the empty file of before

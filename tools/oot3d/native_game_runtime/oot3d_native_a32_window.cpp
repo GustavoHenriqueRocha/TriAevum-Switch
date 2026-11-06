@@ -165,7 +165,8 @@ void NativeA32WindowSession::Run() {
 #if defined(__SWITCH__)
   // config/grass (mod): the grass source rules of the product preset (the
   // PC's default Grass object) for the deko3d backend; off without the file.
-  // The budgets follow the frame rate chosen at start (config/fps60).
+  // The budgets follow the FPS: the start's here, a change in L3+R3 > Video
+  // at once (Deko3dSetGrassFrameRate, RunFrame).
   if (Fast::Deko3dRendererSelected()) {
     static constexpr std::string_view kProductGraphics =
 #include "triaevum_product_graphics.inc"
