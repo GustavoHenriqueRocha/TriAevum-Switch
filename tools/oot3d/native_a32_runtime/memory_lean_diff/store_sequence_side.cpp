@@ -138,11 +138,14 @@ uint64_t WindowRuns() { return gWindowRuns; }
 uint64_t Run(uint32_t index, uint64_t seed) {
 #if defined(SEQ_MONITOR)
 #if defined(SEQ_OLD)
-    static const bool active = [] {
+    // A plain constant-initialized flag, not a guarded static: the guard's
+    // condition variable needs Horizon kernel calls (devkitA64 under
+    // qemu-aarch64 aborts in __cxa_guard_release).
+    static bool active = false;
+    if (!active) {
         SEQ_MONITOR::SetActive(true);
-        return true;
-    }();
-    static_cast<void>(active);
+        active = true;
+    }
 #endif
     SEQ_MONITOR::ResetExclusiveMonitor();
 #endif
