@@ -1,9 +1,13 @@
 #include "oot3d_native_a32_memory.h"
 #include "oot3d_native_a32_second_core.h"
+#include "oot3d_switch_guest_window.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <mutex>
+#include <new>
+#include <type_traits>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -127,6 +131,166 @@ void AddWriteRange(std::vector<std::pair<uint32_t, size_t>>& ranges,
     ranges.insert(position, {static_cast<uint32_t>(begin), static_cast<size_t>(end - begin)});
 }
 
+// ---- fastmem window (oot3d_switch_guest_window.h, phase 1) -------------------
+// The owner image keeps its regions at window base + guest address and two
+// flat tables beside its page table: page flags derived from the typed
+// entries, and cards set and taken wherever this file sets or takes a group
+// card under the kernel lock. Until phase 2 the inline header stores (and
+// the lock-free exclusive/swap marks) reach only the group cards, so a dirty
+// flat card implies a dirty group card, not the reverse. Nothing here runs
+// for an image that is not the owner, and nothing at all with the window off.
+
+template <typename Entry>
+uint8_t ShadowFlags(const Entry& entry, size_t page, bool writable,
+                    const uint8_t* base) noexcept {
+    const uint8_t* home = base + (page << GuestWindow::kPageShift);
+    uint8_t flags = 0;
+    if (entry.Bytes == home) {
+        flags |= GuestWindow::kPageMapped;
+        if (!writable) flags |= GuestWindow::kPageReadOnly;
+    }
+    if (entry.Read != home) flags |= GuestWindow::kPageLoadTrap;
+    if (entry.Write != home) flags |= GuestWindow::kPageStoreTrap;
+    return flags;
+}
+
+// The whole flag table of a page table and its regions.
+template <typename Groups, typename Regions>
+void ComputeShadowFlags(uint8_t* flags, const Groups& groups, const Regions& regions,
+                        size_t pagesPerGroup, const uint8_t* base) noexcept {
+    std::memset(flags, GuestWindow::kPageUnmapped, GuestWindow::kPageCount);
+    for (size_t group = 0; group < groups.size(); ++group) {
+        if (!groups[group]) continue;
+        for (size_t index = 0; index < pagesPerGroup; ++index) {
+            const size_t page = group * pagesPerGroup + index;
+            flags[page] = ShadowFlags(groups[group]->Pages[index], page, true, base);
+        }
+    }
+    // A directly addressable page lies wholly inside one region.
+    for (const auto& region : regions) {
+        if (region.Writable) continue;
+        const uint64_t begin = region.BaseAddress;
+        const uint64_t end = begin + region.Bytes.size();
+        for (uint64_t page = begin >> GuestWindow::kPageShift;
+             page < (end >> GuestWindow::kPageShift); ++page) {
+            if (flags[page] & GuestWindow::kPageMapped) flags[page] |= GuestWindow::kPageReadOnly;
+        }
+    }
+}
+
+// Diagnostic mode: the flag table equals a fresh derivation from the page
+// entries, and no flat card is dirty whose group card is clean.
+template <typename Groups, typename Regions>
+void VerifyShadowTables(const Groups& groups, const Regions& regions,
+                        size_t pagesPerGroup) {
+    const uint8_t* flags = GuestWindow::PageFlags();
+    const uint8_t* cards = GuestWindow::Cards();
+    if (flags == nullptr || cards == nullptr) return;
+    // One buffer for every check (the owner's paths hold the kernel lock).
+    static uint8_t* const expected = new (std::nothrow) uint8_t[GuestWindow::kPageCount];
+    if (expected == nullptr) return;
+    ComputeShadowFlags(expected, groups, regions, pagesPerGroup, GuestWindow::Base());
+    uint64_t mismatches = 0;
+    for (size_t page = 0; page < GuestWindow::kPageCount; ++page) {
+        if (flags[page] != expected[page]) ++mismatches;
+        if (__atomic_load_n(&cards[page], __ATOMIC_RELAXED) == GuestWindow::kCardClean) continue;
+        const auto& group = groups[page / pagesPerGroup];
+        if (!group || __atomic_load_n(reinterpret_cast<const unsigned char*>(
+                                          &group->Cards[page % pagesPerGroup].State),
+                                      __ATOMIC_RELAXED) == 0U) {
+            ++mismatches;
+        }
+    }
+    GuestWindow::CountShadowCheck(mismatches);
+}
+
+// After the owner's page table was rebuilt or its entries re-derived.
+template <typename Groups, typename Regions>
+void SyncShadowTables(const void* memory, const Groups& groups, const Regions& regions,
+                      size_t pagesPerGroup, bool clearCards) {
+    if (!GuestWindow::IsOwner(memory)) return;
+    uint8_t* flags = GuestWindow::PageFlags();
+    uint8_t* cards = GuestWindow::Cards();
+    if (flags == nullptr || cards == nullptr) return;
+    ComputeShadowFlags(flags, groups, regions, pagesPerGroup, GuestWindow::Base());
+    if (clearCards) std::memset(cards, GuestWindow::kCardClean, GuestWindow::kPageCount);
+    if (GuestWindow::Verifying()) VerifyShadowTables(groups, regions, pagesPerGroup);
+}
+
+// One page's typed entry changed (a pointer flip); null: no group.
+template <typename Entry>
+void SyncShadowPage(const void* memory, size_t page, const Entry* entry, bool writable) noexcept {
+    if (!GuestWindow::IsOwner(memory)) return;
+    uint8_t* flags = GuestWindow::PageFlags();
+    if (flags == nullptr) return;
+    flags[page] = entry != nullptr ? ShadowFlags(*entry, page, writable, GuestWindow::Base())
+                                   : GuestWindow::kPageUnmapped;
+}
+
+// Diagnostic checkpoint after incremental changes.
+template <typename Groups, typename Regions>
+void CheckShadowTables(const void* memory, const Groups& groups, const Regions& regions,
+                       size_t pagesPerGroup) {
+    if (GuestWindow::IsOwner(memory) && GuestWindow::Verifying())
+        VerifyShadowTables(groups, regions, pagesPerGroup);
+}
+
+// The flat card of every page of [address, address + size) that has a group
+// (whose card NoteWrite just set).
+template <typename Groups>
+void ShadowNoteWrite(const void* memory, const Groups& groups, uint32_t address, size_t size,
+                     size_t pagesPerGroup) noexcept {
+    if (size == 0U || !GuestWindow::IsOwner(memory)) return;
+    uint8_t* cards = GuestWindow::Cards();
+    if (cards == nullptr) return;
+    const size_t last = (uint64_t{address} + size - 1U) >> GuestWindow::kPageShift;
+    for (size_t page = address >> GuestWindow::kPageShift; page <= last; ++page) {
+        if (groups[page / pagesPerGroup])
+            __atomic_store_n(&cards[page], GuestWindow::kCardDirty, __ATOMIC_RELAXED);
+    }
+}
+
+// The flat card of a page RangeWriteGeneration is about to take.
+inline void ShadowTakeCard(const void* memory, size_t page) noexcept {
+    if (!GuestWindow::IsOwner(memory)) return;
+    if (uint8_t* cards = GuestWindow::Cards())
+        __atomic_store_n(&cards[page], GuestWindow::kCardClean, __ATOMIC_RELAXED);
+}
+
+// Owner only: every region not yet at window base + address moves there (a
+// copy). True when one moved; a region the window refuses stays where it is.
+template <typename Regions>
+bool HomeRegions(Regions& regions) {
+    bool moved = false;
+    for (auto& region : regions) {
+        if (region.Bytes.empty() || GuestWindow::Placed(region.Bytes.data(), region.BaseAddress))
+            continue;
+        std::remove_reference_t<decltype(region.Bytes)> placed;
+        if (!GuestWindow::Reserve(placed, region.BaseAddress, region.Bytes.size())) continue;
+        placed.assign(region.Bytes.begin(), region.Bytes.end());
+        region.Bytes.swap(placed);
+        moved = true;
+    }
+    return moved;
+}
+
+// Owner only: `target` becomes a copy of `source` with every buffer in the
+// window where it can be (the old buffers are released first).
+template <typename Regions>
+void CopyRegionsHome(Regions& target, const Regions& source) {
+    target.clear();
+    target.reserve(source.size());
+    for (const auto& region : source) {
+        auto& copy = target.emplace_back();
+        copy.Name = region.Name;
+        copy.BaseAddress = region.BaseAddress;
+        GuestWindow::Reserve(copy.Bytes, region.BaseAddress, region.Bytes.size());
+        copy.Bytes.assign(region.Bytes.begin(), region.Bytes.end());
+        copy.Writable = region.Writable;
+        copy.Executable = region.Executable;
+    }
+}
+
 } // namespace
 
 NativeA32Memory::NativeA32Memory(const NativeA32Memory& other)
@@ -155,7 +319,12 @@ NativeA32Memory& NativeA32Memory::operator=(const NativeA32Memory& other) {
         mDeferredPages.clear();
         mEscapedReadPointers.clear();
         mEscapedWritePointers.clear();
-        mRegions = other.mRegions;
+        // The window's owner gets its copy at window base + address again.
+        if (GuestWindow::IsOwner(this)) {
+            CopyRegionsHome(mRegions, other.mRegions);
+        } else {
+            mRegions = other.mRegions;
+        }
         mWriteGeneration = other.WriteGeneration();
         mWritten.State = GuestCardState::Clean;
         mWriteTraceFingerprint = other.mWriteTraceFingerprint;
@@ -206,8 +375,17 @@ NativeA32Memory& NativeA32Memory::operator=(NativeA32Memory&& other) noexcept {
     mDeferredPages = std::move(other.mDeferredPages);
     // Backing allocations and their fast pointers move together. Only the
     // destination's certificates change (one fresh value on every page, the
-    // cards cleared); no page-table allocation.
-    RestampAllPages();
+    // cards cleared); no page-table allocation. The window's owner copies
+    // buffers that arrived from elsewhere (a staged or restored image) to
+    // window base + address; their pointers change, so its page table is
+    // rebuilt instead (which restamps too).
+    if (GuestWindow::IsOwner(this) && HomeRegions(mRegions)) {
+        RebuildPageTable();
+    } else {
+        RestampAllPages();
+        SyncShadowTables(this, mFastPageGroups, mRegions, FastGroupPageCount, true);
+    }
+    SyncShadowTables(&other, other.mFastPageGroups, other.mRegions, FastGroupPageCount, true);
     // A reused moved-from image must not revive its old certificates either.
     other.mRangeVersionsValid = false;
     return *this;
@@ -221,6 +399,10 @@ void NativeA32Memory::RestampAllPages() noexcept {
             group->Cards[page].State = GuestCardState::Clean;
             group->Pages[page].WriteGeneration = stamp;
         }
+    }
+    if (GuestWindow::IsOwner(this)) {
+        if (uint8_t* cards = GuestWindow::Cards())
+            std::memset(cards, GuestWindow::kCardClean, GuestWindow::kPageCount);
     }
 }
 
@@ -258,9 +440,16 @@ bool NativeA32Memory::MapRegion(const NativeA32MemoryRegionConfig& config,
         }
     }
 
+    // fastmem window: the owner's buffers live at window base + address. An
+    // image claims the window with its first region while no buffer lives
+    // there (the process claims its own image at construction).
+    const bool windowOwner =
+        GuestWindow::Accepting() &&
+        (GuestWindow::IsOwner(this) || (mRegions.empty() && GuestWindow::ClaimIfVacant(this)));
     Region region;
     region.Name = config.Name;
     region.BaseAddress = config.BaseAddress;
+    if (windowOwner) GuestWindow::Reserve(region.Bytes, config.BaseAddress, config.Size);
     region.Bytes.assign(config.Size, 0);
     std::copy(config.InitialBytes.begin(), config.InitialBytes.end(),
               region.Bytes.begin());
@@ -330,6 +519,7 @@ void NativeA32Memory::RebuildPageTable() {
             }
         }
     }
+    SyncShadowTables(this, mFastPageGroups, mRegions, FastGroupPageCount, true);
 }
 
 void NativeA32Memory::AssignFastPointers(size_t page, FastPage& entry,
@@ -359,6 +549,7 @@ void NativeA32Memory::RefreshFastPointers() noexcept {
                                region != nullptr && region->Writable);
         }
     }
+    SyncShadowTables(this, mFastPageGroups, mRegions, FastGroupPageCount, false);
 }
 
 NativeA32Memory::Region* NativeA32Memory::FindRegion(uint32_t address,
@@ -454,6 +645,8 @@ NativeA32Memory::RangeWriteGeneration(uint32_t address,
       auto& stamp = group->Pages[page & FastGroupPageMask].WriteGeneration;
       // Seen and cleared in one step (TakeCard): a mark a second core sets
       // meanwhile survives for the next certificate.
+      // The flat card first: it is never dirty while its group card is clean.
+      ShadowTakeCard(this, page);
       if (TakeCard(card)) {
           // Written since its last certificate: a value no earlier
           // certificate can equal (one per call is enough for the max).
@@ -589,6 +782,7 @@ nlohmann::json NativeA32Memory::CaptureState() const {
     const KernelGuard kernel;
     if (!MaterializeDeferredWrites())
         throw std::runtime_error("cannot capture deferred guest memory");
+    CheckShadowTables(this, mFastPageGroups, mRegions, FastGroupPageCount);
     nlohmann::json regions = nlohmann::json::array();
     for (const auto& region : mRegions) {
         regions.push_back({
@@ -736,7 +930,13 @@ bool NativeA32Memory::ObserveWrites(uint32_t address, size_t size) {
             mObservedWritePages.insert(position, page);
         auto& group = mFastPageGroups[page / FastGroupPageCount];
         if (group) group->Pages[page & FastGroupPageMask].Write = nullptr;
+        if (GuestWindow::IsOwner(this)) {
+            const auto* region = FindRegion(static_cast<uint32_t>(page << PageShift), PageSize);
+            SyncShadowPage(this, page, group ? &group->Pages[page & FastGroupPageMask] : nullptr,
+                           region != nullptr && region->Writable);
+        }
     }
+    CheckShadowTables(this, mFastPageGroups, mRegions, FastGroupPageCount);
     return true;
 }
 
@@ -776,8 +976,10 @@ void NativeA32Memory::ReleaseDeferredPageTraps() const {
         auto& entry = group->Pages[page & FastGroupPageMask];
         auto* bytes = region->Bytes.data() + (address - region->BaseAddress);
         AssignFastPointers(page, entry, bytes, region->Writable);
+        SyncShadowPage(this, page, &entry, region->Writable);
     }
     mDeferredPages.clear();
+    CheckShadowTables(this, mFastPageGroups, mRegions, FastGroupPageCount);
 }
 
 void NativeA32Memory::DiscardDeferredWrites(uint32_t address, size_t size) const {
@@ -833,10 +1035,14 @@ bool NativeA32Memory::DeferWrites(
                 group->Pages[page & FastGroupPageMask].Write = nullptr;
                 group->Pages[page & FastGroupPageMask].Bytes = nullptr;
             }
+            SyncShadowPage(this, page, group ? &group->Pages[page & FastGroupPageMask] : nullptr,
+                           true);
         }
         // A logical device write invalidates exclusives now, not at readback.
         NoteWrite(address, size);
+        ShadowNoteWrite(this, mFastPageGroups, address, size, FastGroupPageCount);
     }
+    CheckShadowTables(this, mFastPageGroups, mRegions, FastGroupPageCount);
     return true;
 }
 
@@ -941,6 +1147,7 @@ uint8_t* NativeA32Memory::GetWritePointer(uint32_t address, size_t size) {
     AddWriteRange(mEscapedWritePointers, address, size);
     NotifyObservedWrite(address, size);
     NoteWrite(address, size);
+    ShadowNoteWrite(this, mFastPageGroups, address, size, FastGroupPageCount);
     return destination;
 }
 
@@ -1003,6 +1210,7 @@ bool NativeA32Memory::WriteBytes(uint32_t address,
         RecordTracedWrite(address, bytes);
     }
     NoteWrite(address, bytes.size());
+    ShadowNoteWrite(this, mFastPageGroups, address, bytes.size(), FastGroupPageCount);
     NotifyObservedWrite(address, bytes.size());
     return true;
 }
@@ -1024,6 +1232,7 @@ bool NativeA32Memory::WriteHostBytes(
         RecordTracedWrite(address, bytes);
     }
     NoteWrite(address, bytes.size());
+    ShadowNoteWrite(this, mFastPageGroups, address, bytes.size(), FastGroupPageCount);
     if (!mWatchSuppressed && Watches(address, bytes.size())) [[unlikely]] {
         ++mWatchCounters.HostByteWrites;
     }
@@ -1071,6 +1280,7 @@ bool NativeA32Memory::EndHostUpdate(uint32_t address, size_t size) {
         RecordTracedWrite(address, std::span<const uint8_t>(region->Bytes.data() + offset, size));
     }
     NoteWrite(address, size);
+    ShadowNoteWrite(this, mFastPageGroups, address, size, FastGroupPageCount);
     NotifyObservedWrite(address, size);
     return true;
 }
@@ -1093,6 +1303,7 @@ bool NativeA32Memory::Fill(uint32_t address, size_t size, uint8_t value) {
             std::span<const uint8_t>(region->Bytes.data() + offset, size));
     }
     NoteWrite(address, size);
+    ShadowNoteWrite(this, mFastPageGroups, address, size, FastGroupPageCount);
     if (!mWatchSuppressed && Watches(address, size)) [[unlikely]] {
         ++mWatchCounters.Fills;
     }
@@ -1163,6 +1374,7 @@ bool NativeA32Memory::WriteSized(uint32_t address, uint8_t size,
             std::span<const uint8_t>(region->Bytes.data() + offset, size));
     }
     NoteWrite(address, size);
+    ShadowNoteWrite(this, mFastPageGroups, address, size, FastGroupPageCount);
     if (Watches(address, size)) [[unlikely]] {
         NoteWatchedWrite(address, size);
     }

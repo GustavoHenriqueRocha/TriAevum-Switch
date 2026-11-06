@@ -77,6 +77,7 @@ bool ParseConfig(const char* text, Config& config) noexcept {
 #include <reent.h>
 
 #include "oot3d_hang_watchdog.h"
+#include "oot3d_switch_guest_window.h"
 
 extern "C" {
 void* __real__malloc_r(struct _reent* reent, size_t size);
@@ -393,6 +394,8 @@ void HandleException(ThreadExceptionDump* context) {
 // after the code moved to 2 MB blocks (oot3d_switch_code_pages.cpp, 101).
 [[gnu::constructor(102)]] void StartEarly() {
     Start();
+    // The wrappers below place the fastmem window's region buffers.
+    Oot3dNativeGame::GuestWindow::MarkAllocatorHooked();
 }
 
 } // namespace
@@ -453,6 +456,9 @@ using namespace Oot3dNativeGame::GuardAlloc;
 extern "C" {
 
 void* __wrap__malloc_r(struct _reent* reent, size_t size) {
+    // fastmem window: the region buffer NativeA32Memory armed for this thread
+    // and size (oot3d_switch_guest_window.h); one atomic load otherwise.
+    if (void* placed = Oot3dNativeGame::GuestWindow::TakePlacement(size)) return placed;
     // gEnabled before TLS: libnx calls malloc before everything is up.
     if (gEnabled.load(std::memory_order_relaxed) && InRange(gConfig, size) && !tBypass) {
         if (void* pointer = GuardedAlloc(reent, size)) return pointer;
@@ -462,6 +468,7 @@ void* __wrap__malloc_r(struct _reent* reent, size_t size) {
 
 // devkitA64's malloc(): requests of 32 bytes or more arrive here with alignment 32.
 void* __wrap__memalign_r(struct _reent* reent, size_t alignment, size_t size) {
+    if (void* placed = Oot3dNativeGame::GuestWindow::TakePlacement(size)) return placed;
     if (gEnabled.load(std::memory_order_relaxed) && alignment <= kAlignment &&
         InRange(gConfig, size) && !tBypass) {
         if (void* pointer = GuardedAlloc(reent, size)) return pointer;
@@ -470,6 +477,11 @@ void* __wrap__memalign_r(struct _reent* reent, size_t alignment, size_t size) {
 }
 
 void __wrap__free_r(struct _reent* reent, void* pointer) {
+    // A window buffer stays mapped; only its placement ends.
+    if (Oot3dNativeGame::GuestWindow::Contains(pointer)) {
+        Oot3dNativeGame::GuestWindow::ReleaseAllocation(pointer);
+        return;
+    }
     if (pointer != nullptr && gUsed.load(std::memory_order_relaxed)) {
         if (gConfig.GuardMode == Mode::Canary) {
             if (CanaryHeader* header = CanaryOf(pointer)) {
@@ -501,6 +513,15 @@ void* __wrap__calloc_r(struct _reent* reent, size_t count, size_t size) {
 
 void* __wrap__realloc_r(struct _reent* reent, void* pointer, size_t size) {
     if (pointer == nullptr) return __wrap__malloc_r(reent, size);
+    if (Oot3dNativeGame::GuestWindow::Contains(pointer)) {
+        // Never asked of a region buffer; moved to the heap if it is.
+        const size_t oldSize = Oot3dNativeGame::GuestWindow::AllocationSize(pointer);
+        void* const fresh = __real__malloc_r(reent, size);
+        if (fresh == nullptr) return nullptr;
+        std::memcpy(fresh, pointer, oldSize < size ? oldSize : size);
+        Oot3dNativeGame::GuestWindow::ReleaseAllocation(pointer);
+        return fresh;
+    }
     if (!gUsed.load(std::memory_order_relaxed) && !gEnabled.load(std::memory_order_relaxed)) {
         return __real__realloc_r(reent, pointer, size);
     }
@@ -529,6 +550,9 @@ void* __wrap__realloc_r(struct _reent* reent, void* pointer, size_t size) {
 }
 
 size_t __wrap__malloc_usable_size_r(struct _reent* reent, void* pointer) {
+    if (Oot3dNativeGame::GuestWindow::Contains(pointer)) {
+        return Oot3dNativeGame::GuestWindow::AllocationSize(pointer);
+    }
     if (pointer != nullptr && gUsed.load(std::memory_order_relaxed)) {
         if (gConfig.GuardMode == Mode::Canary) {
             if (const CanaryHeader* header = CanaryOf(pointer)) return header->Block.Size;

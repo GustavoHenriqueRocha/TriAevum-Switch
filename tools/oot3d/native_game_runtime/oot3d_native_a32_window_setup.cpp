@@ -3,6 +3,7 @@
 #include "oot3d_native_a32_window_session.h"
 #include "oot3d_native_guest_overrides.h"
 #include "oot3d_switch_threads.h"
+#include "oot3d_switch_guest_window.h"
 #if defined(__SWITCH__)
 #include <EGL/egl.h>
 #include <glad/glad.h>
@@ -1325,6 +1326,18 @@ void NativeA32WindowSession::Setup() {
                    process.Memory().RangeWatchActive() ? 1 : 0,
                    process.Memory().WatchedRangeCount());
     }
+  }
+  // fastmem window (config/fastmem_window, phase 1; SWITCH_PORT.md "fastmem
+  // window"): where the image's regions live once the image is mounted, or
+  // why they stay on the heap. Warning level: the release logger drops info.
+  {
+    const std::string fastmemWindow = Oot3dNativeGame::GuestWindow::FormatStatus(
+        Oot3dNativeGame::GuestWindow::CurrentStatus());
+#if defined(__SWITCH__)
+    SPDLOG_WARN("{}", fastmemWindow);
+#else
+    std::fprintf(stderr, "%s\n", fastmemWindow.c_str());
+#endif
   }
   // config/second_core (SWITCH_PORT.md "Second guest core"; desktop:
   // TRIAEVUM_SECOND_CORE=1): guest threads that ask for processor 1 run on

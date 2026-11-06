@@ -298,6 +298,9 @@ oot3d_target_defaults(oot3d_gameplay_time_tests NO_WARNING_OVERRIDE FOLDER Tests
 
 add_library(oot3d_native_a32_process STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp
+    # fastmem phase 1: guest regions at window base + address
+    # (config/fastmem_window; SWITCH_PORT.md "fastmem window").
+    tools/oot3d/native_game_runtime/oot3d_switch_guest_window.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_registry.cpp
     tools/oot3d/native_game_runtime/oot3d_native_owner_call_adapter.cpp
@@ -321,6 +324,16 @@ target_include_directories(oot3d_native_a32_process PUBLIC
 target_link_libraries(oot3d_native_a32_process PUBLIC
     oot3d_typed_gameplay
     nlohmann_json::nlohmann_json)
+
+# The fastmem window's allocator hook on the host (replaces the global
+# operator new/delete): only in test binaries that run with the window
+# (TRIAEVUM_FASTMEM_WINDOW); the console's hook is in the newlib wrappers.
+function(oot3d_guest_window_host_alloc target)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" AND UNIX)
+        target_sources(${target} PRIVATE
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../../tools/oot3d/native_game_runtime/oot3d_switch_guest_window_host_alloc.cpp)
+    endif()
+endfunction()
 if(OOT3D_WHOLE_AOT_PRODUCT_MODE)
     if(OOT3D_DIRECT_AOT_PLUGIN)
         target_sources(oot3d_native_a32_process PRIVATE

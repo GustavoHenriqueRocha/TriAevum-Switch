@@ -4,6 +4,7 @@
 
 #include "oot3d_native_compiled_functions.h"
 #include "oot3d_native_guest_fault_report.h"
+#include "oot3d_switch_guest_window.h"
 
 #include <algorithm>
 #include <chrono>
@@ -253,6 +254,11 @@ NativeA32Process::NativeA32Process(
     NativeA32HostServices& hostServices)
     : mRegistry(registry), mHostServices(hostServices) {
     mThreadProfile.ProcessorIds.fill(kNativeA32UnknownProcessor);
+    // fastmem window (config/fastmem_window): this image's regions, the
+    // primary stack and TLS pages, the ones a savestate or CreatePrimaryThread
+    // stages, all end up at window base + guest address (memory.cpp re-homes
+    // them in its assignments). The newest process is the owner.
+    if (GuestWindow::Accepting()) GuestWindow::Claim(&mMemory);
 }
 
 bool NativeA32Process::MapRegion(const NativeA32MemoryRegionConfig& config,

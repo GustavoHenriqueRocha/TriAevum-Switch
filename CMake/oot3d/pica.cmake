@@ -235,6 +235,7 @@ add_executable(oot3d_native_pica_submission_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_native_pica_submission_tests PRIVATE
     oot3d_native_pica_submission)
 oot3d_target_defaults(oot3d_native_pica_submission_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_pica_submission_tests)
 
 add_library(oot3d_native_pica_composition STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_composition.cpp

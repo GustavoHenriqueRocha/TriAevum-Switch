@@ -220,6 +220,7 @@ if (OOT3D_WHOLE_AOT_PRODUCT_MODE)
         OOT3D_NATIVE_A32_PRODUCT_DISPATCH_TESTS=1)
 endif()
 oot3d_target_defaults(oot3d_native_a32_process_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_a32_process_tests)
 
 add_executable(oot3d_native_a32_ctr_host_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_tests.cpp
@@ -227,6 +228,7 @@ add_executable(oot3d_native_a32_ctr_host_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_native_a32_ctr_host_tests PRIVATE
     oot3d_native_a32_ctr_host)
 oot3d_target_defaults(oot3d_native_a32_ctr_host_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_a32_ctr_host_tests)
 
 # Second guest core (config/second_core): exclusive monitor, cross-core waits
 # and the switch-absent path. `--stress` runs the long two-thread loops; the
@@ -237,6 +239,17 @@ add_executable(oot3d_native_a32_second_core_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_native_a32_second_core_tests PRIVATE
     oot3d_native_a32_ctr_host)
 oot3d_target_defaults(oot3d_native_a32_second_core_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_a32_second_core_tests)
+
+# fastmem window (config/fastmem_window, phase 1): placement at base + address,
+# re-homing after copies, moves and restores, the flat tables, the fallbacks.
+add_executable(oot3d_switch_guest_window_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_switch_guest_window_tests.cpp
+)
+target_link_libraries(oot3d_switch_guest_window_tests PRIVATE
+    oot3d_native_a32_ctr_host)
+oot3d_target_defaults(oot3d_switch_guest_window_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_switch_guest_window_tests)
 
 # Exercise FS IPC through the same service-only host used by the product module.
 add_executable(oot3d_native_a32_ctr_fs_tests EXCLUDE_FROM_ALL
@@ -245,6 +258,7 @@ add_executable(oot3d_native_a32_ctr_fs_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_native_a32_ctr_fs_tests PRIVATE
     oot3d_native_a32_ctr_service_host triaevum_module)
 oot3d_target_defaults(oot3d_native_a32_ctr_fs_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_a32_ctr_fs_tests)
 
 add_executable(oot3d_native_render_command_stream_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_render_command_stream_tests.cpp
@@ -362,10 +376,14 @@ oot3d_target_defaults(oot3d_native_a32_savestate FOLDER Tools)
 
 add_executable(oot3d_native_a32_savestate_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_a32_savestate_tests.cpp
+    # Ship::WriteConfigFileAtomically (oot3d_savestate_library.cpp); the game
+    # links it with the rest of the ship runtime.
+    runtime/three_ds_recomp/src/ship/config/ConfigPersistence.cpp
 )
 target_link_libraries(oot3d_native_a32_savestate_tests PRIVATE
     oot3d_native_a32_savestate triaevum_zstd)
 oot3d_target_defaults(oot3d_native_a32_savestate_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_a32_savestate_tests)
 
 # Developer tool: what differs between two states of one game moment.
 add_executable(oot3d_native_a32_savestate_diff EXCLUDE_FROM_ALL
