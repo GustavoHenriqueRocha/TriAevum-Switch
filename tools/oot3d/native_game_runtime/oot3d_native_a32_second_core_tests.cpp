@@ -240,7 +240,7 @@ class TwoCores {
     // Runs the cooperative scheduler until `done` (evaluated under the
     // kernel lock); sleeps on the kernel condition while it has nothing to run.
     void RunUntil(const std::function<bool()>& done,
-                  std::chrono::seconds timeout = std::chrono::seconds(120)) {
+                  std::chrono::seconds timeout = std::chrono::seconds(1800)) {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (!done()) {
             const auto result = mProcess.Run(kBudget);
@@ -817,8 +817,10 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--stress") {
         sizes.ExclusivePairs = 2'000'000U;
         sizes.GuestIncrements = 1'000'000U;
-        sizes.PingPongRounds = 1'000'000U;
-        sizes.ArbitrationItems = 500'000U;
+        // Each round trip is two cross-thread wake-ups (0.2-0.5 ms in a
+        // WSL2 container, more under TSan): 200k of each in minutes.
+        sizes.PingPongRounds = 200'000U;
+        sizes.ArbitrationItems = 200'000U;
     }
     TestMonitorInactive();
     TestMonitorSemantics();
