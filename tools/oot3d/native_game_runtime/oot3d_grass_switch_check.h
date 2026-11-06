@@ -25,8 +25,10 @@ struct Sink { bool Fail; std::ostringstream S; ~Sink() { if (Fail) { std::cerr <
 #define EXPECT_GT(a, b) SHIM_CHECK((a) > (b), #a " > " #b) << "(" << (a) << " vs " << (b) << ") "
 #define EXPECT_LT(a, b) SHIM_CHECK((a) < (b), #a " < " #b) << "(" << (a) << " vs " << (b) << ") "
 #define EXPECT_NEAR(a, b, e) SHIM_CHECK(std::abs((a) - (b)) <= (e), #a " ~ " #b) << "(" << (a) << " vs " << (b) << ") "
+#define EXPECT_FLOAT_EQ(a, b) EXPECT_NEAR((a), (b), 1.0e-5F)
 #define SHIM_ASSERT(c, text) if (!(c)) { shim::Sink{true} << __FILE__ << ":" << __LINE__ << ": " text; return; }
 #define ASSERT_TRUE(c) SHIM_ASSERT((c), #c)
 #define ASSERT_EQ(a, b) SHIM_ASSERT((a) == (b), #a " == " #b)
+#define ASSERT_FALSE(c) SHIM_ASSERT(!(c), "!" #c)
 #define ASSERT_GT(a, b) SHIM_ASSERT((a) > (b), #a " > " #b)
 int main() { for (auto& c : shim::Cases()) { int before = shim::Failures(); c.Run(); std::cout << (shim::Failures() == before ? "ok   " : "FAIL ") << c.Name << "\n"; } std::cout << shim::Failures() << " failures\n"; return shim::Failures() != 0; }

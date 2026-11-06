@@ -1937,6 +1937,22 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   variant whenever the mapping was not the identity, and the fragment program hashed every blade with
   `sin()` per pixel: 5.2 ms of GPU for ~3.4k tufts at 3.0x. The blade cut now reads per-tuft values
   computed in the vertex program.) Wind and the bend away from Link and Epona are computed in the vertex shader.
+- **Round 3 (after test.3):**
+  - *Foreign grass:* in the temple entrance, grass from the title demo was drawn. Every cull now
+    carries the area (scene, room) it was made in; the game thread hands the area over once per host
+    frame (`Deko3dSetGrassArea`, only with `draw`). A scene or room change drops the drawn cull, the
+    sources' memo and the frame's placements. A cull of another area, or of none of this frame's
+    placements, is dropped before drawing (`GrassCullFitsFrame`), counted as `foreign culls dropped`.
+  - *60 fps flicker:* in-between frames interpolate the view in the vertex uniforms but not the
+    light binding's camera, so the world transform the source memo checks drifted and those frames lost
+    their sources (no draw point: ~40% of frames). A memoized source now keeps its world transform and
+    takes only the frame's model-to-clip (`GrassRigidModelToClip`), so every frame draws, with its own
+    camera.
+  - *Look:* full density to 1000 units at 60 fps (1600 at 30), thinning to 4000 (5000). Thinned tufts
+    are drawn wider, by 1/sqrt(the share kept), at most 3x, so a field reads as covered at distance
+    with about the same fill cost.
+  - *Log:* the third `grass:` line ends with `area drawn scene S room R, changes C, foreign culls dropped
+    F | empty placements E` (built placements with no tuft: mask, slope or size left nothing).
 - **Shaders:** `tools/oot3d/deko3d_grass/gen.py` compiles `grass_vsh.glsl` and the two fragment
   variants with uam into `gfx_deko3d_grass_dksh.h` (not in `deko3d.pack`). Rerun it after editing a
   shader.

@@ -44,9 +44,9 @@ struct GrassStreamPlacement {
 };
 
 struct GrassStreamSettings {
-    float FullDensityDistance = 700.0F;
-    float DrawDistance = 3000.0F;
-    float FadeStart = 2400.0F;
+    float FullDensityDistance = 1000.0F;
+    float DrawDistance = 4000.0F;
+    float FadeStart = 3300.0F;
     float SingleBladeDistance = 400.0F;
     uint32_t MaxInstances = 8000U;
     // Added to every cluster sphere: the camera of the frame that draws the
@@ -84,7 +84,14 @@ struct GrassStreamStats {
 // Packing helpers, exposed for the tests (GLSL unpackHalf2x16 / unpackUnorm).
 [[nodiscard]] uint16_t PackGrassHalf(float value) noexcept;
 [[nodiscard]] float UnpackGrassHalf(uint16_t value) noexcept;
-[[nodiscard]] GrassStreamInstance PackGrassStreamInstance(const GrassWorldAnchor& anchor, float fade) noexcept;
+// `widthScale` widens the tuft where distance thinning left fewer of them,
+// so the ground stays about as covered (GrassStreamWidthScale).
+[[nodiscard]] GrassStreamInstance PackGrassStreamInstance(const GrassWorldAnchor& anchor, float fade,
+                                                          float widthScale = 1.0F) noexcept;
+// 1 / sqrt(retention), at most kGrassMaxWidthScale: the kept tufts cover the
+// area of the thinned ones (their card is that much wider).
+inline constexpr float kGrassMaxWidthScale = 3.0F;
+[[nodiscard]] float GrassStreamWidthScale(float retention) noexcept;
 
 // Owns its scratch, so a frame allocates nothing once the sizes settled.
 class GrassInstanceStreamBuilder {
@@ -104,6 +111,7 @@ class GrassInstanceStreamBuilder {
         uint32_t Anchor = 0U;
         uint16_t Bucket = 0U; // placement * 2 + kind
         uint8_t Fade = 255U;
+        uint8_t WidthScale = 64U; // x 1/64
     };
     std::vector<Candidate> mCandidates;
     std::vector<Selected> mSelected;

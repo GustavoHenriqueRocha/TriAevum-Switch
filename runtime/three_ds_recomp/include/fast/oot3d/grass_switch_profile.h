@@ -54,17 +54,17 @@ struct GrassSwitchProfile {
     // FullDensityDistance, then thinning with distance (about the same
     // number of tufts per screen area) to none at DrawDistance; tufts shrink
     // into the ground from FadeStart.
-    float FullDensityDistance = 700.0F;
-    float DrawDistance = 3000.0F;
-    float FadeStart = 2400.0F;
+    float FullDensityDistance = 1000.0F;
+    float DrawDistance = 4000.0F;
+    float FadeStart = 3300.0F;
     // Tufts closer than this are drawn as their blades, one segment each.
     float SingleBladeDistance = 400.0F;
     uint32_t MaxVisibleInstances = 8000U;
 };
 
-// 60 fps (60 FPS presented): ≤8k visible, full density to 700 units,
-// thinning to 3000. 30 fps: the frame has 33 ms, so 22k visible, full density
-// to 1200, thinning to 4000. L3+R3 > Video > FPS switches between them while
+// 60 fps (60 FPS presented): ≤8k visible, full density to 1000 units,
+// thinning to 4000. 30 fps: the frame has 33 ms, so 22k visible, full density
+// to 1600, thinning to 5000. Thinned tufts are drawn wider. L3+R3 > Video > FPS switches between them while
 // the game runs (Deko3dSetGrassFrameRate).
 [[nodiscard]] GrassSwitchProfile SelectGrassSwitchProfile(bool fps60) noexcept;
 

@@ -781,6 +781,9 @@ bool NativeA32WindowSession::RunFrame() {
   // Where the game is after the previous host frame (scene, room): for the
   // hitch of that frame and the perf.txt window (both Switch logs).
   if (processStorage) frameArea = Oot3dNativeGame::ReadNativeArea(processStorage->Memory());
+  // deko3d grass (config/grass = draw): a culled selection belongs to the
+  // area it was made in; a scene or room change drops it (one store).
+  if (Fast::Deko3dGrassWantsColliders()) Fast::Deko3dSetGrassArea(frameArea.Scene, frameArea.Room);
   perfAreaWindow.Observe(frameArea);
 #endif
   // Presentation cadence (config/fps60_mode): the previous host frame's

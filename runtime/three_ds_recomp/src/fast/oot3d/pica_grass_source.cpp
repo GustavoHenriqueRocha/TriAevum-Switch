@@ -4,6 +4,7 @@
 #include "fast/oot3d/grass_primitive_topology.h"
 #include "fast/oot3d/grass_scene_bridge.h"
 #include "fast/oot3d/grass_shading_environment.h"
+#include "fast/oot3d/grass_stream_handoff.h"
 #include "fast/oot3d/grass_stage_profile.h"
 #include "fast/oot3d/grass_surface_eligibility.h"
 #include "fast/oot3d/grass_surface_extractor.h"
@@ -322,6 +323,16 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
     return true;
 }
 
+// The model-to-clip of a memoized mesh from this draw (rigid CMB program:
+// projection f[0..3], view f[4..6], model f[20..22]), its world transform kept.
+bool RefreshMemoClip(GrassSceneMesh& mesh, const Renderer3ds::PicaDrawView& draw) {
+    const auto clip = GrassRigidModelToClip(draw.VertexUniformBytes, draw.FramebufferFlipped);
+    if (!clip) return false;
+    mesh.PicaModelToClip = *clip;
+    mesh.PicaModelToClipAvailable = true;
+    return true;
+}
+
 // InteractiveGrassPass's GrassWorldPlacementIdentity.
 uint64_t WorldPlacementIdentity(const GrassSceneMesh& mesh, const GrassPlacementKey& key) {
     uint64_t hash = 14695981039346656037ULL;
@@ -391,6 +402,7 @@ const std::vector<PicaGrassDrawable>& PicaGrassPlacements::Update(uint64_t frame
             if (result.Queued || result.State != GrassAsyncPlacementState::Ready) {
                 ++mStats.Queued;
             }
+            if (result.Placement && result.Placement->Anchors.empty()) ++mStats.Empty;
             if (result.Placement && !result.Placement->Anchors.empty()) {
                 ++mStats.Ready;
                 mStats.Anchors += result.Placement->Anchors.size();
@@ -420,7 +432,13 @@ bool PublishPicaGrassSource(const Renderer3ds::PicaDrawView& draw, uint64_t fram
             return false;
         }
         auto mesh = *entry->Mesh;
-        if (RefreshGrassMemoDraw(mesh, draw, state.Memo.CameraInverse(draw))) {
+        // The memo's world transform stays: the placement's anchors were made
+        // with it. With fps60 the in-between frames interpolate the view in the
+        // vertex uniforms but not the light binding's camera, so the world
+        // matrix the PC test derives drifts by the interpolation and the frame
+        // lost its sources (no grass on ~40% of frames). The grass draws with
+        // the draw's own model-to-clip, which is exact for rigid geometry.
+        if (RefreshGrassMemoDraw(mesh, draw, state.Memo.CameraInverse(draw)) || RefreshMemoClip(mesh, draw)) {
             entry->Mesh->PicaModelToClip = mesh.PicaModelToClip;
             const uint64_t identity = mesh.GeometryId ^ (mesh.TextureHash + 0x9e3779b97f4a7c15ULL +
                                                          (mesh.GeometryId << 6U) + (mesh.GeometryId >> 2U));

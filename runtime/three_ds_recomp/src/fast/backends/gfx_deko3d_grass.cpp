@@ -112,11 +112,13 @@ class GrassCullWorker {
         size_t Capacity = 0;
         uint32_t Slot = 0;
         uint64_t Frame = 0; // whose cameras
+        uint32_t Area = 0;  // GrassArea of that frame
     };
     struct Result {
         bool Valid = false;
         uint32_t Slot = 0;
         uint64_t Frame = 0;
+        uint32_t Area = 0;
         std::vector<uint64_t> Identities;
         std::vector<Oot3d::GrassStreamRange> Ranges;
         Oot3d::GrassStreamStats Stats;
@@ -180,6 +182,7 @@ class GrassCullWorker {
             result.Milliseconds = MillisecondsSince(begin);
             result.Slot = job.Slot;
             result.Frame = job.Frame;
+            result.Area = job.Area;
             result.Identities = std::move(job.Identities);
             result.Valid = true;
             std::scoped_lock lock(mMutex);
@@ -215,7 +218,8 @@ struct GrassState {
     Oot3d::GrassSwitchProfile Profile;
     Oot3d::GrassStreamSettings Stream;
     Oot3d::InteractiveGrassSettings Settings;
-    Oot3d::PicaGrassSourceState Sources;
+    // Reset on an area change (its memo and geometry registry are not movable).
+    std::unique_ptr<Oot3d::PicaGrassSourceState> Sources = std::make_unique<Oot3d::PicaGrassSourceState>();
     std::unique_ptr<Oot3d::PicaGrassPlacements> Placements;
     std::chrono::steady_clock::time_point Start = std::chrono::steady_clock::now();
     uint64_t DrawOrder = 0;
@@ -267,11 +271,17 @@ struct GrassState {
     uint64_t EmptyFrames = 0;   // a draw point with a cull result but nothing of it drawn
     uint64_t NoResultFrames = 0; // a draw point before the first cull finished
     uint64_t FreshBase = 0, StaleBase = 0;
+    // The game's area (GrassArea) the placements of this frame belong to.
+    uint32_t Area = 0xffffffffU;
+    uint32_t DrawnArea = 0xffffffffU;
+    uint64_t AreaChanges = 0, ForeignCulls = 0;
 };
 
 // Set once before the first frame (Deko3dConfigureGrass), read by the render
 // thread afterwards.
 std::atomic<GrassState*> gGrass{nullptr};
+// Written by the game thread (Deko3dSetGrassArea), read by the render thread.
+std::atomic<uint32_t> gGrassArea{0xffffffffU};
 // Read by the game thread once per step: true only with config/grass = draw.
 bool gGrassWantsColliders = false;
 
@@ -412,11 +422,16 @@ void Deko3dSetGrassFrameRate(bool fps60) {
                 state->Stream.MaxInstances);
 }
 
+void Deko3dSetGrassArea(int scene, int room) {
+    gGrassArea.store(Oot3d::GrassArea(scene, room), std::memory_order_relaxed);
+}
+
 bool Deko3dGrassWantsColliders() {
     return gGrassWantsColliders;
 }
 
 namespace Deko3d {
+void CheckGrassArea(GrassState& state);
 
 bool GrassDrawEnabled() {
     const GrassState* state = gGrass.load(std::memory_order_acquire);
@@ -432,10 +447,11 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
     if (state->DrawFrame != frame) {
         state->DrawFrame = frame;
         state->DrawOrder = 0;
+        CheckGrassArea(*state);
     }
     const auto begin = std::chrono::steady_clock::now();
     try {
-        if (Oot3d::PublishPicaGrassSource(draw, frame, state->Settings, state->Sources, frame, state->DrawOrder++)) {
+        if (Oot3d::PublishPicaGrassSource(draw, frame, state->Settings, *state->Sources, frame, state->DrawOrder++)) {
             ++state->Published;
             state->SourceFrame = frame;
             state->SourceNamespace = draw.RenderTargetNamespace;
@@ -455,9 +471,29 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
 
 namespace {
 
+} // namespace
+
+// A scene or room change: the drawn cull, the sources' memo (whose geometry
+// identities the new area may reuse) and this frame's placements are
+// dropped, so no grass of the previous area is ever drawn in the new one.
+void CheckGrassArea(GrassState& state) {
+    const uint32_t area = gGrassArea.load(std::memory_order_relaxed);
+    if (area == state.Area) return;
+    state.Area = area;
+    ++state.AreaChanges;
+    state.Slots.Reset();
+    state.Current = {};
+    state.Sources = std::make_unique<Oot3d::PicaGrassSourceState>();
+    state.Frame.clear();
+    state.SourceFrame = ~0ULL;
+}
+
+namespace {
+
 // Placements of this frame's sources, once per frame (at the first draw
 // point, else at the end of the frame).
 void UpdatePlacements(GrassState& state, uint64_t frame) {
+    CheckGrassArea(state);
     if (state.PreparedFrame == frame) return;
     state.PreparedFrame = frame;
     state.Frame.clear();
@@ -546,6 +582,7 @@ void PostCull(GrassState& state, uint64_t frame) {
     job.Capacity = state.SlotInstances;
     job.Slot = *slot;
     job.Frame = frame;
+    job.Area = state.Area;
     job.Output = reinterpret_cast<Oot3d::GrassStreamInstance*>(
         static_cast<uint8_t*>(dkMemBlockGetCpuAddr(state.StreamMemory)) +
         size_t{*slot} * state.SlotInstances * sizeof(Oot3d::GrassStreamInstance));
@@ -612,7 +649,8 @@ void GrassEndFrame(uint64_t frame) {
         // the culls selected.
         Log("grass: frame %llu fragment raster %llu draws, depth-writing %llu | culls fresh %llu stale %llu "
             "(frames that redrew an older cull), no result %llu, nothing drawn %llu | cull instances %.0f "
-            "(max %llu) thinned %.0f | distance full %.0f max %.0f",
+            "(max %llu) thinned %.0f | distance full %.0f max %.0f | area %s scene %d room %d, changes %llu, "
+            "foreign culls dropped %llu | empty placements %u",
             static_cast<unsigned long long>(frame), static_cast<unsigned long long>(state->RasterDraws),
             static_cast<unsigned long long>(state->DepthDraws),
             static_cast<unsigned long long>(state->Slots.FreshFrames - state->FreshBase),
@@ -620,7 +658,11 @@ void GrassEndFrame(uint64_t frame) {
             static_cast<unsigned long long>(state->NoResultFrames), static_cast<unsigned long long>(state->EmptyFrames),
             static_cast<double>(state->CullInstances) / jobs, static_cast<unsigned long long>(state->CullInstancesMax),
             static_cast<double>(state->CullThinned) / jobs, static_cast<double>(state->Stream.FullDensityDistance),
-            static_cast<double>(state->Stream.DrawDistance));
+            static_cast<double>(state->Stream.DrawDistance), state->DrawnArea == 0xffffffffU ? "none" : "drawn",
+            state->DrawnArea == 0xffffffffU ? -1 : static_cast<int>(state->DrawnArea >> 8U),
+            state->DrawnArea == 0xffffffffU ? -1 : static_cast<int>(static_cast<int8_t>(state->DrawnArea & 0xffU)),
+            static_cast<unsigned long long>(state->AreaChanges), static_cast<unsigned long long>(state->ForeignCulls),
+            state->Placements->Stats().Empty);
     }
     state->Frames = 0;
     state->Published = 0;
@@ -637,6 +679,7 @@ void GrassEndFrame(uint64_t frame) {
     state->CullInstances = state->CullInstancesMax = state->CullThinned = 0;
     state->EmptyFrames = state->NoResultFrames = 0;
     state->FreshBase = state->Slots.FreshFrames;
+    state->AreaChanges = state->ForeignCulls = 0;
     state->StaleBase = state->Slots.StaleFrames;
 }
 
@@ -704,8 +747,21 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
     uint32_t draws = 0U;
     uint64_t visible = 0U;
     bool timed = false;
+    // A cull of another area, or of none of this frame's placements, is
+    // dropped: never drawn with this frame's cameras.
+    if (state->Current.Valid &&
+        Oot3d::GrassCullFitsFrame(state->Current.Area, state->Area, state->Current.Identities,
+                                  [&](uint64_t identity) {
+                                      return state->Frame.contains(Oot3d::GrassFramePlacementKey(
+                                          identity, key.Namespace, key.ColorAddress));
+                                  }) != Oot3d::GrassCullFit::Draw) {
+        ++state->ForeignCulls;
+        state->Slots.Reset();
+        state->Current = {};
+    }
     const auto drawnSlot = state->Slots.Draw(frame);
     if (!drawnSlot) ++state->NoResultFrames;
+    else state->DrawnArea = state->Area;
     const auto& current = state->Current;
     const auto timestamp = [&](uint32_t index) {
         dkCmdBufReportCounter(cmd, DkCounter_Timestamp,
@@ -843,6 +899,7 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
 namespace Fast {
 void Deko3dConfigureGrass(std::string_view, bool) {}
 void Deko3dSetGrassFrameRate(bool) {}
+void Deko3dSetGrassArea(int, int) {}
 bool Deko3dGrassWantsColliders() {
     return false;
 }

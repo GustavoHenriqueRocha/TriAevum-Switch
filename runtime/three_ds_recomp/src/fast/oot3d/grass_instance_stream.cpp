@@ -59,7 +59,12 @@ float UnpackGrassHalf(uint16_t value) noexcept {
     return std::bit_cast<float>(sign | ((exponent + 112U) << 23U) | (mantissa << 13U));
 }
 
-GrassStreamInstance PackGrassStreamInstance(const GrassWorldAnchor& anchor, float fade) noexcept {
+float GrassStreamWidthScale(float retention) noexcept {
+    if (!(retention > 0.0F)) return kGrassMaxWidthScale;
+    return std::clamp(1.0F / std::sqrt(retention), 1.0F, kGrassMaxWidthScale);
+}
+
+GrassStreamInstance PackGrassStreamInstance(const GrassWorldAnchor& anchor, float fade, float widthScale) noexcept {
     GrassStreamInstance instance;
     instance.PositionHeight = anchor.BaseHeight;
     instance.PackedAxis = anchor.PackedWidthAxis;
@@ -71,7 +76,7 @@ GrassStreamInstance PackGrassStreamInstance(const GrassWorldAnchor& anchor, floa
     const auto unorm8 = [](float value) {
         return static_cast<uint32_t>(std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
     };
-    instance.WidthPhaseFade = PackGrassHalf(anchor.HalfWidthPhase[0]) | (unorm8(phase / kTau) << 16U) |
+    instance.WidthPhaseFade = PackGrassHalf(anchor.HalfWidthPhase[0] * widthScale) | (unorm8(phase / kTau) << 16U) |
                               (unorm8(fade) << 24U);
     return instance;
 }
@@ -148,15 +153,17 @@ GrassStreamStats GrassInstanceStreamBuilder::Build(std::span<const GrassStreamPl
             const float dz = position[2] - placement.Eye[2];
             const float squared = dx * dx + dy * dy + dz * dz;
             if (!(squared <= drawSquared)) continue;
-            if (squared > fullSquared &&
-                culling[anchor].StableVisibility >= GrassStreamRetention(settings, std::sqrt(squared))) {
+            const float retention = squared > fullSquared ? GrassStreamRetention(settings, std::sqrt(squared)) : 1.0F;
+            if (culling[anchor].StableVisibility >= retention) {
                 ++stats.AnchorsThinned;
                 continue;
             }
+            const auto widthScale =
+                static_cast<uint8_t>(std::lround(GrassStreamWidthScale(retention) * 64.0F));
             const bool blades = squared < bladeSquared;
             const float fade = std::clamp((settings.DrawDistance - std::sqrt(squared)) / fadeRange, 0.0F, 1.0F);
             const uint16_t bucket = static_cast<uint16_t>(candidate.Placement * 2U + (blades ? 1U : 0U));
-            mSelected.push_back({anchor, bucket, static_cast<uint8_t>(std::lround(fade * 255.0F))});
+            mSelected.push_back({anchor, bucket, static_cast<uint8_t>(std::lround(fade * 255.0F)), widthScale});
             ++mBucketCounts[bucket];
             ++(blades ? stats.Blades : stats.Tufts);
         }
@@ -177,7 +184,8 @@ GrassStreamStats GrassInstanceStreamBuilder::Build(std::span<const GrassStreamPl
     for (const auto& selected : mSelected) {
         const auto& placement = placements[selected.Bucket / 2U];
         output[offsets[selected.Bucket]++] =
-            PackGrassStreamInstance(placement.World->Anchors[selected.Anchor], selected.Fade / 255.0F);
+            PackGrassStreamInstance(placement.World->Anchors[selected.Anchor], selected.Fade / 255.0F,
+                                    selected.WidthScale / 64.0F);
     }
     return stats;
 }

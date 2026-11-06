@@ -44,6 +44,7 @@ struct PicaGrassPlacementStats {
     uint32_t Rules = 0;          // rules whose texture has been seen
     uint32_t Meshes = 0;         // source meshes matched this frame
     uint32_t Ready = 0;          // placements available
+    uint32_t Empty = 0;          // built with no tuft (mask, slope or size left nothing)
     uint32_t Queued = 0;         // placements being built
     uint64_t Anchors = 0;        // tufts in the ready placements
     double BuildMilliseconds = 0.0; // worker time of the placements finished this frame

@@ -379,6 +379,19 @@ GUARDS = [
     Guard("grass: the display copy must see the grass draw's Version (else a lean repeat skips the copy)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'DrawGrass\(\*key, \*source\);\s+\}\s+const PicaDisplayCopy copy\{source->Id, source->Version'),
+    Guard("grass of the title demo drawn in the temple entrance: a cull of another area is dropped, never drawn",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'Oot3d::GrassCullFitsFrame\(state->Current\.Area, state->Area,.*?!= Oot3d::GrassCullFit::Draw\) \{\s+'
+          r'\+\+state->ForeignCulls;\s+state->Slots\.Reset\(\);',
+          test="oot3d_grass_switch_tests (Oot3dGrassForeignCull)"),
+    Guard("grass: a scene or room change drops the drawn cull and the sources' memo",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'if \(area == state\.Area\) return;.*?state\.Slots\.Reset\(\);\s+state\.Current = \{\};\s+'
+          r'state\.Sources = std::make_unique'),
+    Guard("grass flickered at 60 fps: in-between frames must keep their sources (model-to-clip of the frame, world kept)",
+          "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
+          r'RefreshGrassMemoDraw\(mesh, draw, state\.Memo\.CameraInverse\(draw\)\) \|\| RefreshMemoClip\(mesh, draw\)',
+          test="oot3d_grass_switch_tests (Oot3dGrassInterpolatedFrames)"),
     # --- 26/10: dev menu without buttons on deko3d ---
     Guard("dev menu (L3+R3) opened on deko3d but didn't receive controller input (no ImGui SDL backend)",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
