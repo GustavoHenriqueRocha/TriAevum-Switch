@@ -728,6 +728,11 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'guestStateDumper != nullptr && guestStateDumper->Due\(vblankCount\)',
           "oot3d_native_a32_ctr_host_tests (TestGuestStateDump)"),
+    Guard("build -O1 com GCC parava no -Werror do NRI (maybe-uninitialized em SharedVal.h)",
+          "runtime/three_ds_recomp/CMakeLists.txt",
+          r'if\(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND TARGET NRI_Shared\)\s+'
+          r'(?:#[^\n]*\n\s*)*target_compile_options\(NRI_Shared PUBLIC -Wno-error=maybe-uninitialized\)',
+          "build_title_boot_probe.sh com OPT=-O1"),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

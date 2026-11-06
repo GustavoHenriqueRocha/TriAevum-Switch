@@ -276,6 +276,12 @@ if(THREE_DS_RECOMP_ENABLE_VULKAN)
 			# third-party SDK block a Clang/ThinLTO host build.
 			target_compile_options(NRI_Shared PUBLIC /WX-)
 		endif()
+		if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND TARGET NRI_Shared)
+			# NRI turns on -Werror; from -O1 up GCC reports a false
+			# maybe-uninitialized in Source/Validation/SharedVal.h and stops
+			# optimized host builds (SM3DL window at -O1).
+			target_compile_options(NRI_Shared PUBLIC -Wno-error=maybe-uninitialized)
+		endif()
 		if(THREE_DS_RECOMP_ENABLE_SSSR)
 			include(cmake/dependencies/oot3d-sssr.cmake)
 		endif()
