@@ -2,6 +2,7 @@
 #include "oot3d_native_pica_presentation_scheduler.h"
 
 #include "fast/oot3d/pica_uniform_layout.h"
+#include "fast/renderer3ds/pica_texture_copy_pins.h"
 #include "fast/renderer3ds/pica_vulkan_device_profile.h"
 
 #include <algorithm>
@@ -200,8 +201,31 @@ void TestPicaDepthFormatKeepsStencil() {
             "no usable format must be reported");
 }
 
+// SM3DL in parallel presentation: the presentation namespace captured its
+// version of copy 2040 after the frame's pins were declared, the next frame's
+// sweep retired it, and the following frame failed with "the producer version
+// is not registered in this namespace".
+void TestPicaTextureCopyPinCoversLaterVersions() {
+    using Fast::Renderer3ds::PicaTextureCopyPins;
+    std::vector<Fast::Renderer3ds::PicaTextureCopyReference> retained(2);
+    retained[0].CompletionId = 2036U;
+    retained[1].CompletionId = 2040U;
+    PicaTextureCopyPins pins;
+    Require(!pins.Declared(), "no pins are declared before the first declaration");
+    pins.Declare(retained);
+    Require(pins.Declared(), "a declaration must be recorded");
+    // No version of 2040 existed at the declaration; the presentation version
+    // captured afterwards carries the same completion id.
+    Require(pins.Retains(2040U),
+            "a pinned copy must keep every version, also one captured after the pin");
+    Require(!pins.Retains(2044U), "an unreferenced copy must stay retirable");
+    pins.Clear();
+    Require(!pins.Declared() && !pins.Retains(2040U), "clearing must drop the pins");
+}
+
 int main() {
     TestPicaDepthFormatKeepsStencil();
+    TestPicaTextureCopyPinCoversLaterVersions();
     RecordingBackend backend;
     Oot3dNativeGame::Oot3dPicaVulkanDrawPlan plan;
     plan.SubmissionId = 17;

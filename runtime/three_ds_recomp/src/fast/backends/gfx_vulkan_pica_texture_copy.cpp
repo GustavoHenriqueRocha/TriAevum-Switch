@@ -409,18 +409,7 @@ bool GfxRenderingAPIVulkan::SetPinnedPicaTextureCopies(
     std::string* error) {
     // Pin updates may arrive while command buffers still use older producers.
     // Frame fences, not pin updates, authorize reclamation.
-    std::set<std::pair<uint64_t, uint64_t>> pins;
-    for (const auto& reference : retained) {
-        // A copy's completion id identifies every version of it, across
-        // namespaces; the subranges are informational.
-        for (const auto& [producer, identity] : mGpuTextureCopyProducers) {
-            if (std::get<1>(producer) == reference.CompletionId) {
-                pins.insert({std::get<0>(producer), std::get<1>(producer)});
-            }
-        }
-    }
-    mGpuTextureCopyPins = std::move(pins);
-    mGpuTextureCopyPinsDeclared = true;
+    mGpuTextureCopyPins.Declare(retained);
     (void)error;
     return true;
 }
@@ -432,8 +421,8 @@ void GfxRenderingAPIVulkan::RetireGpuTextureCopyProducers(uint64_t completedFram
             surface.LastReferencedFrame > completedFrame ||
             (surface.GuestOwner && surface.GuestOwner.use_count() > 1))
             continue;
-        if (mGpuTextureCopyPinsDeclared) {
-            if (mGpuTextureCopyPins.contains({surface.RenderTargetNamespace, surface.CompletionId}))
+        if (mGpuTextureCopyPins.Declared()) {
+            if (mGpuTextureCopyPins.Retains(surface.CompletionId))
                 continue;
         } else {
             const auto current = mHandledNativePicaTextureCopies.find(
@@ -971,8 +960,7 @@ void GfxRenderingAPIVulkan::DestroyGpuTextureCopySurfaces() {
         DestroyGpuTextureCopySurface(mGpuTextureCopySurfaces.begin()->first);
     }
     mHandledNativePicaTextureCopies.clear();
-    mGpuTextureCopyPins.clear();
-    mGpuTextureCopyPinsDeclared = false;
+    mGpuTextureCopyPins.Clear();
 }
 
 namespace {

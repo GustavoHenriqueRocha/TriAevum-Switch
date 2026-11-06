@@ -13,6 +13,7 @@
 #include "fast/renderer3ds/pica_motion_provenance.h"
 #include "fast/renderer3ds/pica_program_preparation.h"
 #include "fast/renderer3ds/pica_preparation_queue.h"
+#include "fast/renderer3ds/pica_texture_copy_pins.h"
 #include "fast/renderer3ds/pica_texture_copy_plan.h"
 #include "fast/renderer3ds/pica_shadow_geometry.h"
 #include "fast/renderer3ds/pica_ui_canvas.h"
@@ -1397,8 +1398,7 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
         mGpuTextureCopyProducers;
     // Explicit frontend pins supersede conservative latest-destination retention.
     // Both policies still require completed GPU frames and no deferred guest bytes.
-    std::set<std::pair<uint64_t, uint64_t>> mGpuTextureCopyPins;
-    bool mGpuTextureCopyPinsDeclared = false;
+    Renderer3ds::PicaTextureCopyPins mGpuTextureCopyPins;
     // Producer versions travel in the texture-cache snapshot vector, not in a
     // parallel one: an entry with copy-producer metadata carries the full
     // captured RGBA image, and restoring it rebuilds the immutable version so a

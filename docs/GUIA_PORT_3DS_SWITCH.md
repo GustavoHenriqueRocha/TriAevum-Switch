@@ -1663,6 +1663,10 @@ Armadilhas do SM3DL (05/11), todas genéricas:
   sombra por volumes de stencil termina num quad de tela cheia que então pinta tudo o que veio
   antes (chão e céu somem, personagens desenhados depois aparecem). Sintoma: fundo de cor única
   com só os objetos por cima. Use o trace semântico e procure quads de 6 vértices com stencil.
+- **Janela de título novo a -O1** (`docs/pesquisas/2026-11-06-sm3dl-o1-pins-copia.md`): o Debug
+  -O0 roda a ~1/3; `OPT=-O1` no `build_title_boot_probe.sh` (pasta de build separada) dá 2,8× e
+  mantém os asserts. Erro que só aparece no build rápido e cai em vblanks diferentes é corrida da
+  apresentação paralela: compare com `TRIAEVUM_PARALLEL_PRESENTATION=0` antes de afunilar.
 
 ---
 

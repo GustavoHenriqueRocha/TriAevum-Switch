@@ -733,6 +733,12 @@ GUARDS = [
           r'if\(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND TARGET NRI_Shared\)\s+'
           r'(?:#[^\n]*\n\s*)*target_compile_options\(NRI_Shared PUBLIC -Wno-error=maybe-uninitialized\)',
           "build_title_boot_probe.sh com OPT=-O1"),
+    Guard("SM3DL na apresentação paralela: pin resolvido nas versões já registradas deixava aposentar a "
+          "versão capturada depois (producer version is not registered)",
+          "runtime/three_ds_recomp/include/fast/renderer3ds/pica_texture_copy_pins.h",
+          r'for \(const auto& reference : retained\) mCompletions\.insert\(reference\.CompletionId\);.*?'
+          r'bool Retains\(uint64_t completionId\) const \{\s+return mCompletions\.contains\(completionId\);',
+          "oot3d_native_pica_vulkan_bridge_tests (TestPicaTextureCopyPinCoversLaterVersions)"),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar
