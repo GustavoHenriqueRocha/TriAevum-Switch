@@ -215,6 +215,7 @@ struct FramePlacement {
 struct GrassState {
     Oot3d::GrassSwitchMode Mode = Oot3d::GrassSwitchMode::Off;
     bool Fps60 = false;
+    Oot3d::GrassSwitchDistance Distance = Oot3d::GrassSwitchDistance::Near;
     Oot3d::GrassSwitchProfile Profile;
     Oot3d::GrassStreamSettings Stream;
     Oot3d::InteractiveGrassSettings Settings;
@@ -240,8 +241,9 @@ struct GrassState {
     const DkShader* FragmentDepth = nullptr;
     // This frame (render thread).
     uint64_t PreparedFrame = ~0ULL;
-    // Keyed by GrassFramePlacementKey: one placement per render target.
-    std::unordered_map<uint64_t, FramePlacement> Frame;
+    // One placement per render target it was drawn into, also found by
+    // placement identity (GrassFramePlacements).
+    Oot3d::GrassFramePlacements<FramePlacement> Frame;
     // The target this frame's sources were published into.
     uint64_t SourceFrame = ~0ULL;
     uint64_t SourceNamespace = 0;
@@ -274,7 +276,10 @@ struct GrassState {
     // The game's area (GrassArea) the placements of this frame belong to.
     uint32_t Area = 0xffffffffU;
     uint32_t DrawnArea = 0xffffffffU;
-    uint64_t AreaChanges = 0, ForeignCulls = 0;
+    // Culls dropped before drawing (GrassCullFitsFrame): of another area, or
+    // with no placement in common with this frame's; and cull ranges drawn
+    // with their placement as drawn into another target this frame.
+    uint64_t AreaChanges = 0, ForeignOtherArea = 0, ForeignNoPlacement = 0, OtherTargetRanges = 0;
 };
 
 // Set once before the first frame (Deko3dConfigureGrass), read by the render
@@ -357,15 +362,32 @@ FramePlacement BuildFramePlacement(const Oot3d::PicaGrassDrawable& drawable, con
     return result;
 }
 
-// The budgets of one frame rate on top of the preset (at start and when the
-// FPS changes while the game runs): the same code both ways, so a switch
-// leaves what a start at that rate would. The placement fields (density,
-// per-placement cap, retained bytes) are the same at both rates.
-void ApplyFrameRate(GrassState& state, bool fps60) {
+// The budgets of one frame rate and grass distance on top of the preset (at
+// start, and when the FPS or the distance changes while the game runs): the
+// same code every way, so a switch leaves what a start with those choices
+// would. The placement fields (density, per-placement cap, retained bytes)
+// are the same for all of them.
+void ApplyProfile(GrassState& state, bool fps60, Oot3d::GrassSwitchDistance distance) {
     state.Fps60 = fps60;
-    state.Profile = Oot3d::SelectGrassSwitchProfile(fps60);
+    state.Distance = distance;
+    state.Profile = Oot3d::SelectGrassSwitchProfile(fps60, distance);
     state.Stream = Oot3d::GrassStreamSettingsFromProfile(state.Profile);
     Oot3d::ApplyGrassSwitchProfile(state.Profile, state.Settings);
+}
+
+void LogProfile(const GrassState& state) {
+    const auto distance = Oot3d::GrassSwitchDistanceWord(state.Distance);
+    if (state.Distance == Oot3d::GrassSwitchDistance::Area) {
+        Deko3d::Log("grass: %s distance=area: every tuft of the area, at most %u visible (nearest clusters first)",
+                    state.Fps60 ? "60 fps" : "30 fps", state.Stream.MaxInstances);
+        return;
+    }
+    Deko3d::Log("grass: %s distance=%.*s: full density to %.0f, thinning to %.0f (shrinking from %.0f), single "
+                "blades within %.0f, at most %u visible",
+                state.Fps60 ? "60 fps" : "30 fps", static_cast<int>(distance.size()), distance.data(),
+                static_cast<double>(state.Stream.FullDensityDistance), static_cast<double>(state.Stream.DrawDistance),
+                static_cast<double>(state.Stream.FadeStart), static_cast<double>(state.Stream.SingleBladeDistance),
+                state.Stream.MaxInstances);
 }
 
 } // namespace
@@ -374,7 +396,8 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
     if (gGrass.load(std::memory_order_acquire) != nullptr) {
         return;
     }
-    const auto mode = Oot3d::ReadGrassSwitchMode("sdmc:/switch/oot3dre/config");
+    const std::filesystem::path config = "sdmc:/switch/oot3dre/config";
+    const auto mode = Oot3d::ReadGrassSwitchMode(config);
     if (mode == Oot3d::GrassSwitchMode::Off) {
         return;
     }
@@ -392,18 +415,15 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
         Deko3d::Log("grass: the preset has no source rules; off");
         return;
     }
-    ApplyFrameRate(*state, fps60);
+    ApplyProfile(*state, fps60, Oot3d::ReadGrassSwitchDistance(config));
     state->Placements = std::make_unique<Oot3d::PicaGrassPlacements>(state->Profile.RetainedBytes);
     Deko3d::Log("grass: on (config/grass = %s), %zu rules, %.0f tufts/m2 of %u blades, at most %u per placement, "
-                "%.1f MiB retained | %s: full density to %.0f, thinning to %.0f (shrinking from %.0f), single blades within %.0f, "
-                "at most %u visible",
+                "%.1f MiB retained",
                 mode == Oot3d::GrassSwitchMode::Draw ? "draw" : "placements", state->Settings.Rules.size(),
                 static_cast<double>(state->Profile.TuftsPerSquareMeter), state->Profile.BladesPerTuft,
                 state->Profile.MaxAnchorsPerPlacement,
-                static_cast<double>(state->Profile.RetainedBytes) / (1024.0 * 1024.0), fps60 ? "60 fps" : "30 fps",
-                static_cast<double>(state->Stream.FullDensityDistance),
-                static_cast<double>(state->Stream.DrawDistance), static_cast<double>(state->Stream.FadeStart),
-                static_cast<double>(state->Stream.SingleBladeDistance), state->Stream.MaxInstances);
+                static_cast<double>(state->Profile.RetainedBytes) / (1024.0 * 1024.0));
+    LogProfile(*state);
     gGrassWantsColliders = mode == Oot3d::GrassSwitchMode::Draw;
     gGrass.store(state.release(), std::memory_order_release);
 }
@@ -414,12 +434,9 @@ void Deko3dSetGrassFrameRate(bool fps60) {
         return;
     }
     // Stream settings are copied into each cull job: the next job culls with
-    // the new distances and cap (the stream memory holds the larger cap).
-    ApplyFrameRate(*state, fps60);
-    Deko3d::Log("grass: %s: full density to %.0f, thinning to %.0f (shrinking from %.0f), at most %u visible",
-                fps60 ? "60 fps" : "30 fps", static_cast<double>(state->Stream.FullDensityDistance),
-                static_cast<double>(state->Stream.DrawDistance), static_cast<double>(state->Stream.FadeStart),
-                state->Stream.MaxInstances);
+    // the new distances and cap (the stream memory holds the largest cap).
+    ApplyProfile(*state, fps60, state->Distance);
+    LogProfile(*state);
 }
 
 void Deko3dSetGrassArea(int scene, int room) {
@@ -484,7 +501,7 @@ void CheckGrassArea(GrassState& state) {
     state.Slots.Reset();
     state.Current = {};
     state.Sources = std::make_unique<Oot3d::PicaGrassSourceState>();
-    state.Frame.clear();
+    state.Frame.Clear();
     state.SourceFrame = ~0ULL;
 }
 
@@ -496,7 +513,7 @@ void UpdatePlacements(GrassState& state, uint64_t frame) {
     CheckGrassArea(state);
     if (state.PreparedFrame == frame) return;
     state.PreparedFrame = frame;
-    state.Frame.clear();
+    state.Frame.Clear();
     state.FrameUniforms = {DK_GPU_ADDR_INVALID, DK_GPU_ADDR_INVALID};
     state.Posted = false;
     const auto begin = std::chrono::steady_clock::now();
@@ -504,10 +521,8 @@ void UpdatePlacements(GrassState& state, uint64_t frame) {
         const auto& drawables = state.Placements->Update(frame, state.Settings);
         if (state.Mode == Oot3d::GrassSwitchMode::Draw) {
             for (const auto& drawable : drawables)
-                state.Frame.emplace(Oot3d::GrassFramePlacementKey(drawable.Placement->Identity,
-                                                                  drawable.Mesh.RenderTargetNamespace,
-                                                                  drawable.Mesh.FramebufferColorPhysicalAddress),
-                                    BuildFramePlacement(drawable, state));
+                state.Frame.Add(drawable.Placement->Identity, drawable.Mesh.RenderTargetNamespace,
+                                drawable.Mesh.FramebufferColorPhysicalAddress, BuildFramePlacement(drawable, state));
         }
     } catch (const std::exception& exception) {
         static bool reported = false;
@@ -604,6 +619,12 @@ void GrassEndFrame(uint64_t frame) {
     if (state == nullptr) {
         return;
     }
+    // L3+R3 > Video > "Grass distance" while the game runs: the next cull
+    // job reads the new distances and cap (the stream memory holds any cap).
+    if (const auto distance = Oot3d::PublishedGrassSwitchDistance(); distance && *distance != state->Distance) {
+        ApplyProfile(*state, state->Fps60, *distance);
+        LogProfile(*state);
+    }
     UpdatePlacements(*state, frame);
     if (state->Mode == Oot3d::GrassSwitchMode::Draw && state->DrawReady) {
         // A frame without a draw point (no scene target this frame) still
@@ -649,20 +670,26 @@ void GrassEndFrame(uint64_t frame) {
         // the culls selected.
         Log("grass: frame %llu fragment raster %llu draws, depth-writing %llu | culls fresh %llu stale %llu "
             "(frames that redrew an older cull), no result %llu, nothing drawn %llu | cull instances %.0f "
-            "(max %llu) thinned %.0f | distance full %.0f max %.0f | area %s scene %d room %d, changes %llu, "
-            "foreign culls dropped %llu | empty placements %u",
+            "(max %llu) thinned %.0f | distance=%s full %.0f max %.0f | area %s scene %d room %d, changes %llu, "
+            "foreign culls dropped %llu (other area %llu, no shared placement %llu), ranges drawn with another "
+            "target's placement %llu | empty placements %u",
             static_cast<unsigned long long>(frame), static_cast<unsigned long long>(state->RasterDraws),
             static_cast<unsigned long long>(state->DepthDraws),
             static_cast<unsigned long long>(state->Slots.FreshFrames - state->FreshBase),
             static_cast<unsigned long long>(state->Slots.StaleFrames - state->StaleBase),
             static_cast<unsigned long long>(state->NoResultFrames), static_cast<unsigned long long>(state->EmptyFrames),
             static_cast<double>(state->CullInstances) / jobs, static_cast<unsigned long long>(state->CullInstancesMax),
-            static_cast<double>(state->CullThinned) / jobs, static_cast<double>(state->Stream.FullDensityDistance),
+            static_cast<double>(state->CullThinned) / jobs,
+            Oot3d::GrassSwitchDistanceWord(state->Distance).data(),
+            static_cast<double>(state->Stream.FullDensityDistance),
             static_cast<double>(state->Stream.DrawDistance), state->DrawnArea == 0xffffffffU ? "none" : "drawn",
             state->DrawnArea == 0xffffffffU ? -1 : static_cast<int>(state->DrawnArea >> 8U),
             state->DrawnArea == 0xffffffffU ? -1 : static_cast<int>(static_cast<int8_t>(state->DrawnArea & 0xffU)),
-            static_cast<unsigned long long>(state->AreaChanges), static_cast<unsigned long long>(state->ForeignCulls),
-            state->Placements->Stats().Empty);
+            static_cast<unsigned long long>(state->AreaChanges),
+            static_cast<unsigned long long>(state->ForeignOtherArea + state->ForeignNoPlacement),
+            static_cast<unsigned long long>(state->ForeignOtherArea),
+            static_cast<unsigned long long>(state->ForeignNoPlacement),
+            static_cast<unsigned long long>(state->OtherTargetRanges), state->Placements->Stats().Empty);
     }
     state->Frames = 0;
     state->Published = 0;
@@ -679,7 +706,7 @@ void GrassEndFrame(uint64_t frame) {
     state->CullInstances = state->CullInstancesMax = state->CullThinned = 0;
     state->EmptyFrames = state->NoResultFrames = 0;
     state->FreshBase = state->Slots.FreshFrames;
-    state->AreaChanges = state->ForeignCulls = 0;
+    state->AreaChanges = state->ForeignOtherArea = state->ForeignNoPlacement = state->OtherTargetRanges = 0;
     state->StaleBase = state->Slots.StaleFrames;
 }
 
@@ -715,7 +742,8 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
         state->Fragment = mShaders.Embedded(kGrassFragmentKey, std::span<const uint8_t>(kGrassFragmentDksh));
         state->FragmentDepth =
             mShaders.Embedded(kGrassFragmentDepthKey, std::span<const uint8_t>(kGrassFragmentDepthDksh));
-        // Both rates' caps (L3+R3 > Video > FPS switches the profile live).
+        // The largest cap of every rate and distance (Whole area): L3+R3 >
+        // Video > FPS and "Grass distance" switch the profile live.
         state->SlotInstances = Oot3d::GrassSwitchStreamCapacity();
         const uint32_t streamBytes =
             AlignUp(kStreamSlots * state->SlotInstances * static_cast<uint32_t>(sizeof(Oot3d::GrassStreamInstance)),
@@ -728,15 +756,16 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
         if (state->Vertex == nullptr || state->Fragment == nullptr || state->FragmentDepth == nullptr ||
             state->StreamMemory == nullptr) {
             state->DrawFailed = true;
-            Log("grass: drawing off (shaders %d/%d/%d, instance memory %u KiB %s)", state->Vertex != nullptr,
-                state->Fragment != nullptr, state->FragmentDepth != nullptr, streamBytes >> 10,
-                state->StreamMemory != nullptr ? "ok" : "failed");
+            Log("grass: drawing off (shaders %d/%d/%d, instance memory %.1f MiB %s)", state->Vertex != nullptr,
+                state->Fragment != nullptr, state->FragmentDepth != nullptr,
+                static_cast<double>(streamBytes) / (1024.0 * 1024.0), state->StreamMemory != nullptr ? "ok" : "failed");
             return;
         }
         state->Worker = std::make_unique<GrassCullWorker>();
         state->DrawReady = true;
-        Log("grass: drawing ready (%u KiB of instance memory in %u slots, shaders %zu/%zu/%zu B)", streamBytes >> 10,
-            kStreamSlots, sizeof(kGrassVertexDksh), sizeof(kGrassFragmentDksh), sizeof(kGrassFragmentDepthDksh));
+        Log("grass: drawing ready (%.1f MiB of instance memory: %u slots of %u tufts, shaders %zu/%zu/%zu B)",
+            static_cast<double>(streamBytes) / (1024.0 * 1024.0), kStreamSlots, state->SlotInstances,
+            sizeof(kGrassVertexDksh), sizeof(kGrassFragmentDksh), sizeof(kGrassFragmentDepthDksh));
     }
     UpdatePlacements(*state, frame);
     CollectGpuTime(*state, mDevice.Slot());
@@ -747,17 +776,17 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
     uint32_t draws = 0U;
     uint64_t visible = 0U;
     bool timed = false;
-    // A cull of another area, or of none of this frame's placements, is
+    // A cull of another area, or with none of its placements among this
+    // frame's (by identity, whatever target this frame draws into), is
     // dropped: never drawn with this frame's cameras.
-    if (state->Current.Valid &&
-        Oot3d::GrassCullFitsFrame(state->Current.Area, state->Area, state->Current.Identities,
-                                  [&](uint64_t identity) {
-                                      return state->Frame.contains(Oot3d::GrassFramePlacementKey(
-                                          identity, key.Namespace, key.ColorAddress));
-                                  }) != Oot3d::GrassCullFit::Draw) {
-        ++state->ForeignCulls;
-        state->Slots.Reset();
-        state->Current = {};
+    if (state->Current.Valid) {
+        const auto fit = Oot3d::GrassCullFitsFrame(state->Current.Area, state->Area, state->Current.Identities,
+                                                   [&](uint64_t identity) { return state->Frame.Has(identity); });
+        if (fit != Oot3d::GrassCullFit::Draw) {
+            ++(fit == Oot3d::GrassCullFit::OtherArea ? state->ForeignOtherArea : state->ForeignNoPlacement);
+            state->Slots.Reset();
+            state->Current = {};
+        }
     }
     const auto drawnSlot = state->Slots.Draw(frame);
     if (!drawnSlot) ++state->NoResultFrames;
@@ -774,10 +803,14 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
         if (pass == 1U && timed) timestamp(1U);
         for (const auto& range : current.Ranges) {
             if (range.Kind != kind) continue;
-            const auto found = state->Frame.find(Oot3d::GrassFramePlacementKey(
-                current.Identities[range.Placement], key.Namespace, key.ColorAddress));
-            if (found == state->Frame.end()) continue;
-            auto& placement = found->second;
+            // This target's own placement (its camera), else the placement
+            // as drawn into another target this frame (this frame's camera).
+            bool otherTarget = false;
+            auto* found =
+                state->Frame.Find(current.Identities[range.Placement], key.Namespace, key.ColorAddress, &otherTarget);
+            if (found == nullptr) continue;
+            state->OtherTargetRanges += otherTarget ? 1U : 0U;
+            auto& placement = *found;
             if (draws == 0U) {
                 FlushPicaInvalidations();
                 BindPicaTarget(target);
@@ -862,13 +895,9 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
             const DkBufExtents extent = {instances, range.Count * static_cast<uint32_t>(
                                                                       sizeof(Oot3d::GrassStreamInstance))};
             dkCmdBufBindVtxBuffers(cmd, 0, &extent, 1);
-            if (blades) {
-                dkCmdBufDraw(cmd, DkPrimitive_Triangles, 3U * state->Profile.BladesPerTuft, range.Count, 0, 0);
-                state->Blades += range.Count;
-            } else {
-                dkCmdBufDraw(cmd, DkPrimitive_TriangleStrip, 4U, range.Count, 0, 0);
-                state->Tufts += range.Count;
-            }
+            // Both kinds are BladesPerTuft triangles per instance (grass_vsh.glsl).
+            dkCmdBufDraw(cmd, DkPrimitive_Triangles, 3U * state->Profile.BladesPerTuft, range.Count, 0, 0);
+            (blades ? state->Blades : state->Tufts) += range.Count;
             visible += range.Count;
             ++draws;
             ++(placement.ExplicitDepth ? state->DepthDraws : state->RasterDraws);

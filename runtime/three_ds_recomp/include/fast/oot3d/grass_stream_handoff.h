@@ -18,6 +18,8 @@
 #include <span>
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
+#include <utility>
 
 namespace Fast::Oot3d {
 
@@ -86,9 +88,10 @@ class GrassStreamSlots {
 };
 
 // Whether a finished cull may be drawn in this frame: it was culled in the
-// same area (scene and room) and at least one of its placements is among
-// this frame's. Each of its ranges is then drawn only if its own placement
-// is this frame's (GrassFramePlacementKey); the rest is dropped.
+// same area (scene and room) and at least one of its placements (by
+// placement identity, whatever target the frame draws into) is among this
+// frame's. Each of its ranges is then drawn only if its own placement is
+// this frame's (GrassFramePlacements::Find); the rest is dropped.
 enum class GrassCullFit : uint8_t { Draw, OtherArea, NoPlacement };
 template <typename Identities, typename Contains>
 [[nodiscard]] GrassCullFit GrassCullFitsFrame(uint32_t cullArea, uint32_t frameArea, const Identities& cullIdentities,
@@ -147,5 +150,46 @@ template <typename Identities, typename Contains>
     key ^= uint64_t{colorAddress} + 0x9e3779b97f4a7c15ULL + (key << 6U) + (key >> 2U);
     return key;
 }
+
+// This frame's placements: one per placement and render target it was drawn
+// into (GrassFramePlacementKey), each with that draw's camera, also found by
+// placement identity alone. With fps60 an in-between frame may draw into
+// another target than the frame a cull was made in: the placement identity
+// is the same, so the cull still fits and is drawn with this frame's camera.
+template <typename Placement>
+class GrassFramePlacements {
+  public:
+    void Clear() noexcept {
+        mByKey.clear();
+        mByIdentity.clear();
+    }
+    // The first entry per (identity, target) stays.
+    void Add(uint64_t identity, uint64_t renderTargetNamespace, uint32_t colorAddress, Placement placement) {
+        const uint64_t key = GrassFramePlacementKey(identity, renderTargetNamespace, colorAddress);
+        if (mByKey.try_emplace(key, std::move(placement)).second) mByIdentity.try_emplace(identity, key);
+    }
+    [[nodiscard]] bool Has(uint64_t identity) const noexcept { return mByIdentity.contains(identity); }
+    // The placement to draw `identity` with into this target: as drawn into
+    // it this frame, else as drawn into another target this frame
+    // (`otherTarget` set), else null.
+    [[nodiscard]] Placement* Find(uint64_t identity, uint64_t renderTargetNamespace, uint32_t colorAddress,
+                                  bool* otherTarget = nullptr) {
+        if (otherTarget != nullptr) *otherTarget = false;
+        if (const auto own = mByKey.find(GrassFramePlacementKey(identity, renderTargetNamespace, colorAddress));
+            own != mByKey.end())
+            return &own->second;
+        const auto any = mByIdentity.find(identity);
+        if (any == mByIdentity.end()) return nullptr;
+        if (otherTarget != nullptr) *otherTarget = true;
+        return &mByKey.at(any->second);
+    }
+    [[nodiscard]] bool Empty() const noexcept { return mByKey.empty(); }
+    [[nodiscard]] auto begin() const noexcept { return mByKey.begin(); }
+    [[nodiscard]] auto end() const noexcept { return mByKey.end(); }
+
+  private:
+    std::unordered_map<uint64_t, Placement> mByKey;
+    std::unordered_map<uint64_t, uint64_t> mByIdentity; // identity -> its first key
+};
 
 } // namespace Fast::Oot3d

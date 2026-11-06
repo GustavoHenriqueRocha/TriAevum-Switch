@@ -1,10 +1,16 @@
 #version 460
 // deko3d grass (Switch, SWITCH_PORT.md "Grass on deko3d"): one instance per
-// tuft. Tufts far from the camera are a 4-vertex card facing the camera
-// (triangle strip) that the fragment shader cuts into its blades; tufts
-// within grass_distance.z (GrassFrame) are drawn as those blades, one triangle each
-// (3 vertices per blade). Light (the source draw's PICA vertex lights) and
-// fog (its PICA fog LUT) are evaluated here, per vertex.
+// tuft, 3 vertices per blade (a triangle list, BladesPerTuft blades).
+// - Tufts (grass_distance.w = 0): the blades stand side by side in one plane
+//   facing the camera, each narrowing to its tip. They used to be a 4-vertex
+//   card the fragment program cut into blades with discard: ~2/3 of its
+//   pixels were shaded then thrown away, and the discard with depth writes
+//   turned early depth testing off, so tufts hidden behind tufts were shaded
+//   too. Triangles draw only blade pixels, with early depth testing.
+// - Blades (within grass_distance.z, near the camera): each blade with its
+//   own facing and lean, one segment.
+// Light (the source draw's PICA vertex lights) and fog (its PICA fog LUT)
+// are evaluated here, per vertex; the fragment program only writes the colour.
 //
 // Instance stream: GrassStreamInstance (grass_instance_stream.h), 32 bytes.
 layout(location = 0) in vec4 grass_position_height; // world base, tuft height
@@ -38,13 +44,7 @@ layout(std140, binding = 1) uniform GrassFrame {
     vec4 grass_collider_extent[4];// half height, unused
 };
 
-layout(location = 0) out vec4 grass_shade;       // lit colour, alpha 1
-layout(location = 1) out vec2 grass_card;        // across (0-1), up (0-1)
-layout(location = 2) out float grass_fog_factor; // 1 = no fog
-layout(location = 3) flat out vec4 grass_tuft;   // blades, unused, blade mode, unused
-// The card's blades for the fragment cut, per tuft (not per fragment):
-// x centre across the card, y 1 / top height, z lean per unit of height.
-layout(location = 4) flat out vec4 grass_blades[5];
+layout(location = 0) out vec4 grass_shade; // lit and fogged colour, alpha 1
 
 vec3 grass_decode_normal(uint bits) {
     vec2 oct = unpackSnorm2x16(bits);
@@ -128,27 +128,33 @@ void main() {
     vec2 flatToEye = length(toEye.xz) > 1.0e-3 ? normalize(toEye.xz) : vec2(0.0, 1.0);
     vec3 position;
     vec3 normal;
-    vec2 card;
+    float y; // 0 at the root, up to 1 at the tallest tip (the colour ramp)
     float seed = fract(phase * 0.1591549 + base.x * 0.0137 + base.z * 0.0071);
+    // Base left, base right, tip of blade `blade`.
+    uint blade = uint(gl_VertexID) / 3u;
+    uint corner = uint(gl_VertexID) % 3u;
+    float b = float(blade);
+    float r0 = grass_hash(seed * 17.0 + b);
+    float r1 = grass_hash(seed * 31.0 + b * 1.7);
+    float r2 = grass_hash(seed * 53.0 + b * 2.3);
     if (!blades) {
-        // Cylindrical billboard: strip 0 (-1, 0), 1 (1, 0), 2 (-1, 1), 3 (1, 1).
-        uint corner = uint(gl_VertexID) & 3u;
-        float x = (corner & 1u) != 0u ? 1.0 : -1.0;
-        float y = (corner & 2u) != 0u ? 1.0 : 0.0;
+        // The tuft's plane faces the camera (cylindrical billboard), the
+        // blades side by side across it: x 0-1 across, y 0-1 up. Blade b
+        // stands near the middle of its slot, its base 0.84 slot wide, its
+        // tip at 0.7-1 of the height and leaning by up to 0.3 slot.
+        float centre = (b + 0.5 + (r0 - 0.5) * 0.5) / bladeCount;
+        float halfBase = 0.42 / bladeCount;
+        float top = 0.7 + 0.3 * r2;
+        float x = corner == 2u ? centre + (r1 - 0.5) * 0.6 / bladeCount
+                               : centre + (corner == 0u ? -halfBase : halfBase);
+        y = corner == 2u ? top : 0.0;
         vec3 side = vec3(-flatToEye.y, 0.0, flatToEye.x);
-        position = base + side * (x * cardHalf) + vec3(0.0, height * y, 0.0);
+        position = base + side * ((x * 2.0 - 1.0) * cardHalf) + vec3(0.0, height * y, 0.0);
         position.xz += bend * (height * y * y);
         position.y -= dot(bend, bend) * height * 0.3 * y * y;
         normal = normalize(vec3(flatToEye.x, 0.0, flatToEye.y) * 0.5 + vec3(0.0, 1.0, 0.0));
-        card = vec2(x * 0.5 + 0.5, y);
     } else {
-        // One segment per blade: base left, base right, tip.
-        uint blade = uint(gl_VertexID) / 3u;
-        uint corner = uint(gl_VertexID) % 3u;
-        float b = float(blade);
-        float r0 = grass_hash(seed * 17.0 + b);
-        float r1 = grass_hash(seed * 31.0 + b * 1.7);
-        float r2 = grass_hash(seed * 53.0 + b * 2.3);
+        // One segment per blade, each with its own facing and lean.
         vec2 axis = unpackSnorm2x16(grass_axis);
         if (dot(axis, axis) < 1.0e-6) axis = vec2(1.0, 0.0);
         axis = normalize(axis);
@@ -166,28 +172,20 @@ void main() {
             position = root + vec3(facing.x, 0.0, facing.y) * (corner == 0u ? -halfWidth : halfWidth);
         }
         normal = normalize(vec3(-facing.y, 0.6, facing.x));
-        card = vec2(corner == 1u ? 1.0 : 0.0, corner == 2u ? 1.0 : 0.0);
+        y = corner == 2u ? 1.0 : 0.0;
     }
 
     vec4 ground = unpackUnorm4x8(grass_color);
-    float y = card.y;
     vec3 authored = mix(grass_root_color.rgb, grass_tip_color.rgb, y);
     vec3 fromGround = ground.rgb * mix(grass_brightness.x, grass_brightness.y, y);
     vec3 colour = mix(authored, fromGround, grass_root_color.w);
     vec3 groundNormal = grass_decode_normal(grass_normal);
-    grass_shade = vec4(colour * grass_light(normalize(normal + groundNormal)), 1.0);
-    grass_card = card;
-    grass_tuft = vec4(bladeCount, 0.0, blades ? 1.0 : 0.0, 0.0);
-    for (int i = 0; i < 5; ++i) {
-        float b = float(i);
-        float r0 = grass_hash(seed * 17.0 + b);
-        float r1 = grass_hash(seed * 31.0 + b * 1.7);
-        float top = 0.7 + 0.3 * grass_hash(seed * 53.0 + b * 2.3);
-        grass_blades[i] = vec4((b + 0.5 + (r0 - 0.5) * 0.5) / bladeCount, 1.0 / top, (r1 - 0.5) * 0.6 / bladeCount, 0.0);
-    }
+    colour *= grass_light(normalize(normal + groundNormal));
 
     vec4 clip = grass_position_to_clip * vec4(position, 1.0);
-    grass_fog_factor = grass_fog(grass_pica_depth(clip));
+    // Fog per vertex (the factor was interpolated per vertex before too).
+    if (grass_fog_color.w > 0.5) colour = mix(grass_fog_color.rgb, colour, grass_fog(grass_pica_depth(clip)));
+    grass_shade = vec4(colour, 1.0);
     // Window depth = the PICA depth of the source draw. Without w-buffering
     // that mapping (z/w * scale + offset) is linear in z/w, so it goes into
     // clip z (z_gl = (2 d - 1) w) and the rasterizer interpolates it exactly

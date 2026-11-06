@@ -74,6 +74,7 @@ public:
                                std::memory_order_relaxed);
     mPackFound = PackFolderExists();
     mGrassBoot = mGrass = Fast::Oot3d::ReadGrassSwitchMode(mConfig);
+    mGrassDistance = Fast::Oot3d::ReadGrassSwitchDistance(mConfig);
   }
   const char *Label() const noexcept override { return "Video"; }
   void Draw() override {
@@ -178,6 +179,8 @@ private:
   // config/grass (SWITCH_PORT.md, "Grass on deko3d"): off, measure only
   // (placements and the grass: line, nothing drawn) or drawn. Read at start,
   // so it applies on the next start (its budgets follow the FPS at once).
+  // config/grass_distance: how far it reaches, applied at once (the
+  // renderer reads the published choice at its next frame).
   void DrawGrass() {
     ImGui::Separator();
     using Fast::Oot3d::GrassSwitchMode;
@@ -194,6 +197,20 @@ private:
       ImGui::TextUnformatted("Saved. Close and reopen the game to apply.");
     ImGui::TextDisabled("deko3d renderer only. Drawn grass costs GPU time; "
                         "with 30 FPS it reaches farther.");
+    const char *const distances[] = {"Near (default)", "Far", "Whole area"};
+    int distance = static_cast<int>(mGrassDistance);
+    if (ImGui::Combo("Grass distance", &distance, distances, 3)) {
+      mGrassDistance = static_cast<Fast::Oot3d::GrassSwitchDistance>(distance);
+      mGrassDistanceError = !Fast::Oot3d::SaveGrassSwitchDistance(mConfig, mGrassDistance);
+      Fast::Oot3d::PublishGrassSwitchDistance(mGrassDistance);
+    }
+    if (mGrassDistanceError)
+      ImGui::TextWrapped("Could not write config/grass_distance.");
+    ImGui::TextDisabled("Applies at once. Near: full density to 10 m (16 m at 30 FPS), thinner beyond. "
+                        "Far: full density to twice that, about twice the GPU time of Near. "
+                        "Whole area: every tuft of the area, no thinning (up to 65,000 drawn): the most "
+                        "GPU time, several ms per frame in large fields such as Hyrule Field. "
+                        "Use 30 FPS with Whole area.");
   }
 
   // The lighting model (graphics settings: Modern = per-pixel, toon bands
@@ -243,6 +260,8 @@ private:
   Fast::Oot3d::GrassSwitchMode mGrassBoot = Fast::Oot3d::GrassSwitchMode::Off;
   Fast::Oot3d::GrassSwitchMode mGrass = Fast::Oot3d::GrassSwitchMode::Off;
   bool mGrassError = false;
+  Fast::Oot3d::GrassSwitchDistance mGrassDistance = Fast::Oot3d::GrassSwitchDistance::Near;
+  bool mGrassDistanceError = false;
   std::string mLightingError;
   std::string mLightingIssue;
 };

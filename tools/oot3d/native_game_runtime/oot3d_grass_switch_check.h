@@ -31,4 +31,6 @@ struct Sink { bool Fail; std::ostringstream S; ~Sink() { if (Fail) { std::cerr <
 #define ASSERT_EQ(a, b) SHIM_ASSERT((a) == (b), #a " == " #b)
 #define ASSERT_FALSE(c) SHIM_ASSERT(!(c), "!" #c)
 #define ASSERT_GT(a, b) SHIM_ASSERT((a) > (b), #a " > " #b)
+#define ASSERT_LT(a, b) SHIM_ASSERT((a) < (b), #a " < " #b)
+#define ASSERT_NE(a, b) SHIM_ASSERT((a) != (b), #a " != " #b)
 int main() { for (auto& c : shim::Cases()) { int before = shim::Failures(); c.Run(); std::cout << (shim::Failures() == before ? "ok   " : "FAIL ") << c.Name << "\n"; } std::cout << shim::Failures() << " failures\n"; return shim::Failures() != 0; }
