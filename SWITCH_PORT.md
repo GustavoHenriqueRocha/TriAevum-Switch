@@ -1077,6 +1077,72 @@ scheduler. Absent = the previous single-thread code paths exactly (nothing below
   and run the target with `--stress` under `setarch "$(uname -m)" -R` (TSan rejects the
   high-entropy ASLR mappings; in a container that needs `--security-opt seccomp=unconfined`).
 
+### fastmem window, phase 1: `config/fastmem_window` (11/06, off by default)
+Phase 1 of fastmem (one load or store into a flat window instead of the page-table walk; ~11
+AArch64 instructions and three chained loads per guest load today). Phase 1 only lays the window
+down, **with no shard-visible change** (`oot3d_native_a32_memory.h`, the whole-AOT runtime header,
+generated headers, `upstream/` and the generator untouched: the 256 shards and the PGO profile
+stay valid) and **no speed gain expected**: the inline paths still walk the page table.
+- **Window** (`oot3d_switch_guest_window.{h,cpp}`): `virtmemFindAslr` + `virtmemAddReservation` of
+  4 GiB + 2 MiB, base rounded up to 2 MiB. Every region of the process's image (text, read-only
+  data, data+bss, heap and linear commits, primary stack, GSP/HID shared memory, VRAM, DSP RAM,
+  config memory, shared page, TLS pages) lives at `base + guest address`, backed by 2 MiB slabs
+  mapped on demand and never unmapped: `memalign(2 MiB)` heap lent with
+  `svcMapProcessCodeMemory` straight to the window address, then `svcSetProcessMemoryPermission`
+  RW; if the kernel refuses, the shadow route of libnx's `JitType_CodeMemory`
+  (`svcMapProcessCodeMemory` to a code-region shadow, `svcMapProcessMemory` of it RW at the
+  window address). The first slab's route sticks (`route=` in the log line). Lent heap cannot go
+  back to hbloader, so the first slab sets `__nx_applet_exit_mode = 1` (as the code pages do).
+- **`Region::Bytes` stays a `std::vector`**: `GuestWindow::Reserve` arms one placement (thread,
+  size, address) and calls `reserve(size)`; the newlib wrappers in `oot3d_switch_guard_alloc.cpp`
+  (`_malloc_r`/`_memalign_r`) hand the armed window address to exactly that allocation, and
+  `_free_r`/`_realloc_r`/`_malloc_usable_size_r` recognise window buffers (the slab stays, the
+  placement ends). A placement never overlaps a live one: an image holding window buffers
+  (moved out of the owner) makes the owner's new region an ordinary heap buffer (`conflicts=`).
+- **Owner**: the newest `NativeA32Process` claims its image; a bare `NativeA32Memory` (tests)
+  claims the window with its first region while no buffer lives there. Copies of the owner
+  (savestate snapshots, `CreatePrimaryThread`'s staged image) are ordinary heap images.
+  **Re-homing**: the owner's copy assignment copies straight into the window, its move
+  assignment (from `CreatePrimaryThread`, `RestoreState`, the process savestate restore) copies
+  every buffer that arrived from elsewhere to `base + address` and rebuilds the page table. All
+  of it and every new slab happen under the second core's world stop (`MapRegion`, the
+  assignments), so two host threads stay safe.
+- **Flat tables** for phase 2 (owner only, 1 MiB each): page flags (`kPageMapped`,
+  `kPageReadOnly`, `kPageLoadTrap`, `kPageStoreTrap`; a direct read-write page is `kPageMapped`
+  alone) derived from the typed page entries at every rebuild, pointer flip (`ObserveWrites`,
+  `DeferWrites`, deferred read-back, watch, write tracing); cards set wherever `memory.cpp` sets a
+  group card under the kernel lock and taken with it by `RangeWriteGeneration`. Until phase 2 the
+  inline header stores (and the lock-free LDREX/STREX/SWP marks) reach only the group cards, so
+  the invariant is "flat dirty implies group dirty". The file's text `verify` re-derives the flag
+  table and checks the card invariant after every change and at each savestate capture
+  (`verify checks= mismatches=` in the log line).
+- **Switches**: `config/fastmem_window` (desktop/host: `TRIAEVUM_FASTMEM_WINDOW=1|verify`, honoured
+  only where the allocator hook is linked). Absent = no reservation, no hook fires, every region
+  allocated exactly as before. No process handle (emulators), no 4 GiB of address space, or any
+  refused slab mapping: off (or no new placement from then on), and the reason is logged.
+- **Log line** (game log, warning level, once the image is mounted):
+  `fastmem_window: on base=0x… regions=N mapped_kb=… slabs=… region_kb=… route=direct|shadow`
+  or `fastmem_window: off (reason)`.
+- **Memory**: the regions move into the slabs (no second copy); the overhead is the 2 MiB rounding
+  of each slab group (~8–12 MiB with the game's layout: code/data 3 slabs, heap and linear commits,
+  1 slab for a 16 KiB stack, the shared memory, VRAM, the DSP/config/TLS slab) plus the two 1 MiB
+  tables; the 4 GiB reservation is address space only. Transient copies (savestate, primary
+  thread staging) are as before.
+- **Tests**: `oot3d_switch_guest_window_tests` (host backend: `mmap` reservation, `MAP_FIXED` slabs,
+  operator new/delete hook in `oot3d_switch_guest_window_host_alloc.cpp`): the game's layout at
+  `base + address` (15 slabs), re-homing after copy, move and `RestoreState`, conflicts with a
+  moved-out image, a refused slab (today's allocation, reason in the line), the flat tables
+  through observe/defer/watch/trace/cards with 0 mismatches, the process (staging, a ninth
+  thread's TLS page, savestate restore), two host threads counting with LDREX/STREX while the
+  game thread maps new slabs and restores a savestate after every run (no update lost),
+  switch absent; `--stress` for the long two-core run. The memory, process, CTR host, second-core,
+  savestate, FS and PICA submission tests link the host hook and pass with
+  `TRIAEVUM_FASTMEM_WINDOW` unset, `1` and `verify` (each prints `fastmem_window at exit:
+  placed=…`); the second-core and window tests also under TSan `--stress` with the window on.
+- **Console proof**: boot with the file, `fastmem_window: on …` in the log; a save state and its
+  load (no fault, same game); `config/second_core` on and off; `verify` once (mismatches=0); fps
+  unchanged from the run without the file.
+
 ### Real fps60 and GPU savings in the GL backend (2026-10-17)
 - **fps60 did not present at 60 Hz**: the pacer and sample cadence come from the `FrameRate` mode of the
   graphics settings (default `Original30`, chosen in the PC F1 menu); `--presentation-rate 60`

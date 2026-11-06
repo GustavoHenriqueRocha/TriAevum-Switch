@@ -8,6 +8,7 @@
 // definition: it goes only into the targets listed in host_services.cmake.
 #include "oot3d_switch_guest_window.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <new>
 
@@ -15,6 +16,22 @@ namespace {
 
 [[gnu::constructor]] void MarkHooked() {
     Oot3dNativeGame::GuestWindow::MarkAllocatorHooked();
+}
+
+// TRIAEVUM_FASTMEM_WINDOW runs of the existing tests: proof that the window
+// was used, and the verify mode's result.
+[[gnu::destructor]] void ReportUse() {
+    const auto status = Oot3dNativeGame::GuestWindow::CurrentStatus();
+    if (!status.Requested) return;
+    std::fprintf(stderr,
+                 "fastmem_window at exit: placed=%llu conflicts=%llu misses=%llu checks=%llu "
+                 "mismatches=%llu (%s)\n",
+                 static_cast<unsigned long long>(status.Placed),
+                 static_cast<unsigned long long>(status.Conflicts),
+                 static_cast<unsigned long long>(status.Misses),
+                 static_cast<unsigned long long>(status.ShadowChecks),
+                 static_cast<unsigned long long>(status.ShadowMismatches),
+                 Oot3dNativeGame::GuestWindow::FormatStatus(status).c_str());
 }
 
 void* Allocate(std::size_t size) {

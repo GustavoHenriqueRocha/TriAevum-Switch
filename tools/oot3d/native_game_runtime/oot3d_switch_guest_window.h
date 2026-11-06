@@ -63,6 +63,7 @@ struct Status {
     size_t Slabs = 0;        // 2 MiB slabs mapped
     uint64_t Conflicts = 0;  // placements refused: range held by another buffer
     uint64_t Misses = 0;     // the allocator did not take a placement
+    uint64_t Placed = 0;     // placements made since the start
     uint64_t ShadowChecks = 0;
     uint64_t ShadowMismatches = 0;
     const char* Route = "";  // "direct", "shadow" (Switch) or "host"

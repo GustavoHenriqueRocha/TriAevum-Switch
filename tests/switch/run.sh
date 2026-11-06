@@ -53,6 +53,7 @@ UNIT_TESTS=(
     oot3d_native_ui_texture_provider_tests
     oot3d_rom_import_tests
     oot3d_switch_code_pages_tests
+    oot3d_switch_guest_window_tests
     oot3d_switch_motion_tests
     oot3d_switch_thread_layout_tests
     oot3d_texture_pack_scale_tests

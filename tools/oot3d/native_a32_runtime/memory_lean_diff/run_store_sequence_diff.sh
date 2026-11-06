@@ -49,9 +49,10 @@ $CXX $FLAGS $INC -c "$HERE/store_sequence_side.cpp" -o "$OUT/side_new.o" & p2=$!
 $CXX $FLAGS $INC -DSEQ_OLD -c "$HERE/store_sequence_side.cpp" -o "$OUT/side_old.o"
 wait $p2
 $CXX $FLAGS $INC -c "$R/oot3d_memory_bus_abi.cpp" -o "$OUT/bus_abi.o"
+$CXX $FLAGS $INC -c "$R/oot3d_switch_guest_window.cpp" -o "$OUT/guest_window.o"
 MAIN_DEFS=""
 [ "$TARGET" = switch ] && MAIN_DEFS="-DSEQ_TRIALS=$TRIALS -DSEQ_SEED=$SEED"
 $CXX $FLAGS $INC $MAIN_DEFS -c "$HERE/store_sequence_main.cpp" -o "$OUT/main.o"
 $CXX $FLAGS $INC "$OUT/main.o" "$OUT/side_new.o" "$OUT/side_old.o" "$OUT/new_memory.o" \
-    "$OUT/old_memory.o" "$OUT/bus_abi.o" $LINK -o "$OUT/store_sequence_diff"
+    "$OUT/old_memory.o" "$OUT/bus_abi.o" "$OUT/guest_window.o" $LINK -o "$OUT/store_sequence_diff"
 $RUN "$OUT/store_sequence_diff" "$TRIALS" "$SEED"

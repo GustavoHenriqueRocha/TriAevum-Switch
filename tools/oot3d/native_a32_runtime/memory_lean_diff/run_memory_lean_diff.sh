@@ -27,6 +27,8 @@ CXX=${CXX:-g++}
 $CXX $FLAGS $INC -c "$R/oot3d_native_a32_memory.cpp" -o "$OUT/new_memory.o"
 $CXX $FLAGS $INC -c "$OUT/old_memory.cpp" -o "$OUT/old_memory.o"
 $CXX $FLAGS $INC -c "$R/oot3d_memory_bus_abi.cpp" -o "$OUT/bus_abi.o"
+$CXX $FLAGS $INC -c "$R/oot3d_switch_guest_window.cpp" -o "$OUT/guest_window.o"
 $CXX $FLAGS $INC -c "$HERE/memory_lean_diff.cpp" -o "$OUT/memory_lean_diff.o"
-$CXX "$OUT/memory_lean_diff.o" "$OUT/new_memory.o" "$OUT/old_memory.o" "$OUT/bus_abi.o" -o "$OUT/memory_lean_diff"
+$CXX "$OUT/memory_lean_diff.o" "$OUT/new_memory.o" "$OUT/old_memory.o" "$OUT/bus_abi.o" \
+    "$OUT/guest_window.o" -o "$OUT/memory_lean_diff"
 "$OUT/memory_lean_diff" "$OPS" "$SEED" "$EPISODES"

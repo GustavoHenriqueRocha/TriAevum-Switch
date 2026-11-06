@@ -36,6 +36,12 @@ cmake -S . -B ~/oot3d-work/build-host-tests -G Ninja \
 to an unpacked romfs. `oot3d_native_audio_dsp_mix_tests` on the host only matches
 the stored digest in a Release build (`-O3 -ffast-math`); what counts is the AArch64 version.
 
+fastmem window (`config/fastmem_window`, SWITCH_PORT.md "fastmem window"): the memory, process,
+CTR host, FS, second-core, savestate and PICA submission targets link the host allocator hook
+(`oot3d_guest_window_host_alloc` in CMake), so each also runs with the window:
+`TRIAEVUM_FASTMEM_WINDOW=1` (or `verify`, which re-derives the flat tables after every change)
+before the binary; each prints `fastmem_window at exit: placed=… mismatches=…`.
+
 ## Performance (`perf_gate.py`)
 
 Baselines in `perf_baseline.json` (final 4, CPU 1785 MHz, handheld):

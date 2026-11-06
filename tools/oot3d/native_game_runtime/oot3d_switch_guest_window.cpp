@@ -37,10 +37,25 @@ class Lock {
     Mutex mMutex{};
 };
 uintptr_t ThreadToken() noexcept { return reinterpret_cast<uintptr_t>(armGetTls()); }
-#else
+#elif defined(OOT3D_GUEST_WINDOW_HOST_MMAP)
 using Lock = std::mutex;
 thread_local char tThreadToken;
 uintptr_t ThreadToken() noexcept { return reinterpret_cast<uintptr_t>(&tThreadToken); }
+#else
+// No window on this platform (bare-metal test runtimes, Windows): nothing is
+// ever armed, the lock only guards the status.
+class Lock {
+  public:
+    void lock() noexcept {
+        while (mFlag.test_and_set(std::memory_order_acquire)) {
+        }
+    }
+    void unlock() noexcept { mFlag.clear(std::memory_order_release); }
+
+  private:
+    std::atomic_flag mFlag = ATOMIC_FLAG_INIT;
+};
+uintptr_t ThreadToken() noexcept { return 0U; }
 #endif
 
 enum class State : uint8_t { Unstarted, Off, On };
@@ -64,6 +79,7 @@ std::atomic<const void*> gOwner{nullptr};
 std::atomic<size_t> gLive{0};
 std::atomic<uint64_t> gConflicts{0};
 std::atomic<uint64_t> gMisses{0};
+std::atomic<uint64_t> gPlaced{0};
 std::atomic<uint64_t> gShadowChecks{0};
 std::atomic<uint64_t> gShadowMismatches{0};
 // Armed placement: written in the order thread, size, target (release);
@@ -362,6 +378,7 @@ Status CurrentStatus() {
     status.Slabs = gSlabs;
     status.Conflicts = gConflicts.load(std::memory_order_relaxed);
     status.Misses = gMisses.load(std::memory_order_relaxed);
+    status.Placed = gPlaced.load(std::memory_order_relaxed);
     status.ShadowChecks = gShadowChecks.load(std::memory_order_relaxed);
     status.ShadowMismatches = gShadowMismatches.load(std::memory_order_relaxed);
     status.Route = gRoute;
@@ -450,6 +467,7 @@ bool Reserve(std::vector<uint8_t>& bytes, uint32_t address, size_t size) {
         }
         if (!Commit(address, size)) return false;
         gPlacements[gPlacementCount++] = {target, size};
+        gPlaced.fetch_add(1U, std::memory_order_relaxed);
         gPlacementBytes += size;
         gLive.fetch_add(1U, std::memory_order_release);
     }
@@ -542,7 +560,7 @@ bool ResetForTesting(Mode mode, size_t failSlabsAfter) {
     std::memset(gSlabMapped, 0, sizeof(gSlabMapped));
     gSlabs = 0;
     gFailSlabsAfter = failSlabsAfter;
-    gConflicts = gMisses = gShadowChecks = gShadowMismatches = 0;
+    gConflicts = gMisses = gPlaced = gShadowChecks = gShadowMismatches = 0;
     gRoute = "";
     SetReason(mode == Mode::Off ? "off for this test" : "");
     StartLocked(mode);

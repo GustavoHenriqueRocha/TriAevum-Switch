@@ -28,6 +28,38 @@ class Guard:
 
 
 GUARDS = [
+    # --- 11/06: fastmem phase 1, config/fastmem_window (oot3d_switch_guest_window.h) ---
+    # Absent must stay today's allocation bit for bit; phase 1 must not touch a shard-visible
+    # header (the 256 shards and the PGO profile stay valid).
+    Guard("fastmem window, switch absent: a region is allocated as before unless the window takes it",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'const bool windowOwner =\s+GuestWindow::Accepting\(\) &&.*?'
+          r'if \(windowOwner\) GuestWindow::Reserve\(region\.Bytes, config\.BaseAddress, config\.Size\);\s+'
+          r'region\.Bytes\.assign\(config\.Size, 0\);',
+          test="oot3d_switch_guest_window_tests (TestAbsent), sweep of the memory tests with the window off"),
+    Guard("fastmem window, switch absent: a copy assignment copies the regions as before",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'if \(GuestWindow::IsOwner\(this\)\) \{\s+CopyRegionsHome\(mRegions, other\.mRegions\);\s+'
+          r'\} else \{\s+mRegions = other\.mRegions;',
+          test="oot3d_switch_guest_window_tests (TestAbsent, TestRehome)"),
+    Guard("fastmem window: only config/fastmem_window turns it on, and no process handle (emulator) keeps it off",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guest_window.cpp",
+          r'"sdmc:/switch/oot3dre/config/fastmem_window".*?if \(file == nullptr\) \{\s+mode = Mode::Off;.*?'
+          r'gProcess = envGetOwnProcessHandle\(\);\s+if \(gProcess == INVALID_HANDLE\) \{'),
+    Guard("fastmem window: a refused slab mapping stops every new placement (today's allocation from then on)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guest_window.cpp",
+          r'if \(!PlatformMapSlab\(index\)\) \{.*?gAccepting\.store\(false, std::memory_order_release\);',
+          test="oot3d_switch_guest_window_tests (TestRefusedMapping)"),
+    Guard("fastmem window: newlib's free never gets a window buffer",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
+          r'void __wrap__free_r\(struct _reent\* reent, void\* pointer\) \{.*?'
+          r'if \(Oot3dNativeGame::GuestWindow::Contains\(pointer\)\) \{\s+'
+          r'Oot3dNativeGame::GuestWindow::ReleaseAllocation\(pointer\);\s+return;'),
+    Guard("fastmem phase 1: the shard-visible memory header is unchanged (Region::Bytes a vector, ABI 4)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'std::vector<uint8_t> Bytes;.*?WriteObservationAbiVersion\(\) noexcept \{ return 4U; \}|'
+          r'WriteObservationAbiVersion\(\) noexcept \{ return 4U; \}.*?std::vector<uint8_t> Bytes;',
+          forbid=r'GuestWindow|guest_window'),
     # --- 06/11: second guest core, config/second_core (oot3d_native_a32_second_core.h) ---
     # Switch absent must stay today's single-thread path; with it on, STREX must go through the
     # global exclusive monitor (the write-generation token fails under a second writer).
@@ -306,7 +338,7 @@ GUARDS = [
     Guard("the in-place DSP region update must account its write-back exactly as WriteBytes (store cards, written mark, observers)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
           r'bool NativeA32Memory::EndHostUpdate\(.*?RecordTracedWrite\(address, [^;]*;\s*\}\s*'
-          r'NoteWrite\(address, size\);\s*NotifyObservedWrite\(address, size\);',
+          r'NoteWrite\(address, size\);\s*(?:ShadowNoteWrite\([^;]*\);\s*)?NotifyObservedWrite\(address, size\);',
           test="oot3d_native_audio_storage_tests"),
     Guard("shared ADPCM decodes must compare the encoded bytes in full and stay within their memory budget",
           "tools/oot3d/third_party/azahar_audio/audio_core/adpcm_decode_cache.h",
@@ -873,6 +905,7 @@ GUARDS = [
     Guard("guard_alloc: devkitA64's malloc() sends n >= 32 to _memalign_r(32, n); without it nothing gets a guard",
           "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
           r'void\* __wrap__memalign_r\(struct _reent\* reent, size_t alignment, size_t size\) \{\s+'
+          r'(?:if \(void\* placed = Oot3dNativeGame::GuestWindow::TakePlacement\(size\)\) return placed;\s+)?'
           r'if \(gEnabled\.load\(std::memory_order_relaxed\) && alignment <= kAlignment',
           "oot3d_switch_guard_alloc_tests (TestLayout)"),
     Guard("guard_alloc: slack page after the object (header of newlib's next chunk)",

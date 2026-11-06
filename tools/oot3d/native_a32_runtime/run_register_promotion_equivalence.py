@@ -170,6 +170,7 @@ def main() -> int:
     sources = [
         RUNTIME / "oot3d_native_guest_overrides.cpp",
         RUNTIME / "oot3d_native_a32_memory.cpp",
+        RUNTIME / "oot3d_switch_guest_window.cpp",
         RUNTIME / "oot3d_memory_bus_abi.cpp",
         HERE / "oot3d_native_a32_vfp_ops.cpp",
         upstream / "recomp" / "a32_vfp_binary64.cpp",
