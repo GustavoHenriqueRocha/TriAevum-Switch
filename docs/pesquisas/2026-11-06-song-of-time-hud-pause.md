@@ -65,6 +65,27 @@ barato continua sendo um savestate dele antes de entrar no Templo do Tempo.
 Trazer as 6 correções do 3.0: as 6 dão conflito em cherry-pick isolado, porque dependem da série 3.0
 do `main` (5acf8138 … 4b88e124, 24 commits; 77 arquivos, +12266/−1032 desde 23eac6b0).
 
+## Guia de canções e entrada durante a aula (06/11, leitura de código)
+
+- **O guia fica travado durante a aula (código confirmado, valores não medidos).** O predicado de
+  supressão do mod (`oot3d_top_screen_mod_profile_quest.cpp:268-320`) desliga o guia, o texto
+  nativo e a máscara do D-pad com resultado ≠0xFF ou ação da ocarina >1. Os valores durante uma
+  aula no OoT3D nunca foram medidos.
+- **Nenhum caminho nosso toca canção ou injeta nota.** Só os sons do guia chamam áudio, o navegador
+  não escreve no guest e o mapeamento é por rótulo (`oot3d_native_control_config.cpp:518-533`).
+  Então a hipótese "guia tocou pelo Link" fica sem suporte.
+- **"Errou e tocou" pode ser o normal.** No decomp N64 (zeldaret/oot `z_message.c`), nota errada na
+  repetição toca o som de erro, mostra o X vermelho e volta a esperar entrada sem repetir a
+  demonstração. Se o jogador acerta depois, o Link toca a canção. Isso falta conferir no OoT3D e
+  com o Gustavo.
+- **Gatilho em aberto.** Segue sem achar qual estado nativo ficou vivo no fim da cutscene.
+- **Reprodução sem o save dele: Eden com a mesma NRO e o lab.**
+  1. save00 copiado;
+  2. `poke16` do Forest Medallion;
+  3. `warp` adulto ao Templo do Tempo (entrada não conferida no OoT3D);
+  4. notas erradas e depois as certas;
+  5. `peek` dos campos do gate do HUD, de `0x0050AF68` e da ocarina.
+
 ## Em aberto
 
 - Qual arquivo/slot ele jogava: o backup não tem o estado "antes".
