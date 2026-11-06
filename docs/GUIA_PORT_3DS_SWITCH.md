@@ -1658,6 +1658,11 @@ Armadilhas do SM3DL (05/11), todas genéricas:
   listagem precisa escondê-los e dar o tamanho do arquivo *ativo* (o que o GetSize vê), senão o jogo
   vê nomes que não criou. Cursor no `FileOffset` + releitura em ordem de nome deixa o savestate só com
   caminho e posição.
+- **Depth com stencil no backend do PC** (`docs/pesquisas/2026-11-06-sm3dl-stencil-sombra.md`): o
+  depth do PICA é D24S8. Num attachment sem stencil (D32) o stencil test sempre passa; jogo com
+  sombra por volumes de stencil termina num quad de tela cheia que então pinta tudo o que veio
+  antes (chão e céu somem, personagens desenhados depois aparecem). Sintoma: fundo de cor única
+  com só os objetos por cima. Use o trace semântico e procure quads de 6 vértices com stencil.
 
 ---
 

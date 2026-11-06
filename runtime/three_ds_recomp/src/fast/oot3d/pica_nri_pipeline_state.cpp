@@ -1,18 +1,21 @@
 #include "fast/oot3d/pica_nri_pipeline_state.h"
 #include "fast/oot3d/pica_alpha_coverage_policy.h"
 #include "fast/oot3d/outline_occlusion_pass.h"
+#include "fast/renderer3ds/pica_vulkan_device_profile.h"
 #include <stdexcept>
 
 namespace Fast::Oot3d {
 using Renderer3ds::kPicaColorAttachmentCount;
 VkFormat FindPicaDepthFormat(VkPhysicalDevice physicalDevice) {
-    for (auto format : {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT}) {
+    const auto format = Renderer3ds::ChoosePicaDepthFormat([physicalDevice](VkFormat candidate) {
         VkFormatProperties properties{};
-        vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &properties);
+        vkGetPhysicalDeviceFormatProperties(physicalDevice, candidate, &properties);
         constexpr auto required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-        if ((properties.optimalTilingFeatures & required) == required) return format;
-    }
-    throw std::runtime_error("Vulkan device has no sampleable depth attachment format");
+        return (properties.optimalTilingFeatures & required) == required;
+    });
+    if (format == VK_FORMAT_UNDEFINED)
+        throw std::runtime_error("Vulkan device has no sampleable depth attachment format");
+    return format;
 }
 VkCompareOp ToNativeVkCompare(Renderer3ds::PicaCompareFunction compare) {
     switch (compare) {

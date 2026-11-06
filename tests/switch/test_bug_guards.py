@@ -716,6 +716,10 @@ GUARDS = [
           r'if \(journal != nullptr && IsSaveJournalName\(name\.string\(\)\)\) continue;.*?'
           r'journal->ActivePath\(it->path\(\)\)',
           "oot3d_native_a32_ctr_host_tests (TestFsOpenDirectory)"),
+    Guard("SM3DL: depth do PICA sem stencil (D32) faz o quad de sombra pintar chão e céu de cinza",
+          "runtime/three_ds_recomp/include/fast/renderer3ds/pica_vulkan_device_profile.h",
+          r'for \(const auto format : \{VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT\}\)',
+          "oot3d_native_pica_vulkan_bridge_tests (TestPicaDepthFormatKeepsStencil)"),
     Guard("SM3DL: janela sem leitor de command buffer (salto da PICA vira erro)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'picaFrontend\.SetCommandBufferReader\(\s+Oot3dNativeGame::MakeOot3dPicaCommandBufferReader\(picaMemoryView\)\);',

@@ -2,6 +2,7 @@
 #include "oot3d_native_pica_presentation_scheduler.h"
 
 #include "fast/oot3d/pica_uniform_layout.h"
+#include "fast/renderer3ds/pica_vulkan_device_profile.h"
 
 #include <algorithm>
 #include <array>
@@ -180,7 +181,27 @@ class RecordingBackend final : public Oot3d::Renderer::PicaRenderBackend {
 
 } // namespace
 
+// O depth do PICA (formato 3) é D24S8. O SM3DL faz sombra por volumes de
+// stencil e termina com um quad de tela cheia testado no stencil; num D32
+// sem stencil o teste sempre passa e o quad pinta o chão e o céu de cinza.
+void TestPicaDepthFormatKeepsStencil() {
+    using Fast::Renderer3ds::ChoosePicaDepthFormat;
+    const auto all = [](VkFormat) { return true; };
+    const VkFormat preferred = ChoosePicaDepthFormat(all);
+    Require(preferred == VK_FORMAT_D32_SFLOAT_S8_UINT,
+            "the PICA depth attachment must keep a stencil aspect (D32 depth precision)");
+    const auto noD32S8 = [](VkFormat format) { return format != VK_FORMAT_D32_SFLOAT_S8_UINT; };
+    Require(ChoosePicaDepthFormat(noD32S8) == VK_FORMAT_D24_UNORM_S8_UINT,
+            "without D32S8 the PICA depth attachment must fall back to D24S8");
+    const auto depthOnly = [](VkFormat format) { return format == VK_FORMAT_D32_SFLOAT; };
+    Require(ChoosePicaDepthFormat(depthOnly) == VK_FORMAT_D32_SFLOAT,
+            "a device without stencil formats still gets a depth attachment");
+    Require(ChoosePicaDepthFormat([](VkFormat) { return false; }) == VK_FORMAT_UNDEFINED,
+            "no usable format must be reported");
+}
+
 int main() {
+    TestPicaDepthFormatKeepsStencil();
     RecordingBackend backend;
     Oot3dNativeGame::Oot3dPicaVulkanDrawPlan plan;
     plan.SubmissionId = 17;

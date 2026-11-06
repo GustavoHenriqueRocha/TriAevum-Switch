@@ -19,6 +19,18 @@ inline VkApplicationInfo PicaVulkanApplicationInfo() {
     return result;
 }
 
+// Depth/stencil attachment of the native PICA targets. usable(format) says
+// whether the device can render to and sample that format. PICA depth format 3
+// is D24S8 and titles test stencil (SM3DL shadow volumes end in a full-screen
+// stencil-tested quad), so a stencil format comes first; D32S8 keeps the float
+// depth precision the renderer was tuned with. Plain D32 is the last resort.
+template <class Usable>
+VkFormat ChoosePicaDepthFormat(Usable&& usable) {
+    for (const auto format : {VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT})
+        if (usable(format)) return format;
+    return VK_FORMAT_UNDEFINED;
+}
+
 inline VkPhysicalDeviceFeatures PicaVulkanCoreFeatures(const VkPhysicalDeviceFeatures& supported) {
     VkPhysicalDeviceFeatures enabled{};
     enabled.independentBlend = supported.independentBlend;
