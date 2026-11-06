@@ -120,11 +120,13 @@ Formato: sintoma → causa → o que fazer. Detalhe em `docs/pesquisas/` e nos c
   (SIGSTOP a 85 °C, retoma a 75 °C) não segura picos curtos. → No notebook só
   `~/oot3d-work/build-local.sh` com 2 jobs e `LIMITE=80`, um build por vez. Ver
   `docs/pesquisas/2026-10-17-temperatura-builds.md`.
-- **Ryzen travou (26/10)** → RAM do Windows esgotada por WSL + build + PowerShells órfãos. → Build lá
-  só com teto: `/root/agentes/deko3d/guard_build.sh` (systemd-run `MemoryMax=3G`, `ninja -j 1`),
-  uma conexão SSH por vez; RAM com bit flips: confira md5 depois do relink. O WSL desliga quando a
-  última sessão `wsl.exe` fecha (keepalive pelo notebook morre se ele suspender). Desde 03/11 o WSL
-  da Ryzen está parado (SVM desligada): build no notebook.
+- **Ryzen travou (26/10)** → RAM do Windows esgotada por WSL + build + PowerShells órfãos (teto de
+  3 GB/-j 1 na época). → Desde 05/11 à noite o Gustavo liberou o Ryzen a 100% com RAM em 2400 sem
+  DOCP: WSL com 12 GB, `JOBS=12 SHARDS=1 bash /root/agentes/deko3d/build.sh build` (fonte em
+  `src/`, build em `build/`, montados por `mount --bind` nos caminhos do notebook). Transferência
+  para lá até 10 MB/s: `rsync -a --bwlimit=9500 --rsync-path='wsl rsync'`, preservando
+  `.ninja_log`/`.ninja_deps`. RAM já teve bit flips: confira md5 depois do relink. O WSL desliga
+  quando a última sessão `wsl.exe` fecha: mantenha o `ssh ryzen wsl ...` aberto durante o build.
 - **MTP não sobrescreve** → `gio copy` falha em arquivo existente. → `gio remove` antes, ou use o
   FTP (`curl -T` sobrescreve).
 
