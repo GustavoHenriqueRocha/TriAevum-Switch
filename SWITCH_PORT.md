@@ -1077,7 +1077,7 @@ scheduler. Absent = the previous single-thread code paths exactly (nothing below
   and run the target with `--stress` under `setarch "$(uname -m)" -R` (TSan rejects the
   high-entropy ASLR mappings; in a container that needs `--security-opt seccomp=unconfined`).
 
-### fastmem window, phase 1: `config/fastmem_window` (11/06, off by default)
+### fastmem window, phase 1: `config/fastmem_window` (11/06; on by default since phase 2)
 Phase 1 of fastmem (one load or store into a flat window instead of the page-table walk; ~11
 AArch64 instructions and three chained loads per guest load today). Phase 1 only lays the window
 down, **with no shard-visible change** (`oot3d_native_a32_memory.h`, the whole-AOT runtime header,
@@ -1113,9 +1113,11 @@ stay valid) and **no speed gain expected**: the inline paths still walk the page
   invariant "flat dirty implies group dirty". The file's text `verify` re-derives the flag table
   after every change and at each savestate capture (`verify checks= mismatches=` in the log line).
 - **Switches**: `config/fastmem_window` (desktop/host: `TRIAEVUM_FASTMEM_WINDOW=1|verify`, honoured
-  only where the allocator hook is linked). Absent = no reservation, no hook fires, every region
-  allocated exactly as before. No process handle (emulators), no 4 GiB of address space, or any
-  refused slab mapping: off (or no new placement from then on), and the reason is logged.
+  only where the allocator hook is linked). In phase 1 the file turned it on; since phase 2 the
+  window is on by default on Switch and the file's text `off` (or `0`) turns it off. Off = no
+  reservation, no hook fires, every region allocated exactly as before. No process handle
+  (emulators), no 4 GiB of address space, or any refused slab mapping: off (or no new placement
+  from then on), and the reason is logged.
 - **Log line** (game log, warning level, once the image is mounted):
   `fastmem_window: on base=0x… regions=N mapped_kb=… slabs=… region_kb=… route=direct|shadow
   access=window` or `fastmem_window: off (reason) access=slow` (`access=` since phase 2: whether
@@ -1136,15 +1138,15 @@ stay valid) and **no speed gain expected**: the inline paths still walk the page
   savestate, FS and PICA submission tests link the host hook and pass with
   `TRIAEVUM_FASTMEM_WINDOW` unset, `1` and `verify` (each prints `fastmem_window at exit:
   placed=…`); the second-core and window tests also under TSan `--stress` with the window on.
-- **Console proof**: boot with the file, `fastmem_window: on …` in the log; a save state and its
-  load (no fault, same game); `config/second_core` on and off; `verify` once (mismatches=0); fps
-  unchanged from the run without the file.
+- **Console proof**: `fastmem_window: on …` in the log; a save state and its load (no fault, same
+  game); `config/second_core` on and off; `verify` once (mismatches=0).
 
 ### fastmem window, phase 2: the inline paths access the window (11/06, ABI 5)
 Phase 2 changes the shard-visible memory header (`oot3d_native_a32_memory.h`,
 `WriteObservationAbiVersion` 5): **every one of the 256 shards and every runtime object that
-includes the header must be rebuilt** (no regeneration). The file `config/fastmem_window` stays the
-switch, but its meaning changed: **without it every typed guest access takes the slow path**.
+includes the header must be rebuilt** (no regeneration). **Without the window every typed guest
+access takes the slow path**, so on Switch the window is now on by default: no file, or any text
+but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - **Inline load/store** (`ReadFast`/`WriteFast`/`ReadWordsFast`/`WriteWordsFast`): one flag byte
   per 4 KiB guest page in a flat table of the image (`GuestPageFlag`, own alias set like
   `GuestCard`; `kGuestPageLoadFast`, `kGuestPageStoreFast`), the page-crossing test of 2/4/8-byte
@@ -1153,8 +1155,8 @@ switch, but its meaning changed: **without it every typed guest access takes the
   (`DerivePageFlags`), so every page the page table traps (unmapped, read-only for stores,
   observed, deferred, watched, traced) traps inline too and reaches the unchanged slow body
   (`ReadFastSlow`/`WriteFastSlow`: page table, then the checked path). An image that is not in
-  the window (file absent, emulator, refused mapping, savestate snapshots and other copies) points
-  at `sNoFastPages`, a shared table of zeros: everything traps.
+  the window (file says `off`, emulator, refused mapping, savestate snapshots and other copies)
+  points at `sNoFastPages`, a shared table of zeros: everything traps.
 - **AArch64 per access** (shard 064, devkitA64 -O3, Cortex-A57 tuning), word load:
   phase 1 `and, cmp, b.hi, mov #80, lsr #20, add, ldr group, cbz, ubfx, add, ldr entry, cbz,
   ldr value` (13, three chained loads); phase 2 `and, cmp, b.hi, ldr flags, lsr #12, ldrb flag,
@@ -1176,8 +1178,8 @@ switch, but its meaning changed: **without it every typed guest access takes the
   single-core path of phase 1: a plain store between LDREX and STREX that leaves the word's value
   unchanged no longer fails the STREX (as with the second core since it exists); a write anywhere
   else no longer fails it either.
-- **Window off = slow path.** With the file absent, on PC builds (the allocator hook is linked
-  only into the host tests) and on emulators, every typed access calls `ReadFastSlow`/
+- **Window off = slow path.** With the file saying `off`, on PC builds (the allocator hook is
+  linked only into the host tests) and on emulators, every typed access calls `ReadFastSlow`/
   `WriteFastSlow` (a call, the page-table walk, then the access). See the measurements below.
 - **Measurements.** Shard 064 (same flags): 82,526 → 83,175 AArch64 instructions (+0.8%, cold
   code: 1,327 → 1,500 slow-path calls and the out-of-line card stores of its 618 store sites; the
@@ -1192,8 +1194,8 @@ switch, but its meaning changed: **without it every typed guest access takes the
   phase 1; off, two to twelve times phase 1 (spans never take the inline path off).
   **Expected on the console** (an estimate, not measured): the page-walk sequences are ~19% of
   shard 064's instructions; if they are 15–20% of guest time in heavy rooms, halving them saves
-  ~7–10%, about 2–3 ms of the 25–30 ms of guest logic per 30 Hz step. Without the file the same
-  arithmetic costs +20–50% of guest time: **phase 2 must not ship with the window off**.
+  ~7–10%, about 2–3 ms of the 25–30 ms of guest logic per 30 Hz step. With the window off the
+  same arithmetic costs +20–50% of guest time, hence on by default.
 - **Log line**: `fastmem_window: … access=window` (the game's image takes the inline window
   paths) or `access=slow`.
 - **Exactness**: `memory_lean_diff/run_store_sequence_diff.sh` (the generated-code store

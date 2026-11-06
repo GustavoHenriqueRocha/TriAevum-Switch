@@ -14,12 +14,13 @@
 // Not shard-visible: only oot3d_native_a32_memory.cpp, the process, the
 // allocator wrappers and the session's log line include this header.
 //
-// Switch: config/fastmem_window (text "verify" also checks every image's
-// flag table against its page entries after every change). Host:
-// TRIAEVUM_FASTMEM_WINDOW (1 or verify), honoured only in binaries that link
-// the host allocator hook (oot3d_switch_guest_window_host_alloc.cpp).
-// Absent: no reservation, no hook fires, every region is allocated as
-// before, and every guest access takes the slow path (page table).
+// Switch: on by default; config/fastmem_window with the text "off" (or "0")
+// turns it off, "verify" also checks every image's flag table against its
+// page entries after every change. Host: TRIAEVUM_FASTMEM_WINDOW (1 or
+// verify), honoured only in binaries that link the host allocator hook
+// (oot3d_switch_guest_window_host_alloc.cpp), off when unset. Off: no
+// reservation, no hook fires, every region is allocated as before, and
+// every guest access takes the slow path (page table).
 
 #include <cstddef>
 #include <cstdint>
@@ -40,7 +41,7 @@ enum class Mode : uint8_t { Off, On, Verify };
 Mode ParseMode(std::string_view text) noexcept;
 
 struct Status {
-    bool Requested = false;  // config/fastmem_window present (or the variable set)
+    bool Requested = false;  // not turned off (Switch file, host variable)
     bool On = false;         // reserved and taking placements
     bool Verify = false;
     uintptr_t Base = 0;

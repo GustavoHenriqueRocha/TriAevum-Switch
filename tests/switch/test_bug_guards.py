@@ -42,9 +42,10 @@ GUARDS = [
           r'if \(GuestWindow::IsOwner\(this\)\) \{\s+CopyRegionsHome\(mRegions, other\.mRegions\);\s+'
           r'\} else \{\s+mRegions = other\.mRegions;',
           test="oot3d_switch_guest_window_tests (TestAbsent, TestRehome)"),
-    Guard("fastmem window: only config/fastmem_window turns it on, and no process handle (emulator) keeps it off",
+    Guard("fastmem window: on by default on Switch (the file only turns it off or asks for verify), "
+          "and no process handle (emulator) keeps it off",
           "tools/oot3d/native_game_runtime/oot3d_switch_guest_window.cpp",
-          r'"sdmc:/switch/oot3dre/config/fastmem_window".*?if \(file == nullptr\) \{\s+mode = Mode::Off;.*?'
+          r'"sdmc:/switch/oot3dre/config/fastmem_window".*?if \(file == nullptr\) \{\s+mode = Mode::On;.*?'
           r'gProcess = envGetOwnProcessHandle\(\);\s+if \(gProcess == INVALID_HANDLE\) \{'),
     Guard("fastmem window: a refused slab mapping stops every new placement (today's allocation from then on)",
           "tools/oot3d/native_game_runtime/oot3d_switch_guest_window.cpp",

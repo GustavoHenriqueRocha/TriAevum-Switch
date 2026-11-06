@@ -117,11 +117,12 @@ bool SlabMapped(size_t index) noexcept {
 
 bool ReadMode(Mode& mode) {
 #if defined(__SWITCH__)
+    // On unless the file says otherwise: since phase 2 the game's inline
+    // paths take the slow route without the window.
     std::FILE* file = std::fopen(kConfigPath, "rb");
     if (file == nullptr) {
-        mode = Mode::Off;
-        SetReason("config/fastmem_window absent");
-        return false;
+        mode = Mode::On;
+        return true;
     }
     char text[64] = {};
     const size_t read = std::fread(text, 1, sizeof(text) - 1U, file);
