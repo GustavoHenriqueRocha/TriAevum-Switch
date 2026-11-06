@@ -88,6 +88,9 @@ using NativeA32TouchMapping = ThreeDsRecomp::Input::TouchMapping;
 enum class NativeA32TouchPresentation : uint8_t {
     NativeLowerScreen320x240,
     TopScreen400x240,
+    // The 320x240 lower screen as a picture-in-picture in the window's corner
+    // (PlaceUiPictureInPicture; a generic title's lower screen).
+    LowerScreenPictureInPicture,
 };
 
 enum class NativeA32TopScreenPage : uint8_t {

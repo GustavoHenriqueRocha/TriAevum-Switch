@@ -441,6 +441,24 @@ int main(int argc, char** argv) {
     RequireTouch(MapHostPointerToNativeA32Touch(640, 360, 1280, 720, true),
                  true, true, 160, 120,
                  "720p presentation center did not map to native touch");
+    // A generic title's lower screen is a picture-in-picture at the window's
+    // bottom-right (PlaceUiPictureInPicture: 320x240 at 945.6, 465.6 in 720p);
+    // a click there is the 3DS touch, anywhere else is no touch (SM3DL).
+    RequireTouch(MapHostPointerToNativeA32Touch(
+                     1106, 586, 1280, 720, true,
+                     NativeA32TouchPresentation::LowerScreenPictureInPicture),
+                 true, true, 160, 120,
+                 "the picture-in-picture center did not map to native touch");
+    RequireTouch(MapHostPointerToNativeA32Touch(
+                     946, 466, 1280, 720, true,
+                     NativeA32TouchPresentation::LowerScreenPictureInPicture),
+                 true, true, 0, 0,
+                 "the picture-in-picture origin did not map to native touch");
+    RequireTouch(MapHostPointerToNativeA32Touch(
+                     640, 360, 1280, 720, true,
+                     NativeA32TouchPresentation::LowerScreenPictureInPicture),
+                 false, false, 0, 0,
+                 "a click on the top screen became a lower-screen touch");
     RequireTouch(MapHostPointerToNativeA32Touch(159, 360, 1280, 720, true),
                  false, false, 0, 0,
                  "left pillarbox accepted a native touch");

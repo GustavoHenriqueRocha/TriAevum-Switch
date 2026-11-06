@@ -771,6 +771,15 @@ GUARDS = [
           r'LatestSnapshotCompletion\(.*?bottomSelection\.CompletionId = \*executed;.*?'
           r'PicaPresentationMode::\s*PictureInPicture\)',
           "oot3d_native_pica_vulkan_bridge_tests (modo PictureInPicture e LatestSnapshotCompletion)"),
+    Guard("clique no PiP da tela de baixo vira toque do 3DS (F7 esconde/mostra), só no título genérico",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'LUS_KB_F7\);.*?const bool lowerScreenPictureInPicture =\s*titleProfile\.BottomScreenPictureInPicture &&\s*'
+          r'bottomScreenPictureInPictureVisible;.*?WidescreenMenuCornersActive\(\),\s*lowerScreenPictureInPicture\);',
+          "oot3d_native_a32_input_tests (LowerScreenPictureInPicture)"),
+    Guard("toque do PiP: o ponteiro é mapeado pelo retângulo do PiP, não pela tela inteira",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_input.cpp",
+          r'NativeA32TouchPresentation::LowerScreenPictureInPicture\s*\? Oot3d::Renderer::MapUiPictureInPicturePoint\(',
+          "oot3d_native_a32_input_tests (LowerScreenPictureInPicture)"),
     Guard("tela de baixo do SM3DL vinha de 80 linhas dentro do alvo de cima e ia pela CPU (azul): sub-retângulo só no genérico",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'submissionQueue\.SetSubRectDisplayTransfers\(titleProfile\.SubRectDisplayTransfers\);',

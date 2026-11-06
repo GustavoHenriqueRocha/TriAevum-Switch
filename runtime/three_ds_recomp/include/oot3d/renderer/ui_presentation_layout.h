@@ -152,6 +152,27 @@ struct UiPresentationPoint {
     };
 }
 
+// A window point inside the lower-screen picture-in-picture
+// (PlaceUiPictureInPicture), in that screen's logical coordinates.
+[[nodiscard]] inline UiPresentationPoint MapUiPictureInPicturePoint(
+    std::uint32_t targetWidth, std::uint32_t targetHeight, float logicalWidth,
+    float logicalHeight, float targetX, float targetY) noexcept {
+    const UiPresentationRect placed =
+        PlaceUiPictureInPicture(targetWidth, targetHeight, logicalWidth,
+                                logicalHeight);
+    if (!placed.Valid() || !std::isfinite(targetX) ||
+        !std::isfinite(targetY) || targetX < placed.X ||
+        targetY < placed.Y || targetX >= placed.X + placed.Width ||
+        targetY >= placed.Y + placed.Height) {
+        return {};
+    }
+    return {
+        (targetX - placed.X) * logicalWidth / placed.Width,
+        (targetY - placed.Y) * logicalHeight / placed.Height,
+        true,
+    };
+}
+
 // Native framebuffer coordinates include the LCD rotation/sampling convention.
 // Fit in that coordinate system, not in host logical screen coordinates.
 // Ownership, not an orthographic matrix or shader mode, distinguishes UI.

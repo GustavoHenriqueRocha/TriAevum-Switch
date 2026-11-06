@@ -354,9 +354,14 @@ NativeA32TouchMapping MapHostPointerToNativeA32Touch(
         presentation == NativeA32TouchPresentation::TopScreen400x240
             ? static_cast<float>(NativeA32TopScreenHeight)
             : static_cast<float>(NativeA32TouchHeight);
-    const auto logical = Oot3d::Renderer::MapUiPresentationPoint(
-        hostWidth, hostHeight, presentationWidth, presentationHeight,
-        static_cast<float>(pointerX), static_cast<float>(pointerY));
+    const auto logical =
+        presentation == NativeA32TouchPresentation::LowerScreenPictureInPicture
+            ? Oot3d::Renderer::MapUiPictureInPicturePoint(
+                  hostWidth, hostHeight, presentationWidth, presentationHeight,
+                  static_cast<float>(pointerX), static_cast<float>(pointerY))
+            : Oot3d::Renderer::MapUiPresentationPoint(
+                  hostWidth, hostHeight, presentationWidth, presentationHeight,
+                  static_cast<float>(pointerX), static_cast<float>(pointerY));
     return ThreeDsRecomp::Input::MapPresentationPointToTouch(
         logical.X, logical.Y, presentationWidth, presentationHeight,
         logical.Inside, pointerPressed);

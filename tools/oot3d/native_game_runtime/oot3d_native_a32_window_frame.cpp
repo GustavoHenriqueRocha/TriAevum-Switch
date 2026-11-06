@@ -863,6 +863,11 @@ bool NativeA32WindowSession::RunFrame() {
   }
   quickSaveKeyWasDown = quickSaveKeyDown;
   quickLoadKeyWasDown = quickLoadKeyDown;
+  const bool pictureInPictureKeyDown =
+      window.IsKeyDown(Ship::KbScancode::LUS_KB_F7);
+  if (pictureInPictureKeyDown && !bottomScreenPictureInPictureKeyWasDown)
+    bottomScreenPictureInPictureVisible = !bottomScreenPictureInPictureVisible;
+  bottomScreenPictureInPictureKeyWasDown = pictureInPictureKeyDown;
   bool nativeFrontendTouchEnabled = ResolveNativeA32TouchInputEnabled(
       process.Memory(), uiLifecycleBridge,
       nativeCandidateDispatch.TopScreenUiProfile);
@@ -892,8 +897,13 @@ bool NativeA32WindowSession::RunFrame() {
   }
   const bool hostGuiVisible =
       gui->GetMenuOrMenubarVisible() || gui->GetAnyGuiWindowVisible();
+  // A click on a generic title's lower-screen picture-in-picture is its touch.
+  const bool lowerScreenPictureInPicture =
+      titleProfile.BottomScreenPictureInPicture &&
+      bottomScreenPictureInPictureVisible;
   auto physicalInputFrame =
-      PollNativeA32Input(window, nativeFrontendTouchEnabled,
+      PollNativeA32Input(window,
+                         nativeFrontendTouchEnabled || lowerScreenPictureInPicture,
                          hostGuiVisible,
                          nativeCandidateDispatch.TopScreenUiProfile,
                          activeTopScreenConfig.FreeCameraEnabled,
@@ -901,7 +911,8 @@ bool NativeA32WindowSession::RunFrame() {
                          presentationElapsedSeconds,
                          guestRefreshesDue != 0U,
                          nativeControlPollingState,
-                         WidescreenMenuCornersActive());
+                         WidescreenMenuCornersActive(),
+                         lowerScreenPictureInPicture);
   if (physicalInputFrame.Exit || devLabQuit) {
     if (devLabQuit) scriptedExit = true;
     window.Close();
@@ -3704,6 +3715,7 @@ void NativeA32WindowSession::PresentVisualFrame(
     // (ctr_title_profile.h); OoT3D presents its own through the native
     // frontend below.
     if (titleProfile.BottomScreenPictureInPicture &&
+        bottomScreenPictureInPictureVisible &&
         bottomFramebuffer.has_value()) {
       const auto selectedBottom = findBottomTransfer();
       picaStats.BottomScreenTransferHitCount +=

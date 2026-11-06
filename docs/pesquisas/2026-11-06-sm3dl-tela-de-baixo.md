@@ -45,6 +45,17 @@ o OoT3D?
 - PiP: 1/3 da altura da janela, canto inferior direito, margem de 2% (`PlaceUiPictureInPicture`).
   Nunca vira a "última apresentação" do savestate.
 
+## Passo 2: toque e tecla (06/11)
+
+- Clique esquerdo dentro do PiP vira toque do 3DS: `NativeA32TouchPresentation::LowerScreenPictureInPicture`
+  mapeia o ponteiro pelo mesmo retângulo do desenho (`MapUiPictureInPicturePoint` sobre
+  `PlaceUiPictureInPicture`). Em 1280x720: (1106, 586) → toque (160, 120); (640, 360), na tela de cima,
+  não é toque. Com o PiP ligado o cursor fica solto e visível, como nas páginas de toque do OoT3D.
+- F7 esconde/mostra o PiP (F5/F8 são savestate, F6 a câmera livre); escondido, não há toque.
+- `oot3d_native_a32_input_tests` entrou na suíte (`tests/switch/run.sh`): existia e passava, mas não rodava.
+- Não testado com clique real: a timeline de teste substitui todo o input físico e simular mouse
+  (`wlrctl`) mexeria no ponteiro do Gustavo. Fica para ele testar.
+
 ## Alternativas rejeitadas
 
 - Copiar pela CPU depois de ler o alvo da GPU (readback): caro por quadro e o caminho de CPU já mostrava
@@ -57,5 +68,5 @@ o OoT3D?
 ## Em aberto
 
 - O deko3d (Switch) não lê `InputLineOffset`; hoje nenhum título no Switch liga `SubRectDisplayTransfers`.
-- Toque: clicar no PiP ainda não vira toque do 3DS (passo 2).
+- Toque com clique real no PiP: falta o teste do Gustavo.
 - Savestate de 02:47 (anterior a e2329a28) falha ao carregar (fault em pc 0x3361CC); não investigado.

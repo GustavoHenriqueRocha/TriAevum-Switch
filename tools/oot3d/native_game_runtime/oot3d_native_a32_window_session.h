@@ -795,6 +795,9 @@ private:
   std::vector<Oot3dNativeGame::Oot3dPicaDrawSubmission> drainedDraws;
   bool quickSaveKeyWasDown = false;
   bool quickLoadKeyWasDown = false;
+  // F7 hides/shows a generic title's lower-screen picture-in-picture.
+  bool bottomScreenPictureInPictureVisible = true;
+  bool bottomScreenPictureInPictureKeyWasDown = false;
   bool automatedStateSaved = false;
   bool automatedStateSaveFailed = false;
   // The settings block of the --load-state file, for --convert-state.

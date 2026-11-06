@@ -99,7 +99,8 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                    double samplePeriodSeconds,
                    bool guestRefreshWillConsume,
                    NativeControlPollingState &pollingState,
-                   bool widescreenMenuCorners) {
+                   bool widescreenMenuCorners,
+                   bool lowerScreenPictureInPicture) {
   using namespace Oot3dNativeGame;
   auto config = controls.Snapshot().Config;
   NativeControlHostInputState host;
@@ -347,7 +348,10 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
     const auto touch = Oot3dNativeGame::MapHostPointerToNativeA32Touch(
         pointer.x, pointer.y, window.GetWidth(), window.GetHeight(),
         pointerPressed,
-        topScreenUiProfile
+        lowerScreenPictureInPicture
+            ? Oot3dNativeGame::NativeA32TouchPresentation::
+                  LowerScreenPictureInPicture
+        : topScreenUiProfile
             ? Oot3dNativeGame::NativeA32TouchPresentation::TopScreen400x240
             : Oot3dNativeGame::NativeA32TouchPresentation::
                   NativeLowerScreen320x240);
