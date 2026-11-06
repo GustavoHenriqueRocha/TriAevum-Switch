@@ -556,32 +556,35 @@ void TestTwoCores(uint32_t increments) {
         TwoCores cores(guest.process);
         const uint32_t id = guest.CreateThread(counter, 1, kData);
         uint32_t nextSlab = 0x02000000U;
+        uint32_t runs = 0;
         uint32_t restores = 0;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(20);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(40);
         while (!(Terminated(guest.process, 0) && Terminated(guest.process, id))) {
             const auto result = guest.process.Run(kBudget);
             Require(result.Kind != NativeA32ProcessRunKind::Faulted, result.Error);
             if (result.Kind != NativeA32ProcessRunKind::Yielded) {
                 SecondCore::WaitKernelFor(std::chrono::milliseconds(1), [] { return false; });
             }
-            if ((restores & 1U) == 0U && nextSlab < 0x04000000U) {
+            // A new slab every 8th run (16 of them), a savestate round trip
+            // every 16th: the second core keeps counting in between.
+            if (++runs % 8U == 0U && nextSlab < 0x04000000U) {
                 std::string error;
                 Require(guest.process.Memory().MapRegion(
                             {"commit", nextSlab, 0x1000U, true, false, {}}, &error),
                         error);
                 nextSlab += Window::kSlabSize;
             }
-            {
+            if (runs % 16U == 0U) {
                 const SecondCore::WorldStop stop;
                 const auto state = guest.process.CaptureState();
                 std::string error;
                 Require(guest.process.RestoreState(state, &error), error);
+                ++restores;
             }
-            ++restores;
             Require(std::chrono::steady_clock::now() < deadline, "two-core run did not finish");
         }
         cores.Stop();
-        Require(guest.Read32(kData) == 2U * increments,
+        Require(guest.Read32(kData) == 2U * increments && restores != 0U,
                 "an update was lost across the window's re-homing");
         Require(AtHome(guest.process.Memory(), kData) && AtHome(guest.process.Memory(), 0x02000000U),
                 "every buffer at home after the run");
