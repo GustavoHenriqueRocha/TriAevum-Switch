@@ -148,7 +148,7 @@ GUARDS = [
           test="oot3d_native_cadence_governor_tests (TestLiveRateSwitchMatchesFreshStart)"),
     Guard("FPS switched live: grass takes the new rate's budgets; its stream memory holds both caps",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
-          r'void Deko3dSetGrassFrameRate\(bool fps60\) \{.*?ApplyFrameRate\(\*state, fps60\);.*?'
+          r'void Deko3dSetGrassFrameRate\(bool fps60\) \{.*?ApplyProfile\(\*state, fps60, state->Distance\);.*?'
           r'state->SlotInstances = Oot3d::GrassSwitchStreamCapacity\(\);',
           test="oot3d_grass_switch_tests (FrameRateSwitchesLiveAsAStartWould)"),
     Guard("config/pacer_vsync (shipped on): the anchored pacer waited one display period whatever the target, so 30 FPS presented every vsync",
@@ -419,7 +419,8 @@ GUARDS = [
     # --- 05/11: grass on deko3d (config/grass, SWITCH_PORT.md "Grass on deko3d") ---
     Guard("[decision] grass off without config/grass: nothing is configured, every hook returns at once",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
-          r'const auto mode = Oot3d::ReadGrassSwitchMode\("sdmc:/switch/oot3dre/config"\);\s+'
+          r'const std::filesystem::path config = "sdmc:/switch/oot3dre/config";\s+'
+          r'const auto mode = Oot3d::ReadGrassSwitchMode\(config\);\s+'
           r'if \(mode == Oot3d::GrassSwitchMode::Off\) \{\s+return;\s+\}',
           test="oot3d_grass_switch_tests (ConfigFileMeaning)"),
     Guard("[decision] grass: absent config/grass means Off",
@@ -464,7 +465,8 @@ GUARDS = [
     Guard("grass of the title demo drawn in the temple entrance: a cull of another area is dropped, never drawn",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
           r'Oot3d::GrassCullFitsFrame\(state->Current\.Area, state->Area,.*?!= Oot3d::GrassCullFit::Draw\) \{\s+'
-          r'\+\+state->ForeignCulls;\s+state->Slots\.Reset\(\);',
+          r'\+\+\(fit == Oot3d::GrassCullFit::OtherArea \? state->ForeignOtherArea : state->ForeignNoPlacement\);\s+'
+          r'state->Slots\.Reset\(\);',
           test="oot3d_grass_switch_tests (Oot3dGrassForeignCull)"),
     Guard("grass: a scene or room change drops the drawn cull and the sources' memo",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
@@ -474,6 +476,32 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
           r'RefreshGrassMemoDraw\(mesh, draw, state\.Memo\.CameraInverse\(draw\)\) \|\| RefreshMemoClip\(mesh, draw\)',
           test="oot3d_grass_switch_tests (Oot3dGrassInterpolatedFrames)"),
+    # --- grass round 4 (SWITCH_PORT.md "Grass on deko3d", Round 4) ---
+    Guard("grass at 60 fps: an in-between frame publishes no sources; it draws the last real frame's placements with its own camera",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'if \(state->InBetweenFrame == frame\) \{.*?state->InBetween\.InBetweenDraw\(.*?\} else \{\s+try \{\s+'
+          r'if \(Oot3d::PublishPicaGrassSource\(',
+          test="oot3d_grass_switch_tests (AnInBetweenFrameDrawsTheRealFramesPlacementsWithItsCamera)"),
+    Guard("grass at 60 fps: only a real frame's placements become the ones the in-between frames draw",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'if \(state->InBetweenFrame != frame\) \{.*?state->RealFrame = std::move\(state->Frame\);.*?'
+          r'state->InBetween\.EndRealFrame\(frame\);',
+          test="oot3d_grass_switch_tests (AnInBetweenFrameDrawsTheRealFramesPlacementsWithItsCamera)"),
+    Guard("grass at 60 fps: the deko3d backend learns which frames are in-between from the temporal sample",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'GfxRenderingAPIDeko3d::PublishPicaFrameTemporalSample\(.*?Deko3d::GrassNoteSample\(sample\.Synthetic, mDevice\.Frame\(\)\);'),
+    Guard("Grass distance (L3+R3 > Video) applies at once: the renderer takes a published distance at its next frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'const auto distance = Oot3d::PublishedGrassSwitchDistance\(\); distance && \*distance != state->Distance\) \{\s+'
+          r'ApplyProfile\(\*state, state->Fps60, \*distance\);'),
+    Guard("Grass distance: the menu saves and publishes the choice",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'SaveGrassSwitchDistance\(mConfig, mGrassDistance\);\s+Fast::Oot3d::PublishGrassSwitchDistance\(mGrassDistance\);'),
+    Guard("Grass distance Whole area: every tuft, capped only by the stream memory (no distance thinning)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
+          r'case GrassSwitchDistance::Area:\s+profile\.FullDensityDistance = kGrassWholeAreaDistance;.*?'
+          r'profile\.MaxVisibleInstances = kGrassWholeAreaInstances;',
+          test="oot3d_grass_switch_tests (WholeAreaDrawsEveryTuftAndTheCapKeepsTheNearest)"),
     # --- 26/10: dev menu without buttons on deko3d ---
     Guard("dev menu (L3+R3) opened on deko3d but didn't receive controller input (no ImGui SDL backend)",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
