@@ -597,6 +597,11 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/ctr_library_natives.h",
           r'kRvctAeabiF2ulzWords\{\s+0xE1B02BC0U,.*?if \(exponent > 0xBEU\) \{\s+return ~uint64_t\{0\};',
           "oot3d_native_a32_ctr_host_tests (TestRvctLibraryNatives)"),
+    Guard("MK7 parava em MissingBlock 0x005E9F38 (__aeabi_f2lz do RVCT; -2^63 exato não satura)",
+          "tools/oot3d/native_game_runtime/ctr_library_natives.h",
+          r'\{CtrLibraryNative::AeabiF2lz, "__aeabi_f2lz", kRvctAeabiF2lzWords\}.*?'
+          r'if \(negative \? bits > 0xDF000000U : exponent >= 0xBEU\)',
+          "oot3d_native_a32_ctr_host_tests (TestRvctLibraryNatives)"),
     Guard("rotinas nativas da biblioteca do RVCT ligadas no OoT3D (só no título genérico)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'std::vector<Oot3dNativeGame::CtrLibraryNativeEntry> libraryNatives;\s+if \(genericTitle\) \{'),

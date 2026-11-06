@@ -32,6 +32,10 @@ enum class CtrLibraryNative : uint8_t {
     // r0:r1 (baixo:alto). NaN e negativos -> 0; acima de 2^64 e +inf ->
     // 0xFFFFFFFFFFFFFFFF (slots 0 e 3 da tabela do helper __fpl).
     AeabiF2ulz,
+    // long long __aeabi_f2lz(float): mesmo helper e mesma palavra 0x806DB6DB
+    // (MK7 0x5E9F38). NaN -> 0 (slot 0); |x| >= 2^63 e +-inf saturam em
+    // INT64_MAX/INT64_MIN (slot 3: ~(r0 asr 31), alto ^ 0x80000000).
+    AeabiF2lz,
 };
 
 struct CtrLibraryNativeSignature {
@@ -62,8 +66,38 @@ inline constexpr std::array<uint32_t, 19> kRvctAeabiF2ulzWords{
     0xE92D4010U, // push {r4, lr}  (segue BL __fpl_* + literal)
 };
 
-inline constexpr std::array<CtrLibraryNativeSignature, 1> kCtrLibraryNativeSignatures{{
+inline constexpr std::array<uint32_t, 26> kRvctAeabiF2lzWords{
+    0xE1B02BC0U, // asrs r2, r0, #23
+    0xE1A03400U, // lsl r3, r0, #8
+    0x13833102U, // orrne r3, r3, #0x80000000
+    0x4A000007U, // bmi negativo
+    0xE27220BEU, // rsbs r2, r2, #0xbe
+    0x9A000012U, // bls helper (>= 2^63, +inf, NaN)
+    0xE1A01233U, // lsr r1, r3, r2
+    0xE252C020U, // subs ip, r2, #0x20
+    0x21A00C33U, // lsrhs r0, r3, ip
+    0x3262C020U, // rsblo ip, r2, #0x20
+    0x31A00C13U, // lsllo r0, r3, ip
+    0xE12FFF1EU, // bx lr
+    0xE35004DFU, // cmp r0, #0xdf000000  (-2^63)
+    0x8A00000AU, // bhi helper (< -2^63, -inf, NaN)
+    0xE21220FFU, // ands r2, r2, #0xff
+    0xE26220BEU, // rsb r2, r2, #0xbe
+    0x03C33102U, // biceq r3, r3, #0x80000000  (subnormal)
+    0xE1A01233U, // lsr r1, r3, r2
+    0xE252C020U, // subs ip, r2, #0x20
+    0x21A00C33U, // lsrhs r0, r3, ip
+    0x3262C020U, // rsblo ip, r2, #0x20
+    0x31A00C13U, // lsllo r0, r3, ip
+    0xE2700000U, // rsbs r0, r0, #0
+    0xE2E11000U, // rsc r1, r1, #0
+    0xE12FFF1EU, // bx lr
+    0xE92D4010U, // push {r4, lr}  (segue BL __fpl_* + literal)
+};
+
+inline constexpr std::array<CtrLibraryNativeSignature, 2> kCtrLibraryNativeSignatures{{
     {CtrLibraryNative::AeabiF2ulz, "__aeabi_f2ulz", kRvctAeabiF2ulzWords},
+    {CtrLibraryNative::AeabiF2lz, "__aeabi_f2lz", kRvctAeabiF2lzWords},
 }};
 
 inline uint64_t CtrAeabiF2ulz(uint32_t bits) noexcept {
@@ -81,6 +115,23 @@ inline uint64_t CtrAeabiF2ulz(uint32_t bits) noexcept {
         (bits << 8U) | (exponent != 0U ? 0x80000000U : 0U);
     const uint32_t shift = 0xBEU - exponent;
     return shift >= 64U ? 0U : (uint64_t{mantissa} << 32U) >> shift;
+}
+
+inline uint64_t CtrAeabiF2lz(uint32_t bits) noexcept {
+    const uint32_t exponent = (bits >> 23U) & 0xFFU;
+    if (exponent == 0xFFU && (bits & 0x7FFFFFU) != 0U) {
+        return 0U; // NaN: slot 0
+    }
+    const bool negative = (bits & 0x80000000U) != 0U;
+    if (negative ? bits > 0xDF000000U : exponent >= 0xBEU) {
+        return negative ? 0x8000000000000000ULL : 0x7FFFFFFFFFFFFFFFULL;
+    }
+    const uint32_t mantissa =
+        (bits << 8U) | (exponent != 0U ? 0x80000000U : 0U);
+    const uint32_t shift = 0xBEU - exponent;
+    const uint64_t magnitude =
+        shift >= 64U ? 0U : (uint64_t{mantissa} << 32U) >> shift;
+    return negative ? 0U - magnitude : magnitude; // rsbs/rsc
 }
 
 struct CtrLibraryNativeEntry {
@@ -135,6 +186,12 @@ uint32_t ExecuteCtrLibraryNative(CtrLibraryNative kind, GuestState& state) {
     switch (kind) {
     case CtrLibraryNative::AeabiF2ulz: {
         const uint64_t value = CtrAeabiF2ulz(state.r[0]);
+        state.r[0] = static_cast<uint32_t>(value);
+        state.r[1] = static_cast<uint32_t>(value >> 32U);
+        break;
+    }
+    case CtrLibraryNative::AeabiF2lz: {
+        const uint64_t value = CtrAeabiF2lz(state.r[0]);
         state.r[0] = static_cast<uint32_t>(value);
         state.r[1] = static_cast<uint32_t>(value >> 32U);
         break;

@@ -1007,6 +1007,50 @@ void TestRvctLibraryNatives() {
                 regs.r[0] == 3000000000U && regs.r[1] == 0U &&
                 regs.r[15] == 0x002C6064U,
             "native f2ulz did not return r0:r1 to lr");
+
+    // MK7 parava em MissingBlock 0x005E9F38: o __aeabi_f2lz (com sinal) usa o
+    // mesmo helper e a mesma palavra 0x806DB6DB. Slot 0 = NaN -> 0; slot 3 =
+    // ~(r0 asr 31) e eor 0x80000000 no alto: satura em INT64_MAX/INT64_MIN.
+    const Case signedCases[] = {
+        {0x00000000U, 0U},                       // +0
+        {0x80000000U, 0U},                       // -0
+        {0x3FC00000U, 1U},                       // 1.5 (trunca)
+        {0xBFC00000U, ~0ULL},                    // -1.5 -> -1
+        {0xCF32D05EU, 0ULL - 3000000000ULL},     // -3e9
+        {0x5EFFFFFFU, 0x7FFFFF8000000000ULL},    // maior float < 2^63
+        {0x5F000000U, 0x7FFFFFFFFFFFFFFFULL},    // 2^63: satura (slot 3)
+        {0x7F800000U, 0x7FFFFFFFFFFFFFFFULL},    // +inf
+        {0xDF000000U, 0x8000000000000000ULL},    // -2^63 exato (direto)
+        {0xDF000001U, 0x8000000000000000ULL},    // < -2^63: satura
+        {0xFF800000U, 0x8000000000000000ULL},    // -inf
+        {0x7FC00000U, 0U},                       // NaN (slot 0)
+        {0xFFC00000U, 0U},                       // NaN negativo
+        {0x80000001U, 0U},                       // subnormal negativo
+    };
+    for (const auto& item : signedCases) {
+        Require(CtrAeabiF2lz(item.Bits) == item.Expected,
+                "__aeabi_f2lz native result differs from the RVCT routine");
+    }
+    std::vector<uint8_t> both(4U * 80U, 0U);
+    std::memcpy(both.data() + 4U, kRvctAeabiF2lzWords.data(),
+                kRvctAeabiF2lzWords.size() * 4U);
+    std::memcpy(both.data() + 4U * 40U, kRvctAeabiF2ulzWords.data(),
+                kRvctAeabiF2ulzWords.size() * 4U);
+    found.clear();
+    FindCtrLibraryNatives(0x00100000U, both, found);
+    Require(found.size() == 2U && found[0].Pc == 0x00100004U &&
+                found[0].Kind == CtrLibraryNative::AeabiF2lz &&
+                found[1].Pc == 0x001000A0U &&
+                found[1].Kind == CtrLibraryNative::AeabiF2ulz,
+            "RVCT f2lz/f2ulz signatures were not told apart by their bytes");
+    regs.r[0] = 0xCF32D05EU;
+    regs.r[14] = 0x00553EE8U;
+    const uint64_t minus3e9 = 0ULL - 3000000000ULL;
+    Require(ExecuteCtrLibraryNative(CtrLibraryNative::AeabiF2lz, regs) ==
+                    0x00553EE8U &&
+                regs.r[0] == static_cast<uint32_t>(minus3e9) &&
+                regs.r[1] == static_cast<uint32_t>(minus3e9 >> 32U),
+            "native f2lz did not return r0:r1 to lr");
 }
 
 // --- Perfil de título no executável com janela ------------------------------

@@ -1612,6 +1612,10 @@ Armadilhas encontradas no Super Mario 3D Land (05/11):
   semântica do caminho do helper conferida na tabela de retorno do binário (NaN e negativos → 0,
   ≥ 2^64 → saturação). Ligado só no perfil genérico (janela e boot probe). A outra função de CFG
   aberto do Mario (`0x0010748C`, chamada sem retorno) ainda não foi exercitada.
+  O MK7 trouxe o irmão com sinal, `__aeabi_f2lz` (0x5E9F38, logo antes do f2ulz em 0x5E9FC0): mesma
+  palavra 0x806DB6DB, mas o slot 3 faz `eor r1, r0, #0x80000000` → satura em INT64_MAX/INT64_MIN, e
+  −2^63 exato (0xDF000000) sai pelo caminho direto. Cada variante da fplib entra como assinatura nova
+  (bytes do binário + casos de borda no teste), nunca por "parece com".
 - vertex programs: no PC (modo especializado, `TRIAEVUM_SHADER_PREPARATION=sync`) o programa PICA
   que o jogo envia é traduzido em tempo de execução (decompilador do Citra/Azahar); a lista fixa
   `oot3d_translated_vertex_programs.h` só é exigida no modo paramétrico (`--pica-parametric-tev`,
