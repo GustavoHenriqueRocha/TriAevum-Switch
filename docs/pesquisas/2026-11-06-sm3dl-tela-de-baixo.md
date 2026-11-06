@@ -53,8 +53,9 @@ o OoT3D?
   não é toque. Com o PiP ligado o cursor fica solto e visível, como nas páginas de toque do OoT3D.
 - F7 esconde/mostra o PiP (F5/F8 são savestate, F6 a câmera livre); escondido, não há toque.
 - `oot3d_native_a32_input_tests` entrou na suíte (`tests/switch/run.sh`): existia e passava, mas não rodava.
-- Não testado com clique real: a timeline de teste substitui todo o input físico e simular mouse
-  (`wlrctl`) mexeria no ponteiro do Gustavo. Fica para ele testar.
+- Teste com clique real pelo Gustavo (06/11, b6cdb4d5, 10 min sem timeline, até a W1-1 jogando):
+  292 quadros com toque, PiP em 7594 de 7614 quadros; ele confirmou que os cliques no PiP e o F7
+  funcionaram. Prints em `~/oot3d-work/conv/sm3dl/progresso/2026-11-06_1033_b6cdb4d5_toque-gustavo/`.
 
 ## Alternativas rejeitadas
 
@@ -68,5 +69,4 @@ o OoT3D?
 ## Em aberto
 
 - O deko3d (Switch) não lê `InputLineOffset`; hoje nenhum título no Switch liga `SubRectDisplayTransfers`.
-- Toque com clique real no PiP: falta o teste do Gustavo.
 - Savestate de 02:47 (anterior a e2329a28) falha ao carregar (fault em pc 0x3361CC); não investigado.
