@@ -200,7 +200,7 @@ private:
     }
     if (!mLightingError.empty())
       ImGui::TextWrapped("Could not write config/%s.", mLightingError.c_str());
-    ImGui::TextDisabled("Applies at once. Per-pixel costs more GPU time: use it at 30 FPS.");
+    ImGui::TextDisabled("deko3d renderer. Applies at once. Per-pixel costs more GPU time: use it at 30 FPS.");
   }
 
   bool PackFolderExists() const {
