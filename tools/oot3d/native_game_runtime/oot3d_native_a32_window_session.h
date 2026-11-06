@@ -68,6 +68,7 @@
 #include "oot3d_native_pica_deferred_plan.h"
 #include "oot3d_native_offload.h"
 #include "oot3d_hitch_recorder.h"
+#include "oot3d_native_guest_fault_report.h"
 #include "oot3d_frame_spike_log.h"
 #include "oot3d_vsync_clock.h"
 #include "oot3d_native_player_temporal_bridge.h"

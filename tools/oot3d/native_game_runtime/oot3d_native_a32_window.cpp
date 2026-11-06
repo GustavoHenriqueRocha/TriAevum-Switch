@@ -134,6 +134,13 @@ RunUntilGuestWait(Oot3dNativeGame::NativeA32Process &process,
 void RequireRunnableGuest(
     const Oot3dNativeGame::NativeA32ProcessRunResult &result) {
   if (result.Kind == Oot3dNativeGame::NativeA32ProcessRunKind::Faulted) {
+    // The report (registers, backtrace, memory, area, last perf windows) goes
+    // to the game log only; boot-status.txt and the error screen keep the
+    // one-line error of the exception.
+    if (!result.GuestReport.empty()) {
+      LogFatalErrorForDemo(
+          (result.GuestReport + Oot3dNativeGame::GuestFaultPerf().Format()).c_str());
+    }
     throw std::runtime_error("native A32 process faulted: " + result.Error);
   }
 }

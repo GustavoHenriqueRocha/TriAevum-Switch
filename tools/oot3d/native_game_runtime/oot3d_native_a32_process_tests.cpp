@@ -1265,6 +1265,14 @@ void TestFallbackBoundary() {
                services.FallbackCount == 1 &&
                result.Error == "expected test fallback fault",
            "missing block must cross the typed host boundary and fail closed");
+    // The game log gets the faulting thread, its stack and registers (this
+    // thread never pushed: sp is the end of its stack, which the process named).
+    Expect(result.GuestReport.find("guest fault report: thread=0 entry=0x00001000") == 0U &&
+               result.GuestReport.find(
+                   "  stack: sp in primary_stack rw [00007000-00008000) at its end\n") !=
+                   std::string::npos &&
+               result.GuestReport.find("  backtrace: pc=") != std::string::npos,
+           "a fault carries the guest report");
 }
 
 struct BlockEntryProbe {

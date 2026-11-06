@@ -96,6 +96,8 @@ struct NativeA32ProcessRunResult {
     oot3d::recomp::a32::ExecutionResult Exit;
     uint32_t HostTransitions = 0;
     std::string Error;
+    // Faulted only: oot3d_native_guest_fault_report.h, for the game log.
+    std::string GuestReport;
 };
 
 struct NativeA32ProcessTimingStats {
@@ -268,6 +270,14 @@ class NativeA32Process {
     NativeA32ProcessTimingStats mTimingStats;
     bool mThreadTimingEnabled = false;
     std::array<NativeA32ThreadTime, kNativeA32ThreadTimeSlots> mThreadTimes{};
+    // Regions this process mapped (segments, stacks, TLS), named in the
+    // guest fault report; host-service mappings are not listed.
+    struct RegionName {
+        std::string Name;
+        uint32_t BaseAddress = 0;
+        uint32_t Size = 0;
+    };
+    std::vector<RegionName> mRegionNames;
 };
 
 } // namespace Oot3dNativeGame

@@ -1942,9 +1942,19 @@ bool NativeA32WindowSession::RunFrame() {
         perf << Fast::GlPerf::TakeReport(runFrameCount) << '\n';
       }
       // deko3d: GPU time per frame over the same window (empty with GL).
-      if (const std::string dkperf = Fast::Deko3dPerfReport(runFrameCount); !dkperf.empty()) {
+      const std::string dkperf = Fast::Deko3dPerfReport(runFrameCount);
+      if (!dkperf.empty()) {
         perf << dkperf << '\n';
       }
+      // The last windows are repeated in a guest fault report
+      // (oot3d_native_guest_fault_report.h): guest = kNames[0], present = [13].
+      Oot3dNativeGame::GuestFaultPerf().Record(Oot3dNativeGame::GuestFaultPerfWindow{
+          runFrameCount, hostFrames / seconds,
+          (values[0] - windowValues[0]) * 1000.0 / hostFrames,
+          (values[13] - windowValues[13]) * 1000.0 / hostFrames,
+          seconds * 1000.0 / hostFrames,
+          Oot3dNativeGame::PerfLineValue(dkperf, "busy_ms"),
+          Oot3dNativeGame::PerfLineValue(dkperf, "fence_cpu_ms")});
       if (perfWriter.has_value()) {
         (void)perfWriter->Push(std::move(perf).str());
       } else {

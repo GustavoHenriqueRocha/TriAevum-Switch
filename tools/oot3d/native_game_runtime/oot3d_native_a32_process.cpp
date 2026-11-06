@@ -2,6 +2,7 @@
 #include "oot3d_cpu_phase_probe.h"
 
 #include "oot3d_native_compiled_functions.h"
+#include "oot3d_native_guest_fault_report.h"
 
 #include <algorithm>
 #include <chrono>
@@ -207,7 +208,12 @@ bool NativeA32Process::MapRegion(const NativeA32MemoryRegionConfig& config,
         SetError(error, "guest regions cannot change after thread creation");
         return false;
     }
-    return mMemory.MapRegion(config, error);
+    if (!mMemory.MapRegion(config, error)) {
+        return false;
+    }
+    mRegionNames.push_back({config.Name, config.BaseAddress,
+                            static_cast<uint32_t>(config.Size)});
+    return true;
 }
 
 bool NativeA32Process::CreatePrimaryThread(
@@ -255,6 +261,10 @@ bool NativeA32Process::CreatePrimaryThread(
         return false;
     }
     mMemory = std::move(stagedMemory);
+    mRegionNames.push_back({"primary_stack", config.StackBaseAddress,
+                            static_cast<uint32_t>(config.StackSize)});
+    mRegionNames.push_back({"primary_tls", config.TlsBaseAddress,
+                            static_cast<uint32_t>(config.TlsSize)});
 
     mPrimaryThreadState = {};
     mPrimaryThreadState.r[0] = config.Argument0;
@@ -343,6 +353,8 @@ std::optional<uint32_t> NativeA32Process::CreateThread(
             SetError(error, "native A32 process cannot allocate another TLS page");
             return std::nullopt;
         }
+        mRegionNames.push_back({"thread_tls", static_cast<uint32_t>(nextPage),
+                                static_cast<uint32_t>(kTlsPageSize)});
         mTlsSize += kTlsPageSize;
     }
     const uint32_t threadPointer =
@@ -491,12 +503,46 @@ oot3d::recomp::a32::ExecutionResult NativeA32Process::DispatchFallback(
     return process->mPendingFallback.Exit;
 }
 
+namespace {
+
+const char* ThreadStatusName(NativeA32ThreadStatus status) {
+    switch (status) {
+    case NativeA32ThreadStatus::Empty: return "empty";
+    case NativeA32ThreadStatus::Ready: return "ready";
+    case NativeA32ThreadStatus::Running: return "running";
+    case NativeA32ThreadStatus::Waiting: return "waiting";
+    case NativeA32ThreadStatus::Terminated: return "terminated";
+    case NativeA32ThreadStatus::Faulted: return "faulted";
+    }
+    return "?";
+}
+
+} // namespace
+
 NativeA32ProcessRunResult NativeA32Process::Fault(
     const oot3d::recomp::a32::ExecutionResult& exit,
     uint32_t hostTransitions, std::string error) {
     CurrentThreadStatus() = NativeA32ThreadStatus::Faulted;
-    return {NativeA32ProcessRunKind::Faulted, exit, hostTransitions,
-            std::move(error)};
+    NativeA32ProcessRunResult result{NativeA32ProcessRunKind::Faulted, exit,
+                                     hostTransitions, std::move(error), {}};
+    // Only here, on the way out: registers, backtrace and memory for the log.
+    GuestFaultFacts facts;
+    facts.ThreadId = mCurrentThreadId;
+    facts.EntryAddress = ThreadEntryAddress(mCurrentThreadId);
+    facts.State = CurrentThreadState();
+    facts.Exit = exit;
+    for (uint32_t id = 0; id < ThreadCount(); ++id) {
+        const auto* thread = ThreadState(id);
+        if (id == mCurrentThreadId || thread == nullptr) continue;
+        facts.OtherThreads.push_back({id, ThreadEntryAddress(id), thread->r[15],
+                                      thread->r[14], thread->r[13],
+                                      ThreadStatusName(ThreadStatus(id))});
+    }
+    for (const auto& name : mRegionNames) {
+        facts.NamedRegions.push_back({name.Name, name.BaseAddress, name.Size});
+    }
+    result.GuestReport = FormatGuestFaultReport(mMemory, facts);
+    return result;
 }
 
 NativeA32ProcessRunResult NativeA32Process::ApplyHostResult(

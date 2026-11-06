@@ -355,7 +355,8 @@ The instrumented game runs slower (every branch counts): play it for coverage, n
 - `sdmc:/switch/oot3dre/boot-status.txt` — startup stage and readable error.
 - `logs/perf.txt` — FPS and ms per phase, the area of each window and, with `config/actor_profile`,
   the cost of the actors (format below, "Area ids and actor costs"); `logs/hitches.txt` — one line
-  per late presentation, with its area; `logs/oot3d_native_game.log`; `logs/glthread.txt`.
+  per late presentation, with its area; `logs/oot3d_native_game.log` (with a guest fault report,
+  below, "Guest fault report"); `logs/glthread.txt`.
 - Crashes: `atmosphere/crash_reports/` (the `.nro` is loaded by hbloader; the base can be
   found by aligning the return addresses with `bl/blr` instructions in the ELF).
 - Hangs (frozen image, no crash report): `logs/hang.txt`, from the hang watchdog
@@ -1088,6 +1089,33 @@ loads).
 - **Other fixes.** `guest_in_pica` is now ms per host frame of the window like the other phases
   (it was the running total in seconds since the start). `threads:` CPU shares are measured from each
   thread's registration, so the first window of a session no longer shows `na`.
+
+### Guest fault report in the game log (2026-11-05)
+- **Why.** A player's game closed in the final battle with only `native A32 dispatch exited
+  unexpectedly: kind=4 pc=0x004C0A8C detail=268439552`: a memory fault (kind 4) of a store to
+  `0x10001000` in `TextTokenUtf8_ParseNext` (`0x004C08C0`). That store is the loop that copies a
+  text code's argument bytes, one word each, into the 0x28-byte token on the stack; the count comes
+  from the game's table of codes `0x00-0x2F` (`0x004D6708`, at most 5). Reaching `0x10001000` takes
+  thousands of words, so the text had `7f` followed by a byte past the table (from `0x30` the table
+  is other data, e.g. counts of `0x006F0072`): the loop overwrote the rest of the stack, the
+  shared-memory page the game maps at `0x10000000` and faulted on the unmapped page after it. Which
+  text, which thread and which caller the log could not say.
+- **What the log now has.** On any guest fault (memory fault, unsupported exit, unserved host
+  request), before the usual one-line error, `NativeA32Process::Fault` writes a report
+  (`oot3d_native_guest_fault_report.h`, host side only, nothing the whole-AOT shards compile):
+  the thread id and entry, exit kind/pc/detail and what the fault address is mapped as;
+  r0-r15, cpsr, fpscr, TLS; which stack sp is in; a backtrace (pc, lr and the return addresses
+  found on the stack, i.e. words in code right after a `bl`/`blx`); the area as numbers
+  (`scene=0x.. room=..`, never a name); the other threads' pc/lr/sp; 64 bytes (hex and ASCII)
+  around the fault address and around every register that points into mapped data, each with its
+  mapping (`primary_stack rw [0FFFC000-10000000)`, `heap`, `shared memory`, ...); 128 bytes from
+  sp; and the last three perf windows (`fps`, `guest_ms`, `present_ms`, `total_ms`,
+  `gpu_busy_ms`, `gpu_fence_ms`). For this crash the registers hold the text pointers (r1 the
+  code byte, r2 the read position, r8 the token start in `TextCommandStream_ExecuteUtf8`), the
+  stack dump holds that function's frame (text start and length at sp+0x2C/+0x30) and the
+  backtrace names its caller. Cost: none until a fault; the perf trail is one copy per perf window.
+- Tests: `oot3d_native_guest_fault_report_tests`, `oot3d_native_a32_process_tests`
+  (TestFallbackBoundary); guards in `tests/switch/test_bug_guards.py`.
 
 ### Game code on 2 MB pages (`config/no_code_hugepages`, 2026-11-05)
 - **What.** Ported from sa2-nx (`sdk/src/ui/switch_code_blocks.cpp`, from kameo-nx and the Torchlight

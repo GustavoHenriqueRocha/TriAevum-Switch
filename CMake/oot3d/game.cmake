@@ -112,6 +112,16 @@ target_compile_definitions(oot3d_native_perf_diagnostics_tests PRIVATE
     OOT3D_SCENE_LIGHTS_SCRIPT="${CMAKE_SOURCE_DIR}/tools/triaevum_release/scene_lights.py")
 oot3d_target_defaults(oot3d_native_perf_diagnostics_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Guest fault report in the game log (registers, backtrace, memory around
+# pointers, area ids, last perf windows); header-only.
+add_executable(oot3d_native_guest_fault_report_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_guest_fault_report_tests.cpp
+)
+target_compile_features(oot3d_native_guest_fault_report_tests PRIVATE cxx_std_20)
+target_include_directories(oot3d_native_guest_fault_report_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/oot3d/native_a32_runtime/upstream)
+oot3d_target_defaults(oot3d_native_guest_fault_report_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Guest spike profile (config/guest_spike_ms, logs/guest_spikes.txt;
 # header-only).
 add_executable(oot3d_guest_spike_profile_tests EXCLUDE_FROM_ALL

@@ -28,6 +28,26 @@ class Guard:
 
 
 GUARDS = [
+    # --- 05/11: a guest memory fault in the final battle said only "kind=4 pc=0x004C0A8C" ---
+    # The text parser (TextTokenUtf8_ParseNext) met 7f + a code past its table and copied argument words
+    # over the stack; the log could not tell which thread, which text or which caller.
+    Guard("guest fault: every fault carries the report (thread, registers, backtrace, memory, area)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'NativeA32ProcessRunResult NativeA32Process::Fault\(.*?'
+          r'result\.GuestReport = FormatGuestFaultReport\(mMemory, facts\);',
+          test="oot3d_native_guest_fault_report_tests, oot3d_native_a32_process_tests (TestFallbackBoundary)"),
+    Guard("guest fault: the report and the last perf windows go to the game log before the fatal error",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window.cpp",
+          r'if \(!result\.GuestReport\.empty\(\)\) \{\s+LogFatalErrorForDemo\(\s+'
+          r'\(result\.GuestReport \+ Oot3dNativeGame::GuestFaultPerf\(\)\.Format\(\)\)\.c_str\(\)\);\s+\}\s+'
+          r'throw std::runtime_error\("native A32 process faulted: "'),
+    Guard("guest fault: the perf windows of the report are recorded with the GPU numbers of the dkperf line",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'Oot3dNativeGame::GuestFaultPerf\(\)\.Record\(.*?PerfLineValue\(dkperf, "busy_ms"\)'),
+    Guard("guest fault: the report gives the area as numbers, never the scene's name",
+          "tools/oot3d/native_game_runtime/oot3d_native_guest_fault_report.h",
+          r'"  area: scene=0x%02X room=%d\\n"',
+          forbid=r'FormatNativeArea|NativeSceneStem'),
     # --- 05/11: PGO collection on the console (oot3d_whole_aot_pgo.cpp, from sa2-nx/nfsmw-nx) ---
     Guard("PGO generate: value profiling read tpidr_el0 (0 on Horizon) and needs atomics; counters go in a section",
           "CMake/oot3d/native_runtime.cmake",

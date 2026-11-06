@@ -33,6 +33,7 @@ UNIT_TESTS=(
     oot3d_native_audio_tests
     oot3d_native_cadence_governor_tests
     oot3d_native_dynamic_resolution_tests
+    oot3d_native_guest_fault_report_tests
     oot3d_native_interpolation_pacing_tests
     oot3d_native_offload_tests
     oot3d_native_perf_diagnostics_tests
