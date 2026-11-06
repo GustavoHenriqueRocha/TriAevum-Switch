@@ -75,6 +75,18 @@ alternadas (pastas `~/oot3d-work/conv/sm3dl/progresso/*bench-w11-*`):
   fica em só 2,7–3,0 s, então o resto é o frontend PICA (registradores, LUT/hash). Despacho do
   código: 11,1–12,7 s.
 
+## LUT de iluminação: escrita de valor igual (06/11)
+
+Contagem temporária na W1-1 (60 s, -O2): 139.151.104 escritas de entrada da LUT, 109.105.661 (78 %)
+com o valor que já estava lá; 543.559 cargas de tabela, 305.353 inteiras iguais; 182.098 cópias de
+24 KiB do estado e 182.099 hashes FNV de 24 KiB. Correção como o Azahar: valor igual não toca a
+tabela, nem copia, nem invalida o hash (conteúdo idêntico, savestates compatíveis).
+
+| build -O2, sem offload | quadros/s |
+|---|---|
+| antes | 22,19 · 22,13 · 22,09 · 21,59 |
+| depois | 25,52 · 26,92 · 28,02 |
+
 ## Em aberto
 
 - Próximo gargalo: lista de comandos PICA, ~2 ms cada (27,5 s em 75 s depois do fill), com

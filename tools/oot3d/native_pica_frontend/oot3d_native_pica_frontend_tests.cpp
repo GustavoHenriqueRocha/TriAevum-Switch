@@ -966,6 +966,25 @@ int main(int argc, char** argv) {
                 secondLightingLuts->ContentHash !=
                     firstLightingLuts->ContentHash,
             "PICA lighting LUT draw snapshots are not immutable");
+    // Rewriting an entry with the value it already holds (most SM3DL uploads)
+    // must keep the draw snapshot and its content hash, as Azahar only marks a
+    // lighting LUT dirty when the value changes.
+    constexpr std::array<uint32_t, 4> repeatedLightingLutCommands{
+        0U, 0x000F01C5U, changedLightingLutValue0, 0x000F01C8U};
+    lightingLutUpload.Parameters[1] = static_cast<uint32_t>(
+        repeatedLightingLutCommands.size() * sizeof(uint32_t));
+    Require(lightingLutFrontend->SubmitGspCommand(
+                lightingLutUpload, repeatedLightingLutCommands, &error) &&
+                lightingLutFrontend->SubmitGspCommand(
+                    fogDraw, fogDrawCommands, &error),
+            error);
+    const auto repeatedLightingLuts =
+        lightingLutFrontend->PendingDrawPackets().back().LightingLuts;
+    Require(repeatedLightingLuts == secondLightingLuts &&
+                repeatedLightingLuts->ContentHashAvailable &&
+                lightingLutFrontend->ReadPicaRegister(0x1C5U) == 1U,
+            "PICA lighting LUT write of an unchanged value copied the "
+            "snapshot or did not advance the index");
 
     auto procTexFrontend =
         std::make_unique<Oot3dNativeGame::Oot3dNativePicaFrontend>();

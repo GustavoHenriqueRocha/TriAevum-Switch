@@ -324,7 +324,10 @@ void Oot3dNativePicaFrontend::ApplyShaderRegisterSideEffects(
         const uint32_t config = mPicaRegisters[kPicaLightingLutConfig];
         const size_t index = config & 0xFFU;
         const size_t table = (config >> 8U) & 0x1FU;
-        if (table < Oot3dPicaLightingLutState::TableCount) {
+        // An unchanged value keeps the snapshot shared by earlier draws and
+        // its hash (Azahar pica_core.cpp: lut_dirty only when prev != value).
+        if (table < Oot3dPicaLightingLutState::TableCount &&
+            mLightingLuts->Entry(table, index) != writeValue) {
             if (mLightingLuts.use_count() != 1) {
                 mLightingLuts =
                     std::make_shared<Oot3dPicaLightingLutState>(

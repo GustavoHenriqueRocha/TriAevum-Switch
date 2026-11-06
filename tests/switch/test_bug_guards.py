@@ -776,6 +776,11 @@ GUARDS = [
           r'std::copy_n\(value\.begin\(\), first, bytes\.begin\(\)\);\s*'
           r'for \(size_t filled = first; filled < size;\)',
           "oot3d_native_pica_transfer_tests (fill 16/24/32 bits)"),
+    Guard("LUT de iluminação: escrita de valor igual copiava 24 KB e refazia o hash (SM3DL: 78% das escritas)",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'table < Oot3dPicaLightingLutState::TableCount &&\s*'
+          r'mLightingLuts->Entry\(table, index\) != writeValue\)',
+          "oot3d_native_pica_frontend_tests (escrita repetida)"),
     Guard("clique no PiP da tela de baixo vira toque do 3DS (F7 esconde/mostra), só no título genérico",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'LUS_KB_F7\);.*?const bool lowerScreenPictureInPicture =\s*titleProfile\.BottomScreenPictureInPicture &&\s*'
