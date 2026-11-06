@@ -86,8 +86,9 @@ Performance and usability:
   presses the control it pictures while the finger is down: X, Y, Item I (ZR), Item II (ZL), B,
   and the D-pad direction of the action icons around the cross (View/Navi, Ocarina, boots...).
   Under the Restoration HUD, Item I/II are the ZR+X/ZR+Y chords: their icons keep a circle
-  (Item II shares the A circle that moves into its lane) but a tap on them presses nothing; the
-  layout, not what is drawn, decides.
+  (Item II shares the A circle that moves into its lane; the Item I circle is drawn only while the
+  game draws an Item I icon) but a tap on them presses nothing; the layout, not what is drawn,
+  decides.
   Each finger hit-tests where it lands (several fingers at once). The first finger that lands
   outside every control aims by dragging (bow, slingshot, hookshot, first-person view), added to
   the right stick and the gyro like PC mouse aim: `aim.touch_enabled` (default on) and

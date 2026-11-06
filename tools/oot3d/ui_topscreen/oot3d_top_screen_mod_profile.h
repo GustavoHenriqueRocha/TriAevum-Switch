@@ -278,7 +278,8 @@ TopScreenPauseEdgeGeometry BuildTopScreenPauseEdgeGeometry(
 TopScreenTouchClusterGeometry BuildTopScreenTouchClusterGeometry(
     const std::array<float, 4> &nativeVerticalOffsets,
     float nativeAlpha,
-    TopScreenHudLayout layout = TopScreenHudLayout::Normal) noexcept;
+    TopScreenHudLayout layout = TopScreenHudLayout::Normal,
+    bool itemIIconDrawn = false) noexcept;
 
 // Exact four-quad magic meter generated at payload 0x005C8244. The typed
 // content fields map to the original SaveContext +0x4E/+0x50/+0x47 inputs.
@@ -372,6 +373,9 @@ struct TopScreenNativeItemOpacity {
   float ItemZr = 1.0F;
   float ItemZl = 1.0F;
   float Ocarina = 1.0F;
+  // A visible Item I icon was copied (region 0); Restoration draws the lane 2
+  // circle only then.
+  bool ItemIDrawn = false;
 };
 
 bool AppendTopScreenNativeItemIconCopies(

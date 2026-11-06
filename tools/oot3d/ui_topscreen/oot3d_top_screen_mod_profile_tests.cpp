@@ -1350,7 +1350,7 @@ int main() {
           "TopScreen group-39 auxiliary presenter is incomplete");
   const auto restorationTouchCluster = BuildTopScreenTouchClusterGeometry(
       {0.0F, 1.0F, 2.0F, 3.0F}, 0.5F,
-      TopScreenHudLayout::Restoration);
+      TopScreenHudLayout::Restoration, true);
   Require(restorationTouchCluster.Alpha[0] == 0.5F &&
               restorationTouchCluster.Alpha[1] == 0.5F &&
               restorationTouchCluster.Alpha[2] == 0.5F &&
@@ -1358,6 +1358,11 @@ int main() {
               restorationTouchCluster.Positions[4].X == 342.0F &&
               restorationTouchCluster.Positions[4].Y == 52.0F,
           "Restoration touch-cluster geometry is incorrect");
+  Require(BuildTopScreenTouchClusterGeometry({0.0F, 1.0F, 2.0F, 3.0F}, 0.5F,
+                                             TopScreenHudLayout::Restoration,
+                                             false)
+                  .Alpha[2] == 0.0F,
+          "Restoration drew the Item I circle without its icon");
   const auto restorationAuxiliary = BuildTopScreenAuxiliaryTouchGeometry(
       auxiliaryInputs, dynamicTouch.VerticalOffsets, dynamicTouch.Alpha,
       TopScreenHudLayout::Restoration);

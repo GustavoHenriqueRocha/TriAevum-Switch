@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <span>
 #include <string>
@@ -44,15 +45,18 @@ TopScreenUiConfig SwitchConfig() {
   return config;
 }
 
+// itemIIconDrawn: whether the bridge copied a visible Item I icon.
 std::vector<oot3d::ui::UiPrimitive> BuildHud(const TopScreenUiConfig &config,
-                                             float alpha) {
+                                             float alpha,
+                                             bool itemIIconDrawn = true) {
   oot3d::ui::UiTextureIdentity items;
   oot3d::ui::UiTextureIdentity page;
   items.semantic_name = "native-items";
   page.semantic_name = "native-pause";
   std::vector<oot3d::ui::UiPrimitive> hud;
   AppendTopScreenTouchClusterPresentation(
-      BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, alpha, config.HudLayout),
+      BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, alpha, config.HudLayout,
+                                         itemIIconDrawn),
       page, hud);
   TopScreenDpadPresentationState dpad;
   dpad.OwnedEquipment = 0x7777;
@@ -101,7 +105,10 @@ template <typename T> std::span<const std::uint8_t> Bytes(const T &values) {
 // one 48-unit icon in each lower-screen item slot of payload table 0x005D33C8
 // (sources 0-3: Item I, X, Y, Item II, at their slot corners) and source 4 in
 // the D-pad lane, which the bridge leaves out (render_dpad_icons off).
-std::vector<oot3d::ui::UiPrimitive> NativeItemIcons(float alpha) {
+// itemIAlpha is the native alpha of source 0 (0: the game draws no Item I).
+std::vector<oot3d::ui::UiPrimitive>
+NativeItemIcons(float alpha, float itemIAlpha = 1.0F,
+                TopScreenNativeItemOpacity *opacity = nullptr) {
   NativeA32Memory memory;
   std::string error;
   Require(memory.MapRegion({"hud-item-icons", 0x00500000U, 0x00040000U, true,
@@ -126,12 +133,16 @@ std::vector<oot3d::ui::UiPrimitive> NativeItemIcons(float alpha) {
                                      0.0F, 0.6F, 0.1F, 0.6F};
   std::array<float, 16> white{};
   white.fill(1.0F);
+  auto itemI = white;
+  for (std::size_t vertex = 0; vertex < 4; ++vertex)
+    itemI[vertex * 4U + 3U] = itemIAlpha;
   constexpr std::array<std::array<float, 2>, 5> kSlots{
       {{266, 2}, {282, 65}, {264, 107}, {266, 186}, {2, 186}}};
   for (std::uint32_t source = 0; source < kSlots.size(); ++source)
     Require(memory.WriteBytes(kPositions + source * 0x30U, Bytes(kQuad)) &&
                 memory.WriteBytes(kUvs + source * 0x20U, Bytes(kUv)) &&
-                memory.WriteBytes(kColors + source * 0x40U, Bytes(white)) &&
+                memory.WriteBytes(kColors + source * 0x40U,
+                                  Bytes(source == 0 ? itemI : white)) &&
                 memory.WriteBytes(kTranslations + source * 0x08U,
                                   Bytes(kSlots[source])),
             "could not seed an item icon");
@@ -139,7 +150,8 @@ std::vector<oot3d::ui::UiPrimitive> NativeItemIcons(float alpha) {
   items.semantic_name = "native-items";
   std::vector<oot3d::ui::UiPrimitive> icons;
   Require(AppendTopScreenNativeItemIconCopies(memory, {0, 0, 0, 0}, alpha,
-                                              items, icons, &error, false),
+                                              items, icons, &error, false,
+                                              opacity),
           "the item icons were not copied");
   return icons;
 }
@@ -328,10 +340,13 @@ void TestEveryItemIconHasACircle() {
     oot3d::ui::UiTextureIdentity page;
     page.semantic_name = "native-pause";
     std::vector<oot3d::ui::UiPrimitive> hud;
+    TopScreenNativeItemOpacity opacity;
+    const auto icons = NativeItemIcons(1.0F, 1.0F, &opacity);
+    Require(opacity.ItemIDrawn, "the copies report the drawn Item I icon");
     AppendTopScreenTouchClusterPresentation(
-        BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, 1.0F, layout), page,
-        hud);
-    const auto icons = NativeItemIcons(1.0F);
+        BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, 1.0F, layout,
+                                           opacity.ItemIDrawn),
+        page, hud);
     hud.insert(hud.end(), icons.begin(), icons.end());
     ApplyTopScreenHudScale(hud, config);
     ApplyTopScreenGameplayCanvas(hud);
@@ -349,10 +364,62 @@ void TestEveryItemIconHasACircle() {
                    x < rect.x + rect.width && y < rect.y + rect.height;
       }
       Require(circles == 1, "an item icon sits in exactly one circle");
+      // The renderer stable-sorts by layer: the circle is drawn first and
+      // the icon over it, in both layouts.
+      for (const auto &circle : hud) {
+        const auto &rect = circle.destination;
+        if (IsClusterCircle(circle) && x >= rect.x && y >= rect.y &&
+            x < rect.x + rect.width && y < rect.y + rect.height)
+          Require(circle.layer < icon.layer && &circle < &icon,
+                  "the item icon is drawn above its circle");
+      }
       ++framed;
     }
     Require(framed == 4, "Item I, X, Y and Item II icons are all drawn");
   }
+}
+
+// Restoration draws the Item I circle exactly while the game draws the Item I
+// icon (once an empty circle stood there). Normal does not depend on it.
+void TestItemICircleFollowsItsIcon() {
+  oot3d::ui::UiTextureIdentity page;
+  page.semantic_name = "native-pause";
+  for (const float itemIAlpha : {1.0F, 0.0F}) {
+    TopScreenNativeItemOpacity opacity;
+    const auto icons = NativeItemIcons(1.0F, itemIAlpha, &opacity);
+    Require(opacity.ItemIDrawn == (itemIAlpha != 0.0F),
+            "the copies report whether Item I is drawn");
+    std::size_t itemIIcons = 0;
+    for (const auto &icon : icons)
+      itemIIcons += icon.source_quad == 0U && icon.visible;
+    Require(itemIIcons == (opacity.ItemIDrawn ? 1U : 0U),
+            "ItemIDrawn is the visible Item I copy");
+    std::vector<oot3d::ui::UiPrimitive> hud;
+    AppendTopScreenTouchClusterPresentation(
+        BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, 1.0F,
+                                           TopScreenHudLayout::Restoration,
+                                           opacity.ItemIDrawn),
+        page, hud);
+    Require((FindCircle(hud, 2U) != nullptr) == opacity.ItemIDrawn,
+            "Restoration: an Item I circle only around a drawn Item I icon");
+  }
+  const auto normal = BuildTopScreenTouchClusterGeometry(
+      {0, 2, 0, 2}, 0.75F, TopScreenHudLayout::Normal, true);
+  const auto normalNoItem = BuildTopScreenTouchClusterGeometry(
+      {0, 2, 0, 2}, 0.75F, TopScreenHudLayout::Normal, false);
+  Require(std::memcmp(&normal, &normalNoItem, sizeof(normal)) == 0,
+          "Normal ignores the Item I icon");
+  const auto restorationNoItem = BuildHud(
+      [] {
+        auto config = SwitchConfig();
+        config.HudLayout = TopScreenHudLayout::Restoration;
+        return config;
+      }(),
+      1.0F, false);
+  Require(FindCircle(restorationNoItem, 2U) == nullptr &&
+              FindCircle(restorationNoItem, 3U) == nullptr &&
+              FindCircle(restorationNoItem, 4U) != nullptr,
+          "Restoration without Item I: no Item I circle, the A circle stays");
 }
 
 TopScreenTouchContact At(std::uint32_t id, float windowX, float windowY,
@@ -756,6 +823,7 @@ int main() {
   TestDpadIcons();
   TestHiddenControls();
   TestEveryItemIconHasACircle();
+  TestItemICircleFollowsItsIcon();
   TestTracker();
   TestAimOwnership();
   TestAimRates();

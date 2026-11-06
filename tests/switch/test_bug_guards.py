@@ -925,9 +925,23 @@ GUARDS = [
     # the layout, not the drawing, keeps Item I/II untappable.
     Guard("Restoration HUD: the item on the right of the button cluster had no circle around it",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
-          r'layout == TopScreenHudLayout::Restoration && index == 3U \? 0\.0F',
+          r'layout == TopScreenHudLayout::Restoration &&\s*'
+          r'\(index == 3U \|\| \(index == 2U && !itemIIconDrawn\)\)',
           "oot3d_top_screen_hud_touch_tests (TestEveryItemIconHasACircle)",
           forbid=r'index >= 2U \? 0\.0F'),
+    # --- 06/11: then Restoration HUD showed an empty circle on the right ---
+    # The lane-2 circle was drawn whether or not the game drew an Item I icon.
+    # The bridge copies the item icons first and passes ItemIDrawn (a visible
+    # region-0 copy) to the circle geometry; the icons still draw above it.
+    Guard("Restoration HUD: an empty circle on the right (no Item I icon drawn)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
+          r'BuildTopScreenTouchClusterGeometry\(\s*touchState\.VerticalOffsets, touchState\.Alpha,\s*'
+          r'mTopScreenConfig\.HudLayout, itemOpacity\.ItemIDrawn\)',
+          "oot3d_top_screen_hud_touch_tests (TestItemICircleFollowsItsIcon)"),
+    Guard("Restoration HUD: ItemIDrawn is the visible Item I (region 0) icon copy",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'if \(regionIndex == 0U && primitive\.visible\)\s*observedOpacity\.ItemIDrawn = true;',
+          "oot3d_top_screen_hud_touch_tests (TestItemICircleFollowsItsIcon)"),
     Guard("Restoration HUD: Item I/II circles are drawn but a tap never presses ZR/ZL (the layout decides)",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch.cpp",
           r'itemButtonsTappable = layout != TopScreenHudLayout::Restoration;.*?'

@@ -79,7 +79,8 @@ Desempenho e usabilidade:
   controle do HUD do TopScreen aperta o controle que ele mostra enquanto o dedo está na tela: X, Y,
   Item I (ZR), Item II (ZL), B e a direção do D-pad dos ícones de ação em volta da cruz
   (Visão/Navi, Ocarina, botas...). No HUD Restoration, Item I/II são os acordes ZR+X/ZR+Y: os
-  ícones deles mantêm o círculo (o Item II divide o círculo do A, que vai para a pista dele), mas
+  ícones deles mantêm o círculo (o Item II divide o círculo do A, que vai para a pista dele; o do
+  Item I só aparece enquanto o jogo desenha um ícone de Item I), mas
   tocar neles não aperta nada; quem decide é o layout, não o que está desenhado. Cada dedo é
   testado onde encosta (vários dedos ao mesmo tempo).
   O primeiro dedo que encosta fora de todos os controles mira arrastando (estilingue, arco, gancho,

@@ -91,7 +91,8 @@ BuildTopScreenMagicMeterGeometry(const oot3d::ui::UiHudMagicContent &magic,
 
 TopScreenTouchClusterGeometry BuildTopScreenTouchClusterGeometry(
     const std::array<float, 4> &nativeVerticalOffsets,
-    float nativeAlpha, TopScreenHudLayout layout) noexcept {
+    float nativeAlpha, TopScreenHudLayout layout,
+    bool itemIIconDrawn) noexcept {
   // SingleScreen 3.0 hub 0x005DCAD0..0x005DCCB0 (2.1.1 arrays
   // 0x005D33A0/0x005D33B4): the four button circles centred on table
   // 0x00609770/0x00609784, 32 px, custom_ui01 rect 1 (148,3,48,48); the A
@@ -110,13 +111,15 @@ TopScreenTouchClusterGeometry BuildTopScreenTouchClusterGeometry(
     result.AtlasOrigins[index] = {148.0F, 3.0F};
     result.AtlasSizes[index] = {48.0F, 48.0F};
     // Every lane frames its item icon (AppendTopScreenNativeItemIconCopies:
-    // lane 2 Item I, lane 3 Item II), also under Restoration. There the A
-    // circle (quad 4) moves onto lane 3 and frames Item II alone. Taps on
-    // Item I/II follow the layout (ResolveTopScreenHudTouchTargets), not these
+    // lane 2 Item I, lane 3 Item II). Under Restoration the A circle (quad 4)
+    // moves onto lane 3 and frames Item II alone, and lane 2 is drawn only
+    // while the Item I icon is (no item there: no bare circle). Taps on Item
+    // I/II follow the layout (ResolveTopScreenHudTouchTargets), not these
     // circles.
-    result.Alpha[index] =
-        layout == TopScreenHudLayout::Restoration && index == 3U ? 0.0F
-                                                                 : nativeAlpha;
+    const bool restorationHidden =
+        layout == TopScreenHudLayout::Restoration &&
+        (index == 3U || (index == 2U && !itemIIconDrawn));
+    result.Alpha[index] = restorationHidden ? 0.0F : nativeAlpha;
   }
 
   result.Positions[4] =
@@ -811,6 +814,8 @@ bool AppendTopScreenNativeItemIconCopies(
     primitive.color = {colors[0], colors[1], colors[2], colors[3] * alphaScale};
     primitive.layer = 13U;
     primitive.visible = primitive.color.alpha != 0.0F;
+    if (regionIndex == 0U && primitive.visible)
+      observedOpacity.ItemIDrawn = true;
     output.push_back(std::move(primitive));
   }
   if (itemOpacity != nullptr)

@@ -7,6 +7,7 @@
 #include "oot3d_ui/ui_gameplay_hud_inline_semantics.h"
 
 #include <algorithm>
+#include <iterator>
 #include <span>
 #include <string>
 #include <string_view>
@@ -355,9 +356,21 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
     std::string touchStateError;
     if (ReadTopScreenTouchDynamicState(mMemory, mTopScreenInput, &touchState,
                                        &touchStateError)) {
+      // Item icons first (appended below, after the labels): the Restoration
+      // Item I circle is drawn only around a drawn Item I icon.
+      TopScreenNativeItemOpacity itemOpacity;
+      std::vector<oot3d::ui::UiPrimitive> itemIconCopies;
+      const auto itemIcons = NativePauseSharedTextureIdentity(
+          oot3d::ui::UiPauseSharedTextureSlot::ItemIcons);
+      if (itemIcons.has_value()) {
+        std::string itemCopyError;
+        (void)AppendTopScreenNativeItemIconCopies(
+            mMemory, touchState.VerticalOffsets, touchState.Alpha, *itemIcons,
+            itemIconCopies, &itemCopyError, false, &itemOpacity);
+      }
       auto touchGeometry = BuildTopScreenTouchClusterGeometry(
           touchState.VerticalOffsets, touchState.Alpha,
-          mTopScreenConfig.HudLayout);
+          mTopScreenConfig.HudLayout, itemOpacity.ItemIDrawn);
       if (!mTopScreenConfig.RenderDpadIcons) {
         touchGeometry.Alpha[5] = 0.0F;
       }
@@ -385,15 +398,9 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
                                             touchState.Alpha,
                                             mTopScreenConfig.HudLayout),
           uiAtlas, output);
-      TopScreenNativeItemOpacity itemOpacity;
-      const auto itemIcons = NativePauseSharedTextureIdentity(
-          oot3d::ui::UiPauseSharedTextureSlot::ItemIcons);
-      if (itemIcons.has_value()) {
-        std::string itemCopyError;
-        (void)AppendTopScreenNativeItemIconCopies(
-            mMemory, touchState.VerticalOffsets, touchState.Alpha, *itemIcons,
-            output, &itemCopyError, false, &itemOpacity);
-      }
+      output.insert(output.end(),
+                    std::make_move_iterator(itemIconCopies.begin()),
+                    std::make_move_iterator(itemIconCopies.end()));
       TopScreenDpadPresentationState dpadState;
       if (ReadTopScreenDpadPresentationState(mMemory, &dpadState)) {
         dpadState.ItemOpacity = itemOpacity;
