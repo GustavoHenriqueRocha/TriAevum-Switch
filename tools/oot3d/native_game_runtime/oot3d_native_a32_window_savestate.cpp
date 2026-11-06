@@ -599,7 +599,10 @@ void NativeA32WindowSession::ServiceSavestateRequests() {
     return std::string(text.begin(), text.end());
   };
   if (request->Kind == Oot3dNativeGame::SavestateRequestKind::Save) {
-    const auto path = savestateLibrary->NewStatePath(request->WithSettings);
+    // A scripted save may name its file (--savestate-action FRAME:save:PATH).
+    const auto path = request->Path.empty()
+                          ? savestateLibrary->NewStatePath(request->WithSettings)
+                          : request->Path;
     std::error_code directoryError;
     std::filesystem::create_directories(path.parent_path(), directoryError);
     if (directoryError) {

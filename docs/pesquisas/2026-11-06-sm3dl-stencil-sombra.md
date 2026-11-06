@@ -62,5 +62,6 @@ O Switch não tinha o problema: o deko3d usa Z24S8.
 - **Savestate na fase quebra (confirmado, não corrigido):** salvar no quadro 3100 e carregar, até
   dentro da mesma execução, leva a `MemoryFault` no pc 0x3361CC (chamada virtual com vtable
   0x29042104). No logo (quadro 600) salvar e carregar funciona, também em processo novo.
+  Investigação em `2026-11-06-sm3dl-savestate-alvo-render.md`.
 - A tela de baixo aparece preta em todas as capturas (ainda não verificado se o host apresenta).
 - Custo em memória e banda do D32S8 no PC (não medido).

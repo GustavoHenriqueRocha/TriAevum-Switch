@@ -1667,6 +1667,11 @@ Armadilhas do SM3DL (05/11), todas genéricas:
   -O0 roda a ~1/3; `OPT=-O1` no `build_title_boot_probe.sh` (pasta de build separada) dá 2,8× e
   mantém os asserts. Erro que só aparece no build rápido e cai em vblanks diferentes é corrida da
   apresentação paralela: compare com `TRIAEVUM_PARALLEL_PRESENTATION=0` antes de afunilar.
+- **Savestate que quebra só depois do load** (`docs/pesquisas/2026-11-06-sm3dl-savestate-alvo-render.md`):
+  numa execução só, `save:A` → `load:A` → `save:B` sem quadro do guest no meio tem que dar A = B
+  (`oot3d_native_a32_savestate_diff`). Se der, compare o caminho vivo com o restaurado por SVC
+  (thread, pc, argumentos, resultado) e por hash de página de 4 KiB: a primeira página diferente aponta
+  quem escreve fora das SVCs (GPU, DSP, HID).
 
 ---
 

@@ -739,6 +739,10 @@ GUARDS = [
           r'for \(const auto& reference : retained\) mCompletions\.insert\(reference\.CompletionId\);.*?'
           r'bool Retains\(uint64_t completionId\) const \{\s+return mCompletions\.contains\(completionId\);',
           "oot3d_native_pica_vulkan_bridge_tests (TestPicaTextureCopyPinCoversLaterVersions)"),
+    Guard("--savestate-action FRAME:save:PATH ignorava o caminho (dois saves no mesmo segundo viram -2)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_savestate.cpp",
+          r'const auto path = request->Path\.empty\(\)\s*\? savestateLibrary->NewStatePath\(request->WithSettings\)\s*: request->Path;',
+          "investigação do savestate do SM3DL (save e load com caminho fixo)"),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar
