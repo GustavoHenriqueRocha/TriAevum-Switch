@@ -1179,6 +1179,21 @@ switch, but its meaning changed: **without it every typed guest access takes the
 - **Window off = slow path.** With the file absent, on PC builds (the allocator hook is linked
   only into the host tests) and on emulators, every typed access calls `ReadFastSlow`/
   `WriteFastSlow` (a call, the page-table walk, then the access). See the measurements below.
+- **Measurements.** Shard 064 (same flags): 82,526 → 83,175 AArch64 instructions (+0.8%, cold
+  code: 1,327 → 1,500 slow-path calls and the out-of-line card stores of its 618 store sites; the
+  hot path of each access is shorter); `ldr*` 16,389 → 18,797 (flag byte, base and card loads),
+  `str*` 9,434 → 9,159 (no written mark), `ldp` 332 → 803 (base and cards in one pair). Host
+  micro-benchmark of the real `NativeA32Memory` (x86, -O3, median of 3; phase 1 / phase 2 window
+  on / phase 2 window off):
+  64 word stores 117.7 / 61.3 / 259.7 ns, 64 independent word loads 84.4 / 36.3 / 328.2 ns, 64
+  dependent loads on new pages 378 / 152 / 561 ns, `VPUSH {d8-d15}` word by word 39.1 / 28.2 /
+  69.6 ns, as one span 8.1 / 6.0 / 80.2 ns, `VPOP` word by word 33.7 / 24.5 / 90.0 ns, as one
+  span 7.1 / 6.2 / 87.9 ns. With the window on, guest loads and stores cost about half of
+  phase 1; off, two to twelve times phase 1 (spans never take the inline path off).
+  **Expected on the console** (an estimate, not measured): the page-walk sequences are ~19% of
+  shard 064's instructions; if they are 15–20% of guest time in heavy rooms, halving them saves
+  ~7–10%, about 2–3 ms of the 25–30 ms of guest logic per 30 Hz step. Without the file the same
+  arithmetic costs +20–50% of guest time: **phase 2 must not ship with the window off**.
 - **Log line**: `fastmem_window: … access=window` (the game's image takes the inline window
   paths) or `access=slow`.
 - **Exactness**: `memory_lean_diff/run_store_sequence_diff.sh` (the generated-code store

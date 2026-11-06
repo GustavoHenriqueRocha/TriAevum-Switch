@@ -108,6 +108,14 @@ GUARDS = [
           r'if \(selectedId != mCurrentThreadId\) \{\s*SecondCore::ClearExclusive\(\);\s*\}.*?'
           r'SecondCore::ResetExclusiveMonitor\(\);\s*if \(SecondCore::Active\(\) && secondCoreReady\)',
           test="oot3d_native_a32_second_core_tests (TestMonitorInactive, TestSchedulerExclusion)"),
+    Guard("fastmem phase 2: the fastmem_window log line says whether the game's image takes the window (access=window|slow)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'process\.Memory\(\)\.InGuestWindow\(\) \? " access=window" : " access=slow"'),
+    Guard("fastmem phase 2: the store-sequence diff under qemu has no guarded static (its condition variable aborts there)",
+          "tools/oot3d/native_a32_runtime/memory_lean_diff/store_sequence_side.cpp",
+          r'static bool active = false;\s*if \(!active\) \{\s*SEQ_MONITOR::SetActive\(true\);',
+          test="memory_lean_diff/run_store_sequence_diff.sh (TARGET=switch)",
+          forbid=r'static const bool active = \['),
     # --- 06/11: second guest core, config/second_core (oot3d_native_a32_second_core.h) ---
     # With it on, STREX must go through the global exclusive monitor (the write-generation token
     # fails under a second writer); since fastmem phase 2 the monitor serves single-core too.
