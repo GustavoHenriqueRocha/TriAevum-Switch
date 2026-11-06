@@ -612,11 +612,25 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             return {NativeA32HostAction::Resume};
         }
     }
+    uint32_t priority = 0;
     if (event.Detail == kFsSetPriorityRequest &&
+        memory.Read32(commandBuffer + 4U, &priority) &&
         memory.Write32(commandBuffer, kFsSetPriorityResponse) &&
         memory.Write32(commandBuffer + 4U, kResultSuccess)) {
+        mFsPriority = priority;
         state.r[0] = kResultSuccess;
         event.Name += ":SetPriority";
+        event.Handled = true;
+        mSvcEvents.push_back(std::move(event));
+        return {NativeA32HostAction::Resume};
+    }
+    if (event.Detail == kFsGetPriorityRequest &&
+        memory.IsWritable(commandBuffer, 12U) &&
+        memory.Write32(commandBuffer, kFsGetPriorityResponse) &&
+        memory.Write32(commandBuffer + 4U, kResultSuccess) &&
+        memory.Write32(commandBuffer + 8U, mFsPriority)) {
+        state.r[0] = kResultSuccess;
+        event.Name += ":GetPriority";
         event.Handled = true;
         mSvcEvents.push_back(std::move(event));
         return {NativeA32HostAction::Resume};

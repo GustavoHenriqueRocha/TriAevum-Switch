@@ -630,6 +630,7 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     std::shared_ptr<KernelObject> mGspSharedMemory;
     uint32_t mGspThreadId = 0;
     uint32_t mGspPriority = 0;
+    uint32_t mFsPriority = 0xFFFFFFFFU; // fs:USER Set/GetPriority (Azahar: -1)
     uint32_t mGspPriorityWithRights = 0;
     std::array<GspScreenState, 2> mGspScreens{};
     bool mLcdForceBlack = true;
