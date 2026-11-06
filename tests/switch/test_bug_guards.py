@@ -747,6 +747,21 @@ GUARDS = [
           r'removed = std::filesystem::remove\(target, error\);',
           "oot3d_native_a32_ctr_fs_tests (TestSlotEraseWithRelativeSaveRoot)",
           forbid=r'std::filesystem::(weakly_canonical|canonical|absolute)\('),
+    # --- 05/11: Restoration HUD left the item on the right of the button cluster without its circle ---
+    # The Item I/II circles were hidden under Restoration so that taps could not
+    # press ZR/ZL, but the native item icons are still drawn in those lanes.
+    # The circles are drawn (Item II's lane already has the moved A circle) and
+    # the layout, not the drawing, keeps Item I/II untappable.
+    Guard("Restoration HUD: the item on the right of the button cluster had no circle around it",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'layout == TopScreenHudLayout::Restoration && index == 3U \? 0\.0F',
+          "oot3d_top_screen_hud_touch_tests (TestEveryItemIconHasACircle)",
+          forbid=r'index >= 2U \? 0\.0F'),
+    Guard("Restoration HUD: Item I/II circles are drawn but a tap never presses ZR/ZL (the layout decides)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch.cpp",
+          r'itemButtonsTappable = layout != TopScreenHudLayout::Restoration;.*?'
+          r'if \(!itemButtonsTappable && \(primitive\.source_quad == kItemIQuad \|\|',
+          "oot3d_top_screen_hud_touch_tests (TestHiddenControls)"),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay

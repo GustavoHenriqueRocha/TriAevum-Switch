@@ -1353,7 +1353,7 @@ int main() {
       TopScreenHudLayout::Restoration);
   Require(restorationTouchCluster.Alpha[0] == 0.5F &&
               restorationTouchCluster.Alpha[1] == 0.5F &&
-              restorationTouchCluster.Alpha[2] == 0.0F &&
+              restorationTouchCluster.Alpha[2] == 0.5F &&
               restorationTouchCluster.Alpha[3] == 0.0F &&
               restorationTouchCluster.Positions[4].X == 342.0F &&
               restorationTouchCluster.Positions[4].Y == 52.0F,

@@ -709,6 +709,8 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                    // on Switch, taps on its controls press them.
                    std::span<const oot3d::ui::UiPrimitive>
                        topScreenHudPrimitives,
+                   // Decides which of those controls take taps.
+                   Oot3dNativeGame::TopScreenHudLayout topScreenHudLayout,
                    bool widescreenMenuCorners = false);
 
 Oot3dNativeGame::NativeA32InputFrame ResolveNativeA32GuestInput(

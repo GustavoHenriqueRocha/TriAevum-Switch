@@ -2,6 +2,7 @@
 // from the primitives the real HUD emitters produce at the Switch settings.
 #include "oot3d_top_screen_hud_touch.h"
 
+#include "oot3d_native_a32_memory.h"
 #include "oot3d_top_screen_dpad_presentation.h"
 #include "oot3d_top_screen_mod_profile.h"
 #include "three_ds_input.h"
@@ -9,6 +10,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <span>
+#include <string>
 #include <vector>
 
 namespace {
@@ -64,6 +67,83 @@ std::vector<oot3d::ui::UiPrimitive> BuildHud(const TopScreenUiConfig &config,
 float CenterX(const oot3d::ui::UiRect &rect) { return rect.x + rect.width / 2; }
 float CenterY(const oot3d::ui::UiRect &rect) { return rect.y + rect.height / 2; }
 
+bool Same(const oot3d::ui::UiRect &a, const oot3d::ui::UiRect &b) {
+  return Near(a.x, b.x) && Near(a.y, b.y) && Near(a.width, b.width) &&
+         Near(a.height, b.height);
+}
+
+TopScreenHudTouchTargets Targets(const TopScreenUiConfig &config, float alpha) {
+  return ResolveTopScreenHudTouchTargets(BuildHud(config, alpha),
+                                         config.HudLayout, kWidth, kHeight);
+}
+
+bool IsClusterCircle(const oot3d::ui::UiPrimitive &primitive) {
+  return primitive.owner_address == 0x005C9940U && primitive.layer == 12U &&
+         primitive.role == oot3d::ui::UiPrimitiveRole::TouchControl &&
+         primitive.source_quad < 5U && primitive.visible &&
+         primitive.color.alpha > 0.0F;
+}
+
+const oot3d::ui::UiPrimitive *FindCircle(
+    const std::vector<oot3d::ui::UiPrimitive> &hud, std::uint32_t quad) {
+  for (const auto &primitive : hud)
+    if (IsClusterCircle(primitive) && primitive.source_quad == quad)
+      return &primitive;
+  return nullptr;
+}
+
+template <typename T> std::span<const std::uint8_t> Bytes(const T &values) {
+  return {reinterpret_cast<const std::uint8_t *>(values.data()),
+          values.size() * sizeof(values[0])};
+}
+
+// The native item renderer read by AppendTopScreenNativeItemIconCopies, with
+// one 48-unit icon in each lower-screen item slot of payload table 0x005D33C8
+// (sources 0-3: Item I, X, Y, Item II, at their slot corners) and source 4 in
+// the D-pad lane, which the bridge leaves out (render_dpad_icons off).
+std::vector<oot3d::ui::UiPrimitive> NativeItemIcons(float alpha) {
+  NativeA32Memory memory;
+  std::string error;
+  Require(memory.MapRegion({"hud-item-icons", 0x00500000U, 0x00040000U, true,
+                            false, {}},
+                           &error),
+          "could not map the item renderer fixture");
+  constexpr std::uint32_t kPlayState = 0x00522000U;
+  constexpr std::uint32_t kRenderer = 0x00523000U;
+  constexpr std::uint32_t kPositions = 0x00524000U;
+  constexpr std::uint32_t kUvs = 0x00525000U;
+  constexpr std::uint32_t kColors = 0x00526000U;
+  constexpr std::uint32_t kTranslations = 0x00527000U;
+  Require(memory.Write32(0x0050AF34U + 0x14U, kPlayState) &&
+              memory.Write32(kPlayState + 0x10CU, kRenderer) &&
+              memory.Write32(kRenderer + 0x0CU, kPositions) &&
+              memory.Write32(kRenderer + 0x14U, kUvs) &&
+              memory.Write32(kRenderer + 0x18U, kColors) &&
+              memory.Write32(kRenderer + 0x1CU, kTranslations),
+          "could not seed the item renderer");
+  constexpr std::array<float, 12> kQuad{0, 0, 0, 48, 0, 0, 0, 48, 0, 48, 48, 0};
+  constexpr std::array<float, 8> kUv{0.0F, 0.8F, 0.1F, 0.8F,
+                                     0.0F, 0.6F, 0.1F, 0.6F};
+  std::array<float, 16> white{};
+  white.fill(1.0F);
+  constexpr std::array<std::array<float, 2>, 5> kSlots{
+      {{266, 2}, {282, 65}, {264, 107}, {266, 186}, {2, 186}}};
+  for (std::uint32_t source = 0; source < kSlots.size(); ++source)
+    Require(memory.WriteBytes(kPositions + source * 0x30U, Bytes(kQuad)) &&
+                memory.WriteBytes(kUvs + source * 0x20U, Bytes(kUv)) &&
+                memory.WriteBytes(kColors + source * 0x40U, Bytes(white)) &&
+                memory.WriteBytes(kTranslations + source * 0x08U,
+                                  Bytes(kSlots[source])),
+            "could not seed an item icon");
+  oot3d::ui::UiTextureIdentity items;
+  items.semantic_name = "native-items";
+  std::vector<oot3d::ui::UiPrimitive> icons;
+  Require(AppendTopScreenNativeItemIconCopies(memory, {0, 0, 0, 0}, alpha,
+                                              items, icons, &error, false),
+          "the item icons were not copied");
+  return icons;
+}
+
 void TestCanvasMapping() {
   // Handheld: the 5:3 canvas is fitted at x3 between 40 px side bars.
   const auto handheld =
@@ -86,7 +166,8 @@ void TestCanvasMapping() {
 
 void TestButtonsUnderTheirCircles() {
   const auto hud = BuildHud(SwitchConfig(), 1.0F);
-  const auto targets = ResolveTopScreenHudTouchTargets(hud, kWidth, kHeight);
+  const auto targets = ResolveTopScreenHudTouchTargets(
+      hud, TopScreenHudLayout::Normal, kWidth, kHeight);
   constexpr std::array<Control, 5> kOrder{Control::X, Control::Y,
                                           Control::ItemI, Control::ItemII,
                                           Control::B};
@@ -124,7 +205,8 @@ void TestButtonsUnderTheirCircles() {
 void TestDpadIcons() {
   const auto config = SwitchConfig();
   const auto hud = BuildHud(config, 1.0F);
-  const auto targets = ResolveTopScreenHudTouchTargets(hud, kWidth, kHeight);
+  const auto targets =
+      ResolveTopScreenHudTouchTargets(hud, config.HudLayout, kWidth, kHeight);
   Require(targets.DpadVisible, "the D-pad cross is a target");
   std::size_t icons = 0;
   for (const auto &primitive : hud) {
@@ -160,7 +242,8 @@ void TestDpadIcons() {
     return primitive.owner_address == 0x005C9940U && primitive.layer == 12U &&
            primitive.source_quad == 5U;
   });
-  const auto noDpad = ResolveTopScreenHudTouchTargets(noCross, kWidth, kHeight);
+  const auto noDpad = ResolveTopScreenHudTouchTargets(
+      noCross, TopScreenHudLayout::Normal, kWidth, kHeight);
   Require(!noDpad.DpadVisible &&
               HitTestTopScreenHudTouch(noDpad, targets.DpadCenterX,
                                        targets.DpadCenterY +
@@ -172,29 +255,104 @@ void TestDpadIcons() {
 void TestHiddenControls() {
   auto restoration = SwitchConfig();
   restoration.HudLayout = TopScreenHudLayout::Restoration;
-  const auto normalTargets =
-      ResolveTopScreenHudTouchTargets(BuildHud(SwitchConfig(), 1.0F), kWidth,
-                                      kHeight);
-  const auto targets = ResolveTopScreenHudTouchTargets(
-      BuildHud(restoration, 1.0F), kWidth, kHeight);
-  Require(!targets.ButtonVisible[2] && !targets.ButtonVisible[3],
-          "Restoration draws no Item I/II circles");
-  const auto &itemI = normalTargets.Buttons[2];
-  const auto hit =
-      HitTestTopScreenHudTouch(targets, CenterX(itemI), CenterY(itemI));
-  Require(hit != Control::ItemI && hit != Control::ItemII,
-          "Restoration never presses ZR/ZL from a tap");
+  const auto normalHud = BuildHud(SwitchConfig(), 1.0F);
+  const auto restorationHud = BuildHud(restoration, 1.0F);
+  const auto normalTargets = Targets(SwitchConfig(), 1.0F);
+  const auto targets = Targets(restoration, 1.0F);
 
-  const auto faded = ResolveTopScreenHudTouchTargets(
-      BuildHud(SwitchConfig(), 0.25F), kWidth, kHeight);
+  // The Item I icon keeps its circle, drawn as in Normal; Item II sits on
+  // the A circle, which moves into its lane, so it gets no second one.
+  const auto *normalItemI = FindCircle(normalHud, 2U);
+  const auto *itemICircle = FindCircle(restorationHud, 2U);
+  Require(normalItemI != nullptr && itemICircle != nullptr,
+          "Restoration draws the Item I circle");
+  Require(Same(itemICircle->destination, normalItemI->destination) &&
+              Same(itemICircle->uv, normalItemI->uv) &&
+              itemICircle->color.alpha == normalItemI->color.alpha &&
+              itemICircle->texture.semantic_name ==
+                  normalItemI->texture.semantic_name,
+          "Restoration draws the Item I circle with the Normal art and alpha");
+  const auto *itemIICircle = FindCircle(normalHud, 3U);
+  const auto *aCircle = FindCircle(restorationHud, 4U);
+  Require(FindCircle(restorationHud, 3U) == nullptr &&
+              itemIICircle != nullptr && aCircle != nullptr &&
+              Same(aCircle->destination, itemIICircle->destination),
+          "Restoration frames Item II with the A circle alone");
+
+  // The layout, not the drawing, decides: Item I/II are ZR+X/ZR+Y chords.
+  Require(!targets.ButtonVisible[2] && !targets.ButtonVisible[3],
+          "Restoration Item I/II circles take no taps");
+  Require(ResolveTopScreenHudTouchTargets(restorationHud,
+                                          TopScreenHudLayout::Normal, kWidth,
+                                          kHeight)
+              .ButtonVisible[2],
+          "the same circle is a target in the Normal layout");
+  for (const auto &primitive : restorationHud) {
+    if (!IsClusterCircle(primitive))
+      continue;
+    const auto rect = MapTopScreenCanvasRectToWindow(primitive.destination,
+                                                     kWidth, kHeight);
+    const auto hit =
+        HitTestTopScreenHudTouch(targets, CenterX(rect), CenterY(rect));
+    Require(hit != Control::ItemI && hit != Control::ItemII,
+            "Restoration never presses ZR/ZL from a tap");
+  }
+  const auto &itemI = normalTargets.Buttons[2];
+  const auto &itemII = normalTargets.Buttons[3];
+  for (const auto *rect : {&itemI, &itemII}) {
+    const auto hit =
+        HitTestTopScreenHudTouch(targets, CenterX(*rect), CenterY(*rect));
+    Require(hit != Control::ItemI && hit != Control::ItemII,
+            "Restoration never presses ZR/ZL from a tap");
+  }
+
+  const auto faded = Targets(SwitchConfig(), 0.25F);
   for (std::size_t index = 0; index < 4; ++index)
     Require(!faded.ButtonVisible[index], "a faded HUD takes no taps");
   Require(!faded.DpadVisible, "a faded D-pad takes no taps");
 
-  const auto empty = ResolveTopScreenHudTouchTargets({}, kWidth, kHeight);
+  const auto empty = ResolveTopScreenHudTouchTargets(
+      {}, TopScreenHudLayout::Normal, kWidth, kHeight);
   Require(HitTestTopScreenHudTouch(empty, CenterX(itemI), CenterY(itemI)) ==
               Control::None,
           "no HUD, no controls");
+}
+
+// Every lane that shows an item icon shows exactly one circle around it, in
+// both layouts (Restoration once left the Item I icon bare).
+void TestEveryItemIconHasACircle() {
+  for (const auto layout :
+       {TopScreenHudLayout::Normal, TopScreenHudLayout::Restoration}) {
+    auto config = SwitchConfig();
+    config.HudLayout = layout;
+    oot3d::ui::UiTextureIdentity page;
+    page.semantic_name = "native-pause";
+    std::vector<oot3d::ui::UiPrimitive> hud;
+    AppendTopScreenTouchClusterPresentation(
+        BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, 1.0F, layout), page,
+        hud);
+    const auto icons = NativeItemIcons(1.0F);
+    hud.insert(hud.end(), icons.begin(), icons.end());
+    ApplyTopScreenHudScale(hud, config);
+    ApplyTopScreenGameplayCanvas(hud);
+    std::size_t framed = 0;
+    for (const auto &icon : hud) {
+      if (icon.role != oot3d::ui::UiPrimitiveRole::ActionButton ||
+          icon.layer != 13U || !icon.visible)
+        continue;
+      const float x = CenterX(icon.destination);
+      const float y = CenterY(icon.destination);
+      std::size_t circles = 0;
+      for (const auto &circle : hud) {
+        const auto &rect = circle.destination;
+        circles += IsClusterCircle(circle) && x >= rect.x && y >= rect.y &&
+                   x < rect.x + rect.width && y < rect.y + rect.height;
+      }
+      Require(circles == 1, "an item icon sits in exactly one circle");
+      ++framed;
+    }
+    Require(framed == 4, "Item I, X, Y and Item II icons are all drawn");
+  }
 }
 
 TopScreenTouchContact At(std::uint32_t id, float windowX, float windowY,
@@ -204,7 +362,8 @@ TopScreenTouchContact At(std::uint32_t id, float windowX, float windowY,
 
 void TestTracker() {
   const auto hud = BuildHud(SwitchConfig(), 1.0F);
-  const auto targets = ResolveTopScreenHudTouchTargets(hud, kWidth, kHeight);
+  const auto targets = ResolveTopScreenHudTouchTargets(
+      hud, TopScreenHudLayout::Normal, kWidth, kHeight);
   const TopScreenTouchPollContext gameplay{false, false, &targets, kWidth,
                                            kHeight};
   const auto &x = targets.Buttons[0];
@@ -331,7 +490,8 @@ void TestTracker() {
 
 void TestAimOwnership() {
   const auto hud = BuildHud(SwitchConfig(), 1.0F);
-  const auto targets = ResolveTopScreenHudTouchTargets(hud, kWidth, kHeight);
+  const auto targets = ResolveTopScreenHudTouchTargets(
+      hud, TopScreenHudLayout::Normal, kWidth, kHeight);
   const TopScreenTouchPollContext aim{false, false, &targets, kWidth, kHeight,
                                       true};
   const auto &x = targets.Buttons[0];
@@ -538,7 +698,8 @@ void TestAimThroughMotionSources() {
 
 void TestMenuOwnership() {
   const auto hud = BuildHud(SwitchConfig(), 1.0F);
-  const auto targets = ResolveTopScreenHudTouchTargets(hud, kWidth, kHeight);
+  const auto targets = ResolveTopScreenHudTouchTargets(
+      hud, TopScreenHudLayout::Normal, kWidth, kHeight);
   const TopScreenTouchPollContext gameplay{false, false, &targets, kWidth,
                                            kHeight, true};
   const TopScreenTouchPollContext menu{false, true, &targets, kWidth, kHeight,
@@ -594,6 +755,7 @@ int main() {
   TestButtonsUnderTheirCircles();
   TestDpadIcons();
   TestHiddenControls();
+  TestEveryItemIconHasACircle();
   TestTracker();
   TestAimOwnership();
   TestAimRates();

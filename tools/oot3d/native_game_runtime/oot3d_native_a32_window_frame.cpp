@@ -939,6 +939,7 @@ bool NativeA32WindowSession::RunFrame() {
                          nativeControlPollingState,
                          lastTopScreenPrimitivesBySubsystem[static_cast<
                              std::size_t>(oot3d::ui::UiSubsystem::GameplayHud)],
+                         activeTopScreenConfig.HudLayout,
                          WidescreenMenuCornersActive());
   // Exit game / Close game in the L3+R3 menu leave like an exit input: the
   // window closes and Finish discards the frames still queued, as for HOME >

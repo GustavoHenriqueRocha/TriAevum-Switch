@@ -17,6 +17,7 @@
 // control never presses one, even if it slides onto it, a HUD finger never
 // aims, and a menu finger never reaches the game.
 
+#include "oot3d_top_screen_config.h"
 #include "oot3d_ui/ui_primitives.h"
 
 #include <array>
@@ -69,10 +70,12 @@ struct TopScreenHudTouchTargets {
 
 // Reads the controls out of the gameplay HUD primitives the host drew last
 // (lastTopScreenPrimitivesBySubsystem[GameplayHud], after HUD scale, margins
-// and clipping). Controls that are hidden or faded out are left out.
+// and clipping). Controls that are hidden or faded out are left out, and so
+// are Item I/II under the Restoration layout: there they are the ZR+X/ZR+Y
+// chords, so their circles frame the item icons but take no taps.
 [[nodiscard]] TopScreenHudTouchTargets ResolveTopScreenHudTouchTargets(
-    std::span<const oot3d::ui::UiPrimitive> hud, std::uint32_t windowWidth,
-    std::uint32_t windowHeight) noexcept;
+    std::span<const oot3d::ui::UiPrimitive> hud, TopScreenHudLayout layout,
+    std::uint32_t windowWidth, std::uint32_t windowHeight) noexcept;
 
 // The control under a window point, or None.
 [[nodiscard]] TopScreenHudTouchControl

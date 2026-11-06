@@ -109,8 +109,13 @@ TopScreenTouchClusterGeometry BuildTopScreenTouchClusterGeometry(
     result.Sizes[index] = {32.0F, 32.0F};
     result.AtlasOrigins[index] = {148.0F, 3.0F};
     result.AtlasSizes[index] = {48.0F, 48.0F};
+    // Every lane frames its item icon (AppendTopScreenNativeItemIconCopies:
+    // lane 2 Item I, lane 3 Item II), also under Restoration. There the A
+    // circle (quad 4) moves onto lane 3 and frames Item II alone. Taps on
+    // Item I/II follow the layout (ResolveTopScreenHudTouchTargets), not these
+    // circles.
     result.Alpha[index] =
-        layout == TopScreenHudLayout::Restoration && index >= 2U ? 0.0F
+        layout == TopScreenHudLayout::Restoration && index == 3U ? 0.0F
                                                                  : nativeAlpha;
   }
 

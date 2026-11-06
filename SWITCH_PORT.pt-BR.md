@@ -78,7 +78,10 @@ Desempenho e usabilidade:
   e as páginas de pausa Itens/Mapa/Equipamento do TopScreen). No jogo em movimento, tocar num
   controle do HUD do TopScreen aperta o controle que ele mostra enquanto o dedo está na tela: X, Y,
   Item I (ZR), Item II (ZL), B e a direção do D-pad dos ícones de ação em volta da cruz
-  (Visão/Navi, Ocarina, botas...). Cada dedo é testado onde encosta (vários dedos ao mesmo tempo).
+  (Visão/Navi, Ocarina, botas...). No HUD Restoration, Item I/II são os acordes ZR+X/ZR+Y: os
+  ícones deles mantêm o círculo (o Item II divide o círculo do A, que vai para a pista dele), mas
+  tocar neles não aperta nada; quem decide é o layout, não o que está desenhado. Cada dedo é
+  testado onde encosta (vários dedos ao mesmo tempo).
   O primeiro dedo que encosta fora de todos os controles mira arrastando (estilingue, arco, gancho,
   visão em primeira pessoa), somado ao analógico direito e ao giroscópio como a mira do mouse no
   PC: `aim.touch_enabled` (padrão ligado) e `aim.touch_degrees_per_pixel` (padrão 0,14: meia tela,
