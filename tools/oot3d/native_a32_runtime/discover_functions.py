@@ -148,9 +148,12 @@ def discover(code: bytes, exheader: bytes, profile: str) -> tuple[program.AotPro
                              "name": "ctr_entry", "status": "seed"})
         with audit.open("w", newline="") as output:
             csv.DictWriter(output, AUDIT_FIELDS).writeheader()
+        # Ganchos e retomadas do TopScreen precisam começar bloco (o runtime
+        # de produto recusa o módulo); o catálogo só vale para o code.bin dele.
+        observed = program.load_observed_sites(program.DEFAULT_OBSERVED_SITES, code)
         result = program.build_program(code, seed, audit, base=text_address,
                                        executable_size=text_size, extra_roots=pointers,
-                                       seed_roots=seeds)
+                                       seed_roots=seeds, observed_sites=observed)
     return result, pointers | seeds
 
 

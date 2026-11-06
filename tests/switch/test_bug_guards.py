@@ -775,6 +775,11 @@ GUARDS = [
           "tools/oot3d/native_a32_runtime/discover_functions.py",
           r'native = set\(keep_external\) & set\(records\).*?if record\.get\("closed_static_cfg"\)\}\s*-\s*native.*?\|\s*native',
           "test_discover_functions (test_selection_keeps_title_native_entries_external)"),
+    Guard("programa descoberto começa bloco nos 47 sites do TopScreen (OoT3D: NRO descoberta não abria no Switch)",
+          "tools/oot3d/native_a32_runtime/discover_functions.py",
+          r'observed = program\.load_observed_sites\(program\.DEFAULT_OBSERVED_SITES, code\).*?'
+          r'build_program\(.*?observed_sites=observed\)',
+          "test_discover_functions (test_observed_sites_of_this_code_image_start_blocks)"),
     Guard("clique no PiP da tela de baixo vira toque do 3DS (F7 esconde/mostra), só no título genérico",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'LUS_KB_F7\);.*?const bool lowerScreenPictureInPicture =\s*titleProfile\.BottomScreenPictureInPicture &&\s*'

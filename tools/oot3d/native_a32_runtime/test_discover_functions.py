@@ -8,8 +8,13 @@ pool em 0x3A0DAC, que semeada como código derrubava 600 funções.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import struct
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import discover_functions as discover
 
@@ -99,6 +104,30 @@ class DiscoverFunctionsTest(unittest.TestCase):
         plain = discover.closed_selection(manifest)
         self.assertEqual(len(plain["functions"]), 2)
         self.assertEqual(plain["external_functions"], [])
+
+    def test_observed_sites_of_this_code_image_start_blocks(self) -> None:
+        # OoT3D no Switch (06/11/2026): a NRO com o programa descoberto não
+        # abriu ("the title module does not start a block at the TopScreen
+        # sites ..."): discover() montava o programa sem o catálogo
+        # whole_aot_observed_sites.json, e os 47 pcs de gancho/retomada do
+        # TopScreen ficavam no meio de blocos. O probe de host não pegou (a
+        # checagem só existe no modo produto).
+        code, exheader = image(WORDS)
+        with tempfile.TemporaryDirectory() as scratch:
+            catalog = Path(scratch) / "sites.json"
+            catalog.write_text(json.dumps({
+                "format": "oot3d_whole_aot_observed_sites_v1",
+                "code_sha256": hashlib.sha256(code).hexdigest(),
+                "sites": [{"pc": "0x00100004"}],
+            }))
+            with mock.patch.object(discover.program, "DEFAULT_OBSERVED_SITES", catalog):
+                result, _ = discover.discover(code, exheader, "teste")
+                other, _ = discover.discover(code[:-4] + b"\1\0\0\0", exheader, "teste")
+        pcs = {int(block["pc"]) for block in result.to_manifest(False)["blocks"]}
+        self.assertIn(0x100004, pcs, "o pc do catálogo não começa bloco")
+        # Catálogo de outra imagem (todo título genérico) não muda nada.
+        other_pcs = {int(block["pc"]) for block in other.to_manifest(False)["blocks"]}
+        self.assertNotIn(0x100004, other_pcs)
 
 
 if __name__ == "__main__":
