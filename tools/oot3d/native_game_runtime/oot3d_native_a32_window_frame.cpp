@@ -1933,6 +1933,8 @@ bool NativeA32WindowSession::RunFrame() {
       perf << '\n';
       // config/actor_profile: actor costs over the same window (its own line).
       if (actorProfile.has_value()) perf << actorProfile->TakeLine(areaText);
+      // config/indirect_profile: hottest indirect call pairs (its own line).
+      if (indirectProfile.has_value()) perf << indirectProfile->Profile().TakeLine();
       // config/gpu_timing: GPU/CPU per render-thread stage and GL call
       // counts over the same window (empty when off).
       if (Fast::GlPerf::Enabled()) {

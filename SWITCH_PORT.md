@@ -1084,6 +1084,32 @@ loads).
 - Tests: `oot3d_switch_code_pages_tests` (alignment of the copy, block count, heap check, log line);
   guards in `test_bug_guards.py` (constructor order, exit mode, stub page, log line).
 
+### Recompiled-code overhead (2026-11-05)
+- **Flat dispatch table.** Every whole-AOT indirect call (`BLX reg`, computed `ADD pc` calls; 2,099
+  sites) and every dispatcher re-entry looked its target up with `FindDispatchEntry`: a 4 KiB page
+  bucket, then `std::lower_bound` over the 162,757 entries (about 168 per page, so about 8
+  unpredictable compare-and-branch steps). The registry (`_render_registry_source`,
+  `whole_aot_cpp.py`) now has one `uint32_t` slot per guest code word from the first entry to the
+  last (`0x00100000..0x004C97AC`: 992,748 slots, 3.79 MiB of `.bss`, filled once at static
+  initialization, no relocations): the slot holds one plus the entry's index, zero when there is
+  none. The lookup is a subtract, a rotate (a pc that is not word aligned rotates its low bits
+  above the bound), one compare and two loads, with the same entries and the same external-call
+  fallback. Host check over the real entries: identical results for every byte address from
+  64 KiB below to 64 KiB above the range; 66.7 → 3.5 ns per lookup over 64 hot targets and
+  110 → 5.8 ns over random entries (x86 host). On AArch64 the lookup is inlined:
+  `ExecuteOot3dWholeAotIndirect` reaches its tail call in 27 instructions with no stack frame,
+  where it used to call the search (19 instructions, then 10 per bisection step, about 7 steps for
+  the ~168 entries of a page: about 120 instructions per call with the wrapper) with spills around
+  the call. Changes only `oot3d_whole_aot_generated.cpp`.
+- **Indirect call profile, `config/indirect_profile` (file exists, content ignored; off by
+  default).** While it is on, the dispatcher counts calls per site and target
+  (`oot3d_native_indirect_profile.h`); off, it costs one load and one predicted branch per indirect
+  call. Each `perf.txt` window gains a line
+  `indirect: calls=N pairs=K dropped=D top=002E4058>00461344:3000,...`: the calls in the window, the
+  distinct pairs, the pairs that found no slot (4,096), and the 16 hottest `return>target:count`.
+  `return` is the guest LR at the call: the call pc + 4 for `BLX`, the resume pc for computed calls.
+  It is meant to pick the targets worth a guarded direct call.
+
 ### Performance overlay: L3+R3 > Video (`config/fps_counter`)
 - "Performance overlay" checkbox in the Video tab; applies in the same frame and creates/removes
   `config/fps_counter` (present = on, the same file as the old FPS counter). Two lines in the

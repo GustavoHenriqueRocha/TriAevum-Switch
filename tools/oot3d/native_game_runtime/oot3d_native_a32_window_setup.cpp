@@ -494,6 +494,14 @@ void NativeA32WindowSession::Setup() {
     blockEntryHooks.insert(blockEntryHooks.end(), profileHooks.begin(), profileHooks.end());
     std::fprintf(stderr, "TRIAEVUM_ACTOR_PROFILE enabled=1 hooks=%zu\n", profileHooks.size());
   }
+  // Indirect call profile (config/indirect_profile; off by default): the
+  // dispatcher counts call site and target pairs while it is installed
+  // (oot3d_native_indirect_profile.h).
+  if (std::error_code profileError;
+      std::filesystem::exists("sdmc:/switch/oot3dre/config/indirect_profile", profileError)) {
+    indirectProfile.emplace();
+    std::fprintf(stderr, "TRIAEVUM_INDIRECT_PROFILE enabled=1\n");
+  }
 #endif
   std::sort(blockEntryHooks.begin(), blockEntryHooks.end());
   if (hdFontsLoaded) blockEntryHooks.push_back(Oot3dNativeGame::kNativeQbfA4Blit);

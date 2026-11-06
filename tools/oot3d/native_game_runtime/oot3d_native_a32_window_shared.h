@@ -41,6 +41,7 @@
 #include "oot3d_native_actor_interactions.h"
 #include "oot3d_native_a32_actor_visibility.h"
 #include "oot3d_native_actor_profile.h"
+#include "oot3d_native_indirect_profile.h"
 #include "oot3d_native_area.h"
 #include "fast/oot3d/grass_interaction_bridge.h"
 #include "oot3d_native_a32_timing_probe.h"

@@ -99,9 +99,10 @@ add_executable(oot3d_hitch_recorder_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_hitch_recorder_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_hitch_recorder_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
-# Console log diagnostics: area ids (hitches.txt, perf.txt) and the actor
-# cost profile (config/actor_profile); header-only. The name tables are
-# checked against the decomp's actor ids and scene_lights.py's scene table.
+# Console log diagnostics: area ids (hitches.txt, perf.txt), the actor cost
+# profile (config/actor_profile) and the indirect call profile
+# (config/indirect_profile); header-only. The name tables are checked against
+# the decomp's actor ids and scene_lights.py's scene table.
 add_executable(oot3d_native_perf_diagnostics_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_perf_diagnostics_tests.cpp
 )

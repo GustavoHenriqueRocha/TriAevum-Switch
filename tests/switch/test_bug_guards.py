@@ -73,6 +73,20 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'SPDLOG_WARN\("\{\}", Oot3dNativeGame::FormatCodePagesStatus\(',
           test="oot3d_switch_code_pages_tests (TestFormat)"),
+    # --- 05/11: every whole-AOT indirect call searched 162,757 entries ---
+    # The flat dispatch table (one slot per guest code word, filled once at
+    # static initialization) replaces the page bucket and std::lower_bound;
+    # the indirect profile stays opt-in (config/indirect_profile).
+    Guard("whole-AOT indirect calls must look up the flat dispatch table, not search the entries",
+          "tools/oot3d/native_a32_runtime/whole_aot_cpp.py",
+          r'"    const uint32_t slot = std::rotr\(pc - kDispatchCodeBase, 2\);",.*?'
+          r'"    const uint32_t index = gDispatchSlots\[slot\];",',
+          test="tools/oot3d/native_a32_runtime/test_whole_aot_cpp.py (test_flat_dispatch_table_finds_exactly_the_entries)",
+          forbid=r'kDispatchPageOffsets|"        begin, end, pc,"'),
+    Guard("the indirect call profile must stay opt-in (config/indirect_profile): the dispatcher records only while it is installed",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'exists\("sdmc:/switch/oot3dre/config/indirect_profile", profileError\)\) \{\s+indirectProfile\.emplace\(\);',
+          test="oot3d_native_perf_diagnostics_tests"),
     # --- 05/11: console logs could not name the slow area nor the actors' cost ---
     # Area (scene, room) read once per host frame into hitches.txt and perf.txt;
     # the actor cost profile adds its block-entry hooks only with

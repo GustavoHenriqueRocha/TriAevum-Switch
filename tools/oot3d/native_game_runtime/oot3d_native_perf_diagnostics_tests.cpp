@@ -5,6 +5,7 @@
 
 #include "oot3d_native_actor_names.h"
 #include "oot3d_native_actor_profile.h"
+#include "oot3d_native_indirect_profile.h"
 #include "oot3d_native_area.h"
 
 #include <array>
@@ -319,6 +320,39 @@ void TestProfileTop() {
   Require(line.find(",En_Door/enemy:4.00x1\n") != std::string::npos, "top ends at 8: " + line);
 }
 
+// config/indirect_profile: pairs counted per window, the hottest first (ties
+// by return then target), the line and the reset.
+void TestIndirectProfile() {
+  Oot3dIndirectProfile profile;
+  RequireEqual(profile.TakeLine(), "indirect: calls=0 pairs=0 dropped=0 top=-\n", "empty indirect line");
+  for (int index = 0; index < 5; ++index) profile.Record(0x00461788U, 0x0021A000U);
+  for (int index = 0; index < 3; ++index) profile.Record(0x002E4058U, 0x00461344U);
+  profile.Record(0x002E4058U, 0x00461340U);
+  profile.Record(0x00100004U, 0x00461340U);
+  Require(profile.Calls() == 10U && profile.Pairs() == 4U, "indirect counts");
+  RequireEqual(profile.TakeLine(),
+               "indirect: calls=10 pairs=4 dropped=0 "
+               "top=00461788>0021A000:5,002E4058>00461344:3,00100004>00461340:1,002E4058>00461340:1\n",
+               "indirect line");
+  Require(profile.Calls() == 0U && profile.Pairs() == 0U, "indirect reset");
+  // More distinct pairs than the top holds: the line keeps the 16 hottest.
+  for (uint32_t pair = 0; pair < 40U; ++pair) {
+    for (uint32_t count = 0; count <= pair; ++count) profile.Record(0x00200000U + pair * 4U, 0x00300000U);
+  }
+  const std::string line = profile.TakeLine();
+  Require(line.find(" top=0020009C>00300000:40,00200098>00300000:39,") != std::string::npos, "indirect top: " + line);
+  Require(line.find(",00200060>00300000:25\n") != std::string::npos, "indirect top ends at 16: " + line);
+  // A full table drops instead of evicting.
+  for (uint32_t pair = 0; pair < 2U * Oot3dIndirectProfile::kSlots; ++pair) profile.Record(pair * 4U, 0U);
+  Require(profile.Dropped() != 0U && profile.Pairs() + profile.Dropped() == 2U * Oot3dIndirectProfile::kSlots,
+          "indirect drops when full");
+  {
+    Oot3dIndirectProfileInstall install;
+    Require(gOot3dIndirectProfile == &install.Profile(), "indirect profile installed");
+  }
+  Require(gOot3dIndirectProfile == nullptr, "indirect profile removed");
+}
+
 } // namespace
 
 int main() {
@@ -330,6 +364,7 @@ int main() {
   TestProfileLine();
   TestProfilePairing();
   TestProfileTop();
+  TestIndirectProfile();
   std::puts("perf diagnostics: PASS");
   return 0;
 }

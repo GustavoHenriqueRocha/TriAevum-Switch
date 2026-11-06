@@ -2977,19 +2977,16 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
     }
     entry_owners = _entry_owners(functions)
     dispatch_entries = sorted(entry_owners)
-    dispatch_page_shift = 12
-    dispatch_base_page = dispatch_entries[0] >> dispatch_page_shift
-    dispatch_last_page = dispatch_entries[-1] >> dispatch_page_shift
-    dispatch_page_offsets: list[int] = []
-    dispatch_cursor = 0
-    for page in range(dispatch_base_page, dispatch_last_page + 2):
-        page_start = page << dispatch_page_shift
-        while (
-            dispatch_cursor < len(dispatch_entries)
-            and dispatch_entries[dispatch_cursor] < page_start
-        ):
-            dispatch_cursor += 1
-        dispatch_page_offsets.append(dispatch_cursor)
+    # Flat dispatch: one slot per instruction word from the first to the last
+    # entry. Every entry is an A32 instruction address, so a word index is
+    # exact.
+    misaligned = [entry for entry in dispatch_entries if entry & 3]
+    if misaligned:
+        raise LoweringError(
+            f"dispatch entry 0x{misaligned[0]:08X} is not word aligned"
+        )
+    dispatch_code_base = dispatch_entries[0]
+    dispatch_slot_count = ((dispatch_entries[-1] - dispatch_code_base) >> 2) + 1
     entries = ", ".join(
         f"0x{entry:08X}U" for entry in dispatch_entries
     )
@@ -2997,9 +2994,10 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
         f'#include "{HEADER_NAME}"',
         f'#include "{INTERNAL_HEADER_NAME}"',
         '#include "oot3d_native_a32_memory.h"',
+        '#include "oot3d_native_indirect_profile.h"',
         "",
-        "#include <algorithm>",
         "#include <array>",
+        "#include <bit>",
         "",
         "namespace Oot3dNativeGame {",
         "namespace a32 = oot3d::recomp::a32;",
@@ -3032,44 +3030,42 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
         [
             "}};",
             "",
-            f"constexpr uint32_t kDispatchPageShift = {dispatch_page_shift}U;",
-            f"constexpr uint32_t kDispatchBasePage = 0x{dispatch_base_page:08X}U;",
-            f"constexpr uint32_t kDispatchLastPage = 0x{dispatch_last_page:08X}U;",
-            "constexpr std::array<uint32_t, "
-            f"{len(dispatch_page_offsets)}> kDispatchPageOffsets{{{{",
-        ]
-    )
-    for start in range(0, len(dispatch_page_offsets), 16):
-        chunk = dispatch_page_offsets[start:start + 16]
-        lines.append("    " + ", ".join(f"{offset}U" for offset in chunk) + ",")
-    lines.extend(
-        [
-            "}};",
-            "",
-            "const DispatchEntry* FindDispatchEntry(uint32_t pc) noexcept {",
-            "    const uint32_t page = pc >> kDispatchPageShift;",
-            "    if (page < kDispatchBasePage || page > kDispatchLastPage) {",
-                "        return nullptr;",
+            "// Flat dispatch table: slot (pc - kDispatchCodeBase) / 4 holds one",
+            "// plus the index of the entry at that pc in kDispatchEntries, zero",
+            "// where no entry exists (the same set and the same null result as a",
+            "// search of kDispatchEntries). It is filled once during static",
+            "// initialization, in .bss: no relocations and no image growth.",
+            f"constexpr uint32_t kDispatchCodeBase = 0x{dispatch_code_base:08X}U;",
+            f"constexpr uint32_t kDispatchSlotCount = {dispatch_slot_count}U;",
+            "static uint32_t gDispatchSlots[kDispatchSlotCount];",
+            "[[maybe_unused]] const bool gDispatchSlotsReady = [] {",
+            "    for (uint32_t index = 0; index < kDispatchEntries.size(); ++index) {",
+            "        gDispatchSlots[(kDispatchEntries[index].Pc - kDispatchCodeBase) >> 2U] =",
+            "            index + 1U;",
             "    }",
-            "    const size_t pageIndex = page - kDispatchBasePage;",
-            "    const auto begin = kDispatchEntries.begin() +",
-            "                       kDispatchPageOffsets[pageIndex];",
-            "    const auto end = kDispatchEntries.begin() +",
-            "                     kDispatchPageOffsets[pageIndex + 1U];",
-            "    const auto found = std::lower_bound(",
-            "        begin, end, pc,",
-            "        [](const DispatchEntry& entry, uint32_t target) {",
-            "            return entry.Pc < target;",
-            "        });",
-            "    return found != end && found->Pc == pc",
-            "               ? &*found",
-            "               : nullptr;",
+            "    return true;",
+            "}();",
+            "",
+            "// Inline into the indirect call and the dispatcher loop: out of line",
+            "// it costs a call plus spills around it in ExecuteOot3dWholeAotIndirect.",
+            "OOT3D_AOT_HOT const DispatchEntry* FindDispatchEntry(uint32_t pc) noexcept {",
+            "    // A pc below the base wraps above the bound, and a pc that is not",
+            "    // word aligned rotates its low bits to the top: both miss.",
+            "    const uint32_t slot = std::rotr(pc - kDispatchCodeBase, 2);",
+            "    if (slot >= kDispatchSlotCount) {",
+            "        return nullptr;",
+            "    }",
+            "    const uint32_t index = gDispatchSlots[slot];",
+            "    return index != 0U ? &kDispatchEntries[index - 1U] : nullptr;",
             "}",
             "",
             "Oot3dWholeAotFlow ExecuteOot3dWholeAotIndirect(",
             "    uint32_t pc, Oot3dWholeAotFrame& frame,",
             "    Oot3dWholeAotContext& context, Oot3dAotArchitecturalState& state) {",
             "    const DispatchEntry* entry = FindDispatchEntry(pc);",
+            "    if (Oot3dIndirectProfile* profile = gOot3dIndirectProfile) [[unlikely]] {",
+            "        profile->Record(state.R[14], pc);",
+            "    }",
             "    if (entry == nullptr) {",
             "        return Oot3dAotCallExternal(context, pc, frame, state);",
             "    }",

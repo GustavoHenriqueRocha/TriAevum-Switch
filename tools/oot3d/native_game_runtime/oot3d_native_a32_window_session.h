@@ -674,6 +674,8 @@ private:
   Oot3dNativeGame::NativeAreaWindow perfAreaWindow;
   // Actor cost profile (config/actor_profile; oot3d_native_actor_profile.h).
   std::optional<Oot3dNativeGame::NativeActorProfile> actorProfile;
+  // Indirect call profile (config/indirect_profile; oot3d_native_indirect_profile.h).
+  std::optional<Oot3dNativeGame::Oot3dIndirectProfileInstall> indirectProfile;
   // Frame spikes (oot3d_frame_spike_log.h): config/frame_spikes or
   // config/gpu_timing. Render-thread scratch below is written by
   // FinishRenderFrameCost and the scene lambda, read at the present.

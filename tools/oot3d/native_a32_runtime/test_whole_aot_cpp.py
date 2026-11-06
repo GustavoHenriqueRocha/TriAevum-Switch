@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -999,6 +1003,121 @@ class WholeAotCppTests(unittest.TestCase):
             self.assertIn("ExecuteOot3dWholeAotIndirect", source)
             self.assertIn("r3, frame, context, state", source)
             self.assertIn("case 0x00001004U:", source)
+
+    def test_flat_dispatch_table_finds_exactly_the_entries(self) -> None:
+        compiler = (
+            os.environ.get("CXX") or shutil.which("g++") or shutil.which("clang++")
+        )
+        if not compiler:
+            self.skipTest("a host C++ compiler is required")
+        # Entries on both sides of a 4 KiB page boundary, adjacent words and
+        # a gap of several pages.
+        entries = [0x1000, 0x1004, 0x1FFC, 0x2000, 0x2010, 0x5008]
+        code = bytearray(0x5010 - 0x1000)
+        for entry in entries:
+            code[entry - 0x1000:entry - 0x1000 + 4] = (0xE12FFF1E).to_bytes(4, "little")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            code_path = root / "code.bin"
+            program_path = root / "program.json"
+            selection_path = root / "selection.json"
+            code_path.write_bytes(bytes(code))
+            program_path.write_text(
+                json.dumps(
+                    {
+                        "format": PROGRAM_FORMAT,
+                        "base": 0x1000,
+                        "code_sha256": hashlib.sha256(bytes(code)).hexdigest(),
+                        "blocks": [
+                            {
+                                "id": index,
+                                "pc": entry,
+                                "end_pc": entry + 4,
+                                "successors": [{"site": entry, "kind": "return"}],
+                            }
+                            for index, entry in enumerate(entries)
+                        ],
+                        "functions": [
+                            {
+                                "entry": entry,
+                                "name": f"Leaf{index}",
+                                "blocks": [index],
+                                "closed_static_cfg": True,
+                                "direct_calls": [],
+                                "tail_calls": [],
+                                "indirect_sites": [],
+                            }
+                            for index, entry in enumerate(entries)
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            selection_path.write_text(
+                json.dumps(
+                    {
+                        "format": SELECTION_FORMAT,
+                        "functions": [{"entry": entry} for entry in entries],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "output"
+            generate(program_path, selection_path, code_path, output, shard_count=2)
+            registry = (output / SOURCE_NAME).read_text(encoding="utf-8")
+            self.assertIn("constexpr uint32_t kDispatchCodeBase = 0x00001000U;", registry)
+            self.assertIn("constexpr uint32_t kDispatchSlotCount = 4099U;", registry)
+            self.assertNotIn("lower_bound", registry)
+            self.assertIn("profile->Record(state.R[14], pc);", registry)
+            # The table and the lookup, compiled alone against stub types:
+            # every pc around the range, aligned or not, finds exactly the
+            # entry at that pc or nothing.
+            begin = registry.index("using Function = ")
+            end = registry.index("Oot3dWholeAotFlow ExecuteOot3dWholeAotIndirect(", begin)
+            symbols = sorted(set(re.findall(r"Execute_(\w+)\}", registry[begin:end])))
+            self.assertEqual(len(symbols), len(entries))
+            stubs = "\n".join(
+                f"Oot3dWholeAotFlow Execute_{symbol}(Oot3dWholeAotFrame&, "
+                "Oot3dWholeAotContext&, Oot3dAotArchitecturalState&, uint32_t) "
+                "{ return {}; }"
+                for symbol in symbols
+            )
+            expected = ", ".join(f"0x{entry:08X}U" for entry in entries)
+            program = (
+                "#include <array>\n#include <bit>\n#include <cstddef>\n"
+                "#include <cstdint>\n#include <cstdio>\n#define OOT3D_AOT_HOT inline\n"
+                "struct Oot3dWholeAotFlow {}; struct Oot3dWholeAotFrame {};\n"
+                "struct Oot3dWholeAotContext {}; struct Oot3dAotArchitecturalState {};\n"
+                f"{stubs}\n"
+                f"{registry[begin:end]}\n"
+                f"constexpr std::array<uint32_t, {len(entries)}> kExpected{{{expected}}};\n"
+                "int main() {\n"
+                "    const uint32_t probes[] = {0U, 0xFFFFFFFFU, 0xFFFFFFFCU, 0x80001000U,\n"
+                "                               0x40001000U, 0xC0001000U};\n"
+                "    for (uint32_t pc : probes)\n"
+                "        if (FindDispatchEntry(pc) != nullptr) return 1;\n"
+                "    for (uint32_t pc = 0x0; pc < 0x9000U; ++pc) {\n"
+                "        bool want = false;\n"
+                "        for (uint32_t entry : kExpected) want |= entry == pc;\n"
+                "        const DispatchEntry* found = FindDispatchEntry(pc);\n"
+                "        if ((found != nullptr) != want) return 2;\n"
+                "        if (found != nullptr && found->Pc != pc) return 3;\n"
+                "    }\n"
+                "    std::puts(\"dispatch ok\");\n"
+                "    return 0;\n"
+                "}\n"
+            )
+            source = root / "dispatch.cpp"
+            source.write_text(program, encoding="utf-8")
+            executable = root / "dispatch"
+            subprocess.run(
+                [compiler, "-std=c++20", "-O2", str(source), "-o", str(executable)],
+                check=True, capture_output=True, timeout=120,
+            )
+            run = subprocess.run(
+                [str(executable)], capture_output=True, text=True, timeout=30
+            )
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
     def test_computed_add_pc_call_uses_existing_link_register(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
