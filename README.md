@@ -101,6 +101,50 @@ presentation is configurable, so if my artistic decisions offend you
 personally, you can probably undo them. Effects can be expensive; adjust them
 to suit your GPU.
 
+## Converting other 3DS games (experimental, this fork)
+
+`tools/ctr/ctr_convert.py` turns any decrypted 3DS game into native code with the
+same runtime, without a per-game function list:
+
+1. extracts the NCCH (`code.bin`, ExHeader, RomFS);
+2. discovers the functions in `code.bin` (`discover_functions.py`);
+3. generates the whole-AOT C++ (256 shards);
+4. builds and runs the boot probe, or the windowed game with `--window`.
+
+Everything that differs between games lives in one title profile
+(`ctr_title_profile.h`). OoT3D keeps its own behaviour; any other title gets the
+generic profile, with the OoT3D-only PC features switched off.
+
+Requirements: Linux x64, CMake, Ninja, a Vulkan GPU, and Python 3 with
+`capstone==5.0.7` (a venv is fine). Bring your own decrypted `.3ds`/`.cci`: no
+game data, generated code or binaries are ever published here.
+
+```sh
+python3 tools/ctr/ctr_convert.py "/path/to/Game.3ds" --work ~/conv/game --jobs 2 --run
+python3 tools/ctr/ctr_convert.py "/path/to/Game.3ds" --work ~/conv/game --window --run
+```
+
+- `--run` writes `<work>/build/title/report.json`. Its stderr lists the services
+  and SVCs the game asked for that the HLE does not have yet.
+- `--window` builds `oot3d_native_game` in the same tree and saves screenshots
+  of the presented frame.
+- The first build compiles the 256 shards at `-O0`, which takes a while.
+- `tools/ctr/build_title_window.sh` rebuilds the window with other flags, for
+  example `OPT="-O2 -DNDEBUG"`.
+
+Status:
+
+| title | where | result |
+|---|---|---|
+| Super Mario 3D Land | Linux | World 1 map and 1-1 playable: full render, sound, savestates. Full speed (30 fps) in 1-1 on an Intel UHD 620. |
+| Ocarina of Time 3D | Linux, Switch | Boots the same with discovered functions as with the hand-reviewed list. On the Switch it costs about 4% more CPU per frame. |
+
+In the window, the bottom screen is shown as a picture-in-picture. A mouse
+click on it is a touch, and F7 hides or shows it. Other games will probably hit
+services that are not implemented yet; the probe tells you which. Building a
+Switch NRO is only wired up for OoT3D. Notes, traps and measurements:
+[the port guide](docs/GUIA_PORT_3DS_SWITCH.md) (§8, in Portuguese) and `docs/pesquisas/`.
+
 ## Testing and contributing
 
 This is an **experimental alpha**, not a fully tested port. Gameplay testing
