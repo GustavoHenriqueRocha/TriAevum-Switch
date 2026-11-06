@@ -575,8 +575,8 @@ void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw,
         ++mLightingCounters.DrawsIneligible;
         return;
     }
-    if (!Deko3d::PerPixelCostAdmits(draw.Blend.Enabled, draw.DepthWriteEnabled)) {
-        ++mLightingCounters.DrawsNotOpaque;
+    if (!Deko3d::PerPixelCostAdmits(draw.DepthWriteEnabled)) {
+        ++mLightingCounters.DrawsNoDepthWrite;
         ++mLightingCounters.DrawsIneligible;
         return;
     }
@@ -607,12 +607,12 @@ void GfxRenderingAPIDeko3d::LogLightingCounters(const char* when) {
     // the window's average (points: per-pixel draws by scene point lights).
     const auto& frames = mFrameDraws;
     Deko3d::Log("lighting (%s): mode=%s variants found=%llu missing=%llu unsupported=%llu; draws lit=%llu "
-                "native=%llu ineligible=%llu (spilling base=%llu not opaque=%llu); per frame lit %s | avg of %llu %s",
+                "native=%llu ineligible=%llu (spilling base=%llu no depth write=%llu); per frame lit %s | avg of %llu %s",
                 when, Deko3d::LightingModeName(mLightingMode), static_cast<unsigned long long>(c.VariantsFound),
                 static_cast<unsigned long long>(c.VariantsMissing),
                 static_cast<unsigned long long>(c.VariantsUnsupported), static_cast<unsigned long long>(c.DrawsLit),
                 static_cast<unsigned long long>(c.DrawsNative), static_cast<unsigned long long>(c.DrawsIneligible),
-                static_cast<unsigned long long>(c.DrawsSpillingBase), static_cast<unsigned long long>(c.DrawsNotOpaque),
+                static_cast<unsigned long long>(c.DrawsSpillingBase), static_cast<unsigned long long>(c.DrawsNoDepthWrite),
                 Deko3d::FormatPicaLitDraws(frames.Last, 1U).c_str(), static_cast<unsigned long long>(frames.Frames),
                 Deko3d::FormatPicaLitDraws(frames.Sum, frames.Frames).c_str());
 }

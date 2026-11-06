@@ -180,18 +180,19 @@ struct LightingCounters {
     uint64_t DrawsNative = 0;         // eligible, drawn native (missing/unsupported variant)
     uint64_t DrawsIneligible = 0;     // not a draw the mode changes
     // Kept native for cost (also counted as ineligible): the base fragment
-    // program spills (its variants would too), and per-pixel on a blended
-    // draw or one that writes no depth (shaded again under what covers it).
+    // program spills (its variants would too), and per-pixel on a draw that
+    // writes no depth (shaded again under what covers it).
     uint64_t DrawsSpillingBase = 0;
-    uint64_t DrawsNotOpaque = 0;
+    uint64_t DrawsNoDepthWrite = 0;
 };
 
-// Per-pixel shading only for opaque draws (no blending) that write depth:
-// a blended or depth-less draw is shaded again under what covers it, and
-// its relit colour mostly shows through others' (the Scene lights tab says
-// so).
-[[nodiscard]] constexpr bool PerPixelCostAdmits(bool blendEnabled, bool depthWrite) noexcept {
-    return !blendEnabled && depthWrite;
+// Per-pixel shading only for draws that write depth: a depth-less draw
+// (translucency, effects) is shaded again under what covers it. The blend
+// flag alone does not decide: the game enables blending on most solid world
+// geometry, and excluding it left per-pixel lighting 0 draws (logs14: 81% of
+// the draws were blended).
+[[nodiscard]] constexpr bool PerPixelCostAdmits(bool depthWrite) noexcept {
+    return depthWrite;
 }
 
 // One variant stage, looked up by the key of its own text. `lookup(key,

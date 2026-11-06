@@ -1643,9 +1643,10 @@ stay valid) and **no speed gain expected**: the inline paths still walk the page
   again). The release profiles (`runtime/triaevum_resources/environments/`) ship inside `resources.o2r`
   (`environments/`, `scripts/switch/stage-product.sh`) and are read from it only while the Modern model
   is on under deko3d (`SceneEnvironmentRuntime::SetDefaultsReader`). Nothing ties it to `config/fps60`:
-  it runs at 30 or 60 fps. **Kept native for cost (lighting3):** blended draws and draws that write no
-  depth (`PerPixelCostAdmits`), and, in both modes, draws whose base fragment program spills (none in
-  the pack now; their variants would spill too). The Scene lights tab says so. Points 3-4 and every
+  it runs at 30 or 60 fps. **Kept native for cost:** draws that write no depth (`PerPixelCostAdmits`;
+  the blend flag alone does not exclude a draw: the game blends most solid geometry, and the first
+  version of this rule left per-pixel 0 lit draws in logs14), and, in both modes, draws whose base
+  fragment program spills (none in the pack now; their variants would spill too). The Scene lights tab says so. Points 3-4 and every
   rim evaluation sit behind their own uniform branches (same sums in the same order).
 - **Lighting > Scene lights under per-pixel (0.1.2-test.2 said "needs the Modern lighting model"):**
   active by one rule (`SceneEnvironmentActive`: capability, Modern model, not Authentic, no native
@@ -1680,7 +1681,7 @@ stay valid) and **no speed gain expected**: the inline paths still walk the page
 - **Log (`logs/deko3d.txt`):** `lighting: mode <off|toon|perpixel> (config/lighting)` at start and on
   each change, and with every `programs (frame)` line while a mode is on (or was):
   `lighting (frame): mode=… variants found=… missing=… unsupported=…; draws lit=… native=…
-  ineligible=… (spilling base=… not opaque=…)` (variants: distinct shaders resolved; draws: cumulative),
+  ineligible=… (spilling base=… no depth write=…)` (variants: distinct shaders resolved; draws: cumulative),
   then `per frame lit opaque=… translucent=… points 0/1/2/3/4=… rim=… | avg of N …` (lit draws of the
   last frame, then the average since the previous line; points: per-pixel draws by scene point lights).
   `programs (frame)` ends with `per frame spill=D/L px=P/LP M parametric=… normal=… | avg of N …`: draws

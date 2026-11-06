@@ -319,10 +319,10 @@ void TestPerPixel() {
     Require(declaration || variant->rfind("if (pica_surface.rim.x > 0.0)", at) > variant->rfind(';', at),
             "perpixel: rim weight only behind the rim branch");
   }
-  // Per-pixel cost: only opaque draws that write depth.
-  Require(Fast::Deko3d::PerPixelCostAdmits(false, true), "opaque, depth write: per-pixel");
-  Require(!Fast::Deko3d::PerPixelCostAdmits(true, true) && !Fast::Deko3d::PerPixelCostAdmits(false, false),
-          "blended or no depth write: native");
+  // Per-pixel cost: draws that write depth, blended or not (the game blends
+  // most solid geometry; the blend flag must not exclude them).
+  Require(Fast::Deko3d::PerPixelCostAdmits(true), "depth write: per-pixel");
+  Require(!Fast::Deko3d::PerPixelCostAdmits(false), "no depth write: native");
   // The body follows the lighting extension point, after the primary colour.
   const size_t body = variant->find(Fast::Deko3d::PerPixelFragmentBody());
   Require(body > variant->find("// OOT3D_PICA_LIGHTING_EXTENSION_POINT") &&
