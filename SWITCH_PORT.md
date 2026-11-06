@@ -1067,12 +1067,15 @@ scheduler. Absent = the previous single-thread code paths exactly (nothing below
 - **Tests**: `oot3d_native_a32_second_core_tests` (monitor rules and two host threads, guest
   LDREX/STREX counter, event ping-pong, arbitration, sleep timeout, fault, savestate, scheduler
   exclusion, switch absent; DSP frames on the second core: never with the sound thread running,
-  each consumed (none merged), the game thread running guest code meanwhile, the delay of each
-  frame after its refresh never above the switch-off schedule's with a slow main thread and host
-  work in between, switch absent the idle work never runs; an idle-work error reaches `Run()`;
+  each consumed (none merged), the game thread running guest code meanwhile; cadence: with a slow
+  main thread and host work in each refresh, what each frame waits for besides the sound thread's
+  own work (delay after its refresh minus that work) stays within 5 ms of the switch-off
+  schedule's (measured 0.2-0.7 ms; a frame held behind the main thread or the host work would
+  wait 30 ms or more); switch absent the idle work never runs; an idle-work error reaches `Run()`;
   the `second_core:` line); `--stress` for the long runs. TSan: configure a host tree with
   `-DCMAKE_CXX_FLAGS='-fsanitize=thread -O1' -DCMAKE_C_FLAGS=… -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread`
-  and run the target with `--stress`.
+  and run the target with `--stress` under `setarch "$(uname -m)" -R` (TSan rejects the
+  high-entropy ASLR mappings; in a container that needs `--security-opt seccomp=unconfined`).
 
 ### Real fps60 and GPU savings in the GL backend (2026-10-17)
 - **fps60 did not present at 60 Hz**: the pacer and sample cadence come from the `FrameRate` mode of the

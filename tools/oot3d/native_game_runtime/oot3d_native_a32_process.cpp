@@ -14,8 +14,11 @@
 #include <nlohmann/json.hpp>
 
 #if defined(__SWITCH__)
+// The libnx headers carry C linkage only through <switch.h>.
+extern "C" {
 #include <switch/kernel/svc.h>
 #include <switch/result.h>
+}
 #elif defined(__unix__) || defined(__APPLE__)
 #include <time.h>
 #endif
