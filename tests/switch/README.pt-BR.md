@@ -41,6 +41,15 @@ processo, host CTR, FS, segundo núcleo, savestate e submissão PICA ligam o gan
 host (`oot3d_guest_window_host_alloc` no CMake), então cada um também roda com a janela:
 `TRIAEVUM_FASTMEM_WINDOW=1` (ou `verify`, que refaz as tabelas planas depois de cada mudança)
 antes do binário; cada um imprime `fastmem_window at exit: placed=… mismatches=…`.
+Desde a fase 2 (ABI 5) a janela decide os caminhos inline: sem ela, todo acesso tipado vai pelo
+caminho lento, então rode cada alvo dos dois jeitos. Os diferenciais de memória comparam com a
+fase 1 (`e4280d76`, com o segundo núcleo ativo para o monitor exclusivo compartilhado), com a
+janela ligada por padrão (`WINDOW=0` para o caminho lento):
+`memory_lean_diff/run_memory_lean_diff.sh <saída>` e
+`memory_lean_diff/run_store_sequence_diff.sh <saída>`; `TARGET=switch` compila o segundo com
+devkitA64 e o roda no `qemu-aarch64`, mapeando a janela por `qemu_mman.cpp`.
+`run_guest_override_equivalence.py` põe o lado traduzido na janela com
+`TRIAEVUM_FASTMEM_WINDOW=1`.
 
 ## Desempenho (`perf_gate.py`)
 
