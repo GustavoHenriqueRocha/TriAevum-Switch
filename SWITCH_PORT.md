@@ -2073,6 +2073,27 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
     with about the same fill cost.
   - *Log:* the third `grass:` line ends with `area drawn scene S room R, changes C, foreign culls dropped
     F | empty placements E` (built placements with no tuft: mask, slope or size left nothing).
+- **Round 4 (after test.5):**
+  - *60 fps:* round 3's memo still lost sources on in-between frames (`drawn` well under 600/600).
+    An in-between (synthetic) frame now publishes no sources at all: the deko3d backend learns which
+    frames are in-between from the temporal sample (`PublishPicaFrameTemporalSample` ->
+    `GrassNoteSample`), and each draw that was a source of the last real frame gives its target's
+    camera (`GrassInBetweenCameras`, `grass_stream_handoff.h`, at most `kGrassInBetweenReach` frames
+    on). The frame draws the last real frame's placements with that camera. Placements are found by
+    identity on every frame (`GrassFramePlacements`), not by target.
+  - *Grass distance* (`config/grass_distance`, L3+R3 > Video, applies at once): Near (default; the
+    round-3 distances, at most 8k visible at 60 fps, 22k at 30), Far (full density to twice that,
+    thinning to 6000 (8000), at most 16k (40k)) and Whole area (every tuft of the area, no thinning,
+    at most 65,536: the stream holds that cap for every mode, 4 slots of 32 bytes each, 8 MiB). The
+    log's profile line and the third `grass:` line show `distance=near|far|area`.
+  - *Tufts:* blade triangles, no `discard` (early depth stays on for every fragment variant).
+  - *Log:* the second line splits `gpu` into `blades` and `tufts`; the third ends with
+    `foreign culls dropped F (other area A, no shared placement P)` and
+    `in-between frames I (without a camera W)`.
+  - *GPU cost:* test.5 measured ~0.5 µs per tuft at 3.0x (5.5 ms for ~10k at 30 fps); cost is per
+    tuft drawn, so the visible cap bounds it: Near ≤4 ms (60 fps) / ≤11 ms (30 fps), Far ≤8 / ≤20 ms,
+    Whole area ≤33 ms `[INF]`. Whole area in Hyrule Field exceeds a 60 fps frame: the menu says so
+    and recommends 30 FPS.
 - **Shaders:** `tools/oot3d/deko3d_grass/gen.py` compiles `grass_vsh.glsl` and the two fragment
   variants with uam into `gfx_deko3d_grass_dksh.h` (not in `deko3d.pack`). Rerun it after editing a
   shader.

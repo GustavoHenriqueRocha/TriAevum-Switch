@@ -206,11 +206,12 @@ private:
     }
     if (mGrassDistanceError)
       ImGui::TextWrapped("Could not write config/grass_distance.");
-    ImGui::TextDisabled("Applies at once. Near: full density to 10 m (16 m at 30 FPS), thinner beyond. "
-                        "Far: full density to twice that, about twice the GPU time of Near. "
-                        "Whole area: every tuft of the area, no thinning (up to 65,000 drawn): the most "
-                        "GPU time, several ms per frame in large fields such as Hyrule Field. "
-                        "Use 30 FPS with Whole area.");
+    ImGui::TextDisabled("Applies at once. Grass costs GPU time per tuft drawn (about 0.5 ms per 1,000 "
+                        "tufts at 3.0x resolution). Near: full density to 10 m (16 m at 30 FPS), thinner "
+                        "beyond, at most 8,000 tufts (22,000 at 30 FPS). Far: full density to twice that, "
+                        "about twice the GPU time of Near. Whole area: every tuft of the area, no "
+                        "thinning (up to 65,000 drawn): up to 30 ms per frame in large fields such as "
+                        "Hyrule Field, more than a 60 FPS frame has. Use 30 FPS with Whole area.");
   }
 
   // The lighting model (graphics settings: Modern = per-pixel, toon bands
