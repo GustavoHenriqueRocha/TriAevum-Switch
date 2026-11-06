@@ -522,8 +522,9 @@ bool NativeA32Process::SelectReadyThread() {
         ChargeThreadProfile(mCurrentThreadId, ReadThreadProfileCounter());
         ++mThreadProfile.Switches;
     }
-    // The kernel clears the exclusive monitor on a context switch.
-    if (selectedId != mCurrentThreadId && SecondCore::Active()) {
+    // The kernel clears the exclusive monitor on a context switch (the global
+    // monitor serves the single-core path too).
+    if (selectedId != mCurrentThreadId) {
         SecondCore::ClearExclusive();
     }
     mCurrentThreadId = selectedId;
@@ -1811,10 +1812,10 @@ bool NativeA32Process::RestoreState(const nlohmann::json& state,
             secondCoreReady |= thread.HostCore != 0U &&
                                thread.Status == NativeA32ThreadStatus::Ready;
         }
-        if (SecondCore::Active()) {
-            SecondCore::ResetExclusiveMonitor();
-            if (secondCoreReady) SecondCore::NotifyKernel();
-        }
+        // A restored thread's exclusive token (an old savestate's is a write
+        // generation) never meets a live reservation: one STREX retry.
+        SecondCore::ResetExclusiveMonitor();
+        if (SecondCore::Active() && secondCoreReady) SecondCore::NotifyKernel();
         return true;
     } catch (const std::exception& exception) {
         if (error != nullptr) {

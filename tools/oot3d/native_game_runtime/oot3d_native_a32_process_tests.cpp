@@ -1,5 +1,6 @@
 #include "oot3d_native_a32_process.h"
 #include "oot3d_native_a32_memory_region.h"
+#include "oot3d_native_a32_second_core.h"
 #include "oot3d_native_compiled_functions.h"
 #include "oot3d_native_owner_call_adapter.h"
 #include "oot3d_native_true_aot_blocks.h"
@@ -801,10 +802,18 @@ void TestMemoryContract() {
     Expect(memory.LoadExclusive(0x2000U, 4, &loaded, &token, nullptr) &&
                loaded == 11U,
            "load-exclusive contract");
-    Expect(memory.Write32(0x2004U, 12U), "intervening guest write");
-    Expect(memory.StoreExclusive(0x2000U, 4, 13U, token, nullptr) ==
-               oot3d::recomp::a32::ExclusiveStoreResult::ReservationLost,
-           "intervening write must invalidate exclusive token");
+    // The global monitor's value token (single-core too): a write to another
+    // word keeps the reservation, a write that changes the reserved word
+    // loses it.
+    Expect(memory.Write32(0x2004U, 12U) &&
+               memory.StoreExclusive(0x2000U, 4, 13U, token, nullptr) ==
+                   oot3d::recomp::a32::ExclusiveStoreResult::Success,
+           "a write to another word keeps the reservation");
+    Expect(memory.LoadExclusive(0x2000U, 4, &loaded, &token, nullptr) && loaded == 13U &&
+               memory.Write32(0x2000U, 14U) &&
+               memory.StoreExclusive(0x2000U, 4, 15U, token, nullptr) ==
+                   oot3d::recomp::a32::ExclusiveStoreResult::ReservationLost,
+           "a write that changes the reserved word must invalidate the reservation");
 }
 
 void TestMemoryFastBlockEquivalence() {
@@ -983,11 +992,11 @@ void TestMemoryRangeGenerations() {
                batched.WriteGeneration() == beforeBatch + 1U &&
                batched.RangeWriteGeneration(0x1000U, 4U) == untouched &&
                batched.RangeWriteGeneration(0x2FFFU, 2U) != crossing,
-           "batched fault exits preserve bytes, the written mark and range-local invalidation");
+           "batched fault exits preserve bytes, the written cards and range-local invalidation");
 }
 
-// Store cards: a store marks the cards of the pages it touched and the
-// memory-wide written mark; generations are derived when asked.
+// Store cards: a store marks the two-bit cards of the pages it touched;
+// generations are derived when asked.
 void TestMemoryStoreCards() {
     using Oot3dNativeGame::NativeA32Memory;
     using oot3d::recomp::a32::ExclusiveStoreResult;
@@ -1040,12 +1049,20 @@ void TestMemoryStoreCards() {
                memory.RangeWriteGeneration(0x12000U, 4U) != beforeNotePrevious,
            "NoteWrite marks every page it covers");
 
-    // Span and byte fast paths mark their page.
+    // Span and byte fast paths mark their page. The word spans complete
+    // inline only in the fastmem window (TRIAEVUM_FASTMEM_WINDOW); outside
+    // it they decline with no effect and the caller stores word by word.
     const uint32_t words[4] = {1U, 2U, 3U, 4U};
     const auto beforeSpan = memory.RangeWriteGeneration(0x13000U, 4U);
-    Expect(memory.WriteWordsFast(0x13100U, words, 4U) &&
-               memory.RangeWriteGeneration(0x13000U, 4U) != beforeSpan,
-           "a word span marks its page");
+    const uint64_t contentBeforeSpan = memory.ContentFingerprint();
+    const bool spanInline = memory.WriteWordsFast(0x13100U, words, 4U);
+    Expect(spanInline == memory.InGuestWindow(), "a word span is inline exactly in the window");
+    Expect(spanInline || (memory.RangeWriteGeneration(0x13000U, 4U) == beforeSpan &&
+                          memory.ContentFingerprint() == contentBeforeSpan),
+           "a declined word span has no effect");
+    for (uint32_t index = 0; !spanInline && index < 4U; ++index)
+        Expect(memory.WriteFast<uint32_t>(0x13100U + 4U * index, words[index]), "per-word path");
+    Expect(memory.RangeWriteGeneration(0x13000U, 4U) != beforeSpan, "a word span marks its page");
     const auto beforeBytes = memory.RangeWriteGeneration(0x13000U, 4U);
     Expect(memory.WriteBytesFast(0x13200U, std::array<uint8_t, 3>{9, 9, 9}) &&
                memory.RangeWriteGeneration(0x13000U, 4U) != beforeBytes,
@@ -1063,29 +1080,36 @@ void TestMemoryStoreCards() {
     Expect(memory.WriteGeneration() == g1 && memory.StateFingerprint() == memory.StateFingerprint(),
            "observing the generation does not change it");
 
-    // Exclusive monitor: the reservation holds unless something is written
-    // anywhere between LDREX and STREX, as with the per-store counter.
+    // Exclusive monitor: the global monitor with the second core on or off.
+    // The token is the loaded value and the reservation the core's granule;
+    // a store elsewhere no longer loses it (no memory-wide written mark).
     uint64_t loaded = 0, token = 0, other = 0;
-    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) &&
-               memory.RangeWriteGeneration(0x10000U, 4U) && memory.WriteGeneration() == token &&
+    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) && token == loaded &&
+               memory.RangeWriteGeneration(0x10000U, 4U) && memory.WriteGeneration() != 0U &&
                memory.StoreExclusive(0x10200U, 4, 1U, token, nullptr) == ExclusiveStoreResult::Success,
            "a reservation without intervening writes succeeds, observations included");
     Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) &&
                memory.WriteFast<uint32_t>(0x13F00U, 3U) &&
-               memory.StoreExclusive(0x10200U, 4, 2U, token, nullptr) ==
-                   ExclusiveStoreResult::ReservationLost,
-           "a fast store on another page loses the reservation");
-    // Thread A reserves, something is written, thread B reserves and stores:
-    // B succeeds, A has lost its reservation even with no write after B's LDREX.
+               memory.StoreExclusive(0x10200U, 4, 2U, token, nullptr) == ExclusiveStoreResult::Success,
+           "a fast store on another page keeps the reservation");
     Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) &&
-               memory.WriteFast<uint8_t>(0x10300U, 1U) &&
-               memory.LoadExclusive(0x10204U, 4, &loaded, &other, nullptr) &&
+               memory.WriteFast<uint32_t>(0x10200U, 9U) &&
                memory.StoreExclusive(0x10200U, 4, 3U, token, nullptr) ==
                    ExclusiveStoreResult::ReservationLost,
-           "a write before another thread's LDREX still loses the first reservation");
-    Expect(memory.StoreExclusive(0x10204U, 4, 4U, other, nullptr) ==
-               ExclusiveStoreResult::Success,
-           "the second reservation saw no write (A's failed STREX wrote nothing)");
+           "a store that changes the reserved word loses the reservation");
+    // Thread A reserves, the scheduler switches (the kernel clears the
+    // monitor), thread B reserves the same granule and stores; back on A,
+    // its reservation is gone.
+    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr), "A's LDREX");
+    Oot3dNativeGame::SecondCore::ClearExclusive();
+    Expect(memory.LoadExclusive(0x10204U, 4, &loaded, &other, nullptr) &&
+               memory.StoreExclusive(0x10204U, 4, 4U, other, nullptr) ==
+                   ExclusiveStoreResult::Success,
+           "B's pair succeeds");
+    Oot3dNativeGame::SecondCore::ClearExclusive();
+    Expect(memory.StoreExclusive(0x10200U, 4, 3U, token, nullptr) ==
+               ExclusiveStoreResult::ReservationLost,
+           "a context switch loses the first reservation");
     Expect(memory.LoadExclusive(0x10204U, 4, &loaded, &other, nullptr) &&
                memory.StoreExclusive(0x10204U, 4, 5U, other, nullptr) == ExclusiveStoreResult::Success,
            "a fresh reservation succeeds");
