@@ -7,9 +7,12 @@
 //
 // Culling is per cluster: a cluster whose bounding sphere (grown by a margin
 // for the one frame the result lags the camera) is outside the frustum or
-// beyond the draw distance is skipped whole. The kept clusters are taken
-// nearest first until the visible budget is spent, so a budget that bites
-// shortens the draw distance instead of thinning the near grass.
+// beyond the draw distance is skipped whole. Past FullDensityDistance the
+// tufts thin with distance (kept when their stable visibility value is below
+// (full / distance)^2, so about the same number per screen area), down to
+// none at DrawDistance; they also shrink from FadeStart. The kept clusters
+// are taken nearest first until the visible budget is spent, so a budget
+// that bites shortens the reach instead of thinning the near grass.
 
 #include "fast/oot3d/grass_switch_profile.h"
 #include "fast/oot3d/grass_world_placement_cache.h"
@@ -41,8 +44,9 @@ struct GrassStreamPlacement {
 };
 
 struct GrassStreamSettings {
-    float DrawDistance = 1200.0F;
-    float FadeStart = 900.0F;
+    float FullDensityDistance = 700.0F;
+    float DrawDistance = 3000.0F;
+    float FadeStart = 2400.0F;
     float SingleBladeDistance = 400.0F;
     uint32_t MaxInstances = 8000U;
     // Added to every cluster sphere: the camera of the frame that draws the
@@ -70,7 +74,12 @@ struct GrassStreamStats {
     uint32_t Blades = 0U;
     // Clusters the visible budget left out (the farthest ones).
     uint32_t ClustersOverBudget = 0U;
+    // Anchors past FullDensityDistance left out by the distance thinning.
+    uint64_t AnchorsThinned = 0U;
 };
+
+// The share of tufts kept at `distance` (1 up to FullDensityDistance).
+[[nodiscard]] float GrassStreamRetention(const GrassStreamSettings& settings, float distance) noexcept;
 
 // Packing helpers, exposed for the tests (GLSL unpackHalf2x16 / unpackUnorm).
 [[nodiscard]] uint16_t PackGrassHalf(float value) noexcept;

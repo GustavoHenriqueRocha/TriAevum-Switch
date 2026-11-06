@@ -50,16 +50,21 @@ struct GrassSwitchProfile {
     // Placements kept in memory (anchors + culling copies + clusters): the
     // least recently drawn go first, so what stays is what the camera sees.
     size_t RetainedBytes = 12U * 1024U * 1024U;
-    // Drawing, in world units (1 m = 100).
-    float DrawDistance = 1200.0F;
-    float FadeStart = 900.0F;
+    // Drawing, in world units (1 m = 100). Full density up to
+    // FullDensityDistance, then thinning with distance (about the same
+    // number of tufts per screen area) to none at DrawDistance; tufts shrink
+    // into the ground from FadeStart.
+    float FullDensityDistance = 700.0F;
+    float DrawDistance = 3000.0F;
+    float FadeStart = 2400.0F;
     // Tufts closer than this are drawn as their blades, one segment each.
     float SingleBladeDistance = 400.0F;
     uint32_t MaxVisibleInstances = 8000U;
 };
 
-// 60 fps (config/fps60 on): ≤8k visible, 1200 units faded from 900.
-// 30 fps: the frame has 33 ms, so 22k visible and 2000 units (fade from 1500).
+// 60 fps (config/fps60 on): ≤8k visible, full density to 700 units, thinning
+// to 3000. 30 fps: the frame has 33 ms, so 22k visible, full density to 1200,
+// thinning to 4000.
 [[nodiscard]] GrassSwitchProfile SelectGrassSwitchProfile(bool fps60) noexcept;
 
 // The profile's generation and distances on top of the product preset (its

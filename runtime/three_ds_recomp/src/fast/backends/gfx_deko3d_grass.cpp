@@ -29,6 +29,7 @@
 #include "fast/oot3d/grass_instance_stream.h"
 #include "fast/oot3d/grass_interaction_bridge.h"
 #include "fast/oot3d/grass_scene_bridge.h"
+#include "fast/oot3d/grass_stream_handoff.h"
 #include "fast/oot3d/grass_switch_profile.h"
 #include "fast/oot3d/grass_visibility.h"
 #include "fast/oot3d/graphics_settings.h"
@@ -57,11 +58,13 @@ namespace Fast {
 namespace {
 
 constexpr uint64_t kLogEveryFrames = 600U;
-// Instance memory slots: two read by frames in flight, the newest result
-// and the one the worker writes.
-constexpr uint32_t kStreamSlots = 4U;
+// Instance memory slots (GrassStreamSlots): two read by frames in flight,
+// the newest result and the one the worker writes.
+constexpr uint32_t kStreamSlots = Oot3d::GrassStreamSlots::kSlots;
 constexpr uint32_t kMaxColliders = 4U;
 constexpr uint32_t kTimestampBytes = 16U; // DkCounter report: value, timestamp
+// Per device slot: before the grass, after its blades, after its tufts.
+constexpr uint32_t kTimestampsPerSlot = 3U;
 // Keys of the grass stages in the ShaderStore (not text hashes).
 constexpr uint64_t kGrassVertexKey = 0xDE0C3D56A5500001ULL;
 constexpr uint64_t kGrassFragmentKey = 0xDE0C3D56A5500002ULL;
@@ -108,10 +111,12 @@ class GrassCullWorker {
         Oot3d::GrassStreamInstance* Output = nullptr;
         size_t Capacity = 0;
         uint32_t Slot = 0;
+        uint64_t Frame = 0; // whose cameras
     };
     struct Result {
         bool Valid = false;
         uint32_t Slot = 0;
+        uint64_t Frame = 0;
         std::vector<uint64_t> Identities;
         std::vector<Oot3d::GrassStreamRange> Ranges;
         Oot3d::GrassStreamStats Stats;
@@ -174,6 +179,7 @@ class GrassCullWorker {
                                          result.Ranges);
             result.Milliseconds = MillisecondsSince(begin);
             result.Slot = job.Slot;
+            result.Frame = job.Frame;
             result.Identities = std::move(job.Identities);
             result.Valid = true;
             std::scoped_lock lock(mMutex);
@@ -195,6 +201,7 @@ class GrassCullWorker {
 // This frame's draw data of one placement.
 struct FramePlacement {
     std::shared_ptr<const Oot3d::GrassWorldPlacement> World;
+    uint64_t Identity = 0;
     uint64_t Namespace = 0;
     uint32_t ColorAddress = 0;
     GrassPlacementUniforms Uniforms;
@@ -220,9 +227,8 @@ struct GrassState {
     bool DrawFailed = false;
     DkMemBlock StreamMemory = nullptr;
     uint32_t SlotInstances = 0;
-    std::array<uint64_t, kStreamSlots> SlotBoundFrame{};
-    std::array<bool, kStreamSlots> SlotBound{};
-    GrassCullWorker::Result Current;
+    Oot3d::GrassStreamSlots Slots{Deko3d::kFramesInFlight};
+    GrassCullWorker::Result Current; // the cull in Slots.Current()
     DkMemBlock Timestamps = nullptr;
     std::array<bool, Deko3d::kFramesInFlight> TimestampPending{};
     const DkShader* Vertex = nullptr;
@@ -230,7 +236,15 @@ struct GrassState {
     const DkShader* FragmentDepth = nullptr;
     // This frame (render thread).
     uint64_t PreparedFrame = ~0ULL;
+    // Keyed by GrassFramePlacementKey: one placement per render target.
     std::unordered_map<uint64_t, FramePlacement> Frame;
+    // The target this frame's sources were published into.
+    uint64_t SourceFrame = ~0ULL;
+    uint64_t SourceNamespace = 0;
+    uint32_t SourceColorAddress = 0;
+    // The target grass was last drawn into (its camera feeds the cull).
+    uint64_t DrawnNamespace = 0;
+    uint32_t DrawnColorAddress = 0;
     std::array<DkGpuAddr, 2> FrameUniforms{DK_GPU_ADDR_INVALID, DK_GPU_ADDR_INVALID}; // tufts, blades
     bool Posted = false;
 
@@ -247,7 +261,12 @@ struct GrassState {
     uint64_t CullJobs = 0;
     double CullMs = 0.0, CullMaxMs = 0.0;
     uint64_t GpuSamples = 0;
-    double GpuMs = 0.0, GpuMaxMs = 0.0;
+    double GpuMs = 0.0, GpuMaxMs = 0.0, GpuBladesMs = 0.0, GpuTuftsMs = 0.0;
+    uint64_t RasterDraws = 0, DepthDraws = 0;
+    uint64_t CullInstances = 0, CullInstancesMax = 0, CullThinned = 0;
+    uint64_t EmptyFrames = 0;   // a draw point with a cull result but nothing of it drawn
+    uint64_t NoResultFrames = 0; // a draw point before the first cull finished
+    uint64_t FreshBase = 0, StaleBase = 0;
 };
 
 // Set once before the first frame (Deko3dConfigureGrass), read by the render
@@ -290,6 +309,7 @@ GrassFrameUniforms BuildFrameUniforms(const GrassState& state, bool blades) {
 FramePlacement BuildFramePlacement(const Oot3d::PicaGrassDrawable& drawable, const GrassState& state) {
     FramePlacement result;
     result.World = drawable.Placement;
+    result.Identity = drawable.Placement->Identity;
     const auto& mesh = drawable.Mesh;
     result.Namespace = mesh.RenderTargetNamespace;
     result.ColorAddress = mesh.FramebufferColorPhysicalAddress;
@@ -299,10 +319,13 @@ FramePlacement BuildFramePlacement(const Oot3d::PicaGrassDrawable& drawable, con
     // (scale -1, offset 0 is the identity on -gl_FragCoord.z).
     push.DepthState = {depth.Valid ? depth.Scale : -1.0F, depth.Valid ? depth.Offset : 0.0F,
                        depth.Valid && depth.WBuffering ? 1.0F : 0.0F, depth.Valid ? 1.0F : 0.0F};
-    result.ExplicitDepth = !Oot3d::GrassDepthIsRasterDepth(push);
+    // The vertex program puts a linear PICA mapping into clip z; only a
+    // w-buffered one needs gl_FragDepth (and loses early depth testing).
+    result.ExplicitDepth = push.DepthState[3] > 0.5F && push.DepthState[2] > 0.5F;
     auto& u = result.Uniforms;
     u.PositionToClip = push.PositionToClip;
     u.Depth = {push.DepthState[0], push.DepthState[1], push.DepthState[2], result.ExplicitDepth ? 1.0F : 0.0F};
+    (void)Oot3d::GrassDepthIsRasterDepth; // the PC's test; deko3d folds the mapping into clip z
     const auto& fog = mesh.Shading.Fog;
     if (state.Settings.Appearance.ReceiveFog && fog.Enabled) {
         u.FogColor = {fog.Color[0], fog.Color[1], fog.Color[2], fog.Flip ? 2.0F : 1.0F};
@@ -354,12 +377,13 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
     Oot3d::ApplyGrassSwitchProfile(state->Profile, state->Settings);
     state->Placements = std::make_unique<Oot3d::PicaGrassPlacements>(state->Profile.RetainedBytes);
     Deko3d::Log("grass: on (config/grass = %s), %zu rules, %.0f tufts/m2 of %u blades, at most %u per placement, "
-                "%.1f MiB retained | %s: draw distance %.0f (fade from %.0f), single blades within %.0f, "
+                "%.1f MiB retained | %s: full density to %.0f, thinning to %.0f (shrinking from %.0f), single blades within %.0f, "
                 "at most %u visible",
                 mode == Oot3d::GrassSwitchMode::Draw ? "draw" : "placements", state->Settings.Rules.size(),
                 static_cast<double>(state->Profile.TuftsPerSquareMeter), state->Profile.BladesPerTuft,
                 state->Profile.MaxAnchorsPerPlacement,
                 static_cast<double>(state->Profile.RetainedBytes) / (1024.0 * 1024.0), fps60 ? "60 fps" : "30 fps",
+                static_cast<double>(state->Stream.FullDensityDistance),
                 static_cast<double>(state->Stream.DrawDistance), static_cast<double>(state->Stream.FadeStart),
                 static_cast<double>(state->Stream.SingleBladeDistance), state->Stream.MaxInstances);
     gGrassWantsColliders = mode == Oot3d::GrassSwitchMode::Draw;
@@ -391,6 +415,9 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
     try {
         if (Oot3d::PublishPicaGrassSource(draw, frame, state->Settings, state->Sources, frame, state->DrawOrder++)) {
             ++state->Published;
+            state->SourceFrame = frame;
+            state->SourceNamespace = draw.RenderTargetNamespace;
+            state->SourceColorAddress = draw.FramebufferColorPhysicalAddress;
         }
     } catch (const std::exception& exception) {
         static bool reported = false;
@@ -419,7 +446,10 @@ void UpdatePlacements(GrassState& state, uint64_t frame) {
         const auto& drawables = state.Placements->Update(frame, state.Settings);
         if (state.Mode == Oot3d::GrassSwitchMode::Draw) {
             for (const auto& drawable : drawables)
-                state.Frame.emplace(drawable.Placement->Identity, BuildFramePlacement(drawable, state));
+                state.Frame.emplace(Oot3d::GrassFramePlacementKey(drawable.Placement->Identity,
+                                                                  drawable.Mesh.RenderTargetNamespace,
+                                                                  drawable.Mesh.FramebufferColorPhysicalAddress),
+                                    BuildFramePlacement(drawable, state));
         }
     } catch (const std::exception& exception) {
         static bool reported = false;
@@ -433,25 +463,27 @@ void UpdatePlacements(GrassState& state, uint64_t frame) {
     state.UpdateMaxMs = std::max(state.UpdateMaxMs, ms);
 }
 
-// The GPU time of the grass draws of the frame that last used this slot.
+// The GPU time of the grass draws of the frame that last used this slot
+// (end-of-pipe timestamps: before the grass, after its blades, after its tufts).
 void CollectGpuTime(GrassState& state, uint32_t slot) {
     if (state.Timestamps == nullptr || !state.TimestampPending[slot]) return;
     state.TimestampPending[slot] = false;
     const auto* reports = static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(state.Timestamps)) +
-                          slot * 2U * kTimestampBytes;
-    uint64_t begin = 0, end = 0;
-    std::memcpy(&begin, reports + 8U, sizeof(begin));
-    std::memcpy(&end, reports + kTimestampBytes + 8U, sizeof(end));
-    if (end <= begin) return;
+                          slot * kTimestampsPerSlot * kTimestampBytes;
+    std::array<uint64_t, kTimestampsPerSlot> t{};
+    for (uint32_t i = 0; i < kTimestampsPerSlot; ++i) std::memcpy(&t[i], reports + i * kTimestampBytes + 8U, 8U);
+    if (t[2] <= t[0] || t[1] < t[0] || t[2] < t[1]) return;
     // Report timestamps count GPU ticks (614.4 MHz on the Tegra X1).
-    const double ms = static_cast<double>((end - begin) * 625U / 384U) / 1.0e6;
+    const auto ms = [](uint64_t ticks) { return static_cast<double>(ticks * 625U / 384U) / 1.0e6; };
     ++state.GpuSamples;
-    state.GpuMs += ms;
-    state.GpuMaxMs = std::max(state.GpuMaxMs, ms);
+    state.GpuMs += ms(t[2] - t[0]);
+    state.GpuMaxMs = std::max(state.GpuMaxMs, ms(t[2] - t[0]));
+    state.GpuBladesMs += ms(t[1] - t[0]);
+    state.GpuTuftsMs += ms(t[2] - t[1]);
 }
 
 // The newest cull becomes the one drawn; the slot it replaces stays read
-// by the frames in flight until they finish (SlotBoundFrame).
+// by the frames in flight until they finish (GrassStreamSlots).
 void TakeCull(GrassState& state) {
     GrassCullWorker::Result result;
     if (state.Worker == nullptr || !state.Worker->Take(result)) return;
@@ -461,6 +493,11 @@ void TakeCull(GrassState& state) {
     state.ClustersVisible += result.Stats.ClustersVisible;
     state.ClustersTested += result.Stats.ClustersTested;
     state.OverBudgetFrames += result.Stats.ClustersOverBudget != 0U ? 1U : 0U;
+    const uint64_t instances = result.Stats.Tufts + result.Stats.Blades;
+    state.CullInstances += instances;
+    state.CullInstancesMax = std::max(state.CullInstancesMax, instances);
+    state.CullThinned += result.Stats.AnchorsThinned;
+    state.Slots.FinishWrite(result.Slot, result.Frame);
     state.Current = std::move(result);
 }
 
@@ -470,31 +507,34 @@ void PostCull(GrassState& state, uint64_t frame) {
     if (state.Posted || state.Worker == nullptr || state.Worker->Busy()) return;
     state.Posted = true;
     TakeCull(state); // its slot must not be handed out again
-    std::optional<uint32_t> slot;
-    for (uint32_t index = 0; index < kStreamSlots; ++index) {
-        if (state.Current.Valid && state.Current.Slot == index) continue;
-        if (state.SlotBound[index] && state.SlotBoundFrame[index] + kFramesInFlight > frame) continue;
-        slot = index;
-        break;
+    // One entry per placement: the camera of the target grass was last drawn
+    // into, else of any target it was drawn into this frame.
+    std::unordered_map<uint64_t, const FramePlacement*> unique;
+    for (const auto& [key, placement] : state.Frame) {
+        auto& chosen = unique[placement.Identity];
+        if (chosen == nullptr || (placement.Namespace == state.DrawnNamespace &&
+                                  placement.ColorAddress == state.DrawnColorAddress))
+            chosen = &placement;
     }
+    if (unique.empty()) return;
+    const auto slot = state.Slots.BeginWrite(frame);
     if (!slot) return;
     GrassCullWorker::Job job;
     job.Settings = state.Stream;
     job.Capacity = state.SlotInstances;
     job.Slot = *slot;
+    job.Frame = frame;
     job.Output = reinterpret_cast<Oot3d::GrassStreamInstance*>(
         static_cast<uint8_t*>(dkMemBlockGetCpuAddr(state.StreamMemory)) +
         size_t{*slot} * state.SlotInstances * sizeof(Oot3d::GrassStreamInstance));
-    for (const auto& [identity, placement] : state.Frame) {
+    for (const auto& [identity, placement] : unique) {
         Oot3d::GrassStreamPlacement input;
-        input.World = placement.World;
-        input.PositionToClip = placement.Uniforms.PositionToClip;
-        input.Eye = {placement.Uniforms.Eye[0], placement.Uniforms.Eye[1], placement.Uniforms.Eye[2]};
+        input.World = placement->World;
+        input.PositionToClip = placement->Uniforms.PositionToClip;
+        input.Eye = {placement->Uniforms.Eye[0], placement->Uniforms.Eye[1], placement->Uniforms.Eye[2]};
         job.Placements.push_back(std::move(input));
         job.Identities.push_back(identity);
     }
-    // The slot is free again only once the worker is done with it.
-    state.SlotBound[*slot] = false;
     state.Worker->Post(std::move(job));
 }
 
@@ -534,7 +574,7 @@ void GrassEndFrame(uint64_t frame) {
         const double gpu = std::max<double>(1.0, static_cast<double>(state->GpuSamples));
         Log("grass: frame %llu drawn %llu/%.0f frames | visible %.0f (max %llu, budget %u) tufts %.0f blades %.0f "
             "draws %.1f clusters %.0f/%.0f over_budget %llu | worker %.3f ms/cull (max %.2f, %llu culls) | "
-            "render draw %.3f ms/frame (max %.2f) | gpu %.3f ms/frame (max %.2f, %llu samples)%s",
+            "render draw %.3f ms/frame (max %.2f) | gpu %.3f ms/frame (max %.2f, %llu samples; blades %.3f tufts %.3f)%s",
             static_cast<unsigned long long>(frame), static_cast<unsigned long long>(state->DrawnFrames), frames,
             static_cast<double>(state->Visible) / drawn, static_cast<unsigned long long>(state->VisibleMax),
             state->Stream.MaxInstances, static_cast<double>(state->Tufts) / drawn,
@@ -543,7 +583,22 @@ void GrassEndFrame(uint64_t frame) {
             static_cast<unsigned long long>(state->OverBudgetFrames), state->CullMs / jobs, state->CullMaxMs,
             static_cast<unsigned long long>(state->CullJobs), state->DrawMs / frames, state->DrawMaxMs,
             state->GpuMs / gpu, state->GpuMaxMs, static_cast<unsigned long long>(state->GpuSamples),
+            state->GpuBladesMs / gpu, state->GpuTuftsMs / gpu,
             state->DrawFailed ? " | DRAW OFF (setup failed, see above)" : "");
+        // Which fragment program drew (gl_FragDepth turns early depth
+        // testing off), how many draw points reused an older cull, and what
+        // the culls selected.
+        Log("grass: frame %llu fragment raster %llu draws, depth-writing %llu | culls fresh %llu stale %llu "
+            "(frames that redrew an older cull), no result %llu, nothing drawn %llu | cull instances %.0f "
+            "(max %llu) thinned %.0f | distance full %.0f max %.0f",
+            static_cast<unsigned long long>(frame), static_cast<unsigned long long>(state->RasterDraws),
+            static_cast<unsigned long long>(state->DepthDraws),
+            static_cast<unsigned long long>(state->Slots.FreshFrames - state->FreshBase),
+            static_cast<unsigned long long>(state->Slots.StaleFrames - state->StaleBase),
+            static_cast<unsigned long long>(state->NoResultFrames), static_cast<unsigned long long>(state->EmptyFrames),
+            static_cast<double>(state->CullInstances) / jobs, static_cast<unsigned long long>(state->CullInstancesMax),
+            static_cast<double>(state->CullThinned) / jobs, static_cast<double>(state->Stream.FullDensityDistance),
+            static_cast<double>(state->Stream.DrawDistance));
     }
     state->Frames = 0;
     state->Published = 0;
@@ -555,7 +610,12 @@ void GrassEndFrame(uint64_t frame) {
     state->ClustersVisible = state->ClustersTested = state->OverBudgetFrames = state->CullJobs = 0;
     state->CullMs = state->CullMaxMs = 0.0;
     state->GpuSamples = 0;
-    state->GpuMs = state->GpuMaxMs = 0.0;
+    state->GpuMs = state->GpuMaxMs = state->GpuBladesMs = state->GpuTuftsMs = 0.0;
+    state->RasterDraws = state->DepthDraws = 0;
+    state->CullInstances = state->CullInstancesMax = state->CullThinned = 0;
+    state->EmptyFrames = state->NoResultFrames = 0;
+    state->FreshBase = state->Slots.FreshFrames;
+    state->StaleBase = state->Slots.StaleFrames;
 }
 
 } // namespace Deko3d
@@ -576,8 +636,11 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
     // Once per target and frame, into the target the opaque world was just
     // drawn to (its viewport, scissor and depth test: dynamic resolution and
     // widescreen included).
+    // Not before this target's grass sources were drawn this frame: the
+    // placements of this frame are matched at the first draw point.
     if (state == nullptr || state->DrawFailed || mGrassScene.Target != &target || mGrassScene.Frame != frame ||
-        (mGrassDrawn.Frame == frame && mGrassDrawn.Target == &target)) {
+        (mGrassDrawn.Frame == frame && mGrassDrawn.Target == &target) || state->SourceFrame != frame ||
+        state->SourceNamespace != key.Namespace || state->SourceColorAddress != key.ColorAddress) {
         return;
     }
     mGrassDrawn = {&target, frame};
@@ -593,6 +656,7 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
                     DK_MEMBLOCK_ALIGNMENT);
         state->StreamMemory =
             mDevice.MakeBlock(streamBytes, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "grass instances");
+        static_assert(kFramesInFlight * kTimestampsPerSlot * kTimestampBytes <= DK_MEMBLOCK_ALIGNMENT);
         state->Timestamps = mDevice.MakeBlock(DK_MEMBLOCK_ALIGNMENT,
                                               DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "grass timer");
         if (state->Vertex == nullptr || state->Fragment == nullptr || state->FragmentDepth == nullptr ||
@@ -617,21 +681,30 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
     uint32_t draws = 0U;
     uint64_t visible = 0U;
     bool timed = false;
+    const auto drawnSlot = state->Slots.Draw(frame);
+    if (!drawnSlot) ++state->NoResultFrames;
     const auto& current = state->Current;
-    if (current.Valid && !current.Ranges.empty()) {
+    const auto timestamp = [&](uint32_t index) {
+        dkCmdBufReportCounter(cmd, DkCounter_Timestamp,
+                              dkMemBlockGetGpuAddr(state->Timestamps) +
+                                  (mDevice.Slot() * kTimestampsPerSlot + index) * kTimestampBytes);
+    };
+    // Blades first, then tufts, a timestamp between them: the gpu split.
+    for (uint32_t pass = 0; pass < 2U && drawnSlot && current.Valid; ++pass) {
+        const auto kind = pass == 0U ? Oot3d::GrassStreamKind::Blades : Oot3d::GrassStreamKind::Tufts;
+        if (pass == 1U && timed) timestamp(1U);
         for (const auto& range : current.Ranges) {
-            const auto found = state->Frame.find(current.Identities[range.Placement]);
+            if (range.Kind != kind) continue;
+            const auto found = state->Frame.find(Oot3d::GrassFramePlacementKey(
+                current.Identities[range.Placement], key.Namespace, key.ColorAddress));
             if (found == state->Frame.end()) continue;
             auto& placement = found->second;
-            if (placement.Namespace != key.Namespace || placement.ColorAddress != key.ColorAddress) continue;
             if (draws == 0U) {
                 FlushPicaInvalidations();
                 BindPicaTarget(target);
                 ++target.Version;
                 if (state->Timestamps != nullptr) {
-                    dkCmdBufReportCounter(cmd, DkCounter_Timestamp,
-                                          dkMemBlockGetGpuAddr(state->Timestamps) +
-                                              mDevice.Slot() * 2U * kTimestampBytes);
+                    timestamp(0U);
                     timed = true;
                 }
                 // Opaque, no blend; RGB only (the target's alpha belongs to
@@ -705,7 +778,7 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
             dkCmdBufBindUniformBuffer(cmd, DkStage_Vertex, 1, frameUniforms,
                                       AlignUp(sizeof(GrassFrameUniforms), DK_UNIFORM_BUF_ALIGNMENT));
             const DkGpuAddr instances = dkMemBlockGetGpuAddr(state->StreamMemory) +
-                                        (uint64_t{current.Slot} * state->SlotInstances + range.First) *
+                                        (uint64_t{*drawnSlot} * state->SlotInstances + range.First) *
                                             sizeof(Oot3d::GrassStreamInstance);
             const DkBufExtents extent = {instances, range.Count * static_cast<uint32_t>(
                                                                       sizeof(Oot3d::GrassStreamInstance))};
@@ -719,19 +792,17 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
             }
             visible += range.Count;
             ++draws;
+            ++(placement.ExplicitDepth ? state->DepthDraws : state->RasterDraws);
             mDevice.Checkpoint("grass", range.Count, blades ? 1U : 0U);
         }
     }
+    if (drawnSlot && draws == 0U && (current.Stats.Tufts + current.Stats.Blades) != 0U) ++state->EmptyFrames;
     if (timed) {
-        dkCmdBufReportCounter(cmd, DkCounter_Timestamp,
-                              dkMemBlockGetGpuAddr(state->Timestamps) + mDevice.Slot() * 2U * kTimestampBytes +
-                                  kTimestampBytes);
+        timestamp(2U);
         state->TimestampPending[mDevice.Slot()] = true;
     }
-    if (current.Valid) {
-        state->SlotBound[current.Slot] = true;
-        state->SlotBoundFrame[current.Slot] = frame;
-    }
+    state->DrawnNamespace = key.Namespace;
+    state->DrawnColorAddress = key.ColorAddress;
     if (draws != 0U) {
         ++state->DrawnFrames;
         state->Visible += visible;

@@ -41,7 +41,10 @@ layout(std140, binding = 1) uniform GrassFrame {
 layout(location = 0) out vec4 grass_shade;       // lit colour, alpha 1
 layout(location = 1) out vec2 grass_card;        // across (0-1), up (0-1)
 layout(location = 2) out float grass_fog_factor; // 1 = no fog
-layout(location = 3) flat out vec4 grass_tuft;   // blades, seed, blade mode, unused
+layout(location = 3) flat out vec4 grass_tuft;   // blades, unused, blade mode, unused
+// The card's blades for the fragment cut, per tuft (not per fragment):
+// x centre across the card, y 1 / top height, z lean per unit of height.
+layout(location = 4) flat out vec4 grass_blades[5];
 
 vec3 grass_decode_normal(uint bits) {
     vec2 oct = unpackSnorm2x16(bits);
@@ -174,11 +177,25 @@ void main() {
     vec3 groundNormal = grass_decode_normal(grass_normal);
     grass_shade = vec4(colour * grass_light(normalize(normal + groundNormal)), 1.0);
     grass_card = card;
-    grass_tuft = vec4(bladeCount, seed, blades ? 1.0 : 0.0, 0.0);
+    grass_tuft = vec4(bladeCount, 0.0, blades ? 1.0 : 0.0, 0.0);
+    for (int i = 0; i < 5; ++i) {
+        float b = float(i);
+        float r0 = grass_hash(seed * 17.0 + b);
+        float r1 = grass_hash(seed * 31.0 + b * 1.7);
+        float top = 0.7 + 0.3 * grass_hash(seed * 53.0 + b * 2.3);
+        grass_blades[i] = vec4((b + 0.5 + (r0 - 0.5) * 0.5) / bladeCount, 1.0 / top, (r1 - 0.5) * 0.6 / bladeCount, 0.0);
+    }
 
     vec4 clip = grass_position_to_clip * vec4(position, 1.0);
     grass_fog_factor = grass_fog(grass_pica_depth(clip));
-    // The PICA vertex epilogue on OpenGL/deko3d (pica_gl_shader_dialect.cpp):
-    // z_gl = 2 z_vk - w with z_vk = -z_pica.
-    gl_Position = vec4(clip.x, clip.y, -2.0 * clip.z - clip.w, clip.w);
+    // Window depth = the PICA depth of the source draw. Without w-buffering
+    // that mapping (z/w * scale + offset) is linear in z/w, so it goes into
+    // clip z (z_gl = (2 d - 1) w) and the rasterizer interpolates it exactly
+    // as the native fragment program computes it: no gl_FragDepth, early
+    // depth testing stays on. With the identity mapping (scale -1, offset 0)
+    // this is the dialect's epilogue, z_gl = -2 z - w. W-buffered draws use
+    // the fragment variant that writes gl_FragDepth.
+    float zGl = grass_depth.z > 0.5 ? -2.0 * clip.z - clip.w
+                                     : 2.0 * (clip.z * grass_depth.x + grass_depth.y * clip.w) - clip.w;
+    gl_Position = vec4(clip.x, clip.y, zGl, clip.w);
 }

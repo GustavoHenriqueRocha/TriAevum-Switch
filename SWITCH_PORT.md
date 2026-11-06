@@ -1752,8 +1752,11 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   fragment shader) at 40/m2, 14-30 units tall; within 4 m (400 units) the tuft is drawn as its 5
   blades, one segment each. At most 96k tufts per placement and 12 MiB of placements kept (the least
   recently drawn go first; Hyrule Field at 40/m2 is ~11 MB).
-  - `config/fps60` on: at most 8000 visible, draw distance 1200 units, shrinking from 900.
-  - 30 fps: at most 22000 visible, 2000 units, from 1500.
+  - `config/fps60` on: at most 8000 visible; full density to 700 units, then thinning with distance
+    (a tuft stays while its stable visibility value is below (700 / distance)², about the same count
+    per screen area) to none at 3000, shrinking from 2400.
+  - 30 fps: at most 22000 visible; full density to 1200, thinning to 4000, shrinking from 3200.
+  - (0.1.2-test.2 cut at 1200/2000 units: the title demo's far camera drew nothing at 60 fps.)
 - **Threads:** sources are read on the render thread (as before). Placements build on one service
   worker. Culling per cluster and writing the 32-byte instances straight into GPU memory runs on
   a second service worker (`grass_instance_stream.cpp`; cores 1|2). Its result is drawn from the next
@@ -1762,12 +1765,23 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   colliders, and only with `draw` (`CollectNativeGrassColliders`: the player list head and the first 16
   background actors).
 - **Drawing** (`gfx_deko3d_grass.cpp`): instanced draws into the scene target, before its first
-  non-opaque scene draw (or before its display transfer). They use the viewport, scissor
+  translucent world draw after this frame's grass sources were drawn into it (or before its display
+  transfer). In 0.1.2-test.2 any non-opaque scene draw (the sky, unknown layers) triggered it, often
+  before the ground was drawn: the placements of that frame were matched while still empty and the
+  frame drew nothing (`drawn 0/600` at 60 fps, 374/600 at 30). A placement is now also kept per render
+  target, so the same ground drawn into two targets keeps both cameras.
+- **Hand-off** (`grass_stream_handoff.h`): every draw point draws the newest finished cull; a late or
+  skipped worker reuses the previous one (counted as `stale`), never an empty frame. The worker writes
+  only a slot no frame in flight reads. They use the viewport, scissor
   (dynamic resolution, widescreen) and depth compare of that target's opaque world draws.
   The camera is each source draw's own model-to-clip, so interpolated frames match. Fog comes
   from the draw's PICA fog LUT and light from its decoded PICA vertex lights, per vertex.
-  Depth follows the PICA `gl_FragDepth` mapping: a fragment variant writes it when the mapping is
-  not the raster depth. Wind and the bend away from Link and Epona are computed in the vertex shader.
+  Depth follows the source draw's PICA mapping: without w-buffering it is linear in z/w, so the vertex
+  program puts it into clip z and the rasterizer produces it (early depth testing stays on). Only
+  w-buffered draws use the fragment variant that writes `gl_FragDepth`. (0.1.2-test.2 used that
+  variant whenever the mapping was not the identity, and the fragment program hashed every blade with
+  `sin()` per pixel: 5.2 ms of GPU for ~3.4k tufts at 3.0x. The blade cut now reads per-tuft values
+  computed in the vertex program.) Wind and the bend away from Link and Epona are computed in the vertex shader.
 - **Shaders:** `tools/oot3d/deko3d_grass/gen.py` compiles `grass_vsh.glsl` and the two fragment
   variants with uam into `gfx_deko3d_grass_dksh.h` (not in `deko3d.pack`). Rerun it after editing a
   shader.
@@ -1776,10 +1790,16 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
     placements ms`: the render-thread cost of finding sources and matching placements.
   - `grass: frame N drawn D/600 frames | visible V (max, budget) tufts blades draws clusters
     visible/tested over_budget | worker W ms/cull | render draw R ms/frame | gpu G ms/frame (max)`.
-    `gpu` is the time between two GPU timestamps around the grass draws, approximate.
+    `gpu` is the time between GPU timestamps around the grass draws, approximate; `blades` and
+    `tufts` split it (near single blades first, then the cards).
+  - `grass: frame N fragment raster R draws, depth-writing D | culls fresh F stale S (frames that
+    redrew an older cull), no result X, nothing drawn E | cull instances I (max) thinned T | distance
+    full A max B`. `depth-writing` should be 0 unless the scene uses w-buffering; `nothing drawn`
+    counts draw points that had a cull result but drew none of it (should be 0).
   - The game thread's cost shows in `perf.txt` (`guest`/`game_pair_ms`) as before; the GPU's in
     `dkperf` `busy_ms`.
-- Budget estimates `[INF]`: GPU 0.6-1.2 ms per frame at the 2.25 floor at 60 fps, 1.5-3 ms at 30 fps.
+- Budget estimates `[INF]`: GPU 0.6-1.2 ms per frame at the 2.25 floor at 60 fps, 1.5-3 ms at 30 fps
+  (first console run, before the depth and fragment fixes: 5.2 ms at 3.0x for ~3.4k tufts).
   Worker 0.3-1 ms per cull. Render thread well under 0.1 ms per frame for the draw plus the existing
   `sources`/`placements` cost. Game thread: a few guest reads per step.
 - Tests: `oot3d_grass_switch_tests` (thinning, profile budgets, config file, culling and the instance

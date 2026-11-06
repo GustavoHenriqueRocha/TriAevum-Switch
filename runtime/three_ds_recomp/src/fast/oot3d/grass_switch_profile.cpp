@@ -54,8 +54,9 @@ bool SaveGrassSwitchMode(const std::filesystem::path& configDirectory, GrassSwit
 GrassSwitchProfile SelectGrassSwitchProfile(bool fps60) noexcept {
     GrassSwitchProfile profile;
     if (!fps60) {
-        profile.DrawDistance = 2000.0F;
-        profile.FadeStart = 1500.0F;
+        profile.FullDensityDistance = 1200.0F;
+        profile.DrawDistance = 4000.0F;
+        profile.FadeStart = 3200.0F;
         profile.MaxVisibleInstances = 22000U;
     }
     return profile;

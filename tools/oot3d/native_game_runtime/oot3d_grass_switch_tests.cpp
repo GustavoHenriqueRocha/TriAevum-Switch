@@ -3,6 +3,7 @@
 // per-frame culling and instance stream of the deko3d draw.
 #include "fast/oot3d/grass_anchor_codec.h"
 #include "fast/oot3d/grass_instance_stream.h"
+#include "fast/oot3d/grass_stream_handoff.h"
 #include "fast/oot3d/grass_surface_extractor.h"
 #include "fast/oot3d/grass_switch_profile.h"
 #include "fast/oot3d/grass_texture_source_cache.h"
@@ -177,9 +178,13 @@ TEST(Oot3dGrassThinning, RankThinningKeepsOrderAndIgnoresPosition) {
 
 TEST(Oot3dGrassSwitchProfile, SixtyFpsBudget) {
     const auto profile = SelectGrassSwitchProfile(true);
-    EXPECT_LE(profile.MaxVisibleInstances, 8000U);
-    EXPECT_EQ(profile.DrawDistance, 1200.0F);
-    EXPECT_EQ(profile.FadeStart, 900.0F);
+    EXPECT_EQ(profile.MaxVisibleInstances, 8000U);
+    // Full density near the camera, thinning with distance instead of a
+    // hard cut at 1200 (the title demo's far camera saw nothing).
+    EXPECT_EQ(profile.FullDensityDistance, 700.0F);
+    EXPECT_EQ(profile.DrawDistance, 3000.0F);
+    EXPECT_GT(profile.FadeStart, profile.FullDensityDistance);
+    EXPECT_LT(profile.FadeStart, profile.DrawDistance);
     EXPECT_EQ(profile.SingleBladeDistance, 400.0F); // 4 m
     EXPECT_EQ(profile.TuftsPerSquareMeter, 40.0F);
     EXPECT_GE(profile.BladesPerTuft, 4U);
@@ -190,7 +195,8 @@ TEST(Oot3dGrassSwitchProfile, ThirtyFpsBudget) {
     const auto profile = SelectGrassSwitchProfile(false);
     EXPECT_GE(profile.MaxVisibleInstances, 20000U);
     EXPECT_LE(profile.MaxVisibleInstances, 25000U);
-    EXPECT_EQ(profile.DrawDistance, 2000.0F);
+    EXPECT_EQ(profile.FullDensityDistance, 1200.0F);
+    EXPECT_EQ(profile.DrawDistance, 4000.0F);
     EXPECT_LT(profile.FadeStart, profile.DrawDistance);
     // Placement and memory do not depend on the frame rate.
     const auto sixty = SelectGrassSwitchProfile(true);
@@ -219,12 +225,13 @@ TEST(Oot3dGrassSwitchProfile, AppliesOnTopOfThePresetRules) {
     EXPECT_EQ(settings.Rules.size(), 1U);
     EXPECT_EQ(settings.MaxInstancesPerRoom, profile.MaxAnchorsPerPlacement);
     EXPECT_EQ(settings.Generation.InstancesPerSquareMeter, 40.0F);
-    EXPECT_EQ(settings.DrawDistance, 1200.0F);
+    EXPECT_EQ(settings.DrawDistance, 3000.0F);
     EXPECT_FALSE(settings.MidrangeClustersEnabled);
     EXPECT_GT(settings.Appearance.TextureColorInfluence, 0.0F);
     const auto stream = GrassStreamSettingsFromProfile(profile);
     EXPECT_EQ(stream.MaxInstances, profile.MaxVisibleInstances);
     EXPECT_EQ(stream.DrawDistance, profile.DrawDistance);
+    EXPECT_EQ(stream.FullDensityDistance, profile.FullDensityDistance);
 }
 
 TEST(Oot3dGrassSwitchProfile, ConfigFileMeaning) {
@@ -275,7 +282,8 @@ std::shared_ptr<GrassWorldPlacement> GridPlacement(float extent, float step, uin
             cluster.Center = {x, 0.0F, z};
             cluster.Radius = step * 0.75F + 30.0F;
             cluster.MaximumBladeHeight = 30.0F;
-            for (int corner = 0; corner < 4; ++corner) {
+            for (int corner = 0; corner < 4; ++corner) { // stable visibility ascending, as built
+                const float visibility = (static_cast<float>(corner) + 0.5F) / 4.0F;
                 GrassWorldAnchor anchor;
                 anchor.BaseHeight = {x + (corner & 1 ? 0.25F : -0.25F) * step, 0.0F,
                                      z + (corner & 2 ? 0.25F : -0.25F) * step, 20.0F};
@@ -286,7 +294,7 @@ std::shared_ptr<GrassWorldPlacement> GridPlacement(float extent, float step, uin
                 anchor.SurfaceColor = 0xff00ff00U;
                 placement->Anchors.push_back(anchor);
                 placement->CullingAnchors.push_back(
-                    {{anchor.BaseHeight[0], anchor.BaseHeight[1], anchor.BaseHeight[2]}, 0.5F});
+                    {{anchor.BaseHeight[0], anchor.BaseHeight[1], anchor.BaseHeight[2]}, visibility});
             }
             placement->Clusters.push_back(cluster);
         }
@@ -421,6 +429,98 @@ TEST(Oot3dGrassInstanceStream, NothingWithoutBudgetOrPlacements) {
     GrassStreamPlacement placement{GridPlacement(500.0F, 100.0F, 1U), LookAlongZ(eye), eye};
     settings.MaxInstances = 0U;
     EXPECT_EQ(builder.Build({&placement, 1}, settings, output, ranges).Tufts, 0U);
+}
+
+} // namespace
+
+namespace {
+using namespace Fast::Oot3d;
+
+TEST(Oot3dGrassDistanceThinning, FullNearThinningFarNothingPastTheEnd) {
+    GrassStreamSettings settings;
+    settings.FullDensityDistance = 700.0F;
+    settings.DrawDistance = 3000.0F;
+    EXPECT_EQ(GrassStreamRetention(settings, 0.0F), 1.0F);
+    EXPECT_EQ(GrassStreamRetention(settings, 700.0F), 1.0F);
+    EXPECT_NEAR(GrassStreamRetention(settings, 1400.0F), 0.25F, 1.0e-6F);
+    EXPECT_GT(GrassStreamRetention(settings, 2999.0F), 0.0F);
+    EXPECT_EQ(GrassStreamRetention(settings, 3001.0F), 0.0F);
+    for (float d = 700.0F; d < 3000.0F; d += 100.0F)
+        EXPECT_GE(GrassStreamRetention(settings, d), GrassStreamRetention(settings, d + 100.0F));
+}
+
+TEST(Oot3dGrassDistanceThinning, AFarCameraStillSeesGrassWithinTheBudget) {
+    // The title demo: the grass starts ~1500 units away. A hard 1200 cut
+    // drew nothing; thinning keeps some, fewer per area the farther it is.
+    const std::array<float, 3> eye{0.0F, 300.0F, -1500.0F};
+    GrassStreamPlacement placement{GridPlacement(1500.0F, 100.0F, 3U), LookAlongZ(eye), eye};
+    const auto settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(true));
+    std::vector<GrassStreamInstance> output(settings.MaxInstances);
+    std::vector<GrassStreamRange> ranges;
+    GrassInstanceStreamBuilder builder;
+    const auto stats = builder.Build({&placement, 1}, settings, output, ranges);
+    const uint32_t total = stats.Tufts + stats.Blades;
+    EXPECT_GT(total, 100U);
+    EXPECT_LE(total, settings.MaxInstances);
+    EXPECT_GT(stats.AnchorsThinned, 0U);
+    // Near band (< 1600) keeps a larger share of its anchors than a far one.
+    uint32_t nearCount = 0U, farCount = 0U;
+    for (uint32_t index = 0; index < total; ++index) {
+        const float d = Distance(output[index], eye);
+        EXPECT_LE(d, settings.DrawDistance + 1.0F);
+        if (d < 1600.0F) ++nearCount;
+        else if (d > 2400.0F && d < 2800.0F) ++farCount;
+    }
+    EXPECT_GT(nearCount, 0U);
+    EXPECT_LT(farCount, nearCount * 4U);
+}
+
+TEST(Oot3dGrassHandoff, AFrameAlwaysDrawsTheNewestFinishedCull) {
+    GrassStreamSlots slots(2U);
+    EXPECT_FALSE(slots.Draw(1).has_value()); // nothing culled yet
+    auto first = slots.BeginWrite(1);
+    ASSERT_TRUE(first.has_value());
+    EXPECT_FALSE(slots.BeginWrite(1).has_value()); // one cull at a time
+    slots.FinishWrite(*first, 1);
+    // A late worker: frames 2..10 draw the same result, never nothing.
+    for (uint64_t frame = 2; frame <= 10; ++frame) {
+        const auto drawn = slots.Draw(frame);
+        ASSERT_TRUE(drawn.has_value());
+        EXPECT_EQ(*drawn, *first);
+    }
+    EXPECT_EQ(slots.FreshFrames, 1U);
+    EXPECT_EQ(slots.StaleFrames, 8U);
+    auto second = slots.BeginWrite(11);
+    ASSERT_TRUE(second.has_value());
+    EXPECT_NE(*second, *first); // never the drawn result
+    EXPECT_EQ(*slots.Draw(11), *first); // still the old one while the new one is written
+    slots.FinishWrite(*second, 11);
+    EXPECT_EQ(*slots.Draw(12), *second);
+    EXPECT_EQ(slots.CurrentFrame(), 11U);
+}
+
+TEST(Oot3dGrassHandoff, NeverWritesASlotAFrameInFlightReads) {
+    GrassStreamSlots slots(2U);
+    std::vector<std::pair<uint32_t, uint64_t>> reads; // slot, frame
+    for (uint64_t frame = 1; frame < 200; ++frame) {
+        // The worker finishes every other frame, sometimes late.
+        if (const auto writing = slots.Writing(); writing && frame % 3 != 0) slots.FinishWrite(*writing, frame - 1);
+        if (const auto slot = slots.BeginWrite(frame)) {
+            for (const auto& [read, readFrame] : reads)
+                if (read == *slot) EXPECT_LE(readFrame + 2U, frame) << "slot " << *slot << " frame " << frame;
+            EXPECT_FALSE(slots.Current() && *slots.Current() == *slot);
+        }
+        if (const auto drawn = slots.Draw(frame)) reads.emplace_back(*drawn, frame);
+        if (frame > 3) EXPECT_TRUE(slots.Current().has_value());
+    }
+}
+
+TEST(Oot3dGrassHandoff, APlacementIsKeyedPerRenderTarget) {
+    // The same placement drawn into two targets (a native replay and the
+    // presented frame) keeps both cameras apart.
+    EXPECT_NE(GrassFramePlacementKey(5U, 1U, 0x182447c0U), GrassFramePlacementKey(5U, 2U, 0x182447c0U));
+    EXPECT_NE(GrassFramePlacementKey(5U, 2U, 0x182447c0U), GrassFramePlacementKey(5U, 2U, 0x18244800U));
+    EXPECT_EQ(GrassFramePlacementKey(5U, 2U, 0x182447c0U), GrassFramePlacementKey(5U, 2U, 0x182447c0U));
 }
 
 } // namespace

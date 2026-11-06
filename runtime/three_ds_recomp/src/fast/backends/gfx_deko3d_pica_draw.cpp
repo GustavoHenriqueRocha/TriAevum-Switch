@@ -411,9 +411,10 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         return true;
     }
     if (mGrassDraws && draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Scene &&
-        draw.Composition.Layer != Renderer3ds::PicaCompositionLayer::OpaqueWorld) {
-        // config/grass = draw: before the first non-opaque scene draw into
-        // the target whose opaque world was just drawn (once per frame).
+        draw.Composition.Layer == Renderer3ds::PicaCompositionLayer::TransparentWorld) {
+        // config/grass = draw: before the first translucent world draw into
+        // the target whose grass sources were drawn this frame (once per
+        // frame). Sky and unknown layers can come between opaque draws.
         DrawGrass(key, *target);
     }
 

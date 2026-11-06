@@ -11,11 +11,20 @@ namespace Fast::Oot3d {
 
 GrassStreamSettings GrassStreamSettingsFromProfile(const GrassSwitchProfile& profile) noexcept {
     GrassStreamSettings settings;
+    settings.FullDensityDistance = std::min(profile.FullDensityDistance, profile.DrawDistance);
     settings.DrawDistance = profile.DrawDistance;
     settings.FadeStart = std::min(profile.FadeStart, profile.DrawDistance);
     settings.SingleBladeDistance = profile.SingleBladeDistance;
     settings.MaxInstances = profile.MaxVisibleInstances;
     return settings;
+}
+
+float GrassStreamRetention(const GrassStreamSettings& settings, float distance) noexcept {
+    if (!(distance <= settings.DrawDistance)) return 0.0F;
+    const float full = std::max(settings.FullDensityDistance, 1.0F);
+    if (distance <= full) return 1.0F;
+    const float ratio = full / distance;
+    return ratio * ratio;
 }
 
 uint16_t PackGrassHalf(float value) noexcept {
@@ -109,6 +118,7 @@ GrassStreamStats GrassInstanceStreamBuilder::Build(std::span<const GrassStreamPl
 
     // 2. Their anchors, nearest clusters first, until the budget is spent.
     const float drawSquared = settings.DrawDistance * settings.DrawDistance;
+    const float fullSquared = settings.FullDensityDistance * settings.FullDensityDistance;
     const float bladeSquared = settings.SingleBladeDistance * settings.SingleBladeDistance;
     const float fadeRange = std::max(settings.DrawDistance - settings.FadeStart, 1.0e-3F);
     mBucketCounts.assign(placements.size() * 2U, 0U);
@@ -123,7 +133,14 @@ GrassStreamStats GrassInstanceStreamBuilder::Build(std::span<const GrassStreamPl
         const auto& culling = placement.World->CullingAnchors;
         const uint32_t end = static_cast<uint32_t>(
             std::min<size_t>(culling.size(), size_t{cluster.FirstAnchor} + cluster.AnchorCount));
+        // A cluster's anchors are sorted by stable visibility: past the
+        // retention at its nearest point none further on is kept.
+        const float clusterRetention = GrassStreamRetention(settings, candidate.Distance);
         for (uint32_t anchor = cluster.FirstAnchor; anchor < end && mSelected.size() < budget; ++anchor) {
+            if (culling[anchor].StableVisibility >= clusterRetention) {
+                stats.AnchorsThinned += end - anchor;
+                break;
+            }
             ++stats.AnchorsTested;
             const auto& position = culling[anchor].Position;
             const float dx = position[0] - placement.Eye[0];
@@ -131,6 +148,11 @@ GrassStreamStats GrassInstanceStreamBuilder::Build(std::span<const GrassStreamPl
             const float dz = position[2] - placement.Eye[2];
             const float squared = dx * dx + dy * dy + dz * dz;
             if (!(squared <= drawSquared)) continue;
+            if (squared > fullSquared &&
+                culling[anchor].StableVisibility >= GrassStreamRetention(settings, std::sqrt(squared))) {
+                ++stats.AnchorsThinned;
+                continue;
+            }
             const bool blades = squared < bladeSquared;
             const float fade = std::clamp((settings.DrawDistance - std::sqrt(squared)) / fadeRange, 0.0F, 1.0F);
             const uint16_t bucket = static_cast<uint16_t>(candidate.Placement * 2U + (blades ? 1U : 0U));
