@@ -666,7 +666,18 @@ NativeA32ProcessRunResult NativeA32Process::Run(
                     std::snprintf(encoded, sizeof(encoded), "%08X", exit.pc);
                     return std::string(encoded);
                 }() +
-                " detail=" + std::to_string(exit.detail));
+                " detail=" + std::to_string(exit.detail) + [&] {
+                    // Registradores da thread no fault: sem eles o pc só diz
+                    // onde, não com que objeto.
+                    const auto& guest = CurrentThreadState();
+                    std::string registers = " thread=" + std::to_string(mCurrentThreadId);
+                    for (size_t index = 0; index < 16U; ++index) {
+                        char encoded[24]{};
+                        std::snprintf(encoded, sizeof(encoded), " r%zu=%08X", index, guest.r[index]);
+                        registers += encoded;
+                    }
+                    return registers;
+                }());
     }
 
     CurrentThreadStatus() = NativeA32ThreadStatus::Ready;
