@@ -327,10 +327,11 @@ struct LocalGuest {
 // header's public interface. Uses the standard rule that explicit
 // instantiations may name private members. The constants below mirror those
 // in oot3d_native_a32_memory.h and FastPageOf/ResolveCursor reproduce
-// FastPageFor + the fast-path test of ReadFast/WriteFast; the writes through
-// these pointers then take WriteFast's bookkeeping with
-// NativeA32Memory::NoteWrite (the cards of the written pages and the written
-// mark), so the end state is the translation's whatever the store order.
+// FastPageFor and the page-table test of the slow paths (a fast entry points
+// at the same bytes as the window); the writes through these pointers then
+// take WriteFast's bookkeeping with NativeA32Memory::NoteWrite (the cards of
+// the written pages), so the end state is the translation's whatever the
+// store order.
 template <class Tag, auto Member> struct ExposeMember {
     friend constexpr auto MemberOf(Tag) noexcept { return Member; }
 };
@@ -393,8 +394,8 @@ inline void CursorStore(const Cursor& cursor, uint32_t index, uint32_t value) no
 }
 
 // Bookkeeping for a run of samples (at least one) in which every cursor was
-// written: the card of each cursor's page and the written mark, as the
-// translation's WriteFast calls leave them.
+// written: the card of each cursor's page, as the translation's WriteFast
+// calls leave it.
 inline void CommitSamples(NativeA32Memory& memory,
                           std::initializer_list<const Cursor*> written) noexcept {
     for (const Cursor* cursor : written) memory.NoteWrite(cursor->Address, 4U);

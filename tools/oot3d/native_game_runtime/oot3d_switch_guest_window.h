@@ -1,24 +1,25 @@
 #pragma once
 
-// fastmem phase 1: the guest window (SWITCH_PORT.md "fastmem window").
+// fastmem: the guest window (SWITCH_PORT.md "fastmem window").
 //
 // A 4 GiB + 2 MiB address-space reservation, its base rounded up to 2 MiB, in
 // which every guest region of one NativeA32Memory (the owner: the process's
-// image) is backed at window_base + guest_address. Phase 1 changes no
-// shard-visible code: Region::Bytes stays a std::vector, whose buffer the
-// allocator hook places at the window address (Reserve), and the inline
-// typed paths still walk the page table. Alongside the page table the owner
-// keeps two flat tables of one byte per 4 KiB guest page, the ones phase 2's
-// checked window access will read: page flags and store cards.
+// image) is backed at window_base + guest_address. Region::Bytes stays a
+// std::vector, whose buffer the allocator hook places at the window address
+// (Reserve). Phase 2: every image whose regions are here keeps a page-flag
+// table (oot3d_native_a32_memory.h), and the inline typed paths of the
+// shards load and store at window_base + address when a page's flag allows
+// it.
 //
 // Not shard-visible: only oot3d_native_a32_memory.cpp, the process, the
 // allocator wrappers and the session's log line include this header.
 //
-// Switch: config/fastmem_window (text "verify" also checks the flat tables
-// against the page entries after every change). Host: TRIAEVUM_FASTMEM_WINDOW
-// (1 or verify), honoured only in binaries that link the host allocator hook
-// (oot3d_switch_guest_window_host_alloc.cpp). Absent: no reservation, no hook
-// fires, every region is allocated as before.
+// Switch: config/fastmem_window (text "verify" also checks every image's
+// flag table against its page entries after every change). Host:
+// TRIAEVUM_FASTMEM_WINDOW (1 or verify), honoured only in binaries that link
+// the host allocator hook (oot3d_switch_guest_window_host_alloc.cpp).
+// Absent: no reservation, no hook fires, every region is allocated as
+// before, and every guest access takes the slow path (page table).
 
 #include <cstddef>
 #include <cstdint>
@@ -32,21 +33,6 @@ inline constexpr size_t kSlabSize = size_t{2} << 20;
 inline constexpr uint64_t kGuestSpan = uint64_t{1} << 32;
 inline constexpr uint64_t kReservationSize = kGuestSpan + kSlabSize;
 inline constexpr size_t kSlabCount = static_cast<size_t>(kGuestSpan / kSlabSize);
-inline constexpr unsigned kPageShift = 12U;
-inline constexpr size_t kPageCount = static_cast<size_t>(kGuestSpan >> kPageShift);
-// Page-flag table (phase 2's per-access check): a load takes the window
-// unless kPageLoadTrap is set, a store unless kPageStoreTrap is; a directly
-// readable and writable page is kPageMapped alone.
-enum PageFlag : uint8_t {
-    kPageMapped = 0x01,     // directly addressable, its bytes at base + address
-    kPageReadOnly = 0x02,   // mapped, in a read-only region
-    kPageLoadTrap = 0x04,   // loads take the checked path
-    kPageStoreTrap = 0x08,  // stores take the checked path
-};
-inline constexpr uint8_t kPageUnmapped = kPageLoadTrap | kPageStoreTrap;
-// Card table: GuestCardState values (0 clean, 1 dirty).
-inline constexpr uint8_t kCardClean = 0U;
-inline constexpr uint8_t kCardDirty = 1U;
 
 enum class Mode : uint8_t { Off, On, Verify };
 // The config file's text or the environment variable: empty, "1" or "on" =
@@ -64,8 +50,8 @@ struct Status {
     uint64_t Conflicts = 0;  // placements refused: range held by another buffer
     uint64_t Misses = 0;     // the allocator did not take a placement
     uint64_t Placed = 0;     // placements made since the start
-    uint64_t ShadowChecks = 0;
-    uint64_t ShadowMismatches = 0;
+    uint64_t ShadowChecks = 0;      // verify mode: flag-table checks
+    uint64_t ShadowMismatches = 0;  // pages whose flag disagreed with its entry
     const char* Route = "";  // "direct", "shadow" (Switch) or "host"
     std::string Reason;      // why off, or why placements stopped
 };
@@ -96,9 +82,7 @@ inline bool Placed(const uint8_t* data, uint32_t address) noexcept {
     return base != nullptr && data == base + address;
 }
 
-// Flat tables of the owner (null while off).
-uint8_t* PageFlags() noexcept;
-uint8_t* Cards() noexcept;
+// Verify mode (the config file's text "verify").
 bool Verifying() noexcept;
 void CountShadowCheck(uint64_t mismatches) noexcept;
 

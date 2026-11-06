@@ -55,19 +55,70 @@ GUARDS = [
           r'void __wrap__free_r\(struct _reent\* reent, void\* pointer\) \{.*?'
           r'if \(Oot3dNativeGame::GuestWindow::Contains\(pointer\)\) \{\s+'
           r'Oot3dNativeGame::GuestWindow::ReleaseAllocation\(pointer\);\s+return;'),
-    Guard("fastmem phase 1: the shard-visible memory header is unchanged (Region::Bytes a vector, ABI 4)",
+    # --- 11/06: fastmem phase 2, checked window access (ABI 5, every shard rebuilt) ---
+    # One flag byte per guest page decides whether a typed access completes inline at window
+    # base + address; everything else takes the original slow path (exact faults, observers,
+    # deferred writes, watches, traces). An image outside the window (file absent, emulator,
+    # refused mapping, copies) points at the all-trap table. mWritten is gone from the stores.
+    Guard("fastmem phase 2: a typed load completes inline only where its page's flag allows it, at window base + address",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
-          r'std::vector<uint8_t> Bytes;.*?WriteObservationAbiVersion\(\) noexcept \{ return 4U; \}|'
-          r'WriteObservationAbiVersion\(\) noexcept \{ return 4U; \}.*?std::vector<uint8_t> Bytes;',
-          forbid=r'GuestWindow|guest_window'),
-    # --- 06/11: second guest core, config/second_core (oot3d_native_a32_second_core.h) ---
-    # Switch absent must stay today's single-thread path; with it on, STREX must go through the
-    # global exclusive monitor (the write-generation token fails under a second writer).
-    Guard("second core, switch absent: LDREX/STREX keep the write-generation token of the single-thread path",
+          r'if \(value != nullptr && \(address & PageMask\) <= PageSize - sizeof\(T\) &&\s*'
+          r'PageAllows\(address, kGuestPageLoadFast\)\) \[\[likely\]\] \{\s*'
+          r'\*value = LoadGuestValue<T>\(mWindowBase \+ address\);\s*return true;\s*\}\s*'
+          r'return ReadFastSlow<T>\(address, value, faultAddress\);',
+          test="oot3d_switch_guest_window_tests (TestPageFlags), memory_lean_diff/run_store_sequence_diff.sh"),
+    Guard("fastmem phase 2: a typed store completes inline only where its page's flag allows it, then marks its card",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'if \(\(address & PageMask\) <= PageSize - sizeof\(T\) &&\s*'
+          r'PageAllows\(address, kGuestPageStoreFast\)\) \[\[likely\]\] \{\s*'
+          r'StoreGuestValue<T>\(mWindowBase \+ address, value\);\s*MarkCard\(address >> PageShift\);\s*'
+          r'return true;\s*\}\s*return WriteFastSlow<T>\(address, value, faultAddress\);',
+          test="oot3d_switch_guest_window_tests (TestPageFlags), memory_lean_diff/run_store_sequence_diff.sh"),
+    Guard("fastmem phase 2: page flags keep their own alias set (union of an enum class), not uint8_t",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'enum class GuestPageFlags : uint8_t \{\};\s*union GuestPageFlag \{\s*GuestPageFlags Bits;'),
+    Guard("fastmem phase 2: a flag allows an access only when the page entry's own pointer is the page's window address",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
-          r'LoadExclusive\(.*?if \(!SecondCore::Active\(\)\) \{.*?\*token = WriteGeneration\(\);.*?'
-          r'StoreExclusive\(.*?if \(!SecondCore::Active\(\)\) \{\s+if \(token != WriteGeneration\(\)\)',
-          test="oot3d_native_a32_second_core_tests (TestMonitorInactive), oot3d_native_a32_process_tests"),
+          r'\(entry\.Read == home \? kGuestPageLoadFast : 0U\) \|\s*'
+          r'\(entry\.Write == home \? kGuestPageStoreFast : 0U\)',
+          test="oot3d_switch_guest_window_tests (TestPageFlags, TestConflicts), TRIAEVUM_FASTMEM_WINDOW=verify sweep"),
+    Guard("fastmem phase 2, window inactive: an image outside the window points at the all-trap table",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'if \(!inWindow \|\| !mOwnPageFlags\) \{\s*'
+          r'if \(mPageFlags != sNoFastPages\) mPageFlags = sNoFastPages;',
+          test="oot3d_switch_guest_window_tests (TestAbsent, TestConflicts, TestRefusedMapping), sweep with the window off"),
+    Guard("fastmem phase 2: a store marks its card only when it is not Dirty already (no memory-wide written mark)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'OOT3D_AOT_HOT void MarkCard\(size_t page\) noexcept \{\s*GuestCard& card = mCards\[page\];\s*'
+          r'if \(card\.State != GuestCardState::Dirty\) \[\[unlikely\]\] \{',
+          test="oot3d_switch_guest_window_tests (TestPageFlags), oot3d_native_a32_process_tests (TestMemoryStoreCards)",
+          forbid=r'mWritten'),
+    Guard("fastmem phase 2: the inline paths changed, so the title-module ABI is 5 (rebuild every shard)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'WriteObservationAbiVersion\(\) noexcept \{ return 5U; \}'),
+    Guard("fastmem phase 2: the global exclusive monitor serves the single-core path too (value token, no write-generation token)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'bool NativeA32Memory::LoadExclusive\(uint32_t address, uint8_t size,\s*'
+          r'uint64_t\* value, uint64_t\* token,\s*uint32_t\* faultAddress\) \{\s*'
+          r'if \(token == nullptr \|\| value == nullptr\) \{',
+          test="oot3d_native_a32_second_core_tests (TestMonitorInactive), oot3d_native_a32_process_tests (TestMemoryStoreCards)",
+          forbid=r'if \(!SecondCore::Active\(\)\)|token != WriteGeneration\(\)'),
+    Guard("fastmem phase 2: every guest context switch drops the reservation, every savestate load resets the monitor",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'if \(selectedId != mCurrentThreadId\) \{\s*SecondCore::ClearExclusive\(\);\s*\}.*?'
+          r'SecondCore::ResetExclusiveMonitor\(\);\s*if \(SecondCore::Active\(\) && secondCoreReady\)',
+          test="oot3d_native_a32_second_core_tests (TestMonitorInactive, TestSchedulerExclusion)"),
+    Guard("fastmem phase 2: the fastmem_window log line says whether the game's image takes the window (access=window|slow)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'process\.Memory\(\)\.InGuestWindow\(\) \? " access=window" : " access=slow"'),
+    Guard("fastmem phase 2: the store-sequence diff under qemu has no guarded static (its condition variable aborts there)",
+          "tools/oot3d/native_a32_runtime/memory_lean_diff/store_sequence_side.cpp",
+          r'static bool active = false;\s*if \(!active\) \{\s*SEQ_MONITOR::SetActive\(true\);',
+          test="memory_lean_diff/run_store_sequence_diff.sh (TARGET=switch)",
+          forbid=r'static const bool active = \['),
+    # --- 06/11: second guest core, config/second_core (oot3d_native_a32_second_core.h) ---
+    # With it on, STREX must go through the global exclusive monitor (the write-generation token
+    # fails under a second writer); since fastmem phase 2 the monitor serves single-core too.
     Guard("second core: STREX is a compare-and-swap under the global exclusive monitor (reservation per host core)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
           r'if \(gExclusiveGranule\[processor\] != granule\) \{.*?ClearExclusiveGranule\(granule\);\s+'
@@ -310,10 +361,13 @@ GUARDS = [
           test="tools/oot3d/native_a32_runtime/test_whole_aot_vfp_memory_execution.py"),
     # Store cards replaced the per-store counter. A u8 card would alias every
     # host value in GCC (reloads after each guest store); a crossing store
-    # must mark both pages; the exclusive token must still change on any write.
+    # must mark both pages; the write generation must still change on any write.
+    # Since fastmem phase 2: one flat two-bit card per page (bit 0 for the range
+    # certificates, bit 1 for the write generation), each taken atomically.
     Guard("store cards must keep their own alias set (union of an enum class), not uint8_t",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
-          r'enum class GuestCardState : uint8_t \{ Clean = 0, Dirty = 1 \};\s*union GuestCard \{\s*GuestCardState State;',
+          r'enum class GuestCardState : uint8_t \{ Clean = 0, RangeWritten = 1, Written = 2, Dirty = 3 \};\s*'
+          r'union GuestCard \{\s*GuestCardState State;',
           test="oot3d_native_a32_process_tests (TestMemoryStoreCards)",
           forbid=r'\+\+mRangeGeneration;'),
     Guard("a write must mark the card of every page it covers (crossing stores mark both pages)",
@@ -322,10 +376,15 @@ GUARDS = [
           r'const size_t last = \(uint64_t\{address\} \+ size - 1U\) >> PageShift;\s*'
           r'for \(size_t page = address >> PageShift; page <= last; \+\+page\)',
           test="oot3d_native_a32_process_tests (TestMemoryStoreCards)"),
-    Guard("WriteGeneration must step whenever a write happened since the last observation (LDREX/STREX token)",
+    Guard("WriteGeneration must step whenever a write happened since the last observation (savestates)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
-          r'if \(TakeCard\(mWritten\)\) \{\s*__atomic_add_fetch\(&mWriteGeneration, 1U, __ATOMIC_RELAXED\);',
-          test="oot3d_native_a32_process_tests (TestMemoryStoreCards, TestMemoryContract)"),
+          r'if \(TakeWrittenCards\(\)\) \{\s*__atomic_add_fetch\(&mWriteGeneration, 1U, __ATOMIC_RELAXED\);',
+          test="oot3d_native_a32_process_tests (TestMemoryStoreCards), oot3d_switch_guest_window_tests (TestPageFlags)"),
+    Guard("the two generations take their own card bit with an atomic and-fetch (a racing store's mark survives)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'__atomic_fetch_and\(&words\[word\], ~written, __ATOMIC_ACQ_REL\).*?'
+          r'TakeCardBit\(mCards\[page\], GuestCardState::RangeWritten\)',
+          test="oot3d_switch_guest_window_tests (TestPageFlags, TestTwoCores)"),
     # --- 05/11: dsp_mix 0.45 -> 1.3-1.6 ms per frame in battles (logs8, Forest Temple Wolfos) ---
     # The DSP frame runs on core 0 while the guest waits. The shared regions are
     # processed in the guest's bytes (no 4 x 32 KiB of copies per frame) with the
@@ -336,10 +395,10 @@ GUARDS = [
           r'memory\.EndUpdate\(readAddress, regionBytes\) \|\|\s*!memory\.EndUpdate\(writeAddress, regionBytes\)',
           test="oot3d_native_audio_dsp_mix_tests",
           forbid=r'memory\.(Read|Write)\('),
-    Guard("the in-place DSP region update must account its write-back exactly as WriteBytes (store cards, written mark, observers)",
+    Guard("the in-place DSP region update must account its write-back exactly as WriteBytes (store cards, observers)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
           r'bool NativeA32Memory::EndHostUpdate\(.*?RecordTracedWrite\(address, [^;]*;\s*\}\s*'
-          r'NoteWrite\(address, size\);\s*(?:ShadowNoteWrite\([^;]*\);\s*)?NotifyObservedWrite\(address, size\);',
+          r'NoteWrite\(address, size\);\s*NotifyObservedWrite\(address, size\);',
           test="oot3d_native_audio_storage_tests"),
     Guard("shared ADPCM decodes must compare the encoded bytes in full and stay within their memory budget",
           "tools/oot3d/third_party/azahar_audio/audio_core/adpcm_decode_cache.h",

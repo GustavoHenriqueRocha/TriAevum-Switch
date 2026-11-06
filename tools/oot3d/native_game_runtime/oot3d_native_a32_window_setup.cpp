@@ -1327,12 +1327,15 @@ void NativeA32WindowSession::Setup() {
                    process.Memory().WatchedRangeCount());
     }
   }
-  // fastmem window (config/fastmem_window, phase 1; SWITCH_PORT.md "fastmem
-  // window"): where the image's regions live once the image is mounted, or
-  // why they stay on the heap. Warning level: the release logger drops info.
+  // fastmem window (config/fastmem_window; SWITCH_PORT.md "fastmem window"):
+  // where the image's regions live once the image is mounted, or why they
+  // stay on the heap, and whether the guest's typed accesses take the window
+  // (access=window) or the slow path for every access (access=slow).
+  // Warning level: the release logger drops info.
   {
-    const std::string fastmemWindow = Oot3dNativeGame::GuestWindow::FormatStatus(
-        Oot3dNativeGame::GuestWindow::CurrentStatus());
+    const std::string fastmemWindow =
+        Oot3dNativeGame::GuestWindow::FormatStatus(Oot3dNativeGame::GuestWindow::CurrentStatus()) +
+        (process.Memory().InGuestWindow() ? " access=window" : " access=slow");
 #if defined(__SWITCH__)
     SPDLOG_WARN("{}", fastmemWindow);
 #else

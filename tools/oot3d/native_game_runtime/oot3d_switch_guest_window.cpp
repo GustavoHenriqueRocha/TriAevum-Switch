@@ -1,4 +1,4 @@
-// fastmem phase 1: the guest window (see oot3d_switch_guest_window.h).
+// fastmem: the guest window (see oot3d_switch_guest_window.h).
 #include "oot3d_switch_guest_window.h"
 
 #include <algorithm>
@@ -16,7 +16,9 @@ extern "C" {
 // libnx (applet.c, weak, default 0): 1 ends the application through AM.
 extern u32 __nx_applet_exit_mode;
 }
-#elif defined(__unix__) || defined(__APPLE__)
+#elif defined(__unix__) || defined(__APPLE__) || defined(OOT3D_GUEST_WINDOW_MMAP)
+// OOT3D_GUEST_WINDOW_MMAP: a target with Linux's mmap that does not define
+// __unix__ (devkitA64 under qemu-aarch64, memory_lean_diff/qemu_mman.cpp).
 #include <sys/mman.h>
 #define OOT3D_GUEST_WINDOW_HOST_MMAP 1
 #endif
@@ -92,8 +94,6 @@ bool gRequested = false;
 char gReason[192] = "not started";
 const char* gRoute = "";
 uintptr_t gReservation = 0;  // start of the raw reservation
-uint8_t* gPageFlags = nullptr;
-uint8_t* gCards = nullptr;
 Placement gPlacements[kMaxPlacements];
 size_t gPlacementCount = 0;
 size_t gPlacementBytes = 0;
@@ -287,18 +287,6 @@ void StartLocked(Mode mode) {
         return;
     }
     // Before the base is published: no placement can be armed yet.
-    gPageFlags = static_cast<uint8_t*>(std::malloc(kPageCount));
-    gCards = static_cast<uint8_t*>(std::malloc(kPageCount));
-    if (gPageFlags == nullptr || gCards == nullptr) {
-        std::free(gPageFlags);
-        std::free(gCards);
-        gPageFlags = gCards = nullptr;
-        SetReason("no memory for the flat tables");
-        gState.store(State::Off, std::memory_order_release);
-        return;
-    }
-    std::memset(gPageFlags, kPageUnmapped, kPageCount);
-    std::memset(gCards, kCardClean, kPageCount);
     gReason[0] = '\0';
     gVerify.store(mode == Mode::Verify, std::memory_order_relaxed);
     const uintptr_t base = (gReservation + kSlabSize - 1U) & ~(uintptr_t{kSlabSize} - 1U);
@@ -495,14 +483,6 @@ bool Reserve(std::vector<uint8_t>& bytes, uint32_t address, size_t size) {
     return false;
 }
 
-uint8_t* PageFlags() noexcept {
-    return gState.load(std::memory_order_acquire) == State::On ? gPageFlags : nullptr;
-}
-
-uint8_t* Cards() noexcept {
-    return gState.load(std::memory_order_acquire) == State::On ? gCards : nullptr;
-}
-
 bool Verifying() noexcept {
     return gVerify.load(std::memory_order_relaxed);
 }
@@ -553,9 +533,6 @@ bool ResetForTesting(Mode mode, size_t failSlabsAfter) {
     gAccepting.store(false, std::memory_order_release);
     gBase.store(0, std::memory_order_release);
     PlatformReleaseReservation();
-    std::free(gPageFlags);
-    std::free(gCards);
-    gPageFlags = gCards = nullptr;
     gOwner.store(nullptr, std::memory_order_release);
     std::memset(gSlabMapped, 0, sizeof(gSlabMapped));
     gSlabs = 0;

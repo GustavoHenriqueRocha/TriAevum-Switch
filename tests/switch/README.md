@@ -41,6 +41,14 @@ CTR host, FS, second-core, savestate and PICA submission targets link the host a
 (`oot3d_guest_window_host_alloc` in CMake), so each also runs with the window:
 `TRIAEVUM_FASTMEM_WINDOW=1` (or `verify`, which re-derives the flat tables after every change)
 before the binary; each prints `fastmem_window at exit: placed=… mismatches=…`.
+Since phase 2 (ABI 5) the window decides the inline paths: unset, every typed access takes the
+slow path, so run each target both ways. The memory differentials compare against phase 1
+(`e4280d76`, its second core active for the shared exclusive monitor), window on by default
+(`WINDOW=0` for the slow path): `memory_lean_diff/run_memory_lean_diff.sh <out>` and
+`memory_lean_diff/run_store_sequence_diff.sh <out>`; `TARGET=switch` builds the latter with
+devkitA64 and runs it under `qemu-aarch64`, mapping the window through `qemu_mman.cpp`.
+`run_guest_override_equivalence.py` puts its translated side in the window with
+`TRIAEVUM_FASTMEM_WINDOW=1`.
 
 ## Performance (`perf_gate.py`)
 

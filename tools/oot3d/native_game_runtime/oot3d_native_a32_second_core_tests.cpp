@@ -419,22 +419,53 @@ void TestMonitorSemantics() {
     memory.SetWriteObserver({});
 }
 
-// Switch absent: the token is the write generation, as before.
+// Switch absent (fastmem phase 2): the same global monitor as with the second
+// core on. The token is the loaded value, a store to another word no longer
+// fails the STREX (no memory-wide written mark on every store), one that
+// changes the reserved word does, and so do a context switch (the scheduler
+// clears the monitor), a SWP to the granule and a savestate load (reset).
 void TestMonitorInactive() {
     NativeA32Memory memory;
     std::string error;
     Require(memory.MapRegion({"data", 0x1000, 0x1000, true, false, {}}, &error), error);
     Require(!SecondCore::Active(), "monitor must start inactive");
+    SecondCore::ResetExclusiveMonitor();
     uint64_t value = 0;
     uint64_t token = 0;
     uint32_t fault = 0;
-    Require(memory.LoadExclusive(0x1000U, 4U, &value, &token, &fault) &&
-                token == memory.WriteGeneration(),
-            "inactive LDREX token is the write generation");
+    Require(memory.Write32(0x1000U, 7U) &&
+                memory.LoadExclusive(0x1000U, 4U, &value, &token, &fault) && value == 7U &&
+                token == value,
+            "inactive LDREX token is the loaded value");
     Require(memory.Write32(0x1800U, 1U), "unrelated write");
-    Require(memory.StoreExclusive(0x1000U, 4U, 1U, token, &fault) ==
+    Require(memory.StoreExclusive(0x1000U, 4U, 8U, token, &fault) == ExclusiveStoreResult::Success,
+            "inactive STREX survives a write to another word");
+    Require(memory.LoadExclusive(0x1000U, 4U, &value, &token, &fault) &&
+                memory.Write32(0x1000U, 9U) &&
+                memory.StoreExclusive(0x1000U, 4U, 10U, token, &fault) ==
+                    ExclusiveStoreResult::ReservationLost,
+            "inactive STREX fails when the reserved word changed");
+    Require(memory.LoadExclusive(0x1000U, 4U, &value, &token, &fault), "LDREX");
+    SecondCore::ClearExclusive();
+    Require(memory.StoreExclusive(0x1000U, 4U, 10U, token, &fault) ==
                 ExclusiveStoreResult::ReservationLost,
-            "inactive STREX fails after any tracked write");
+            "inactive STREX fails after a context switch");
+    uint32_t previous = 0;
+    Require(memory.LoadExclusive(0x1000U, 4U, &value, &token, &fault) &&
+                memory.AtomicSwap(0x1004U, 4U, 0U, &previous, &fault) &&
+                memory.StoreExclusive(0x1000U, 4U, 10U, token, &fault) ==
+                    ExclusiveStoreResult::ReservationLost,
+            "inactive SWP to the granule clears the reservation");
+    Require(memory.LoadExclusive(0x1000U, 4U, &value, &token, &fault), "LDREX");
+    SecondCore::ResetExclusiveMonitor();
+    Require(memory.StoreExclusive(0x1000U, 4U, 10U, token, &fault) ==
+                ExclusiveStoreResult::ReservationLost,
+            "a savestate load (monitor reset) costs one STREX retry");
+    Require(memory.LoadExclusive(0x1000U, 4U, &value, &token, &fault) &&
+                memory.StoreExclusive(0x1000U, 4U, 11U, token, &fault) ==
+                    ExclusiveStoreResult::Success &&
+                memory.Read32(0x1000U, &previous) && previous == 11U,
+            "the retry succeeds");
 }
 
 // Two host threads, one guest word: no lost update, no false success.

@@ -7,10 +7,18 @@
 #include "old_memory.h"
 namespace SeqMem = OldMem;
 #define SEQ_SIDE OldSide
+// The base's exclusives with its second core active: the global exclusive
+// monitor, which the current memory uses with the second core on or off.
+#if __has_include("old_second_core.h")
+#include "old_second_core.h"
+#define SEQ_MONITOR OldMem::SecondCore
+#endif
 #else
 #include "oot3d_native_a32_memory.h"
+#include "oot3d_native_a32_second_core.h"
 namespace SeqMem = Oot3dNativeGame;
 #define SEQ_SIDE NewSide
+#define SEQ_MONITOR Oot3dNativeGame::SecondCore
 #endif
 #include "oot3d_aot_architectural_state.h"
 
@@ -121,9 +129,26 @@ uint64_t RunRaw(uint32_t index, uint64_t seed) {
 
 uint32_t SeqCount() { return sizeof(kSeqFunctions) / sizeof(kSeqFunctions[0]); }
 
+// Runs whose image took the fastmem window (current side).
+uint64_t gWindowRuns = 0;
+uint64_t WindowRuns() { return gWindowRuns; }
+
 // Runs function `index` with state and configuration derived from `seed` and
 // returns the digest of everything observable.
 uint64_t Run(uint32_t index, uint64_t seed) {
+#if defined(SEQ_MONITOR)
+#if defined(SEQ_OLD)
+    // A plain constant-initialized flag, not a guarded static: the guard's
+    // condition variable needs Horizon kernel calls (devkitA64 under
+    // qemu-aarch64 aborts in __cxa_guard_release).
+    static bool active = false;
+    if (!active) {
+        SEQ_MONITOR::SetActive(true);
+        active = true;
+    }
+#endif
+    SEQ_MONITOR::ResetExclusiveMonitor();
+#endif
     std::mt19937_64 rng(seed);
     auto below = [&](uint32_t n) { return static_cast<uint32_t>(rng() % n); };
     Memory memory;
@@ -136,6 +161,9 @@ uint64_t Run(uint32_t index, uint64_t seed) {
         !memory.MapRegion({"ram2", 0x20000U, ram2.size(), true, false, ram2})) {
         return 0;
     }
+#if !defined(SEQ_OLD)
+    if (memory.InGuestWindow()) ++gWindowRuns;
+#endif
     Hash events;
     const uint32_t mode = below(12);
     if (mode == 0) {

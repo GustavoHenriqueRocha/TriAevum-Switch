@@ -1,11 +1,13 @@
-// fastmem window, phase 1 (oot3d_switch_guest_window.h, config/fastmem_window,
+// fastmem window (oot3d_switch_guest_window.h, config/fastmem_window,
 // SWITCH_PORT.md "fastmem window"), on the host backend (mmap reservation,
 // MAP_FIXED slabs, the operator new/delete hook): every region of the owner
 // image at window base + guest address, the same after copies, moves,
-// restores, CreatePrimaryThread staging and TLS pages, the flat page-flag and
-// card tables equal to the page entries, the fallbacks (switch absent,
-// refused mapping, a range held by another image), and guest code on two host
-// threads while slabs are mapped and savestates re-home the image.
+// restores, CreatePrimaryThread staging and TLS pages; phase 2's page-flag
+// table of each image equal to its page entries and the inline paths on the
+// window bytes; two-bit cards; the fallbacks (switch absent, refused
+// mapping, a range held by another image: every access on the slow path),
+// and guest code on two host threads while slabs are mapped and savestates
+// re-home the image.
 //
 // --stress: longer two-core runs.
 #include "oot3d_native_a32_ctr_host.h"
@@ -62,9 +64,11 @@ bool AtHome(const NativeA32Memory& memory, uint32_t address) {
 void RequireNoMismatch(std::string_view where) {
     const auto status = Window::CurrentStatus();
     Require(status.ShadowMismatches == 0U,
-            std::string(where) + ": flat tables differ from the page entries (" +
+            std::string(where) + ": flag tables differ from the page entries (" +
                 std::to_string(status.ShadowMismatches) + ")");
 }
+
+constexpr uint8_t kLoadStore = kGuestPageLoadFast | kGuestPageStoreFast;
 
 // The game's layout (EUR): text, read-only data, data+bss, heap, primary
 // stack, GSP and HID shared memory, linear heap, VRAM, DSP RAM, config
@@ -122,11 +126,22 @@ void TestAbsent() {
     for (const auto& region : kLayout) {
         Require(!Window::Contains(Bytes(memory, region.Base)),
                 std::string("off: ") + region.Name + " is an ordinary heap buffer");
+        Require(memory.PageFlagsAt(region.Base) == 0U,
+                std::string("off: ") + region.Name + " traps (slow path)");
     }
+    Require(!memory.InGuestWindow(), "off: the image is not in the window");
+    // Every typed access takes the slow path, with the same results.
+    uint32_t word = 0;
+    Require(memory.WriteFast<uint32_t>(0x08000010U, 0xA1B2C3D4U) &&
+                memory.ReadFast<uint32_t>(0x08000010U, &word) && word == 0xA1B2C3D4U &&
+                !memory.WriteFast<uint32_t>(0x00100000U, 1U) &&
+                memory.CardAt(0x08000010U) == static_cast<uint8_t>(GuestCardState::Dirty),
+            "off: slow-path accesses");
     Require(Window::LivePlacements() == 0U, "off: no placement");
     NativeA32Memory copy = memory;
     NativeA32Memory moved = std::move(copy);
-    Require(!Window::Contains(Bytes(moved, 0x08000000U)) && Window::LivePlacements() == 0U,
+    Require(!Window::Contains(Bytes(moved, 0x08000000U)) && Window::LivePlacements() == 0U &&
+                !moved.InGuestWindow(),
             "off: copies and moves stay on the heap");
     const std::string line = Window::FormatStatus(Window::CurrentStatus());
     Require(line == "fastmem_window: off (off for this test)", "off line: " + line);
@@ -164,16 +179,18 @@ void TestPlacement() {
     const auto status = Window::CurrentStatus();
     Require(status.On && status.Regions == kLayout.size() && status.Slabs == kLayoutSlabs,
             "status: " + Window::FormatStatus(status));
-    const uint8_t* flags = Window::PageFlags();
-    Require(flags[0x00100000U >> 12U] ==
-                (Window::kPageMapped | Window::kPageReadOnly | Window::kPageStoreTrap),
-            "text page: mapped, read-only, stores trap");
-    Require(flags[0x08000000U >> 12U] == Window::kPageMapped,
-            "heap page: direct (" + std::to_string(flags[0x08000000U >> 12U]) + ")");
-    Require(flags[0x00000000U] == Window::kPageUnmapped, "page 0: unmapped");
-    Require(flags[0x1FF81000U >> 12U] ==
-                (Window::kPageMapped | Window::kPageReadOnly | Window::kPageStoreTrap),
-            "shared page: read-only");
+    Require(memory.InGuestWindow(), "the owner's image takes the window");
+    Require(memory.PageFlagsAt(0x00100000U) == kGuestPageLoadFast,
+            "text page: loads in the window, stores trap");
+    Require(memory.PageFlagsAt(0x08000000U) == kLoadStore,
+            "heap page: direct (" + std::to_string(memory.PageFlagsAt(0x08000000U)) + ")");
+    Require(memory.PageFlagsAt(0x00000000U) == 0U, "page 0: unmapped, traps");
+    Require(memory.PageFlagsAt(0x1FF81000U) == kGuestPageLoadFast, "shared page: read-only");
+    // Crossing a page into an unmapped one: the slow path faults exactly.
+    uint32_t fault = 0;
+    Require(!memory.ReadFast<uint32_t>(0x004F8FFEU + 0x000CE000U, &word, &fault) &&
+                fault == 0x005C6FFEU,
+            "a load crossing into an unmapped page faults at its address");
     RequireNoMismatch("placement");
     Require(status.ShadowChecks != 0U, "verify mode checked the tables");
     std::cout << "  placement: " << Window::FormatStatus(status) << '\n';
@@ -195,7 +212,8 @@ void TestRehome() {
     Require(memory.Write32(0x08000100U, 0x11111111U), "write");
     // Copy construction: an independent image on the heap.
     NativeA32Memory snapshot = memory;
-    Require(!Window::Contains(Bytes(snapshot, 0x08000000U)), "a copy is not in the window");
+    Require(!Window::Contains(Bytes(snapshot, 0x08000000U)) && !snapshot.InGuestWindow(),
+            "a copy is not in the window (slow path)");
     Require(memory.Write32(0x08000100U, 0x22222222U), "write");
     // Copy assignment into the owner (a savestate load from memory).
     memory = snapshot;
@@ -217,7 +235,9 @@ void TestRehome() {
     Require(memory.Read32(0x0FF00010U, &value) && value == 0x33333333U, "moved bytes");
     Require(memory.WriteFast<uint32_t>(0x0FF00010U, 0x44444444U), "fast write after the move");
     std::memcpy(&value, Window::Base() + 0x0FF00010U, 4);
-    Require(value == 0x44444444U, "page table points at the window after the move");
+    Require(value == 0x44444444U && memory.InGuestWindow() &&
+                memory.PageFlagsAt(0x0FF00010U) == kLoadStore,
+            "the moved image's flags point at the window");
     Require(Window::LivePlacements() == kLayout.size() + 1U, "one placement per region");
 
     // RestoreState (decoded into a staged image, then moved).
@@ -247,10 +267,20 @@ void TestConflicts() {
     // Moved out of the owner: the buffer stays valid where it is, and the
     // owner cannot place over it.
     NativeA32Memory holder = std::move(owner);
-    Require(AtHome(holder, 0x00200000U), "the moved-out buffer is still the window's");
+    Require(AtHome(holder, 0x00200000U) && holder.InGuestWindow() && !owner.InGuestWindow(),
+            "the moved-out buffer is still the window's, with its flags");
     Require(owner.MapRegion({"data", 0x00200000U, 0x1000U, true, false, {}}, &error), error);
     Require(!Window::Contains(Bytes(owner, 0x00200000U)), "no overlapping placement");
     Require(Window::CurrentStatus().Conflicts == 1U, "the refusal is counted");
+    // Two images at the same guest address: each reaches its own bytes (the
+    // holder through the window, the owner on the slow path).
+    uint32_t value = 0;
+    Require(holder.WriteFast<uint32_t>(0x00200010U, 0x1111U) &&
+                owner.WriteFast<uint32_t>(0x00200010U, 0x2222U) &&
+                holder.ReadFast<uint32_t>(0x00200010U, &value) && value == 0x1111U &&
+                owner.ReadFast<uint32_t>(0x00200010U, &value) && value == 0x2222U &&
+                !owner.InGuestWindow() && owner.PageFlagsAt(0x00200000U) == 0U,
+            "images sharing an address stay apart");
     holder = NativeA32Memory();
     Require(Window::LivePlacements() == 0U, "released with its image");
     std::cout << "  conflicts: ok\n";
@@ -268,6 +298,8 @@ void TestRefusedMapping() {
     Require(!Window::Contains(Bytes(memory, 0x08000000U)), "refused slab: today's allocation");
     Require(memory.Write32(0x08000000U, 7U) && memory.Write32(0x00200000U, 8U),
             "both regions work");
+    Require(memory.PageFlagsAt(0x00200000U) == kLoadStore && memory.PageFlagsAt(0x08000000U) == 0U,
+            "the refused region traps, the placed one takes the window");
     const auto status = Window::CurrentStatus();
     const std::string line = Window::FormatStatus(status);
     Require(!status.On && line.find("refused (test)") != std::string::npos &&
@@ -279,9 +311,9 @@ void TestRefusedMapping() {
     std::cout << "  refused mapping: " << line << '\n';
 }
 
-// --- flat tables -----------------------------------------------------------------
+// --- page flags and cards ---------------------------------------------------------
 
-void TestShadowTables() {
+void TestPageFlags() {
     Reset(Window::Mode::Verify);
     NativeA32Memory memory;
     std::string error;
@@ -289,19 +321,19 @@ void TestShadowTables() {
                 memory.MapRegion({"data", 0x00200000U, 0x8000U, true, false, {}}, &error) &&
                 memory.MapRegion({"odd", 0x00300800U, 0x1000U, true, false, {}}, &error),
             error);
-    const uint8_t* flags = Window::PageFlags();
-    const uint8_t* cards = Window::Cards();
-    constexpr size_t kData = 0x00200000U >> 12U;
-    Require(flags[0x00300000U >> 12U] == Window::kPageUnmapped &&
-                flags[0x00301000U >> 12U] == Window::kPageUnmapped,
+    const auto flags = [&](uint32_t address) { return memory.PageFlagsAt(address); };
+    const auto card = [&](uint32_t address) { return memory.CardAt(address); };
+    Require(flags(0x00300000U) == 0U && flags(0x00301000U) == 0U,
             "pages a region covers partly have no direct entry");
     // Observed writes: stores trap.
-    memory.SetWriteObserver([](uint32_t, size_t) {});
+    uint32_t observed = 0;
+    memory.SetWriteObserver([&](uint32_t address, size_t) { observed = address; });
     Require(memory.ObserveWrites(0x00201000U, 0x10U), "observe");
-    Require(flags[kData + 1U] == (Window::kPageMapped | Window::kPageStoreTrap) &&
-                flags[kData] == Window::kPageMapped,
+    Require(flags(0x00201000U) == kGuestPageLoadFast && flags(0x00200000U) == kLoadStore,
             "observed page: stores trap");
-    // Deferred device writes: the page leaves the table until read back.
+    Require(memory.WriteFast<uint32_t>(0x00201008U, 1U) && observed == 0x00201008U,
+            "an inline store to an observed page reaches the observer");
+    // Deferred device writes: the page traps until read back.
     const std::array ranges{std::pair<uint32_t, size_t>{0x00203000U, 0x100U}};
     Require(memory.DeferWrites(ranges,
                                [](uint32_t, std::span<uint8_t> out) {
@@ -309,42 +341,66 @@ void TestShadowTables() {
                                    return true;
                                }),
             "defer");
-    Require(flags[kData + 3U] == Window::kPageUnmapped, "deferred page: unmapped");
-    Require(memory.MaterializeDeferredWrites() && flags[kData + 3U] == Window::kPageMapped,
-            "read back: direct again");
-    Require(Window::Base()[0x00203000U] == 0x5AU, "device bytes in the window");
+    Require(flags(0x00203000U) == 0U, "deferred page traps");
+    uint8_t device = 0;
+    Require(memory.ReadFast<uint8_t>(0x00203000U, &device) && device == 0x5AU &&
+                flags(0x00203000U) == 0U,
+            "an inline load reads its device bytes back; the rest of the range stays pending");
+    Require(memory.MaterializeDeferredWrites() && flags(0x00203000U) == kLoadStore,
+            "read back whole: the page is direct again");
+    Require(Window::Base()[0x002030FFU] == 0x5AU, "device bytes in the window");
     // Range watch: rebuilt table.
     const std::array watch{std::pair<uint32_t, uint32_t>{0x00204000U, 0x00205000U}};
     memory.SetRangeWatch(watch);
-    Require(flags[kData + 4U] == Window::kPageUnmapped, "watched page traps");
+    Require(flags(0x00204000U) == 0U, "watched page traps");
+    uint32_t word = 0;
+    Require(memory.ReadFast<uint32_t>(0x00204000U, &word) &&
+                memory.WatchCounters().TypedReads == 1U,
+            "an inline load of a watched page is counted");
     memory.ClearRangeWatch();
-    Require(flags[kData + 4U] == Window::kPageMapped, "watch cleared");
+    Require(flags(0x00204000U) == kLoadStore, "watch cleared");
     // Write tracing: every typed access traps.
     memory.EnableWriteTraceFingerprint(true);
-    Require(flags[kData] == (Window::kPageMapped | Window::kPageLoadTrap | Window::kPageStoreTrap),
-            "traced page: loads and stores trap");
+    Require(flags(0x00200000U) == 0U && flags(0x00100000U) == 0U, "traced pages trap");
     memory.EnableWriteTraceFingerprint(false);
-    Require(flags[kData] == Window::kPageMapped, "trace off");
-    // Cards: set by the checked write paths, taken by RangeWriteGeneration.
-    Require(memory.RangeWriteGeneration(0x00200000U, 0x8000U).has_value(), "certificate");
-    Require(cards[kData + 2U] == Window::kCardClean, "clean after a certificate");
+    Require(flags(0x00200000U) == kLoadStore && flags(0x00100000U) == kGuestPageLoadFast,
+            "trace off");
+
+    // Two-bit cards: a store sets both bits once; RangeWriteGeneration takes
+    // bit 0, WriteGeneration bit 1, each leaving the other.
+    constexpr auto kDirty = static_cast<uint8_t>(GuestCardState::Dirty);
+    constexpr auto kRange = static_cast<uint8_t>(GuestCardState::RangeWritten);
+    constexpr auto kWritten = static_cast<uint8_t>(GuestCardState::Written);
+    memory.WriteGeneration();
+    Require(memory.RangeWriteGeneration(0x00200000U, 0x8000U).has_value() &&
+                card(0x00202000U) == 0U && card(0x00206000U) == 0U,
+            "clean after both generations");
     const std::array<uint8_t, 4> bytes{1, 2, 3, 4};
-    Require(memory.WriteBytes(0x00202000U, bytes), "checked write");
-    Require(cards[kData + 2U] == Window::kCardDirty, "a checked write marks the flat card");
-    Require(memory.Fill(0x00205000U, 0x10U, 9U) && cards[kData + 5U] == Window::kCardDirty,
-            "a fill marks it");
-    Require(memory.RangeWriteGeneration(0x00202000U, 0x4000U).has_value() &&
-                cards[kData + 2U] == Window::kCardClean && cards[kData + 5U] == Window::kCardClean,
-            "a certificate takes it");
-    // An inline store reaches only the group card (phase 1); the invariant
-    // (flat dirty implies group dirty) holds.
-    Require(memory.WriteFast<uint32_t>(0x00206000U, 1U) && cards[kData + 6U] == Window::kCardClean,
-            "inline stores leave the flat card alone in phase 1");
+    Require(memory.WriteBytes(0x00202000U, bytes) && card(0x00202000U) == kDirty,
+            "a checked write marks the card");
+    Require(memory.Fill(0x00205000U, 0x10U, 9U) && card(0x00205000U) == kDirty, "a fill marks it");
+    Require(memory.WriteFast<uint32_t>(0x00206000U, 1U) && card(0x00206000U) == kDirty,
+            "an inline store marks the card in the flat table");
+    const auto certificate = memory.RangeWriteGeneration(0x00202000U, 0x5000U);
+    Require(certificate.has_value() && card(0x00202000U) == kWritten &&
+                card(0x00206000U) == kWritten,
+            "a certificate takes bit 0 only");
+    const uint64_t generation = memory.WriteGeneration();
+    Require(card(0x00202000U) == 0U && card(0x00206000U) == 0U &&
+                memory.WriteGeneration() == generation,
+            "the write generation takes bit 1, once");
+    Require(memory.WriteFast<uint16_t>(0x00206FFFU, 7U) && card(0x00206000U) == kDirty &&
+                card(0x00207000U) == kDirty,
+            "a crossing store (slow path) marks both pages");
+    Require(memory.WriteGeneration() != generation && card(0x00206000U) == kRange,
+            "WriteGeneration leaves bit 0 for the next certificate");
+    Require(memory.RangeWriteGeneration(0x00206000U, 4U) != memory.RangeWriteGeneration(0x00202000U, 4U),
+            "the page written after the certificate gets a fresh one");
     memory.CaptureState();  // a checkpoint
-    RequireNoMismatch("flat tables");
+    RequireNoMismatch("page flags");
     const auto status = Window::CurrentStatus();
     Require(status.ShadowChecks >= 8U, "checked after each change");
-    std::cout << "  flat tables: " << status.ShadowChecks << " checks, 0 mismatches\n";
+    std::cout << "  page flags and cards: " << status.ShadowChecks << " checks, 0 mismatches\n";
 }
 
 // --- the process: staging, TLS pages, savestates, two host threads ----------------
@@ -632,7 +688,7 @@ int main(int argc, char** argv) {
     TestRehome();
     TestConflicts();
     TestRefusedMapping();
-    TestShadowTables();
+    TestPageFlags();
     TestProcess();
     TestTwoCores(stress ? 200'000U : 5'000U);
     Reset(Window::Mode::Off);

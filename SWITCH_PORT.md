@@ -1107,22 +1107,19 @@ stay valid) and **no speed gain expected**: the inline paths still walk the page
   every buffer that arrived from elsewhere to `base + address` and rebuilds the page table. All
   of it and every new slab happen under the second core's world stop (`MapRegion`, the
   assignments), so two host threads stay safe.
-- **Flat tables** for phase 2 (owner only, 1 MiB each): page flags (`kPageMapped`,
-  `kPageReadOnly`, `kPageLoadTrap`, `kPageStoreTrap`; a direct read-write page is `kPageMapped`
-  alone) derived from the typed page entries at every rebuild, pointer flip (`ObserveWrites`,
-  `DeferWrites`, deferred read-back, watch, write tracing); cards set wherever `memory.cpp` sets a
-  group card under the kernel lock and taken with it by `RangeWriteGeneration`. Until phase 2 the
-  inline header stores (and the lock-free LDREX/STREX/SWP marks) reach only the group cards, so
-  the invariant is "flat dirty implies group dirty". The file's text `verify` re-derives the flag
-  table and checks the card invariant after every change and at each savestate capture
-  (`verify checks= mismatches=` in the log line).
+- **Flat tables** (phase 1 only; phase 2 replaced them with per-image tables in
+  `NativeA32Memory`, next section): page flags derived from the typed page entries at every
+  rebuild and pointer flip, and cards set wherever `memory.cpp` set a group card, under the
+  invariant "flat dirty implies group dirty". The file's text `verify` re-derives the flag table
+  after every change and at each savestate capture (`verify checks= mismatches=` in the log line).
 - **Switches**: `config/fastmem_window` (desktop/host: `TRIAEVUM_FASTMEM_WINDOW=1|verify`, honoured
   only where the allocator hook is linked). Absent = no reservation, no hook fires, every region
   allocated exactly as before. No process handle (emulators), no 4 GiB of address space, or any
   refused slab mapping: off (or no new placement from then on), and the reason is logged.
 - **Log line** (game log, warning level, once the image is mounted):
-  `fastmem_window: on base=0x… regions=N mapped_kb=… slabs=… region_kb=… route=direct|shadow`
-  or `fastmem_window: off (reason)`.
+  `fastmem_window: on base=0x… regions=N mapped_kb=… slabs=… region_kb=… route=direct|shadow
+  access=window` or `fastmem_window: off (reason) access=slow` (`access=` since phase 2: whether
+  the game's image takes the inline window paths).
 - **Memory**: the regions move into the slabs (no second copy); the overhead is the 2 MiB rounding
   of each slab group (~8–12 MiB with the game's layout: code/data 3 slabs, heap and linear commits,
   1 slab for a 16 KiB stack, the shared memory, VRAM, the DSP/config/TLS slab) plus the two 1 MiB
@@ -1142,6 +1139,79 @@ stay valid) and **no speed gain expected**: the inline paths still walk the page
 - **Console proof**: boot with the file, `fastmem_window: on …` in the log; a save state and its
   load (no fault, same game); `config/second_core` on and off; `verify` once (mismatches=0); fps
   unchanged from the run without the file.
+
+### fastmem window, phase 2: the inline paths access the window (11/06, ABI 5)
+Phase 2 changes the shard-visible memory header (`oot3d_native_a32_memory.h`,
+`WriteObservationAbiVersion` 5): **every one of the 256 shards and every runtime object that
+includes the header must be rebuilt** (no regeneration). The file `config/fastmem_window` stays the
+switch, but its meaning changed: **without it every typed guest access takes the slow path**.
+- **Inline load/store** (`ReadFast`/`WriteFast`/`ReadWordsFast`/`WriteWordsFast`): one flag byte
+  per 4 KiB guest page in a flat table of the image (`GuestPageFlag`, own alias set like
+  `GuestCard`; `kGuestPageLoadFast`, `kGuestPageStoreFast`), the page-crossing test of 2/4/8-byte
+  accesses, then the access itself at `mWindowBase + address`. No page-table walk. A flag allows an
+  access only when the page entry's own pointer is the page's window address
+  (`DerivePageFlags`), so every page the page table traps (unmapped, read-only for stores,
+  observed, deferred, watched, traced) traps inline too and reaches the unchanged slow body
+  (`ReadFastSlow`/`WriteFastSlow`: page table, then the checked path). An image that is not in
+  the window (file absent, emulator, refused mapping, savestate snapshots and other copies) points
+  at `sNoFastPages`, a shared table of zeros: everything traps.
+- **AArch64 per access** (shard 064, devkitA64 -O3, Cortex-A57 tuning), word load:
+  phase 1 `and, cmp, b.hi, mov #80, lsr #20, add, ldr group, cbz, ubfx, add, ldr entry, cbz,
+  ldr value` (13, three chained loads); phase 2 `and, cmp, b.hi, ldr flags, lsr #12, ldrb flag,
+  tbz #0, ldr base, ldr value` (9; the value hangs on two loads, the flag on a predicted branch).
+  Word store: phase 1 the same walk to `Write` + `str` + `strb` card + `strb` written mark (15);
+  phase 2 `and, cmp, b.hi, ldr flags, lsr, ldrb flag, tbz #1, ldp base+cards, str value, ldrb
+  card, cmp #3, b.ne` (12; the card store is out of line). Byte accesses drop the crossing test.
+- **Cards** (`GuestCardState`, two bits): one flat byte per page and image (1 MiB, allocated
+  with the first region). Bit 0 is taken by `RangeWriteGeneration` (the page's certificate), bit 1
+  by `WriteGeneration` (the architectural generation), each with an atomic and-fetch, so a racing
+  store's mark survives. A store makes the card `Dirty` only when it is not already: after the
+  first store of a page the card line is only read (shared by the two cores, no bouncing).
+  `mWritten`, the memory-wide written byte every store wrote, is gone; `WriteGeneration()` scans
+  the cards of the mapped pages instead (8 bytes at a time; savestates and copies only).
+- **Exclusives**: LDREX/STREX/SWP always use the global exclusive monitor
+  (`oot3d_native_a32_second_core.h`), with the second core on or off: the token is the loaded
+  value, STREX a compare-and-swap on the guest word. A guest context switch drops the reservation
+  (`ClearExclusive`), every savestate restore resets the monitor. The difference from the
+  single-core path of phase 1: a plain store between LDREX and STREX that leaves the word's value
+  unchanged no longer fails the STREX (as with the second core since it exists); a write anywhere
+  else no longer fails it either.
+- **Window off = slow path.** With the file absent, on PC builds (the allocator hook is linked
+  only into the host tests) and on emulators, every typed access calls `ReadFastSlow`/
+  `WriteFastSlow` (a call, the page-table walk, then the access). See the measurements below.
+- **Measurements.** Shard 064 (same flags): 82,526 → 83,175 AArch64 instructions (+0.8%, cold
+  code: 1,327 → 1,500 slow-path calls and the out-of-line card stores of its 618 store sites; the
+  hot path of each access is shorter); `ldr*` 16,389 → 18,797 (flag byte, base and card loads),
+  `str*` 9,434 → 9,159 (no written mark), `ldp` 332 → 803 (base and cards in one pair). Host
+  micro-benchmark of the real `NativeA32Memory` (x86, -O3, median of 3; phase 1 / phase 2 window
+  on / phase 2 window off):
+  64 word stores 117.7 / 61.3 / 259.7 ns, 64 independent word loads 84.4 / 36.3 / 328.2 ns, 64
+  dependent loads on new pages 378 / 152 / 561 ns, `VPUSH {d8-d15}` word by word 39.1 / 28.2 /
+  69.6 ns, as one span 8.1 / 6.0 / 80.2 ns, `VPOP` word by word 33.7 / 24.5 / 90.0 ns, as one
+  span 7.1 / 6.2 / 87.9 ns. With the window on, guest loads and stores cost about half of
+  phase 1; off, two to twelve times phase 1 (spans never take the inline path off).
+  **Expected on the console** (an estimate, not measured): the page-walk sequences are ~19% of
+  shard 064's instructions; if they are 15–20% of guest time in heavy rooms, halving them saves
+  ~7–10%, about 2–3 ms of the 25–30 ms of guest logic per 30 Hz step. Without the file the same
+  arithmetic costs +20–50% of guest time: **phase 2 must not ship with the window off**.
+- **Log line**: `fastmem_window: … access=window` (the game's image takes the inline window
+  paths) or `access=slow`.
+- **Exactness**: `memory_lean_diff/run_store_sequence_diff.sh` (the generated-code store
+  sequences against phase 1 e4280d76, whose exclusives run with its second core active; host and
+  `TARGET=switch` under qemu-aarch64 with `qemu_mman.cpp`, `WINDOW=1` and `0`),
+  `run_memory_lean_diff.sh` (2,000,000 random operations, window on and off) and
+  `run_guest_override_equivalence.py` (the translated side in the window); the memory, process,
+  CTR host, second-core, savestate, FS, PICA submission and window tests with
+  `TRIAEVUM_FASTMEM_WINDOW` unset, `1` and `verify`; the second-core and window tests under TSan
+  `--stress`, window off and on.
+- **Rebuild**: the 256 `oot3d_whole_aot_shard_*.o` and the 61 other objects that include the
+  header (among them `oot3d_whole_aot_generated.o`, the guest overrides, the process and memory,
+  the CTR host services, savestate, the window/setup objects, PICA submission and transfer, the
+  typed bridges and the top-screen UI), plus `oot3d_switch_guest_window.o` (its source changed);
+  a PGO build needs a new collection (the inline paths of every function changed).
+- **Console proof**: rooms 0, 2 and 8 of a heavy scene with the file present, `access=window` in
+  the log; `config/second_core` on and off; a save state and its load; `guest_ms` in `perf.txt`
+  against the same rooms without the file (`access=slow`) and against phase 1.
 
 ### Real fps60 and GPU savings in the GL backend (2026-10-17)
 - **fps60 did not present at 60 Hz**: the pacer and sample cadence come from the `FrameRate` mode of the

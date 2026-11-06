@@ -1,12 +1,19 @@
 // Memory differential test (run_memory_lean_diff.sh): current NativeA32Memory against the
-// previous implementation (HEAD, renamed to OldMem). Random sequences
+// base implementation (renamed to OldMem). Random sequences
 // of operations applied to both; after each one compares return value, values
 // read, fault address, architectural generation, per-page generations
 // (RangeWriteGeneration), content/state/trace fingerprint,
 // watch counters, fast-read mismatches, observer events,
-// exclusives, fast spans, CaptureState and copies/moves/restore.
+// exclusives, fast spans, CaptureState and copies/moves/restore. The current
+// side runs in the fastmem window when TRIAEVUM_FASTMEM_WINDOW=1; the base,
+// with its second core active (the global exclusive monitor of both).
 #include "oot3d_native_a32_memory.h"
+#include "oot3d_native_a32_second_core.h"
 #include "old_memory.h"
+#if __has_include("old_second_core.h")
+#include "old_second_core.h"
+#define OLD_MONITOR 1
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -192,15 +199,35 @@ void Step(Pair& p) {
         gLastOp = "words";
         const uint32_t address = RandomAddress() & ~3U;
         const uint32_t count = Rand(9);
+        // As the generated LDM/STM: the span, else word by word up to the
+        // first fault. Outside the fastmem window the current spans always
+        // decline (every page traps), so their own result is compared only
+        // when the current image is in the window.
+        const auto readWords = [&](auto& memory, uint32_t* out, bool& span) {
+            span = memory.ReadWordsFast(address, out, count);
+            for (uint32_t i = 0; !span && i < count; ++i) {
+                if (!memory.template ReadFast<uint32_t>(address + 4U * i, &out[i])) return i;
+            }
+            return count;
+        };
+        const auto writeWords = [&](auto& memory, const uint32_t* in, bool& span) {
+            span = memory.WriteWordsFast(address, in, count);
+            for (uint32_t i = 0; !span && i < count; ++i) {
+                if (!memory.template WriteFast<uint32_t>(address + 4U * i, in[i])) return i;
+            }
+            return count;
+        };
+        bool spanN = false, spanO = false;
         if (Rand(2)) {
             uint32_t a[8] = {}, b[8] = {};
-            Eq("ReadWordsFast", p.N->ReadWordsFast(address, a, count), p.O->ReadWordsFast(address, b, count));
-            for (uint32_t i = 0; i < 8; ++i) Eq("ReadWordsFast.value", a[i], b[i]);
+            Eq("ReadWords", readWords(*p.N, a, spanN), readWords(*p.O, b, spanO));
+            for (uint32_t i = 0; i < 8; ++i) Eq("ReadWords.value", a[i], b[i]);
         } else {
             uint32_t v[8];
             for (auto& w : v) w = uint32_t(rng());
-            Eq("WriteWordsFast", p.N->WriteWordsFast(address, v, count), p.O->WriteWordsFast(address, v, count));
+            Eq("WriteWords", writeWords(*p.N, v, spanN), writeWords(*p.O, v, spanO));
         }
+        if (p.N->InGuestWindow()) Eq("WordsFast", spanN, spanO);
     } else if (kind < 58) {
         const uint32_t address = RandomAddress();
         const size_t size = Rand(5) == 0 ? 0 : 1 + Rand(300);
@@ -382,10 +409,19 @@ int main(int argc, char** argv) {
     const uint64_t seed = argc > 2 ? std::strtoull(argv[2], nullptr, 0) : 0x51A7;
     const uint64_t episodes = argc > 3 ? std::strtoull(argv[3], nullptr, 0) : 50;
     rng.seed(seed);
+#if defined(OLD_MONITOR)
+    OldMem::SecondCore::SetActive(true);
+#endif
+    uint64_t windowEpisodes = 0;
     for (uint64_t episode = 0; episode < episodes; ++episode) {
+        Oot3dNativeGame::SecondCore::ResetExclusiveMonitor();
+#if defined(OLD_MONITOR)
+        OldMem::SecondCore::ResetExclusiveMonitor();
+#endif
         Pair p;
         Map(*p.N);
         Map(*p.O);
+        windowEpisodes += p.N->InGuestWindow();
         if (Rand(2)) {
             const bool enabled = Rand(2) == 0;
             p.N->EnableWriteTraceFingerprint(enabled);
@@ -399,7 +435,8 @@ int main(int argc, char** argv) {
         gLastOp = "final";
         CompareState(p, true);
     }
-    std::printf("memdiff: %" PRIu64 " operations, %" PRIu64 " episodes, zero divergences\n",
-                gOps, episodes);
+    std::printf("memdiff: %" PRIu64 " operations, %" PRIu64 " episodes (%" PRIu64
+                " in the fastmem window), zero divergences\n",
+                gOps, episodes, windowEpisodes);
     return 0;
 }
