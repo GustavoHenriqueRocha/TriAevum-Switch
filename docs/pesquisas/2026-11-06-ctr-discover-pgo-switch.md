@@ -139,3 +139,16 @@ Este registro cobre a primeira etapa (build instrumentada enviada ao Switch).
   de antes do 2e28914e e nunca foi regenerado; a descoberta tem 19. Se a comparação ficar
   apertada, refazer a revisada com 19 para separar os efeitos. Não foi conferido no binário
   da p7e se os prólogos estão lá.
+
+## Rodada 3: lab desligado (06/11, 14:06)
+
+- Observado: com a rodada 2 no Switch, o roteiro `lab/script.jsonl` (tour de 49 áreas, o mesmo da
+  coleta do pgo5) não rodou; o arquivo ficou intacto e não houve `acks.jsonl`.
+- Causa (confirmada no CMakeCache): a build descoberta saiu com `TRIAEVUM_DEVELOPER_TOOLS=OFF`; a
+  `build-switch` da p7e tem `ON`, e o canal lab só existe com ela
+  (`oot3d_native_a32_window_setup.cpp:1058-1093`). Diff completo das opções contra a p7e: só essa
+  difere, além de programa, seleção, manifesto, C++ e perfil.
+- Correção: `-DTRIAEVUM_DEVELOPER_TOOLS=ON` no `config` do `build.sh` (generate e use). No Switch a
+  opção não toca os shards (CMakeLists.txt:202), então a build levou 73 s e o C++/`.gcda` não mudam.
+- NRO: md5 `17b70bb2…` (rotulada `cb092d8a…`, 279797773 bytes, conferido no Switch), mesmo nome
+  `oot3d_native_game.descoberto-pgogen.nro`; `pgo/` vazia; roteiro do tour de 49 áreas no lab.
