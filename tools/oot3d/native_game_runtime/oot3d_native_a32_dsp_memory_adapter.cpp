@@ -24,12 +24,11 @@ bool NativeA32DspHle::ProcessFrame(
     NativeA32Memory& memory, std::vector<int16_t>& interleavedStereo,
     std::string* error) {
     NativeDspMemoryAccess access;
-    access.Read = [&memory](uint32_t address, std::span<uint8_t> output) {
-        return memory.ReadBytes(address, output);
+    access.BeginUpdate = [&memory](uint32_t address, size_t size) {
+        return memory.BeginHostUpdate(address, size);
     };
-    access.Write = [&memory](uint32_t address,
-                             std::span<const uint8_t> input) {
-        return memory.WriteBytes(address, input);
+    access.EndUpdate = [&memory](uint32_t address, size_t size) {
+        return memory.EndHostUpdate(address, size);
     };
     access.ResolvePhysical = [this, &memory](uint32_t physicalAddress, size_t size) {
         for (const auto& region : PhysicalRegions()) {

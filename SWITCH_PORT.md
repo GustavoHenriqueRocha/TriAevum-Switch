@@ -772,7 +772,8 @@ Round proofs (scripts in the repository; run on the Ryzen and the notebook):
      remembers which ADPCM decode it holds: a loop that comes back with the same address, size,
      coefficients, initial predictor state and identical encoded bytes (`memcmp`) reuses the
      samples and final state, which are exactly what decoding would give. Host only, not in
-     the savestate; encoded buffers > 64 KiB are not remembered.
+     the savestate; encoded buffers > 64 KiB are not remembered. (Replaced on 05/11 by the
+     decodes shared between sources, below.)
   2. ADPCM: 14-sample frame without the clamp on the feedback path (multiply-add + shift, ~5
      cycles/sample on A57 vs ~9); if any value leaves s16 the frame is redone by the original
      code. One 32-bit write per sample (both channels).
@@ -786,7 +787,7 @@ Round proofs (scripts in the repository; run on the Ryzen and the notebook):
 - Measured on host (i3-8130U, -O3 -ffast-math): 0.0506 → 0.0288 ms per DSP frame (−43%).
   Estimated on A57 at 1785 MHz (llvm-mca per loop × scene counts): ~0.6 → ~0.33 ms per step.
   The 4 × 32 KiB copies per frame remain (`Read`/`Write` need the same ranges for
-  write-generation accounting) and become ~1/4 of the cost.
+  write-generation accounting) and become ~1/4 of the cost. (Removed on 05/11, below.)
 - Proof: `oot3d_native_audio_dsp_mix_tests` runs 4 random titles × 3000 frames through the
   whole `ProcessFrame` (24 sources, all formats, loops, resets, filters, extreme gains and
   denormals, aux with guest effect, output formats, sample data rewritten during the loop,
@@ -796,6 +797,44 @@ Round proofs (scripts in the repository; run on the Ryzen and the notebook):
   `oot3d_native_audio_interpolation_tests` (original digest) and the storage tests pass.
   Note: the `DspStatus` padding is copied from an uninitialized variable since the
   original (stack garbage); the test ignores those 28 bytes and the code was not changed there.
+
+### DSP mixing in battles: in place, shared decodes, two outputs per step (05/11)
+- Seen on the console (logs8, Forest Temple, two Wolfos): `dsp_mix` 0.45 → 1.3–1.6 ms per host
+  frame. Part of that is the window measure: at ~33 fps a host frame holds ~6 DSP frames instead of
+  ~3.4, so per DSP frame it went ~0.15 → ~0.25 ms, i.e. ~1.0 → ~1.7 ms per 30 Hz step.
+- Where the AArch64 instructions went (qemu, Switch flags, `oot3d_native_audio_dsp_mix_tests`
+  scenes, per DSP frame): linear interpolation 42–48%, the shared-region copies 15–31% (memmove,
+  and on the console those 128 KiB also cost memory bandwidth), `MixInto` 17–19%, ADPCM decoding
+  0–15% (sound effects and notes decoded again on every trigger).
+- What changed (the guest sees the same bytes; same PCM):
+  1. The shared regions are processed in the guest's bytes: `NativeDspMemoryAccess` is now
+     `BeginUpdate`/`EndUpdate` (`NativeA32Memory::BeginHostUpdate`/`EndHostUpdate`), with the
+     accounting of `ReadBytes` of both regions and `WriteBytes` of each one back, in the same order
+     (deferred device writes resolved, watch counters, write generations, write observers).
+     `EndHostUpdate` must keep `WriteBytes`' bookkeeping exactly (guard in `test_bug_guards.py`).
+  2. `AdpcmDecodeCache` (`audio_core/adpcm_decode_cache.h`, one per `NativeA32DspHle`): a decode
+     is shared by every source that dequeues the same address, length, coefficients and starting
+     predictor state while the encoded bytes are identical (compared in full: the guest may
+     rewrite them). The queue holds a reference, no copy. Least recently used decodes go beyond
+     2 M samples (8 MiB); buffers over 128 KiB encoded are decoded but not kept. Host only, never
+     in the savestate. It replaces the per-queue memo of 10/17.
+  3. Linear (AArch64): two outputs per iteration (both x0/x1 pairs gathered with TRN, one
+     fraction register per output): ~4.6 vs ~6.6 cycles per output (llvm-mca A57).
+  - Tried and dropped: mixing the three intermediate mixes in one pass (llvm-mca: 6.1 vs 5.0
+    cycles per sample with one mix, the common case).
+- Measured, per DSP frame (base → now):
+  - AArch64 instructions (qemu, 30 frames after 150): quiet (10 voices) 70.8k → 41.7k (−41%),
+    music (18 voices) 116.3k → 81.6k (−30%), battle (24 voices, a note or effect every 3
+    frames from 12 samples) 147.9k → 89.9k (−39%).
+  - Host x86-64 (Ryzen 5 5600G, -O3 -ffast-math, no NEON paths): quiet 0.0245 → 0.0188 ms,
+    music 0.040 → 0.031 ms, battle 0.0527 → 0.0417 ms.
+  - Console expectation: ~−30–40% of `dsp_mix`, about −0.5 ms per 30 Hz step in the logs8
+    battle (1.3–1.6 → ~0.9–1.1 ms per host frame at the same fps); the shared decodes count
+    for as much as titles retrigger the same samples, the copies on every frame.
+- Proof: the `run_audio_dsp_mix_tests_qemu.sh` digests (AArch64, Switch flags) are unchanged;
+  the test now also checks the region access order. `oot3d_native_audio_storage_tests`
+  compares an in-place update with read + write back (bytes, generations, watch counters,
+  observers, deferred writes) and covers shared queues.
 
 
 ### PICA planning off the game thread (2026-10-17)

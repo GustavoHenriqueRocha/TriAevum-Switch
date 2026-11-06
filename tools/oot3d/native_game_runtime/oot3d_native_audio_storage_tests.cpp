@@ -248,6 +248,101 @@ void DeferredDspBufferTest() {
     }
 }
 
+// The DSP HLE updates its shared regions in place (BeginHostUpdate/EndHostUpdate) instead of
+// ReadBytes into a copy and WriteBytes back: same bytes, write generations, watch counters,
+// write observations and deferred-write resolution.
+void HostUpdateTest() {
+    using namespace Oot3dNativeGame;
+    constexpr uint32_t base = 0x1FF50000U;
+    constexpr size_t size = 0x8000U;
+    struct Observed {
+        std::vector<std::pair<uint32_t, size_t>> writes;
+        size_t fetched = 0;
+    };
+    const auto prepare = [&](NativeA32Memory& memory, Observed& observed) {
+        std::vector<uint8_t> initial(size);
+        for (size_t i = 0; i < size; ++i) initial[i] = static_cast<uint8_t>(i * 37U + 5U);
+        std::string error;
+        Require(memory.MapRegion({"dsp0", base, size, true, false, initial}, &error), "map DSP region");
+        Require(memory.MapRegion({"other", 0x14000000U, 4096, true, false, {}}, &error), "map other region");
+        memory.SetWriteObserver([&observed](uint32_t address, size_t bytes) {
+            observed.writes.emplace_back(address, bytes);
+        });
+        Require(memory.ObserveWrites(base + 0x100U, 64), "observe DSP writes");
+        const std::array watch{std::pair<uint32_t, uint32_t>{base + 0x2000U, base + 0x2010U}};
+        memory.SetRangeWatch(watch);
+        const std::array ranges{std::pair<uint32_t, size_t>{base + 0x4000U, 0x300U}};
+        Require(memory.DeferWrites(ranges, [&observed](uint32_t, std::span<uint8_t> output) {
+            std::fill(output.begin(), output.end(), uint8_t{0xA5});
+            observed.fetched += output.size();
+            return true;
+        }), "defer a device write into the DSP region");
+        Require(memory.Write8(0x14000000U, 1), "unrelated write");
+    };
+    const auto modify = [](uint8_t* bytes) {
+        for (size_t i = 0; i < size; i += 97U) bytes[i] = static_cast<uint8_t>(bytes[i] ^ (i >> 3U));
+        bytes[0x4010U] = 0x5A;
+    };
+    NativeA32Memory copied;
+    NativeA32Memory inPlace;
+    Observed copiedObserved;
+    Observed inPlaceObserved;
+    prepare(copied, copiedObserved);
+    prepare(inPlace, inPlaceObserved);
+
+    std::vector<uint8_t> copy(size);
+    Require(copied.ReadBytes(base, copy), "read DSP region");
+    modify(copy.data());
+    Require(copied.WriteBytes(base, copy), "write DSP region back");
+
+    uint8_t* const bytes = inPlace.BeginHostUpdate(base, size);
+    Require(bytes != nullptr, "begin in-place DSP update");
+    Require(inPlaceObserved.fetched == copiedObserved.fetched && inPlaceObserved.fetched == 0x300U,
+            "in-place update did not resolve the pending device write first");
+    modify(bytes);
+    Require(inPlace.EndHostUpdate(base, size), "end in-place DSP update");
+
+    Require(inPlace.StateFingerprint() == copied.StateFingerprint(),
+            "in-place update changed bytes or the write generation");
+    for (const uint32_t offset : {0U, 0x100U, 0x2000U, 0x4000U, 0x7FF0U}) {
+        Require(inPlace.RangeWriteGeneration(base + offset, 16) ==
+                    copied.RangeWriteGeneration(base + offset, 16),
+                "in-place update changed a range write generation");
+    }
+    Require(inPlace.RangeWriteGeneration(0x14000000U, 1) == copied.RangeWriteGeneration(0x14000000U, 1),
+            "in-place update changed an unrelated range generation");
+    Require(inPlace.WatchCounters().ByteReads == copied.WatchCounters().ByteReads &&
+                inPlace.WatchCounters().ByteWrites == copied.WatchCounters().ByteWrites &&
+                copied.WatchCounters().ByteReads == 1U && copied.WatchCounters().ByteWrites == 1U,
+            "in-place update counted watched accesses differently");
+    Require(inPlaceObserved.writes == copiedObserved.writes && !copiedObserved.writes.empty(),
+            "in-place update notified write observers differently");
+    Require(inPlace.BeginHostUpdate(base + size - 4U, 8) == nullptr, "update past the region end");
+}
+
+// Queues sharing one decode read it without copying and stay independent of each other.
+void SharedDecodeTest() {
+    auto owner = std::make_shared<std::vector<Sample>>();
+    for (s16 i = 0; i < 100; ++i) owner->push_back({i, static_cast<s16>(-i)});
+    AudioCore::DecodedSampleQueue first;
+    AudioCore::DecodedSampleQueue second;
+    first.Share(owner, owner->data(), owner->size());
+    second.Share(owner, owner->data(), owner->size());
+    first.Consume(10);
+    Require(first.data() == owner->data() + 10 && second.data() == owner->data(), "shared cursor");
+    AudioCore::DecodedSampleQueue copy = first;
+    Require(copy.size() == 90 && copy.data() != first.data() && copy[0] == (*owner)[10],
+            "copy of a shared queue");
+    std::weak_ptr<std::vector<Sample>> alive = owner;
+    owner.reset();
+    Require(!alive.expired(), "shared decode released while queued");
+    first.clear();
+    Sample* storage = second.Overwrite(3);
+    storage[0] = storage[1] = storage[2] = Sample{7, 7};
+    Require(alive.expired(), "shared decode kept after every queue moved on");
+    Require(second.size() == 3 && second[2] == (Sample{7, 7}), "overwrite after sharing");
+}
+
 nlohmann::json ReadDspSnapshot(const char* path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     Require(file.good(), "cannot open gameplay checkpoint");
@@ -292,6 +387,8 @@ int main(int argc, char** argv) {
         const auto calls = ResamplerTests();
         SourceStateTest();
         DeferredDspBufferTest();
+        HostUpdateTest();
+        SharedDecodeTest();
         std::cout << "audio storage: " << calls << " differential resampler calls, codecs, source playback/save/restore/sleep: PASS\n";
         if (argc == 3) {
             const auto before = ReadDspSnapshot(argv[1]);

@@ -48,18 +48,16 @@ struct NativeA32DspHle::Impl {
                            ? CurrentMemory->ResolvePhysical(address, size)
                            : nullptr;
             });
+            Sources.back().SetDecodeCache(&DecodeCache);
         }
     }
 
     std::vector<NativeA32DspPhysicalRegion> PhysicalRegions;
+    // ADPCM decodes shared by the sources (declared first: they keep a pointer to it).
+    AudioCore::AdpcmDecodeCache DecodeCache;
     std::vector<AudioCore::HLE::Source> Sources;
     AudioCore::HLE::Mixers Mixers;
     const NativeDspMemoryAccess* CurrentMemory = nullptr;
-    // Host copies of the two shared-memory regions, reused every frame: both
-    // are overwritten whole by the reads below, so zero-filling 2 x 64 KiB
-    // per frame (the former stack locals) only cost game-thread time.
-    AudioCore::HLE::SharedMemory Region0;
-    AudioCore::HLE::SharedMemory Region1;
 };
 
 NativeA32DspHle::NativeA32DspHle(
@@ -76,21 +74,28 @@ NativeA32DspHle::PhysicalRegions() const {
 bool NativeA32DspHle::ProcessFrame(
     const NativeDspMemoryAccess& memory,
     std::vector<int16_t>& interleavedStereo, std::string* error) {
-    if (!memory.Read || !memory.Write || !memory.ResolvePhysical) {
+    if (!memory.BeginUpdate || !memory.EndUpdate || !memory.ResolvePhysical) {
         SetError(error, "native DSP memory contract is incomplete");
         return false;
     }
-    AudioCore::HLE::SharedMemory& region0 = mImpl->Region0;
-    AudioCore::HLE::SharedMemory& region1 = mImpl->Region1;
-    auto region0Bytes = std::span<uint8_t>(
-        reinterpret_cast<uint8_t*>(&region0), sizeof(region0));
-    auto region1Bytes = std::span<uint8_t>(
-        reinterpret_cast<uint8_t*>(&region1), sizeof(region1));
-    if (!memory.Read(kDspRegion0Address, region0Bytes) ||
-        !memory.Read(kDspRegion1Address, region1Bytes)) {
+    // The regions are processed in the guest's bytes: the former host copies
+    // (read both, process, write both back whole) cost 4 x 32 KiB of copying per
+    // frame on the game thread, most of it bytes the frame never touches. The
+    // accounting covers the same ranges in the same order (both reads, then the
+    // read region written back, then the write region).
+    constexpr size_t regionBytes = sizeof(AudioCore::HLE::SharedMemory);
+    uint8_t* const region0Bytes = memory.BeginUpdate(kDspRegion0Address, regionBytes);
+    uint8_t* const region1Bytes =
+        region0Bytes != nullptr ? memory.BeginUpdate(kDspRegion1Address, regionBytes) : nullptr;
+    constexpr auto alignment = alignof(AudioCore::HLE::SharedMemory);
+    if (region0Bytes == nullptr || region1Bytes == nullptr ||
+        reinterpret_cast<uintptr_t>(region0Bytes) % alignment != 0 ||
+        reinterpret_cast<uintptr_t>(region1Bytes) % alignment != 0) {
         SetError(error, "native DSP shared memory is not mapped");
         return false;
     }
+    auto& region0 = *reinterpret_cast<AudioCore::HLE::SharedMemory*>(region0Bytes);
+    auto& region1 = *reinterpret_cast<AudioCore::HLE::SharedMemory*>(region1Bytes);
 
     mImpl->CurrentMemory = &memory;
 
@@ -121,16 +126,12 @@ bool NativeA32DspHle::ProcessFrame(
     interleavedStereo.resize(first + output.size() * 2U);
     std::memcpy(interleavedStereo.data() + first, output.data(), sizeof(output));
 
-    const auto readBytes = std::span<const uint8_t>(
-        reinterpret_cast<const uint8_t*>(&read), sizeof(read));
-    const auto writeBytes = std::span<const uint8_t>(
-        reinterpret_cast<const uint8_t*>(&write), sizeof(write));
     const uint32_t readAddress =
         readIndex == 0U ? kDspRegion0Address : kDspRegion1Address;
     const uint32_t writeAddress =
         readIndex == 0U ? kDspRegion1Address : kDspRegion0Address;
-    if (!memory.Write(readAddress, readBytes) ||
-        !memory.Write(writeAddress, writeBytes)) {
+    if (!memory.EndUpdate(readAddress, regionBytes) ||
+        !memory.EndUpdate(writeAddress, regionBytes)) {
         SetError(error, "native DSP shared memory is not writable");
         return false;
     }
@@ -201,6 +202,7 @@ bool NativeA32DspHle::RestoreState(const nlohmann::json& state,
                            ? impl->CurrentMemory->ResolvePhysical(address, size)
                            : nullptr;
             });
+            restoredSources.back().SetDecodeCache(&mImpl->DecodeCache);
             if (!restoredSources.back().RestoreState(sources[index], error)) {
                 return false;
             }

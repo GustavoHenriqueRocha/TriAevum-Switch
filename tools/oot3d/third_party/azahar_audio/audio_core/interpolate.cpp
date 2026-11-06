@@ -142,10 +142,34 @@ static void StepOverSamplesFast(State& state, StereoBuffer16& input, float rate,
         Sample* __restrict out = output.data() + outputi;
 #if defined(__aarch64__) && defined(__ARM_NEON)
         if constexpr (kLinear) {
-            // Both channels in one D register: x0 and x1 are adjacent, so one 8-byte load. Same
-            // integer operations as emit(): saturating difference (the clamp), exact 64-bit
-            // product, arithmetic shift by 24 and the low 16 bits of x0 + result.
-            for (std::size_t k = 0; k < count; ++k) {
+            // Same integer operations as emit(): saturating difference (the clamp), exact 64-bit
+            // product, arithmetic shift by 24 and the low 16 bits of x0 + result. Two outputs per
+            // iteration: x0/x1 of output a and of output b are adjacent samples (one 8-byte load
+            // each); TRN gathers [x0a x0b] and [x1a x1b] with both channels, so each vector
+            // instruction below works for both outputs and the result is one 8-byte store.
+            std::size_t k = 0;
+            for (; k + 2 <= count; k += 2) {
+                const u64 positionB = fposition + step_size;
+                const std::size_t ia = static_cast<std::size_t>(fposition >> 24);
+                const std::size_t ib = static_cast<std::size_t>(positionB >> 24);
+                const int32x2_t xa = vreinterpret_s32_s16(vld1_s16(in[ia - 2].data()));
+                const int32x2_t xb = vreinterpret_s32_s16(vld1_s16(in[ib - 2].data()));
+                const int16x4_t x0 = vreinterpret_s16_s32(vtrn1_s32(xa, xb)); // x0a.L x0a.R x0b.L x0b.R
+                const int16x4_t x1 = vreinterpret_s16_s32(vtrn2_s32(xa, xb)); // x1a.L x1a.R x1b.L x1b.R
+                const int32x4_t delta = vmovl_s16(vqsub_s16(x1, x0));
+                // One fraction register per output: inserting the second into a lane of the
+                // first would chain both multiplies behind the insert.
+                const int64x2_t productA = vmull_n_s32(vget_low_s32(delta),
+                                                       static_cast<s32>(fposition & scale_mask));
+                const int64x2_t productB =
+                    vmull_high_n_s32(delta, static_cast<s32>(positionB & scale_mask));
+                const int32x4_t shifted =
+                    vshrn_high_n_s64(vshrn_n_s64(productA, 24), productB, 24);
+                const int16x4_t result = vadd_s16(x0, vmovn_s32(shifted));
+                vst1_s16(out[k].data(), result);
+                fposition = positionB + step_size;
+            }
+            for (; k < count; ++k) {
                 const std::size_t i = static_cast<std::size_t>(fposition >> 24);
                 const int16x4_t x = vld1_s16(in[i - 2].data()); // x0.L x0.R x1.L x1.R
                 const int16x4_t delta = vqsub_s16(vext_s16(x, x, 2), x);

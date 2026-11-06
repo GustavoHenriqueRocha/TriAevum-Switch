@@ -703,19 +703,18 @@ bool Source::DequeueBuffer() {
             break;
         case Format::ADPCM: {
             DEBUG_ASSERT(num_channels == 1);
-            // A looping buffer coming round again with the same inputs and unchanged encoded
-            // bytes: the samples still in the queue's storage are this decode's result.
-            const std::size_t bytes = EncodedSourceBytes(buf.format, buf.mono_or_stereo, buf.length);
-            const AudioInterp::StereoBuffer16::AdpcmOrigin origin{
-                buf.physical_address, buf.length, state.adpcm_coeffs, state.adpcm_state.yn1,
-                state.adpcm_state.yn2};
-            if (!state.current_buffer.ReplayAdpcm(origin, memory, bytes, state.adpcm_state.yn1,
-                                                  state.adpcm_state.yn2)) {
+            if (decode_cache != nullptr) {
+                // The same buffer decoded before (by any source) with the same inputs and
+                // unchanged encoded bytes is shared, not decoded again.
+                decode_cache->Decode(
+                    {buf.physical_address, buf.length, state.adpcm_coeffs, state.adpcm_state.yn1,
+                     state.adpcm_state.yn2},
+                    memory, EncodedSourceBytes(buf.format, buf.mono_or_stereo, buf.length),
+                    state.adpcm_state, state.current_buffer);
+            } else {
                 Codec::DecodeADPCMInto(
                     state.current_buffer.Overwrite(Codec::ADPCMOutputSamples(buf.length)), memory,
                     buf.length, state.adpcm_coeffs, state.adpcm_state);
-                state.current_buffer.RememberAdpcm(origin, memory, bytes, state.adpcm_state.yn1,
-                                                   state.adpcm_state.yn2);
             }
             break;
         }

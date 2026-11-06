@@ -20,8 +20,12 @@ struct NativeA32DspPhysicalRegion {
 };
 
 struct NativeDspMemoryAccess {
-    std::function<bool(uint32_t, std::span<uint8_t>)> Read;
-    std::function<bool(uint32_t, std::span<const uint8_t>)> Write;
+    // The two shared regions are updated in place: BeginUpdate returns the bytes
+    // of a guest range (accounted as a read of it; null if not mapped writable)
+    // and EndUpdate accounts the whole range as written back, as copying it in,
+    // modifying the copy and writing it back would.
+    std::function<uint8_t*(uint32_t, size_t)> BeginUpdate;
+    std::function<bool(uint32_t, size_t)> EndUpdate;
     std::function<const uint8_t*(uint32_t, size_t)> ResolvePhysical;
 };
 

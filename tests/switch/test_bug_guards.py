@@ -113,6 +113,25 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
           r'if \(mWritten\.State != GuestCardState::Clean\) \{\s*mWritten\.State = GuestCardState::Clean;\s*\+\+mWriteGeneration;',
           test="oot3d_native_a32_process_tests (TestMemoryStoreCards, TestMemoryContract)"),
+    # --- 05/11: dsp_mix 0.45 -> 1.3-1.6 ms per frame in battles (logs8, Forest Temple Wolfos) ---
+    # The DSP frame runs on core 0 while the guest waits. The shared regions are
+    # processed in the guest's bytes (no 4 x 32 KiB of copies per frame) with the
+    # same read/write accounting; ADPCM decodes are shared between sources.
+    Guard("dsp_mix: the DSP shared regions were copied in and out whole every frame (128 KiB of memcpy on core 0)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_dsp_hle.cpp",
+          r'memory\.BeginUpdate\(kDspRegion0Address, regionBytes\).*?'
+          r'memory\.EndUpdate\(readAddress, regionBytes\) \|\|\s*!memory\.EndUpdate\(writeAddress, regionBytes\)',
+          test="oot3d_native_audio_dsp_mix_tests",
+          forbid=r'memory\.(Read|Write)\('),
+    Guard("the in-place DSP region update must account its write-back exactly as WriteBytes (store cards, written mark, observers)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'bool NativeA32Memory::EndHostUpdate\(.*?RecordTracedWrite\(address, [^;]*;\s*\}\s*'
+          r'NoteWrite\(address, size\);\s*NotifyObservedWrite\(address, size\);',
+          test="oot3d_native_audio_storage_tests"),
+    Guard("shared ADPCM decodes must compare the encoded bytes in full and stay within their memory budget",
+          "tools/oot3d/third_party/azahar_audio/audio_core/adpcm_decode_cache.h",
+          r'std::memcmp\(entry->encoded\.data\(\), encoded, bytes\) == 0.*?while \(samples_ > kBudgetSamples',
+          test="oot3d_native_audio_dsp_mix_tests"),
     # --- 05/11: console logs could not name the slow area nor the actors' cost ---
     # Area (scene, room) read once per host frame into hitches.txt and perf.txt;
     # the actor cost profile adds its block-entry hooks only with

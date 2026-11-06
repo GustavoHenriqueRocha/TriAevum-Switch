@@ -15,6 +15,7 @@
 #include <boost/serialization/priority_queue.hpp>
 #include <boost/serialization/vector.hpp>
 #include <queue>
+#include "audio_core/adpcm_decode_cache.h"
 #include "audio_core/audio_types.h"
 #include "audio_core/codec.h"
 #include "audio_core/hle/common.h"
@@ -50,6 +51,12 @@ public:
     /// Resolves the complete encoded buffer for immediate, synchronous decoding.
     void SetMemoryResolver(PhysicalMemoryResolver resolver);
 
+    /// TriAevum: ADPCM decodes shared with the other sources (optional; must outlive the Source's
+    /// use of it). Without one every buffer is decoded.
+    void SetDecodeCache(AdpcmDecodeCache* cache) {
+        decode_cache = cache;
+    }
+
     /**
      * This is called once every audio frame. This performs per-source processing every frame.
      * @param config The new configuration we've got for this Source from the application.
@@ -76,6 +83,7 @@ public:
 private:
     const std::size_t source_id;
     PhysicalMemoryResolver memory_resolver;
+    AdpcmDecodeCache* decode_cache = nullptr;
     StereoFrame16 current_frame;
     StereoFrame16 backup_frame{}; // TODO(PabloMK7): Check if we actually need this
 

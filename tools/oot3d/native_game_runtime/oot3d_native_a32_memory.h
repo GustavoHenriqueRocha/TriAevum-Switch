@@ -291,6 +291,15 @@ class NativeA32Memory final : public oot3d::recomp::a32::MemoryBus {
                 reinterpret_cast<const uint8_t*>(&value), sizeof(value)));
     }
 
+    // In-place host update of a writable guest range (the DSP HLE's shared
+    // regions): BeginHostUpdate checks and accounts like ReadBytes of the range
+    // and returns its bytes; EndHostUpdate accounts like WriteBytes of the
+    // range's current bytes, without the copy. Read the range, modify it,
+    // write it back whole has the same observable effect, minus two copies.
+    // EndHostUpdate must keep WriteBytes' bookkeeping exactly.
+    uint8_t* BeginHostUpdate(uint32_t address, size_t size);
+    bool EndHostUpdate(uint32_t address, size_t size);
+
     // AOT code uses these non-virtual typed paths. Fully mapped guest pages
     // become one indexed host load; boundaries and protected pages preserve
     // the exact checked-memory behavior.

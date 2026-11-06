@@ -6,14 +6,16 @@
 //                                               frame), the PCM handed to the host and the
 //                                               savestates (msgpack bytes), with save/restore
 //                                               round trips in the middle of playback
-//   oot3d_native_audio_dsp_mix_tests --bench    also time a realistic OoT3D-like frame
+//   oot3d_native_audio_dsp_mix_tests --bench    also time OoT3D-like scenes (kBenchScenes: quiet,
+//                                               music, battle)
 //   oot3d_native_audio_dsp_mix_tests --digest   only print the digests
 //   oot3d_native_audio_dsp_mix_tests --bench-only
 //
 // kExpected below holds the digests of the original code (topscreen-3.0) for the host build
 // (x86-64, -O3 -ffast-math) and for the Switch flags (devkitA64 -O3 -ffast-math -mtune=cortex-a57,
 // run under qemu-aarch64 by run_audio_dsp_mix_tests_qemu.sh). The same file built against the old
-// audio_core prints the reference values.
+// audio_core and DSP HLE (copying Read/Write interface, see FakeGuest::Bind) prints the reference
+// values.
 #include "oot3d_native_a32_dsp_hle.h"
 
 #include "audio_core/hle/shared_memory.h"
@@ -26,6 +28,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <random>
 #include <span>
 #include <string>
@@ -78,19 +81,43 @@ struct FakeGuest {
     std::vector<u8> dsp = std::vector<u8>(kDspBytes);
     std::vector<u8> samples = std::vector<u8>(kSampleBytes);
     NativeDspMemoryAccess access;
+    // Region accesses of the last frame: 'r'/'w' and the address, in order.
+    std::vector<std::pair<char, u32>> accesses;
 
-    FakeGuest() {
-        access.Read = [this](u32 address, std::span<u8> out) {
-            if (address < kDspBase || address - kDspBase + out.size() > dsp.size()) return false;
-            std::memcpy(out.data(), dsp.data() + (address - kDspBase), out.size());
-            return true;
+    FakeGuest() { Bind(access); }
+    // The in-place interface (BeginUpdate/EndUpdate), or the copying one (Read/Write) of the
+    // pre-optimization code, so this file still builds against it to print reference digests.
+    template <typename Access>
+    void Bind(Access& target) {
+        const auto inside = [this](u32 address, std::size_t size) {
+            return address >= kDspBase && address - kDspBase + size <= dsp.size();
         };
-        access.Write = [this](u32 address, std::span<const u8> in) {
-            if (address < kDspBase || address - kDspBase + in.size() > dsp.size()) return false;
-            std::memcpy(dsp.data() + (address - kDspBase), in.data(), in.size());
-            return true;
-        };
-        access.ResolvePhysical = [this](u32 address, std::size_t size) -> const u8* {
+        if constexpr (requires { target.BeginUpdate; }) {
+            target.BeginUpdate = [this, inside](u32 address, std::size_t size) -> u8* {
+                if (!inside(address, size)) return nullptr;
+                accesses.emplace_back('r', address);
+                return dsp.data() + (address - kDspBase);
+            };
+            target.EndUpdate = [this, inside](u32 address, std::size_t size) {
+                if (!inside(address, size)) return false;
+                accesses.emplace_back('w', address);
+                return true;
+            };
+        } else {
+            target.Read = [this, inside](u32 address, std::span<u8> out) {
+                if (!inside(address, out.size())) return false;
+                accesses.emplace_back('r', address);
+                std::memcpy(out.data(), dsp.data() + (address - kDspBase), out.size());
+                return true;
+            };
+            target.Write = [this, inside](u32 address, std::span<const u8> in) {
+                if (!inside(address, in.size())) return false;
+                accesses.emplace_back('w', address);
+                std::memcpy(dsp.data() + (address - kDspBase), in.data(), in.size());
+                return true;
+            };
+        }
+        target.ResolvePhysical = [this](u32 address, std::size_t size) -> const u8* {
             if (address < kSampleBase || address - kSampleBase + size > samples.size()) return nullptr;
             return samples.data() + (address - kSampleBase);
         };
@@ -413,12 +440,21 @@ u64 RunTitle(u32 seed, unsigned frames, std::size_t* restoreCount) {
         }
 
         pcm.clear();
+        guest.accesses.clear();
         std::string error;
         if (!hle->ProcessFrame(guest.access, pcm, &error)) {
             Check(false, "ProcessFrame failed");
             return 0;
         }
         Check(pcm.size() == samples_per_frame * 2, "PCM size");
+        // Region traffic as the original: both regions read, then the one the guest filled
+        // (read) and the one the DSP filled written back, which the memory's write accounting
+        // sees.
+        const u32 readRegion = guestRegion ? kRegion1 : kRegion0;
+        const u32 writeRegion = guestRegion ? kRegion0 : kRegion1;
+        Check(guest.accesses == std::vector<std::pair<char, u32>>{{'r', kRegion0}, {'r', kRegion1},
+                                                                  {'w', readRegion}, {'w', writeRegion}},
+              "shared region reads and write-backs");
         digest.Bytes(reinterpret_cast<const u8*>(pcm.data()), pcm.size() * 2);
         for (unsigned index = 0; index < 2; ++index) {
             // DspStatus's padding words are copied from an uninitialized local by the original
@@ -465,6 +501,137 @@ constexpr Expected kExpected[] = {
 
 // ----- cost --------------------------------------------------------------------------------------
 
+// OoT3D-like frames: sequenced music (looping ADPCM instrument samples at varied pitch), a stereo
+// PCM16 stream on voice 0, one-shot ADPCM notes and sound effects (the last `oneShots` active
+// voices) retriggered every `retrigger` frames, a few filtered voices, the reverb send on aux 0
+// and the guest's aux return.
+struct BenchScene {
+    const char* name;
+    unsigned active;    // voices playing
+    unsigned oneShots;  // of which one-shots
+    unsigned retrigger; // frames between two one-shot triggers
+    // 0: each trigger picks a new address (frame % 64 * 512); otherwise triggers cycle through
+    // this many sample addresses with varied lengths, as notes and effects that repeat.
+    unsigned pool;
+};
+constexpr BenchScene kBenchScenes[] = {
+    {"quiet (10 voices, a sound every 40 frames)", 10, 2, 40, 0},
+    {"music (18 voices, a sound every 20 frames)", 18, 5, 20, 0},
+    {"battle (24 voices, a note or sound every 3 frames from 12 samples)", 24, 8, 3, 12},
+};
+
+struct BenchRun {
+    FakeGuest guest;
+    std::unique_ptr<NativeA32DspHle> hle;
+    std::vector<int16_t> pcm;
+    unsigned frame = 0;
+    u64 sink = 0;
+};
+
+void SetupBenchScene(const BenchScene& scene, SharedMemory& region) {
+    for (unsigned voice = 0; voice < num_sources; ++voice) {
+        Configuration& config = region.source_configurations.config[voice];
+        const bool active = voice < scene.active;
+        const bool stream = voice == 0;
+        const bool oneShot = active && voice >= scene.active - scene.oneShots;
+        config.enable = active;
+        config.enable_dirty.Assign(1);
+        config.rate_multiplier = stream ? 1.0f : 0.45f + 0.083f * voice;
+        config.rate_multiplier_dirty.Assign(1);
+        config.interpolation_mode = Configuration::InterpolationMode::Polyphase;
+        config.interpolation_dirty.Assign(1);
+        config.format.Assign(stream ? Configuration::Format::PCM16 : Configuration::Format::ADPCM);
+        config.mono_or_stereo.Assign(stream ? Configuration::MonoOrStereo::Stereo
+                                            : Configuration::MonoOrStereo::Mono);
+        config.format_dirty.Assign(1);
+        config.mono_or_stereo_dirty.Assign(1);
+        for (unsigned i = 0; i < 16; ++i) region.adpcm_coefficients.coeff[voice][i] = kAdpcmCoefficients[i];
+        config.adpcm_coefficients_dirty.Assign(1);
+        for (unsigned c = 0; c < 4; ++c) {
+            config.gain[0][c] = 0.35f + 0.01f * voice;
+            config.gain[1][c] = voice % 3 == 0 ? 0.2f : 0.0f;
+            config.gain[2][c] = 0.0f;
+        }
+        config.gain_0_dirty.Assign(1);
+        config.gain_1_dirty.Assign(1);
+        config.gain_2_dirty.Assign(1);
+        if (voice % 5 == 1) {
+            config.simple_filter_enabled.Assign(1);
+            config.biquad_filter_enabled.Assign(voice % 10 == 1);
+            config.simple_filter.b0 = 20000;
+            config.simple_filter.a1 = 12000;
+            config.biquad_filter.b0 = 9000;
+            config.biquad_filter.b1 = 4000;
+            config.biquad_filter.b2 = 2000;
+            config.biquad_filter.a1 = 3000;
+            config.biquad_filter.a2 = -1000;
+            config.filters_enabled_dirty.Assign(1);
+            config.simple_filter_dirty.Assign(1);
+            config.biquad_filter_dirty.Assign(1);
+        }
+        config.physical_address = kSampleBase + (stream ? 0 : static_cast<u32>(kSampleBytes / 2)) + voice * 4096;
+        config.length = stream ? 8192 : oneShot ? 20000 : 1500 + 700 * voice;
+        config.is_looping.Assign(!oneShot);
+        config.adpcm_dirty.Assign(1);
+        config.embedded_buffer_dirty.Assign(1);
+    }
+    region.dsp_configuration.master_volume = 1.0f;
+    region.dsp_configuration.aux_return_volume[0] = 0.6f;
+    region.dsp_configuration.aux_bus_enable[0] = 1;
+    region.dsp_configuration.output_format = DspConfiguration::OutputFormat::Stereo;
+    region.dsp_configuration.dirty_raw = 0xFFFFFFFFU;
+}
+
+// The scenes' sample memory, generated once.
+std::vector<u8> gBenchSamples;
+
+void StartBenchScene(const BenchScene& scene, BenchRun& run) {
+    if (gBenchSamples.empty()) {
+        std::mt19937 random(11);
+        gBenchSamples.resize(kSampleBytes);
+        FillSamples(gBenchSamples, random);
+    }
+    run.guest.samples = gBenchSamples;
+    std::memset(run.guest.dsp.data(), 0, run.guest.dsp.size());
+    SetupBenchScene(scene, run.guest.Region(0));
+    run.hle = std::make_unique<NativeA32DspHle>(
+        std::vector<Oot3dNativeGame::NativeA32DspPhysicalRegion>{{kSampleBase, 0, kSampleBytes}});
+    run.pcm.reserve(512);
+    run.frame = 0;
+}
+
+void StepBenchScene(const BenchScene& scene, BenchRun& run) {
+    const unsigned frame = run.frame++;
+    SharedMemory& region = run.guest.Region(frame & 1U);
+    if (frame == 0) SetupBenchScene(scene, region);
+    region.frame_counter = static_cast<u16>(frame + 1);
+    if (frame % scene.retrigger == 0) {
+        const unsigned trigger = frame / scene.retrigger;
+        Configuration& config =
+            region.source_configurations.config[scene.active - scene.oneShots + trigger % scene.oneShots];
+        const u32 encoded = kSampleBase + static_cast<u32>(kSampleBytes / 2);
+        if (scene.pool == 0) {
+            config.physical_address = encoded + frame % 64 * 512;
+        } else {
+            const unsigned sample = trigger * 7 % scene.pool;
+            config.physical_address = encoded + sample * 16384;
+            config.length = 3000 + sample * 1500;
+        }
+        config.buffer_id = static_cast<u16>(frame);
+        // A sample's own start context, whichever region the trigger lands in.
+        config.adpcm_dirty.Assign(1);
+        config.adpcm_yn[0] = 0;
+        config.adpcm_yn[1] = 0;
+        config.enable = 1;
+        config.enable_dirty.Assign(1);
+        config.embedded_buffer_dirty.Assign(1);
+    }
+    run.pcm.clear();
+    run.guest.accesses.clear();
+    run.hle->ProcessFrame(run.guest.access, run.pcm);
+    run.sink += static_cast<u16>(run.pcm[frame % run.pcm.size()]);
+}
+
 #if !defined(__SWITCH__) && !defined(OOT3D_QEMU_AARCH64_TEST)
 double ThreadSeconds() {
     timespec time{};
@@ -472,105 +639,21 @@ double ThreadSeconds() {
     return static_cast<double>(time.tv_sec) + time.tv_nsec * 1e-9;
 }
 
-// An OoT3D-like frame: sequenced music (looping ADPCM instrument samples at varied pitch), a
-// stereo PCM16 stream, sound effects retriggered from time to time, a few filtered voices, the
-// reverb send on aux 0 and the guest's aux return.
 void Benchmark() {
-    std::mt19937 random(11);
-    FakeGuest guest;
-    FillSamples(guest.samples, random);
-    std::memset(guest.dsp.data(), 0, guest.dsp.size());
-    auto setup = [&](SharedMemory& region) {
-        for (unsigned voice = 0; voice < num_sources; ++voice) {
-            Configuration& config = region.source_configurations.config[voice];
-            const bool active = voice < 18;
-            const bool stream = voice == 0;
-            const bool sfx = voice >= 13;
-            config.enable = active;
-            config.enable_dirty.Assign(1);
-            config.rate_multiplier = stream ? 1.0f : 0.45f + 0.083f * voice;
-            config.rate_multiplier_dirty.Assign(1);
-            config.interpolation_mode = Configuration::InterpolationMode::Polyphase;
-            config.interpolation_dirty.Assign(1);
-            config.format.Assign(stream ? Configuration::Format::PCM16 : Configuration::Format::ADPCM);
-            config.mono_or_stereo.Assign(stream ? Configuration::MonoOrStereo::Stereo
-                                                : Configuration::MonoOrStereo::Mono);
-            config.format_dirty.Assign(1);
-            config.mono_or_stereo_dirty.Assign(1);
-            for (unsigned i = 0; i < 16; ++i)
-                region.adpcm_coefficients.coeff[voice][i] = kAdpcmCoefficients[i];
-            config.adpcm_coefficients_dirty.Assign(1);
-            for (unsigned c = 0; c < 4; ++c) {
-                config.gain[0][c] = 0.35f + 0.01f * voice;
-                config.gain[1][c] = voice % 3 == 0 ? 0.2f : 0.0f;
-                config.gain[2][c] = 0.0f;
-            }
-            config.gain_0_dirty.Assign(1);
-            config.gain_1_dirty.Assign(1);
-            config.gain_2_dirty.Assign(1);
-            if (voice % 5 == 1) {
-                config.simple_filter_enabled.Assign(1);
-                config.biquad_filter_enabled.Assign(voice % 10 == 1);
-                config.simple_filter.b0 = 20000;
-                config.simple_filter.a1 = 12000;
-                config.biquad_filter.b0 = 9000;
-                config.biquad_filter.b1 = 4000;
-                config.biquad_filter.b2 = 2000;
-                config.biquad_filter.a1 = 3000;
-                config.biquad_filter.a2 = -1000;
-                config.filters_enabled_dirty.Assign(1);
-                config.simple_filter_dirty.Assign(1);
-                config.biquad_filter_dirty.Assign(1);
-            }
-            config.physical_address =
-                kSampleBase + (stream ? 0 : static_cast<u32>(kSampleBytes / 2)) + voice * 4096;
-            config.length = stream ? 8192 : sfx ? 20000 : 1500 + 700 * voice;
-            config.is_looping.Assign(!sfx);
-            config.adpcm_dirty.Assign(1);
-            config.embedded_buffer_dirty.Assign(1);
+    for (const BenchScene& scene : kBenchScenes) {
+        constexpr unsigned kFrames = 3000;
+        double best = 1e9;
+        for (unsigned round = 0; round < 7; ++round) {
+            BenchRun run;
+            StartBenchScene(scene, run);
+            const double begin = ThreadSeconds();
+            for (unsigned frame = 0; frame < kFrames; ++frame) StepBenchScene(scene, run);
+            best = std::min(best, (ThreadSeconds() - begin) / kFrames * 1e3);
+            if (run.sink == 0) std::printf("(silent)\n");
         }
-        region.dsp_configuration.master_volume = 1.0f;
-        region.dsp_configuration.aux_return_volume[0] = 0.6f;
-        region.dsp_configuration.aux_bus_enable[0] = 1;
-        region.dsp_configuration.output_format = DspConfiguration::OutputFormat::Stereo;
-        region.dsp_configuration.dirty_raw = 0xFFFFFFFFU;
-    };
-    setup(guest.Region(0));
-    guest.Region(0).frame_counter = 1;
-
-    constexpr unsigned kFrames = 3000;
-    auto run = [&] {
-        NativeA32DspHle hle({{kSampleBase, 0, kSampleBytes}});
-        std::vector<int16_t> pcm;
-        pcm.reserve(512);
-        u64 sink = 0;
-        const double begin = ThreadSeconds();
-        for (unsigned frame = 0; frame < kFrames; ++frame) {
-            SharedMemory& region = guest.Region(frame & 1U);
-            if (frame == 0) setup(region);
-            region.frame_counter = static_cast<u16>(frame + 1);
-            // Retrigger one sound effect every 20 frames.
-            if (frame % 20 == 0) {
-                Configuration& config = region.source_configurations.config[13 + frame / 20 % 5];
-                config.physical_address = kSampleBase + static_cast<u32>(kSampleBytes / 2) + frame % 64 * 512;
-                config.buffer_id = static_cast<u16>(frame);
-                config.enable = 1;
-                config.enable_dirty.Assign(1);
-                config.embedded_buffer_dirty.Assign(1);
-            }
-            pcm.clear();
-            hle.ProcessFrame(guest.access, pcm);
-            sink += static_cast<u16>(pcm[frame % pcm.size()]);
-        }
-        const double seconds = ThreadSeconds() - begin;
-        if (sink == 0) std::printf("(silent)\n");
-        return seconds / kFrames * 1e3;
-    };
-    double best = 1e9;
-    for (unsigned round = 0; round < 7; ++round) best = std::min(best, run());
-    std::printf("bench dsp mix (18 active voices, aux 0): %.4f ms per DSP frame, %.3f ms per 33.3 ms step "
-                "(6.82 frames)\n",
-                best, best * 6.82);
+        std::printf("bench dsp mix, %s: %.4f ms per DSP frame, %.3f ms per 33.3 ms step (6.82 frames)\n",
+                    scene.name, best, best * 6.82);
+    }
 }
 #endif
 } // namespace

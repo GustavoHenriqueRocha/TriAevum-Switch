@@ -911,6 +911,48 @@ bool NativeA32Memory::WriteHostBytes(
     return true;
 }
 
+uint8_t* NativeA32Memory::BeginHostUpdate(uint32_t address, size_t size) {
+    if (size == 0) {
+        return nullptr;
+    }
+    auto* region = FindRegion(address, size);
+    if (region == nullptr || !region->Writable) {
+        return nullptr;
+    }
+    // ReadBytes of the range.
+    if (!ResolveDeferredRead(address, size)) return nullptr;
+    if (!mWatchSuppressed && Watches(address, size)) [[unlikely]] {
+        ++mWatchCounters.ByteReads;
+    }
+    return region->Bytes.data() +
+           static_cast<size_t>(address - region->BaseAddress);
+}
+
+bool NativeA32Memory::EndHostUpdate(uint32_t address, size_t size) {
+    if (size == 0) {
+        return true;
+    }
+    auto* region = FindRegion(address, size);
+    if (region == nullptr || !region->Writable) {
+        return false;
+    }
+    // WriteBytes of the range's current bytes, without the copy.
+    const size_t offset = static_cast<size_t>(address - region->BaseAddress);
+    if (Watches(address, size)) [[unlikely]] {
+        if (mWatchSuppressed) {
+            ++mWatchCounters.SuppressedByteWrites;
+        } else {
+            ++mWatchCounters.ByteWrites;
+        }
+    }
+    if (mTraceWriteFingerprint) [[unlikely]] {
+        RecordTracedWrite(address, std::span<const uint8_t>(region->Bytes.data() + offset, size));
+    }
+    NoteWrite(address, size);
+    NotifyObservedWrite(address, size);
+    return true;
+}
+
 bool NativeA32Memory::Fill(uint32_t address, size_t size, uint8_t value) {
     if (size == 0) {
         return true;
