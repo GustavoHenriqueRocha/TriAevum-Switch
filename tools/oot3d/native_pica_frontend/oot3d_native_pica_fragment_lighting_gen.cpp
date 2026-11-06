@@ -4,6 +4,7 @@
 #include "fast/renderer3ds/pica_lighting_program.h"
 
 #include <array>
+#include <cctype>
 #include <charconv>
 #include <sstream>
 
@@ -117,6 +118,34 @@ std::string LightingLutDeclarations() {
       "    int entry_index = signed_index < 0 ? signed_index + 256 : signed_index;\n"
       "    return pica_lighting_lut_lookup(table_index, entry_index, delta);\n"
       "}\n";
+}
+
+// PicaLightingProgramBody for the parametric program: no local copy of the
+// program; `lp.` reads the uniform block, the LUT helper its uniform form.
+std::string UniformProgramBody() {
+  constexpr std::string_view copy =
+      "    PicaLightingProgram lp = pica_lighting_constant_program;\n";
+  constexpr std::string_view lutCall = "pica_program_lut(lp, ";
+  constexpr std::string_view member = "lp.";
+  const std::string_view body = Fast::Renderer3ds::PicaLightingProgramBody;
+  std::string result;
+  result.reserve(body.size() + 1024U);
+  for (size_t at = 0; at < body.size();) {
+    const bool wordStart =
+        at == 0 || !(std::isalnum(static_cast<unsigned char>(body[at - 1])) || body[at - 1] == '_');
+    if (body.compare(at, copy.size(), copy) == 0) {
+      at += copy.size();
+    } else if (wordStart && body.compare(at, lutCall.size(), lutCall) == 0) {
+      result += "pica_uniform_program_lut(";
+      at += lutCall.size();
+    } else if (wordStart && body.compare(at, member.size(), member) == 0) {
+      result += "fragment_uniforms.lighting_program.";
+      at += member.size();
+    } else {
+      result += body[at++];
+    }
+  }
+  return result;
 }
 
 } // namespace
@@ -279,11 +308,9 @@ bool GenerateOot3dPicaFragmentLightingSource(const Oot3dPicaDrawPacket &packet,
 
   // One lighting text for both programs: the specialized program runs it with
   // its program as a constant (the compiler folds every branch), the
-  // always-available program reads the same program from the draw's uniforms.
-  // Both evaluate the same operations in the same order and produce the same
-  // bits, so a draw can swap between them.
-  const std::string program = parametric ? "fragment_uniforms.lighting_program"
-                                         : "pica_lighting_constant_program";
+  // always-available program reads the same program from the draw's uniforms
+  // where it uses it. Both evaluate the same operations in the same order and
+  // produce the same bits, so a draw can swap between them.
   declarations = std::string(Fast::Renderer3ds::PicaLightingArithmeticFunctions) +
       "vec3 pica_quaternion_rotate(vec4 q, vec3 v) {\n"
       "    precise vec3 rotated = v + 2.0 * pica_lighting_cross(q.xyz, "
@@ -300,7 +327,8 @@ bool GenerateOot3dPicaFragmentLightingSource(const Oot3dPicaDrawPacket &packet,
     declarations += "float pica_lighting_lut_unsigned(int t, float p) { return 1.0; }\n"
                     "float pica_lighting_lut_signed(int t, float p) { return 1.0; }\n";
   }
-  declarations += Fast::Renderer3ds::PicaLightingProgramFunctions;
+  declarations += parametric ? Fast::Renderer3ds::PicaLightingUniformProgramFunctions
+                             : Fast::Renderer3ds::PicaLightingProgramFunctions;
   std::ostringstream source;
   // `precise`: no contraction, so folding the constant program cannot fuse
   // the specialized program's operations differently.
@@ -313,7 +341,8 @@ bool GenerateOot3dPicaFragmentLightingSource(const Oot3dPicaDrawPacket &packet,
   }
   source << "    vec3 pica_surface_normal, pica_surface_tangent;\n"
             "    vec4 pica_shadow_factor;\n"
-            "    pica_program_surface(" << program << ", "
+         << (parametric ? "    pica_uniform_program_surface("
+                        : "    pica_program_surface(pica_lighting_constant_program, ")
          << (bumpTextureSample.empty() ? "vec4(0.0)" : bumpTextureSample) << ", "
          << (shadowTextureSample.empty() ? "vec4(1.0)" : shadowTextureSample)
          << ", pica_surface_normal, pica_surface_tangent, pica_shadow_factor);\n";
@@ -325,12 +354,7 @@ bool GenerateOot3dPicaFragmentLightingSource(const Oot3dPicaDrawPacket &packet,
             "    vec3 normal = pica_lighting_normal;\n"
             "    vec3 tangent = pica_lighting_tangent;\n"
             "    precise vec3 pica_normalized_view = pica_lighting_normalize(pica_view);\n";
-  std::string body(Fast::Renderer3ds::PicaLightingProgramBody);
-  const std::string uniformProgram = "fragment_uniforms.lighting_program";
-  for (size_t at = body.find(uniformProgram); at != std::string::npos;
-       at = body.find(uniformProgram, at + program.size()))
-    body.replace(at, uniformProgram.size(), program);
-  source << body;
+  source << (parametric ? UniformProgramBody() : std::string(Fast::Renderer3ds::PicaLightingProgramBody));
   source << "    pica_diffuse_sum.rgb += "
             "fragment_uniforms.lighting_global_ambient.rgb;\n"
             "    primary_fragment_color = clamp(pica_diffuse_sum, vec4(0.0), "

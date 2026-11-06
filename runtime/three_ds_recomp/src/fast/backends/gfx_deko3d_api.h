@@ -191,6 +191,11 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
         Deko3d::PicaProgramPick Pick = Deko3d::PicaProgramPick::NoVertex;
         const DkShader* Vertex = nullptr;
         const DkShader* Fragment = nullptr;
+        // The class of the base (native) fragment program (per-frame
+        // breakdown, and a spilling base gets no lighting variant).
+        Deko3d::PicaBaseClass Base = Deko3d::PicaBaseClass::Normal;
+        // config/lighting: drawn with the mode's variant.
+        bool Lit = false;
         // config/lighting perpixel: the draw binds mSurfaceLighting at
         // Deko3d::kSurfaceLightingBinding.
         bool SurfaceLighting = false;
@@ -290,6 +295,8 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     Deko3d::PicaStageCache<DkShader> mVertexStages;
     Deko3d::PicaStageCache<DkShader> mFragmentStages;
     uint64_t mTranslationFailures = 0;
+    // Issued draws by base program class (logs/deko3d.txt, per frame).
+    Deko3d::PicaFrameDrawWindow mFrameDraws;
     // config/lighting: the mode in use, the live settings revision applied,
     // the variants per native fragment identity (one cache per mode) and per
     // vertex identity and hooks, the frame's environment profile (per-pixel)

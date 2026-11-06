@@ -686,6 +686,7 @@ bool GenerateOot3dPicaFragmentShader(
                        : Fast::Renderer3ds::PicaFloatTexture0Program);
         source << "vec4 pica_native_texture3() { return pica_sample_proctex(); }\n";
         source << Fast::Renderer3ds::PicaTextureSelectionProgram;
+        source << Fast::Renderer3ds::PicaTevUniformEvaluatorGlsl();
     }
     source << lightingDeclarations;
     hooks.Offsets[static_cast<size_t>(
@@ -824,16 +825,14 @@ bool GenerateOot3dPicaFragmentShader(
         source << "    PicaTevInputs tev_inputs;\n"
                   "    tev_inputs.primary = rounded_primary_color;\n"
                   "    tev_inputs.primary_fragment = primary_fragment_color;\n"
-                  "    tev_inputs.secondary_fragment = secondary_fragment_color;\n"
-                  "    tev_inputs.buffer_color = fragment_uniforms.combiner_buffer_color;\n"
-                  "    for(int i=0;i<6;++i) tev_inputs.constants[i]=fragment_uniforms.tev_constants[i];\n";
+                  "    tev_inputs.secondary_fragment = secondary_fragment_color;\n";
         // Fixed unit dispatch lets the GPU compiler eliminate irrelevant sampler paths.
         for (unsigned unit = 0; unit < 4; ++unit) {
             source << "    tev_inputs.textures[" << unit << "] = (fragment_uniforms.tev_program.control.y & "
                    << (1U << unit) << "u) != 0u ? pica_native_texture(" << unit
                    << "u, pica_texcoord0, pica_texcoord1, pica_texcoord2) : vec4(0.0);\n";
         }
-        source << "    combiner_output = pica_evaluate_tev_resolved(fragment_uniforms.tev_program, tev_inputs);\n";
+        source << "    combiner_output = pica_evaluate_tev_uniform(tev_inputs);\n";
         if (!supported) { SetError(error, "parametric TEV texture interface unsupported"); return false; }
     }
     hooks.Offsets[static_cast<size_t>(
@@ -954,12 +953,14 @@ bool GenerateOot3dPicaFragmentShader(
 
 bool GenerateOot3dPicaParametricBaseFragmentShader(
     bool fragmentLighting, bool integerTexture0,
-    Oot3dPicaGeneratedFragmentShader& shader, std::string* error) {
+    Oot3dPicaGeneratedFragmentShader& shader, std::string* error, bool lightingLuts) {
     auto packet = std::make_unique<Oot3dPicaDrawPacket>();
     Oot3dPicaDecodedDrawState state{};
     packet->Registers[0x8FU] = fragmentLighting ? 1U : 0U;
     packet->Registers[0x80U] = 1U;
     packet->Registers[0x83U] = integerTexture0 ? 2U << 28U : 0U;
+    // Config1: every lookup table and per-light attenuation disabled.
+    if (!lightingLuts) packet->Registers[0x1C4U] = 0xFF7FFFFFU;
     state.Textures[0].Enabled = true;
     state.Textures[0].Type = integerTexture0 ? 2U : 0U;
     return GenerateOot3dPicaFragmentShader(*packet, state, shader, error,

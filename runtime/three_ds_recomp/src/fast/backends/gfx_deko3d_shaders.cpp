@@ -54,7 +54,7 @@ const DkShader* ShaderStore::Find(ShaderStage stage, std::string_view text) {
 
 const DkShader* ShaderStore::FindKey(ShaderStage stage, uint64_t key, std::string_view textForRecord) {
     if (const auto found = mLoaded.find(key); found != mLoaded.end()) {
-        return found->second.get();
+        return &found->second->Shader;
     }
     ShaderStage packedStage = stage;
     const auto dksh = mPack.Find(key, &packedStage);
@@ -67,7 +67,7 @@ const DkShader* ShaderStore::FindKey(ShaderStage stage, uint64_t key, std::strin
 
 const DkShader* ShaderStore::Embedded(uint64_t key, std::span<const uint8_t> dksh) {
     if (const auto found = mLoaded.find(key); found != mLoaded.end()) {
-        return found->second.get();
+        return &found->second->Shader;
     }
     return Load(key, dksh);
 }
@@ -93,11 +93,12 @@ const DkShader* ShaderStore::Load(uint64_t key, std::span<const uint8_t> dksh) {
         return nullptr;
     }
     std::memcpy(static_cast<uint8_t*>(dkMemBlockGetCpuAddr(mCode)) + at, dksh.data(), dksh.size());
-    auto shader = std::make_unique<DkShader>();
+    auto shader = std::make_unique<Loaded>();
+    shader->Needs = {DkshGprCount(dksh).value_or(0U), *scratch};
     DkShaderMaker maker;
     dkShaderMakerDefaults(&maker, mCode, at);
-    dkShaderInitialize(shader.get(), &maker);
-    if (!dkShaderIsValid(shader.get())) {
+    dkShaderInitialize(&shader->Shader, &maker);
+    if (!dkShaderIsValid(&shader->Shader)) {
         if (mStats.LoadFailures++ < 10U) {
             Log("shaders: %016llx (%zu bytes) is not a valid shader", static_cast<unsigned long long>(key),
                 dksh.size());
@@ -108,7 +109,7 @@ const DkShader* ShaderStore::Load(uint64_t key, std::span<const uint8_t> dksh) {
     mStats.CodeBytes = mCodeUsed;
     ++mStats.Loaded;
     mCodeWritten = true;
-    return mLoaded.emplace(key, std::move(shader)).first->second.get();
+    return &mLoaded.emplace(key, std::move(shader)).first->second->Shader;
 }
 
 void ShaderStore::RecordMissing(ShaderStage stage, uint64_t key, std::string_view text) {

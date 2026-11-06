@@ -191,6 +191,7 @@ void GfxRenderingAPIDeko3d::FinishRender() {
     mDevice.EndFrame(GetWindowAcquireHook());
     mWindowBound = false;
     mBoundTarget = nullptr;
+    mFrameDraws.EndFrame();
     if (Deko3dPicaLogDue(mDevice.Frame())) {
         LogPicaProgramCounters("frame");
     }
@@ -400,10 +401,18 @@ GfxRenderingAPIDeko3d::PicaProgram GfxRenderingAPIDeko3d::ResolvePicaProgram(con
     }
     program.Pick = Deko3d::PickPicaProgram(program.Vertex != nullptr, specialized != nullptr, uber != nullptr);
     program.Fragment = specialized != nullptr ? specialized : uber;
+    if (program.Fragment != nullptr) {
+        program.Base = Deko3d::ClassifyPicaBase(
+            specialized == nullptr, Deko3d::ShaderStore::ResourcesOf(*program.Fragment).ScratchBytes);
+    }
     mCounters.Programs.Count(program.Pick);
     if (mLightingMode != Deko3d::LightingMode::Off && program.Vertex != nullptr && program.Fragment != nullptr) {
-        // The variant of the text the native draw uses (specialized or uber).
-        if (specialized != nullptr) {
+        if (program.Base == Deko3d::PicaBaseClass::Spilling) {
+            // Its variants spill too: native shading.
+            ++mLightingCounters.DrawsSpillingBase;
+            ++mLightingCounters.DrawsIneligible;
+        } else if (specialized != nullptr) {
+            // The variant of the text the native draw uses (specialized or uber).
             ApplyPicaLighting(draw, draw.FragmentShaderSource, draw.FragmentShaderSourceIdentity, program);
         } else {
             ApplyPicaLighting(draw, draw.UberFragmentShaderSource, draw.UberFragmentShaderSourceIdentity, program);
@@ -555,6 +564,7 @@ void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw,
                                                                     fragment, mLightingCounters);
         program.Vertex = choice.Vertex;
         program.Fragment = choice.Fragment;
+        program.Lit = choice.Lit;
         return;
     }
     // Per-pixel: both variants, then the block (only for a draw that uses them).
@@ -562,6 +572,11 @@ void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw,
     if (draw.CompositionDomain != Renderer3ds::PicaCompositionDomain::Scene ||
         !Renderer3ds::PicaCompositionReceivesSurfaceLighting(draw.Composition.Layer) ||
         hooks.SurfaceProgram() == nullptr || hooks.TransformProgram() == nullptr) {
+        ++mLightingCounters.DrawsIneligible;
+        return;
+    }
+    if (!Deko3d::PerPixelCostAdmits(draw.Blend.Enabled, draw.DepthWriteEnabled)) {
+        ++mLightingCounters.DrawsNotOpaque;
         ++mLightingCounters.DrawsIneligible;
         return;
     }
@@ -577,6 +592,7 @@ void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw,
         Deko3d::ChooseLightingProgram<DkShader>(program.Vertex, program.Fragment, vertex, fragment, mLightingCounters);
     program.Vertex = choice.Vertex;
     program.Fragment = choice.Fragment;
+    program.Lit = choice.Lit;
     program.SurfaceLighting = choice.Lit;
 }
 
@@ -587,26 +603,38 @@ void GfxRenderingAPIDeko3d::LogLightingCounters(const char* when) {
         return;
     }
     // The GPU cost: dkperf busy_ms in logs/perf.txt (same windows), against
-    // a run with the mode off.
+    // a run with the mode off. Per frame: the lit draws of the last frame and
+    // the window's average (points: per-pixel draws by scene point lights).
+    const auto& frames = mFrameDraws;
     Deko3d::Log("lighting (%s): mode=%s variants found=%llu missing=%llu unsupported=%llu; draws lit=%llu "
-                "native=%llu ineligible=%llu (GPU cost: dkperf busy_ms in perf.txt)",
+                "native=%llu ineligible=%llu (spilling base=%llu not opaque=%llu); per frame lit %s | avg of %llu %s",
                 when, Deko3d::LightingModeName(mLightingMode), static_cast<unsigned long long>(c.VariantsFound),
                 static_cast<unsigned long long>(c.VariantsMissing),
                 static_cast<unsigned long long>(c.VariantsUnsupported), static_cast<unsigned long long>(c.DrawsLit),
-                static_cast<unsigned long long>(c.DrawsNative), static_cast<unsigned long long>(c.DrawsIneligible));
+                static_cast<unsigned long long>(c.DrawsNative), static_cast<unsigned long long>(c.DrawsIneligible),
+                static_cast<unsigned long long>(c.DrawsSpillingBase), static_cast<unsigned long long>(c.DrawsNotOpaque),
+                Deko3d::FormatPicaLitDraws(frames.Last, 1U).c_str(), static_cast<unsigned long long>(frames.Frames),
+                Deko3d::FormatPicaLitDraws(frames.Sum, frames.Frames).c_str());
 }
 
 void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
     const auto& programs = mCounters.Programs;
     const auto& shaders = mShaders.Stats();
+    // Per frame, by base fragment program class: draws/lit draws and
+    // viewport-in-scissor pixels/lit pixels (millions), the last frame and
+    // the average since the previous line.
+    const auto& frames = mFrameDraws;
     Deko3d::Log("programs (%s): draws specialized=%llu uber=%llu no_vertex=%llu no_fragment=%llu; "
-                "stages vertex=%zu fragment=%zu loaded=%llu missing=%llu code=%llu KiB",
+                "stages vertex=%zu fragment=%zu loaded=%llu missing=%llu code=%llu KiB; per frame %s | avg of %llu %s",
                 when, static_cast<unsigned long long>(programs.Specialized),
                 static_cast<unsigned long long>(programs.Uber), static_cast<unsigned long long>(programs.NoVertex),
                 static_cast<unsigned long long>(programs.NoFragment), mVertexStages.Size(), mFragmentStages.Size(),
                 static_cast<unsigned long long>(shaders.Loaded), static_cast<unsigned long long>(shaders.Missing),
-                static_cast<unsigned long long>(shaders.CodeBytes >> 10));
+                static_cast<unsigned long long>(shaders.CodeBytes >> 10),
+                Deko3d::FormatPicaClassDraws(frames.Last, 1U).c_str(), static_cast<unsigned long long>(frames.Frames),
+                Deko3d::FormatPicaClassDraws(frames.Sum, frames.Frames).c_str());
     LogLightingCounters(when);
+    mFrameDraws.StartWindow();
     const auto& resources = mResources.Stats();
     Deko3d::Log("resources (%s): draws prepared=%llu rejected=%llu; textures created=%llu evicted=%llu "
                 "live=%llu MiB predecoded=%llu failures=%llu shadow_fallbacks=%llu unsupported_wraps=%llu "

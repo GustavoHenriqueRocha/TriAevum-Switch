@@ -650,6 +650,19 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         RememberGrassScene(target, viewport, dkScissor, DekoCompareOp(draw.DepthCompare));
     }
     mDevice.Checkpoint("draw.viewport");
+    {
+        // Per-frame breakdown (logs/deko3d.txt): the viewport inside the scissor.
+        const int64_t x0 = std::max<int64_t>(viewport.X, dkScissor.x);
+        const int64_t y0 = std::max<int64_t>(viewport.Y, dkScissor.y);
+        const int64_t x1 = std::min<int64_t>(int64_t{viewport.X} + viewport.Width, int64_t{dkScissor.x} + dkScissor.width);
+        const int64_t y1 =
+            std::min<int64_t>(int64_t{viewport.Y} + viewport.Height, int64_t{dkScissor.y} + dkScissor.height);
+        const uint64_t pixels = x1 > x0 && y1 > y0 ? static_cast<uint64_t>((x1 - x0) * (y1 - y0)) : 0U;
+        mFrameDraws.Current.Count(program.Base, program.Lit, draw.Blend.Enabled, pixels);
+        if (program.SurfaceLighting) {
+            mFrameDraws.Current.CountSurfaceLighting(mSurfaceLighting.Control[1], mSurfaceLighting.Rim[0] > 0.0F);
+        }
+    }
 
     const auto primitive = static_cast<DkPrimitive>(DekoPrimitive(draw.Topology));
     if (draw.Indexed) {

@@ -154,6 +154,32 @@ GUARDS = [
     Guard("deko3d per-pixel lighting: the draw binds the surface block at kSurfaceLightingBinding (5)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'dkCmdBufBindUniformBuffer\(cmd, DkStage_Fragment, Deko3d::kSurfaceLightingBinding, res\.SurfaceLighting,'),
+    # --- lighting3: Forest Temple room 8, 16.7 ms off / 38.4 ms per-pixel busy_ms (spilling parametric programs) ---
+    Guard("lighting3: the parametric lighting copied its 256-byte program to a local; the loop's dynamic light index put it in scratch (105 GPRs, 4096 B/warp)",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_fragment_lighting_gen.cpp",
+          r'parametric \? Fast::Renderer3ds::PicaLightingUniformProgramFunctions.*?'
+          r'parametric \? UniformProgramBody\(\)',
+          test="oot3d_native_pica_program_descriptor_tests (TestParametricRegisterPressure)"),
+    Guard("lighting3: the parametric TEV copied its constants and selected sources with switches (97 GPRs unlit)",
+          "runtime/three_ds_recomp/src/fast/renderer3ds/pica_tev_program.cpp",
+          r'vec4 pica_evaluate_tev_uniform\(PicaTevInputs inputs\).*?fragment_uniforms\.tev_constants\[stage\]',
+          test="oot3d_native_pica_program_descriptor_tests (TestParametricRegisterPressure)",
+          forbid=r'case 14u: return inputs\.constants\[stage\];'),
+    Guard("lighting3: the no-LUT lit parametric base (console-recorded 08743ed174a0fce1) is dumped into the pack",
+          "tools/oot3d/deko3d_parametric_glsl_dump.cpp",
+          r'\{true, false, false\}, \{true, true, false\}'),
+    Guard("lighting3: a draw whose base fragment program spills keeps native shading (its variants spill too)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'if \(program\.Base == Deko3d::PicaBaseClass::Spilling\) \{.*?\+\+mLightingCounters\.DrawsSpillingBase;',
+          test="oot3d_deko3d_backend_tests (TestFrameBreakdown)"),
+    Guard("lighting3: per-pixel only on opaque draws that write depth",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'if \(!Deko3d::PerPixelCostAdmits\(draw\.Blend\.Enabled, draw\.DepthWriteEnabled\)\) \{',
+          test="oot3d_deko3d_lighting_tests (TestPerPixel)"),
+    Guard("lighting3: logs/deko3d.txt counts each issued draw by base program class (per-frame breakdown)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'mFrameDraws\.Current\.Count\(program\.Base, program\.Lit, draw\.Blend\.Enabled, pixels\);',
+          test="oot3d_deko3d_backend_tests (TestFrameBreakdown)"),
     # --- 05/11: a guest memory fault in the final battle said only "kind=4 pc=0x004C0A8C" ---
     # The text parser (TextTokenUtf8_ParseNext) met 7f + a code past its table and copied argument words
     # over the stack; the log could not tell which thread, which text or which caller.

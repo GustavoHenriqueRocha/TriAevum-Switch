@@ -99,6 +99,7 @@ void TestDkshScratch() {
   Put32(dksh, 0x40 + 8, 105);
   Put32(dksh, 0x40 + 20, 4096);
   Require(DkshPerWarpScratchBytes(dksh) == 4096U, "reads per_warp_scratch_sz");
+  Require(DkshGprCount(dksh) == 105U, "reads num_gprs");
   Require(kPerWarpScratchBytes >= 4096U && kPerWarpScratchBytes % 0x200U == 0U,
           "the queue covers the pack's shaders (multiple of 0x200)");
   Put32(dksh, 20, 0);
@@ -107,7 +108,7 @@ void TestDkshScratch() {
   Put32(dksh, 16, 0x7C);
   Require(!DkshPerWarpScratchBytes(dksh).has_value(), "header past the end fails");
   Put32(dksh, 0, 0);
-  Require(!DkshPerWarpScratchBytes(dksh).has_value(), "no DKSH fails");
+  Require(!DkshPerWarpScratchBytes(dksh).has_value() && !DkshGprCount(dksh).has_value(), "no DKSH fails");
 }
 
 // p6d-p6j: binding the 16 vertex buffers wrote past the command block
@@ -131,6 +132,47 @@ void TestProgramPick() {
   counters.Count(PicaProgramPick::Uber);
   counters.Count(PicaProgramPick::NoVertex);
   Require(counters.Uber == 2 && counters.NoVertex == 1 && counters.Specialized == 0, "counters per pick");
+}
+
+// lighting3: the per-frame breakdown of logs/deko3d.txt (programs and
+// lighting lines) by base fragment program class.
+void TestFrameBreakdown() {
+  using namespace Fast::Deko3d;
+  Require(ClassifyPicaBase(false, 0U) == PicaBaseClass::Normal, "specialized without scratch: normal");
+  Require(ClassifyPicaBase(true, 0U) == PicaBaseClass::Parametric, "uber without scratch: parametric");
+  Require(ClassifyPicaBase(true, 4096U) == PicaBaseClass::Spilling &&
+              ClassifyPicaBase(false, 512U) == PicaBaseClass::Spilling,
+          "any scratch: spilling");
+  PicaFrameDrawWindow window;
+  window.Current.Count(PicaBaseClass::Parametric, true, false, 1000000U);
+  window.Current.Count(PicaBaseClass::Parametric, false, true, 500000U);
+  window.Current.Count(PicaBaseClass::Normal, true, true, 250000U);
+  window.Current.CountSurfaceLighting(2U, true);
+  window.Current.CountSurfaceLighting(9U, false); // above the trim: the last bucket
+  window.EndFrame();
+  Require(window.Current.Classes[1].Draws == 0U && window.Last.Classes[1].Draws == 2U &&
+              window.Last.Classes[1].Lit == 1U && window.Last.Classes[1].Pixels == 1500000U &&
+              window.Last.Classes[1].LitPixels == 1000000U,
+          "per class: draws, lit draws, pixels");
+  Require(window.Last.LitOpaque == 1U && window.Last.LitTranslucent == 1U, "lit opaque vs translucent");
+  Require(window.Last.LitPointLights[2] == 1U && window.Last.LitPointLights[4] == 1U && window.Last.LitRim == 1U,
+          "points per lit draw and rim");
+  window.Current.Count(PicaBaseClass::Spilling, false, false, 100U);
+  window.EndFrame();
+  Require(window.Frames == 2U && window.Sum.Classes[1].Draws == 2U && window.Sum.Classes[0].Draws == 1U &&
+              window.Last.Classes[1].Draws == 0U,
+          "window sums frames, last is the last frame");
+  Require(FormatPicaClassDraws(window.Sum, 1U) ==
+              "spill=1/0 px=0.00/0.00M parametric=2/1 px=1.50/1.00M normal=1/1 px=0.25/0.25M",
+          FormatPicaClassDraws(window.Sum, 1U).c_str());
+  Require(FormatPicaClassDraws(window.Sum, 2U).find("parametric=1/") != std::string::npos &&
+              FormatPicaClassDraws(window.Sum, 2U).find("px=0.75/0.50M") != std::string::npos,
+          "window average per frame");
+  Require(FormatPicaLitDraws(window.Sum, 1U) == "opaque=1 translucent=1 points 0/1/2/3/4=0/0/1/0/1 rim=1",
+          FormatPicaLitDraws(window.Sum, 1U).c_str());
+  window.StartWindow();
+  Require(window.Frames == 0U && window.Sum.Classes[1].Draws == 0U && window.Last.Classes[0].Draws == 1U,
+          "a log line starts a new window");
 }
 
 // Drawing regression: each text is translated/looked up in the pack only once

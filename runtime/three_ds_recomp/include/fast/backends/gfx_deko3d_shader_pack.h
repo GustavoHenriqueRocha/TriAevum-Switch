@@ -46,17 +46,17 @@ constexpr uint32_t kShaderPackVersion = 1U;
 constexpr uint32_t kDkshMagic = 0x48534B44U;       // "DKSH"
 
 // Per-warp scratch (local memory) the queue gives every shader
-// (DkQueueMaker::perWarpScratchMemorySize, a multiple of 0x200): two
-// lighting fragment shaders of the pack need 4096 bytes (105 GPRs, spills),
-// above deko3d's default 2048. (Not the crash leaving Link's house, p6g:
-// that was the command memory, kCommandGuardBytes.)
+// (DkQueueMaker::perWarpScratchMemorySize, a multiple of 0x200): the lit
+// parametric programs once needed 4096 bytes (105 GPRs, spills; none since
+// lighting3), above deko3d's default 2048. (Not the crash leaving Link's
+// house, p6g: that was the command memory, kCommandGuardBytes.)
 constexpr uint32_t kPerWarpScratchBytes = 8U << 10;
 
-// The per-warp scratch a DKSH's first program needs (DkshHeader: magic,
-// header_sz, control_sz, code_sz, programs_off, num_programs; its
-// DkshProgramHeader: type, entrypoint, num_gprs, constbuf1_off,
-// constbuf1_sz, per_warp_scratch_sz), or nothing if the blob is malformed.
-[[nodiscard]] inline std::optional<uint32_t> DkshPerWarpScratchBytes(std::span<const uint8_t> dksh) {
+// A word of a DKSH's first program header (DkshHeader: magic, header_sz,
+// control_sz, code_sz, programs_off, num_programs; its DkshProgramHeader:
+// type, entrypoint, num_gprs (+8), constbuf1_off, constbuf1_sz,
+// per_warp_scratch_sz (+20)), or nothing if the blob is malformed.
+[[nodiscard]] inline std::optional<uint32_t> DkshProgramWord(std::span<const uint8_t> dksh, size_t offset) {
     const auto read = [&](size_t at, uint32_t& value) {
         if (at + sizeof(value) > dksh.size()) {
             return false;
@@ -67,12 +67,22 @@ constexpr uint32_t kPerWarpScratchBytes = 8U << 10;
     uint32_t magic = 0;
     uint32_t programsOffset = 0;
     uint32_t programs = 0;
-    uint32_t scratch = 0;
+    uint32_t word = 0;
     if (!read(0, magic) || magic != kDkshMagic || !read(16, programsOffset) || !read(20, programs) || programs == 0U ||
-        !read(static_cast<size_t>(programsOffset) + 20U, scratch)) {
+        !read(static_cast<size_t>(programsOffset) + offset, word)) {
         return std::nullopt;
     }
-    return scratch;
+    return word;
+}
+
+// The per-warp scratch (local memory) a DKSH's first program needs.
+[[nodiscard]] inline std::optional<uint32_t> DkshPerWarpScratchBytes(std::span<const uint8_t> dksh) {
+    return DkshProgramWord(dksh, 20U);
+}
+
+// The registers (GPRs per thread) a DKSH's first program uses.
+[[nodiscard]] inline std::optional<uint32_t> DkshGprCount(std::span<const uint8_t> dksh) {
+    return DkshProgramWord(dksh, 8U);
 }
 
 struct ShaderPackEntry {

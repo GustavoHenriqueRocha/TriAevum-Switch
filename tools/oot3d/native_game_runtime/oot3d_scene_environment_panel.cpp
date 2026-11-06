@@ -85,6 +85,10 @@ private:
           ? "Inactive: choose Per-pixel (the Modern lighting model) in Video > Lighting."
           : "Inactive: needs the Modern lighting model, " TRIAEVUM_KEY_HINT("native override", "F2 native override") " off "
             "and a supported renderer.");
+    if (deko3d)
+      ImGui::TextWrapped("Switch renderer, for frame time: per-pixel lights only opaque surfaces that write depth; "
+                         "blended ones (water, glass, smoke, effects) and draws whose native program spills keep "
+                         "native lighting.");
     ImGui::BeginDisabled(!value.Enabled || !supported);
     changed |= ImGui::Checkbox("Preserve scene brightness", &value.PreserveSceneBrightness);
     ImGui::TextWrapped(

@@ -1577,7 +1577,10 @@ scheduler. Absent = the previous single-thread code paths exactly (nothing below
   again). The release profiles (`runtime/triaevum_resources/environments/`) ship inside `resources.o2r`
   (`environments/`, `scripts/switch/stage-product.sh`) and are read from it only while the Modern model
   is on under deko3d (`SceneEnvironmentRuntime::SetDefaultsReader`). Nothing ties it to `config/fps60`:
-  it runs at 30 or 60 fps; at 60 fps its 1-2.5 ms can drop frames in busy rooms (the Video tab says so).
+  it runs at 30 or 60 fps. **Kept native for cost (lighting3):** blended draws and draws that write no
+  depth (`PerPixelCostAdmits`), and, in both modes, draws whose base fragment program spills (none in
+  the pack now; their variants would spill too). The Scene lights tab says so. Points 3-4 and every
+  rim evaluation sit behind their own uniform branches (same sums in the same order).
 - **Lighting > Scene lights under per-pixel (0.1.2-test.2 said "needs the Modern lighting model"):**
   active by one rule (`SceneEnvironmentActive`: capability, Modern model, not Authentic, no native
   override). Live through the published environment: Use scene environment, Preserve scene
@@ -1598,21 +1601,38 @@ scheduler. Absent = the previous single-thread code paths exactly (nothing below
   `deko3d_shader_pack.py --glsl logs/deko3d_shaders --pack deko3d.pack -o deko3d.pack` adds it, and the
   second run draws per-pixel. Both mutations are idempotent, so recorded variant texts can go back
   through the tool unchanged.
-- **Pack (05/11, reference p7b + bases + console-missing):** 287 fragment texts, all 287 toon and 287
-  per-pixel variants compile with uam; 1.77 MB before, 8.14 MB after (toon +1.97 MB, about 6.9 KB
-  each; per-pixel +4.54 MB, about 15.8 KB each; native fragments average 5.0 KB). Scratch per warp:
-  at most 4096 bytes (3 variants per mode use some, like 3 native stages), under the queue's 8 KiB;
-  the tool now refuses any stage above it. Existing entries stay byte for byte.
+- **Pack (06/11, lighting3: reference p7b + six bases + console-missing):** 288 fragment texts, 288 toon
+  and 288 per-pixel variants, 0 uam failures, **no stage uses scratch** (before: 3 per kind at 4096
+  bytes per warp, 105-106 GPRs); 14.5 MB merged. Bases: the parametric (uber) programs no longer copy
+  their TEV and lighting programs into locals (the lighting copy's light table, indexed by the light
+  loop, went to scratch) and pick TEV sources/operands with if chains; lit 105 → 73 GPRs, unlit 97 →
+  65; same output (lavapipe comparison of both texts over random uniform blocks, bit for bit). The
+  sixth base is the lit family without lookup tables, which the console recorded in the Forest Temple
+  as `frag_08743ed174a0fce1` (now `frag_251773f35edd5102`, dumped by `oot3d_deko3d_parametric_glsl_dump`):
+  drop the old file from `console-missing/`. Specialized texts are unchanged (their keys are the
+  reference pack's; fingerprints in `oot3d_native_pica_program_descriptor_tests`).
 - **Log (`logs/deko3d.txt`):** `lighting: mode <off|toon|perpixel> (config/lighting)` at start and on
   each change, and with every `programs (frame)` line while a mode is on (or was):
   `lighting (frame): mode=… variants found=… missing=… unsupported=…; draws lit=… native=…
-  ineligible=…` (variants: distinct shaders resolved; draws: cumulative). `missing` > 0 means the pack
-  did not cover the scene: the texts are in `logs/deko3d_shaders/`.
+  ineligible=… (spilling base=… not opaque=…)` (variants: distinct shaders resolved; draws: cumulative),
+  then `per frame lit opaque=… translucent=… points 0/1/2/3/4=… rim=… | avg of N …` (lit draws of the
+  last frame, then the average since the previous line; points: per-pixel draws by scene point lights).
+  `programs (frame)` ends with `per frame spill=D/L px=P/LP M parametric=… normal=… | avg of N …`: draws
+  and lit draws by base fragment program class (spilling, parametric, specialized) and their pixels
+  (viewport inside scissor, millions; an upper bound). `missing` > 0 means the pack did not cover the
+  scene: the texts are in `logs/deko3d_shaders/`.
 - **Expected cost [not measured]:** game thread 0 (the per-draw work runs in `SubmitPicaDraw` on the
   render thread; only the rare dependency flushes run it on core 0). Toon: about 0.2-0.5 ms of GPU per
   frame at the 2.25x floor. Per-pixel: about 1-2.5 ms of GPU per frame, plus about 0.3-0.8 ms of render
   thread (the block per lit draw, 3 KB streamed each). Measure: `busy_ms` in the `dkperf` lines of
   `logs/perf.txt` and `rt_ms_*`, same scene and save, mode off against on.
+- **Forest Temple room 8 (lighting3) [expected, not measured]:** before, 16.7 ms `busy_ms` off and 38.4
+  ms per-pixel at 60 fps / 2.25x, against 10-11 ms off in rooms 0-2: its large surfaces are drawn by the
+  parametric lit program (105 GPRs, scratch), and per-pixel added its spilling variant. Now that program
+  has 73 GPRs and no scratch (about 1.4x the warps per SM): off should fall toward the 11-13 ms of
+  other rooms, per-pixel to off + 1-4 ms (the rooms 0-2 increment). Check in room 8, off then per-pixel:
+  `programs (frame)` `parametric=` draws and `px=` (who pays), `spill=0/0`, `missing=0` once the pack
+  holds the new texts, `lighting (frame)` `translucent=0` and `spilling base=0`, then `busy_ms`.
 - Code: `gfx_deko3d_lighting.{h,cpp}` (mode, mutations, lookup and fallback), `gfx_deko3d.cpp`
   (`ApplyPicaLighting`, `BuildSurfaceLighting`), `gfx_deko3d_pica_draw.cpp` (binding),
   `tools/oot3d/deko3d_lighting_variants.cpp`. Host tests `oot3d_deko3d_lighting_tests` (config, both

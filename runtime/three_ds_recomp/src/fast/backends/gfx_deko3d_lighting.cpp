@@ -141,16 +141,24 @@ void pica_surface_light(int slot, out vec3 direction, out vec3 radiance) {
         direction = pica_surface_unit(delta);
     }
 }
+vec3 pica_surface_scene_point(uint slot, vec3 normal_view) {
+    PicaScenePointLight light = pica_surface.scene_points[slot];
+    vec3 delta = light.position_radius.xyz + pica_view;
+    vec3 world_delta = pica_surface_to_world(delta);
+    float attenuation = max(0.0, 1.0 - dot(world_delta, world_delta) /
+                            (light.position_radius.w * light.position_radius.w));
+    return pica_surface_diffuse_rim(normal_view, pica_surface_unit(delta)) * light.color.rgb * attenuation;
+}
+// Points 3 and 4 (a room with Navi, a fairy and torches) behind their own
+// uniform branch; same sums in the same order as one loop.
 vec3 pica_surface_scene_point_primary(vec3 normal_view) {
     vec3 color = vec3(0.0);
     uint count = min(pica_surface.control.y, 4u);
-    for (uint slot = 0u; slot < count; ++slot) {
-        PicaScenePointLight light = pica_surface.scene_points[slot];
-        vec3 delta = light.position_radius.xyz + pica_view;
-        vec3 world_delta = pica_surface_to_world(delta);
-        float attenuation = max(0.0, 1.0 - dot(world_delta, world_delta) /
-                                (light.position_radius.w * light.position_radius.w));
-        color += pica_surface_diffuse_rim(normal_view, pica_surface_unit(delta)) * light.color.rgb * attenuation;
+    for (uint slot = 0u; slot < min(count, 2u); ++slot)
+        color += pica_surface_scene_point(slot, normal_view);
+    if (count > 2u) {
+        for (uint slot = 2u; slot < count; ++slot)
+            color += pica_surface_scene_point(slot, normal_view);
     }
     return color;
 }
@@ -190,8 +198,11 @@ vec3 pica_surface_native_primary(vec3 normal_view) {
 // Baked outdoor colour is a lit reference: ambient and the directionals
 // redistribute it; a horizontal face keeps its native colour.
 float pica_surface_baked_diffuse(vec3 normal_view, vec3 up, vec3 direction) {
-    return min(max(dot(normal_view, direction), 0.0), max(dot(up, direction), 0.0)) +
-        pica_surface_rim_weight(normal_view, pica_surface_unit(pica_view), direction);
+    float diffuse = min(max(dot(normal_view, direction), 0.0), max(dot(up, direction), 0.0));
+    // Every rim evaluation sits behind the rim's uniform branch.
+    if (pica_surface.rim.x > 0.0)
+        diffuse += pica_surface_rim_weight(normal_view, pica_surface_unit(pica_view), direction);
+    return diffuse;
 }
 vec3 pica_surface_baked_response(vec3 normal_view, out vec3 reference) {
     vec3 up = pica_surface_unit(pica_surface.baked_reference_up.xyz);

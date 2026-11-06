@@ -46,5 +46,11 @@ struct PicaTevInputs {
 // pica_evaluate_tev_resolved accepts primary already quantized and processed by
 // authorized lighting hooks; it must not re-quantize those hook results.
 std::string_view PicaTevProgramGlsl() noexcept;
+// The parametric program's entry point, pica_evaluate_tev_uniform(inputs)
+// (resolved primary, like pica_evaluate_tev_resolved): reads the program,
+// the constants and the buffer colour from the PICA fragment uniform block
+// (`fragment_uniforms`: tev_program, tev_constants, combiner_buffer_color)
+// instead of local copies. Follows PicaTevProgramGlsl and that block.
+std::string_view PicaTevUniformEvaluatorGlsl() noexcept;
 
 } // namespace Fast::Renderer3ds

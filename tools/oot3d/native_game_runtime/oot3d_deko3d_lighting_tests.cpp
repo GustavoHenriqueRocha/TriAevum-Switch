@@ -307,6 +307,22 @@ void TestPerPixel() {
               variant->find("pica_point_shadow(") == std::string::npos,
           "perpixel: no placed lights, water or shadows");
   Require(variant->find("min(pica_surface.control.y, 4u)") != std::string::npos, "perpixel: at most 4 points");
+  // lighting3: points 3-4 and every rim evaluation behind uniform branches.
+  Require(variant->find("slot < min(count, 2u)") != std::string::npos &&
+              variant->find("    if (count > 2u) {\n        for (uint slot = 2u; slot < count; ++slot)") !=
+                  std::string::npos,
+          "perpixel: points 3-4 behind their own branch");
+  for (size_t at = variant->find("pica_surface_rim_weight("); at != std::string::npos;
+       at = variant->find("pica_surface_rim_weight(", at + 1U)) {
+    const size_t line = variant->rfind('\n', at);
+    const bool declaration = variant->compare(line + 1U, 6U, "float ") == 0;
+    Require(declaration || variant->rfind("if (pica_surface.rim.x > 0.0)", at) > variant->rfind(';', at),
+            "perpixel: rim weight only behind the rim branch");
+  }
+  // Per-pixel cost: only opaque draws that write depth.
+  Require(Fast::Deko3d::PerPixelCostAdmits(false, true), "opaque, depth write: per-pixel");
+  Require(!Fast::Deko3d::PerPixelCostAdmits(true, true) && !Fast::Deko3d::PerPixelCostAdmits(false, false),
+          "blended or no depth write: native");
   // The body follows the lighting extension point, after the primary colour.
   const size_t body = variant->find(Fast::Deko3d::PerPixelFragmentBody());
   Require(body > variant->find("// OOT3D_PICA_LIGHTING_EXTENSION_POINT") &&
