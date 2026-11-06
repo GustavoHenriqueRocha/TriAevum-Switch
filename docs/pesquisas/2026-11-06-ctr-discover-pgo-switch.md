@@ -176,5 +176,9 @@ coverage-mismatch; build use em 27 min no Ryzen (md5 `bb15e4e4…`, rotulada `27
 - Ressalvas:
   - é uma passada de cada, e a primeira inclui compilação de shader;
   - o casamento janela↔área deriva nas duas (guest estimado 25248/36964 contra ack 22477/22101).
-- Conclusão provisória: não há ganho; a descoberta parece ~4 % mais cara de CPU. Falta repetir a
-  passada antes de concluir.
+- Shaders: os 2195 estágios vêm pré-compilados no pacote e as duas rodadas têm `missing=0` no
+  `deko3d.txt`. A ressalva da "primeira passada" (época do Mesa) não se aplica, e a piora tem
+  direção consistente (23/29 áreas).
+- **Decisão (Gustavo, 06/11): sem segunda passada.** A descoberta não compensa: ~4 % mais CPU por
+  quadro sem ganho de FPS. A p7e segue como a melhor. A descoberto-pgo saiu do Switch, com cópia
+  em `~/oot3d-work/nro-descoberto/` e os `.gcda` em `~/oot3d-work/pgo-descoberto-*`.
