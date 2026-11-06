@@ -1,6 +1,7 @@
 // Native A32 window session: setup (process image, host services, renderer, UI, initial state).
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
 #include "oot3d_native_a32_window_session.h"
+#include "oot3d_native_a32_ctr_save_safety.h"
 #include "oot3d_native_guest_overrides.h"
 #include "oot3d_switch_threads.h"
 #if defined(__SWITCH__)
@@ -232,11 +233,15 @@ void NativeA32WindowSession::Setup() {
   hostConfig.PicaFrontend = &picaFrontend;
   hostConfig.PicaCompositionDomain = &picaCompositionDomain;
   hostConfig.PicaCompositionProvider = &picaCompositionTracker;
-  hostConfig.SaveDataDirectory =
+  // Pasta por título: um título que não é o OoT3D nunca grava na pasta de
+  // save do Zelda (o argv padrão do NRO passa sdmc:/switch/oot3dre/savedata);
+  // vai para sdmc:/switch/triaevum/<title id>/savedata. O OoT3D não muda.
+  hostConfig.SaveDataDirectory = Oot3dNativeGame::ResolveCtrTitleSaveDataDirectory(
       launch.SaveDataDirectory.empty()
           ? launch.A32ProcessManifestPath.parent_path() /
                 "oot3d_native_savedata"
-          : launch.SaveDataDirectory;
+          : launch.SaveDataDirectory,
+      titleProfile.Kind == Oot3dNativeGame::CtrTitleKind::Oot3d, manifest->TitleId);
   saveDataDirectory = hostConfig.SaveDataDirectory;
   // Save states default to a folder beside the executable on Windows and beside
   // the save data elsewhere; --quick-state pins one file for scripted runs.
