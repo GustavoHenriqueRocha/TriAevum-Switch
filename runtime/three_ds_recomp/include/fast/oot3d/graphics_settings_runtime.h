@@ -83,9 +83,6 @@ class GraphicsSettingsRuntime final {
     void PublishGlobalIlluminationStatus(GlobalIlluminationProviderStatus status);
     // Resolved title-owned profile; never serialized into global graphics settings.
     void PublishSceneEnvironment(const Renderer3ds::PicaEnvironmentLighting& environment);
-    // The last published profile, whatever the lighting mode (the deko3d
-    // backend's per-pixel option reads it once per frame while it is on).
-    [[nodiscard]] Renderer3ds::PicaEnvironmentLighting PublishedSceneEnvironment() const;
     GraphicsSettingsValidation Apply(GraphicsSettings candidate, bool persist = true);
     // Restores previously stored preferences the way the startup load does: a
     // capability missing at this moment (for example view metadata outside

@@ -20,7 +20,6 @@
 #include "fast/backends/gl_frame_profiler.h"
 #include "fast/backends/gl_pica_dynamic_scale.h"
 #include "fast/backends/gfx_deko3d.h"
-#include "fast/backends/gfx_deko3d_lighting.h"
 #include "ship/resource/File.h"
 #include "ship/resource/ResourceManager.h"
 #include "ship/resource/archive/ArchiveManager.h"
@@ -4216,7 +4215,7 @@ namespace {
 // deko3d config/lighting perpixel reads the scene's environment profile; the
 // release defaults are in resources.o2r (environments/, staged by
 // scripts/switch/stage-product.sh), not in a folder on the card. Installed
-// only while that mode is on; render stream only.
+// only while the Modern model is on; render stream only.
 std::optional<std::string> ReadArchivedEnvironmentDefault(const std::string &fileName) {
   auto *context = Ship::Context::GetRawInstance();
   auto resources = context != nullptr ? context->GetResourceManager() : nullptr;
@@ -4229,14 +4228,10 @@ std::optional<std::string> ReadArchivedEnvironmentDefault(const std::string &fil
   return std::string(file->Buffer->begin() + static_cast<std::ptrdiff_t>(file->BufferOffset), file->Buffer->end());
 }
 
-void ApplyLightingEnvironmentDefaults(Oot3dNativeGame::SceneEnvironmentRuntime &environment) {
-  static uint64_t seenRevision = 0;
+void ApplyLightingEnvironmentDefaults(Oot3dNativeGame::SceneEnvironmentRuntime &environment, bool modernModel) {
   static bool installed = false;
-  const auto &live = Fast::Deko3d::LiveLightingSettings();
-  const uint64_t revision = live.Revision.load(std::memory_order_acquire);
-  if (revision == seenRevision) return;
-  seenRevision = revision;
-  const bool perPixel = live.Current() == Fast::Deko3d::LightingMode::PerPixel;
+  // Only the deko3d renderer's defaults live in the archive.
+  const bool perPixel = modernModel && Fast::Deko3dRendererSelected();
   if (perPixel == installed) return;
   installed = perPixel;
   environment.SetDefaultsReader(perPixel ? ReadArchivedEnvironmentDefault
@@ -4290,11 +4285,12 @@ void NativeA32WindowSession::PublishNativeSceneView() {
       spikeSceneChangePresent = spikePresents;
     spikeLastScene = scene;
   }
-  ApplyLightingEnvironmentDefaults(*sceneEnvironment);
   sceneEnvironment->ObserveScene(snapshot ? snapshot->SceneId : std::nullopt,
       environmentTime.value_or(Oot3dNativeGame::SceneEnvironmentTime{}), player);
   sceneEnvironment->PollProfileFiles();
   const auto shadowSettings = Fast::Oot3d::GraphicsSettingsRuntime::Instance().SnapshotForRendering();
+  ApplyLightingEnvironmentDefaults(*sceneEnvironment,
+                                   Fast::Oot3d::UsesFullSceneLighting(shadowSettings.Value.Effects.SurfaceLighting));
   picaCompositionTracker.SetRoomShadowShellsEnabled(
       shadowSettings.Environment.CasterFaces == Fast::Renderer3ds::ShadowCasterFaces::InteriorShells &&
       shadowSettings.Value.Effects.DirectionalShadows.Mode == Fast::Oot3d::DirectionalShadowMode::VirtualShadowMaps);

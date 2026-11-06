@@ -27,11 +27,11 @@
 // Pure code, tested on the host (oot3d_deko3d_lighting_tests).
 
 #include "fast/backends/gfx_deko3d_shader_pack.h"
+#include "fast/oot3d/graphics_settings.h"
 #include "fast/renderer3ds/pica_shader_hooks.h"
 #include "fast/renderer3ds/pica_surface_lighting.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -98,23 +98,25 @@ inline constexpr const char* kLightingConfigName = "lighting";
     return file ? "" : kLightingConfigName;
 }
 
-// Published by the Video tab (and by the renderer's start-up read of the
-// file); the renderer applies a new revision at the start of its next frame.
-struct LightingLiveSettings {
-    std::atomic<uint8_t> Mode{static_cast<uint8_t>(LightingMode::Off)};
-    std::atomic<uint64_t> Revision{0U};
+// The lighting model lives in the graphics settings (one source of truth,
+// the same the scene environment tab reads): per-pixel is the Modern model
+// (Effects.SurfaceLighting PerPixel, validated to PerPixelPbr), toon is
+// Effects.Toon PicaMaterial. config/lighting persists it on the Switch: the
+// renderer applies the file at start, the Video tab writes both.
+[[nodiscard]] inline LightingMode LightingModeOf(const Oot3d::GraphicsSettings& settings) noexcept {
+    if (Oot3d::UsesFullSceneLighting(settings.Effects.SurfaceLighting)) return LightingMode::PerPixel;
+    if (settings.Effects.Toon == Oot3d::ToonMode::PicaMaterial) return LightingMode::Toon;
+    return LightingMode::Off;
+}
 
-    void Publish(LightingMode mode) noexcept {
-        Mode.store(static_cast<uint8_t>(mode), std::memory_order_relaxed);
-        Revision.fetch_add(1U, std::memory_order_release);
-    }
-    [[nodiscard]] LightingMode Current() const noexcept {
-        return static_cast<LightingMode>(Mode.load(std::memory_order_relaxed));
-    }
-};
-
-inline LightingLiveSettings& LiveLightingSettings() noexcept {
-    static LightingLiveSettings settings;
+// `settings` with the model of `mode`. A mode needs a non-Authentic preset
+// (Authentic is native presentation by definition): Custom then.
+[[nodiscard]] inline Oot3d::GraphicsSettings WithLightingMode(Oot3d::GraphicsSettings settings, LightingMode mode) {
+    settings.Effects.SurfaceLighting =
+        mode == LightingMode::PerPixel ? Oot3d::SurfaceLightingMode::PerPixel : Oot3d::SurfaceLightingMode::Native;
+    settings.Effects.Toon = mode == LightingMode::Toon ? Oot3d::ToonMode::PicaMaterial : Oot3d::ToonMode::Off;
+    if (mode != LightingMode::Off && settings.Preset == Oot3d::GraphicsPreset::Authentic)
+        settings.Preset = Oot3d::GraphicsPreset::Custom;
     return settings;
 }
 
@@ -136,6 +138,10 @@ inline constexpr std::string_view kPerPixelVariantMarker = "// OOT3D_DEKO3D_PER_
 [[nodiscard]] std::string_view PerPixelFragmentDeclarations() noexcept;
 // The lines it inserts after the lighting extension point.
 [[nodiscard]] std::string_view PerPixelFragmentBody() noexcept;
+// The lines it puts before and after the native fog line (when the text has
+// one): the environment's fog contribution.
+[[nodiscard]] std::string_view PerPixelFragmentFogBefore() noexcept;
+[[nodiscard]] std::string_view PerPixelFragmentFogAfter() noexcept;
 
 // The variant of a GLSL 4.3 PICA fragment text, or nothing when the text has
 // no place for it (and for LightingMode::Off). A text that already is this
@@ -151,14 +157,14 @@ inline constexpr std::string_view kPerPixelVariantMarker = "// OOT3D_DEKO3D_PER_
                                                                const Renderer3ds::PicaVertexShaderHookLayout& hooks);
 
 // The trimmed shader reads at most kMaximumSurfacePointLights scene points;
-// the block is cut to match (the selector's order: the first ones win).
+// the block is cut to match (the selector's order: the first ones win). The
+// rim (AssignPicaSurfaceRim) is kept; placed lights, GI, shadows and water go.
 inline void TrimSurfaceLighting(Renderer3ds::PicaSurfaceLightingUniforms& uniforms) noexcept {
     uniforms.Control[1] = std::min(uniforms.Control[1], kMaximumSurfacePointLights);
     for (uint32_t slot = uniforms.Control[1]; slot < uniforms.ScenePoints.size(); ++slot) {
         uniforms.ScenePoints[slot] = {};
     }
     uniforms.Control[3] &= ~0xFF00U; // placed lights: none
-    uniforms.Rim = uniforms.RimColor = uniforms.RimDirection = {};
     uniforms.GlobalIlluminationSources = {};
     uniforms.PointShadow = uniforms.PointShadowAtlas = {};
     uniforms.WaterViewTranslation = {};

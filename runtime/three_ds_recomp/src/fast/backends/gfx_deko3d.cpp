@@ -6,6 +6,7 @@
 #include "gfx_deko3d_api.h"
 #include "fast/oot3d/directional_shadows.h"
 #include "fast/oot3d/graphics_settings_runtime.h"
+#include "fast/oot3d/pica_rim_light.h"
 #include "fast/oot3d/pica_toon_shader.h"
 #include "fast/oot3d/pica_uniform_layout.h"
 #include "fast/renderer3ds/pica_gl_shader_dialect.h"
@@ -62,9 +63,16 @@ void GfxRenderingAPIDeko3d::Init() {
     if (!mShaders.Init(mDevice)) {
         throw std::runtime_error("deko3d: shader code memory");
     }
-    // config/lighting (off when absent): published for the Video tab and the
-    // scene environment, applied from the first frame.
-    Deko3d::LiveLightingSettings().Publish(Deko3d::LoadLightingMode("sdmc:/switch/oot3dre/config"));
+    // Per-pixel surface lighting (the Modern model) needs its variants from
+    // deko3d.pack; then config/lighting (off when absent) becomes the
+    // graphics settings' model, which the menus and the renderer read.
+    auto& graphics = Oot3d::GraphicsSettingsRuntime::Instance();
+    const bool surfaceLighting = mShaders.Stats().PackEntries != 0U;
+    graphics.SetCapability(Oot3d::GraphicsCapability::NativeSurfaceLighting, surfaceLighting,
+                           surfaceLighting ? "" : "deko3d: shadercache/deko3d.pack is missing");
+    if (const auto mode = Deko3d::LoadLightingMode("sdmc:/switch/oot3dre/config"); mode != Deko3d::LightingMode::Off) {
+        graphics.Apply(Deko3d::WithLightingMode(graphics.Snapshot(), mode), false);
+    }
     ApplyLightingSettings();
     if (!mResources.Init(mDevice)) {
         Deko3d::Log("init failed: descriptor/fallback memory");
@@ -407,20 +415,19 @@ GfxRenderingAPIDeko3d::PicaProgram GfxRenderingAPIDeko3d::ResolvePicaProgram(con
 // ---- config/lighting: toon and trimmed per-pixel variants (gfx_deko3d_lighting.h) ----
 
 void GfxRenderingAPIDeko3d::ApplyLightingSettings() {
-    auto& live = Deko3d::LiveLightingSettings();
-    const uint64_t revision = live.Revision.load(std::memory_order_acquire);
-    if (revision != mLightingRevision) {
-        mLightingRevision = revision;
-        const Deko3d::LightingMode mode = live.Current();
-        if (mode != mLightingMode || revision == 1U) {
-            Deko3d::Log("lighting: mode %s (config/lighting)", Deko3d::LightingModeName(mode));
-        }
-        mLightingMode = mode;
+    // The model and, under Modern, the scene environment profile (the
+    // Scene lights tab's live values; resources.o2r environments/ and the
+    // user's files), as rendering sees them (preset, native override).
+    auto rendering = Oot3d::GraphicsSettingsRuntime::Instance().SnapshotForRendering();
+    const Deko3d::LightingMode mode = Deko3d::LightingModeOf(rendering.Value);
+    if (mode != mLightingMode || mLightingRevision == 0U) {
+        Deko3d::Log("lighting: mode %s (config/lighting, graphics settings revision %llu)",
+                    Deko3d::LightingModeName(mode), static_cast<unsigned long long>(rendering.Revision));
     }
-    if (mLightingMode == Deko3d::LightingMode::PerPixel) {
-        // The scene's environment profile (resources.o2r environments/ and
-        // the user's own files), as the scene environment last published it.
-        mLightingEnvironment = Oot3d::GraphicsSettingsRuntime::Instance().PublishedSceneEnvironment();
+    mLightingRevision = rendering.Revision;
+    mLightingMode = mode;
+    if (mode == Deko3d::LightingMode::PerPixel) {
+        mLightingEnvironment = std::move(rendering.Environment);
     }
 }
 
@@ -496,8 +503,9 @@ bool GfxRenderingAPIDeko3d::BuildSurfaceLighting(const GfxNativePicaDrawView& dr
     std::memcpy(&booleans, draw.VertexUniformBytes.data() + Oot3d::kPicaPackedVertexBooleanMaskOffset,
                 sizeof(booleans));
     const bool vertexLit = ((booleans >> surface->LightingBooleanUniform) & 1U) != 0U;
-    if (Renderer3ds::ClassifyPicaSurfaceAppearance(draw.Blend, vertexLit, draw.FragmentFeatures.FragmentLightingEnabled) !=
-        Renderer3ds::PicaSurfaceAppearance::Relightable) {
+    const auto appearance =
+        Renderer3ds::ClassifyPicaSurfaceAppearance(draw.Blend, vertexLit, draw.FragmentFeatures.FragmentLightingEnabled);
+    if (appearance != Renderer3ds::PicaSurfaceAppearance::Relightable) {
         return false;
     }
     const auto* worldToView = draw.LightBinding.WorldToView ? &*draw.LightBinding.WorldToView : nullptr;
@@ -519,6 +527,12 @@ bool GfxRenderingAPIDeko3d::BuildSurfaceLighting(const GfxNativePicaDrawView& dr
         mSurfaceLighting.BakedReferenceUp = {};
     }
     Deko3d::TrimSurfaceLighting(mSurfaceLighting);
+    // Scene lights > Rim light, on the draws upstream gives it to.
+    if (Oot3d::PicaDrawReceivesRimLight(mLightingEnvironment, draw.CompositionDomain, draw.Composition, draw.Blend,
+                                        appearance, draw.DepthTestEnabled, draw.DepthWriteEnabled,
+                                        draw.FragmentOperationMode)) {
+        Renderer3ds::AssignPicaSurfaceRim(mSurfaceLighting, mLightingEnvironment.Rim);
+    }
     return true;
 }
 
@@ -572,8 +586,10 @@ void GfxRenderingAPIDeko3d::LogLightingCounters(const char* when) {
         c.VariantsUnsupported == 0U) {
         return;
     }
+    // The GPU cost: dkperf busy_ms in logs/perf.txt (same windows), against
+    // a run with the mode off.
     Deko3d::Log("lighting (%s): mode=%s variants found=%llu missing=%llu unsupported=%llu; draws lit=%llu "
-                "native=%llu ineligible=%llu",
+                "native=%llu ineligible=%llu (GPU cost: dkperf busy_ms in perf.txt)",
                 when, Deko3d::LightingModeName(mLightingMode), static_cast<unsigned long long>(c.VariantsFound),
                 static_cast<unsigned long long>(c.VariantsMissing),
                 static_cast<unsigned long long>(c.VariantsUnsupported), static_cast<unsigned long long>(c.DrawsLit),

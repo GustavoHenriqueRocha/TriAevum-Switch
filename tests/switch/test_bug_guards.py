@@ -29,6 +29,17 @@ class Guard:
 
 GUARDS = [
     # --- 05/11: optional deko3d lighting, config/lighting (gfx_deko3d_lighting.h) ---
+    Guard("0.1.2-test.2: Scene lights said 'needs the Modern lighting model' under deko3d per-pixel (the model lived outside the graphics settings)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'SetCapability\(Oot3d::GraphicsCapability::NativeSurfaceLighting, surfaceLighting,.*?'
+          r'graphics\.Apply\(Deko3d::WithLightingMode\(graphics\.Snapshot\(\), mode\), false\);.*?'
+          r'Deko3d::LightingModeOf\(rendering\.Value\)',
+          test="oot3d_deko3d_lighting_tests (TestModelCapabilityAndPanel)"),
+    Guard("0.1.2-test.2: Scene lights tab: one activity rule, and controls the Switch renderer cannot draw are marked, not ignored",
+          "tools/oot3d/native_game_runtime/oot3d_scene_environment_panel.cpp",
+          r'SceneEnvironmentActive\(supported, settings, graphics\.NativePresentationOverrideActive\(\)\).*?'
+          r'Unavailable on the Switch renderer: placed lights.*?Unavailable on the Switch renderer: it draws no',
+          test="oot3d_deko3d_lighting_tests (TestControlsReachTheBlock)"),
     Guard("[decision] deko3d lighting off: native keys and shaders untouched (the variant path only runs with a mode on)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
           r'mCounters\.Programs\.Count\(program\.Pick\);\s*'

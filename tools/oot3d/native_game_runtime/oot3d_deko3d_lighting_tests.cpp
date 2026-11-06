@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -105,13 +106,152 @@ void TestConfig() {
   Require(Fast::Deko3d::SaveLightingMode(dir, LightingMode::Off).empty(), "save off");
   Require(!std::filesystem::exists(dir / Fast::Deko3d::kLightingConfigName), "off removes config/lighting");
   std::filesystem::remove_all(dir);
+}
 
-  auto &live = Fast::Deko3d::LiveLightingSettings();
-  const uint64_t revision = live.Revision.load();
-  Require(live.Current() == LightingMode::Off, "live default off");
-  live.Publish(LightingMode::Toon);
-  Require(live.Current() == LightingMode::Toon && live.Revision.load() == revision + 1U, "publish");
-  live.Publish(LightingMode::Off);
+// One source of truth: the model is the graphics settings' (per-pixel =
+// Modern), the capability deko3d reports makes it valid, and the Scene
+// lights tab is active exactly then.
+void TestModelCapabilityAndPanel() {
+  using namespace Fast::Oot3d;
+  GraphicsSettings authentic;
+  authentic.Preset = GraphicsPreset::Authentic;
+  for (const auto mode : {LightingMode::Off, LightingMode::Toon, LightingMode::PerPixel}) {
+    auto settings = Fast::Deko3d::WithLightingMode(authentic, mode);
+    Require(Fast::Deko3d::LightingModeOf(settings) == mode, "the model reads back as written");
+    Require((mode == LightingMode::Off) == (settings.Preset == GraphicsPreset::Authentic),
+            "a lighting mode leaves the Authentic preset (Custom), off keeps it");
+    // GraphicsSettingsService::Validate with the capability turns PerPixel
+    // into PerPixelPbr (Modern) and Native into NativePbr.
+    if (settings.Effects.SurfaceLighting == SurfaceLightingMode::PerPixel)
+      settings.Effects.SurfaceLighting = SurfaceLightingMode::PerPixelPbr;
+    else
+      settings.Effects.SurfaceLighting = SurfaceLightingMode::NativePbr;
+    Require(Fast::Deko3d::LightingModeOf(settings) == mode, "validated with deko3d's capability, the model holds");
+    Require(SceneEnvironmentActive(true, settings, false) == (mode == LightingMode::PerPixel),
+            "Scene lights is active exactly under per-pixel (Modern) with the capability");
+    Require(!SceneEnvironmentActive(true, settings, true), "the native override still turns it off");
+    Require(!SceneEnvironmentActive(false, settings, false), "no capability (no pack): inactive");
+    // Without the capability validation falls back to Native: not per-pixel.
+    settings.Effects.SurfaceLighting = SurfaceLightingMode::Native;
+    Require(Fast::Deko3d::LightingModeOf(settings) != LightingMode::PerPixel, "native fallback is not per-pixel");
+  }
+  auto custom = Fast::Deko3d::WithLightingMode(GraphicsSettings{}, LightingMode::PerPixel);
+  custom.Preset = GraphicsPreset::Authentic;
+  Require(!SceneEnvironmentActive(true, custom, false), "Authentic is native presentation");
+}
+
+// The Scene lights controls reach the block the per-pixel shader reads
+// (upstream's surface builder, as deko3d calls it), and the shader reads the
+// fields they change.
+void TestControlsReachTheBlock() {
+  using namespace Fast::Renderer3ds;
+  using V4 = std::array<float, 4>;
+  PicaVertexShaderHookLayout hooks;
+  hooks.Transform = {PicaVertexTransformOperation::ModelViewProjection3x4, 0, 4, 4, 3, 20, 3, 0, 1};
+  auto &s = hooks.Surface;
+  s.ViewNormalTemporary = 14;
+  s.LightingBooleanUniform = 9;
+  s.DiffuseUniform = 8;
+  s.AmbientUniform = 9;
+  s.TintBooleanUniform = 5;
+  s.TintInputRegister = 2;
+  s.TintScale = {90, 2};
+  s.LightEnabledValue = {93, 1};
+  s.LightDirectionUniforms = {80, 83, 86};
+  std::array<V4, 96> native{};
+  native[8] = {1, 1, 1, 1};
+  native[9] = {1, 1, 1, 1};
+  native[80] = {0, -1, 0, 1};
+  native[81] = {0.8F, 0.8F, 0.8F, 0};
+  native[82] = {0.3F, 0.3F, 0.3F, 0};
+  native[93][1] = 1;
+  PicaNativeLightBinding binding;
+  auto scene = std::make_shared<PicaSceneDirectionalLights>();
+  scene->Count = 1;
+  scene->Lights[0] = {42, {0.6F, 0.8F, 0}, {0.8F, 0.8F, 0.8F}, true};
+  binding.SceneDirectionals = scene;
+  auto points = std::make_shared<PicaScenePointLights>();
+  points->Count = 1;
+  points->Lights[0] = {7, {10, 0, 0}, {1, 0.5F, 0.25F}, 100.0F, 0, true};
+  binding.ScenePoints = points;
+  const auto view = BuildPicaSurfaceLightingView({1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+  const auto build = [&](const PicaEnvironmentLighting &environment) {
+    auto block = BuildPicaSurfaceLightingUniforms(hooks, 512U,
+                                                  {reinterpret_cast<const uint8_t *>(native.data()), sizeof(native)},
+                                                  binding, environment, &*view);
+    Require(block.has_value(), "surface fixture accepted");
+    Fast::Deko3d::TrimSurfaceLighting(*block);
+    return *block;
+  };
+  PicaEnvironmentLighting base;
+  base.Enabled = true;
+  const auto reference = build(base);
+  Require(reference.EnvironmentParameters[3] == 1.0F, "Use scene environment reaches the block");
+  Require(build(PicaEnvironmentLighting{}).EnvironmentParameters[3] == 0.0F, "native environment: w = 0");
+  const auto changes = [&](const char *what, auto edit, auto differs) {
+    auto environment = base;
+    edit(environment);
+    Require(differs(build(environment)), what);
+  };
+  changes("ambient intensity", [](auto &e) { e.AmbientIntensity = 1.5F; },
+          [&](const auto &b) { return b.EnvironmentAmbient != reference.EnvironmentAmbient; });
+  changes("ambient colour", [](auto &e) { e.AmbientColor = {1.0F, 0.2F, 0.2F}; },
+          [&](const auto &b) { return b.EnvironmentAmbient != reference.EnvironmentAmbient; });
+  changes("native local contribution", [](auto &e) { e.NativeLocalStrength = 0.5F; },
+          [&](const auto &b) { return b.EnvironmentParameters[0] == 0.5F; });
+  changes("native ambient contribution", [](auto &e) {
+            e.PreserveSceneBrightness = false;
+            e.NativeAmbientStrength = 0.25F;
+          },
+          [&](const auto &b) { return b.EnvironmentParameters[1] == 0.25F; });
+  changes("preserve brightness keeps the native ambient", [](auto &e) {
+            e.NativeAmbientStrength = 0.25F;
+            e.PreserveSceneBrightness = true;
+          },
+          [&](const auto &b) { return b.EnvironmentParameters[1] == 1.0F; });
+  changes("native fog contribution", [](auto &e) { e.FogStrength = 0.3F; },
+          [&](const auto &b) { return b.EnvironmentParameters[2] == 0.3F; });
+  changes("native scene direct contribution", [](auto &e) { e.NativeDirectStrength = 0.5F; },
+          [&](const auto &b) { return b.SceneDirectionalColors != reference.SceneDirectionalColors; });
+  changes("key light intensity", [](auto &e) { e.Lights[0].Intensity = 2.0F; },
+          [&](const auto &b) { return b.EnvironmentDirections[0][3] != reference.EnvironmentDirections[0][3]; });
+  changes("Navi point light intensity", [](auto &e) { e.PointLights[0].Intensity = 3.0F; },
+          [&](const auto &b) { return b.ScenePoints[0].Color != reference.ScenePoints[0].Color; });
+  changes("Navi point lights off", [](auto &e) { e.PointLights[0].Enabled = false; },
+          [&](const auto &b) { return b.Control[1] == 0U || b.ScenePoints[0].Color != reference.ScenePoints[0].Color; });
+  // Rim light: deko3d assigns it after the trim (TrimSurfaceLighting keeps it).
+  auto rimmed = reference;
+  PicaRimLightSettings rim;
+  rim.Enabled = true;
+  rim.Intensity = 0.5F;
+  AssignPicaSurfaceRim(rimmed, rim);
+  Fast::Deko3d::TrimSurfaceLighting(rimmed);
+  Require(rimmed.Rim[0] > 0.0F, "rim reaches the block and survives the trim");
+  // The variant reads every field those controls write.
+  const auto text = *Fast::Deko3d::PerPixelFragmentVariant(kNative);
+  for (const char *field : {"pica_surface.environment_parameters.x", "pica_surface.environment_parameters.y",
+                            "pica_surface.environment_parameters.w", "pica_surface.environment_ambient",
+                            "pica_surface.resolved_ambient", "pica_surface.environment_directions[slot]",
+                            "pica_surface.scene_directional_colors[slot]", "pica_surface.scene_points[slot]",
+                            "pica_surface.rim.x", "pica_surface.rim_color", "pica_surface.rim_direction",
+                            "pica_surface.baked_reference_key"})
+    Require(text.find(field) != std::string::npos, field);
+  // Fog contribution: around the native fog line, when the text has one.
+  constexpr std::string_view fogLine =
+      "    combiner_output.rgb = mix(fragment_uniforms.fog_color.rgb, combiner_output.rgb, fog_factor);\n";
+  const std::string fogged = Replace(kNative, "    combiner_output.rgb = mix(fragment_uniforms.fog_color.rgb, combiner_output.rgb, 1.0);\n",
+                                     "    float fog_factor = 0.5;\n" + std::string(fogLine));
+  const auto variant = *Fast::Deko3d::PerPixelFragmentVariant(fogged);
+  Require(variant.find("pica_surface.environment_parameters.z") != std::string::npos, "fog contribution read");
+  Require(*Fast::Deko3d::PerPixelFragmentVariant(variant) == variant, "fog variant idempotent");
+  std::string stripped = Without(variant, Fast::Deko3d::PerPixelFragmentDeclarations());
+  stripped = Without(stripped, Fast::Deko3d::PerPixelFragmentBody());
+  stripped = Without(stripped, Fast::Deko3d::PerPixelFragmentFogBefore().substr(1));
+  stripped = Without(stripped, Fast::Deko3d::PerPixelFragmentFogAfter());
+  Require(stripped == fogged, "fog: only the intended code changes");
+  Require(variant.find(Fast::Deko3d::PerPixelFragmentFogBefore().substr(1)) < variant.find(fogLine) &&
+              variant.find(Fast::Deko3d::PerPixelFragmentFogAfter()) > variant.find(fogLine),
+          "fog contribution wraps the native fog");
 }
 
 void TestOffIsNative() {
@@ -265,7 +405,7 @@ void TestBlockLayoutAndBinding() {
   Require(uniforms.ScenePoints[3].Color[0] == 1.0F && uniforms.ScenePoints[4].Color[0] == 0.0F,
           "trim: points past 4 cleared");
   Require(uniforms.Control[3] == 0x0001U, "trim: no placed lights, other control bits kept");
-  Require(uniforms.Rim[0] == 0.0F, "trim: no rim");
+  Require(uniforms.Rim[0] == 1.0F, "trim: the rim is kept (Scene lights > Rim light)");
 }
 
 void TestLookupAndFallback() {
@@ -335,6 +475,8 @@ void TestVertexVariantNeedsHooks() {
 
 int main() {
   TestConfig();
+  TestModelCapabilityAndPanel();
+  TestControlsReachTheBlock();
   TestOffIsNative();
   TestToon();
   TestPerPixel();

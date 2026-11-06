@@ -40,8 +40,9 @@ bool AlphaReadsPrimaryRgb(std::string_view text) {
 }
 
 // Upstream's surface lighting (pica_surface_lighting.cpp) without placed
-// lights, water, rim, GI and shadows, and with at most four scene points. The
-// block is upstream's, member for member (2992 bytes); only the binding moves.
+// lights, water, GI and shadows, and with at most four scene points; the rim
+// light and the environment's fog contribution are upstream's. The block is
+// upstream's, member for member (2992 bytes); only the binding moves.
 constexpr std::string_view kPerPixelDeclarations = R"glsl(
 // OOT3D_DEKO3D_PER_PIXEL declarations (gfx_deko3d_lighting.cpp)
 layout(location=9) in vec3 pica_surface_normal;
@@ -96,6 +97,33 @@ vec3 pica_surface_unit(vec3 value) {
     float squared = dot(value, value);
     return squared > 1.0e-20 ? value * inversesqrt(squared) : vec3(0.0);
 }
+// Rim light (AssignPicaSurfaceRim; zero when off): rim.x intensity, .y
+// sharpness, .z source (1 independent, 2 scene lights), .w coverage.
+float pica_surface_rim_fresnel(vec3 n, vec3 v) {
+    if (dot(n, n) < 0.5 || dot(v, v) < 0.5) return 0.0;
+    return pow(clamp(1.0 - abs(dot(n, v)), 0.0, 1.0), pica_surface.rim.y);
+}
+float pica_surface_rim_weight(vec3 n, vec3 v, vec3 l) {
+    if (pica_surface.rim.x <= 0.0 || pica_surface.rim.z != 2.0) return 0.0;
+    l = pica_surface_unit(l);
+    if (dot(l, l) < 0.5) return 0.0;
+    float back = smoothstep(-0.25, 0.5, dot(l, -v));
+    float wrap = clamp((dot(n, l) + 0.5) / 1.5, 0.0, 1.0);
+    return pica_surface.rim.x * pica_surface_rim_fresnel(n, v) * back * wrap;
+}
+vec3 pica_surface_rim_independent(vec3 n, vec3 v) {
+    if (pica_surface.rim.x <= 0.0 || pica_surface.rim.z != 1.0) return vec3(0.0);
+    float projected = dot(n.xy, n.xy);
+    float side = projected > 1.0e-8
+        ? smoothstep(-0.25, 0.75, dot(n.xy * inversesqrt(projected), pica_surface.rim_direction.xy)) : 0.0;
+    float coverage = mix(side, 1.0, pica_surface.rim.w);
+    return pica_surface.rim_color.rgb * pica_surface.rim.x * pica_surface_rim_fresnel(n, v) * coverage;
+}
+float pica_surface_diffuse_rim(vec3 n, vec3 l) {
+    float diffuse = max(dot(n, l), 0.0);
+    if (pica_surface.rim.x > 0.0) diffuse += pica_surface_rim_weight(n, pica_surface_unit(pica_view), l);
+    return diffuse;
+}
 vec3 pica_surface_to_world(vec3 view_vector) {
     return vec3(dot(pica_surface.view_to_world_linear[0].xyz, view_vector),
                 dot(pica_surface.view_to_world_linear[1].xyz, view_vector),
@@ -122,7 +150,7 @@ vec3 pica_surface_scene_point_primary(vec3 normal_view) {
         vec3 world_delta = pica_surface_to_world(delta);
         float attenuation = max(0.0, 1.0 - dot(world_delta, world_delta) /
                                 (light.position_radius.w * light.position_radius.w));
-        color += max(dot(normal_view, pica_surface_unit(delta)), 0.0) * light.color.rgb * attenuation;
+        color += pica_surface_diffuse_rim(normal_view, pica_surface_unit(delta)) * light.color.rgb * attenuation;
     }
     return color;
 }
@@ -130,7 +158,7 @@ vec3 pica_surface_scene_directional_primary(vec3 normal_view) {
     vec3 color = vec3(0.0);
     uint count = min(pica_surface.control.z, 2u);
     for (uint slot = 0u; slot < count; ++slot)
-        color += max(dot(normal_view, pica_surface_unit(pica_surface.scene_directions[slot].xyz)), 0.0) *
+        color += pica_surface_diffuse_rim(normal_view, pica_surface_unit(pica_surface.scene_directions[slot].xyz)) *
             pica_surface.scene_directional_colors[slot].rgb;
     return color;
 }
@@ -142,15 +170,16 @@ vec3 pica_surface_native_primary(vec3 normal_view) {
         if (pica_surface.lights[slot].direction_enabled.w == 0.0) continue;
         vec3 direction, radiance;
         pica_surface_light(slot, direction, radiance);
-        direct += max(dot(normal_view, direction), 0.0) * radiance;
+        direct += pica_surface_diffuse_rim(normal_view, direction) * radiance;
     }
     vec3 color = direct * pica_surface.material_diffuse.rgb;
     if (pica_surface.environment_parameters.w != 0.0) color *= pica_surface.environment_parameters.x;
     color += pica_surface.resolved_ambient.rgb;
+    color += pica_surface_rim_independent(normal_view, pica_surface_unit(pica_view));
     if (pica_surface.environment_parameters.w != 0.0) {
         for (int slot = 0; slot < 2; ++slot) {
             if (pica_surface.environment_directions[slot].w <= 0.0) continue;
-            color += max(dot(normal_view, pica_surface_unit(pica_surface.environment_directions[slot].xyz)), 0.0) *
+            color += pica_surface_diffuse_rim(normal_view, pica_surface_unit(pica_surface.environment_directions[slot].xyz)) *
                 pica_surface.environment_colors[slot].rgb * pica_surface.environment_directions[slot].w;
         }
     }
@@ -161,7 +190,8 @@ vec3 pica_surface_native_primary(vec3 normal_view) {
 // Baked outdoor colour is a lit reference: ambient and the directionals
 // redistribute it; a horizontal face keeps its native colour.
 float pica_surface_baked_diffuse(vec3 normal_view, vec3 up, vec3 direction) {
-    return min(max(dot(normal_view, direction), 0.0), max(dot(up, direction), 0.0));
+    return min(max(dot(normal_view, direction), 0.0), max(dot(up, direction), 0.0)) +
+        pica_surface_rim_weight(normal_view, pica_surface_unit(pica_view), direction);
 }
 vec3 pica_surface_baked_response(vec3 normal_view, out vec3 reference) {
     vec3 up = pica_surface_unit(pica_surface.baked_reference_up.xyz);
@@ -192,7 +222,8 @@ vec3 pica_surface_primary(vec3 native_color, vec3 normal_view) {
         vec3 reference;
         vec3 response = pica_surface_baked_response(normal_view, reference);
         vec3 color = native_color * response / max(reference, vec3(1.0e-6));
-        color += pica_surface_scene_point_primary(normal_view) * pica_surface_tint.rgb;
+        color += (pica_surface_scene_point_primary(normal_view) +
+                  pica_surface_rim_independent(normal_view, pica_surface_unit(pica_view))) * pica_surface_tint.rgb;
         return clamp(color, 0.0, 1.0);
     }
     if (pica_surface.control.x != 0u ||
@@ -204,6 +235,17 @@ vec3 pica_surface_primary(vec3 native_color, vec3 normal_view) {
                pica_surface_scene_directional_primary(normal_view)) * pica_surface_tint.rgb, vec3(1.0));
 }
 )glsl";
+
+// The environment's fog contribution (upstream: the "Native fog
+// contribution" control, environment_parameters.z) around the native fog.
+constexpr std::string_view kNativeFog =
+    "    combiner_output.rgb = mix(fragment_uniforms.fog_color.rgb, combiner_output.rgb, fog_factor);";
+constexpr std::string_view kPerPixelFogBefore = R"glsl(
+    vec3 pica_surface_before_fog = combiner_output.rgb; // OOT3D_DEKO3D_PER_PIXEL fog
+)glsl";
+constexpr std::string_view kPerPixelFogAfter = R"glsl(
+    if (pica_surface.environment_parameters.w != 0.0)
+        combiner_output.rgb = mix(pica_surface_before_fog, combiner_output.rgb, pica_surface.environment_parameters.z);)glsl";
 
 constexpr std::string_view kPerPixelBody = R"glsl(
     // OOT3D_DEKO3D_PER_PIXEL
@@ -220,6 +262,14 @@ std::string_view PerPixelFragmentDeclarations() noexcept {
 
 std::string_view PerPixelFragmentBody() noexcept {
     return kPerPixelBody;
+}
+
+std::string_view PerPixelFragmentFogBefore() noexcept {
+    return kPerPixelFogBefore;
+}
+
+std::string_view PerPixelFragmentFogAfter() noexcept {
+    return kPerPixelFogAfter;
 }
 
 std::optional<std::string> ToonFragmentVariant(std::string_view text) {
@@ -264,13 +314,29 @@ std::optional<std::string> PerPixelFragmentVariant(std::string_view text) {
         return std::nullopt;
     }
     const size_t insertion = point + kLightingExtensionPoint.size();
+    // The native fog line, when the draw has fog (one per text, after main).
+    size_t fog = text.find(kNativeFog, insertion);
+    if (fog != std::string_view::npos && text.find(kNativeFog, fog + kNativeFog.size()) != std::string_view::npos) {
+        fog = std::string_view::npos;
+    }
     std::string result;
-    result.reserve(text.size() + kPerPixelDeclarations.size() + kPerPixelBody.size());
+    result.reserve(text.size() + kPerPixelDeclarations.size() + kPerPixelBody.size() + kPerPixelFogBefore.size() +
+                   kPerPixelFogAfter.size());
     result.append(text.substr(0, main));
     result.append(kPerPixelDeclarations);
     result.append(text.substr(main, insertion - main));
     result.append(kPerPixelBody);
-    result.append(text.substr(insertion));
+    if (fog == std::string_view::npos) {
+        result.append(text.substr(insertion));
+        return result;
+    }
+    // Before the fog line's own indentation and after its semicolon.
+    result.append(text.substr(insertion, fog - insertion));
+    result.append(kPerPixelFogBefore.substr(1)); // the line, without the leading break
+    const size_t fogEnd = fog + kNativeFog.size();
+    result.append(text.substr(fog, fogEnd - fog));
+    result.append(kPerPixelFogAfter);
+    result.append(text.substr(fogEnd));
     return result;
 }
 

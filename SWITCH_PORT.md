@@ -1375,9 +1375,14 @@ loads).
 
 ### Toon and per-pixel lighting (deko3d): L3+R3 > Video > Lighting (`config/lighting`, off by default)
 - **Switch:** `sdmc:/switch/oot3dre/config/lighting`, first word `toon` or `perpixel`; absent, empty or
-  anything else = off (native PICA lighting, as before). The Video tab's "Lighting" combo (Native,
-  Toon bands, Per-pixel (for 30 FPS)) writes or deletes the file and publishes the mode; the deko3d
-  renderer applies it at the start of its next frame. Off: the variant code is not reached
+  anything else = off (native PICA lighting, as before). **The model lives in the graphics settings**
+  (one source of truth, the one Lighting > Scene lights reads): per-pixel *is* the Modern lighting model
+  (`Effects.SurfaceLighting` PerPixel, validated to PerPixelPbr), toon is `Effects.Toon` PicaMaterial,
+  off is Native (`Deko3d::WithLightingMode` / `LightingModeOf`). At start deko3d reports the
+  `NativeSurfaceLighting` capability (available when `deko3d.pack` loaded) and applies the file to the
+  settings; a mode moves an Authentic preset to Custom (the Switch starts from the Custom preset anyway:
+  no settings file, no F2 override). The Video tab's "Lighting" combo (Native, Toon bands, Per-pixel (Modern model)) applies the model and writes the file; the renderer reads the model and the
+  scene environment from `SnapshotForRendering()` each frame. Off: the variant code is not reached
   (`ResolvePicaProgram` checks the mode once per draw), the native shader keys and the pack's existing
   entries are unchanged, and nothing new runs on the game thread.
 - **Toon:** upstream's Toon "PICA material" banding (`pica_toon_shader.cpp`, default style: 4 bands,
@@ -1388,18 +1393,28 @@ loads).
 - **Per-pixel:** a trimmed copy of upstream's per-pixel surface lighting: the draw's native lights,
   ambient, the sun (scene and environment directionals), at most 4 scene point lights (Navi, fairies,
   flames; the first 4 the selector keeps) and the baked-surface branch (outdoor vertex colour
-  redistributed by the light, a horizontal face keeps its native colour). No placed lights, water
-  optics, rim, GI or shadows. Admission is upstream's (`surfaceCandidate`: scene domain, world layer,
-  perspective, relightable appearance, a typed surface vertex program). The vertex variant adds
-  upstream's surface normal and tint outputs (`BuildPicaVertexSurfaceShader`, locations 9 and 10); the
-  fragment variant reads upstream's 2992-byte `PicaSurfaceLighting` block, member for member, bound at
-  fragment slot **5** instead of upstream's 16 (deko3d has 0-15; slot 4 is the PICA fragment uniforms).
-  The block is built per draw on the render thread (`BuildPicaSurfaceLightingUniforms`, then
-  `TrimSurfaceLighting`) and streamed like the PICA uniforms (an equal block is bound again). Its
-  environment profile is the scene environment's (`GraphicsSettingsRuntime::PublishedSceneEnvironment`);
-  the release profiles (`runtime/triaevum_resources/environments/`) ship inside `resources.o2r`
-  (`environments/`, `scripts/switch/stage-product.sh`) and are read from it only while per-pixel is on
-  (`SceneEnvironmentRuntime::SetDefaultsReader`). Meant for `config/fps60` off (30 fps).
+  redistributed by the light, a horizontal face keeps its native colour), plus upstream's rim light and
+  the environment's fog contribution. No placed lights, water optics, GI or shadows. Admission is
+  upstream's (`surfaceCandidate`: scene domain, world layer, perspective, relightable appearance, a typed
+  surface vertex program). The vertex variant adds upstream's surface normal and tint outputs
+  (`BuildPicaVertexSurfaceShader`, locations 9 and 10); the fragment variant reads upstream's 2992-byte
+  `PicaSurfaceLighting` block, member for member, bound at fragment slot **5** instead of upstream's 16
+  (deko3d has 0-15; slot 4 is the PICA fragment uniforms). The block is built per draw on the render
+  thread (`BuildPicaSurfaceLightingUniforms`, `TrimSurfaceLighting`, then `AssignPicaSurfaceRim` on the
+  draws `PicaDrawReceivesRimLight` admits) and streamed like the PICA uniforms (an equal block is bound
+  again). The release profiles (`runtime/triaevum_resources/environments/`) ship inside `resources.o2r`
+  (`environments/`, `scripts/switch/stage-product.sh`) and are read from it only while the Modern model
+  is on under deko3d (`SceneEnvironmentRuntime::SetDefaultsReader`). Nothing ties it to `config/fps60`:
+  it runs at 30 or 60 fps; at 60 fps its 1-2.5 ms can drop frames in busy rooms (the Video tab says so).
+- **Lighting > Scene lights under per-pixel (0.1.2-test.2 said "needs the Modern lighting model"):**
+  active by one rule (`SceneEnvironmentActive`: capability, Modern model, not Authentic, no native
+  override). Live through the published environment: Use scene environment, Preserve scene
+  brightness, ambient colour and intensity, native scene direct, local and ambient contributions,
+  native fog contribution, rim light (all its controls), key and fill lights (colour, intensity,
+  direction modes), and the Navi / fairy / flame / architecture point-light groups (on, intensity,
+  radius, tint; at most 4 per surface, said in the tab). Marked unavailable on the Switch renderer:
+  placed lights (kept in the profile, not drawn) and shadows (caster faces). No other reachable Switch
+  menu names the lighting model (the built-in Lighting & GI / Shadows panels are not in L3+R3).
 - **Variants come from the pack:** a variant is the deterministic mutation of the text the native draw
   uses (specialized or parametric), looked up by its own `ShaderTextKey`. Offline,
   `oot3d_deko3d_lighting_variants` (the console's own mutation code) writes the toon and per-pixel

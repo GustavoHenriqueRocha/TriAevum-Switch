@@ -2,6 +2,7 @@
 #include "oot3d_video_settings.h"
 #include "oot3d_fps_counter.h"
 #include "fast/backends/gfx_deko3d_lighting.h"
+#include "fast/oot3d/graphics_settings_runtime.h"
 #include "oot3d/renderer/azahar_texture_pack_settings.h"
 #include "fast/oot3d/grass_switch_profile.h"
 #include <imgui.h>
@@ -66,8 +67,7 @@ class VideoSettingsPanel final : public Fast::Oot3d::GraphicsSettingsPanelTab {
 public:
   explicit VideoSettingsPanel(std::filesystem::path config)
       : mConfig(std::move(config)), mBoot(VideoSettings::Load(mConfig)), mSettings(mBoot),
-        mPack(::Oot3d::Renderer::TexturePackSettings::Load(mConfig)),
-        mLighting(Fast::Deko3d::LoadLightingMode(mConfig)) {
+        mPack(::Oot3d::Renderer::TexturePackSettings::Load(mConfig)) {
     std::error_code error;
     PerfOverlayEnabled().store(std::filesystem::exists(mConfig / kPerfOverlayConfigName, error),
                                std::memory_order_relaxed);
@@ -186,21 +186,35 @@ private:
                         "with 30 FPS it reaches farther.");
   }
 
-  // config/lighting: native (no file), toon bands or trimmed per-pixel
-  // lighting; saved, and applied by the deko3d renderer at the start of its
-  // next frame. A shader the pack lacks keeps its native look.
+  // The lighting model (graphics settings: Modern = per-pixel, toon bands
+  // or native), saved to config/lighting and applied at once; the renderer
+  // and Lighting > Scene lights read the same settings. A shader the pack
+  // lacks keeps its native look.
   void DrawLighting() {
     ImGui::Separator();
-    const char *const modes[] = {"Native (default)", "Toon bands", "Per-pixel (for 30 FPS)"};
-    int mode = static_cast<int>(mLighting);
+    auto &graphics = Fast::Oot3d::GraphicsSettingsRuntime::Instance();
+    const auto current = graphics.Snapshot();
+    const bool modernAvailable =
+        graphics.Capabilities().Get(Fast::Oot3d::GraphicsCapability::NativeSurfaceLighting).Available;
+    const char *const modes[] = {"Native (default)", "Toon bands", "Per-pixel (Modern model)"};
+    int mode = static_cast<int>(Fast::Deko3d::LightingModeOf(current));
     if (ImGui::Combo("Lighting", &mode, modes, 3)) {
-      mLighting = static_cast<Fast::Deko3d::LightingMode>(mode);
-      mLightingError = Fast::Deko3d::SaveLightingMode(mConfig, mLighting);
-      Fast::Deko3d::LiveLightingSettings().Publish(mLighting);
+      const auto chosen = static_cast<Fast::Deko3d::LightingMode>(mode);
+      const auto validation = graphics.Apply(Fast::Deko3d::WithLightingMode(current, chosen), false);
+      const auto applied = Fast::Deko3d::LightingModeOf(graphics.Snapshot());
+      mLightingError = Fast::Deko3d::SaveLightingMode(mConfig, applied);
+      if (applied != chosen && !validation.Issues.empty()) mLightingIssue = validation.Issues.front().Message;
+      else mLightingIssue.clear();
     }
     if (!mLightingError.empty())
       ImGui::TextWrapped("Could not write config/%s.", mLightingError.c_str());
-    ImGui::TextDisabled("deko3d renderer. Applies at once. Per-pixel costs more GPU time: use it at 30 FPS.");
+    if (!mLightingIssue.empty())
+      ImGui::TextWrapped("Not applied: %s", mLightingIssue.c_str());
+    else if (!modernAvailable)
+      ImGui::TextWrapped("Per-pixel needs the deko3d renderer and its shadercache/deko3d.pack.");
+    ImGui::TextDisabled("deko3d renderer. Applies at once, at 30 or 60 FPS. Per-pixel is the Modern lighting "
+                        "model of Lighting > Scene lights; it costs about 1-2.5 ms of GPU per frame: at 60 FPS "
+                        "busy rooms may drop frames.");
   }
 
   bool PackFolderExists() const {
@@ -219,8 +233,8 @@ private:
   Fast::Oot3d::GrassSwitchMode mGrassBoot = Fast::Oot3d::GrassSwitchMode::Off;
   Fast::Oot3d::GrassSwitchMode mGrass = Fast::Oot3d::GrassSwitchMode::Off;
   bool mGrassError = false;
-  Fast::Deko3d::LightingMode mLighting = Fast::Deko3d::LightingMode::Off;
   std::string mLightingError;
+  std::string mLightingIssue;
 };
 } // namespace
 std::shared_ptr<Fast::Oot3d::GraphicsSettingsPanelTab>

@@ -1,4 +1,5 @@
 #include "oot3d_key_hint.h"
+#include "fast/backends/gfx_deko3d.h"
 #include "fast/oot3d/graphics_settings_runtime.h"
 #include "fast/oot3d/settings_panel_widgets.h"
 #include "oot3d_scene_environment.h"
@@ -76,13 +77,14 @@ private:
     ImGui::BeginDisabled(!supported && !value.Enabled);
     bool changed = ImGui::Checkbox("Use scene environment", &value.Enabled);
     ImGui::EndDisabled();
-    if (!supported ||
-        !Fast::Oot3d::UsesFullSceneLighting(settings.Effects.SurfaceLighting) ||
-        settings.Preset == Fast::Oot3d::GraphicsPreset::Authentic ||
-        graphics.NativePresentationOverrideActive())
-      ImGui::TextWrapped(
-          "Inactive: needs the Modern lighting model, " TRIAEVUM_KEY_HINT("native override", "F2 native override") " off "
-          "and a supported renderer.");
+    // The Switch renderer (deko3d) draws a trimmed per-pixel model: what it
+    // leaves out is marked below instead of silently ignored.
+    const bool deko3d = Fast::Deko3dRendererSelected();
+    if (!Fast::Oot3d::SceneEnvironmentActive(supported, settings, graphics.NativePresentationOverrideActive()))
+      ImGui::TextWrapped(deko3d
+          ? "Inactive: choose Per-pixel (the Modern lighting model) in Video > Lighting."
+          : "Inactive: needs the Modern lighting model, " TRIAEVUM_KEY_HINT("native override", "F2 native override") " off "
+            "and a supported renderer.");
     ImGui::BeginDisabled(!value.Enabled || !supported);
     changed |= ImGui::Checkbox("Preserve scene brightness", &value.PreserveSceneBrightness);
     ImGui::TextWrapped(
@@ -221,6 +223,8 @@ private:
                                  "Architecture point lights"};
     const char *pointNames[] = {"Navi", "Fairy", "Flame", "Architecture"};
     static_assert(std::size(pointLabels) == Fast::Renderer3ds::kPicaScenePointLightGroups);
+    if (deko3d)
+      ImGui::TextWrapped("Switch renderer: at most 4 point lights light a surface, the first ones the game selects.");
     for (size_t i = 0; i < value.PointLights.size(); ++i) {
       auto &light = value.PointLights[i];
       ImGui::PushID(pointLabels[i]);
@@ -238,11 +242,15 @@ private:
       ImGui::EndDisabled();
       ImGui::PopID();
     }
-    ImGui::BeginDisabled(!value.Enabled || !supported);
+    ImGui::BeginDisabled(!value.Enabled || !supported || deko3d);
     changed |= DrawPlacedLights(value, state);
     ImGui::EndDisabled();
+    if (deko3d)
+      ImGui::TextWrapped("Unavailable on the Switch renderer: placed lights are kept in the profile but not drawn.");
     ImGui::SeparatorText("Shadows");
-    ImGui::BeginDisabled(!supported);
+    if (deko3d)
+      ImGui::TextWrapped("Unavailable on the Switch renderer: it draws no directional or point shadows.");
+    ImGui::BeginDisabled(!supported || deko3d);
     int faces = static_cast<int>(value.CasterFaces);
     if (ImGui::Combo("Shadow caster faces", &faces, "Native\0Both faces\0Interior sun / offline\0")) {
       value.CasterFaces = static_cast<Fast::Renderer3ds::ShadowCasterFaces>(faces);
