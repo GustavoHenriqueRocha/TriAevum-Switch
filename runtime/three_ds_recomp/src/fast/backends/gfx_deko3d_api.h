@@ -139,6 +139,17 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     bool QueuePicaCompletion(uint64_t completionId, std::string* error = nullptr) override;
     std::vector<uint64_t> TakePicaCompletions() override;
     bool ResetPicaState(std::string* error = nullptr) override;
+    // Savestates (gfx_deko3d_pica_snapshot.h): every PICA target's colour,
+    // depth and stencil at the guest framebuffer extent, and back at this
+    // renderer's scale. Called with the render thread drained; nothing of it
+    // runs in a frame without a save or a load.
+    bool CapturePicaColorTargets(std::vector<GfxNativePicaRenderTargetColorSnapshot>& snapshots,
+                                 std::string* error = nullptr) override;
+    bool RestorePicaColorTargets(std::span<const GfxNativePicaRenderTargetColorSnapshot> snapshots,
+                                 std::string* error = nullptr) override;
+    // The native namespace's replay stays skipped: a savestate keeps whatever
+    // that namespace holds (what was drawn there for guest read-backs); the
+    // presented scene lives in the visual namespace, which no savestate keeps.
     [[nodiscard]] bool PicaNativeNamespaceObservable() const override {
         return false;
     }

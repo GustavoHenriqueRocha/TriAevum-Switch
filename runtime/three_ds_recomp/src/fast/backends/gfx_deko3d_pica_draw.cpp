@@ -30,7 +30,10 @@
 #include <cstring>
 #include <fstream>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace Fast {
 using WindowAcquireHook = void (*)(bool after);
@@ -897,6 +900,110 @@ bool GfxRenderingAPIDeko3d::ResetPicaState(std::string*) {
     mPendingFills.clear();
     mBoundTarget = nullptr;
     return true;
+}
+
+bool GfxRenderingAPIDeko3d::CapturePicaColorTargets(std::vector<GfxNativePicaRenderTargetColorSnapshot>& snapshots,
+                                                    std::string* error) {
+    snapshots.clear();
+    if (!mDeviceReady) {
+        if (error != nullptr) {
+            *error = "native PICA color capture requires the deko3d device";
+        }
+        return false;
+    }
+    std::string failure;
+    try {
+        // The idle boundary: the render thread is drained, so what the open
+        // frame recorded is complete in guest order. It reaches the GPU with
+        // the first read-back, which waits for all of it.
+        EnsureFrame();
+        mDevice.WaitPresentIdle();
+        const auto layout = mTargets.DepthStencilLayout(&failure);
+        mBoundTarget = nullptr; // the probe was bound
+        if (!layout.has_value()) {
+            throw std::runtime_error(failure);
+        }
+        std::vector<std::pair<const PicaTargetKey*, const PicaTarget*>> targets;
+        targets.reserve(mTargets.Count());
+        mTargets.ForEach([&](const PicaTargetKey& key, PicaTarget& target) { targets.emplace_back(&key, &target); });
+        std::sort(targets.begin(), targets.end(),
+                  [](const auto& left, const auto& right) { return PicaTargetKeyLess(*left.first, *right.first); });
+        snapshots.reserve(targets.size());
+        // One target's read-back at its extent at a time: only the guest-extent
+        // snapshots accumulate.
+        std::vector<uint8_t> rgba8;
+        std::vector<uint32_t> depthStencil;
+        for (const auto& [key, target] : targets) {
+            if (!mTargets.ReadTarget(*target, rgba8, depthStencil, &failure)) {
+                throw std::runtime_error(failure);
+            }
+            snapshots.push_back(MakeGuestExtentSnapshot(*key, target->Extent.Width, target->Extent.Height, rgba8,
+                                                        depthStencil, *layout));
+        }
+        Deko3d::Log("savestate: captured %zu targets", snapshots.size());
+        return true;
+    } catch (const std::exception& exception) {
+        snapshots.clear();
+        if (error != nullptr) {
+            *error = exception.what();
+        }
+        return false;
+    }
+}
+
+bool GfxRenderingAPIDeko3d::RestorePicaColorTargets(
+    std::span<const GfxNativePicaRenderTargetColorSnapshot> snapshots, std::string* error) {
+    if (snapshots.empty()) {
+        return true;
+    }
+    std::string failure = !mDeviceReady              ? "native PICA color restore requires the deko3d device"
+                          : mTargets.Count() != 0U ? "native PICA color restore requires reset renderer state"
+                                                   : ValidateRestoreSnapshots(snapshots);
+    if (!failure.empty()) {
+        if (error != nullptr) {
+            *error = failure;
+        }
+        return false;
+    }
+    try {
+        // Guest-extent snapshots (and legacy ones, saved at a renderer's
+        // scale) are resampled to the extent this renderer creates the target
+        // at: its scale, the top target widened by widescreen.
+        EnsureFrame();
+        const auto layout = mTargets.DepthStencilLayout(&failure);
+        mBoundTarget = nullptr;
+        if (!layout.has_value()) {
+            throw std::runtime_error(failure);
+        }
+        for (const auto& snapshot : snapshots) {
+            // Created cleared and bound (the copy below rebinds it).
+            PicaTarget* target = mTargets.Get(PicaTargetKeyOf(snapshot), nullptr);
+            mBoundTarget = nullptr;
+            if (target == nullptr) {
+                throw std::runtime_error("no memory for a restored render target");
+            }
+            const auto pixels = PlanRestorePixels(snapshot, target->Extent.Width, target->Extent.Height, *layout);
+            if (!mTargets.WriteTarget(*target, pixels.Rgba8, pixels.DepthStencil, &failure)) {
+                throw std::runtime_error(failure);
+            }
+        }
+        Deko3d::Log("savestate: restored %zu targets (%s)", snapshots.size(),
+                    snapshots.front().RenderScalePermille == Renderer3ds::kPicaGuestExtentRenderScalePermille
+                        ? "guest extent"
+                        : "legacy scale");
+        return true;
+    } catch (const std::exception& exception) {
+        // Half-restored targets would pass for the saved ones: gone, after
+        // the GPU finished what was recorded for them (as ResetPicaState).
+        mDevice.Submit();
+        mDevice.WaitIdle();
+        mTargets.Reset();
+        mBoundTarget = nullptr;
+        if (error != nullptr) {
+            *error = exception.what();
+        }
+        return false;
+    }
 }
 
 } // namespace Fast

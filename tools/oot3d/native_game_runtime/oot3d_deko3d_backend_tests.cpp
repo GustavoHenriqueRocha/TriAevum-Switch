@@ -2,13 +2,18 @@
 // without a GPU is tested here on the host.
 #include "fast/backends/gfx_deko3d.h"
 #include "fast/backends/gfx_deko3d_pica_pipeline.h"
+#include "fast/backends/gfx_deko3d_pica_snapshot.h"
 #include "fast/backends/gfx_deko3d_pica_plan.h"
 #include "fast/oot3d/scene_presentation_policy.h"
 #include "fast/backends/gfx_deko3d_programs.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
 #include "fast/backends/gfx_deko3d_ui_plan.h"
+#include "fast/renderer3ds/pica_framebuffer_encode.h"
 
 #include <array>
+#include <limits>
+#include <span>
+#include <string>
 #include <cstring>
 #include <string_view>
 #include <vector>
@@ -388,6 +393,192 @@ void TestTransferAndScanout() {
   Require(wide.CoversWindow && wide.Viewport.Width == 1280, "16:9 covers the window");
 }
 
+// ---- savestates: CapturePicaColorTargets / RestorePicaColorTargets ----
+
+void TestSavestateDepthWords() {
+  using namespace Fast::Deko3d;
+  using L = DepthStencilWordLayout;
+  Require(PackDepthStencilWord(kProbeDepth, kProbeStencil, L::DepthHigh) == 0x4000005AU &&
+              PackDepthStencilWord(kProbeDepth, kProbeStencil, L::DepthLow) == 0x5A400000U,
+          "Z24S8 words in both layouts");
+  Require(PackDepthStencilWord(1.0F, 0xFF, L::DepthHigh) == 0xFFFFFFFFU &&
+              PackDepthStencilWord(2.0F, 0, L::DepthLow) == 0x00FFFFFFU &&
+              PackDepthStencilWord(-1.0F, 7, L::DepthHigh) == 7U,
+          "depth clamped to [0, 1]");
+  for (const auto layout : {L::DepthHigh, L::DepthLow}) {
+    const uint32_t word = PackDepthStencilWord(0.75F, 0x81, layout);
+    Require(WordDepth24(word, layout) == Depth24(0.75F) && WordStencil(word, layout) == 0x81,
+            "unpack inverts pack");
+  }
+  // The probe clear, rounded either way by the hardware; garbage is refused
+  // (the save fails instead of storing swapped depth and stencil).
+  Require(IdentifyDepthStencilWordLayout(0x4000005AU) == L::DepthHigh &&
+              IdentifyDepthStencilWordLayout(0x3FFFFF5AU) == L::DepthHigh &&
+              IdentifyDepthStencilWordLayout(0x5A400000U) == L::DepthLow &&
+              IdentifyDepthStencilWordLayout(0x5A3FFFFFU) == L::DepthLow,
+          "probe clear identifies the layout");
+  Require(!IdentifyDepthStencilWordLayout(0x00000000U) && !IdentifyDepthStencilWordLayout(0x4000005BU) &&
+              !IdentifyDepthStencilWordLayout(0x5A400002U) && !IdentifyDepthStencilWordLayout(0xFFFFFF00U),
+          "unknown words refused");
+}
+
+// A 2x target (16x16) of an 8x8 guest framebuffer through the whole path:
+// read-back -> guest-extent snapshot -> guest memory (SaveState's encode) ->
+// decode (LoadState) -> validation -> the pixels a restored 2x target gets.
+void TestSavestateRoundTrip() {
+  using namespace Fast::Deko3d;
+  using Fast::Renderer3ds::PicaRenderTargetColorSnapshot;
+  const PicaTargetKey key{1, 0x18000000, 0x18100000, 8, 8, 0, 3};
+  constexpr uint32_t kWidth = 16;
+  constexpr uint32_t kHeight = 16;
+  for (const auto layout : {DepthStencilWordLayout::DepthHigh, DepthStencilWordLayout::DepthLow}) {
+    std::vector<uint8_t> rgba(kWidth * kHeight * 4U);
+    std::vector<uint32_t> words(kWidth * kHeight);
+    for (uint32_t y = 0; y < kHeight; ++y) {
+      for (uint32_t x = 0; x < kWidth; ++x) {
+        // Colour constant over each guest pixel's 2x2 block, so its average is exact.
+        uint8_t* texel = rgba.data() + (y * kWidth + x) * 4U;
+        texel[0] = static_cast<uint8_t>((x / 2U) * 30U);
+        texel[1] = static_cast<uint8_t>((y / 2U) * 30U);
+        texel[2] = static_cast<uint8_t>(((x / 2U) ^ (y / 2U)) * 16U);
+        texel[3] = 255U;
+        words[y * kWidth + x] =
+            PackDepthStencilWord(static_cast<float>(y * kWidth + x + 1U) / 300.0F, static_cast<uint8_t>(x ^ y), layout);
+      }
+    }
+    const auto snapshot = MakeGuestExtentSnapshot(key, kWidth, kHeight, rgba, words, layout);
+    Require(snapshot.RenderTargetNamespace == 1 && snapshot.ColorPhysicalAddress == 0x18000000 &&
+                snapshot.DepthPhysicalAddress == 0x18100000 && snapshot.FramebufferWidth == 8 &&
+                snapshot.FramebufferHeight == 8 && snapshot.FramebufferColorFormat == 0 &&
+                snapshot.FramebufferDepthFormat == 3,
+            "snapshot identity is the target key");
+    Require(snapshot.RenderScalePermille == Fast::Renderer3ds::kPicaGuestExtentRenderScalePermille &&
+                snapshot.ImageWidth == 8 && snapshot.ImageHeight == 8 && snapshot.SampleCount == 1 &&
+                !snapshot.WBuffering && !snapshot.SceneEffectsResolved,
+            "snapshot at the guest extent, as SaveState requires");
+    Require(snapshot.NormalGuideRgba8.empty() && snapshot.ShadowR32UintLe.empty() &&
+                snapshot.ColorRgba8.size() == 8U * 8U * 4U && snapshot.DepthValues.size() == 64U &&
+                snapshot.StencilValues.size() == 64U,
+            "colour, depth and stencil only");
+    for (uint32_t y = 0; y < 8U; ++y) {
+      for (uint32_t x = 0; x < 8U; ++x) {
+        const uint8_t* texel = snapshot.ColorRgba8.data() + (y * 8U + x) * 4U;
+        Require(texel[0] == x * 30U && texel[1] == y * 30U && texel[2] == (x ^ y) * 16U && texel[3] == 255U,
+                "colour area-averaged to the guest pixel");
+        // Nearest: the source pixel at the destination centre (2x + 1, 2y + 1).
+        const uint32_t source = words[(2U * y + 1U) * kWidth + 2U * x + 1U];
+        Require(Depth24(snapshot.DepthValues[y * 8U + x]) == WordDepth24(source, layout) &&
+                    snapshot.StencilValues[y * 8U + x] == WordStencil(source, layout),
+                "depth and stencil from the same nearest pixel");
+      }
+    }
+    // SaveState writes it into guest memory, LoadState reads it back.
+    const auto colorBytes = Fast::Renderer3ds::EncodePicaFramebuffer(snapshot.ColorRgba8, 8, 8, 8, 8, 0);
+    const auto depthBytes =
+        Fast::Renderer3ds::EncodePicaDepthStencil(snapshot.DepthValues, snapshot.StencilValues, 8, 8, 3);
+    PicaRenderTargetColorSnapshot loaded = snapshot;
+    loaded.ColorRgba8 = Fast::Renderer3ds::DecodePicaFramebuffer(colorBytes, 8, 8, 0);
+    Fast::Renderer3ds::DecodePicaDepthStencil(depthBytes, 8, 8, 3, loaded.DepthValues, loaded.StencilValues);
+    Require(loaded.ColorRgba8 == snapshot.ColorRgba8 && loaded.StencilValues == snapshot.StencilValues,
+            "guest memory keeps colour and stencil");
+    const std::array<PicaRenderTargetColorSnapshot, 1> restored{loaded};
+    Require(ValidateRestoreSnapshots(restored).empty(), "a loaded snapshot restores");
+    const auto pixels = PlanRestorePixels(loaded, kWidth, kHeight, layout);
+    Require(pixels.Rgba8.size() == rgba.size() && pixels.DepthStencil.size() == words.size(), "pixels at the target extent");
+    for (uint32_t y = 0; y < kHeight; ++y) {
+      for (uint32_t x = 0; x < kWidth; ++x) {
+        const uint32_t word = pixels.DepthStencil[y * kWidth + x];
+        const uint32_t saved = words[(2U * (y / 2U) + 1U) * kWidth + 2U * (x / 2U) + 1U];
+        const uint32_t depth = WordDepth24(word, layout);
+        const uint32_t savedDepth = WordDepth24(saved, layout);
+        Require((depth > savedDepth ? depth - savedDepth : savedDepth - depth) <= 1U &&
+                    WordStencil(word, layout) == WordStencil(saved, layout),
+                "restored depth/stencil: the saved guest pixel, nearest");
+      }
+    }
+  }
+  // Uniform colour survives the area average and the bilinear enlargement unchanged.
+  std::vector<uint8_t> flat(kWidth * kHeight * 4U);
+  for (size_t index = 0; index < flat.size(); index += 4U) {
+    flat[index] = 12;
+    flat[index + 1] = 200;
+    flat[index + 2] = 77;
+    flat[index + 3] = 255;
+  }
+  const std::vector<uint32_t> cleared(kWidth * kHeight, PackDepthStencilWord(1.0F, 0, DepthStencilWordLayout::DepthHigh));
+  const auto snapshot = MakeGuestExtentSnapshot(key, kWidth, kHeight, flat, cleared, DepthStencilWordLayout::DepthHigh);
+  const auto pixels = PlanRestorePixels(snapshot, kWidth, kHeight, DepthStencilWordLayout::DepthHigh);
+  Require(pixels.Rgba8 == flat && pixels.DepthStencil == cleared, "uniform target round-trips exactly");
+  // A widescreen top target (taller than its scale) still saves at the guest extent.
+  const PicaTargetKey top{1, 0x18000000, 0x18100000, 16, 8, 0, 3};
+  const std::vector<uint8_t> wideColor(32U * 21U * 4U, 9);
+  const std::vector<uint32_t> wideWords(32U * 21U, 0x12345678U);
+  const auto wide = MakeGuestExtentSnapshot(top, 32, 21, wideColor, wideWords, DepthStencilWordLayout::DepthLow);
+  Require(wide.ImageWidth == 16 && wide.ImageHeight == 8 && wide.ColorRgba8.size() == 16U * 8U * 4U &&
+              wide.DepthValues.size() == 128U,
+          "widened target resampled to the guest extent");
+}
+
+void TestSavestateRestoreValidation() {
+  using namespace Fast::Deko3d;
+  using Fast::Renderer3ds::PicaRenderTargetColorSnapshot;
+  PicaRenderTargetColorSnapshot good;
+  good.RenderTargetNamespace = 1;
+  good.ColorPhysicalAddress = 0x18000000;
+  good.DepthPhysicalAddress = 0x18100000;
+  good.FramebufferWidth = 8;
+  good.FramebufferHeight = 8;
+  good.FramebufferDepthFormat = 3;
+  good.RenderScalePermille = Fast::Renderer3ds::kPicaGuestExtentRenderScalePermille;
+  good.ImageWidth = 8;
+  good.ImageHeight = 8;
+  good.ColorRgba8.assign(256, 0);
+  good.DepthValues.assign(64, 1.0F);
+  Require(ValidateRestoreSnapshots(std::span<const PicaRenderTargetColorSnapshot>{}).empty(), "nothing to restore");
+  Require(ValidateRestoreSnapshots(std::span(&good, 1)).empty(), "guest extent without stencil (D24)");
+  const auto refused = [&](auto change, const char* message) {
+    PicaRenderTargetColorSnapshot bad = good;
+    change(bad);
+    Require(!ValidateRestoreSnapshots(std::span(&bad, 1)).empty(), message);
+  };
+  refused([](auto& s) { s.ImageWidth = 16; s.ColorRgba8.assign(512, 0); s.DepthValues.assign(128, 1.0F); },
+          "guest extent other than the framebuffer's");
+  refused([](auto& s) { s.ColorRgba8.pop_back(); }, "short colour");
+  refused([](auto& s) { s.DepthValues.pop_back(); }, "short depth");
+  refused([](auto& s) { s.StencilValues.assign(63, 0); }, "short stencil");
+  refused([](auto& s) { s.DepthValues[5] = std::numeric_limits<float>::quiet_NaN(); }, "depth NaN");
+  refused([](auto& s) { s.DepthValues[5] = 1.5F; }, "depth above 1");
+  refused([](auto& s) { s.ColorPhysicalAddress = 0; }, "no colour address");
+  refused([](auto& s) { s.SampleCount = 4; }, "multisampled");
+  const std::array<PicaRenderTargetColorSnapshot, 2> twice{good, good};
+  Require(!ValidateRestoreSnapshots(twice).empty(), "same identity twice");
+  // Legacy (saved at a renderer's 2x scale, with guides deko3d does not have):
+  // its colour, depth and stencil restore; mixed scales are refused.
+  PicaRenderTargetColorSnapshot legacy = good;
+  legacy.RenderScalePermille = 2000;
+  legacy.ImageWidth = 16;
+  legacy.ImageHeight = 16;
+  legacy.ColorRgba8.assign(1024, 0);
+  legacy.DepthValues.assign(256, 0.5F);
+  legacy.NormalGuideRgba8.assign(1024, 128);
+  Require(ValidateRestoreSnapshots(std::span(&legacy, 1)).empty(), "legacy snapshot restores");
+  const auto pixels = PlanRestorePixels(legacy, 24, 24, DepthStencilWordLayout::DepthHigh);
+  Require(pixels.Rgba8.size() == 24U * 24U * 4U && pixels.DepthStencil.size() == 576U &&
+              pixels.DepthStencil.front() == PackDepthStencilWord(0.5F, 0, DepthStencilWordLayout::DepthHigh),
+          "legacy resampled from its own extent");
+  PicaRenderTargetColorSnapshot other = good;
+  other.ColorPhysicalAddress = 0x18200000;
+  const std::array<PicaRenderTargetColorSnapshot, 2> mixed{legacy, other};
+  Require(ValidateRestoreSnapshots(mixed).find("different render scales") != std::string::npos,
+          "mixed scales refused");
+  // Snapshot order and the key a restore creates.
+  Require(PicaTargetKeyOf(good) == PicaTargetKey{1, 0x18000000, 0x18100000, 8, 8, 0, 3}, "key of a snapshot");
+  Require(PicaTargetKeyLess({1, 0x10, 0, 8, 8, 0, 0}, {1, 0x20, 0, 8, 8, 0, 0}) &&
+              PicaTargetKeyLess({1, 0x20, 0, 8, 8, 0, 0}, {2, 0x10, 0, 8, 8, 0, 0}) &&
+              !PicaTargetKeyLess({1, 0x10, 0, 8, 8, 0, 0}, {1, 0x10, 0, 8, 8, 0, 0}),
+          "namespace, then colour address (FindColor's order)");
+}
+
 void TestLogSchedule() {
   // Lines that show whether p5 reached the console (24/10: the log didn't say
   // which NRO it came from nor whether PICA reached the backend before frame 1800).
@@ -474,6 +665,9 @@ int main() {
   TestTransferAndScanout();
   TestLogSchedule();
   TestUiPlan();
+  TestSavestateDepthWords();
+  TestSavestateRoundTrip();
+  TestSavestateRestoreValidation();
   std::puts("oot3d_deko3d_backend_tests: ok");
   return 0;
 }

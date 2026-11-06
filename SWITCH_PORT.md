@@ -840,6 +840,48 @@ Round proofs (scripts in the repository; run on the Ryzen and the notebook):
   compares an in-place update with read + write back (bytes, generations, watch counters,
   observers, deferred writes) and covers shared queues.
 
+### Save states on deko3d (05/11)
+- Seen on the console: every save state ended in "Save state failed: native PICA color capture
+  failed: rendering backend does not capture native PICA color targets". A save writes the game's
+  render targets into the saved copy of guest memory (`SaveState`, graphics-free states) and asks
+  the backend for them with `CapturePicaColorTargets`; only Vulkan implemented it, deko3d kept the
+  interface default, which refuses. The load side (`RestorePicaColorTargets`) had the same default.
+- Now deko3d implements both with Vulkan's contract (`gfx_vulkan_pica_state.cpp`):
+  - Capture (`gfx_deko3d_pica_draw.cpp`): at the savestate boundary (render thread drained), the
+    open frame's commands are submitted and waited for, as is the present thread
+    (`Device::WaitPresentIdle`). Every target, in `FindColor`'s key order, one at a time: the copy
+    engine reads its drawn extent (colour RGBA8, depth/stencil Z24S8; the images are block-linear,
+    the depth one compressed) into a CPU-visible staging block, which is copied once into cached
+    memory and freed. The snapshot is at the guest framebuffer extent
+    (`kPicaGuestExtentRenderScalePermille`): colour area-averaged (`ResamplePicaRgba8`), depth and
+    stencil nearest (`ResamplePicaNearest`), namespace, addresses, formats as the target key.
+    W-buffering and resolved scene effects stay false: deko3d has neither (Vulkan sets
+    W-buffering again at the target's next draw).
+  - Restore: requires the reset renderer (no target), validates like Vulkan (scales, extents,
+    sizes, depth in [0, 1], unique identities) and creates each target at this renderer's scale
+    (the top target widened by widescreen), with the colour bilinear and depth/stencil nearest
+    from the snapshot. A legacy snapshot (saved at a renderer's scale) is resampled from its own
+    extent; its guide images are not read (deko3d has none). The copy engine writes the images,
+    then Zcull is invalidated (the creation clear told it depth 1 everywhere). A failure removes
+    every target restored so far.
+  - The Z24S8 word layout the copy engine gives is probed once per run (first save or load): a
+    256×256 compressed target cleared to depth 0.25 / stencil 0x5A is read back, then a pattern is
+    written and read back. `logs/deko3d.txt` says which layout came out (`savestate: Z24S8 words
+    read as ...`); an unrecognised word or a write that does not round-trip fails the save with
+    the words in the message, instead of storing swapped depth and stencil.
+  - The pure parts (word layout, snapshot fields, resampling, validation, restore pixels) are in
+    `gfx_deko3d_pica_snapshot.h`, tested by `oot3d_deko3d_backend_tests` through SaveState's
+    encode into guest memory and LoadState's decode.
+- Memory: only the guest-extent snapshots accumulate (1.7 MiB for a 480×400 target); one
+  target's staging and full-size copy (a few MiB at 2–3× scale) live at a time and are freed
+  before the next. The frame path is unchanged: nothing runs without a save or a load request.
+- The native namespace replay stays skipped on deko3d (`PicaNativeNamespaceObservable` false):
+  a state keeps what that namespace holds; the presented scene (visual namespace) is never in a
+  state, on any backend, and the first frame after a load draws it again.
+- Using it: L3+R3 → Game → Save states. "Save state" / "Save state + settings" save, "Load last
+  state" / "Load last state + settings" load (the folder is at the top of the tab; states listed
+  below can be picked). The result shows as a notice.
+
 
 ### PICA planning off the game thread (2026-10-17)
 - The plan for each draw (shaders, uniforms, bindings, texture hashes; `pica_plan`, ~2.5 ms per

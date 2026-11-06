@@ -13,11 +13,15 @@
 
 #if defined(__SWITCH__)
 #include "fast/backends/gfx_deko3d_pica_pipeline.h"
+#include "fast/backends/gfx_deko3d_pica_snapshot.h"
 #include "gfx_deko3d_device.h"
 #include "gfx_deko3d_pica_resources.h"
 
 #include <cstdint>
 #include <map>
+#include <optional>
+#include <span>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -99,6 +103,23 @@ class PicaTargets {
             visit(key, target);
         }
     }
+    [[nodiscard]] size_t Count() const noexcept { return mTargets.size(); }
+
+    // Savestates (gfx_deko3d_pica_snapshot.h), at an idle boundary only:
+    // the copy engine moves a target's drawn extent between its block-linear
+    // images and CPU memory (colour RGBA8 rows, depth/stencil Z24S8 words).
+    // Each call records into the open frame, submits it and waits for the GPU;
+    // its staging memory is freed before it returns. False (and *error) when
+    // memory runs out or the queue fails.
+    bool ReadTarget(const PicaTarget& target, std::vector<uint8_t>& rgba8, std::vector<uint32_t>& depthStencil,
+                    std::string* error);
+    bool WriteTarget(PicaTarget& target, std::span<const uint8_t> rgba8, std::span<const uint32_t> depthStencil,
+                     std::string* error);
+    // The Z24S8 word layout the copy engine reads and writes, probed once on a
+    // small compressed target like the real ones: a clear read back gives the
+    // layout, a written pattern read back proves writes reach the image. Leaves
+    // the probe bound: the caller rebinds before drawing.
+    std::optional<DepthStencilWordLayout> DepthStencilLayout(std::string* error);
 
     // Dynamic resolution at the frame's first draw into an eligible target
     // (GL: ApplyPicaGlTargetScaleAtDraw): moves the drawn extent to the
@@ -130,6 +151,7 @@ class PicaTargets {
     std::unordered_map<PicaTargetKey, PicaTarget, PicaTargetKeyHash> mTargets;
     std::map<std::pair<uint64_t, uint32_t>, PicaDisplay> mDisplays;
     std::vector<Retired> mRetired;
+    std::optional<DepthStencilWordLayout> mDepthStencilLayout;
     PicaTargetStats mStats{};
 };
 

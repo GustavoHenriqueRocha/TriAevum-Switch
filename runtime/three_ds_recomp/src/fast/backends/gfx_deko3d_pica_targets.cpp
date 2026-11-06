@@ -8,6 +8,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
 #include <tuple>
 
 namespace Fast::Deko3d {
@@ -47,6 +50,30 @@ bool Place(std::initializer_list<ImagePlacement*> images, uint64_t& total) {
 }
 
 constexpr uint32_t kRenderFlags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
+constexpr uint32_t kDepthFlags = DkImageFlags_UsageRender | DkImageFlags_HwCompression;
+
+// Savestate staging: written or read by the CPU once, between two waits for
+// the GPU (every queue flush also flushes and invalidates the GPU's L2).
+constexpr uint32_t kStagingFlags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+constexpr uint32_t kStagingAlignment = 256U;
+
+bool Fail(std::string* error, const std::string& message) {
+    Log("savestate: %s", message.c_str());
+    if (error != nullptr) {
+        *error = message;
+    }
+    return false;
+}
+
+// Hands what the frame recorded to the GPU and waits for all of it.
+bool SubmitAndWait(Device& device, std::string* error) {
+    device.Submit();
+    device.WaitIdle();
+    if (dkQueueIsInErrorState(device.Queue())) {
+        return Fail(error, "the deko3d queue failed during a savestate copy");
+    }
+    return true;
+}
 } // namespace
 
 bool PicaTargets::Init(Device& device, PicaResources& resources, float scale, float widescreenFactor) {
@@ -128,8 +155,7 @@ PicaTarget* PicaTargets::Get(const PicaTargetKey& key, bool* created) {
                                          kTopScreenPhysicalHeight);
     ImagePlacement color{MakeLayout(mDevice->Handle(), DkImageFormat_RGBA8_Unorm, kRenderFlags, target.Extent.Width,
                                     target.Extent.Height)};
-    ImagePlacement depth{MakeLayout(mDevice->Handle(), DkImageFormat_Z24S8,
-                                    DkImageFlags_UsageRender | DkImageFlags_HwCompression, target.Extent.Width,
+    ImagePlacement depth{MakeLayout(mDevice->Handle(), DkImageFormat_Z24S8, kDepthFlags, target.Extent.Width,
                                     target.Extent.Height)};
     uint64_t bytes = 0U;
     if (!Place({&color, &depth}, bytes) ||
@@ -272,6 +298,179 @@ PicaDisplay* PicaTargets::GetDisplay(uint64_t targetNamespace, uint32_t outputAd
     Log("targets: display image %ux%u (native %ux%u, ns %llu, output %08x)", allocWidth, allocHeight, width, height,
         static_cast<unsigned long long>(targetNamespace), outputAddress);
     return &display;
+}
+
+bool PicaTargets::ReadTarget(const PicaTarget& target, std::vector<uint8_t>& rgba8,
+                             std::vector<uint32_t>& depthStencil, std::string* error) {
+    const uint32_t width = target.Extent.Width;
+    const uint32_t height = target.Extent.Height;
+    const uint64_t bytes64 = static_cast<uint64_t>(width) * height * 4U;
+    if (bytes64 == 0U || bytes64 > 0x3FFFFFFFULL) {
+        return Fail(error, "a render target has an invalid extent");
+    }
+    const auto bytes = static_cast<uint32_t>(bytes64);
+    const uint32_t depthOffset = AlignUp(bytes, kStagingAlignment);
+    DkMemBlock staging = mDevice->MakeBlock(depthOffset + bytes, kStagingFlags, "savestate read-back");
+    if (staging == nullptr) {
+        return Fail(error, "no memory to read back a " + std::to_string(width) + "x" + std::to_string(height) +
+                               " render target");
+    }
+    const DkGpuAddr gpu = dkMemBlockGetGpuAddr(staging);
+    DkCmdBuf cmd = mDevice->Cmd();
+    // The target's fragments are in memory before the copy engine reads them;
+    // the copies are in memory before the CPU does.
+    dkCmdBufBarrier(cmd, DkBarrier_Full, 0);
+    const DkImageRect rect = {0U, 0U, 0U, width, height, 1U};
+    const DkCopyBuf color = {gpu, 0U, 0U};
+    dkCmdBufCopyImageToBuffer(cmd, &target.ColorView, &rect, &color, 0U);
+    const DkCopyBuf depth = {gpu + depthOffset, 0U, 0U};
+    dkCmdBufCopyImageToBuffer(cmd, &target.DepthView, &rect, &depth, 0U);
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
+    const bool done = SubmitAndWait(*mDevice, error);
+    if (done) {
+        // One pass over the uncached block into cached memory.
+        const auto* cpu = static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(staging));
+        rgba8.resize(bytes);
+        std::memcpy(rgba8.data(), cpu, bytes);
+        depthStencil.resize(bytes / 4U);
+        std::memcpy(depthStencil.data(), cpu + depthOffset, bytes);
+    }
+    dkMemBlockDestroy(staging);
+    return done;
+}
+
+bool PicaTargets::WriteTarget(PicaTarget& target, std::span<const uint8_t> rgba8,
+                              std::span<const uint32_t> depthStencil, std::string* error) {
+    const uint32_t width = target.Extent.Width;
+    const uint32_t height = target.Extent.Height;
+    const uint64_t bytes64 = static_cast<uint64_t>(width) * height * 4U;
+    if (bytes64 == 0U || bytes64 > 0x3FFFFFFFULL || rgba8.size() != bytes64 ||
+        depthStencil.size() * 4U != bytes64) {
+        return Fail(error, "restored pixels do not match the render target's extent");
+    }
+    const auto bytes = static_cast<uint32_t>(bytes64);
+    const uint32_t depthOffset = AlignUp(bytes, kStagingAlignment);
+    DkMemBlock staging = mDevice->MakeBlock(depthOffset + bytes, kStagingFlags, "savestate upload");
+    if (staging == nullptr) {
+        return Fail(error, "no memory to restore a " + std::to_string(width) + "x" + std::to_string(height) +
+                               " render target");
+    }
+    auto* cpu = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(staging));
+    std::memcpy(cpu, rgba8.data(), bytes);
+    std::memcpy(cpu + depthOffset, depthStencil.data(), bytes);
+    const DkGpuAddr gpu = dkMemBlockGetGpuAddr(staging);
+    DkCmdBuf cmd = mDevice->Cmd();
+    // The target's creation clear is done (and nothing stale of the staging
+    // memory is cached) before the copy engine overwrites it.
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
+    const DkImageRect rect = {0U, 0U, 0U, width, height, 1U};
+    const DkCopyBuf color = {gpu, 0U, 0U};
+    dkCmdBufCopyBufferToImage(cmd, &color, &target.ColorView, &rect, 0U);
+    const DkCopyBuf depth = {gpu + depthOffset, 0U, 0U};
+    dkCmdBufCopyBufferToImage(cmd, &depth, &target.DepthView, &rect, 0U);
+    // Later draws and copies see the restored images, and Zcull forgets the
+    // creation clear (it would cull against depth 1 where the copy wrote less).
+    const DkImageView* colors[] = {&target.ColorView};
+    dkCmdBufBindRenderTargets(cmd, colors, 1, &target.DepthView);
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_Zcull);
+    ++target.Version;
+    const bool done = SubmitAndWait(*mDevice, error);
+    dkMemBlockDestroy(staging);
+    return done;
+}
+
+std::optional<DepthStencilWordLayout> PicaTargets::DepthStencilLayout(std::string* error) {
+    if (mDepthStencilLayout.has_value()) {
+        return mDepthStencilLayout;
+    }
+    constexpr uint32_t kSize = 256U;
+    constexpr uint32_t kWords = kSize * kSize;
+    constexpr uint32_t kBytes = kWords * 4U;
+    ImagePlacement color{MakeLayout(mDevice->Handle(), DkImageFormat_RGBA8_Unorm, kRenderFlags, kSize, kSize)};
+    ImagePlacement depth{MakeLayout(mDevice->Handle(), DkImageFormat_Z24S8, kDepthFlags, kSize, kSize)};
+    uint64_t imageBytes = 0U;
+    DkMemBlock images = nullptr;
+    if (Place({&color, &depth}, imageBytes)) {
+        images = mDevice->MakeBlock(static_cast<uint32_t>(imageBytes), DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image,
+                                    "depth probe");
+    }
+    // [cleared read-back | written pattern | pattern read-back]
+    DkMemBlock staging = images != nullptr ? mDevice->MakeBlock(3U * kBytes, kStagingFlags, "depth probe staging")
+                                           : nullptr;
+    if (staging == nullptr) {
+        if (images != nullptr) {
+            dkMemBlockDestroy(images);
+        }
+        Fail(error, "no memory for the depth read-back probe");
+        return std::nullopt;
+    }
+    DkImage colorImage;
+    DkImage depthImage;
+    dkImageInitialize(&colorImage, &color.Layout, images, color.Offset);
+    dkImageInitialize(&depthImage, &depth.Layout, images, depth.Offset);
+    DkImageView colorView;
+    DkImageView depthView;
+    dkImageViewDefaults(&colorView, &colorImage);
+    dkImageViewDefaults(&depthView, &depthImage);
+    auto* cpu = static_cast<uint8_t*>(dkMemBlockGetCpuAddr(staging));
+    std::vector<uint32_t> pattern(kWords);
+    for (uint32_t index = 0; index < kWords; ++index) {
+        pattern[index] = (index + 1U) * 0x9E3779B9U;
+    }
+    std::memcpy(cpu + kBytes, pattern.data(), kBytes);
+    const DkGpuAddr gpu = dkMemBlockGetGpuAddr(staging);
+    const DkImageRect rect = {0U, 0U, 0U, kSize, kSize, 1U};
+    const DkCopyBuf cleared = {gpu, 0U, 0U};
+    const DkCopyBuf written = {gpu + kBytes, 0U, 0U};
+    const DkCopyBuf reread = {gpu + 2U * kBytes, 0U, 0U};
+    DkCmdBuf cmd = mDevice->Cmd();
+    const DkImageView* colors[] = {&colorView};
+    dkCmdBufBindRenderTargets(cmd, colors, 1, &depthView);
+    const DkScissor scissor = {0U, 0U, kSize, kSize};
+    dkCmdBufSetScissors(cmd, 0, &scissor, 1);
+    dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA, 0.0F, 0.0F, 0.0F, 0.0F);
+    dkCmdBufClearDepthStencil(cmd, true, kProbeDepth, 0xFF, kProbeStencil);
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
+    dkCmdBufCopyImageToBuffer(cmd, &depthView, &rect, &cleared, 0U);
+    dkCmdBufBarrier(cmd, DkBarrier_Full, 0);
+    dkCmdBufCopyBufferToImage(cmd, &written, &depthView, &rect, 0U);
+    dkCmdBufBarrier(cmd, DkBarrier_Full, 0);
+    dkCmdBufCopyImageToBuffer(cmd, &depthView, &rect, &reread, 0U);
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Zcull | DkInvalidateFlags_L2Cache);
+    bool done = SubmitAndWait(*mDevice, error);
+    std::vector<uint32_t> words(2U * kWords);
+    if (done) {
+        std::memcpy(words.data(), cpu, kBytes);
+        std::memcpy(words.data() + kWords, cpu + 2U * kBytes, kBytes);
+    }
+    dkMemBlockDestroy(staging);
+    dkMemBlockDestroy(images);
+    if (!done) {
+        return std::nullopt;
+    }
+    const std::span<const uint32_t> clearedWords(words.data(), kWords);
+    const std::span<const uint32_t> rereadWords(words.data() + kWords, kWords);
+    const auto layout = IdentifyDepthStencilWordLayout(clearedWords.front());
+    char detail[160];
+    if (!layout.has_value() ||
+        !std::all_of(clearedWords.begin(), clearedWords.end(), [&](uint32_t word) { return word == clearedWords.front(); })) {
+        std::snprintf(detail, sizeof(detail), "depth read-back unrecognised: a clear to %.2f/%02x read %08x",
+                      static_cast<double>(kProbeDepth), kProbeStencil, clearedWords.front());
+        Fail(error, detail);
+        return std::nullopt;
+    }
+    const auto mismatch = std::mismatch(rereadWords.begin(), rereadWords.end(), pattern.begin());
+    if (mismatch.first != rereadWords.end()) {
+        std::snprintf(detail, sizeof(detail), "depth write does not round-trip: wrote %08x, read %08x",
+                      *mismatch.second, *mismatch.first);
+        Fail(error, detail);
+        return std::nullopt;
+    }
+    Log("savestate: Z24S8 words read as %s (a clear to %.2f/%02x read %08x), writes round-trip",
+        *layout == DepthStencilWordLayout::DepthHigh ? "depth << 8 | stencil" : "stencil << 24 | depth",
+        static_cast<double>(kProbeDepth), kProbeStencil, clearedWords.front());
+    mDepthStencilLayout = layout;
+    return layout;
 }
 
 } // namespace Fast::Deko3d

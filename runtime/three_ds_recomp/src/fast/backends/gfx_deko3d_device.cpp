@@ -835,6 +835,24 @@ void Device::WaitIdle() {
     }
 }
 
+void Device::WaitPresentIdle() {
+    if (!mPresentThreaded) {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(mPresentMutex);
+    if (!mMailbox) {
+        mPresentDone.wait(lock, [this] { return !mPresentPending; });
+        return;
+    }
+    // The mailbox loop signals nothing per copy (no cost in the frame path):
+    // polled here, at most one display refresh plus the copy.
+    while (mMailboxPending >= 0 || mMailboxCopying >= 0) {
+        lock.unlock();
+        svcSleepThread(1'000'000LL);
+        lock.lock();
+    }
+}
+
 StreamSpan Device::Stream(uint32_t size, uint32_t alignment) {
     BeginFrame();
     FrameSlot& slot = mSlots[mSlot];

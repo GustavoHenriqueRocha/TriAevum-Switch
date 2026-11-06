@@ -131,6 +131,10 @@ class Device {
     void EndFrame(AcquireHook hook);
     // Waits for every submitted command (shutdown, resets).
     void WaitIdle();
+    // Savestate capture: until the present thread has nothing left of the
+    // frames handed to it (the queued window buffer, or the mailbox frame
+    // waiting or being copied). Immediate without the present thread.
+    void WaitPresentIdle();
 
     // Per-frame CPU-visible memory (valid until this slot comes round again).
     StreamSpan Stream(uint32_t size, uint32_t alignment);

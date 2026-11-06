@@ -215,6 +215,22 @@ GUARDS = [
     Guard("savestate didn't overwrite the existing file on Switch (EEXIST)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_savestate.cpp",
           r'#if defined\(__SWITCH__\).*?renameError == std::errc::file_exists.*?std::filesystem::remove\(destination'),
+    # --- 05/11: "native PICA color capture failed" on every save state with deko3d ---
+    Guard("deko3d: save states failed (\"native PICA color capture failed\"): the backend kept the "
+          "interface defaults, which refuse to capture and restore render targets",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_api.h",
+          r'bool CapturePicaColorTargets\(std::vector<GfxNativePicaRenderTargetColorSnapshot>& snapshots,'
+          r'\s+std::string\* error = nullptr\) override;'
+          r'\s+bool RestorePicaColorTargets\(std::span<const GfxNativePicaRenderTargetColorSnapshot> snapshots,'
+          r'\s+std::string\* error = nullptr\) override;',
+          "oot3d_deko3d_backend_tests (TestSavestateRoundTrip)"),
+    Guard("deko3d save states: depth/stencil read back in a probed Z24S8 layout (an unrecognised one fails the "
+          "save), and Zcull forgets the creation clear after a restore writes the depth",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_targets.cpp",
+          r'dkCmdBufCopyBufferToImage\(cmd, &depth, &target\.DepthView, &rect, 0U\);.*?'
+          r'DkInvalidateFlags_Image \| DkInvalidateFlags_Zcull\);.*?'
+          r'const auto layout = IdentifyDepthStencilWordLayout\(clearedWords\.front\(\)\);',
+          "oot3d_deko3d_backend_tests (TestSavestateDepthWords)"),
     # --- 26/10: dev menu without buttons on deko3d ---
     Guard("dev menu (L3+R3) opened on deko3d but didn't receive controller input (no ImGui SDL backend)",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
