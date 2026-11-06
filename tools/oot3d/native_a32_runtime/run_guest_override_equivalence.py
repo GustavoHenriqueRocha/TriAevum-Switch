@@ -9,6 +9,12 @@ from the block)
 guest_override_equivalence.cpp with the same runtime headers and the
 same floating-point options as the build (-fno-fast-math -ffp-contract=off).
 
+The host build links the fastmem window's allocator hook: with
+TRIAEVUM_FASTMEM_WINDOW=1 the translated side's memory (the first image) takes
+the window, so the generated code's inline paths load and store at window base
++ address while the overrides run on an ordinary heap image (unset: both on the
+slow path).
+
 With --qemu-aarch64 the same test is compiled with devkitA64 (the Switch shards'
 floating-point and CPU options, native ARM64 VFP in both
 versions) and runs under qemu-aarch64, with code.bin embedded in the binary.
@@ -179,6 +185,7 @@ def main() -> int:
         RUNTIME / "oot3d_native_guest_overrides.cpp",
         RUNTIME / "oot3d_native_a32_memory.cpp",
         RUNTIME / "oot3d_switch_guest_window.cpp",
+        RUNTIME / "oot3d_switch_guest_window_host_alloc.cpp",
         RUNTIME / "oot3d_memory_bus_abi.cpp",
         HERE / "oot3d_native_a32_vfp_ops.cpp",
         upstream / "recomp" / "a32_vfp_binary64.cpp",

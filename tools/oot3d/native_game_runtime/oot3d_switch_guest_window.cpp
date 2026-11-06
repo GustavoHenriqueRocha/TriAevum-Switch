@@ -16,7 +16,9 @@ extern "C" {
 // libnx (applet.c, weak, default 0): 1 ends the application through AM.
 extern u32 __nx_applet_exit_mode;
 }
-#elif defined(__unix__) || defined(__APPLE__)
+#elif defined(__unix__) || defined(__APPLE__) || defined(OOT3D_GUEST_WINDOW_MMAP)
+// OOT3D_GUEST_WINDOW_MMAP: a target with Linux's mmap that does not define
+// __unix__ (devkitA64 under qemu-aarch64, memory_lean_diff/qemu_mman.cpp).
 #include <sys/mman.h>
 #define OOT3D_GUEST_WINDOW_HOST_MMAP 1
 #endif
