@@ -599,7 +599,8 @@ python apply_guest_overrides.py --generated ~/oot3d-work/gen/cpp-lean
    - Spills around cold calls: they stay only on cold paths (GCC already splits live
      ranges); the ones left on the hot path are the `frame`/`context`/`state` pointers around
      each guest call, which cost the same in callee-saved. Not touched.
-3. **Generation counter `mRangeGeneration`: evaluated, no change.** The fast write does load,
+3. **Generation counter `mRangeGeneration`: evaluated, no change** (replaced on 2026-11-05 by
+   store cards, "Recompiled-code overhead" below). The fast write does load,
    add, store of the counter and store of the page stamp. Generations are observable (exclusive
    monitor LDREX/STREX via `WriteGeneration()`, GPU cache page stamps,
    `CaptureState`), so they can't be eliminated. Reordering (read before the guest store, write the
@@ -1117,6 +1118,32 @@ loads).
   runs unchanged (fault order, partial stores, lane updates). Host micro-benchmark of the real
   `NativeA32Memory`, `VPUSH {d8-d15}`: 47.7 → 8.5 ns, `VPOP {d8-d15}`: 35.8 → 7.5 ns (x86 host).
   Shard 064: 85,045 → 84,548 AArch64 instructions. Changes the generated shards.
+- **Store cards instead of the global store counter.** Every guest store did load, add and store of
+  `mRangeGeneration`, stored it into the page's stamp and tested it for wrap-around; consecutive
+  stores were chained through that counter in memory. Now each 1 MiB page group starts with one
+  card byte per page (`FastPageGroup`, `oot3d_native_a32_memory.h`) and a store does two byte stores
+  of a constant: its page's card (`strb w1, [group, page]`) and the memory-wide written mark. No
+  load, no branch. `GuestCard` is a one-member union of an `enum class`, so GCC gives it its own
+  alias set: guest registers held in host registers are not reloaded after a card store (checked
+  in the AArch64 output).
+  - `RangeWriteGeneration` turns the set cards of the range into one fresh certificate (larger
+    than every earlier one) when asked; a page nobody wrote keeps its certificate. Every slow or
+    host write path (`WriteSized`, `WriteBytes`, `WriteHostBytes`, `Fill`, `GetWritePointer`,
+    `DeferWrites`) marks the cards of every page it covers (`NoteWrite`), so a store crossing a
+    page boundary marks both. Copies, moves, restores and page-table rebuilds restamp every page.
+  - `WriteGeneration()` steps once when it sees the written mark: two observations differ exactly
+    when something was written in between, which is all the LDREX/STREX token compares, so the
+    exclusive monitor behaves exactly as before (a write anywhere, by any thread or service,
+    between LDREX and STREX loses the reservation; a thread switch without writes does not). The
+    value counts observations with writes instead of writes; savestates still round-trip it.
+  - Guest overrides and `NativeA32UnobservedMemory` call `NoteWrite` for what they wrote;
+    generated code no longer commits a region store count. `WriteObservationAbiVersion` is 4.
+  - Per store on AArch64: 5 bookkeeping instructions (`ldr`/`add`/`str` of the counter, `str` of
+    the stamp, `cbz`) become 2 `strb` (plus a `mov #1` that GCC shares). Shard 064:
+    84,548 → 82,526 instructions. Host micro-benchmark (x86): 64 stores 191 → 162 ns,
+    `VPUSH {d8-d15}` word by word 47 → 42 ns, loads unchanged. Changes the memory header: every
+    shard, the guest overrides and the runtime must be rebuilt (no regeneration needed for the
+    product shards).
 
 ### Performance overlay: L3+R3 > Video (`config/fps_counter`)
 - "Performance overlay" checkbox in the Video tab; applies in the same frame and creates/removes

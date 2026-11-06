@@ -425,8 +425,10 @@ in the header runtime (`tools/oot3d/native_game_runtime/oot3d_native_whole_aot_r
 ### 3.4 Lean mode (write generations and block entry)
 
 - Memory (0126356c): write tracing lives in the page table (with it on, the typed entries
-  are null and the fast path tests nothing); 32-byte `FastPage`; a single counter
-  (`mRangeGeneration`): the fast write does `++` and stamps the page with the same value.
+  are null and the fast path tests nothing); 32-byte `FastPage`. Since 2026-11-05 a store
+  marks a per-page card byte (stored before the group's entries) and a memory-wide written mark;
+  `RangeWriteGeneration`/`WriteGeneration` derive generations when asked (SWITCH_PORT.md,
+  "Recompiled-code overhead"). Before, a single counter (`mRangeGeneration`): `++` and a stamp per store.
 - Block entry: `BlockEntryGate` (superset filter computed at initialization: one load and one
   bit test on the hot path; the slow one stays exact). `RefreshBlockEntryGate()` for whoever changes the
   hooks later.

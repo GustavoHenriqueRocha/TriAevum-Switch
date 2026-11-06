@@ -323,25 +323,20 @@ struct LocalGuest {
     }
 };
 
-// Access to the NativeA32Memory fast page table without changing the header
-// (which is included by every shard: changing it would recompile all 256).
-// Uses the standard rule that explicit instantiations may name private
-// members. The constants below mirror those in oot3d_native_a32_memory.h and
-// FastPageOf/ResolveCursor reproduce FastPageFor + the fast-path test of
-// ReadFast/WriteFast; CommitSamples, CopyRun and friends reproduce the
-// WriteFast bookkeeping.
+// Access to the NativeA32Memory fast page table without widening the
+// header's public interface. Uses the standard rule that explicit
+// instantiations may name private members. The constants below mirror those
+// in oot3d_native_a32_memory.h and FastPageOf/ResolveCursor reproduce
+// FastPageFor + the fast-path test of ReadFast/WriteFast; the writes through
+// these pointers then take WriteFast's bookkeeping with
+// NativeA32Memory::NoteWrite (the cards of the written pages and the written
+// mark), so the end state is the translation's whatever the store order.
 template <class Tag, auto Member> struct ExposeMember {
     friend constexpr auto MemberOf(Tag) noexcept { return Member; }
 };
 struct FastGroupsTag { friend constexpr auto MemberOf(FastGroupsTag) noexcept; };
-// mRangeGeneration = architectural generation + certificate bias, in a single
-// counter: WriteFast does ++ and stamps the page with the new value.
-struct RangeGenerationTag { friend constexpr auto MemberOf(RangeGenerationTag) noexcept; };
-struct RangeVersionsTag { friend constexpr auto MemberOf(RangeVersionsTag) noexcept; };
 struct TraceTag { friend constexpr auto MemberOf(TraceTag) noexcept; };
 template struct ExposeMember<FastGroupsTag, &NativeA32Memory::mFastPageGroups>;
-template struct ExposeMember<RangeGenerationTag, &NativeA32Memory::mRangeGeneration>;
-template struct ExposeMember<RangeVersionsTag, &NativeA32Memory::mRangeVersionsValid>;
 template struct ExposeMember<TraceTag, &NativeA32Memory::mTraceWriteFingerprint>;
 
 constexpr uint32_t kMemPageShift = 12U;     // NativeA32Memory::PageShift
@@ -353,21 +348,21 @@ constexpr uint32_t kMemPageSize = 0x1000U;
 // Fast page of [address, address + size) (null if it crosses a page).
 inline auto* FastPageOf(NativeA32Memory& memory, uint32_t address, uint32_t size) noexcept {
     auto& groups = memory.*MemberOf(FastGroupsTag{});
-    using Page = std::remove_reference_t<decltype(groups[0][0])>;
+    using Page = std::remove_reference_t<decltype(groups[0]->Pages[0])>;
     const uint32_t offset = address & kMemPageMask;
     if (size == 0U || size > kMemPageSize - offset) return static_cast<Page*>(nullptr);
     auto& group = groups[address >> kMemGroupShift];
-    return group ? &group[(address >> kMemPageShift) & kMemGroupPageMask]
+    return group ? &group->Pages[(address >> kMemPageShift) & kMemGroupPageMask]
                  : static_cast<Page*>(nullptr);
 }
 
 // Run of guest words inside a read-write fast page (the audio loops): up to
-// `Words` words starting at Bytes, with the page stamp. The loops access the
-// words through this pointer and reproduce the WriteFast bookkeeping at the
-// end of each run (CommitSamples).
+// `Words` words starting at Bytes (guest address Address). The loops access
+// the words through this pointer and do the WriteFast bookkeeping at the end
+// of each run (CommitSamples).
 struct Cursor {
     uint8_t* Bytes = nullptr;
-    uint64_t* Stamp = nullptr;
+    uint32_t Address = 0U;
     uint32_t Words = 0U;
 };
 
@@ -385,7 +380,7 @@ inline bool ResolveCursor(NativeA32Memory& memory, uint32_t address, uint32_t wo
         page->Read != page->Write) {
         return false;
     }
-    cursor = {page->Write + (address & kMemPageMask), &page->WriteGeneration, take};
+    cursor = {page->Write + (address & kMemPageMask), address, take};
     return true;
 }
 
@@ -397,40 +392,24 @@ inline void CursorStore(const Cursor& cursor, uint32_t index, uint32_t value) no
     StoreGuestValue<uint32_t>(cursor.Bytes + 4U * index, value);
 }
 
-// Bookkeeping for `samples` samples of a loop with `slots` WriteFast per
-// sample, always in the same order (stamps[j] = page of the j-th write): the
-// generation advances by slots * samples and each page is stamped with the
-// generation of its last write, which is from the last sample (every page of
-// the run is written in every sample); repeated pages keep the largest j.
-// Precondition: GenerationRoom(slots * samples) and samples > 0.
-inline void CommitSamples(NativeA32Memory& memory, uint64_t* const* stamps, uint32_t slots,
-                          uint32_t samples) noexcept {
-    auto& generation = memory.*MemberOf(RangeGenerationTag{});
-    const uint64_t last = generation + uint64_t{slots} * (samples - 1U);
-    for (uint32_t j = 0; j < slots; ++j) *stamps[j] = last + j + 1U;
-    generation += uint64_t{slots} * samples;
+// Bookkeeping for a run of samples (at least one) in which every cursor was
+// written: the card of each cursor's page and the written mark, as the
+// translation's WriteFast calls leave them.
+inline void CommitSamples(NativeA32Memory& memory,
+                          std::initializer_list<const Cursor*> written) noexcept {
+    for (const Cursor* cursor : written) memory.NoteWrite(cursor->Address, 4U);
 }
 
 inline Oot3dAotFlagMask Mask(uint8_t bits) noexcept {
     return static_cast<Oot3dAotFlagMask>(bits);
 }
 
-// The write generation can take `writes` increments without wrapping (on wrap
-// the translation would invalidate range versions; then the replacement declines).
-inline bool GenerationRoom(NativeA32Memory& memory, uint64_t writes) noexcept {
-    return memory.*MemberOf(RangeGenerationTag{}) <= UINT64_MAX - writes;
-}
-
 // Copy of `bytes` from `from` to `to` like the translation's ascending
 // sequence of `unit`-byte WriteFast (each read before the write to the same
 // address; with no overlap, the order between reads and writes does not
-// matter): the same bytes, generation +1 per unit and each page stamped with
-// the generation of the last unit written to it. Preconditions:
-// Readable(from, bytes, unit), Writable(to, bytes, unit), disjoint ranges
-// and GenerationRoom(bytes / unit).
-void CopyRun(NativeA32Memory& memory, uint32_t to, uint32_t from, uint32_t bytes,
-             uint32_t unit) noexcept {
-    auto& generation = memory.*MemberOf(RangeGenerationTag{});
+// matter): the same bytes and the same written pages. Preconditions:
+// Readable(from, bytes, unit), Writable(to, bytes, unit), disjoint ranges.
+void CopyRun(NativeA32Memory& memory, uint32_t to, uint32_t from, uint32_t bytes) noexcept {
     uint32_t done = 0U;
     while (done < bytes) {
         const uint32_t source = from + done, target = to + done;
@@ -440,8 +419,7 @@ void CopyRun(NativeA32Memory& memory, uint32_t to, uint32_t from, uint32_t bytes
         auto* writePage = FastPageOf(memory, target, chunk);
         std::memcpy(writePage->Write + (target & kMemPageMask),
                     readPage->Bytes + (source & kMemPageMask), chunk);
-        generation += chunk / unit;
-        writePage->WriteGeneration = generation;
+        memory.NoteWrite(target, chunk);
         done += chunk;
     }
 }
@@ -463,29 +441,25 @@ inline bool SinglePageWritable(const NativeA32Memory& memory, uint32_t address,
 }
 
 // `writes` consecutive writes of the same word (in-memory counter in a loop):
-// the last value remains, the generation advances by `writes` and the page is
-// stamped with it. Preconditions: SinglePageWritable(address, 4) and GenerationRoom(writes).
+// the last value remains and the page is marked written once at least one
+// write happened. Precondition: SinglePageWritable(address, 4).
 inline void RepeatStore32(NativeA32Memory& memory, uint32_t address, uint32_t value,
                           uint32_t writes) noexcept {
     if (writes == 0U) return;
-    auto& generation = memory.*MemberOf(RangeGenerationTag{});
     auto* page = FastPageOf(memory, address, 4U);
     std::memcpy(page->Write + (address & kMemPageMask), &value, 4U);
-    generation += writes;
-    page->WriteGeneration = generation;
+    memory.NoteWrite(address, 4U);
 }
 
 // Same for `bytes` single-byte writes of the same value (STRB in a loop).
 void FillBytes(NativeA32Memory& memory, uint32_t to, uint8_t value, uint32_t bytes) noexcept {
-    auto& generation = memory.*MemberOf(RangeGenerationTag{});
     uint32_t done = 0U;
     while (done < bytes) {
         const uint32_t target = to + done;
         const uint32_t chunk = std::min(bytes - done, kMemPageSize - (target & kMemPageMask));
         auto* writePage = FastPageOf(memory, target, chunk);
         std::memset(writePage->Write + (target & kMemPageMask), value, chunk);
-        generation += chunk;
-        writePage->WriteGeneration = generation;
+        memory.NoteWrite(target, chunk);
         done += chunk;
     }
 }
@@ -1407,8 +1381,7 @@ bool Override_004A022C(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
             // 0x004A02A4, 0x004A02C8) and only enters with quota >= 3,
             // as in the per-sample loop.
             Cursor stateCell;
-            bool fast = GenerationRoom(memory, 3U * 160U) &&
-                        ResolveCursor(memory, R[6], 1U, stateCell);
+            bool fast = ResolveCursor(memory, R[6], 1U, stateCell);
             const uint32_t gain = fast ? Read32(memory, R[0] + 0x44U) : 0U;
             const uint32_t mix = fast ? Read32(memory, R[0] + 0x48U) : 0U;
             const uint32_t feedback = fast ? Read32(memory, R[0] + 0x4CU) : 0U;
@@ -1442,8 +1415,7 @@ bool Override_004A022C(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
                         CursorStore(io, i, r3);
                     }
                     CursorStore(stateCell, 0U, state);
-                    uint64_t* const stamps[3] = {stateCell.Stamp, delay.Stamp, io.Stamp};
-                    CommitSamples(memory, stamps, 3U, samples);
+                    CommitSamples(memory, {&stateCell, &delay, &io});
                     Consume(context, 3U * samples);
                     R[1] += samples;
                     R[2] += samples;
@@ -1636,8 +1608,7 @@ bool Override_004A0338(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         // at the end of the chunk; each sample is 7 to 9 blocks and only enters with
         // quota >= 9, as in the per-sample loop.
         Cursor stack0, stack4, filterCell;
-        bool fast = GenerationRoom(memory, 9U * 160U) &&
-                    ResolveCursor(memory, R[13], 1U, stack0) &&
+        bool fast = ResolveCursor(memory, R[13], 1U, stack0) &&
                     ResolveCursor(memory, R[13] + 4U, 1U, stack4) &&
                     ResolveCursor(memory, R[9] + 0xCCU, 1U, filterCell);
         uint32_t pointerA = 0U, pointerB = 0U, pointerC = 0U, pointerD = 0U, pointerE = 0U;
@@ -1750,9 +1721,7 @@ bool Override_004A0338(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
                 CursorStore(stack4, 0U, st4);
                 CursorStore(stack0, 0U, st0);
                 CursorStore(filterCell, 0U, filter);
-                uint64_t* const stamps[9] = {a.Stamp, b.Stamp, stack4.Stamp, c.Stamp, stack0.Stamp,
-                                             d.Stamp, e.Stamp, filterCell.Stamp, io.Stamp};
-                CommitSamples(memory, stamps, 9U, n);
+                CommitSamples(memory, {&a, &b, &stack4, &c, &stack0, &d, &e, &filterCell, &io});
                 context.BlocksRemaining = remaining;
                 R[1] = r1 + n;
                 R[2] = r2;
@@ -1929,8 +1898,7 @@ bool Override_004A0338(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
 // 1 block per iteration); then 16 and 8 bytes per bits 4 and 3 of r2, pop,
 // 4 bytes (bit 2) and, if any remain, 2 and 1 bytes in block 0x00371794.
 // The loop becomes per-page-chunk copies: the translation writes word by
-// word in ascending address order (generation +1 per word, page
-// stamped with the generation of the last word written to it), and this is
+// word in ascending address order, and the same bytes and written pages are
 // reproduced chunk by chunk. Requires src and dst aligned to 4, no
 // overlap between source and destination (each map region has its own
 // bytes, so disjoint guest ranges are disjoint on the host) and everything
@@ -1955,9 +1923,6 @@ bool Override_00371738(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         Overlaps(src, len, dst, len)) {
         return Decline(kIdx);
     }
-    auto& generation = memory.*MemberOf(RangeGenerationTag{});
-    // No stamp may wrap around (the translation would invalidate the versions).
-    if (generation > UINT64_MAX - 64U - len) return Decline(kIdx);
     Consume(context, blocks);
     // 0x00371738: push {r4-r10, lr}; subs r2, r2, #0x20
     {
@@ -1982,8 +1947,7 @@ bool Override_00371738(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
             auto* writePage = FastPageOf(memory, to, chunk);
             std::memcpy(writePage->Write + (to & kMemPageMask),
                         readPage->Bytes + (from & kMemPageMask), chunk);
-            generation += chunk >> 2U;
-            writePage->WriteGeneration = generation;
+            memory.NoteWrite(to, chunk);
             done += chunk;
         }
         // Registers of the last iteration (r3-r10 = the final 8 words).
@@ -2187,11 +2151,11 @@ bool Override_00466E68(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     const uint32_t dst = Read32(memory, sp);
     const uint32_t bytes = 8U * count;
     if (!Readable(memory, src, bytes + 4U) || !Writable(memory, dst, bytes) ||
-        Overlaps(src, bytes + 4U, dst, bytes) || !GenerationRoom(memory, 2U * count)) {
+        Overlaps(src, bytes + 4U, dst, bytes)) {
         return Decline(kIdx);
     }
     Consume(context, 1U + count);
-    CopyRun(memory, dst, src, bytes, 4U);
+    CopyRun(memory, dst, src, bytes);
     R[0] = src - 4U + bytes;
     R[1] = dst - 4U + bytes;
     R[2] = 0U;
@@ -2230,8 +2194,7 @@ bool Override_003247B0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     // decline here would repeat on every translated iteration).
     const uint32_t done = std::min(count, context.BlocksRemaining);
     if (count > 0x00100000U || done == 0U ||
-        !Writable(memory, start, done, 1U) || Overlaps(start, done, baseAddress, 4U) ||
-        !GenerationRoom(memory, done)) {
+        !Writable(memory, start, done, 1U) || Overlaps(start, done, baseAddress, 4U)) {
         return Decline(kIdx);
     }
     Consume(context, done);
@@ -2559,7 +2522,6 @@ bool Override_002FA674(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
         ++writes;
         if (flags.Z()) break;
     }
-    if (!GenerationRoom(memory, writes)) return Decline(kIdx);
     Consume(context, blocks);
     RepeatStore32(memory, counter, initial + writes, writes);
     R[4] = r4;

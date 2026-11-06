@@ -50,7 +50,9 @@ NativeA32Memory::NativeA32Memory(const NativeA32Memory& other)
     : mRegions((other.MaterializeDeferredWrites()
                     ? other.mRegions
                     : throw std::runtime_error("cannot copy deferred guest memory"))),
-      mRangeGeneration(other.WriteGeneration()),
+      mWriteGeneration(other.WriteGeneration()),
+      // Certificates of the copy never equal ones the source handed out.
+      mRangeGeneration(other.mRangeGeneration),
       mWriteTraceFingerprint(other.mWriteTraceFingerprint),
       mTraceWriteFingerprint(other.mTraceWriteFingerprint),
       mFastReadMismatchCount(other.mFastReadMismatchCount),
@@ -64,21 +66,20 @@ NativeA32Memory& NativeA32Memory::operator=(const NativeA32Memory& other) {
     if (this != &other) {
         if (!other.MaterializeDeferredWrites())
             throw std::runtime_error("cannot copy deferred guest memory");
-        const auto nextRangeGeneration = CurrentRangeGeneration() + 1U;
         mDeferredWrites.clear();
         mDeferredPages.clear();
         mEscapedReadPointers.clear();
         mEscapedWritePointers.clear();
         mRegions = other.mRegions;
-        mRangeGeneration = nextRangeGeneration;
-        mRangeGenerationBias = nextRangeGeneration - other.WriteGeneration();
-        mRangeVersionsValid = mRangeVersionsValid && nextRangeGeneration != 0U;
+        mWriteGeneration = other.WriteGeneration();
+        mWritten.State = GuestCardState::Clean;
         mWriteTraceFingerprint = other.mWriteTraceFingerprint;
         mTraceWriteFingerprint = other.mTraceWriteFingerprint;
         mFastReadMismatchCount = other.mFastReadMismatchCount;
         mLastFastReadMismatchAddress = other.mLastFastReadMismatchAddress;
         mLastFastReadMismatchValue = other.mLastFastReadMismatchValue;
         mLastCheckedReadMismatchValue = other.mLastCheckedReadMismatchValue;
+        // New certificates for every page (RebuildPageTable restamps).
         RebuildPageTable();
     }
     return *this;
@@ -90,14 +91,12 @@ NativeA32Memory::NativeA32Memory(NativeA32Memory&& other) noexcept {
 
 NativeA32Memory& NativeA32Memory::operator=(NativeA32Memory&& other) noexcept {
     if (this == &other) return *this;
-    const auto nextRangeGeneration = CurrentRangeGeneration() + 1U;
-    const bool versionsValid =
-        mRangeVersionsValid && other.mRangeVersionsValid && nextRangeGeneration != 0U;
+    const bool versionsValid = mRangeVersionsValid && other.mRangeVersionsValid;
+    mWriteGeneration = other.WriteGeneration();
+    mWritten.State = GuestCardState::Clean;
     mRegions = std::move(other.mRegions);
     mPageRegions = std::move(other.mPageRegions);
     mFastPageGroups = std::move(other.mFastPageGroups);
-    mRangeGenerationBias = nextRangeGeneration - other.WriteGeneration();
-    mRangeGeneration = nextRangeGeneration;
     mRangeVersionsValid = versionsValid;
     mWriteTraceFingerprint = other.mWriteTraceFingerprint;
     mTraceWriteFingerprint = other.mTraceWriteFingerprint;
@@ -119,15 +118,23 @@ NativeA32Memory& NativeA32Memory::operator=(NativeA32Memory&& other) noexcept {
     mDeferredWrites = std::move(other.mDeferredWrites);
     mDeferredPages = std::move(other.mDeferredPages);
     // Backing allocations and their fast pointers move together. Only the
-    // destination's certificate epoch changes; no page-table allocation.
-    for (auto& group : mFastPageGroups) {
-        if (!group) continue;
-        for (size_t page = 0; page < FastGroupPageCount; ++page)
-            group[page].WriteGeneration = nextRangeGeneration;
-    }
+    // destination's certificates change (one fresh value on every page, the
+    // cards cleared); no page-table allocation.
+    RestampAllPages();
     // A reused moved-from image must not revive its old certificates either.
     other.mRangeVersionsValid = false;
     return *this;
+}
+
+void NativeA32Memory::RestampAllPages() noexcept {
+    const uint64_t stamp = NextRangeGeneration();
+    for (auto& group : mFastPageGroups) {
+        if (!group) continue;
+        for (size_t page = 0; page < FastGroupPageCount; ++page) {
+            group->Cards[page].State = GuestCardState::Clean;
+            group->Pages[page].WriteGeneration = stamp;
+        }
+    }
 }
 
 void NativeA32Memory::SetError(std::string* error, std::string_view message) {
@@ -184,6 +191,9 @@ void NativeA32Memory::RebuildPageTable() {
     for (auto& group : mFastPageGroups) {
         group.reset();
     }
+    // The new groups start with clean cards: every mapped page gets one fresh
+    // certificate, so writes not yet folded into a stamp still change it.
+    const uint64_t stamp = NextRangeGeneration();
     for (size_t regionIndex = 0; regionIndex < mRegions.size();
          ++regionIndex) {
         auto& region = mRegions[regionIndex];
@@ -202,9 +212,9 @@ void NativeA32Memory::RebuildPageTable() {
                 entry = AmbiguousPage;
             }
             auto& group = mFastPageGroups[page / FastGroupPageCount];
-            if (!group) group = std::make_unique<FastPage[]>(FastGroupPageCount);
-            auto& fastPage = group[page & FastGroupPageMask];
-            fastPage.WriteGeneration = CurrentRangeGeneration();
+            if (!group) group = std::make_unique<FastPageGroup>();
+            auto& fastPage = group->Pages[page & FastGroupPageMask];
+            fastPage.WriteGeneration = stamp;
 
             const uint64_t pageAddress =
                 static_cast<uint64_t>(page) << PageShift;
@@ -248,7 +258,7 @@ void NativeA32Memory::RefreshFastPointers() noexcept {
         auto& group = mFastPageGroups[groupIndex];
         if (!group) continue;
         for (size_t index = 0; index < FastGroupPageCount; ++index) {
-            auto& entry = group[index];
+            auto& entry = group->Pages[index];
             if (entry.Bytes == nullptr) continue;
             const size_t page = groupIndex * FastGroupPageCount + index;
             const auto* region = FindRegion(
@@ -321,7 +331,14 @@ size_t NativeA32Memory::RegionCount() const {
 }
 
 uint64_t NativeA32Memory::WriteGeneration() const {
-    return mRangeGeneration - mRangeGenerationBias;
+    // One step per observation that saw new writes: two observations differ
+    // exactly when something was written between them, as with the per-write
+    // count this replaces (exclusive tokens compare for equality only).
+    if (mWritten.State != GuestCardState::Clean) {
+        mWritten.State = GuestCardState::Clean;
+        ++mWriteGeneration;
+    }
+    return mWriteGeneration;
 }
 
 std::optional<uint64_t>
@@ -330,12 +347,24 @@ NativeA32Memory::RangeWriteGeneration(uint32_t address,
   if (!mRangeVersionsValid || FindRegion(address, size) == nullptr ||
       HasEscapedWritePointer(address, size)) return std::nullopt;
   uint64_t generation = 0;
+  uint64_t fresh = 0;
   const size_t last = (uint64_t{address} + size - 1U) >> PageShift;
   for (size_t page = address >> PageShift; page <= last; ++page) {
-      const auto& group = mFastPageGroups[page / FastGroupPageCount];
-      if (!group || !group[page & FastGroupPageMask].WriteGeneration) return std::nullopt;
-      generation = std::max(generation, group[page & FastGroupPageMask].WriteGeneration);
+      FastPageGroup* group = mFastPageGroups[page / FastGroupPageCount].get();
+      if (!group) return std::nullopt;
+      auto& card = group->Cards[page & FastGroupPageMask];
+      auto& stamp = group->Pages[page & FastGroupPageMask].WriteGeneration;
+      if (card.State != GuestCardState::Clean) {
+          // Written since its last certificate: a value no earlier
+          // certificate can equal (one per call is enough for the max).
+          if (fresh == 0U) fresh = NextRangeGeneration();
+          stamp = fresh;
+          card.State = GuestCardState::Clean;
+      }
+      if (!stamp) return std::nullopt;
+      generation = std::max(generation, stamp);
   }
+  if (!mRangeVersionsValid) return std::nullopt;
   return generation;
 }
 
@@ -503,10 +532,11 @@ bool NativeA32Memory::RestoreState(const nlohmann::json& state,
                 return false;
             }
         }
-        // A fresh image has no bias: its range generation is architectural.
-        staged.mRangeGeneration =
+        // The architectural generation round-trips, so saved exclusive
+        // tokens stay valid; certificates are fresh (move assignment).
+        staged.mWriteGeneration =
             state.at("write_generation").get<uint64_t>();
-        if (staged.mRangeGeneration == 0U) {
+        if (staged.mWriteGeneration == 0U) {
             SetError(error,
                      "native A32 memory write generation is invalid");
             return false;
@@ -595,7 +625,7 @@ bool NativeA32Memory::ObserveWrites(uint32_t address, size_t size) {
         if (position == mObservedWritePages.end() || *position != page)
             mObservedWritePages.insert(position, page);
         auto& group = mFastPageGroups[page / FastGroupPageCount];
-        if (group) group[page & FastGroupPageMask].Write = nullptr;
+        if (group) group->Pages[page & FastGroupPageMask].Write = nullptr;
     }
     return true;
 }
@@ -632,7 +662,7 @@ void NativeA32Memory::ReleaseDeferredPageTraps() const {
         const uint32_t address = static_cast<uint32_t>(page << PageShift);
         const auto* region = FindRegion(address, PageSize);
         if (!region) continue;
-        auto& entry = group[page & FastGroupPageMask];
+        auto& entry = group->Pages[page & FastGroupPageMask];
         auto* bytes = region->Bytes.data() + (address - region->BaseAddress);
         AssignFastPointers(page, entry, bytes, region->Writable);
     }
@@ -687,14 +717,13 @@ bool NativeA32Memory::DeferWrites(
             if (at == mDeferredPages.end() || *at != page) mDeferredPages.insert(at, page);
             auto& group = mFastPageGroups[page / FastGroupPageCount];
             if (group) {
-                group[page & FastGroupPageMask].Read = nullptr;
-                group[page & FastGroupPageMask].Write = nullptr;
-                group[page & FastGroupPageMask].Bytes = nullptr;
+                group->Pages[page & FastGroupPageMask].Read = nullptr;
+                group->Pages[page & FastGroupPageMask].Write = nullptr;
+                group->Pages[page & FastGroupPageMask].Bytes = nullptr;
             }
         }
         // A logical device write invalidates exclusives now, not at readback.
-        ++mRangeGeneration;
-        MarkRangeWritten(address, size, CurrentRangeGeneration());
+        NoteWrite(address, size);
     }
     return true;
 }
@@ -794,8 +823,7 @@ uint8_t* NativeA32Memory::GetWritePointer(uint32_t address, size_t size) {
     }
     AddWriteRange(mEscapedWritePointers, address, size);
     NotifyObservedWrite(address, size);
-    ++mRangeGeneration;
-    MarkRangeWritten(address, size, CurrentRangeGeneration());
+    NoteWrite(address, size);
     return destination;
 }
 
@@ -855,8 +883,7 @@ bool NativeA32Memory::WriteBytes(uint32_t address,
     if (mTraceWriteFingerprint) [[unlikely]] {
         RecordTracedWrite(address, bytes);
     }
-    ++mRangeGeneration;
-    MarkRangeWritten(address, bytes.size(), CurrentRangeGeneration());
+    NoteWrite(address, bytes.size());
     NotifyObservedWrite(address, bytes.size());
     return true;
 }
@@ -876,8 +903,7 @@ bool NativeA32Memory::WriteHostBytes(
     if (mTraceWriteFingerprint) [[unlikely]] {
         RecordTracedWrite(address, bytes);
     }
-    ++mRangeGeneration;
-    MarkRangeWritten(address, bytes.size(), CurrentRangeGeneration());
+    NoteWrite(address, bytes.size());
     if (!mWatchSuppressed && Watches(address, bytes.size())) [[unlikely]] {
         ++mWatchCounters.HostByteWrites;
     }
@@ -901,8 +927,7 @@ bool NativeA32Memory::Fill(uint32_t address, size_t size, uint8_t value) {
             address,
             std::span<const uint8_t>(region->Bytes.data() + offset, size));
     }
-    ++mRangeGeneration;
-    MarkRangeWritten(address, size, CurrentRangeGeneration());
+    NoteWrite(address, size);
     if (!mWatchSuppressed && Watches(address, size)) [[unlikely]] {
         ++mWatchCounters.Fills;
     }
@@ -970,8 +995,7 @@ bool NativeA32Memory::WriteSized(uint32_t address, uint8_t size,
             address,
             std::span<const uint8_t>(region->Bytes.data() + offset, size));
     }
-    ++mRangeGeneration;
-    MarkRangeWritten(address, size, CurrentRangeGeneration());
+    NoteWrite(address, size);
     if (Watches(address, size)) [[unlikely]] {
         NoteWatchedWrite(address, size);
     }

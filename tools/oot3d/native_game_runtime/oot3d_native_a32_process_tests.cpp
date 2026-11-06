@@ -882,15 +882,137 @@ void TestMemoryRangeGenerations() {
                    region.WriteFast<uint32_t>(0x2000U, 17U),
                "batched stores across a page boundary");
         Expect(!region.ReadFast<uint32_t>(0U, &word),
-               "a checked fault must commit preceding batched stores");
+               "a checked fault after batched stores");
     }
     uint16_t halfword = 0;
+    // The architectural generation steps once per observation that saw
+    // writes (the exclusive token compares for equality only).
     Expect(batched.Read16(0x2FFFU, &halfword) && halfword == 0x1234U &&
                batched.Read32(0x2000U, &word) && word == 17U &&
-               batched.WriteGeneration() == beforeBatch + 2U &&
+               batched.WriteGeneration() == beforeBatch + 1U &&
                batched.RangeWriteGeneration(0x1000U, 4U) == untouched &&
                batched.RangeWriteGeneration(0x2FFFU, 2U) != crossing,
-           "batched fault exits preserve bytes, write counts and range-local invalidation");
+           "batched fault exits preserve bytes, the written mark and range-local invalidation");
+}
+
+// Store cards: a store marks the cards of the pages it touched and the
+// memory-wide written mark; generations are derived when asked.
+void TestMemoryStoreCards() {
+    using Oot3dNativeGame::NativeA32Memory;
+    using oot3d::recomp::a32::ExclusiveStoreResult;
+    NativeA32Memory memory;
+    std::string error;
+    Expect(memory.MapRegion({"data", 0x10000U, 0x4000U, true, false, {}}, &error) &&
+               memory.MapRegion({"rom", 0x20000U, 0x1000U, false, false, {}}, &error),
+           "map card memory");
+    const auto pageA = memory.RangeWriteGeneration(0x10000U, 4U);
+    const auto pageB = memory.RangeWriteGeneration(0x11000U, 4U);
+    Expect(pageA && pageB && *pageA != 0U &&
+               memory.RangeWriteGeneration(0x10000U, 4U) == pageA,
+           "certificates are nonzero and stable without writes");
+
+    // A same-value store changes its page's certificate and no other.
+    Expect(memory.WriteFast<uint32_t>(0x11010U, 0U), "same-value store");
+    const auto pageB1 = memory.RangeWriteGeneration(0x11000U, 4U);
+    Expect(pageB1 && pageB1 != pageB && memory.RangeWriteGeneration(0x10000U, 4U) == pageA &&
+               memory.RangeWriteGeneration(0x11000U, 4U) == pageB1,
+           "a store changes only its page, once");
+    // A certificate never comes back: write the page again.
+    Expect(memory.WriteFast<uint8_t>(0x11FFFU, 1U), "second store");
+    const auto pageB2 = memory.RangeWriteGeneration(0x11000U, 4U);
+    Expect(pageB2 && pageB2 != pageB && pageB2 != pageB1, "certificates do not repeat");
+
+    // A multi-page range changes when any of its pages is written, even if
+    // another query folded that page's card first.
+    const auto both = memory.RangeWriteGeneration(0x10000U, 0x2000U);
+    Expect(memory.WriteFast<uint32_t>(0x10004U, 5U) &&
+               memory.RangeWriteGeneration(0x10000U, 4U) != pageA &&
+               memory.RangeWriteGeneration(0x10000U, 0x2000U) != both,
+           "a range sees a page folded by another query");
+
+    // A store crossing a page boundary marks both pages: each page alone
+    // and the range starting on the previous page all change.
+    const auto lowPage = memory.RangeWriteGeneration(0x11000U, 4U);
+    const auto highPage = memory.RangeWriteGeneration(0x12000U, 4U);
+    const auto spanning = memory.RangeWriteGeneration(0x11FF0U, 0x20U);
+    Expect(memory.WriteFast<uint32_t>(0x11FFEU, 0xA1B2C3D4U), "crossing store");
+    Expect(memory.RangeWriteGeneration(0x12000U, 4U) != highPage &&
+               memory.RangeWriteGeneration(0x11000U, 4U) != lowPage,
+           "a crossing store marks both pages");
+    Expect(memory.WriteBytes(0x12FFCU, std::array<uint8_t, 8>{1, 2, 3, 4, 5, 6, 7, 8}) &&
+               memory.RangeWriteGeneration(0x11FF0U, 0x20U) != spanning,
+           "a crossing byte write marks both pages");
+    const auto beforeNote = memory.RangeWriteGeneration(0x13000U, 4U);
+    const auto beforeNotePrevious = memory.RangeWriteGeneration(0x12000U, 4U);
+    memory.NoteWrite(0x12FFFU, 2U);
+    Expect(memory.RangeWriteGeneration(0x13000U, 4U) != beforeNote &&
+               memory.RangeWriteGeneration(0x12000U, 4U) != beforeNotePrevious,
+           "NoteWrite marks every page it covers");
+
+    // Span and byte fast paths mark their page.
+    const uint32_t words[4] = {1U, 2U, 3U, 4U};
+    const auto beforeSpan = memory.RangeWriteGeneration(0x13000U, 4U);
+    Expect(memory.WriteWordsFast(0x13100U, words, 4U) &&
+               memory.RangeWriteGeneration(0x13000U, 4U) != beforeSpan,
+           "a word span marks its page");
+    const auto beforeBytes = memory.RangeWriteGeneration(0x13000U, 4U);
+    Expect(memory.WriteBytesFast(0x13200U, std::array<uint8_t, 3>{9, 9, 9}) &&
+               memory.RangeWriteGeneration(0x13000U, 4U) != beforeBytes,
+           "a fast byte span marks its page");
+
+    // The architectural generation changes exactly when something was
+    // written between two observations; failed writes leave it alone.
+    const uint64_t g0 = memory.WriteGeneration();
+    Expect(memory.WriteGeneration() == g0 && !memory.WriteFast<uint32_t>(0x20000U, 1U) &&
+               !memory.WriteFast<uint32_t>(0x30000U, 1U) && memory.WriteGeneration() == g0,
+           "no write, no generation change");
+    Expect(memory.WriteFast<uint16_t>(0x10100U, 7U) && memory.WriteGeneration() != g0,
+           "a store changes the generation");
+    const uint64_t g1 = memory.WriteGeneration();
+    Expect(memory.WriteGeneration() == g1 && memory.StateFingerprint() == memory.StateFingerprint(),
+           "observing the generation does not change it");
+
+    // Exclusive monitor: the reservation holds unless something is written
+    // anywhere between LDREX and STREX, as with the per-store counter.
+    uint64_t loaded = 0, token = 0, other = 0;
+    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) &&
+               memory.RangeWriteGeneration(0x10000U, 4U) && memory.WriteGeneration() == token &&
+               memory.StoreExclusive(0x10200U, 4, 1U, token, nullptr) == ExclusiveStoreResult::Success,
+           "a reservation without intervening writes succeeds, observations included");
+    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) &&
+               memory.WriteFast<uint32_t>(0x13F00U, 3U) &&
+               memory.StoreExclusive(0x10200U, 4, 2U, token, nullptr) ==
+                   ExclusiveStoreResult::ReservationLost,
+           "a fast store on another page loses the reservation");
+    // Thread A reserves, something is written, thread B reserves and stores:
+    // B succeeds, A has lost its reservation even with no write after B's LDREX.
+    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) &&
+               memory.WriteFast<uint8_t>(0x10300U, 1U) &&
+               memory.LoadExclusive(0x10204U, 4, &loaded, &other, nullptr) &&
+               memory.StoreExclusive(0x10200U, 4, 3U, token, nullptr) ==
+                   ExclusiveStoreResult::ReservationLost,
+           "a write before another thread's LDREX still loses the first reservation");
+    Expect(memory.StoreExclusive(0x10204U, 4, 4U, other, nullptr) ==
+               ExclusiveStoreResult::Success,
+           "the second reservation saw no write (A's failed STREX wrote nothing)");
+    Expect(memory.LoadExclusive(0x10204U, 4, &loaded, &other, nullptr) &&
+               memory.StoreExclusive(0x10204U, 4, 5U, other, nullptr) == ExclusiveStoreResult::Success,
+           "a fresh reservation succeeds");
+    Expect(memory.LoadExclusive(0x10200U, 4, &loaded, &token, nullptr) &&
+               memory.StoreExclusive(0x10200U, 4, 6U, token, nullptr) == ExclusiveStoreResult::Success &&
+               memory.StoreExclusive(0x10200U, 4, 7U, token, nullptr) ==
+                   ExclusiveStoreResult::ReservationLost,
+           "a STREX is itself a write");
+
+    // Copies and moves restamp: no certificate of the source repeats.
+    const auto sourceCertificate = memory.RangeWriteGeneration(0x10000U, 4U);
+    NativeA32Memory copy = memory;
+    Expect(copy.RangeWriteGeneration(0x10000U, 4U) != sourceCertificate &&
+               copy.WriteGeneration() == memory.WriteGeneration(),
+           "a copy keeps the architectural generation with new certificates");
+    Expect(copy.WriteFast<uint32_t>(0x10000U, 1U) &&
+               memory.RangeWriteGeneration(0x10000U, 4U) == sourceCertificate,
+           "a copy's store does not mark the source");
 }
 
 #if defined(OOT3D_NATIVE_A32_AOT_TESTS)
@@ -1910,6 +2032,7 @@ int main(int argc, char** argv) {
             TestMemoryContract();
             TestMemoryFastBlockEquivalence();
             TestMemoryRangeGenerations();
+            TestMemoryStoreCards();
             std::cout << "oot3d_native_a32_process_tests: memory ok\n";
             return 0;
         }
@@ -1921,6 +2044,7 @@ int main(int argc, char** argv) {
         TestMemoryContract();
         TestMemoryFastBlockEquivalence();
         TestMemoryRangeGenerations();
+        TestMemoryStoreCards();
 #if defined(OOT3D_NATIVE_A32_AOT_TESTS)
         TestWholeAotShiftAndFlagSemantics();
 #if defined(OOT3D_NATIVE_WHOLE_AOT_TESTS)

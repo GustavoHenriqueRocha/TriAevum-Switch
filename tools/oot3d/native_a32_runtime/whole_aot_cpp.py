@@ -2216,7 +2216,7 @@ def _render_function(
             lines.append("        state.Flags = flags;")
     if memory_view:
         lines.extend([
-            "        regionMemory.Commit();",
+            # Region stores mark their cards as they go: nothing to publish.
             # Consumed blocks are derived (BlockBudget - BlocksRemaining).
             "        context.BlocksRemaining = regionBlocksRemaining;",
         ])

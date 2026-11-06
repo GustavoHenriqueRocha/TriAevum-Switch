@@ -95,6 +95,24 @@ GUARDS = [
           r'body\.extend\(_vfp_word_span\(True, first, words, per_word\)\).*?'
           r'body\.extend\(_vfp_word_span\(load, first, words, per_word\)\)',
           test="tools/oot3d/native_a32_runtime/test_whole_aot_vfp_memory_execution.py"),
+    # Store cards replaced the per-store counter. A u8 card would alias every
+    # host value in GCC (reloads after each guest store); a crossing store
+    # must mark both pages; the exclusive token must still change on any write.
+    Guard("store cards must keep their own alias set (union of an enum class), not uint8_t",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'enum class GuestCardState : uint8_t \{ Clean = 0, Dirty = 1 \};\s*union GuestCard \{\s*GuestCardState State;',
+          test="oot3d_native_a32_process_tests (TestMemoryStoreCards)",
+          forbid=r'\+\+mRangeGeneration;'),
+    Guard("a write must mark the card of every page it covers (crossing stores mark both pages)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.h",
+          r'void NoteWrite\(uint32_t address, size_t size\) noexcept \{\s*'
+          r'const size_t last = \(uint64_t\{address\} \+ size - 1U\) >> PageShift;\s*'
+          r'for \(size_t page = address >> PageShift; page <= last; \+\+page\)',
+          test="oot3d_native_a32_process_tests (TestMemoryStoreCards)"),
+    Guard("WriteGeneration must step whenever a write happened since the last observation (LDREX/STREX token)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_memory.cpp",
+          r'if \(mWritten\.State != GuestCardState::Clean\) \{\s*mWritten\.State = GuestCardState::Clean;\s*\+\+mWriteGeneration;',
+          test="oot3d_native_a32_process_tests (TestMemoryStoreCards, TestMemoryContract)"),
     # --- 05/11: console logs could not name the slow area nor the actors' cost ---
     # Area (scene, room) read once per host frame into hitches.txt and perf.txt;
     # the actor cost profile adds its block-entry hooks only with

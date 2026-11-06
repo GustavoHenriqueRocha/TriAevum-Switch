@@ -35,8 +35,10 @@ struct Oot3dWholeAotProgramV2 final {
   Oot3dWholeAotObservableExitV2 ObservableExit = nullptr;
   // Optional tail, gated by StructSize. Generated code uses checked memory
   // helpers from its own support library, not the host executable's helpers.
-  // Version 3 includes native per-page write generations and a new fast-page
-  // stride. Recompile every shard and its support library; older modules are
+  // Version 4 (NativeA32Memory::WriteObservationAbiVersion): stores mark
+  // per-page cards stored before the fast-page entries of each group and a
+  // memory-wide written mark, instead of advancing a counter and stamping the
+  // page. Recompile every shard and its support library; older modules are
   // rejected rather than allowed to bypass cache invalidation.
   uint32_t MemoryWriteObservationVersion = 0U;
 };
