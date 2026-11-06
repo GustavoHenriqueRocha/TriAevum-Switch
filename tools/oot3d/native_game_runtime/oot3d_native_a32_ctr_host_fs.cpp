@@ -597,6 +597,30 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             return {NativeA32HostAction::Resume};
         }
     }
+    // Só respondem sucesso, como no Azahar (fs_user.cpp); o MK7 chama os dois
+    // no boot e cai no err:f se falharem.
+    if (event.Detail == kFsInitializeWithSdkVersionRequest) {
+        uint32_t descriptor = 0;
+        if (memory.Read32(commandBuffer + 8U, &descriptor) &&
+            descriptor == kCallingPidDescriptor &&
+            memory.Write32(commandBuffer, kFsInitializeWithSdkVersionResponse) &&
+            memory.Write32(commandBuffer + 4U, kResultSuccess)) {
+            state.r[0] = kResultSuccess;
+            event.Name += ":InitializeWithSdkVersion";
+            event.Handled = true;
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Resume};
+        }
+    }
+    if (event.Detail == kFsSetPriorityRequest &&
+        memory.Write32(commandBuffer, kFsSetPriorityResponse) &&
+        memory.Write32(commandBuffer + 4U, kResultSuccess)) {
+        state.r[0] = kResultSuccess;
+        event.Name += ":SetPriority";
+        event.Handled = true;
+        mSvcEvents.push_back(std::move(event));
+        return {NativeA32HostAction::Resume};
+    }
     if (event.Detail == kFsOpenDirectoryRequest) {
         return OpenFsDirectory(state, memory, sessionType, commandBuffer, std::move(event));
     }
@@ -1362,7 +1386,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
     const uint32_t id = event.Detail >> 16U;
     const bool knownCommand = id == 0x801U || id == 0x802U || id == 0x803U ||
                               id == 0x804U || id == 0x808U || id == 0x80CU ||
-                              id == 0x80DU || id == 0x80EU;
+                              id == 0x80DU || id == 0x80EU || id == 0x861U;
     return FailFsRequest(state, memory, commandBuffer, sessionType, event,
                          knownCommand ? kInvalidBufferDescriptor : kFsNotImplemented,
                          knownCommand ? "malformed-fs-request" : "unsupported-fs-command");

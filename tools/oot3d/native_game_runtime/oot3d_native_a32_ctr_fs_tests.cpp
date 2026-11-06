@@ -285,6 +285,22 @@ void TestFsFailuresAndRestore() {
     f.Host.WriteFsRequestSummary();
 }
 
+// MK7 chamava err:f (erro fatal) logo no boot: fs:USER InitializeWithSdkVersion
+// (0x0861) e SetPriority (0x0862) davam "não implementado". No Azahar
+// (fs_user.cpp) os dois só respondem sucesso.
+void TestFsSdkInitializeAndPriority() {
+    TestFs fs;
+    FsFixture f(fs);
+    f.Call(f.Fs, {0x08610042U, 0x0F0001C8U, 0x20U, 0U});
+    Require(f.State.r[0] == 0U && f.Word(0) == 0x08610040U && f.Word(1) == 0U,
+            "InitializeWithSdkVersion was not served");
+    f.Call(f.Fs, {0x08610042U, 0x0F0001C8U, 0x4002U, 0U});
+    Require(f.State.r[0] == 0xD9001830U, "InitializeWithSdkVersion without PID descriptor");
+    f.Call(f.Fs, {0x08620040U, 0x10U});
+    Require(f.State.r[0] == 0U && f.Word(0) == 0x08620040U && f.Word(1) == 0U,
+            "SetPriority was not served");
+}
+
 void TestFullHistoryIntentionalWait() {
     auto config = MakeConfig();
     config.RetainFullSvcHistory = true;
@@ -1796,6 +1812,7 @@ int main(int argc, char** argv) {
     // Sem argumento: todos. Com nomes: só esses (para ver um teste falhar sozinho).
     const std::vector<std::pair<std::string_view, void (*)()>> tests{
         {"TestFullHistoryIntentionalWait", TestFullHistoryIntentionalWait},
+        {"TestFsSdkInitializeAndPriority", TestFsSdkInitializeAndPriority},
         {"TestFsFailuresAndRestore", TestFsFailuresAndRestore},
         {"TestFsRootedRoundTrip", TestFsRootedRoundTrip},
         {"TestMasterQuestUnlockPolicy", TestMasterQuestUnlockPolicy},
