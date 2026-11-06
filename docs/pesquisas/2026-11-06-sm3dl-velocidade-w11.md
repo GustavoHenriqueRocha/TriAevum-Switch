@@ -55,8 +55,27 @@ O SM3DL funciona no PC, mas abaixo da velocidade do 3DS. Onde vai o tempo na W1-
   igual não muda conteúdo nem hash (savestates antigos seguem válidos). Falta medir quantas escritas
   do SM3DL repetem o valor.
 
+## Medidas repetidas (06/11, notebook sem build concorrente, janela na ws2)
+
+Bench W1-1, 60 s, savestate `w11-b6cdb4d5`, `benchmark_window.frames_per_second`, rodadas
+alternadas (pastas `~/oot3d-work/conv/sm3dl/progresso/*bench-w11-*`):
+
+| build | rodadas (quadros/s) |
+|---|---|
+| Debug `-O1` (com o fill novo) | 22,05 · 21,77 |
+| `-O2 -DNDEBUG` | 22,19 · 22,13 · 22,09 · 21,59 |
+| `-O2 -DNDEBUG` + `TRIAEVUM_OFFLOAD=1` | 23,48 · 27,27 · 22,15 · 23,35 |
+
+- O -O2 quase não muda nada (~1 %), o que indica que o gargalo não está no código gerado.
+- O offload parece ajudar um pouco, mas oscila demais (22 a 27): ainda não dá para concluir.
+- Os 26,43 do commit do fill eram uma medida única e não se repetiram. O valor estável depois do
+  fill fica em ~22 quadros/s, contra 18,95 antes.
+- Perfil com offload (`--profile-a32-runtime`, 60 s): `gsp_trigger_command_queue_seconds`
+  18,1–19,9 s, dos quais `gsp_pica_frontend_submit_seconds` 17,4–19,1 s. `pica_submission_total_seconds`
+  fica em só 2,7–3,0 s, então o resto é o frontend PICA (registradores, LUT/hash). Despacho do
+  código: 11,1–12,7 s.
+
 ## Em aberto
 
-- Repetir o bench sem carga concorrente (medida única de cada lado).
 - Próximo gargalo: lista de comandos PICA, ~2 ms cada (27,5 s em 75 s depois do fill), com
   `ComputeOot3dPicaLightingLutContentHash` nas amostras.
