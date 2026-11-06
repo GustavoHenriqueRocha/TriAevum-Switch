@@ -152,3 +152,29 @@ Este registro cobre a primeira etapa (build instrumentada enviada ao Switch).
   opção não toca os shards (CMakeLists.txt:202), então a build levou 73 s e o C++/`.gcda` não mudam.
 - NRO: md5 `17b70bb2…` (rotulada `cb092d8a…`, 279797773 bytes, conferido no Switch), mesmo nome
   `oot3d_native_game.descoberto-pgogen.nro`; `pgo/` vazia; roteiro do tour de 49 áreas no lab.
+
+## Resultado: tour27 descoberto-pgo × p7e (06/11, 15:17)
+
+Coleta: tour de 49 áreas parado (`bench/tour/script.jsonl`, igual ao pgo5), 258 `.gcda`, 0
+coverage-mismatch; build use em 27 min no Ryzen (md5 `bb15e4e4…`, rotulada `27ceaac7…`,
+172952441 bytes). Tour27 uma passada cada (`~/oot3d-work/bench/descoberto-pgo` × `bench/p7e`,
+`lab_tour_report.py`, médias nas 29 áreas):
+
+| métrica | p7e | descoberto-pgo | diferença |
+|---|---|---|---|
+| FPS mín | 59,41 | 59,60 | +0,19 |
+| FPS médio | 59,85 | 59,90 | +0,05 |
+| guest ms por quadro | 8,98 | 9,36 | +0,38 (+4 %) |
+| refreshes perdidos | 0,43 | 0,33 | −0,10 |
+| áreas com FPS mín < 59 | 7 | 6 | |
+
+- FPS empatado: o jogo está no teto de 60, então o FPS quase não separa as duas.
+- O custo de CPU do guest, que é o que o AOT muda, ficou pior na descoberta em 23 das 29 áreas
+  (mediana +0,43 ms). O C++ descoberto é 17,9 % maior.
+- A p7e ainda tem as 5 substituições VFP antigas, então a comparação não é só "descoberto ×
+  revisado".
+- Ressalvas:
+  - é uma passada de cada, e a primeira inclui compilação de shader;
+  - o casamento janela↔área deriva nas duas (guest estimado 25248/36964 contra ack 22477/22101).
+- Conclusão provisória: não há ganho; a descoberta parece ~4 % mais cara de CPU. Falta repetir a
+  passada antes de concluir.
