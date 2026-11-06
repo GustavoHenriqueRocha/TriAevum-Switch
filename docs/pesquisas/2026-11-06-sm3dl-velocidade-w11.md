@@ -87,6 +87,31 @@ tabela, nem copia, nem invalida o hash (conteúdo idêntico, savestates compatí
 | antes | 22,19 · 22,13 · 22,09 · 21,59 |
 | depois | 25,52 · 26,92 · 28,02 |
 
+## Gargalo depois da LUT: VSync com a janela escondida (06/11)
+
+Amostragem com gdb (40 amostras, -O2, W1-1):
+- thread do jogo: 40 % em `pthread_cond_wait` dentro de `NativeRenderCommandStream::Enqueue`, ou
+  seja, esperando a thread de render;
+- thread de render: 32,5 % em `drmSyncobjTimelineWait` dentro de `GfxRenderingAPIVulkan::StartFrame`,
+  ou seja, a fence do quadro em voo (`gfx_vulkan_frame.cpp:642`).
+
+GPU do notebook: Intel UHD 620. Efeitos extras desligados, `RenderScale` 1,0, VSync ligado.
+
+A janela das rodadas abre escondida no workspace 2. Com VSync (FIFO) no Wayland, o compositor
+segura o ritmo de uma janela que não está na tela. Teste com `Graphics.Presentation.VSync=false` na
+config da janela, -O2 com a correção da LUT:
+
+| VSync | quadros/s | vblanks no bench |
+|---|---|---|
+| ligado | 25,52 · 26,92 · 28,02 | 3268 em 59,4 s |
+| desligado | 29,83 · 29,81 | 3478 em 59,4 s (58,6/s) |
+
+- O SM3DL desenha um quadro a cada 2 vblanks (30 quadros/s no 3DS). Sem VSync, a W1-1 roda em
+  velocidade cheia: 29,8 quadros/s e ~59 vblanks/s, com variação quase zero (1770 quadros nas duas).
+- A oscilação e o "lento" que sobravam vinham do VSync com a janela escondida, não do jogo.
+- Regra de bench daqui em diante: janela na ws2 só com VSync desligado. O FPS satura em 30, então
+  folga se mede por tempo de CPU e GPU, não por FPS.
+
 ## Em aberto
 
 - Próximo gargalo: lista de comandos PICA, ~2 ms cada (27,5 s em 75 s depois do fill), com
