@@ -662,6 +662,34 @@ int main() {
                 "the command buffer reader accepted an unmapped or odd buffer");
     }
 
+    {
+        // SM3DL, 2026-11-06: a savestate wrote every known render target back
+        // over guest memory, also a 64x64 target the game had abandoned and
+        // reused as heap, and the restored game called a "vtable" made of
+        // pixels. A target the CPU wrote after its last draw is not the GPU's.
+        Oot3dNativeGame::Oot3dNativePicaSubmissionQueue targetQueue(
+            Oot3dNativeGame::Oot3dPicaPhysicalMemoryView(
+                memory, {{0x20000000U, 0x14000000U, 0x2000U}}),
+            true);
+        auto targetPacket = packet;
+        targetPacket.Registers[0x11E] = (7U << 12U) | 8U;  // 8x8
+        targetPacket.Registers[0x11C] = 0x04000300U;       // depth 0x20001800
+        Require(targetQueue.SubmitDrawPacket(targetPacket, &error), error);
+        Require(!targetQueue.RenderTargetWrittenSinceDraw(0x20000200U) &&
+                    !targetQueue.RenderTargetWrittenSinceDraw(0x20001800U),
+                "a target the CPU never wrote counted as written");
+        Require(!targetQueue.RenderTargetWrittenSinceDraw(0x20000000U),
+                "an address no draw targeted counted as a written target");
+        const std::array<uint8_t, 4> heapObject{0x04U, 0x21U, 0x04U, 0x29U};
+        Require(memory.WriteBytes(0x140002FCU, heapObject), "cannot reuse the target");
+        Require(targetQueue.RenderTargetWrittenSinceDraw(0x20000200U) &&
+                    !targetQueue.RenderTargetWrittenSinceDraw(0x20001800U),
+                "a CPU write inside the color target was not noticed");
+        Require(targetQueue.SubmitDrawPacket(targetPacket, &error), error);
+        Require(!targetQueue.RenderTargetWrittenSinceDraw(0x20000200U),
+                "a new draw did not make the target the GPU's again");
+    }
+
     std::cout << "oot3d_native_pica_submission_tests: ok\n";
     return 0;
 }

@@ -743,6 +743,18 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_savestate.cpp",
           r'const auto path = request->Path\.empty\(\)\s*\? savestateLibrary->NewStatePath\(request->WithSettings\)\s*: request->Path;',
           "investigação do savestate do SM3DL (save e load com caminho fixo)"),
+    Guard("savestate regravava alvo de render abandonado por cima do heap (SM3DL W1-1, vtable de pixels)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_savestate.cpp",
+          r'if \(!submissionQueue\.RenderTargetWrittenSinceDraw\(target\.ColorPhysicalAddress\)\) \{\s*'
+          r'savestateStats\.PicaColorTargetBytesCaptured \+= color\.size\(\);\s*'
+          r'runtime\.GuestMemoryOverlays\.push_back\(\{\*colorAddress, std::move\(color\)\}\);\s*\}.*?'
+          r'!submissionQueue\.RenderTargetWrittenSinceDraw\(target\.DepthPhysicalAddress\)',
+          "oot3d_native_pica_submission_tests (alvo escrito pela CPU depois do draw)"),
+    Guard("alvo de render escrito pela CPU depois do draw tem de ser notado (carimbo por draw)",
+          "tools/oot3d/native_game_runtime/oot3d_native_pica_submission.cpp",
+          r'mRenderTargetStamps\[address\] = \{byteCount, mMemory\.RangeWriteGeneration\(address, byteCount\)\};.*?'
+          r'return now\.has_value\(\) && now != stamp->second\.Generation;',
+          "oot3d_native_pica_submission_tests (alvo escrito pela CPU depois do draw)"),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

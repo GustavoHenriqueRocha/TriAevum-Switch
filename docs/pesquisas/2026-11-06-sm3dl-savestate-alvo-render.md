@@ -20,7 +20,8 @@ o caminho, e dois saves no mesmo segundo viravam `-2`).
   (contagem em +0xC, vetor em +0x10) e, para cada objeto com byte +0x2C diferente de zero, chama
   vtable+0xC; vem de uma chamada virtual em 0x2B832C, num escopo de perfil "nw::lyt::Layout::…".
 - Estados lidos com `scratchpad/mp.py`: contêiner 0x16C2C58C com 22 objetos; o 16 (0x17503E00) tem
-  flag +0x2C = 4 e "vtable" 0x29042104 **também ao vivo**, em 3100 e em 3150.
+  flag +0x2C = 4 e "vtable" 0x29042104 nos estados salvos em 3100 e em 3150 (que já trazem o overlay
+  dos alvos; ver item 5).
 - `oot3d_native_a32_savestate_diff S0 S2`, com S2 salvo logo depois do load (sem executar o guest):
   memória e estado do host iguais; só diferem as fases do agendador de apresentação.
 - Trace temporário (fora do commit) em `HandleSvc` (thread, SVC, pc, lr, entrada e saída), no
@@ -41,25 +42,31 @@ o caminho, e dois saves no mesmo segundo viravam `-2`).
    0x23502500–0x23504500 (64×64×2 bytes). 0x29042104 são dois pixels RGB565 (0x2104 e 0x2904).
    Ao vivo, o conteúdo dessas páginas depois do save já não é o do arquivo, e o laço não chama o
    objeto; restaurado, os bytes do S0 (flag 4) fazem o laço chamar a "vtable".
-
-## Hipótese principal (sem prova ainda)
-
-A memória do guest nesses alvos não é o que a GPU real deixaria lá. A suspeita é que o host grave
-o alvo 64×64 inteiro de volta na memória, inclusive áreas que a GPU real não toca (fora do
-viewport/scissor). Ou então que capture/materialize de forma diferente do que o caminho ao vivo
-mostra ao guest. Isso estragaria um objeto do heap colocado logo depois da área desenhada. Na
-mesma linha: o contêiner do layout aponta para 0x23503E00, que o jogo não usaria como alvo se a
-área desenhada fosse 64×64 inteira.
-
-Como provar: trace semântico (`--pica-semantic-trace`) dos draws e clears que miram 0x23502500
-(viewport, scissor, memory fill), e os escritores de memória do host (materialização de cópias
-adiadas, writeback de alvo) com endereço e tamanho.
+5. **Causa (confirmada no código e nos estados):** o `SaveState`
+   (`oot3d_native_a32_window_savestate.cpp`) grava por cima da cópia salva da memória a imagem de
+   **todo** alvo que o renderer conhece (`CapturePicaColorTargets`, cor e depth na extensão inteira).
+   O alvo 64×64 em 0x23502500 foi abandonado pelo jogo: nenhum draw mirou nele nos vblanks
+   6184–6186 (trace semântico) e a memória dele virou heap (contêiner do layout, objeto 16 em
+   0x23503E00). O save escreveu os pixels velhos do alvo por cima do objeto vivo; depois do load,
+   o laço de animação do layout (0x33619C, chamado de 0x2B832C) leu flag 4 e chamou a "vtable"
+   0x29042104. As leituras de "objeto com lixo também ao vivo" vinham de estados salvos, que já
+   traziam esse overlay.
 
 ## Decisão
 
-- Corrigido só o `--savestate-action FRAME:save:PATH` (guarda nova, vista falhando 175/176), que
-  tornou possível salvar e carregar com caminho fixo na mesma execução.
-- O bug do savestate continua aberto, agora com a região exata.
+- A fila de submissão (`Oot3dNativePicaSubmissionQueue`) carimba, a cada draw, a geração de escrita
+  (`RangeWriteGeneration`, por página de 4 KiB) da faixa de cor e de depth do alvo.
+  `RenderTargetWrittenSinceDraw(físico)` diz se a CPU escreveu nessa faixa depois do último draw;
+  o save não grava overlay desse alvo (cor e depth separados). Sem carimbo ou sem geração certificada
+  (ponteiro escapado), segue o comportamento antigo.
+- Teste em `oot3d_native_pica_submission_tests` (alvo 8×8: não escrito → escrita da CPU dentro da cor
+  → escrito, depth intacto → novo draw → da GPU de novo), visto falhando com o stub (`a CPU write
+  inside the color target was not noticed`). Duas guardas, cada uma vista falhando por mutação
+  (177/178).
+- `PicaColorFormatBytes` foi para `pica_framebuffer_encode.h`, ao lado de `PicaDepthFormatBytes`, para
+  o carimbo e o encode usarem a mesma regra de bytes por pixel.
+- Antes disso, só o `--savestate-action FRAME:save:PATH` (guarda vista falhando 175/176), que tornou
+  possível salvar e carregar com caminho fixo na mesma execução.
 
 ## Alternativas rejeitadas
 
@@ -67,3 +74,25 @@ adiadas, writeback de alvo) com endereço e tamanho.
   (6181 e 6187), então os estados não ficam alinhados.
 - Estado de thread velho ou SleepThread extra: foi um alinhamento errado do trace; refeito com o
   despertar e o vblank no log, o caminho restaurado repete o vivo.
+- Hipótese anterior "o host grava o alvo inteiro de volta na memória ao vivo, fora do
+  viewport": ao vivo nenhum draw mira o alvo nesses vblanks; quem grava é só o save.
+- Não salvar alvo nenhum: perderia a imagem de alvos vivos que o jogo lê depois do load (cópia,
+  display transfer) antes de redesenhar.
+- Gravar só as páginas não tocadas pela CPU: um alvo meio reusado já não é imagem de GPU; pular o
+  alvo inteiro é mais simples e o próximo draw recria a posse.
+
+## Resultado com a correção
+
+Mesmo repro (save 3100, load 3103, janela -O1): rodada de 300 s com `save_count` 1, `load_count` 1,
+13569 vblanks e nenhum `MemoryFault`; outra sob gdb foi até os 420 s (vblank 18720). Antes, 9 de 9
+caíram. Dos 5 alvos capturados, só 384000 bytes viraram overlay (a tela de cima, 400×240 RGBA8): os
+quatro 64×64 abandonados ficaram de fora. Folha em
+`~/oot3d-work/conv/sm3dl/progresso/2026-11-06_0409_4b2ce887_savestate-fix/folha.png` (aviso "State
+loaded" e a W1-1 seguindo, cronômetro 497 → 334).
+
+## Armadilha de medição
+
+Várias rodadas desta noite "saíram cedo" em exatamente 5897 vblanks (~114 s de janela): não era o
+jogo. O comando em segundo plano do agente tinha o tempo-limite padrão de 120 s; o SIGTERM vira
+`SDL_QUIT` e a janela fecha limpa, com `summary.json` normal. Debaixo do gdb (outro grupo de
+processos) a mesma rodada foi até os 420 s. Rodadas longas precisam de tempo-limite explícito.

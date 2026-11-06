@@ -307,6 +307,7 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     bool IsQuiescent() const noexcept;
     void RestoreGpuColorRenderTargetOwnership(
         std::span<const uint32_t> colorPhysicalAddresses);
+    bool RenderTargetWrittenSinceDraw(uint32_t physicalAddress) const;
     nlohmann::json CaptureState() const;
     bool RestoreState(const nlohmann::json& state,
                       std::string* error = nullptr);
@@ -429,6 +430,14 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     std::vector<Oot3dPicaMemoryFillSubmission> mPendingMemoryFills;
     std::unordered_set<uint32_t> mKnownColorRenderTargets;
     std::unordered_set<uint32_t> mInvalidatedColorRenderTargets;
+    // Write generation of each color/depth target at its last draw. A save
+    // writes GPU targets back over guest memory; a target the CPU wrote since
+    // then was abandoned and its memory reused (SM3DL W1-1, 2026-11-06).
+    struct RenderTargetStamp {
+        size_t ByteCount = 0;
+        std::optional<uint64_t> Generation;
+    };
+    std::unordered_map<uint32_t, RenderTargetStamp> mRenderTargetStamps;
     std::vector<Oot3dPicaDisplayTransferSubmission>
         mRestoredDisplayTransfersAwaitingTarget;
     std::vector<RawCopyProducer> mRawCopyProducers;

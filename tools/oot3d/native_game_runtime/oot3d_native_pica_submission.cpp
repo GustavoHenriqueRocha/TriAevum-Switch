@@ -1,6 +1,7 @@
 #include "oot3d_native_pica_submission.h"
 #include "oot3d_cpu_phase_probe.h"
 #include "oot3d_native_pica_transfer.h"
+#include "fast/renderer3ds/pica_framebuffer_encode.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1033,6 +1034,16 @@ bool Oot3dNativePicaSubmissionQueue::SubmitDrawLocked(
         submission.State.Framebuffer.ColorPhysicalAddress;
     mKnownColorRenderTargets.insert(colorTarget);
     mInvalidatedColorRenderTargets.erase(colorTarget);
+    const auto& framebuffer = submission.State.Framebuffer;
+    const size_t pixels = size_t{framebuffer.Width} * framebuffer.Height;
+    const auto stampTarget = [&](uint32_t address, uint32_t bytesPerPixel) {
+        if (address == 0U || pixels == 0U || bytesPerPixel == 0U) return;
+        const size_t byteCount = pixels * bytesPerPixel;
+        mRenderTargetStamps[address] = {byteCount, mMemory.RangeWriteGeneration(address, byteCount)};
+    };
+    stampTarget(colorTarget, Fast::Renderer3ds::PicaColorFormatBytes(framebuffer.ColorFormat));
+    stampTarget(framebuffer.DepthPhysicalAddress,
+                Fast::Renderer3ds::PicaDepthFormatBytes(framebuffer.DepthFormat));
     for (auto transfer = mRestoredDisplayTransfersAwaitingTarget.begin();
          transfer != mRestoredDisplayTransfersAwaitingTarget.end();) {
         if (transfer->InputPhysicalAddress != colorTarget) {
@@ -1306,6 +1317,15 @@ bool Oot3dNativePicaSubmissionQueue::IsQuiescent() const noexcept {
     std::lock_guard guard(mQueueMutex);
     return mPendingDraws.empty() && mPendingCompletions.empty() &&
            mPendingDisplayTransfers.empty() && mPendingMemoryFills.empty();
+}
+
+bool Oot3dNativePicaSubmissionQueue::RenderTargetWrittenSinceDraw(
+    uint32_t physicalAddress) const {
+    std::lock_guard guard(mQueueMutex);
+    const auto stamp = mRenderTargetStamps.find(physicalAddress);
+    if (stamp == mRenderTargetStamps.end()) return false;
+    const auto now = mMemory.RangeWriteGeneration(physicalAddress, stamp->second.ByteCount);
+    return now.has_value() && now != stamp->second.Generation;
 }
 
 void Oot3dNativePicaSubmissionQueue::RestoreGpuColorRenderTargetOwnership(
@@ -1738,6 +1758,7 @@ bool Oot3dNativePicaSubmissionQueue::RestoreState(
         // invalidated: a CPU transfer remains safe immediately, and its GPU
         // replay is materialized only after a real draw recreates ownership.
         mKnownColorRenderTargets.clear();
+        mRenderTargetStamps.clear();
         mInvalidatedColorRenderTargets =
             std::move(invalidatedColorRenderTargets);
         mInvalidatedColorRenderTargets.insert(

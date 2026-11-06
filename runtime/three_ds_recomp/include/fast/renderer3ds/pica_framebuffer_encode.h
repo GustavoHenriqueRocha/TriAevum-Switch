@@ -17,6 +17,11 @@ namespace Fast::Renderer3ds {
 // way it was rendered. Memory row y is therefore read from the attachment's
 // native row height - 1 - y, sampled at its centre. Columns keep their order;
 // no screen rotation or presentation effect is applied.
+// Native colour formats 0-4: RGBA8, RGB8, then the 16-bit ones. Bytes per texel.
+[[nodiscard]] inline uint32_t PicaColorFormatBytes(uint8_t format) noexcept {
+    return format == 0 ? 4U : format == 1 ? 3U : 2U;
+}
+
 inline std::vector<uint8_t> EncodePicaFramebuffer(
     std::span<const uint8_t> rgba, uint32_t imageWidth, uint32_t imageHeight,
     uint32_t width, uint32_t height, uint8_t format) {
@@ -24,7 +29,7 @@ inline std::vector<uint8_t> EncodePicaFramebuffer(
         imageWidth == 0 || imageHeight == 0 ||
         rgba.size() % 4 != 0 || uint64_t{imageWidth} * imageHeight != rgba.size() / 4)
         throw std::runtime_error("invalid PICA framebuffer encode extent/format");
-    const uint32_t bpp = format == 0 ? 4 : format == 1 ? 3 : 2;
+    const uint32_t bpp = PicaColorFormatBytes(format);
     if (uint64_t{width} * height > std::numeric_limits<std::size_t>::max() / bpp)
         throw std::runtime_error("PICA framebuffer byte size overflows");
     std::vector<uint8_t> result(std::size_t{width} * height * bpp);

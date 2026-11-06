@@ -1672,6 +1672,9 @@ Armadilhas do SM3DL (05/11), todas genéricas:
   (`oot3d_native_a32_savestate_diff`). Se der, compare o caminho vivo com o restaurado por SVC
   (thread, pc, argumentos, resultado) e por hash de página de 4 KiB: a primeira página diferente aponta
   quem escreve fora das SVCs (GPU, DSP, HID).
+  No SM3DL era o próprio save: ele grava a imagem de cada alvo de render conhecido por cima da memória,
+  e um alvo abandonado já era heap. Só grave de volta alvo que a CPU não escreveu depois do último draw
+  (geração de escrita carimbada no draw, `RenderTargetWrittenSinceDraw`).
 
 ---
 

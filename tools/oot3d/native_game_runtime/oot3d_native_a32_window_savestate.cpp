@@ -363,9 +363,14 @@ NativeA32WindowSession::SaveState(const std::filesystem::path &path, bool withSe
             target.FramebufferHeight, target.FramebufferColorFormat);
         const auto colorAddress = virtualAddress(target.ColorPhysicalAddress, color.size());
         if (!colorAddress) return FailSave("native PICA color target lies outside emulated memory");
-        savestateStats.PicaColorTargetBytesCaptured += color.size();
-        runtime.GuestMemoryOverlays.push_back({*colorAddress, std::move(color)});
+        // A target the CPU wrote after its last draw was abandoned: its memory
+        // holds game data now (SM3DL W1-1 heap objects), not the GPU image.
+        if (!submissionQueue.RenderTargetWrittenSinceDraw(target.ColorPhysicalAddress)) {
+          savestateStats.PicaColorTargetBytesCaptured += color.size();
+          runtime.GuestMemoryOverlays.push_back({*colorAddress, std::move(color)});
+        }
         if (target.DepthPhysicalAddress != 0U &&
+            !submissionQueue.RenderTargetWrittenSinceDraw(target.DepthPhysicalAddress) &&
             Fast::Renderer3ds::PicaDepthFormatBytes(target.FramebufferDepthFormat) != 0U &&
             target.DepthValues.size() == size_t{target.ImageWidth} * target.ImageHeight) {
           auto depth = Fast::Renderer3ds::EncodePicaDepthStencil(
