@@ -155,6 +155,9 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     [[nodiscard]] bool PicaNativeNamespaceObservable() const override {
         return false;
     }
+    // fps60: which presented frames are synthetic in-between samples (grass
+    // draws the last real frame's placements in them; gfx_deko3d_grass.cpp).
+    bool PublishPicaFrameTemporalSample(const Renderer3ds::PicaFrameTemporalSample& sample) override;
 
     void StartDrawToFramebuffer(int fbId, float noiseScale) override;
     void CopyFramebuffer(int fbDstId, int fbSrcId, int srcX0, int srcY0, int srcX1, int srcY1, int dstX0, int dstY0,
@@ -378,6 +381,9 @@ namespace Deko3d {
 // grass sources) and the end of the frame (placements, the next cull).
 void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame);
 void GrassEndFrame(uint64_t frame);
+// The sample the next draws of `frame` belong to: synthetic (an fps60
+// in-between frame) or real.
+void GrassNoteSample(bool synthetic, uint64_t frame);
 // config/grass = draw and the preset loaded (EnsureFrame reads it per frame).
 [[nodiscard]] bool GrassDrawEnabled();
 } // namespace Deko3d

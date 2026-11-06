@@ -11,8 +11,9 @@
 // Who does what (none of it on the game thread, core 0):
 // - render thread: publishes sources (as before), once per frame matches the
 //   placements to this frame's source draws (their model-to-clip, fog and
-//   lights: interpolated frames included), records the instanced draws and
-//   hands the next cull to the worker;
+//   lights), records the instanced draws and hands the next cull to the
+//   worker. An fps60 in-between frame publishes no sources: it draws the last
+//   real frame's placements with its own camera (GrassInBetweenCameras);
 // - grass cull worker (service thread, cores 1|2): culls per cluster and
 //   writes the 32-byte instances straight into GPU-visible memory
 //   (grass_instance_stream.h); its result is drawn from the next frame on;
@@ -244,6 +245,12 @@ struct GrassState {
     // One placement per render target it was drawn into, also found by
     // placement identity (GrassFramePlacements).
     Oot3d::GrassFramePlacements<FramePlacement> Frame;
+    // fps60 in-between frames (GrassNoteSample): the device frame presenting
+    // a synthetic sample, the last real frame's placements (what an
+    // in-between frame draws) and the in-between frame's camera per target.
+    uint64_t InBetweenFrame = ~0ULL;
+    Oot3d::GrassFramePlacements<FramePlacement> RealFrame;
+    Oot3d::GrassInBetweenCameras InBetween;
     // The target this frame's sources were published into.
     uint64_t SourceFrame = ~0ULL;
     uint64_t SourceNamespace = 0;
@@ -280,6 +287,9 @@ struct GrassState {
     // with no placement in common with this frame's; and cull ranges drawn
     // with their placement as drawn into another target this frame.
     uint64_t AreaChanges = 0, ForeignOtherArea = 0, ForeignNoPlacement = 0, OtherTargetRanges = 0;
+    // In-between frames, and those that had the real frame's placements but
+    // none of its source draws to take their camera from.
+    uint64_t InBetweenFrames = 0, InBetweenWithoutCamera = 0;
 };
 
 // Set once before the first frame (Deko3dConfigureGrass), read by the render
@@ -360,6 +370,30 @@ FramePlacement BuildFramePlacement(const Oot3d::PicaGrassDrawable& drawable, con
     const auto eye = Oot3d::GrassCameraFromProjection(push.PositionToClip).value_or(std::array<float, 3>{});
     u.Eye = {eye[0], eye[1], eye[2], static_cast<float>(std::min<size_t>(shading.ActiveLightCount, 3U))};
     return result;
+}
+
+// A source draw (its plan's geometry identity, which fps60 interpolation
+// keeps) and its render target, as GrassInBetweenCameras keys them.
+uint64_t SourceDrawKey(uint64_t geometryIdentity, uint64_t renderTargetNamespace, uint32_t colorAddress) {
+    return Oot3d::GrassFramePlacementKey(geometryIdentity, renderTargetNamespace, colorAddress);
+}
+uint64_t TargetKey(uint64_t renderTargetNamespace, uint32_t colorAddress) {
+    return Oot3d::GrassFramePlacementKey(0U, renderTargetNamespace, colorAddress);
+}
+
+// A real frame's placement in in-between frame `frame`: the same placement
+// (anchors, fog, lights, depth mapping) with that frame's camera of its
+// target; nullopt when none of the real frame's sources was drawn there.
+std::optional<FramePlacement> MoveToInBetween(const GrassState& state, const FramePlacement& real, uint64_t frame) {
+    const auto* change = state.InBetween.Change(frame, TargetKey(real.Namespace, real.ColorAddress));
+    if (change == nullptr) return std::nullopt;
+    FramePlacement moved = real;
+    moved.UniformsGpu = DK_GPU_ADDR_INVALID;
+    auto& u = moved.Uniforms;
+    u.PositionToClip = Oot3d::GrassMultiplyClip(*change, real.Uniforms.PositionToClip);
+    const auto eye = Oot3d::GrassCameraFromProjection(u.PositionToClip);
+    if (eye) u.Eye = {(*eye)[0], (*eye)[1], (*eye)[2], real.Uniforms.Eye[3]};
+    return moved;
 }
 
 // The budgets of one frame rate and grass distance on top of the preset (at
@@ -467,18 +501,37 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
         CheckGrassArea(*state);
     }
     const auto begin = std::chrono::steady_clock::now();
-    try {
-        if (Oot3d::PublishPicaGrassSource(draw, frame, state->Settings, *state->Sources, frame, state->DrawOrder++)) {
-            ++state->Published;
+    if (state->InBetweenFrame == frame) {
+        // fps60 in-between frame: no sources of its own. A draw that was a
+        // source of the last real frame gives its target's camera.
+        if (state->InBetween.InBetweenDraw(
+                frame, SourceDrawKey(draw.GeometryIdentity, draw.RenderTargetNamespace,
+                                     draw.FramebufferColorPhysicalAddress),
+                TargetKey(draw.RenderTargetNamespace, draw.FramebufferColorPhysicalAddress), draw.VertexUniformBytes,
+                draw.FramebufferFlipped)) {
             state->SourceFrame = frame;
             state->SourceNamespace = draw.RenderTargetNamespace;
             state->SourceColorAddress = draw.FramebufferColorPhysicalAddress;
         }
-    } catch (const std::exception& exception) {
-        static bool reported = false;
-        if (!reported) {
-            reported = true;
-            Log("grass: source failed (%s)", exception.what());
+    } else {
+        try {
+            if (Oot3d::PublishPicaGrassSource(draw, frame, state->Settings, *state->Sources, frame,
+                                              state->DrawOrder++)) {
+                ++state->Published;
+                state->SourceFrame = frame;
+                state->SourceNamespace = draw.RenderTargetNamespace;
+                state->SourceColorAddress = draw.FramebufferColorPhysicalAddress;
+                if (const auto clip = Oot3d::GrassRigidModelToClip(draw.VertexUniformBytes, draw.FramebufferFlipped))
+                    state->InBetween.RealSource(SourceDrawKey(draw.GeometryIdentity, draw.RenderTargetNamespace,
+                                                              draw.FramebufferColorPhysicalAddress),
+                                                *clip);
+            }
+        } catch (const std::exception& exception) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                Log("grass: source failed (%s)", exception.what());
+            }
         }
     }
     const double ms = MillisecondsSince(begin);
@@ -486,9 +539,12 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
     state->ObserveMaxMs = std::max(state->ObserveMaxMs, ms);
 }
 
-namespace {
-
-} // namespace
+void GrassNoteSample(bool synthetic, uint64_t frame) {
+    GrassState* state = gGrass.load(std::memory_order_acquire);
+    if (state == nullptr) return;
+    if (synthetic) state->InBetweenFrame = frame;
+    else if (state->InBetweenFrame == frame) state->InBetweenFrame = ~0ULL;
+}
 
 // A scene or room change: the drawn cull, the sources' memo (whose geometry
 // identities the new area may reuse) and this frame's placements are
@@ -502,13 +558,16 @@ void CheckGrassArea(GrassState& state) {
     state.Current = {};
     state.Sources = std::make_unique<Oot3d::PicaGrassSourceState>();
     state.Frame.Clear();
+    state.RealFrame.Clear();
+    state.InBetween.Clear();
     state.SourceFrame = ~0ULL;
 }
 
 namespace {
 
 // Placements of this frame's sources, once per frame (at the first draw
-// point, else at the end of the frame).
+// point, else at the end of the frame); in an fps60 in-between frame, the
+// last real frame's placements with this frame's camera.
 void UpdatePlacements(GrassState& state, uint64_t frame) {
     CheckGrassArea(state);
     if (state.PreparedFrame == frame) return;
@@ -518,11 +577,21 @@ void UpdatePlacements(GrassState& state, uint64_t frame) {
     state.Posted = false;
     const auto begin = std::chrono::steady_clock::now();
     try {
-        const auto& drawables = state.Placements->Update(frame, state.Settings);
-        if (state.Mode == Oot3d::GrassSwitchMode::Draw) {
-            for (const auto& drawable : drawables)
-                state.Frame.Add(drawable.Placement->Identity, drawable.Mesh.RenderTargetNamespace,
-                                drawable.Mesh.FramebufferColorPhysicalAddress, BuildFramePlacement(drawable, state));
+        if (state.InBetweenFrame == frame) {
+            ++state.InBetweenFrames;
+            const uint64_t reference = state.InBetween.ReferenceFrame();
+            if (reference < frame && frame - reference <= Oot3d::kGrassInBetweenReach)
+                state.Frame.AssignMoved(state.RealFrame, [&](const FramePlacement& real) {
+                    return MoveToInBetween(state, real, frame);
+                });
+            if (state.Frame.Empty() && !state.RealFrame.Empty()) ++state.InBetweenWithoutCamera;
+        } else {
+            const auto& drawables = state.Placements->Update(frame, state.Settings);
+            if (state.Mode == Oot3d::GrassSwitchMode::Draw) {
+                for (const auto& drawable : drawables)
+                    state.Frame.Add(drawable.Placement->Identity, drawable.Mesh.RenderTargetNamespace,
+                                    drawable.Mesh.FramebufferColorPhysicalAddress, BuildFramePlacement(drawable, state));
+            }
         }
     } catch (const std::exception& exception) {
         static bool reported = false;
@@ -631,6 +700,13 @@ void GrassEndFrame(uint64_t frame) {
         // keeps the cull following the camera.
         PostCull(*state, frame);
     }
+    if (state->InBetweenFrame != frame) {
+        // A real frame: its placements and source draws are what the fps60
+        // in-between frames after it draw, with their own camera.
+        state->RealFrame = std::move(state->Frame);
+        state->Frame.Clear();
+        state->InBetween.EndRealFrame(frame);
+    }
     if (frame > 3U) {
         Oot3d::GrassSceneBridge::Instance().PruneBeforeFrame(frame - 2U);
     }
@@ -672,7 +748,7 @@ void GrassEndFrame(uint64_t frame) {
             "(frames that redrew an older cull), no result %llu, nothing drawn %llu | cull instances %.0f "
             "(max %llu) thinned %.0f | distance=%s full %.0f max %.0f | area %s scene %d room %d, changes %llu, "
             "foreign culls dropped %llu (other area %llu, no shared placement %llu), ranges drawn with another "
-            "target's placement %llu | empty placements %u",
+            "target's placement %llu | empty placements %u | in-between frames %llu (without a camera %llu)",
             static_cast<unsigned long long>(frame), static_cast<unsigned long long>(state->RasterDraws),
             static_cast<unsigned long long>(state->DepthDraws),
             static_cast<unsigned long long>(state->Slots.FreshFrames - state->FreshBase),
@@ -689,7 +765,9 @@ void GrassEndFrame(uint64_t frame) {
             static_cast<unsigned long long>(state->ForeignOtherArea + state->ForeignNoPlacement),
             static_cast<unsigned long long>(state->ForeignOtherArea),
             static_cast<unsigned long long>(state->ForeignNoPlacement),
-            static_cast<unsigned long long>(state->OtherTargetRanges), state->Placements->Stats().Empty);
+            static_cast<unsigned long long>(state->OtherTargetRanges), state->Placements->Stats().Empty,
+            static_cast<unsigned long long>(state->InBetweenFrames),
+            static_cast<unsigned long long>(state->InBetweenWithoutCamera));
     }
     state->Frames = 0;
     state->Published = 0;
@@ -707,10 +785,17 @@ void GrassEndFrame(uint64_t frame) {
     state->EmptyFrames = state->NoResultFrames = 0;
     state->FreshBase = state->Slots.FreshFrames;
     state->AreaChanges = state->ForeignOtherArea = state->ForeignNoPlacement = state->OtherTargetRanges = 0;
+    state->InBetweenFrames = state->InBetweenWithoutCamera = 0;
     state->StaleBase = state->Slots.StaleFrames;
 }
 
 } // namespace Deko3d
+
+bool GfxRenderingAPIDeko3d::PublishPicaFrameTemporalSample(const Renderer3ds::PicaFrameTemporalSample& sample) {
+    // Before the sample's draws, into the device frame that presents them.
+    Deko3d::GrassNoteSample(sample.Synthetic, mDevice.Frame());
+    return true;
+}
 
 void GfxRenderingAPIDeko3d::RememberGrassScene(const Deko3d::PicaTarget& target, const Deko3d::PicaRect& viewport,
                                                const DkScissor& scissor, uint8_t depthCompare) {

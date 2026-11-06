@@ -20,6 +20,7 @@
 #include <optional>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace Fast::Oot3d {
 
@@ -153,9 +154,9 @@ template <typename Identities, typename Contains>
 
 // This frame's placements: one per placement and render target it was drawn
 // into (GrassFramePlacementKey), each with that draw's camera, also found by
-// placement identity alone. With fps60 an in-between frame may draw into
-// another target than the frame a cull was made in: the placement identity
-// is the same, so the cull still fits and is drawn with this frame's camera.
+// placement identity alone: a cull fits a frame that drew one of its
+// placements into any target, and a range drawn into a target without its
+// own copy of the placement uses another target's (a native replay).
 template <typename Placement>
 class GrassFramePlacements {
   public:
@@ -186,10 +187,139 @@ class GrassFramePlacements {
     [[nodiscard]] bool Empty() const noexcept { return mByKey.empty(); }
     [[nodiscard]] auto begin() const noexcept { return mByKey.begin(); }
     [[nodiscard]] auto end() const noexcept { return mByKey.end(); }
+    // These placements: `from`'s, each as `move` returns it (nullopt: left
+    // out), under the same identities and targets.
+    template <typename Move>
+    void AssignMoved(const GrassFramePlacements& from, Move&& move) {
+        Clear();
+        for (const auto& [key, placement] : from.mByKey)
+            if (auto moved = move(placement)) mByKey.emplace(key, std::move(*moved));
+        for (const auto& [identity, key] : from.mByIdentity)
+            if (mByKey.contains(key)) mByIdentity.emplace(identity, key);
+    }
 
   private:
     std::unordered_map<uint64_t, Placement> mByKey;
     std::unordered_map<uint64_t, uint64_t> mByIdentity; // identity -> its first key
 };
+
+// Column-major 4x4 product a * b.
+[[nodiscard]] inline std::array<float, 16> GrassMultiplyClip(const std::array<float, 16>& a,
+                                                           const std::array<float, 16>& b) noexcept {
+    std::array<float, 16> r{};
+    for (size_t column = 0; column < 4U; ++column)
+        for (size_t row = 0; row < 4U; ++row) {
+            double sum = 0.0;
+            for (size_t k = 0; k < 4U; ++k) sum += double{a[k * 4U + row]} * double{b[column * 4U + k]};
+            r[column * 4U + row] = static_cast<float>(sum);
+        }
+    return r;
+}
+
+// The camera change between two model-to-clips of one rigid draw
+// (GrassRigidModelToClip, column-major): now * inverse(before). Applied to a
+// world-to-clip of `before`'s frame it gives the one of `now`'s frame,
+// whatever the draw's model transform. Nullopt when `before` is singular.
+[[nodiscard]] inline std::optional<std::array<float, 16>> GrassClipChange(const std::array<float, 16>& before,
+                                                                          const std::array<float, 16>& now) noexcept {
+    // Gauss-Jordan with partial pivoting, in double.
+    std::array<std::array<double, 8>, 4> m{};
+    for (size_t row = 0; row < 4U; ++row) {
+        for (size_t column = 0; column < 4U; ++column) m[row][column] = before[column * 4U + row];
+        m[row][4U + row] = 1.0;
+    }
+    for (size_t column = 0; column < 4U; ++column) {
+        size_t pivot = column;
+        for (size_t row = column + 1U; row < 4U; ++row)
+            if (std::abs(m[row][column]) > std::abs(m[pivot][column])) pivot = row;
+        if (!(std::abs(m[pivot][column]) > 1.0e-12)) return std::nullopt;
+        std::swap(m[column], m[pivot]);
+        const double scale = 1.0 / m[column][column];
+        for (auto& value : m[column]) value *= scale;
+        for (size_t row = 0; row < 4U; ++row) {
+            if (row == column) continue;
+            const double factor = m[row][column];
+            for (size_t k = 0; k < 8U; ++k) m[row][k] -= factor * m[column][k];
+        }
+    }
+    std::array<float, 16> inverse{};
+    for (size_t row = 0; row < 4U; ++row)
+        for (size_t column = 0; column < 4U; ++column) inverse[column * 4U + row] = static_cast<float>(m[row][4U + column]);
+    auto change = GrassMultiplyClip(now, inverse);
+    if (!std::all_of(change.begin(), change.end(), [](float v) { return std::isfinite(v); })) return std::nullopt;
+    return change;
+}
+
+// fps60 in-between frames (the renderer's synthetic samples, strictly
+// between two guest frames) draw the placements of the last real frame, each
+// with the in-between frame's camera. The in-between frame's draw list and
+// views are interpolated (carried and inserted unmatched draws,
+// vertex-binding overrides, interpolated uniforms), so grass sources of its
+// own came out with other placement identities than the real frame's: the
+// cull of the real frame no longer fitted the in-between frame, nor the
+// in-between's cull the next real frame (logs14g: 257/600 frames drawn).
+// Instead, a real frame's source draws are remembered by draw key (the plan's
+// geometry identity and target, which interpolation does not change) with
+// their model-to-clip; the same draw in an in-between frame gives its
+// target's camera change (GrassClipChange).
+class GrassInBetweenCameras {
+  public:
+    // A grass source draw of the real frame being drawn.
+    void RealSource(uint64_t drawKey, const std::array<float, 16>& modelToClip) {
+        mPending.try_emplace(drawKey, modelToClip);
+    }
+    // The end of real frame `frame`: its sources become the reference of
+    // the in-between frames that follow it.
+    void EndRealFrame(uint64_t frame) {
+        mReference.swap(mPending);
+        mPending.clear();
+        mReferenceFrame = frame;
+        mChanges.clear();
+    }
+    // A draw of in-between frame `frame` into `target`: if it is one of the
+    // reference frame's sources and `target` has no camera change yet, the
+    // change is taken from it. True when `target` has one now.
+    bool InBetweenDraw(uint64_t frame, uint64_t drawKey, uint64_t target, std::span<const uint8_t> vertexUniforms,
+                       bool framebufferFlipped) {
+        if (mChangesFrame != frame) {
+            mChangesFrame = frame;
+            mChanges.clear();
+        }
+        if (Change(frame, target) != nullptr) return true;
+        const auto reference = mReference.find(drawKey);
+        if (reference == mReference.end()) return false;
+        const auto now = GrassRigidModelToClip(vertexUniforms, framebufferFlipped);
+        if (!now) return false;
+        const auto change = GrassClipChange(reference->second, *now);
+        if (!change) return false;
+        mChanges.emplace_back(target, *change);
+        return true;
+    }
+    // The camera change of `target` in in-between frame `frame` (null: none
+    // of the reference frame's sources was drawn into it yet).
+    [[nodiscard]] const std::array<float, 16>* Change(uint64_t frame, uint64_t target) const noexcept {
+        if (mChangesFrame != frame) return nullptr;
+        for (const auto& [key, change] : mChanges)
+            if (key == target) return &change;
+        return nullptr;
+    }
+    // The real frame the reference sources were drawn in (~0 before any).
+    [[nodiscard]] uint64_t ReferenceFrame() const noexcept { return mReferenceFrame; }
+    void Clear() {
+        mPending.clear();
+        mReference.clear();
+        mChanges.clear();
+        mReferenceFrame = ~0ULL;
+        mChangesFrame = ~0ULL;
+    }
+
+  private:
+    std::unordered_map<uint64_t, std::array<float, 16>> mPending, mReference;
+    std::vector<std::pair<uint64_t, std::array<float, 16>>> mChanges; // per target, this in-between frame
+    uint64_t mReferenceFrame = ~0ULL;
+    uint64_t mChangesFrame = ~0ULL;
+};
+// In-between frames that may follow one real frame (Fixed3x: two).
+inline constexpr uint64_t kGrassInBetweenReach = 3U;
 
 } // namespace Fast::Oot3d

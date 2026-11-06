@@ -733,12 +733,10 @@ TEST(Oot3dGrassDistanceThinning, WholeAreaDrawsEveryTuftAndTheCapKeepsTheNearest
     EXPECT_LT(keptFarthest, allFarthest * 0.7F);
 }
 
-// 60 fps (logs14g, Sacred Forest Meadow): the cull made in one frame was
-// dropped as foreign in the next one, so only 257 of 600 frames drew. A
-// cull of the same area and placement is drawn in every frame, whatever
-// target the frame draws into, with that frame's camera; another area or
-// placement set is still dropped.
-TEST(Oot3dGrassInterpolatedFrames, AnInBetweenFrameIntoAnotherTargetKeepsTheGrass) {
+// A cull of the same area and placement is drawn in every frame, whatever
+// target the frame draws into (a native replay), with that target's camera;
+// another area or placement set is still dropped.
+TEST(Oot3dGrassHandoff, ACullIsDrawnIntoATargetWithoutItsOwnCopyOfThePlacement) {
     struct Camera {
         int Frame = 0;
     };
@@ -778,11 +776,10 @@ TEST(Oot3dGrassInterpolatedFrames, AnInBetweenFrameIntoAnotherTargetKeepsTheGras
     EXPECT_EQ(GrassCullFitsFrame(meadow, meadow, std::vector<uint64_t>{90U}, has), GrassCullFit::NoPlacement);
     EXPECT_EQ(frame.Find(90U, kReal, kRealColor), nullptr);
 
-    // 600 frames, the in-between ones drawing into another target than the
-    // one their source is keyed by, a cull finishing every frame (made with
-    // the previous frame's placements): every frame after the first cull
-    // draws, each with its own camera. (Keyed by target alone, as in round
-    // 3, every in-between frame dropped the cull.)
+    // 600 frames, every other one drawing into another target than the one
+    // its source is keyed by, a cull finishing every frame (made with the
+    // previous frame's placements): every frame after the first cull draws,
+    // each with its own camera.
     GrassStreamSlots slots(2U);
     uint64_t drawn = 0U, dropped = 0U, ownCamera = 0U;
     std::optional<uint32_t> writing;
@@ -810,6 +807,174 @@ TEST(Oot3dGrassInterpolatedFrames, AnInBetweenFrameIntoAnotherTargetKeepsTheGras
     EXPECT_EQ(ownCamera, drawn);
     // A scene change in the middle drops it.
     EXPECT_EQ(GrassCullFitsFrame(meadow, GrassArea(0x5B, 0), cull, has), GrassCullFit::OtherArea);
+}
+
+// fps60 (logs14g, Sacred Forest Meadow, 257/600 frames drawn, 330 culls
+// dropped): the in-between frames made grass sources of their own from their
+// interpolated draws, whose placement identities the real frame's cull did
+// not share, nor the next real frame the in-between's cull: two drops per
+// in-between frame. An in-between frame now draws the last real frame's
+// placements, each with its own camera, taken from the real frame's source
+// draw as drawn in the in-between frame (GrassInBetweenCameras).
+TEST(Oot3dGrassInterpolatedFrames, AnInBetweenFrameDrawsTheRealFramesPlacementsWithItsCamera) {
+    std::vector<uint8_t> uniforms(80U + 24U * 16U);
+    const auto put = [&](size_t vec4, std::array<float, 4> v) {
+        std::memcpy(uniforms.data() + 80U + vec4 * 16U, v.data(), 16U);
+    };
+    // A perspective projection, the view (a turn about y and a translation)
+    // and the ground's model transform.
+    put(0, {1.2F, 0, 0, 0}); put(1, {0, 2.1F, 0, 0}); put(2, {0, 0, -1.01F, -20.0F}); put(3, {0, 0, -1, 0});
+    const auto view = [&](float x, float turn) {
+        const float c = std::cos(turn), s = std::sin(turn);
+        put(4, {c, 0, s, -x}); put(5, {0, 1, 0, -50.0F}); put(6, {-s, 0, c, -300.0F});
+    };
+    const auto model = [&](float x, float z) {
+        put(20, {1, 0, 0, x}); put(21, {0, 1, 0, 0}); put(22, {0, 0, 1, z});
+    };
+    // The world-to-clip of a view: its model-to-clip with the identity model.
+    const auto worldToClip = [&](float x, float turn) {
+        view(x, turn);
+        model(0.0F, 0.0F);
+        return *GrassRigidModelToClip(uniforms, true);
+    };
+    const auto groundClip = [&](float x, float turn) {
+        view(x, turn);
+        model(150.0F, -40.0F);
+        return *GrassRigidModelToClip(uniforms, true);
+    };
+    const auto apply = [](const std::array<float, 16>& m, std::array<float, 4> p) {
+        std::array<float, 4> r{};
+        for (size_t row = 0; row < 4U; ++row)
+            for (size_t k = 0; k < 4U; ++k) r[row] += m[k * 4U + row] * p[k];
+        return r;
+    };
+
+    struct Placement {
+        uint64_t Namespace = 0;
+        uint32_t ColorAddress = 0;
+        std::array<float, 16> PositionToClip{};
+    };
+    constexpr uint64_t kVisual = 2U;
+    constexpr uint32_t kColor = 0x18000000U;
+    const uint64_t groundDraw = GrassFramePlacementKey(0xA5C3D2E1F0ULL, kVisual, kColor);
+    const uint64_t otherDraw = GrassFramePlacementKey(0x1234ULL, kVisual, kColor);
+    const uint64_t target = GrassFramePlacementKey(0U, kVisual, kColor);
+    GrassInBetweenCameras cameras;
+    GrassFramePlacements<Placement> real, frame;
+    const auto moveTo = [&](uint64_t index) {
+        return [&, index](const Placement& placement) -> std::optional<Placement> {
+            const auto* change = cameras.Change(index, GrassFramePlacementKey(0U, placement.Namespace,
+                                                                              placement.ColorAddress));
+            if (change == nullptr) return std::nullopt;
+            Placement moved = placement;
+            moved.PositionToClip = GrassMultiplyClip(*change, placement.PositionToClip);
+            return moved;
+        };
+    };
+
+    // Real frame 1: placement 5, the ground drawn with the view at x 10.
+    real.Add(5U, kVisual, kColor, {kVisual, kColor, worldToClip(10.0F, 0.10F)});
+    cameras.RealSource(groundDraw, groundClip(10.0F, 0.10F));
+    cameras.EndRealFrame(1U);
+    // In-between frame 2: the view half way to the next step. Its own source
+    // would have been another placement (identity 9); a draw that was no
+    // source of the real frame gives no camera.
+    EXPECT_FALSE(cameras.InBetweenDraw(2U, otherDraw, target, uniforms, true));
+    EXPECT_EQ(cameras.Change(2U, target), nullptr);
+    model(150.0F, -40.0F);
+    view(12.5F, 0.13F);
+    ASSERT_TRUE(cameras.InBetweenDraw(2U, groundDraw, target, uniforms, true));
+    frame.AssignMoved(real, moveTo(2U));
+    ASSERT_FALSE(frame.Empty());
+    EXPECT_FALSE(frame.Has(9U));
+    const auto* moved = frame.Find(5U, kVisual, kColor);
+    ASSERT_NE(moved, nullptr);
+    // Its camera is the in-between frame's: a point of the ground lands
+    // where the in-between frame's own world-to-clip puts it.
+    const auto expected = worldToClip(12.5F, 0.13F);
+    for (const auto point : {std::array<float, 4>{150.0F, 0.0F, -40.0F, 1.0F}, {900.0F, 30.0F, 2500.0F, 1.0F}}) {
+        const auto got = apply(moved->PositionToClip, point), want = apply(expected, point);
+        for (size_t i = 0; i < 4U; ++i) EXPECT_NEAR(got[i], want[i], 1e-3F * (1.0F + std::abs(want[i]))) << i;
+    }
+    // The real frame's own placement is untouched.
+    EXPECT_EQ(real.Find(5U, kVisual, kColor)->PositionToClip, worldToClip(10.0F, 0.10F));
+
+    // The cull of the real frame fits the in-between frame; another area or
+    // placement set is still dropped.
+    const uint32_t meadow = GrassArea(0x56, 0);
+    const auto has = [&](uint64_t identity) { return frame.Has(identity); };
+    EXPECT_EQ(GrassCullFitsFrame(meadow, meadow, std::vector<uint64_t>{5U}, has), GrassCullFit::Draw);
+    EXPECT_EQ(GrassCullFitsFrame(meadow, GrassArea(0x5B, 0), std::vector<uint64_t>{5U}, has),
+              GrassCullFit::OtherArea);
+    EXPECT_EQ(GrassCullFitsFrame(meadow, meadow, std::vector<uint64_t>{90U}, has), GrassCullFit::NoPlacement);
+    // The reference is the real frame before: an in-between frame long after
+    // it, or after an area change, has none.
+    cameras.Clear();
+    EXPECT_EQ(cameras.ReferenceFrame(), ~0ULL);
+    EXPECT_FALSE(cameras.InBetweenDraw(3U, groundDraw, target, uniforms, true));
+
+    // 600 frames, real and in-between alternating, a cull finishing every
+    // frame with the previous frame's placements. With the in-between
+    // frames' own sources (identity 9) the logs' pattern comes back: each
+    // in-between frame and the real frame after it drop the cull. With the
+    // real frame's placements every frame after the first cull draws.
+    for (const bool ownSources : {true, false}) {
+        GrassStreamSlots slots(2U);
+        std::optional<uint32_t> writing;
+        std::vector<uint64_t> cull, posted;
+        uint64_t drawn = 0U, dropped = 0U;
+        cameras.Clear();
+        for (uint64_t index = 1U; index <= 600U; ++index) {
+            const bool between = index % 2U == 0U;
+            const float x = 10.0F + static_cast<float>(index), turn = 0.002F * static_cast<float>(index);
+            if (!between) {
+                real.Clear();
+                real.Add(5U, kVisual, kColor, {kVisual, kColor, worldToClip(x, turn)});
+                cameras.RealSource(groundDraw, groundClip(x, turn));
+                cameras.EndRealFrame(index);
+                frame = real;
+            } else if (ownSources) {
+                frame.Clear();
+                frame.Add(9U, kVisual, kColor, {kVisual, kColor, worldToClip(x, turn)});
+            } else {
+                model(150.0F, -40.0F);
+                view(x, turn);
+                ASSERT_TRUE(cameras.InBetweenDraw(index, groundDraw, target, uniforms, true));
+                frame.AssignMoved(real, moveTo(index));
+            }
+            if (writing) {
+                slots.FinishWrite(*writing, index - 1U);
+                cull = posted;
+            }
+            if (slots.Current() && GrassCullFitsFrame(meadow, meadow, cull, has) != GrassCullFit::Draw) {
+                ++dropped;
+                slots.Reset();
+            }
+            if (slots.Draw(index)) {
+                bool any = false;
+                for (const auto identity : cull) any |= frame.Find(identity, kVisual, kColor) != nullptr;
+                drawn += any ? 1U : 0U;
+                if (!ownSources && any) {
+                    // With this frame's camera.
+                    const auto got = apply(frame.Find(5U, kVisual, kColor)->PositionToClip, {150.0F, 0.0F, -40.0F, 1.0F});
+                    const auto want = apply(worldToClip(x, turn), {150.0F, 0.0F, -40.0F, 1.0F});
+                    EXPECT_NEAR(got[0], want[0], 1e-3F * (1.0F + std::abs(want[0])));
+                    EXPECT_NEAR(got[3], want[3], 1e-3F * (1.0F + std::abs(want[3])));
+                }
+            }
+            posted.clear();
+            for (const uint64_t identity : {5U, 9U})
+                if (frame.Has(identity)) posted.push_back(identity);
+            writing = slots.BeginWrite(index);
+        }
+        if (ownSources) {
+            EXPECT_EQ(dropped, 599U) << "the logs' pattern";
+            EXPECT_EQ(drawn, 0U);
+        } else {
+            EXPECT_EQ(dropped, 0U);
+            EXPECT_EQ(drawn, 599U);
+        }
+    }
 }
 
 } // namespace
