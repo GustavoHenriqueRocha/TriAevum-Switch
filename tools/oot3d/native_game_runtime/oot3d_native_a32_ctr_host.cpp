@@ -4,6 +4,10 @@
 
 #include <cstdio>
 
+#if !defined(OOT3D_CTR_HOST_SERVICE_PICA_ONLY)
+#include <spdlog/spdlog.h>
+#endif
+
 namespace Oot3dNativeGame {
 
 detail::NativeA32CtrSvcEventHistory::NativeA32CtrSvcEventHistory(
@@ -626,12 +630,25 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         }
         std::string threadError;
         const auto threadId = context.Process.CreateThread(
-            {state.r[1], state.r[2], state.r[3], 0x10U, 0x03C00000U, priority},
+            {state.r[1], state.r[2], state.r[3], 0x10U, 0x03C00000U, priority,
+             processorId},
             &threadError);
         if (!threadId.has_value()) {
             event.Detail = 1;
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
+        }
+        // Which guest threads exist and the core each asked for (all run
+        // cooperatively on the game thread here); warning level, because the
+        // release logger drops info.
+        {
+            const std::string line = FormatNativeA32GuestThreadCreated(
+                *threadId, state.r[1], priority, processorId, state.r[3]);
+#if defined(OOT3D_CTR_HOST_SERVICE_PICA_ONLY)
+            std::fprintf(stderr, "%s\n", line.c_str());
+#else
+            SPDLOG_WARN("{}", line);
+#endif
         }
         state.r[0] = kResultSuccess;
         state.r[1] = CreateHandle("thread", *threadId);

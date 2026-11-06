@@ -24,6 +24,26 @@ uint64_t ElapsedNanoseconds(TimingClock::time_point start) {
             TimingClock::now() - start).count());
 }
 
+// The guest-thread profile's clock: one read per thread switch.
+inline uint64_t ReadThreadProfileCounter() noexcept {
+#if defined(__SWITCH__) && defined(__aarch64__)
+    uint64_t value;
+    // armGetSystemTick(): Horizon blocks cntvct_el0 at EL0 (Data Abort).
+    asm volatile("mrs %0, cntpct_el0" : "=r"(value));
+    return value;
+#else
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            TimingClock::now().time_since_epoch()).count());
+#endif
+}
+
+constexpr size_t ThreadProfileSlot(uint32_t threadId) noexcept {
+    return threadId < kNativeA32GuestThreadSlots
+               ? threadId
+               : kNativeA32GuestThreadSlots - 1U;
+}
+
 #if defined(OOT3D_WHOLE_AOT_PRODUCT_MODE)
 oot3d::recomp::a32::ExecutionResult DispatchWholeAotProduct(
     oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
@@ -200,6 +220,7 @@ NativeA32Process::NativeA32Process(
     const oot3d::recomp::a32::Registry& registry,
     NativeA32HostServices& hostServices)
     : mRegistry(registry), mHostServices(hostServices) {
+    mThreadProfile.ProcessorIds.fill(kNativeA32UnknownProcessor);
 }
 
 bool NativeA32Process::MapRegion(const NativeA32MemoryRegionConfig& config,
@@ -281,6 +302,9 @@ bool NativeA32Process::CreatePrimaryThread(
     mPrimaryThreadArgument = config.Argument0;
     mTlsBaseAddress = config.TlsBaseAddress;
     mTlsSize = config.TlsSize;
+    // The main thread runs on the exheader's ideal processor, which is what
+    // processor id -2 selects for CreateThread.
+    mThreadProfile.ProcessorIds[0] = -2;
     mNextTlsOffset = 0x200U;
     mPrimaryThreadStatus = NativeA32ThreadStatus::Ready;
     return true;
@@ -379,6 +403,7 @@ std::optional<uint32_t> NativeA32Process::CreateThread(
     mNextTlsOffset += kTlsEntrySize;
     const uint32_t id = thread.Id;
     mSecondaryThreads.push_back(std::move(thread));
+    mThreadProfile.ProcessorIds[ThreadProfileSlot(id)] = config.ProcessorId;
     return id;
 }
 
@@ -442,6 +467,10 @@ bool NativeA32Process::SelectReadyThread() {
             selectedId = thread.Id;
             selectedPriority = thread.Priority;
         }
+    }
+    if (mThreadProfileRunning && selectedId != mCurrentThreadId) {
+        ChargeThreadProfile(mCurrentThreadId, ReadThreadProfileCounter());
+        ++mThreadProfile.Switches;
     }
     mCurrentThreadId = selectedId;
     CurrentThreadStatus() = NativeA32ThreadStatus::Running;
@@ -596,13 +625,18 @@ NativeA32ProcessRunResult NativeA32Process::Run(
     if (!SelectReadyThread()) {
         return {NativeA32ProcessRunKind::Waiting, {}, 0, {}};
     }
+    // Every return below charges the running thread up to here.
+    BeginThreadProfile();
+    struct ThreadProfileEnd {
+        NativeA32Process& Process;
+        ~ThreadProfileEnd() { Process.EndThreadProfile(); }
+    } threadProfileEnd{*this};
     for (uint32_t transitions = 0; transitions < maxHostTransitions;
          ++transitions) {
         mPendingFallback = {};
         auto& state = CurrentThreadState();
         const uint32_t dispatchBudget = DispatchBlockBudget(blockLimitPerDispatch);
-        const bool timed = mTimingEnabled || mThreadTimingEnabled;
-        const uint32_t dispatchThreadId = mCurrentThreadId;
+        const bool timed = mTimingEnabled;
         const auto dispatchStart = timed ? TimingClock::now()
                                          : TimingClock::time_point{};
         CpuPhaseProbe::Scope cpuDispatch(CpuPhaseProbe::Phase::Aot);
@@ -626,11 +660,8 @@ NativeA32ProcessRunResult NativeA32Process::Run(
         cpuDispatch.Stop();
         if (timed) {
             const uint64_t nanoseconds = ElapsedNanoseconds(dispatchStart);
-            if (mThreadTimingEnabled) AddThreadTime(dispatchThreadId, nanoseconds);
-            if (mTimingEnabled) {
-                ++mTimingStats.DispatchCalls;
-                mTimingStats.DispatchNanoseconds += nanoseconds;
-            }
+            ++mTimingStats.DispatchCalls;
+            mTimingStats.DispatchNanoseconds += nanoseconds;
         }
 
         if (mPendingFallback.Active) {
@@ -662,12 +693,9 @@ NativeA32ProcessRunResult NativeA32Process::Run(
             auto hostResult =
                 mHostServices.HandleSvc(exit.detail, state, mMemory, context);
             cpuSvc.Stop();
-            const uint64_t svcNanoseconds =
-                timed ? ElapsedNanoseconds(svcStart) : 0U;
-            if (mThreadTimingEnabled) AddThreadTime(dispatchThreadId, svcNanoseconds);
             if (mTimingEnabled) {
+                const uint64_t nanoseconds = ElapsedNanoseconds(svcStart);
                 ++mTimingStats.SvcCalls;
-                const uint64_t nanoseconds = svcNanoseconds;
                 mTimingStats.SvcNanoseconds += nanoseconds;
                 if (exit.detail < mTimingStats.SvcCallsByImmediate.size()) {
                     ++mTimingStats.SvcCallsByImmediate[exit.detail];
@@ -950,24 +978,94 @@ NativeA32ProcessTimingStats NativeA32Process::TimingStats() const noexcept {
     return mTimingStats;
 }
 
-void NativeA32Process::SetThreadTimingEnabled(bool enabled) noexcept {
-    mThreadTimingEnabled = enabled;
-    mThreadTimes = {};
+void NativeA32Process::BeginThreadProfile() noexcept {
+    const uint64_t now = ReadThreadProfileCounter();
+    mThreadProfileRunStart = now;
+    mThreadProfileMark = now;
+    mThreadProfileRunning = true;
+    // A different thread than the one the previous Run() left on.
+    if (mCurrentThreadId != mThreadProfileLastThread) ++mThreadProfile.Switches;
 }
 
-void NativeA32Process::AddThreadTime(uint32_t threadId,
-                                     uint64_t nanoseconds) noexcept {
-    for (auto& slot : mThreadTimes) {
-        if (slot.Dispatches == 0U) {
-            slot.Id = threadId;
-            slot.EntryAddress = ThreadEntryAddress(threadId).value_or(0U);
-        } else if (slot.Id != threadId) {
+void NativeA32Process::EndThreadProfile() noexcept {
+    const uint64_t now = ReadThreadProfileCounter();
+    ChargeThreadProfile(mCurrentThreadId, now);
+    mThreadProfile.RunTicks += now - mThreadProfileRunStart;
+    mThreadProfileLastThread = mCurrentThreadId;
+    mThreadProfileRunning = false;
+}
+
+void NativeA32Process::ChargeThreadProfile(uint32_t threadId,
+                                           uint64_t now) noexcept {
+    mThreadProfile.Ticks[ThreadProfileSlot(threadId)] += now - mThreadProfileMark;
+    mThreadProfileMark = now;
+}
+
+uint64_t NativeA32ProfileTicksToNanoseconds(uint64_t ticks) noexcept {
+#if defined(__SWITCH__) && defined(__aarch64__)
+    constexpr uint64_t kFrequency = 19'200'000ULL; // Switch CNTFRQ
+    return ticks / kFrequency * 1'000'000'000ULL +
+           ticks % kFrequency * 1'000'000'000ULL / kFrequency;
+#else
+    return ticks;
+#endif
+}
+
+std::string FormatNativeA32GuestThreadsLine(
+    const NativeA32Process& process,
+    const NativeA32GuestThreadProfile& windowStart, uint64_t hostFrameCount,
+    uint64_t windowHostFrames) {
+    const auto& now = process.GuestThreadProfile();
+    const double frames =
+        windowHostFrames != 0U ? static_cast<double>(windowHostFrames) : 1.0;
+    const auto msPerFrame = [&](uint64_t ticks) {
+        return static_cast<double>(NativeA32ProfileTicksToNanoseconds(ticks)) /
+               1.0e6 / frames;
+    };
+    char buffer[128];
+    std::string line = "guest_threads: host_frames=" + std::to_string(hostFrameCount);
+    std::snprintf(buffer, sizeof(buffer), " run_ms=%.3f switches=%.1f",
+                  msPerFrame(now.RunTicks - windowStart.RunTicks),
+                  static_cast<double>(now.Switches - windowStart.Switches) / frames);
+    line += buffer;
+    for (size_t slot = 0; slot < kNativeA32GuestThreadSlots; ++slot) {
+        const uint64_t ticks = now.Ticks[slot] - windowStart.Ticks[slot];
+        if (ticks == 0U) continue;
+        const double ms = msPerFrame(ticks);
+        if (slot == kNativeA32GuestThreadSlots - 1U) {
+            std::snprintf(buffer, sizeof(buffer), " other=%.3f", ms);
+            line += buffer;
             continue;
         }
-        slot.Nanoseconds += nanoseconds;
-        ++slot.Dispatches;
-        return;
+        const auto id = static_cast<uint32_t>(slot);
+        char processor[16];
+        if (now.ProcessorIds[slot] == kNativeA32UnknownProcessor) {
+            std::snprintf(processor, sizeof(processor), "?");
+        } else {
+            std::snprintf(processor, sizeof(processor), "%d",
+                          static_cast<int>(now.ProcessorIds[slot]));
+        }
+        std::snprintf(buffer, sizeof(buffer), " %u:0x%08X:0x%02X:%s=%.3f",
+                      static_cast<unsigned>(id),
+                      static_cast<unsigned>(process.ThreadEntryAddress(id).value_or(0U)),
+                      static_cast<unsigned>(process.ThreadPriority(id).value_or(0U)),
+                      processor, ms);
+        line += buffer;
     }
+    return line;
+}
+
+std::string FormatNativeA32GuestThreadCreated(
+    uint32_t id, uint32_t entryAddress, uint32_t priority, int32_t processorId,
+    uint32_t stackTopAddress) {
+    char buffer[128];
+    std::snprintf(buffer, sizeof(buffer),
+                  "guest_thread: id=%u entry=0x%08X prio=0x%02X processor=%d "
+                  "stack_top=0x%08X",
+                  static_cast<unsigned>(id), static_cast<unsigned>(entryAddress),
+                  static_cast<unsigned>(priority), static_cast<int>(processorId),
+                  static_cast<unsigned>(stackTopAddress));
+    return buffer;
 }
 
 uint64_t NativeA32Process::StateFingerprint() const {

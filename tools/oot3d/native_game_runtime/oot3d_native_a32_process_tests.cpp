@@ -15,6 +15,8 @@
 #include <exception>
 #include <iostream>
 #include <span>
+#include <chrono>
+#include <thread>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -591,6 +593,95 @@ void TestPrioritySchedulerAndTls(bool testScheduler = true) {
            "foreground-priority service work must complete before host yield");
     Expect(process.DispatchBlockBudget(1'000'000U) == 1'000'000U,
            "foreground service work must retain its full dispatch budget");
+}
+
+// Each SVC spends a known host time, so both guest threads accrue time.
+class SleepingHostServices final
+    : public Oot3dNativeGame::NativeA32HostServices {
+  public:
+    Oot3dNativeGame::NativeA32HostResult HandleSvc(
+        uint32_t immediate, oot3d::recomp::a32::GuestState&,
+        Oot3dNativeGame::NativeA32Memory&,
+        Oot3dNativeGame::NativeA32HostContext&) override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (immediate == 1U) return {Oot3dNativeGame::NativeA32HostAction::Wait};
+        if (immediate == 2U || immediate == 3U) {
+            return {Oot3dNativeGame::NativeA32HostAction::Terminate};
+        }
+        return {Oot3dNativeGame::NativeA32HostAction::Fault, std::nullopt, 0,
+                "unexpected profile SVC"};
+    }
+};
+
+void TestGuestThreadProfile() {
+    const auto registry = MakeTestRegistry();
+    SleepingHostServices services;
+    Oot3dNativeGame::NativeA32Process process(registry, services);
+    const std::array<uint8_t, 0x20> code{};
+    std::string error;
+    Expect(process.MapRegion(
+               {"text", kEntry, code.size(), false, true, code}, &error) &&
+               process.MapRegion({"data", kData, 0x100U, true, false, {}}, &error) &&
+               process.CreatePrimaryThread(
+                   {kEntry, kStack, 0x1000U, kTls, 0x1000U, 0,
+                    0, 0x10U, 0x03C00010U, 0x30U},
+                   &error),
+           "profile process setup");
+    const auto worker = process.CreateThread(
+        {kEntry + 0x10U, 0U, kData + 0x100U, 0x10U, 0x03C00000U, 0x18U, 1}, &error);
+    Expect(worker == 1U, "profile worker thread");
+    const Oot3dNativeGame::NativeA32GuestThreadProfile start =
+        process.GuestThreadProfile();
+
+    // Worker first (higher priority) until it terminates, then the primary
+    // until it waits; then the primary again until it terminates.
+    const auto wallStart = std::chrono::steady_clock::now();
+    const auto first = process.Run();
+    Expect(first.Kind == Oot3dNativeGame::NativeA32ProcessRunKind::Waiting &&
+               process.ResumePrimaryThread(std::nullopt, &error),
+           "profile run 1: worker then primary");
+    const auto second = process.Run();
+    const auto wallNs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - wallStart).count());
+    Expect(second.Kind == Oot3dNativeGame::NativeA32ProcessRunKind::Terminated,
+           "profile run 2: primary terminates");
+
+    const auto& profile = process.GuestThreadProfile();
+    uint64_t threadSum = 0U;
+    for (const uint64_t ticks : profile.Ticks) threadSum += ticks;
+    const uint64_t mainNs =
+        Oot3dNativeGame::NativeA32ProfileTicksToNanoseconds(profile.Ticks[0]);
+    const uint64_t workerNs =
+        Oot3dNativeGame::NativeA32ProfileTicksToNanoseconds(profile.Ticks[1]);
+    Expect(threadSum == profile.RunTicks,
+           "thread totals must add up to the time inside Run()");
+    Expect(Oot3dNativeGame::NativeA32ProfileTicksToNanoseconds(profile.RunTicks) <=
+               wallNs,
+           "time inside Run() cannot exceed the wall time around it");
+    Expect(mainNs >= 4'000'000U && workerNs >= 2'000'000U,
+           "each thread is charged its SVC host time (main 2 SVCs, worker 1)");
+    Expect(profile.Switches == 2U,
+           "switches: entry onto the worker, worker -> primary; run 2 stays on primary");
+
+    const std::string line = Oot3dNativeGame::FormatNativeA32GuestThreadsLine(
+        process, start, 300U, 1U);
+    Expect(line.starts_with("guest_threads: host_frames=300 run_ms=") &&
+               line.find(" switches=2.0 ") != std::string::npos &&
+               line.find(" 0:0x00001000:0x30:-2=") != std::string::npos &&
+               line.find(" 1:0x00001010:0x18:1=") != std::string::npos &&
+               line.find(" 2:") == std::string::npos,
+           "guest_threads line: id:entry:prio:proc=ms/frame of threads that ran");
+    const std::string idle = Oot3dNativeGame::FormatNativeA32GuestThreadsLine(
+        process, profile, 450U, 150U);
+    Expect(idle == "guest_threads: host_frames=450 run_ms=0.000 switches=0.0",
+           "a window where no guest thread ran lists none");
+
+    Expect(Oot3dNativeGame::FormatNativeA32GuestThreadCreated(
+               3U, 0x00123456U, 0x18U, -2, 0x0FF00000U) ==
+               "guest_thread: id=3 entry=0x00123456 prio=0x18 processor=-2 "
+               "stack_top=0x0FF00000",
+           "guest_thread log line format");
 }
 
 void TestProcessStateRoundTrip() {
@@ -2069,6 +2160,7 @@ int main(int argc, char** argv) {
         TestSourceOwnerCallAdapterPerCallBudget();
         TestPersistentProcess();
         TestPrioritySchedulerAndTls();
+        TestGuestThreadProfile();
         TestProcessStateRoundTrip();
         TestFallbackBoundary();
         TestBlockEntryCallback();
@@ -2081,7 +2173,7 @@ int main(int argc, char** argv) {
         // round trips and block-entry callbacks in this one). Thread and TLS
         // initialization does not dispatch.
         TestPrioritySchedulerAndTls(false);
-        std::cout << "oot3d_native_a32_process_tests: 12 interpreter-dispatcher cases "
+        std::cout << "oot3d_native_a32_process_tests: 13 interpreter-dispatcher cases "
                      "do not apply in whole-AOT product mode\n";
 #endif
         TestCompiledRuntimeMemcpy();

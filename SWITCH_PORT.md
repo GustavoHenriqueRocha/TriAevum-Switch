@@ -956,6 +956,30 @@ loads).
   thread less behind), `pacer_oversleep_max_ms` (if above ~0.5 ms, try `pacer_spin_us=200`)
   and, in `float`, how often `render@…` appears on core 1.
 
+### Guest threads: time per thread and the requested core (06/11)
+All guest threads run cooperatively on the game thread (`NativeA32Process::Run`, core 0). To
+see whether work (the game's sound engine, for instance) has its own guest thread and could move
+off the game thread, two things are always on:
+- **Game log**, one line per guest `svcCreateThread`, at warning level (the release logger drops
+  info): `guest_thread: id=<n> entry=0x… prio=0x… processor=<r4, signed> stack_top=0x…`.
+  `processor` is what the game asked the 3DS kernel for: -2 = the process default (the core the
+  main thread uses), -1 = any core, 0/1 = that core. A thread that asked for core 1 ran beside the
+  main thread on the 3DS.
+- **`perf.txt`**, its own line per window after the main one:
+  `guest_threads: host_frames=<n> run_ms=<x> switches=<y> <id>:<entry>:<prio>:<proc>=<ms> …`.
+  Times are host ms per host frame (same unit as `guest=`), only threads that ran in the window;
+  id 0 is the main thread (`proc=-2`), `?` = a thread a save-state restore brought in, `other=` =
+  ids ≥ 31. `run_ms` = all time inside `Run()` and equals the sum of the threads; `switches` =
+  guest thread switches per host frame.
+- **What a thread's time includes**: its recompiled code, the host services its SVCs run inline
+  (IPC, GSP/DSP commands, waits that return at once) and the scheduler. Work outside `Run()` (DSP
+  mixing `dsp_mix`, PICA submission/plan, presentation) is not in any thread.
+- **Cost**: one system-counter read (`cntpct_el0`) at `Run()` entry, one per thread switch and one
+  at exit, into a fixed array (no allocation); the line is built once per window. It replaced
+  `thr_<entry>_us/_n` (`config/gpu_timing`/`config/thread_timing`), which read `steady_clock` twice
+  per dispatch and twice per SVC. Test: `oot3d_native_a32_process_tests` (two threads switching:
+  totals equal the time inside `Run()`; the line and log formats).
+
 ### Real fps60 and GPU savings in the GL backend (2026-10-17)
 - **fps60 did not present at 60 Hz**: the pacer and sample cadence come from the `FrameRate` mode of the
   graphics settings (default `Original30`, chosen in the PC F1 menu); `--presentation-rate 60`

@@ -73,6 +73,10 @@ struct NativeA32ThreadConfig {
     uint32_t InitialCpsr = 0;
     uint32_t InitialFpscr = 0;
     uint32_t Priority = 0;
+    // svcCreateThread's processor id (r4): -2 = the process default, -1 =
+    // any core, 0..3 = that core. Profile only; every guest thread runs on
+    // the game thread here.
+    int32_t ProcessorId = -2;
 };
 
 enum class NativeA32ThreadStatus : uint8_t {
@@ -112,15 +116,34 @@ struct NativeA32ProcessTimingStats {
     uint64_t FallbackNanoseconds = 0;
 };
 
-// Guest time per guest thread (dispatch + SVC), accumulated since the start;
-// logs/perf.txt prints the window delta per thread entry (thr_<entry>_us).
-struct NativeA32ThreadTime {
-    uint32_t Id = 0;
-    uint32_t EntryAddress = 0;
-    uint64_t Nanoseconds = 0;
-    uint64_t Dispatches = 0;
+// Host time each guest thread held the game thread inside Run(): its AOT
+// dispatch, the host services its SVCs ran (inline, on the same thread) and
+// the scheduler. One counter read at Run() entry, one per thread switch and
+// one at exit, so the thread totals add up to RunTicks exactly. Always on.
+// Ticks are the ARM system counter on the Switch, nanoseconds on the host.
+// Threads with an id at or above the last slot share it ("other").
+inline constexpr size_t kNativeA32GuestThreadSlots = 32U;
+inline constexpr int32_t kNativeA32UnknownProcessor = INT32_MIN;
+struct NativeA32GuestThreadProfile {
+    std::array<uint64_t, kNativeA32GuestThreadSlots> Ticks{};
+    // Requested processor per thread id, from CreateThread (not saved state:
+    // kNativeA32UnknownProcessor for threads a restore brought in).
+    std::array<int32_t, kNativeA32GuestThreadSlots> ProcessorIds{};
+    uint64_t RunTicks = 0;
+    uint64_t Switches = 0;
 };
-inline constexpr size_t kNativeA32ThreadTimeSlots = 16U;
+uint64_t NativeA32ProfileTicksToNanoseconds(uint64_t ticks) noexcept;
+// The perf.txt line for one window: "guest_threads: host_frames=<n>
+// run_ms=<ms/frame> switches=<per frame> <id>:<entry>:<prio>:<proc>=<ms/frame> ...",
+// threads that ran in the window only.
+std::string FormatNativeA32GuestThreadsLine(
+    const NativeA32Process& process,
+    const NativeA32GuestThreadProfile& windowStart, uint64_t hostFrameCount,
+    uint64_t windowHostFrames);
+// The game-log line of one guest CreateThread.
+std::string FormatNativeA32GuestThreadCreated(
+    uint32_t id, uint32_t entryAddress, uint32_t priority, int32_t processorId,
+    uint32_t stackTopAddress);
 
 class NativeA32Process {
   public:
@@ -182,11 +205,8 @@ class NativeA32Process {
         void* user = nullptr);
     void SetTimingEnabled(bool enabled) noexcept;
     NativeA32ProcessTimingStats TimingStats() const noexcept;
-    void SetThreadTimingEnabled(bool enabled) noexcept;
-    bool ThreadTimingEnabled() const noexcept { return mThreadTimingEnabled; }
-    const std::array<NativeA32ThreadTime, kNativeA32ThreadTimeSlots>& ThreadTimes()
-        const noexcept {
-        return mThreadTimes;
+    const NativeA32GuestThreadProfile& GuestThreadProfile() const noexcept {
+        return mThreadProfile;
     }
     uint64_t StateFingerprint() const;
     nlohmann::json CaptureState() const;
@@ -232,7 +252,9 @@ class NativeA32Process {
     bool SelectReadyThread();
     bool HasReadyThread() const;
     bool AllThreadsTerminated() const;
-    void AddThreadTime(uint32_t threadId, uint64_t nanoseconds) noexcept;
+    void BeginThreadProfile() noexcept;
+    void EndThreadProfile() noexcept;
+    void ChargeThreadProfile(uint32_t threadId, uint64_t now) noexcept;
 
     struct SecondaryThread {
         uint32_t Id = 0;
@@ -268,8 +290,11 @@ class NativeA32Process {
     void* mNativeBlockUser = nullptr;
     bool mTimingEnabled = false;
     NativeA32ProcessTimingStats mTimingStats;
-    bool mThreadTimingEnabled = false;
-    std::array<NativeA32ThreadTime, kNativeA32ThreadTimeSlots> mThreadTimes{};
+    NativeA32GuestThreadProfile mThreadProfile{};
+    bool mThreadProfileRunning = false;
+    uint64_t mThreadProfileMark = 0;
+    uint64_t mThreadProfileRunStart = 0;
+    uint32_t mThreadProfileLastThread = 0;
     // Regions this process mapped (segments, stacks, TLS), named in the
     // guest fault report; host-service mappings are not listed.
     struct RegionName {

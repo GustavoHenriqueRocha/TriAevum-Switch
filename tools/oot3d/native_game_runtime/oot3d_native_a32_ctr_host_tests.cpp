@@ -523,7 +523,48 @@ void TestSharedPageDateTime() {
             "host clock RTC is not the local wall clock");
 }
 
+// svcCreateThread passes the requested processor (r4) to the guest-thread
+// profile, next to the guest_thread: log line.
+void TestCreateThreadProcessor() {
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32CtrHostServices host(MakeConfig());
+    NativeA32Process process(registry, host);
+    const std::array<uint8_t, 0x10> code{};
+    std::string error;
+    Require(process.MapRegion({"text", 0x00100000, code.size(), false, true, code},
+                              &error) &&
+                process.MapRegion({"data", 0x00200000, 0x1000, true, false, {}},
+                                  &error) &&
+                process.CreatePrimaryThread(
+                    {0x00100000, 0x00300000, 0x1000, 0x00400000, 0x1000, 0, 0,
+                     0x10U, 0x03C00010U, 0x30U},
+                    &error),
+            error);
+    NativeA32HostContext context{process, 0};
+    GuestState state{};
+    state.r[0] = 0x18;        // priority
+    state.r[1] = 0x00100000;  // entry
+    state.r[2] = 7;           // argument
+    state.r[3] = 0x00200400;  // stack top
+    state.r[4] = 1;           // processor
+    Require(host.HandleSvc(0x08, state, process.Memory(), context).Action ==
+                    NativeA32HostAction::Resume &&
+                state.r[0] == 0 && process.ThreadCount() == 2U,
+            "CreateThread did not create the guest thread");
+    Require(process.GuestThreadProfile().ProcessorIds[0] == -2 &&
+                process.GuestThreadProfile().ProcessorIds[1] == 1,
+            "CreateThread did not record the requested processor");
+    state.r[0] = 0x18;
+    state.r[1] = 0x00100000;  // r1 came back as the thread handle
+    state.r[4] = static_cast<uint32_t>(-1);
+    Require(host.HandleSvc(0x08, state, process.Memory(), context).Action ==
+                    NativeA32HostAction::Resume &&
+                process.GuestThreadProfile().ProcessorIds[2] == -1,
+            "CreateThread did not record processor -1 as signed");
+}
+
 int main() {
+    TestCreateThreadProcessor();
     TestSharedPageDateTime();
     TestDeferredDeviceMemory();
     TestDeferredDeviceFailureAndOverwrite();

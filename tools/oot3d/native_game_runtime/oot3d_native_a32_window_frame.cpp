@@ -1711,25 +1711,8 @@ bool NativeA32WindowSession::RunFrame() {
           previousHolds = holds;
           DrainFrameSpikes();
         }
-        // Guest time per guest thread in this window: thr_<entry>_us and
-        // thr_<entry>_n (dispatches).
         perf << " audio_deferred=" << (deferDspAudio ? 1 : 0)
              << " audio_in_render_wait=" << dspAudioInRenderWait;
-        if (process.ThreadTimingEnabled()) {
-          static std::array<Oot3dNativeGame::NativeA32ThreadTime,
-                            Oot3dNativeGame::kNativeA32ThreadTimeSlots>
-              previousThreads{};
-          const auto& threads = process.ThreadTimes();
-          for (size_t i = 0U; i < threads.size(); ++i) {
-            if (threads[i].Dispatches == 0U) break;
-            perf << " thr_" << std::hex << threads[i].EntryAddress << std::dec
-                 << "_us="
-                 << (threads[i].Nanoseconds - previousThreads[i].Nanoseconds) / 1000U
-                 << " thr_" << std::hex << threads[i].EntryAddress << std::dec
-                 << "_n=" << (threads[i].Dispatches - previousThreads[i].Dispatches);
-          }
-          previousThreads = threads;
-        }
         // Textures the plan worker decoded ahead (hit) or the render thread
         // still decoded itself (miss), since the start.
         {
@@ -1967,6 +1950,16 @@ bool NativeA32WindowSession::RunFrame() {
         }
       }
       perf << '\n';
+      // Host ms per host frame each guest thread held the game thread
+      // (dispatch + its SVCs' host services) and thread switches per frame
+      // (its own line; NativeA32GuestThreadProfile).
+      {
+        static Oot3dNativeGame::NativeA32GuestThreadProfile previousThreads{};
+        perf << Oot3dNativeGame::FormatNativeA32GuestThreadsLine(
+                    process, previousThreads, runFrameCount, hostFrames)
+             << '\n';
+        previousThreads = process.GuestThreadProfile();
+      }
       // config/actor_profile: actor costs over the same window (its own line).
       if (actorProfile.has_value()) perf << actorProfile->TakeLine(areaText);
       // config/indirect_profile: hottest indirect call pairs (its own line).
