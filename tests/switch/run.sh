@@ -28,6 +28,7 @@ UNIT_TESTS=(
     oot3d_native_a32_ctr_fs_tests
     oot3d_native_a32_ctr_host_tests
     oot3d_native_a32_input_tests
+    oot3d_native_pica_transfer_tests
     oot3d_native_audio_interpolation_tests
     oot3d_native_audio_storage_tests
     oot3d_native_audio_tests

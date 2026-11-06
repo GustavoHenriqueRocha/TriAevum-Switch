@@ -3,6 +3,7 @@
 #include "fast/renderer3ds/pica_framebuffer_encode.h"
 
 #include <array>
+#include <utility>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -113,6 +114,26 @@ int main() {
         Require(fill24[index] == std::array<uint8_t, 3>{0x11U, 0x22U, 0x33U}
                                      [index % 3U],
                 "24-bit memory fill did not repeat its native byte pattern");
+    }
+
+    // 16- and 32-bit fills, ending mid-element: the pattern restarts at the
+    // fill's start, and the last element is cut where the range ends.
+    for (const auto& [control, pattern] :
+         {std::pair<uint16_t, std::array<uint8_t, 4>>{0x0001U, {0x11U, 0x22U, 0U, 0U}},
+          std::pair<uint16_t, std::array<uint8_t, 4>>{0x0201U, {0x11U, 0x22U, 0x33U, 0x44U}}}) {
+        const size_t element = (control & 0x200U) != 0U ? 4U : 2U;
+        std::array<uint8_t, 15> before{};
+        before.fill(0xEEU);
+        Require(memory.WriteBytes(0x10001200U, before), "cannot seed the fill");
+        Require(Oot3dNativeGame::ExecuteOot3dPicaMemoryFill(
+                    {0x10001200U, 0x1000120DU, 0x44332211U, control}, memory, &error),
+                error);
+        std::array<uint8_t, 15> filled{};
+        Require(memory.ReadBytes(0x10001200U, filled), "cannot read the fill");
+        for (size_t index = 0; index < filled.size(); ++index) {
+            Require(filled[index] == (index < 13U ? pattern[index % element] : 0xEEU),
+                    "16/32-bit memory fill wrote the wrong byte or past its end");
+        }
     }
 
     using namespace Oot3dNativeGame;

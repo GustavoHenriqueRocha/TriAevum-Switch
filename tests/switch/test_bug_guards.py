@@ -771,6 +771,11 @@ GUARDS = [
           r'LatestSnapshotCompletion\(.*?bottomSelection\.CompletionId = \*executed;.*?'
           r'PicaPresentationMode::\s*PictureInPicture\)',
           "oot3d_native_pica_vulkan_bridge_tests (modo PictureInPicture e LatestSnapshotCompletion)"),
+    Guard("MemoryFill do PICA montava o padrão byte a byte com divisão: 7 ms por fill de 768 KB (SM3DL 3/quadro)",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_transfer.cpp",
+          r'std::copy_n\(value\.begin\(\), first, bytes\.begin\(\)\);\s*'
+          r'for \(size_t filled = first; filled < size;\)',
+          "oot3d_native_pica_transfer_tests (fill 16/24/32 bits)"),
     Guard("clique no PiP da tela de baixo vira toque do 3DS (F7 esconde/mostra), só no título genérico",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'LUS_KB_F7\);.*?const bool lowerScreenPictureInPicture =\s*titleProfile\.BottomScreenPictureInPicture &&\s*'
