@@ -4,6 +4,11 @@ Respostas e comentários em português do Brasil.
 
 ## Antes de investigar: procurar o que já foi feito
 
+**Regra dura (06/11):** isso vale antes de implementar, otimizar ou medir também, não só de
+investigar. O port OoT3D→Switch já resolveu muita coisa que os títulos do ctr-recomp vão
+encontrar (ex.: o SM3DL era medido num build Debug -O1 enquanto o port roda em Release
+`-O2 -DNDEBUG`). Procure aqui, nos repos locais e na web (Azahar/Citra, 3dbrew) antes de começar.
+
 Este projeto já investigou muita coisa (887+ commits, 200+ documentos). Antes de
 começar uma investigação nova, gaste 2 minutos procurando se ela já existe:
 
