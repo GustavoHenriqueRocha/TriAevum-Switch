@@ -1,4 +1,4 @@
-# Song of Time: HUD some, B em cima do A e pause não abre (NRO saves-ff4fc3b8)
+# Canção nova (Prelude of Light, não Song of Time): HUD some, B em cima do A e pause não abre (NRO saves-ff4fc3b8)
 
 ## Pergunta
 
@@ -46,6 +46,24 @@ tudo isso. O nosso código não escreve no caminho das notas, então as candidat
 - Leitura do backup pelo agente (layout de `tools/oot3d/soh_save_to_oot3d.py`, sem suporte até eu
   conferir): nenhum arquivo é "antes do evento" (criança, 3 pedras, sem a Song of Time). O save00
   é criança só com a Kokiri Emerald; o save03 e o save04 são MQ, adultos, com a canção.
+
+## Correção do relato (06/11, mais tarde)
+
+O Gustavo esclareceu que a canção era "a de voltar pro templo", ou seja, o **Prelude of Light**:
+- adulto;
+- ensinado pelo Sheik no Templo do Tempo depois do Forest Medallion;
+- no save **MQ** save03, que mudou hoje.
+
+Não era a Song of Time. Leitura conferida por mim (`questItems` em +0xB8, bits 6–17 = canções):
+- save03 é adulto;
+- tem a Light Medallion e o Minuet;
+- não tem o Forest Medallion nem o Prelude.
+
+Ou seja, é anterior ao Forest Temple, e reproduzir a partir dele exige terminar o templo. O caminho
+barato continua sendo um savestate dele antes de entrar no Templo do Tempo.
+
+Trazer as 6 correções do 3.0: as 6 dão conflito em cherry-pick isolado, porque dependem da série 3.0
+do `main` (5acf8138 … 4b88e124, 24 commits; 77 arquivos, +12266/−1032 desde 23eac6b0).
 
 ## Em aberto
 
