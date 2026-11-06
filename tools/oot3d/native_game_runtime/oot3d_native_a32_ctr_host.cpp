@@ -879,13 +879,28 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         const uint32_t address = state.r[1];
         const uint32_t permissions = state.r[2];
         const uint32_t otherPermissions = state.r[3];
+        // Bloco do applet de biblioteca (APT): vem do heap, então o Azahar
+        // exige other_permissions diferente de DontCare; tamanho 0 (sem
+        // captura) não mapeia nada e dá sucesso.
+        const bool appletBlock = memoryBlock != nullptr &&
+                                 memoryBlock->Object->Type == "shared_memory:applet_capture";
+        if (appletBlock && memoryBlock->Object->FileSize == 0 &&
+            (permissions & ~3U) == 0 && permissions != 0 && otherPermissions != 0x10000000U) {
+            state.r[0] = kResultSuccess;
+            event.Name += ":applet-capture-empty";
+            event.Handled = true;
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Resume};
+        }
         if (memoryBlock == nullptr ||
             !memoryBlock->Object->Type.starts_with("shared_memory:") ||
             memoryBlock->Object->FileSize == 0 ||
             memoryBlock->Object->FileSize > SIZE_MAX ||
             memoryBlock->Object->MappedAddress.has_value() ||
             (address & 0xFFFU) != 0 || (permissions & ~7U) != 0 ||
-            permissions == 0 || otherPermissions != 0x10000000U) {
+            permissions == 0 ||
+            (appletBlock ? otherPermissions == 0x10000000U || (permissions & ~otherPermissions) != 0
+                         : otherPermissions != 0x10000000U)) {
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
         }
@@ -914,6 +929,27 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         memoryBlock->Object->MappedAddress = address;
         state.r[0] = kResultSuccess;
         event.Detail = address;
+        event.Handled = true;
+        mSvcEvents.push_back(std::move(event));
+        return {NativeA32HostAction::Resume};
+    }
+    case 0x20: {
+        // UnmapMemoryBlock: por enquanto só o bloco vazio do applet de
+        // biblioteca (o Azahar faz UnmapRange de tamanho 0 = sucesso). A
+        // memória do host não desmapeia regiões; bloco com conteúdo segue
+        // como falha nomeada.
+        event.Name = "UnmapMemoryBlock";
+        const HandleRecord* memoryBlock = LookupHandle(state.r[0]);
+        event.Detail = state.r[1];
+        if (memoryBlock == nullptr ||
+            memoryBlock->Object->Type != "shared_memory:applet_capture" ||
+            memoryBlock->Object->FileSize != 0) {
+            event.Name += ":unsupported";
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Wait};
+        }
+        state.r[0] = kResultSuccess;
+        event.Name += ":applet-capture-empty";
         event.Handled = true;
         mSvcEvents.push_back(std::move(event));
         return {NativeA32HostAction::Resume};

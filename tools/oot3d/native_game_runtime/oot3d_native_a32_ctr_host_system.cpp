@@ -181,6 +181,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleAptRequest(
     oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
     NativeA32HostContext& context, const std::optional<std::string>& sessionType,
     uint32_t commandBuffer, NativeA32CtrSvcEvent event) {
+    if (auto applet = HandleAptAppletRequest(state, memory, commandBuffer, event)) {
+        return *applet;
+    }
     if (event.Detail == kAptGetLockHandleRequest) {
         uint32_t attributes = 0;
         if (memory.Read32(commandBuffer + 4U, &attributes)) {

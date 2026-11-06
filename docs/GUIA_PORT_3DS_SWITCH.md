@@ -1645,6 +1645,13 @@ Armadilhas do SM3DL (05/11), todas genéricas:
   conclui cada comando GX contando UMA interrupção qualquer: lista sem P3D = fila GX travada
   (thread principal em `ArbitrateAddress` no lock do GX). O frontend segue os saltos pelo leitor
   `MakeOot3dPicaCommandBufferReader` (OoT3D não usa: nenhum `0x804F0238` no code.bin).
+- **Applet de biblioteca (seletor de Mii, 0x402)** (`docs/pesquisas/2026-11-05-sm3dl-seletor-mii.md`):
+  stub que responde "sucesso" a `PreloadLibraryApplet` e zeros a `GetAppletInfo`/`IsRegistered`
+  prende o jogo num laço de consulta. O ciclo do Azahar está em
+  `oot3d_native_a32_ctr_host_applet.cpp`: slot registrado → Request/Response com o bloco de captura
+  (pode ter tamanho 0) → `StartLibraryApplet` → `WakeupByExit` com o Mii padrão. Para ver os IPC
+  *atendidos* (o stub só loga os sem HLE), use o despejo do item 2; recusa do `SendParameter` grava
+  o motivo no nome do evento.
 
 ---
 

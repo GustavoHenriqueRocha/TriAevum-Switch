@@ -1355,6 +1355,199 @@ void TestAptGetSharedFont() {
             "a second shared font block was mapped");
 }
 
+// --- Applet de biblioteca no APT (seletor de Mii, 0x402) ------------------
+// O SM3DL pré-carrega o seletor de Mii e espera GetAppletInfo dizer
+// "registered && loaded"; o stub zerava a resposta e o jogo esperava para
+// sempre. Semântica do Azahar (applet_manager.cpp, applets/mii_selector.cpp):
+// Preload registra o HLE, Request recebe Response com o bloco de captura e
+// StartLibraryApplet devolve WakeupByExit com o Mii padrão.
+void TestAptLibraryAppletMiiSelector() {
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.KernelWaitTimeouts = true;  // espera com timeout 0 = consulta
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    auto& memory = process.Memory();
+    const uint32_t srv = OpenSrv(guest);
+    uint32_t apt = 0;
+    Require(GetServiceHandle(guest, srv, "APT:U", &apt) == NativeA32HostAction::Resume && apt != 0,
+            "APT:U was not opened");
+    constexpr uint32_t command = 0x1FF82080;
+    constexpr uint32_t input = 0x0FF00400;
+    constexpr uint32_t output = 0x0FF00800;
+    const auto call = [&](std::vector<uint32_t> words) {
+        for (size_t i = 0; i < words.size(); ++i) {
+            Require(memory.Write32(command + static_cast<uint32_t>(i * 4U), words[i]),
+                    "cannot write APT command");
+        }
+        // Buffer estático 0 da thread (saída de Receive/GlanceParameter).
+        Require(memory.Write32(0x1FF82180, (0x1000U << 14U) | 2U) &&
+                    memory.Write32(0x1FF82184, output),
+                "cannot write static buffer table");
+        guest.State(0).r[0] = apt;
+        return guest.Svc(0, 0x32);
+    };
+    const auto word = [&](uint32_t index) {
+        uint32_t value = 0;
+        Require(memory.Read32(command + index * 4U, &value), "cannot read APT reply");
+        return value;
+    };
+    // Initialize(0x300) e o Wakeup inicial, como o SDK faz no boot.
+    Require(call({0x00020080U, 0x300U, 0U}) == NativeA32HostAction::Resume &&
+                word(0) == 0x00020043U && word(1) == 0U,
+            "APT:Initialize failed");
+    const uint32_t parameterEvent = word(4);
+    Require(guest.Wait1(0, parameterEvent, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0U,
+            "the parameter event was not signaled for the initial Wakeup");
+    Require(call({0x000D0080U, 0x300U, 0x1000U}) == NativeA32HostAction::Resume &&
+                word(1) == 0U && word(3) == 1U,
+            "the initial Wakeup was not received");
+    Require(guest.Wait1(0, parameterEvent, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] != 0U,
+            "the parameter event stayed signaled after the Wakeup");
+    // Sem parâmetro pendente, GlanceParameter é NoData (Azahar).
+    Require(call({0x000E0080U, 0x300U, 0x1000U}) == NativeA32HostAction::Resume &&
+                word(0) == 0x000E0040U && word(1) == 0xC8A0CFEFU,
+            "GlanceParameter without a parameter is not NoData");
+
+    // Antes do Preload o seletor não existe.
+    Require(call({0x00060040U, 0x402U}) == NativeA32HostAction::Resume &&
+                word(0) == 0x00060040U && word(1) == 0xC880CFFAU,
+            "GetAppletInfo(0x402) before the preload is not NotFound");
+    Require(call({0x00160040U, 0x402U}) == NativeA32HostAction::Resume &&
+                word(0) == 0x00160040U && word(1) == 0U,
+            "PreloadLibraryApplet(0x402) failed");
+    Require(call({0x00160040U, 0x402U}) == NativeA32HostAction::Resume &&
+                word(1) == 0xC8A0CFFCU,
+            "a second PreloadLibraryApplet is not AlreadyExists");
+    // EUR (SystemRegion 2): seletor de Mii 0x000400300000D102, NAND,
+    // registrado, carregado, posição Library.
+    Require(call({0x00060040U, 0x402U}) == NativeA32HostAction::Resume &&
+                word(0) == 0x000601C0U && word(1) == 0U && word(2) == 0x0000D102U &&
+                word(3) == 0x00040030U && word(4) == 0U && word(5) == 1U &&
+                word(6) == 1U && word(7) == 1U,
+            "GetAppletInfo(0x402) after the preload is not registered && loaded");
+    // O SDK ainda chama PrepareToStart (AlreadyExists, como no Azahar) e
+    // espera IsRegistered(0x402) antes do StartLibraryApplet.
+    Require(call({0x00180040U, 0x402U}) == NativeA32HostAction::Resume &&
+                word(1) == 0xC8A0CFFCU,
+            "PrepareToStartLibraryApplet after the preload is not AlreadyExists");
+    const auto isRegistered = [&](uint32_t appletId) {
+        Require(call({0x00090040U, appletId}) == NativeA32HostAction::Resume &&
+                    word(0) == 0x00090080U && word(1) == 0U,
+                "APT:IsRegistered failed");
+        return word(2);
+    };
+    Require(isRegistered(0x402U) == 1U && isRegistered(0x300U) == 1U &&
+                isRegistered(0x401U) == 0U && isRegistered(0x406U) == 0U,
+            "IsRegistered does not follow the applet slots");
+
+    // Request com o CaptureBufferInfo -> Response com o bloco de captura.
+    std::vector<uint8_t> capture(0x20, 0);
+    capture[0] = 0x00; capture[1] = 0x80; capture[2] = 0x07;  // 0x78000 bytes
+    Require(memory.WriteBytes(input, capture), "cannot write CaptureBufferInfo");
+    Require(call({0x000C0104U, 0x300U, 0x402U, 2U, 0x20U, 0U, 0U, (0x20U << 14U) | 2U, input}) ==
+                    NativeA32HostAction::Resume &&
+                word(0) == 0x000C0040U && word(1) == 0U,
+            "SendParameter(Request) to the Mii selector failed");
+    Require(guest.Wait1(0, parameterEvent, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0U,
+            "the Response did not signal the parameter event");
+    // Savestate com a Response pendente: consumir e restaurar a traz de volta.
+    const auto saved = host.CaptureState();
+    Require(call({0x000D0080U, 0x300U, 0x1000U}) == NativeA32HostAction::Resume &&
+                word(1) == 0U && word(3) == 3U,
+            "the Response was not received before the restore");
+    std::string error;
+    Require(host.RestoreState(saved, process, &error),
+            "a savestate with a pending APT parameter did not restore: " + error);
+    Require(call({0x000E0080U, 0x300U, 0x1000U}) == NativeA32HostAction::Resume &&
+                word(0) == 0x000E0104U && word(1) == 0U && word(2) == 0x402U &&
+                word(3) == 3U && word(4) == 0U && word(5) == 0x10U && word(6) != 0U,
+            "GlanceParameter did not see the Response");
+    Require(call({0x000D0080U, 0x300U, 0x1000U}) == NativeA32HostAction::Resume &&
+                word(0) == 0x000D0104U && word(1) == 0U && word(2) == 0x402U &&
+                word(3) == 3U && word(5) == 0x10U && word(6) != 0U,
+            "ReceiveParameter did not return the Response");
+    const uint32_t captureBlock = word(6);
+    auto& state = guest.State(0);
+    state.r[0] = captureBlock;
+    state.r[1] = 0x1A000000U;
+    state.r[2] = 3U;
+    state.r[3] = 3U;  // bloco do heap: other_permissions RW, não DontCare (Azahar)
+    Require(guest.Svc(0, 0x1F) == NativeA32HostAction::Resume && state.r[0] == 0U &&
+                memory.IsWritable(0x1A000000U, 0x78000U),
+            "the capture block from the Mii selector cannot be mapped");
+    Require(call({0x000E0080U, 0x300U, 0x1000U}) == NativeA32HostAction::Resume &&
+                word(1) == 0xC8A0CFEFU,
+            "ReceiveParameter did not consume the Response");
+
+    // O SM3DL pede sem captura: size 0 e formatos 0xFFFFFFFF (bytes reais do
+    // jogo). O Azahar cria o bloco de tamanho 0 e responde do mesmo jeito.
+    std::vector<uint8_t> noCapture(0x20, 0);
+    std::fill(noCapture.begin() + 0x10, noCapture.begin() + 0x14, uint8_t{0xFF});
+    std::fill(noCapture.begin() + 0x1C, noCapture.begin() + 0x20, uint8_t{0xFF});
+    Require(memory.WriteBytes(input, noCapture), "cannot write the empty CaptureBufferInfo");
+    Require(call({0x000C0104U, 0x300U, 0x402U, 2U, 0x20U, 0U, 0U, (0x20U << 14U) | 2U, input}) ==
+                    NativeA32HostAction::Resume &&
+                word(0) == 0x000C0040U && word(1) == 0U,
+            "SendParameter(Request) without capture was refused");
+    Require(call({0x000D0080U, 0x300U, 0x1000U}) == NativeA32HostAction::Resume &&
+                word(1) == 0U && word(2) == 0x402U && word(3) == 3U && word(6) != 0U,
+            "the Response without capture did not carry a block");
+    // O SM3DL mapeia o bloco vazio no endereço 0: nada a mapear, sucesso.
+    state.r[0] = word(6);
+    state.r[1] = 0U;
+    state.r[2] = 3U;
+    state.r[3] = 3U;
+    Require(guest.Svc(0, 0x1F) == NativeA32HostAction::Resume && state.r[0] == 0U,
+            "MapMemoryBlock of the empty capture block failed");
+    // ... e o desmapeia depois que o seletor fecha (UnmapMemoryBlock, svc 0x20).
+    const uint32_t emptyBlock = state.r[0] == 0U ? word(6) : 0U;
+    state.r[0] = emptyBlock;
+    state.r[1] = 0U;
+    Require(guest.Svc(0, 0x20) == NativeA32HostAction::Resume && state.r[0] == 0U,
+            "UnmapMemoryBlock of the empty capture block failed");
+
+    // StartLibraryApplet com o MiiConfig (0x104 bytes) -> WakeupByExit com o
+    // MiiResult do Mii padrão do Azahar.
+    Require(memory.WriteBytes(input, std::vector<uint8_t>(0x104, 0)), "cannot write MiiConfig");
+    Require(call({0x001E0084U, 0x402U, 0x104U, 0U, 0U, (0x104U << 14U) | 2U, input}) ==
+                    NativeA32HostAction::Resume &&
+                word(0) == 0x001E0040U && word(1) == 0U,
+            "StartLibraryApplet(0x402) failed");
+    Require(guest.Wait1(0, parameterEvent, 0) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == 0U,
+            "the Mii selector result did not signal the parameter event");
+    Require(memory.WriteBytes(output, std::vector<uint8_t>(0x100, 0xAA)), "cannot clear output");
+    Require(call({0x000D0080U, 0x300U, 0x1000U}) == NativeA32HostAction::Resume &&
+                word(1) == 0U && word(2) == 0x402U && word(3) == 0xAU && word(4) == 0x84U &&
+                word(6) == 0U && word(7) == ((0x1000U << 14U) | 2U) && word(8) == output,
+            "ReceiveParameter did not return WakeupByExit with the MiiResult");
+    std::vector<uint8_t> result(0x84);
+    Require(memory.ReadBytes(output, result), "cannot read MiiResult");
+    const std::vector<uint8_t> header{0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF};
+    Require(std::equal(header.begin(), header.end(), result.begin()),
+            "MiiResult return code / guest index is wrong");
+    // MiiData: versão 3, system_id/mii_id big-endian, nome "Citra" UTF-16LE,
+    // CRC-16/XMODEM dos 0x5E bytes em +0x5E (big-endian) = 0x056C.
+    Require(result[0x0C] == 3U && result[0x10] == 0xD2U && result[0x18] == 0x98U &&
+                result[0x26] == 'C' && result[0x27] == 0U && result[0x28] == 'i' &&
+                result[0x0C + 0x5E] == 0x05U && result[0x0C + 0x5F] == 0x6CU &&
+                result[0x6C] == 0U && result[0x83] == 0U,
+            "MiiResult does not carry Azahar's standard Mii");
+    // O seletor fechou: o slot de applet de biblioteca ficou livre.
+    Require(call({0x00060040U, 0x402U}) == NativeA32HostAction::Resume &&
+                word(1) == 0xC880CFFAU,
+            "the Mii selector is still registered after closing");
+    Require(isRegistered(0x402U) == 0U, "IsRegistered(0x402) is still true after closing");
+    Require(call({0x00160040U, 0x402U}) == NativeA32HostAction::Resume && word(1) == 0U,
+            "the Mii selector cannot be preloaded again after closing");
+}
+
 // --- Despejo periódico do estado do guest (TRIAEVUM_GUEST_STATE_DUMP) -------
 // O Mario parava no logo sem erro; para saber em que cada thread espera, o
 // despejo mostra PC/LR, o último SVC de cada thread e os IPC que mudaram.
@@ -1695,6 +1888,7 @@ int main() {
     TestThreadQueries();
     TestCreateMemoryBlockOfGuestMemory();
     TestAptGetSharedFont();
+    TestAptLibraryAppletMiiSelector();
     TestDeferredDeviceMemory();
     TestDeferredDeviceFailureAndOverwrite();
     TestGpuMemoryWriteOwnership();

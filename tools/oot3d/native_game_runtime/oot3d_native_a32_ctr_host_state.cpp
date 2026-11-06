@@ -81,6 +81,9 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
           mHidSharedMemory, mY2rCompletionEvent}) {
         registerObject(object);
     }
+    if (mAptParameter) {
+        registerObject(mAptParameter->Object);
+    }
     for (const auto& type : mDspInterruptEvents) {
         for (const auto& object : type) {
             registerObject(object);
@@ -253,6 +256,19 @@ nlohmann::json NativeA32CtrHostServices::CaptureState() const {
         {"lcd_force_black", mLcdForceBlack},
         {"apt_application_id", mAptApplicationId},
         {"apt_wakeup_pending", mAptWakeupPending},
+        {"apt_parameter",
+         mAptParameter
+             ? nlohmann::json{{"sender", mAptParameter->Sender},
+                              {"destination", mAptParameter->Destination},
+                              {"signal", mAptParameter->Signal},
+                              {"object", objectId(mAptParameter->Object)},
+                              {"buffer", nlohmann::json::binary(mAptParameter->Buffer)}}
+             : nlohmann::json(nullptr)},
+        {"apt_library_applet",
+         {{"applet_id", mAptLibraryApplet.AppletId},
+          {"parent", mAptLibraryApplet.Parent},
+          {"registered", mAptLibraryApplet.Registered},
+          {"loaded", mAptLibraryApplet.Loaded}}},
         {"dsp_component", nlohmann::json::binary(mDspComponent)},
         {"dsp_program_mask", mDspProgramMask},
         {"dsp_data_mask", mDspDataMask},
@@ -677,6 +693,28 @@ bool NativeA32CtrHostServices::RestoreState(const nlohmann::json& state,
         staged.mAptApplicationId =
             state.at("apt_application_id").get<uint32_t>();
         staged.mAptWakeupPending = state.at("apt_wakeup_pending").get<bool>();
+        // Applet de biblioteca (05/11): savestates anteriores não têm as chaves.
+        staged.mAptParameter.reset();
+        if (const auto parameter = state.find("apt_parameter");
+            parameter != state.end() && !parameter->is_null()) {
+            const auto& buffer = parameter->at("buffer");
+            if (!buffer.is_binary()) {
+                throw std::runtime_error("APT parameter buffer is invalid");
+            }
+            staged.mAptParameter = AptParameter{
+                parameter->at("sender").get<uint32_t>(),
+                parameter->at("destination").get<uint32_t>(),
+                parameter->at("signal").get<uint32_t>(),
+                object(parameter->at("object").get<uint32_t>()),
+                {buffer.get_binary().begin(), buffer.get_binary().end()}};
+        }
+        staged.mAptLibraryApplet = {};
+        if (const auto applet = state.find("apt_library_applet"); applet != state.end()) {
+            staged.mAptLibraryApplet = {applet->at("applet_id").get<uint32_t>(),
+                                        applet->at("parent").get<uint32_t>(),
+                                        applet->at("registered").get<bool>(),
+                                        applet->at("loaded").get<bool>()};
+        }
         const auto& dspComponent = state.at("dsp_component");
         if (!dspComponent.is_binary()) {
             throw std::runtime_error("DSP component state is invalid");

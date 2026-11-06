@@ -416,6 +416,22 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         std::shared_ptr<KernelObject> Object;
     };
 
+    // Parâmetro APT pendente para a aplicação (o Wakeup inicial segue em
+    // mAptWakeupPending) e o slot de applet de biblioteca em HLE.
+    struct AptParameter {
+        uint32_t Sender = 0;
+        uint32_t Destination = 0;
+        uint32_t Signal = 0;
+        std::shared_ptr<KernelObject> Object;
+        std::vector<uint8_t> Buffer;
+    };
+    struct AptLibraryApplet {
+        uint32_t AppletId = 0;
+        uint32_t Parent = 0;
+        bool Registered = false;
+        bool Loaded = false;
+    };
+
     struct ArbiterWaiter {
         std::shared_ptr<KernelObject> Arbiter;
         NativeA32Process* Process = nullptr;
@@ -544,6 +560,12 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
         NativeA32HostContext& context, const std::optional<std::string>& sessionType,
         uint32_t commandBuffer, NativeA32CtrSvcEvent event);
+    // Applet de biblioteca e parâmetros genéricos do APT; nullopt = comando
+    // que não é desta parte (segue no HandleAptRequest).
+    std::optional<NativeA32HostResult> HandleAptAppletRequest(
+        oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
+        uint32_t commandBuffer, NativeA32CtrSvcEvent& event);
+    void SendAptParameter(AptParameter parameter);
     NativeA32HostResult HandleFsRequest(
         oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
         NativeA32HostContext& context, const std::optional<std::string>& sessionType,
@@ -603,6 +625,8 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     bool mLcdForceBlack = true;
     uint32_t mAptApplicationId = 0;
     bool mAptWakeupPending = false;
+    std::optional<AptParameter> mAptParameter;
+    AptLibraryApplet mAptLibraryApplet;
     std::vector<uint8_t> mDspComponent;
     uint16_t mDspProgramMask = 0;
     uint16_t mDspDataMask = 0;

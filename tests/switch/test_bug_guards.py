@@ -694,6 +694,19 @@ GUARDS = [
           r'kPicaCommandBufferJump0 = 0x23CU;.*?pendingJumpChannel = id - kPicaCommandBufferJump0;.*?'
           r'commandListWords = jumpedListWords;',
           "oot3d_native_pica_frontend_tests"),
+    Guard("SM3DL: seletor de Mii (applet 0x402) pré-carregado e GetAppletInfo esperado para sempre",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_applet.cpp",
+          r'case kAptGetAppletInfoRequest: \{\s+if \(slot\.Registered && appletId == slot\.AppletId\).*?'
+          r'SendAptParameter\(\{appletId, parent, kAptSignalWakeupByExit, nullptr, StandardMiiResult\(\)\}\);',
+          "oot3d_native_a32_ctr_host_tests (TestAptLibraryAppletMiiSelector)"),
+    Guard("SM3DL: APT:U sem o despacho do applet de biblioteca (Preload/GetAppletInfo viram stub)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_system.cpp",
+          r'if \(auto applet = HandleAptAppletRequest\(state, memory, commandBuffer, event\)\) \{'),
+    Guard("SM3DL: bloco de captura vazio do seletor de Mii (Map/Unmap no endereço 0) parava o processo",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
+          r'if \(appletBlock && memoryBlock->Object->FileSize == 0 &&.*?'
+          r'case 0x20: \{.*?event\.Name \+= ":applet-capture-empty";',
+          "oot3d_native_a32_ctr_host_tests (TestAptLibraryAppletMiiSelector)"),
     Guard("SM3DL: janela sem leitor de command buffer (salto da PICA vira erro)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'picaFrontend\.SetCommandBufferReader\(\s+Oot3dNativeGame::MakeOot3dPicaCommandBufferReader\(picaMemoryView\)\);',
