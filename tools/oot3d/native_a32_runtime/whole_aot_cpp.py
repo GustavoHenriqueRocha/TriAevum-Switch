@@ -1392,6 +1392,41 @@ def _emit_native_vfp(
     return None
 
 
+def _vfp_word_span(
+    load: bool, first: int, words: int, per_word: list[str]
+) -> list[str]:
+    """VLDM/VSTM/VPUSH/VPOP of `words` S lanes from `first` at firstAddress.
+
+    Two or more words take one page check and one copy when the whole range
+    lies on a single untraced fast page (ReadWordsFast/WriteWordsFast: the
+    same bytes, generations and page stamps as the word-by-word transfer).
+    Otherwise `per_word`, the exact word-by-word lowering, runs unchanged in
+    its own scope, so fault order, partial stores and lane updates stay
+    identical. A store snapshots the lanes first; guest memory never aliases
+    the VFP registers, so the values are the same."""
+    if words < 2:
+        return per_word
+    if load:
+        return [
+            f"uint32_t spanWords[{words}];",
+            f"if (context.Memory.ReadWordsFast(firstAddress, spanWords, {words}U)) {{",
+            *(
+                f"    {_lane(first + offset)} = spanWords[{offset}];"
+                for offset in range(words)
+            ),
+            "} else {",
+            *(f"    {line}" for line in per_word),
+            "}",
+        ]
+    sources = ", ".join(_lane(first + offset) for offset in range(words))
+    return [
+        f"const uint32_t spanWords[{words}] = {{{sources}}};",
+        f"if (!context.Memory.WriteWordsFast(firstAddress, spanWords, {words}U)) {{",
+        *(f"    {line}" for line in per_word),
+        "}",
+    ]
+
+
 def _emit_vfp(item: Instruction) -> list[str]:
     raw = item.raw
     pc = item.pc
@@ -1419,30 +1454,34 @@ def _emit_vfp(item: Instruction) -> list[str]:
                     "const uint32_t firstAddress = frame.Guest.r[13];",
                 ]
             )
-            for offset in range(words):
-                body.extend(
-                    [
-                        "if (!context.Memory.WriteFast<uint32_t>(",
-                        f"        firstAddress + {offset * 4}U, {_lane(first + offset)})) {{",
-                        f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
-                        f"                               firstAddress + {offset * 4}U);",
-                        "}",
-                    ]
+            per_word = [
+                line
+                for offset in range(words)
+                for line in (
+                    "if (!context.Memory.WriteFast<uint32_t>(",
+                    f"        firstAddress + {offset * 4}U, {_lane(first + offset)})) {{",
+                    f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
+                    f"                               firstAddress + {offset * 4}U);",
+                    "}",
                 )
+            ]
+            body.extend(_vfp_word_span(False, first, words, per_word))
         else:
             body.append("const uint32_t firstAddress = frame.Guest.r[13];")
-            for offset in range(words):
-                body.extend(
-                    [
-                        f"uint32_t value{offset} = 0;",
-                        "if (!context.Memory.ReadFast<uint32_t>(",
-                        f"        firstAddress + {offset * 4}U, &value{offset})) {{",
-                        f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
-                        f"                               firstAddress + {offset * 4}U);",
-                        "}",
-                        f"{_lane(first + offset)} = value{offset};",
-                    ]
+            per_word = [
+                line
+                for offset in range(words)
+                for line in (
+                    f"uint32_t value{offset} = 0;",
+                    "if (!context.Memory.ReadFast<uint32_t>(",
+                    f"        firstAddress + {offset * 4}U, &value{offset})) {{",
+                    f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
+                    f"                               firstAddress + {offset * 4}U);",
+                    "}",
+                    f"{_lane(first + offset)} = value{offset};",
                 )
+            ]
+            body.extend(_vfp_word_span(True, first, words, per_word))
             body.append(f"frame.Guest.r[13] += {byte_count}U;")
         return _conditional(raw, body)
     if (raw & 0x0FF00FD0) in {0x0C400B10, 0x0C500B10}:
@@ -1559,30 +1598,34 @@ def _emit_vfp(item: Instruction) -> list[str]:
             updated = first_address
         body.append(f"const uint32_t firstAddress = {first_address};")
         if load:
-            for offset in range(words):
-                body.extend(
-                    [
-                        f"uint32_t value{offset} = 0;",
-                        "if (!context.Memory.ReadFast<uint32_t>(",
-                        f"        firstAddress + {offset * 4}U, &value{offset})) {{",
-                        f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
-                        f"                               firstAddress + {offset * 4}U);",
-                        "}",
-                    ]
+            per_word = [
+                line
+                for offset in range(words)
+                for line in (
+                    f"uint32_t value{offset} = 0;",
+                    "if (!context.Memory.ReadFast<uint32_t>(",
+                    f"        firstAddress + {offset * 4}U, &value{offset})) {{",
+                    f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
+                    f"                               firstAddress + {offset * 4}U);",
+                    "}",
                 )
-            for offset in range(words):
-                body.append(f"{_lane(first + offset)} = value{offset};")
+            ] + [
+                f"{_lane(first + offset)} = value{offset};"
+                for offset in range(words)
+            ]
         else:
-            for offset in range(words):
-                body.extend(
-                    [
-                        "if (!context.Memory.WriteFast<uint32_t>(",
-                        f"        firstAddress + {offset * 4}U, {_lane(first + offset)})) {{",
-                        f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
-                        f"                               firstAddress + {offset * 4}U);",
-                        "}",
-                    ]
+            per_word = [
+                line
+                for offset in range(words)
+                for line in (
+                    "if (!context.Memory.WriteFast<uint32_t>(",
+                    f"        firstAddress + {offset * 4}U, {_lane(first + offset)})) {{",
+                    f"    return Oot3dAotMemoryFault(context, 0x{pc:08X}U,",
+                    f"                               firstAddress + {offset * 4}U);",
+                    "}",
                 )
+            ]
+        body.extend(_vfp_word_span(load, first, words, per_word))
         if writeback:
             body.append(f"{_reg(rn)} = {updated};")
         return _conditional(raw, body)

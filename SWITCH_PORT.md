@@ -1109,6 +1109,14 @@ loads).
   distinct pairs, the pairs that found no slot (4,096), and the 16 hottest `return>target:count`.
   `return` is the guest LR at the call: the call pc + 4 for `BLX`, the resume pc for computed calls.
   It is meant to pick the targets worth a guarded direct call.
+- **VFP multiple transfers: one page walk.** `VLDM`/`VSTM`/`VPUSH`/`VPOP` of two or more words
+  (8,062 sites in the 256 shards: 5,060 loads, 3,002 stores) walked the two-level page table once
+  per word. They now take `ReadWordsFast`/`WriteWordsFast` first, like `LDM`/`STM`: one page check
+  and one copy when the whole range lies on one untraced fast page (the same bytes, generation
+  steps and page stamp as the word-by-word path); otherwise the previous word-by-word lowering
+  runs unchanged (fault order, partial stores, lane updates). Host micro-benchmark of the real
+  `NativeA32Memory`, `VPUSH {d8-d15}`: 47.7 → 8.5 ns, `VPOP {d8-d15}`: 35.8 → 7.5 ns (x86 host).
+  Shard 064: 85,045 → 84,548 AArch64 instructions. Changes the generated shards.
 
 ### Performance overlay: L3+R3 > Video (`config/fps_counter`)
 - "Performance overlay" checkbox in the Video tab; applies in the same frame and creates/removes

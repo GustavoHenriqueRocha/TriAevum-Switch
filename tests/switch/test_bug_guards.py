@@ -87,6 +87,14 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'exists\("sdmc:/switch/oot3dre/config/indirect_profile", profileError\)\) \{\s+indirectProfile\.emplace\(\);',
           test="oot3d_native_perf_diagnostics_tests"),
+    # VLDM/VSTM/VPUSH/VPOP walked the page table once per word; the span path
+    # walks it once when the whole range lies on one page.
+    Guard("VFP multiple transfers must take the single-page span path before the word-by-word one",
+          "tools/oot3d/native_a32_runtime/whole_aot_cpp.py",
+          r'body\.extend\(_vfp_word_span\(False, first, words, per_word\)\).*?'
+          r'body\.extend\(_vfp_word_span\(True, first, words, per_word\)\).*?'
+          r'body\.extend\(_vfp_word_span\(load, first, words, per_word\)\)',
+          test="tools/oot3d/native_a32_runtime/test_whole_aot_vfp_memory_execution.py"),
     # --- 05/11: console logs could not name the slow area nor the actors' cost ---
     # Area (scene, room) read once per host frame into hitches.txt and perf.txt;
     # the actor cost profile adds its block-entry hooks only with
