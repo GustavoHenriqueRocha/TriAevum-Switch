@@ -18,8 +18,9 @@
 //    (kStub) and only uses registers and the stack.
 //  - Nothing else runs the code meanwhile: priority 101 is the first
 //    constructor priority a program may use (only libstdc++'s iostream set-up,
-//    90, and libgcov's registration, 100, come earlier; neither starts a
-//    thread; checked in the linked .init_array), libnx's start-up (__appInit)
+//    90, comes earlier and starts no thread: checked in the linked
+//    .init_array; the PGO build registers its counters in a section, not with
+//    libgcov constructors), libnx's start-up (__appInit)
 //    starts no thread, and our other constructors (oot3d_switch_threads.cpp,
 //    oot3d_switch_guard_alloc.cpp) run at 102, after this one.
 //  - Text and read-only data have no relocations left to apply (crt0 applied

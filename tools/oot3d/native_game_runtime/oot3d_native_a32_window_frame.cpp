@@ -2,7 +2,6 @@
 // First: on the Switch it brings in glad, which must precede any GL header.
 #include "oot3d_native_gpu_frame_timer.h"
 #include "oot3d_native_a32_window_session.h"
-#include "oot3d_whole_aot_gcov.h"
 #include <fstream>
 #include <sstream>
 #include "fast/renderer3ds/pica_surface_debug.h"
@@ -1311,7 +1310,6 @@ bool NativeA32WindowSession::RunFrame() {
 #if defined(__SWITCH__)
   gSwitchRuntimeHostFrames = runFrameCount;
   gSwitchRuntimeGuestFrames = frameCount;
-  Oot3dNativeGame::Oot3dWholeAotGcovFrame(runFrameCount);
   // Physical-console profile: every 150 host frames, append the rate and the
   // per-frame milliseconds of each phase over that window to logs/perf.txt.
   {

@@ -193,7 +193,9 @@ int main(int argc, char** argv) {
         NativeGameArguments preparedArguments;
 #if defined(__SWITCH__)
         PlaceSwitchMainThread();
-        Oot3dNativeGame::Oot3dWholeAotGcovInitialize();
+        // Instrumented (PGO generate) build only: stream the counts to
+        // sdmc:/switch/oot3dre/pgo (oot3d_whole_aot_gcov.h).
+        Oot3dNativeGame::Oot3dWholeAotPgoStart();
         // First launch: prepare game/ from the player's decrypted dump
         // before anything reads the manifest or the RomFS.
         if (!Oot3dNativeGame::RunSwitchRomImport())

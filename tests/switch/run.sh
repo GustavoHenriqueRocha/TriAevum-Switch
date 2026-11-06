@@ -85,6 +85,12 @@ result test_topscreen_30_pack "$code"
 python3 "$repo/tools/switch/test_shrink_texture_pack.py" > /tmp/switch-shrink.$$ 2>&1; code=$?
 grep -E '^(FAIL|ERROR)' /tmp/switch-shrink.$$ | sed 's/^/  /'; rm -f /tmp/switch-shrink.$$
 result test_shrink_texture_pack "$code"
+# PGO: session streams merged into .gcda, hot list from them (the gcov-tool
+# end-to-end case runs where devkitA64 is installed).
+(cd "$repo/tools/oot3d/native_a32_runtime" && python3 -m unittest test_whole_aot_pgo_merge \
+    test_whole_aot_hot_from_gcda) > /tmp/switch-pgo.$$ 2>&1; code=$?
+grep -E '^(FAIL|ERROR)' /tmp/switch-pgo.$$ | sed 's/^/  /'; rm -f /tmp/switch-pgo.$$
+result test_whole_aot_pgo "$code"
 [[ "${1:-}" == "--quick" ]] && { echo "passed $pass, failed $fail"; exit $((fail > 0)); }
 
 echo "== unit tests (host: $HOST_BUILD)"

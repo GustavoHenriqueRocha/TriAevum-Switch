@@ -14,6 +14,7 @@
 #include "oot3d_build_version.h"
 #include "oot3d_update_panel.h"
 #include "oot3d_switch_code_pages.h"
+#include "oot3d_whole_aot_gcov.h"
 #include <spdlog/spdlog.h>
 #endif
 #include <cstdlib>
@@ -1078,6 +1079,9 @@ void NativeA32WindowSession::Setup() {
   // the release logger drops info.
   SPDLOG_WARN("{}", Oot3dNativeGame::FormatCodePagesStatus(
                         Oot3dNativeGame::CurrentCodePagesStatus()));
+  // Instrumented (PGO generate) builds: where the counts go.
+  if (const std::string pgo = Oot3dNativeGame::Oot3dWholeAotPgoDescribe(); !pgo.empty())
+    SPDLOG_WARN("{}", pgo);
 #endif
 #if defined(OOT3D_WHOLE_AOT_PRODUCT_MODE) && defined(_WIN32)
   std::string crashDiagnosticsError;

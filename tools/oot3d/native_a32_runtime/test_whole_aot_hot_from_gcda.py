@@ -98,8 +98,9 @@ class HotFromGcdaTests(unittest.TestCase):
             gcda += _function(987654, [77], 0, 3)  # inline runtime helper
             profiles = root / "pgo"
             profiles.mkdir()
+            # The name GCC gives CMake's object shard_000.cpp.obj.
             name = ("CMakeFiles#oot3d_native_whole_aot.dir#home#x#gen#"
-                    "oot3d_whole_aot_shard_000.gcda")
+                    "oot3d_whole_aot_shard_000.cpp.gcda")
             (profiles / name).write_bytes(gcda)
             self.assertEqual(len(read_gcda(profiles / name)), 4)
             output = root / "hot.txt"

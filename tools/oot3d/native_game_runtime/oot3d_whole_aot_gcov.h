@@ -1,78 +1,64 @@
 #pragma once
 
-// GCC profile-generate support for the whole-AOT shards
-// (OOT3D_WHOLE_AOT_PROFILE_MODE=generate with GCC, see native_runtime.cmake).
+// GCC profile collection for the whole-AOT shards
+// (OOT3D_WHOLE_AOT_PROFILE_MODE=generate with GCC, see native_runtime.cmake;
+// implementation in oot3d_whole_aot_pgo.cpp, following sa2-nx's
+// app/src/sa2_pgo.cpp and nfsmw-nx's app/src/nfsmw_pgo.cpp).
 //
-// libgcov writes the .gcda files at normal process exit. A Switch homebrew
-// closed from the HOME menu may never reach exit, so the frame loop also
-// flushes periodically: __gcov_dump() merges the counters into the files
-// (adding to what is there) and __gcov_reset() starts the next interval, so
-// repeated flushes and the final exit-time write never double count.
+// libgcov's own exit-time .gcda writes do not fit the Switch: a game closed
+// from the HOME menu never exits, and a dump cut short by that leaves a
+// half-written .gcda. So the shards register their counters in a section
+// (-fprofile-info-section=gcov_info) and a service thread streams the whole
+// session (the counts only grow, nothing is reset) with __gcov_info_to_gcda
+// into sdmc:/switch/oot3dre/pgo/oot3d_pgo_<N>.stream, one file per session:
+//   - every kOot3dWholeAotPgoPeriodSeconds, when the game loses focus (HOME,
+//     sleep, an applet) and at exit;
+//   - each dump goes to a .tmp file that replaces the previous one only when
+//     complete, so a dump interrupted by closing the game keeps the last one.
+// On the PC, tools/oot3d/native_a32_runtime/whole_aot_pgo_merge.py turns the
+// sessions into .gcda files (gcov-tool merge-stream adds them) for the
+// OOT3D_WHOLE_AOT_PROFILE_MODE=use build. Steps in SWITCH_PORT.md.
 //
-// Without OOT3D_WHOLE_AOT_GCOV_GENERATE every function is an empty inline.
-
-#if defined(OOT3D_WHOLE_AOT_GCOV_GENERATE)
-#include <cerrno>
-#include <cstdio>
-#include <string>
-#include <sys/stat.h>
-
-extern "C" void __gcov_dump(void);
-extern "C" void __gcov_reset(void);
-#endif
+// Without OOT3D_WHOLE_AOT_GCOV_GENERATE every function does nothing.
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 namespace Oot3dNativeGame {
-
-#if defined(OOT3D_WHOLE_AOT_GCOV_GENERATE)
 
 #ifndef OOT3D_WHOLE_AOT_GCOV_DIR
 #define OOT3D_WHOLE_AOT_GCOV_DIR "sdmc:/switch/oot3dre/pgo"
 #endif
 
-// Host frames between flushes (3 to 6 minutes of play); each flush stalls
-// the game while a few hundred files are rewritten on the SD card.
-inline constexpr uint64_t kOot3dWholeAotGcovFlushFrames = 60U * 60U * 3U;
+inline constexpr uint32_t kOot3dWholeAotPgoPeriodSeconds = 180U;
 
-// Creates every directory of OOT3D_WHOLE_AOT_GCOV_DIR so libgcov can open
-// its files directly.
-inline void Oot3dWholeAotGcovInitialize() {
-    const std::string directory = OOT3D_WHOLE_AOT_GCOV_DIR;
-    for (size_t slash = directory.find('/', 1); ; slash = directory.find('/', slash + 1)) {
-        const std::string prefix = directory.substr(0, slash);
-        if (!prefix.empty() && prefix.back() != ':' &&  // "sdmc:" is the device
-            mkdir(prefix.c_str(), 0777) != 0 && errno != EEXIST) {
-            std::fprintf(stderr, "gcov: cannot create %s\n", prefix.c_str());
-        }
-        if (slash == std::string::npos) {
-            break;
-        }
+// "<dir>/oot3d_pgo_<n>.stream".
+inline std::string Oot3dWholeAotPgoStreamPath(std::string_view directory, uint32_t session) {
+    std::string path(directory);
+    if (!path.empty() && path.back() != '/') path += '/';
+    return path + "oot3d_pgo_" + std::to_string(session) + ".stream";
+}
+
+// The first session number >= 1 whose stream and .tmp are both absent
+// (`exists(path)`), so earlier sessions are never overwritten; 0 when every
+// number up to `limit` is taken.
+template <typename Exists>
+uint32_t Oot3dWholeAotPgoNextSession(std::string_view directory, Exists&& exists,
+                                     uint32_t limit = 100000U) {
+    for (uint32_t session = 1U; session <= limit; ++session) {
+        const std::string path = Oot3dWholeAotPgoStreamPath(directory, session);
+        if (!exists(path) && !exists(path + ".tmp")) return session;
     }
+    return 0U;
 }
 
-inline void Oot3dWholeAotGcovFlush() {
-    __gcov_dump();
-    __gcov_reset();
-}
+// Creates the directory, picks this session's stream, starts the dump thread,
+// hooks focus changes and registers the exit dump. Call once, early in main.
+void Oot3dWholeAotPgoStart();
 
-inline void Oot3dWholeAotGcovFrame(uint64_t hostFrame) {
-    if (hostFrame != 0U && hostFrame % kOot3dWholeAotGcovFlushFrames == 0U) {
-        Oot3dWholeAotGcovFlush();
-    }
-}
-
-#else
-
-inline void Oot3dWholeAotGcovInitialize() {
-}
-
-inline void Oot3dWholeAotGcovFlush() {
-}
-
-inline void Oot3dWholeAotGcovFrame(uint64_t) {
-}
-
-#endif
+// One line for the game log: where the counts go, or why they do not.
+// Empty in a build that is not instrumented.
+std::string Oot3dWholeAotPgoDescribe();
 
 } // namespace Oot3dNativeGame

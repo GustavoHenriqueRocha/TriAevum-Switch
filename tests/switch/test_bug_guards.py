@@ -28,6 +28,23 @@ class Guard:
 
 
 GUARDS = [
+    # --- 05/11: PGO collection on the console (oot3d_whole_aot_pgo.cpp, from sa2-nx/nfsmw-nx) ---
+    Guard("PGO generate: value profiling read tpidr_el0 (0 on Horizon) and needs atomics; counters go in a section",
+          "CMake/oot3d/native_runtime.cmake",
+          r'-fprofile-update=single\s+-fno-profile-values\s+-fprofile-info-section=gcov_info\)',
+          test="test_whole_aot_pgo_merge"),
+    Guard("PGO use: counts taken without atomics are not flow-consistent; GCC stops without -fprofile-correction",
+          "CMake/oot3d/native_runtime.cmake",
+          r'-fprofile-partial-training\s+-fprofile-correction\s+-fno-profile-values'),
+    Guard("PGO dumps: a HOME close mid-dump must keep the last complete stream (.tmp, then remove + rename: Horizon cannot rename over a file)",
+          "tools/oot3d/native_game_runtime/oot3d_whole_aot_pgo.cpp",
+          r'const std::string temporary = gStream \+ ".tmp";.*?std::remove\(gStream\.c_str\(\)\);\s+'
+          r'ok = std::rename\(temporary\.c_str\(\), gStream\.c_str\(\)\) == 0;',
+          test="test_whole_aot_pgo_merge (SessionStreamsTest)"),
+    Guard("PGO dumps: the focus-loss hook (game thread) only wakes the writer thread, never writes",
+          "tools/oot3d/native_game_runtime/oot3d_whole_aot_pgo.cpp",
+          r'void OnAppletHook\(AppletHookType hook, void\*\) \{.*?gDumpRequested = true;\s+\}\s+gWake\.notify_one\(\);\s+\}',
+          forbid=r'void OnAppletHook[^}]*DumpNow'),
     # --- 05/11: NRO code on 2 MB blocks (oot3d_switch_code_pages.cpp, from sa2-nx) ---
     # The swap unmaps the code while it runs: it must be the first constructor
     # (no other code or thread may run meanwhile), every later constructor that

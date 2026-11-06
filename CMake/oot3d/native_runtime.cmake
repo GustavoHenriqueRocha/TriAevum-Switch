@@ -93,7 +93,8 @@ set_property(CACHE OOT3D_WHOLE_AOT_SHARD_STRATEGY PROPERTY STRINGS
 # "use", -fprofile-partial-training optimizes for speed the functions the
 # collection didn't execute, so mark only the collection's cold ones: generate the list with
 # whole_aot_hot_from_gcda.py from the .gcda files and pass it in
-# OOT3D_WHOLE_AOT_HOT_FUNCTIONS (the executed functions come out byte-for-byte identical).
+# OOT3D_WHOLE_AOT_HOT_FUNCTIONS (the executed functions come out byte-for-byte identical);
+# left empty, a GCC "use" configure derives it from OOT3D_WHOLE_AOT_PROFILE_FILE.
 set(OOT3D_WHOLE_AOT_GIANT_FUNCTION_INSTRUCTIONS "0" CACHE STRING
     "Marks functions with >= N guest instructions (except the hot ones) without sched1/gcse-after-reload; 0 turns it off")
 set(OOT3D_WHOLE_AOT_HOT_FUNCTIONS "" CACHE FILEPATH
@@ -475,6 +476,10 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
             target_compile_options(oot3d_native_whole_aot PRIVATE
                 -flto=thin)
         endif()
+        unset(_oot3d_whole_aot_hot_list)
+        if (OOT3D_WHOLE_AOT_HOT_FUNCTIONS)
+            set(_oot3d_whole_aot_hot_list "${OOT3D_WHOLE_AOT_HOT_FUNCTIONS}")
+        endif()
         if (_oot3d_whole_aot_gcc_profile)
             # GCC instrumentation (gcov) of the generated shards only. Both
             # builds name each .gcda by its object path relative to their own
@@ -482,17 +487,28 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
             # optimized build may live in different build directories, but
             # they must compile the same generated C++ from the same
             # OOT3D_WHOLE_AOT_GENERATED_DIR path. Names are flat, e.g.
-            # CMakeFiles#oot3d_native_whole_aot.dir#home#...#oot3d_whole_aot_shard_000.gcda
+            # CMakeFiles#oot3d_native_whole_aot.dir#home#...#oot3d_whole_aot_shard_000.cpp.gcda
+            # Both modes: -fno-profile-values. libgcov's value profilers keep
+            # shared lists that need atomic updates, and its indirect-call
+            # profiler reads tpidr_el0 (crashed before main until
+            # oot3d_switch_threads.cpp mirrored it); nfsmw-nx and sa2-nx turn
+            # it off too. Branch and function counts are what PGO uses.
             if (OOT3D_WHOLE_AOT_PROFILE_MODE STREQUAL "generate")
+                # -fprofile-info-section: no libgcov constructor/exit write;
+                # each object's counters are listed in the gcov_info section
+                # and oot3d_whole_aot_pgo.cpp streams the whole session to
+                # the SD card (periodically, on focus loss, at exit). The
+                # runtime directory only names the files inside the stream
+                # (whole_aot_pgo_merge.py --runtime-dir).
                 target_compile_options(oot3d_native_whole_aot PRIVATE
                     "-fprofile-generate=${OOT3D_WHOLE_AOT_GCC_PROFILE_RUNTIME_DIR}"
                     "-fprofile-prefix-path=${CMAKE_BINARY_DIR}"
-                    -fprofile-update=single)
-                # Links libgcov into the final executable.
+                    -fprofile-update=single
+                    -fno-profile-values
+                    -fprofile-info-section=gcov_info)
+                # Links libgcov (__gcov_info_to_gcda) into the final executable.
                 target_link_options(oot3d_native_whole_aot INTERFACE
                     -fprofile-generate)
-                # Lets the program create the directory and flush counters
-                # before it is closed (oot3d_whole_aot_gcov.h).
                 set(OOT3D_WHOLE_AOT_GCOV_GENERATE ON)
                 target_compile_definitions(oot3d_native_whole_aot INTERFACE
                     OOT3D_WHOLE_AOT_GCOV_GENERATE=1
@@ -506,14 +522,77 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
                 # Functions the training never reached keep their normal
                 # optimization instead of being optimized for size; shards
                 # without a .gcda are compiled as without a profile.
+                # -fprofile-correction: the counters were updated without
+                # atomics (-fprofile-update=single) while the guest and host
+                # threads ran the same code and were read while running, so
+                # some blocks' counts do not add up ("not flow-consistent");
+                # GCC smooths them instead of stopping (nfsmw-nx, sa2-nx).
                 target_compile_options(oot3d_native_whole_aot PRIVATE
                     "-fprofile-use=${OOT3D_WHOLE_AOT_PROFILE_FILE}"
                     "-fprofile-prefix-path=${CMAKE_BINARY_DIR}"
                     -fprofile-partial-training
+                    -fprofile-correction
+                    -fno-profile-values
                     -Wno-missing-profile
                     # A function whose CFG changed since the collection run
                     # (edited runtime header) just loses its profile.
                     -Wno-error=coverage-mismatch)
+                # The functions the collection ran keep sched1 and
+                # gcse-after-reload even when giant
+                # (OOT3D_WHOLE_AOT_GIANT_FUNCTION_INSTRUCTIONS): without an
+                # explicit OOT3D_WHOLE_AOT_HOT_FUNCTIONS the list comes from
+                # the profile itself.
+                if (NOT OOT3D_WHOLE_AOT_HOT_FUNCTIONS)
+                    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+                    set(_oot3d_whole_aot_hot_list
+                        "${CMAKE_BINARY_DIR}/whole_aot_hot_from_gcda.txt")
+                    execute_process(
+                        COMMAND ${Python3_EXECUTABLE}
+                            "${CMAKE_CURRENT_SOURCE_DIR}/tools/oot3d/native_a32_runtime/whole_aot_hot_from_gcda.py"
+                            --gcda-dir "${OOT3D_WHOLE_AOT_PROFILE_FILE}"
+                            --generated-dir "${OOT3D_WHOLE_AOT_GENERATED_DIR}"
+                            --mode gcda
+                            --output "${_oot3d_whole_aot_hot_list}"
+                        RESULT_VARIABLE _oot3d_whole_aot_hot_result
+                        OUTPUT_VARIABLE _oot3d_whole_aot_hot_output
+                        ERROR_VARIABLE _oot3d_whole_aot_hot_output)
+                    if (NOT _oot3d_whole_aot_hot_result EQUAL 0)
+                        message(FATAL_ERROR
+                            "whole_aot_hot_from_gcda.py failed on "
+                            "${OOT3D_WHOLE_AOT_PROFILE_FILE}:\n${_oot3d_whole_aot_hot_output}")
+                    endif()
+                    message(STATUS "Whole-AOT hot functions from the profile: "
+                        "${_oot3d_whole_aot_hot_list}")
+                endif()
+                # Pre-generated C++ (OOT3D_REGENERATE_WHOLE_AOT=OFF, as
+                # scripts/build-fork.sh builds) only follows the list if it
+                # was generated with it (build-fork.sh PGO=use does).
+                set(_oot3d_whole_aot_manifest
+                    "${OOT3D_WHOLE_AOT_GENERATED_DIR}/whole_aot_cpp_manifest.json")
+                if (NOT OOT3D_REGENERATE_WHOLE_AOT AND
+                    EXISTS "${_oot3d_whole_aot_manifest}")
+                    file(READ "${_oot3d_whole_aot_manifest}" _oot3d_whole_aot_manifest_text)
+                    string(JSON _oot3d_whole_aot_giant ERROR_VARIABLE _oot3d_json_error
+                        GET "${_oot3d_whole_aot_manifest_text}" giant_cold_instructions)
+                    if (_oot3d_json_error)
+                        set(_oot3d_whole_aot_giant 0)
+                    endif()
+                    string(JSON _oot3d_whole_aot_generated_hot ERROR_VARIABLE _oot3d_json_error
+                        LENGTH "${_oot3d_whole_aot_manifest_text}" giant_cold_hot_entries)
+                    file(STRINGS "${_oot3d_whole_aot_hot_list}" _oot3d_whole_aot_hot_lines
+                        REGEX "^[ \t]*[0-9A-Fa-fx]")
+                    list(LENGTH _oot3d_whole_aot_hot_lines _oot3d_whole_aot_hot_count)
+                    if (_oot3d_whole_aot_giant GREATER 0 AND (_oot3d_json_error OR
+                        NOT _oot3d_whole_aot_generated_hot EQUAL _oot3d_whole_aot_hot_count))
+                        message(WARNING
+                            "The generated whole-AOT C++ was not generated with the "
+                            "${_oot3d_whole_aot_hot_count} hot functions of "
+                            "${_oot3d_whole_aot_hot_list} (manifest: "
+                            "${_oot3d_whole_aot_generated_hot}): giant functions the "
+                            "collection ran stay without sched1/gcse-after-reload. "
+                            "Regenerate with --hot-functions (scripts/build-fork.sh PGO=use).")
+                    endif()
+                endif()
             endif()
         elseif (OOT3D_WHOLE_AOT_PROFILE_MODE STREQUAL "generate")
             target_compile_options(oot3d_native_whole_aot PRIVATE
@@ -577,11 +656,11 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
                     "${OOT3D_WHOLE_AOT_CODE_BIN}")
             endif()
             set(_oot3d_whole_aot_hot_arguments)
-            if (OOT3D_WHOLE_AOT_HOT_FUNCTIONS)
+            if (_oot3d_whole_aot_hot_list)
                 set(_oot3d_whole_aot_hot_arguments
-                    --hot-functions "${OOT3D_WHOLE_AOT_HOT_FUNCTIONS}")
+                    --hot-functions "${_oot3d_whole_aot_hot_list}")
                 list(APPEND _oot3d_whole_aot_code_dependencies
-                    "${OOT3D_WHOLE_AOT_HOT_FUNCTIONS}")
+                    "${_oot3d_whole_aot_hot_list}")
             endif()
             set(_oot3d_whole_aot_generation_stamp
                 "${OOT3D_WHOLE_AOT_GENERATED_DIR}/generation.stamp")

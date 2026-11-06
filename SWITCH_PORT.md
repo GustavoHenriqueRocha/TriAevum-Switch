@@ -270,6 +270,83 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
 5. Stage the SD with `scripts/switch/stage-product.sh` and copy `switch/oot3dre/` to the card.
    Launch from the Homebrew Menu **in title mode** (holding R on a game), not from the album.
 
+### PGO: collecting a profile on the console
+
+GCC profile-guided optimization of the 256 whole-AOT shards (`OOT3D_WHOLE_AOT_PROFILE_MODE`,
+`CMake/oot3d/native_runtime.cmake`), following nfsmw-nx and sa2-nx (sa2-nx measured ~15% from one
+session). The workshop wrapper is `~/workshop-OOT/scripts/build-fork.sh` (env `PGO`, `PGO_PROFILE`,
+`BUILD_DIR`); with plain CMake, add the `-D` options it passes (below).
+
+**How the counts are kept.** The instrumented shards are compiled with
+`-fprofile-generate=sdmc:/switch/oot3dre/pgo -fprofile-prefix-path=<build dir> -fprofile-update=single
+-fno-profile-values -fprofile-info-section=gcov_info`. libgcov writes nothing by itself:
+`oot3d_whole_aot_pgo.cpp` streams the whole session (the counts only grow) with
+`__gcov_info_to_gcda` into `sdmc:/switch/oot3dre/pgo/oot3d_pgo_<N>.stream`, a new `<N>` per session,
+every 3 minutes, when the game loses focus (HOME, sleep) and at exit. The writer is a service
+thread (priority 0x3B, cores 1-2), never the game thread. Each dump goes to `.stream.tmp` and
+replaces the stream only when complete, so closing the game mid-dump keeps the previous one. Every
+dump appends `oot3d_pgo_<N>.stream <why> bytes= ms=` to `pgo/dumps.txt`, and the game log says where
+the counts go (`pgo: instrumented build, <n> objects streamed to …`, one object per shard). `-fno-profile-values` keeps
+libgcov's value profilers out (shared lists that need atomics; the indirect-call one read
+`tpidr_el0`).
+
+**Size and cost (measured on shard 064, devkitA64 GCC 16.1).** 35 functions, 342 KB of code
+without instrumentation: 570 KB instrumented (x1.67) and 90.8 KB of counters (0.27 byte per byte of
+code). Over the 133.8 MB `.text`: about 36 MB of counters at most (`.bss`, RAM) and a `.text` of about
+220 MB (the linker adds branch veneers past 128 MB; the 2 MB-page copy then takes ~230 MB of the
+~3 GB heap). A stream holds every counter of the functions that ran and 8 bytes for each untouched
+counter array, so one session file is at most ~36 MB (one file per session, rewritten in place);
+at 15-25 MB/s that is 1.5-2.5 s of SD writing per dump on the service thread [estimate: check
+`ms=` in `dumps.txt`]. The game thread does not wait for it; other SD reads in that window can.
+The instrumented game runs slower (every branch counts): play it for coverage, not for frame rate.
+
+**Steps for the integrator.**
+1. Instrumented build, in its own build directory (the product's `build-switch-deko3d` keeps its
+   objects):
+   ```sh
+   PGO=generate scripts/build-fork.sh        # ~/workshop-OOT; BUILD_DIR defaults to build-switch-pgo-gen
+   ```
+   It compiles the generated C++ from `aot-cache/fork-gen-<tree>-pgo/cpp` (a copy of the normal
+   generation; the `.gcda` files are named after that path, so the use build must compile the same
+   path) with `-DOOT3D_WHOLE_AOT_PROFILE_MODE=generate`; no `CMAKE_ARGS` needed. All 256 shards
+   compile instrumented (more memory per shard: keep `AOT_JOBS` at 4-6). Install
+   `build-switch-pgo-gen/oot3d_native_game.nro` in place of the normal NRO (same
+   `switch/oot3dre/`, so the game data and settings are used); keep the release NRO to put back.
+2. Play 20-30 minutes, in one or several sessions (each makes its own stream; they add up), with the
+   default settings (no `config/fps60`): title and file select, Kokiri Forest, Hyrule Field by day and
+   night, Market/Kakariko, a dungeon with fights (the Forest Temple Wolfos, the slowest spot of the
+   logs), one boss, the pause menu (items, map, quest), an ocarina song, swimming and a cutscene. End
+   with Exit game (L3+R3) for the final dump; after a HOME press wait ~5 s before closing (the focus
+   loss dump; `dumps.txt` shows it). Profile only the build that will be optimized: a regenerated
+   shard or an edited runtime header loses the profile of the functions it changes.
+3. Bring the counts back: copy `sdmc:/switch/oot3dre/pgo/` (FTP or USB) to
+   `~/workshop-OOT/pgo/streams/`, then merge them into `.gcda` files with devkitA64's gcov-tool:
+   ```sh
+   docker run --rm --name pgo-merge -v $HOME:$HOME -w $HOME/triaevum-switch/tools/oot3d/native_a32_runtime \
+     retuned-switch-prep:local python3.12 whole_aot_pgo_merge.py \
+     --streams ~/workshop-OOT/pgo/streams --output ~/workshop-OOT/pgo/profile
+   ```
+   (`gcov-tool merge-stream` per session, then each file's summary gets runs = sessions and
+   sum_max = the largest count: the stream API writes zeros, which would make every block hot.) It
+   refuses an `--output` that already has `.gcda` files (merging adds); lone `.stream.tmp` files are
+   skipped. Then empty `pgo/` on the SD card. Keep `~/workshop-OOT/pgo/profile` with the release.
+4. Optimized build:
+   ```sh
+   PGO=use PGO_PROFILE=~/workshop-OOT/pgo/profile scripts/build-fork.sh   # BUILD_DIR defaults to build-switch-deko3d
+   ```
+   It lists the functions the collection ran (`whole_aot_hot_from_gcda.py`), regenerates the `-pgo`
+   C++ in place with `--hot-functions` (the giant functions that ran keep sched1/gcse-after-reload;
+   the attribute changes no profile checksum) and configures `-DOOT3D_WHOLE_AOT_PROFILE_MODE=use
+   -DOOT3D_WHOLE_AOT_PROFILE_FILE=<profile> -DOOT3D_WHOLE_AOT_HOT_FUNCTIONS=<list>`: the shards get
+   `-fprofile-use -fprofile-partial-training -fprofile-correction -fno-profile-values`
+   (`-fprofile-correction`: counters updated without atomics by several threads, and read while
+   running, are not flow-consistent). With plain CMake and an empty `OOT3D_WHOLE_AOT_HOT_FUNCTIONS`,
+   the configure derives the list itself (`<build>/whole_aot_hot_from_gcda.txt`) and warns when
+   pre-generated C++ was not generated with it. All 256 shards rebuild (new generated path). A plain
+   `scripts/build-fork.sh` afterwards goes back to `PROFILE_MODE=none` and the normal C++.
+5. Measure: the same spots and save as a 0.1.1 session (Forest Temple Wolfos, Hyrule Field);
+   compare `guest` and `game_pair_ms` per `perf.txt` window.
+
 ## On-console diagnostics
 
 - `sdmc:/switch/oot3dre/boot-status.txt` — startup stage and readable error.
@@ -981,8 +1058,8 @@ loads).
   code page of its own, so no pointer changes.
 - **Order.** The swap is constructor priority 101; the TLS mirror (`oot3d_switch_threads.cpp`) and
   guard_alloc's early start (`oot3d_switch_guard_alloc.cpp`) moved from 101 to 102. Only libstdc++'s
-  iostream set-up (90) and, in a PGO-instrumented build without `-fprofile-info-section`, libgcov's
-  registration (100) run earlier; none starts a thread. Text and read-only data are swapped in two
+  iostream set-up (90) runs earlier (checked in the linked `.init_array`); it starts no thread. The
+  PGO-instrumented build registers its counters in a section, not with libgcov constructors. Text and read-only data are swapped in two
   calls: a refused data swap leaves the text on blocks.
 - **Exit.** After the text moved, hbloader's own unmap would fail if the NRO returned to it (hbl
   error 24). A successful swap therefore sets `__nx_applet_exit_mode = 1` for the whole process: every

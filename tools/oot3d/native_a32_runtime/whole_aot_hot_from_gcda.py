@@ -23,7 +23,7 @@ gcda  Reads the .gcda directly, without .gcno. Each function in the .gcda is
       criterion both modes agree; the gcda-mode count is only for ordering.
 
 The .gcda files have names flattened with '#' (-fprofile-prefix-path), for example
-CMakeFiles#oot3d_native_whole_aot.dir#home#gustavo#oot3d-work#gen#cpp-lean#oot3d_whole_aot_shard_000.gcda;
+CMakeFiles#oot3d_native_whole_aot.dir#home#gustavo#oot3d-work#gen#cpp-lean#oot3d_whole_aot_shard_000.cpp.gcda;
 the shard is deduced from the ``oot3d_whole_aot_shard_NNN`` suffix.
 """
 
@@ -40,7 +40,10 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 DEFAULT_GCOV = "/opt/devkitpro/devkitA64/bin/aarch64-none-elf-gcov"
-SHARD_RE = re.compile(r"(oot3d_whole_aot_shard_\d+)\.gcda$")
+# GCC names the .gcda after the object minus its last suffix: CMake's
+# oot3d_whole_aot_shard_000.cpp.obj gives oot3d_whole_aot_shard_000.cpp.gcda
+# (checked with devkitA64 GCC 16.1); a bare shard_000.gcda is accepted too.
+SHARD_RE = re.compile(r"(oot3d_whole_aot_shard_\d+)(?:\.cpp)?\.gcda$")
 # Definitions in the generated C++ (the giant-function attribute, if any, comes
 # earlier on the same line); declarations end in ");" and are left out.
 DEFINITION_RE = re.compile(
