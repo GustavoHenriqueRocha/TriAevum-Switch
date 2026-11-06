@@ -389,8 +389,9 @@ void HandleException(ThreadExceptionDump* context) {
     HangWatch::ReportFault("EXCEPTION", text.Data(), frame);
 }
 
-// Before the game's constructors (libnx already mounted sdmc in __appInit).
-[[gnu::constructor(101)]] void StartEarly() {
+// Before the game's constructors (libnx already mounted sdmc in __appInit) and
+// after the code moved to 2 MB blocks (oot3d_switch_code_pages.cpp, 101).
+[[gnu::constructor(102)]] void StartEarly() {
     Start();
 }
 

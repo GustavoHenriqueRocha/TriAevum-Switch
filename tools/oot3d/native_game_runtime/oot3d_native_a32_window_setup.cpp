@@ -13,6 +13,8 @@
 #include <fstream>
 #include "oot3d_build_version.h"
 #include "oot3d_update_panel.h"
+#include "oot3d_switch_code_pages.h"
+#include <spdlog/spdlog.h>
 #endif
 #include <cstdlib>
 #include <string>
@@ -1071,6 +1073,11 @@ void NativeA32WindowSession::Setup() {
   InitContextForDemo(hostArgs);
 #if defined(__SWITCH__)
   WriteSwitchBootStage("host_context_initialized");
+  // What the start-up constructor did with the code (oot3d_switch_code_pages.cpp):
+  // remapped (size, time), off or why it stayed on 4 KB pages. Warning level:
+  // the release logger drops info.
+  SPDLOG_WARN("{}", Oot3dNativeGame::FormatCodePagesStatus(
+                        Oot3dNativeGame::CurrentCodePagesStatus()));
 #endif
 #if defined(OOT3D_WHOLE_AOT_PRODUCT_MODE) && defined(_WIN32)
   std::string crashDiagnosticsError;

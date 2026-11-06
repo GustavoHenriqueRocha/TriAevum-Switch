@@ -969,6 +969,44 @@ loads).
   (it was the running total in seconds since the start). `threads:` CPU shares are measured from each
   thread's registration, so the first window of a session no longer shows `na`.
 
+### Game code on 2 MB pages (`config/no_code_hugepages`, 2026-11-05)
+- **What.** Ported from sa2-nx (`sdk/src/ui/switch_code_blocks.cpp`, from kameo-nx and the Torchlight
+  port; GPL-3.0 like this fork): `oot3d_switch_code_pages.cpp`. hbloader maps the NRO at a random
+  address whose virtual and physical addresses do not line up modulo 2 MB, so the kernel maps the
+  133.8 MB `.text` with 4 KB pages and the game thread misses the instruction TLB constantly
+  (Torchlight measured +115 ns per instruction-fetch TLB miss on 4 KB pages, +7 ns on 2 MB blocks;
+  data reads +81 / +5 ns; combat 2-4% faster). The first constructor copies text and read-only data
+  to heap that lines up modulo 2 MB and swaps the mapping at the same virtual address
+  (`svcUnmapProcessCodeMemory` / `svcMapProcessCodeMemory` / `svcSetProcessMemoryPermission`) from a
+  code page of its own, so no pointer changes.
+- **Order.** The swap is constructor priority 101; the TLS mirror (`oot3d_switch_threads.cpp`) and
+  guard_alloc's early start (`oot3d_switch_guard_alloc.cpp`) moved from 101 to 102. Only libstdc++'s
+  iostream set-up (90) and, in a PGO-instrumented build without `-fprofile-info-section`, libgcov's
+  registration (100) run earlier; none starts a thread. Text and read-only data are swapped in two
+  calls: a refused data swap leaves the text on blocks.
+- **Exit.** After the text moved, hbloader's own unmap would fail if the NRO returned to it (hbl
+  error 24). A successful swap therefore sets `__nx_applet_exit_mode = 1` for the whole process: every
+  return from `main` (including declining the game data import or the HUD offer) and every `exit()`
+  closes the application through AM, as Exit game and the fatal error dialog already did. Back to the
+  HOME menu, not to hbmenu.
+- **Cost.** The loader's copy cannot be given back (start of the heap, `.data` after it): about
+  138 MB more memory (the heap peaked at 892 MB of ~3 GB in the 0.1.1 logs). It is skipped when less
+  than 1.5 GB would stay free (an applet). The copy takes tens of ms at start-up.
+- **Kill switch.** `sdmc:/switch/oot3dre/config/no_code_hugepages` (exists = off). Read directly in
+  the constructor: libnx's `__appInit` mounts sdmc (`fsdevMountSdmc`) before `__libc_init_array` runs
+  the constructors.
+- **Log.** One line in `logs/oot3d_native_game.log` (warning level: the release logger drops info):
+  `code_pages: remapped text_kb=… rodata_kb=… blocks_2mb=65+1 copy_ms=… swap_ms=… code=0x… copy=0x…`,
+  or `code_pages: off (config/no_code_hugepages)`, or `code_pages: left on 4 KB pages: <reason>
+  (<value>)`. Under an emulator (no hbloader, no process handle) the code stays put and the swap is
+  tested on two pages of its own: `code_pages: no loader (emulator) … self-test passed`. Each
+  `perf.txt` window has `code_2mb=1|0` in its `threads:` part.
+- **Measure.** Same save, same spot (e.g. Forest Temple, the two Wolfos), one session with and one
+  without `config/no_code_hugepages`; compare `guest` and `game_pair_ms` of the windows with
+  `code_2mb=1` against `code_2mb=0`. Expected 2-4% of guest time or more (the text is 3.4x sa2's).
+- Tests: `oot3d_switch_code_pages_tests` (alignment of the copy, block count, heap check, log line);
+  guards in `test_bug_guards.py` (constructor order, exit mode, stub page, log line).
+
 ### Performance overlay: L3+R3 > Video (`config/fps_counter`)
 - "Performance overlay" checkbox in the Video tab; applies in the same frame and creates/removes
   `config/fps_counter` (present = on, the same file as the old FPS counter). Two lines in the

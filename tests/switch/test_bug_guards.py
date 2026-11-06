@@ -28,6 +28,34 @@ class Guard:
 
 
 GUARDS = [
+    # --- 05/11: NRO code on 2 MB blocks (oot3d_switch_code_pages.cpp, from sa2-nx) ---
+    # The swap unmaps the code while it runs: it must be the first constructor
+    # (no other code or thread may run meanwhile), every later constructor that
+    # depends on the final mapping runs at 102, and once moved hbloader must
+    # never get control back (its own unmap fails and it aborts).
+    Guard("code pages: the swap must be the first constructor (101), before any other start-up code",
+          "tools/oot3d/native_game_runtime/oot3d_switch_code_pages.cpp",
+          r'\[\[gnu::constructor\(101\)\]\] void RemapCodeOnBlocks\(\)',
+          test="oot3d_switch_code_pages_tests"),
+    Guard("code pages: the TLS mirror must run after the swap (102, not 101)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_threads.cpp",
+          r'__attribute__\(\(constructor\(102\)\)\) void MirrorMainThreadTlsPointer\(\)',
+          forbid=r'constructor\(10[01]\)'),
+    Guard("code pages: guard_alloc's early start must run after the swap (102, not 101)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp",
+          r'\[\[gnu::constructor\(102\)\]\] void StartEarly\(\)',
+          forbid=r'constructor\(10[01]\)'),
+    Guard("code pages: after the text moved, a return to hbloader aborts (hbl error 24): exit mode 1 for the whole process",
+          "tools/oot3d/native_game_runtime/oot3d_switch_code_pages.cpp",
+          r'if \(textResult != 0\) \{.*?return Fallback\("the kernel refused the text swap", textResult\);\s+\}'
+          r'(\s+//[^\n]*)*\s+__nx_applet_exit_mode = 1;'),
+    Guard("code pages: the swap runs from a page of its own (the code cannot unmap itself)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_code_pages.cpp",
+          r'MapCodePage\(process, kStub, sizeof\(kStub\), &stub\).*?reinterpret_cast<SwapFunction>\(stub\.Va\)'),
+    Guard("code pages: config/no_code_hugepages turns it off and the game log says what happened",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'SPDLOG_WARN\("\{\}", Oot3dNativeGame::FormatCodePagesStatus\(',
+          test="oot3d_switch_code_pages_tests (TestFormat)"),
     # --- 05/11: console logs could not name the slow area nor the actors' cost ---
     # Area (scene, room) read once per host frame into hitches.txt and perf.txt;
     # the actor cost profile adds its block-entry hooks only with

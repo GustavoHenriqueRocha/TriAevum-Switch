@@ -546,6 +546,9 @@ unset(_oot3d_release_version_length)
 if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
     # Core and priority placement for every pthread (see the source).
     target_sources(oot3d_native_game PRIVATE
+        # The NRO's code and read-only data moved to 2 MB blocks by the first
+        # constructor (config/no_code_hugepages turns it off).
+        tools/oot3d/native_game_runtime/oot3d_switch_code_pages.cpp
         tools/oot3d/native_game_runtime/oot3d_switch_threads.cpp
         # Clocks for logs/perf.txt (sys-clk IPC, read only).
         tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp

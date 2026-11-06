@@ -28,6 +28,7 @@
 #include <string>
 
 #include "oot3d_switch_threads.h"
+#include "oot3d_switch_code_pages.h"
 #include "oot3d_hang_watchdog.h"
 
 extern "C" int __real_pthread_create(pthread_t* thread, const pthread_attr_t* attr,
@@ -59,8 +60,9 @@ struct ThreadEntry {
     void* Argument;
 };
 
-// Before any static constructor of instrumented code runs on the main thread.
-__attribute__((constructor(101))) void MirrorMainThreadTlsPointer() {
+// Before any static constructor of instrumented code runs on the main thread,
+// and after the code moved to 2 MB blocks (oot3d_switch_code_pages.cpp, 101).
+__attribute__((constructor(102))) void MirrorMainThreadTlsPointer() {
     MirrorTlsPointer();
 }
 
@@ -285,7 +287,10 @@ std::string SwitchThreadPerfSummary() {
     text.setf(std::ios::fixed);
     text.precision(1);
     text << "threads: layout=" << SwitchThreadLayoutName(layout.Layout)
-         << (layout.Valid ? "" : "(invalid)") << " pacer_spin_us=" << layout.PacerSpinMicroseconds;
+         << (layout.Valid ? "" : "(invalid)") << " pacer_spin_us=" << layout.PacerSpinMicroseconds
+         // 1 = the code runs on 2 MB blocks (oot3d_switch_code_pages.cpp), for
+         // A/B against config/no_code_hugepages.
+         << " code_2mb=" << CodePagesPerfFlag(CurrentCodePagesStatus());
     // Per role: CPU % of one core over the window (sum over its threads),
     // "/nN" when several threads share the role, "@c0:c1:c2" commands or
     // batches seen on each core (threads that note it).
