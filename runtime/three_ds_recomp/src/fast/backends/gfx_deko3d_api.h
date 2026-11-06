@@ -305,13 +305,40 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     std::vector<uint64_t> mCompletions;
     Deko3dBackendCounters mCounters{};
     Deko3dPicaCalls mCalls{};
+
+    // config/grass = draw (gfx_deko3d_grass.cpp). mGrassDraws is false in
+    // every other case, and then nothing below is touched.
+    bool mGrassDraws = false;
+    // The opaque world draw of the frame that last reached a target: where
+    // and how the grass draws (viewport and scissor with dynamic resolution
+    // and widescreen applied, the scene's depth compare).
+    struct GrassScene {
+        const Deko3d::PicaTarget* Target = nullptr;
+        Deko3d::PicaRect Viewport;
+        DkScissor Scissor{};
+        uint8_t DepthCompare = 0;
+        uint64_t Frame = ~0ULL;
+    };
+    GrassScene mGrassScene;
+    struct GrassDrawn {
+        const Deko3d::PicaTarget* Target = nullptr;
+        uint64_t Frame = ~0ULL;
+    };
+    GrassDrawn mGrassDrawn;
+    void RememberGrassScene(const Deko3d::PicaTarget& target, const Deko3d::PicaRect& viewport,
+                            const DkScissor& scissor, uint8_t depthCompare);
+    // Draws the culled tufts of this frame's sources into `target`, once per
+    // target and frame, if its opaque world was drawn this frame.
+    void DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target);
 };
 
 namespace Deko3d {
 // gfx_deko3d_grass.cpp: a scene draw of the frame (opaque world draws become
-// grass sources) and the end of the frame (placements).
+// grass sources) and the end of the frame (placements, the next cull).
 void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame);
 void GrassEndFrame(uint64_t frame);
+// config/grass = draw and the preset loaded (EnsureFrame reads it per frame).
+[[nodiscard]] bool GrassDrawEnabled();
 } // namespace Deko3d
 
 } // namespace Fast

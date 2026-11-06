@@ -19,4 +19,11 @@ CollectNativeActorInteractions(const NativeA32Memory &memory,
                                uint32_t playState, uint64_t sourceFrame);
 void PublishNativeActorInteractions(const NativeA32Memory &memory,
                                     uint32_t playState, uint64_t sourceFrame);
+// The deko3d grass (config/grass = draw) bends around Link and Epona only:
+// the player list's head and the adult Epona / child horse among the first
+// 16 actors of the background list, read field by field (a few guest reads
+// per step instead of every actor of every list).
+std::vector<Fast::Oot3d::GrassInteractor>
+CollectNativeGrassColliders(const NativeA32Memory &memory, uint32_t playState,
+                            uint64_t sourceFrame);
 } // namespace Oot3dNativeGame

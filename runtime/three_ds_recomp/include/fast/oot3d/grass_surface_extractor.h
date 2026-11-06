@@ -94,6 +94,19 @@ struct GrassPlacementSet {
 [[nodiscard]] bool GrassPlacementViewNeedsRefresh(
     const GrassPlacementView& previous, const GrassPlacementView& current) noexcept;
 
+// Candidates evaluated per allowed anchor when a budget bites: the mask,
+// clustering and minimum spacing reject some, so the extractor samples up to
+// this many times the budget and thins the survivors to it.
+inline constexpr uint32_t kGrassCandidateHeadroom = 4U;
+
+// Deterministic density thinning. When more anchors survive than `limit`,
+// keeps the `limit` with the smallest rank key (a hash of StableId that is
+// independent of position, of extraction order and of the LOD visibility
+// value), in their original order. Every anchor has the same chance wherever
+// it lies, so a budget that bites lowers the density evenly instead of
+// leaving the last triangles of the index buffer bare.
+void ThinGrassAnchorsToLimit(std::vector<GrassAnchor>& anchors, uint32_t limit);
+
 class GrassSurfaceExtractor final {
   public:
     [[nodiscard]] static std::vector<GrassAnchor> Extract(

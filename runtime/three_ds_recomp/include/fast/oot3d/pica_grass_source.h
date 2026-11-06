@@ -10,6 +10,7 @@
 
 #include "fast/oot3d/grass_async_placement_builder.h"
 #include "fast/oot3d/grass_draw_memo.h"
+#include "fast/oot3d/grass_scene_bridge.h"
 #include "fast/oot3d/grass_geometry_registry.h"
 #include "fast/oot3d/graphics_settings.h"
 #include "fast/renderer3ds/pica_render_backend.h"
@@ -44,21 +45,30 @@ struct PicaGrassPlacementStats {
     uint32_t Meshes = 0;         // source meshes matched this frame
     uint32_t Ready = 0;          // placements available
     uint32_t Queued = 0;         // placements being built
-    uint64_t Anchors = 0;        // blades in the ready placements
+    uint64_t Anchors = 0;        // tufts in the ready placements
     double BuildMilliseconds = 0.0; // worker time of the placements finished this frame
+    size_t ResidentBytes = 0;    // placements kept by the builder (all frames)
+};
+
+// A ready placement and the source mesh of this frame it belongs to (its
+// model-to-clip, fog, lights and render target).
+struct PicaGrassDrawable {
+    std::shared_ptr<const GrassWorldPlacement> Placement;
+    GrassSceneMesh Mesh;
 };
 
 class PicaGrassPlacements {
   public:
-    PicaGrassPlacements();
+    // `retainedBytes` caps the placements kept in memory; the least recently
+    // drawn go first.
+    explicit PicaGrassPlacements(size_t retainedBytes = 512U * 1024U * 1024U);
     // Placements of the meshes published for `frameId`.
-    const std::vector<std::shared_ptr<const GrassWorldPlacement>>& Update(uint64_t frameId,
-                                                                          const InteractiveGrassSettings& settings);
+    const std::vector<PicaGrassDrawable>& Update(uint64_t frameId, const InteractiveGrassSettings& settings);
     [[nodiscard]] const PicaGrassPlacementStats& Stats() const noexcept { return mStats; }
 
   private:
     GrassAsyncPlacementBuilder mBuilder;
-    std::vector<std::shared_ptr<const GrassWorldPlacement>> mReady;
+    std::vector<PicaGrassDrawable> mReady;
     PicaGrassPlacementStats mStats;
 };
 

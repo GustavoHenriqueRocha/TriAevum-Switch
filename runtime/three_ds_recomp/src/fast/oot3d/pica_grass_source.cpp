@@ -342,10 +342,10 @@ uint64_t WorldPlacementIdentity(const GrassSceneMesh& mesh, const GrassPlacement
 
 } // namespace
 
-PicaGrassPlacements::PicaGrassPlacements() : mBuilder(64U, 1U) {}
+PicaGrassPlacements::PicaGrassPlacements(size_t retainedBytes) : mBuilder(64U, 1U, retainedBytes) {}
 
-const std::vector<std::shared_ptr<const GrassWorldPlacement>>&
-PicaGrassPlacements::Update(uint64_t frameId, const InteractiveGrassSettings& settings) {
+const std::vector<PicaGrassDrawable>& PicaGrassPlacements::Update(uint64_t frameId,
+                                                                  const InteractiveGrassSettings& settings) {
     mReady.clear();
     mStats = {};
     const auto inherited = GrassTwinRules::Instance().AllInherited(settings.Rules);
@@ -395,10 +395,11 @@ PicaGrassPlacements::Update(uint64_t frameId, const InteractiveGrassSettings& se
                 ++mStats.Ready;
                 mStats.Anchors += result.Placement->Anchors.size();
                 mStats.BuildMilliseconds += result.BuildMilliseconds;
-                mReady.push_back(std::move(result.Placement));
+                mReady.push_back({std::move(result.Placement), mesh});
             }
         }
     }
+    mStats.ResidentBytes = mBuilder.Stats().ResidentBytes;
     return mReady;
 }
 

@@ -3276,6 +3276,12 @@ void NativeA32WindowSession::PresentVisualFrame(
                   process.Memory(),
                   sceneViewProbe.Stats().LastPlayStateAddress,
                   finished->Sequence);
+            } else if (Fast::Deko3dGrassWantsColliders()) {
+              // deko3d grass (config/grass = draw): Link and Epona only.
+              frameActors = Oot3dNativeGame::CollectNativeGrassColliders(
+                  process.Memory(),
+                  sceneViewProbe.Stats().LastPlayStateAddress,
+                  finished->Sequence);
             }
             ++visualStats.SnapshotCount;
             suppressTopScreenBackdrop = relocatedFrontend;

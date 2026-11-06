@@ -285,6 +285,24 @@ endif()
 set_property(TARGET oot3d_graphics_settings_schedule_tests PROPERTY
     FOLDER Tests)
 
+# Grass on the Switch (SWITCH_PORT.md, "Grass on deko3d"): density thinning,
+# the profile's budgets and config/grass, culling and the instance stream.
+set(_oot3d_grass_runtime "${CMAKE_CURRENT_SOURCE_DIR}/runtime/three_ds_recomp")
+add_executable(oot3d_grass_switch_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_grass_switch_tests.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_instance_stream.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_overlay_mask.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_surface_extractor.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_switch_profile.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_visibility.cpp
+)
+target_include_directories(oot3d_grass_switch_tests PRIVATE
+    tools/oot3d/native_game_runtime ${_oot3d_grass_runtime}/include)
+target_compile_features(oot3d_grass_switch_tests PRIVATE cxx_std_20)
+find_package(Threads REQUIRED)
+target_link_libraries(oot3d_grass_switch_tests PRIVATE Threads::Threads)
+set_property(TARGET oot3d_grass_switch_tests PROPERTY FOLDER Tests)
+
 add_executable(oot3d_actor_visibility_policy_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_actor_visibility_policy.cpp
     tools/oot3d/native_game_runtime/oot3d_actor_visibility_policy_tests.cpp

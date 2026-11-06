@@ -231,6 +231,40 @@ GUARDS = [
           r'DkInvalidateFlags_Image \| DkInvalidateFlags_Zcull\);.*?'
           r'const auto layout = IdentifyDepthStencilWordLayout\(clearedWords\.front\(\)\);',
           "oot3d_deko3d_backend_tests (TestSavestateDepthWords)"),
+    # --- 05/11: grass on deko3d (config/grass, SWITCH_PORT.md "Grass on deko3d") ---
+    Guard("[decision] grass off without config/grass: nothing is configured, every hook returns at once",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'const auto mode = Oot3d::ReadGrassSwitchMode\("sdmc:/switch/oot3dre/config"\);\s+'
+          r'if \(mode == Oot3d::GrassSwitchMode::Off\) \{\s+return;\s+\}',
+          test="oot3d_grass_switch_tests (ConfigFileMeaning)"),
+    Guard("[decision] grass: absent config/grass means Off",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
+          r'if \(!fileText\.has_value\(\)\) return GrassSwitchMode::Off;',
+          test="oot3d_grass_switch_tests (ConfigFileMeaning)"),
+    Guard("[decision] grass: the deko3d draw hooks run only with config/grass = draw (mGrassDraws)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'if \(mGrassDraws && draw\.CompositionDomain == Renderer3ds::PicaCompositionDomain::Scene &&\s+'
+          r'draw\.Composition\.Layer != Renderer3ds::PicaCompositionLayer::OpaqueWorld\) \{.*?DrawGrass\(key, \*target\);'),
+    Guard("[decision] grass: game thread reads colliders only when grass draws (Link and Epona, not every actor)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'\} else if \(Fast::Deko3dGrassWantsColliders\(\)\) \{\s+//[^\n]*\n\s+'
+          r'frameActors = Oot3dNativeGame::CollectNativeGrassColliders\('),
+    Guard("[decision] grass: collider flag is set only for config/grass = draw",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'gGrassWantsColliders = mode == Oot3d::GrassSwitchMode::Draw;'),
+    Guard("[decision] grass: culling runs on the grass worker thread, never in the render or game thread's draw path",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'GrassCullWorker\(\) : mThread\(\[this\] \{ Run\(\); \}\) \{\}.*?result\.Stats = builder\.Build\(',
+          forbid=r'GrassInstanceStreamBuilder builder;(?![^\n]*\n\s+for \(;;\))'),
+    Guard("grass: a placement cap must thin evenly, not cut the index buffer short (bald patches)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_surface_extractor.cpp",
+          r'if \(kept\[index\]\) anchors\.push_back\(pending\[index\]\.Anchor\);\s+'
+          r'ThinGrassAnchorsToLimit\(anchors, limit\);',
+          test="oot3d_grass_switch_tests (Oot3dGrassThinning)",
+          forbid=r'index < pending\.size\(\) && anchors\.size\(\) < limit'),
+    Guard("grass: the display copy must see the grass draw's Version (else a lean repeat skips the copy)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'DrawGrass\(\*key, \*source\);\s+\}\s+const PicaDisplayCopy copy\{source->Id, source->Version'),
     # --- 26/10: dev menu without buttons on deko3d ---
     Guard("dev menu (L3+R3) opened on deko3d but didn't receive controller input (no ImGui SDL backend)",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",

@@ -2,6 +2,7 @@
 #include "oot3d_video_settings.h"
 #include "oot3d_fps_counter.h"
 #include "oot3d/renderer/azahar_texture_pack_settings.h"
+#include "fast/oot3d/grass_switch_profile.h"
 #include <imgui.h>
 #include <array>
 #include <cstdio>
@@ -69,6 +70,7 @@ public:
     PerfOverlayEnabled().store(std::filesystem::exists(mConfig / kPerfOverlayConfigName, error),
                                std::memory_order_relaxed);
     mPackFound = PackFolderExists();
+    mGrassBoot = mGrass = Fast::Oot3d::ReadGrassSwitchMode(mConfig);
   }
   const char *Label() const noexcept override { return "Video"; }
   void Draw() override {
@@ -111,6 +113,7 @@ public:
     if (!mOverlayError.empty())
       ImGui::TextWrapped("Could not write config/%s.", mOverlayError.c_str());
     DrawTexturePack();
+    DrawGrass();
   }
 
 private:
@@ -159,6 +162,27 @@ private:
     ImGui::TextDisabled("Applies at once. Larger sizes use more memory and GPU time.");
   }
 
+  // config/grass (SWITCH_PORT.md, "Grass on deko3d"): off, measure only
+  // (placements and the grass: line, nothing drawn) or drawn. Read at start,
+  // so it applies on the next start, like the frame rate.
+  void DrawGrass() {
+    ImGui::Separator();
+    using Fast::Oot3d::GrassSwitchMode;
+    const char *const modes[] = {"Off (default)", "Measure only (log, not drawn)",
+                                 "On (drawn)"};
+    int mode = static_cast<int>(mGrass);
+    if (ImGui::Combo("Grass", &mode, modes, 3)) {
+      mGrass = static_cast<GrassSwitchMode>(mode);
+      mGrassError = !Fast::Oot3d::SaveGrassSwitchMode(mConfig, mGrass);
+    }
+    if (mGrassError)
+      ImGui::TextWrapped("Could not write config/grass.");
+    else if (mGrass != mGrassBoot)
+      ImGui::TextUnformatted("Saved. Close and reopen the game to apply.");
+    ImGui::TextDisabled("deko3d renderer only. Drawn grass costs GPU time; "
+                        "with 30 FPS it reaches farther.");
+  }
+
   bool PackFolderExists() const {
     std::error_code error;
     return std::filesystem::is_directory(mPack.Folder, error);
@@ -172,6 +196,9 @@ private:
   ::Oot3d::Renderer::TexturePackSettings mPack;
   bool mPackFound = false;
   std::string mPackError;
+  Fast::Oot3d::GrassSwitchMode mGrassBoot = Fast::Oot3d::GrassSwitchMode::Off;
+  Fast::Oot3d::GrassSwitchMode mGrass = Fast::Oot3d::GrassSwitchMode::Off;
+  bool mGrassError = false;
 };
 } // namespace
 std::shared_ptr<Fast::Oot3d::GraphicsSettingsPanelTab>

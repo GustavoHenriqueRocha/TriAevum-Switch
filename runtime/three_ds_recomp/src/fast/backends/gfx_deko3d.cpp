@@ -108,6 +108,8 @@ void GfxRenderingAPIDeko3d::EnsureFrame() {
         CollectUiRetired();
         // A new command list: nothing is known to be bound.
         mBoundTarget = nullptr;
+        // config/grass = draw: configured once after Init, before the game.
+        mGrassDraws = Deko3d::GrassDrawEnabled();
     }
 }
 

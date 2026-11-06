@@ -165,11 +165,12 @@ void NativeA32WindowSession::Run() {
 #if defined(__SWITCH__)
   // config/grass (mod): the grass source rules of the product preset (the
   // PC's default Grass object) for the deko3d backend; off without the file.
+  // The budgets follow the frame rate chosen at start (config/fps60).
   if (Fast::Deko3dRendererSelected()) {
     static constexpr std::string_view kProductGraphics =
 #include "triaevum_product_graphics.inc"
         ;
-    Fast::Deko3dConfigureGrass(kProductGraphics);
+    Fast::Deko3dConfigureGrass(kProductGraphics, visualInterpolationEnabled);
   }
   // Guard pages (config/guard_alloc) from here on: the boot is left out (it
   // ran out of memory with every small block guarded).

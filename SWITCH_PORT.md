@@ -1673,11 +1673,68 @@ sample advances one frame every block of N (one per block, alternating parity).
   Host captures checked: version choice, file select, file 1, name entry, copy, fade until
   entering the game, BACK tab in the corner.
 
+### Grass on deko3d: `config/grass` (05/11)
+
+Off by default: without `config/grass` nothing below runs (each hook returns at its first test,
+the game thread does not change). L3+R3 > Video > "Grass" writes the file; it applies at the next start.
+
+| `config/grass` | What happens |
+|---|---|
+| absent, `0`, `off` | nothing (default) |
+| empty or `placements` | as before: sources and placements are built and logged, nothing is drawn |
+| `draw` | the tufts are drawn too |
+
+- **Placements** (`grass_surface_extractor.cpp`): a cap that bites no longer depends on the index
+  buffer order. Camera-independent placements sample up to 4x the cap, then keep the anchors with the
+  smallest rank key (a hash of the stable id, not of the position): the density drops evenly and the
+  cap is filled even when the mask rejects most candidates (`ThinGrassAnchorsToLimit`).
+  View-focused placements (PC) keep their exact quotas.
+- **Switch profile** (`grass_switch_profile.h`): tufts (a 4-vertex card cut into 5 blades in the
+  fragment shader) at 40/m2, 14-30 units tall; within 4 m (400 units) the tuft is drawn as its 5
+  blades, one segment each. At most 96k tufts per placement and 12 MiB of placements kept (the least
+  recently drawn go first; Hyrule Field at 40/m2 is ~11 MB).
+  - `config/fps60` on: at most 8000 visible, draw distance 1200 units, shrinking from 900.
+  - 30 fps: at most 22000 visible, 2000 units, from 1500.
+- **Threads:** sources are read on the render thread (as before). Placements build on one service
+  worker. Culling per cluster and writing the 32-byte instances straight into GPU memory runs on
+  a second service worker (`grass_instance_stream.cpp`; cores 1|2). Its result is drawn from the next
+  frame on, with the current frame's projection; the cluster spheres grow by 64 units + 6% of the
+  distance so the one frame of lag never shows an edge. The game thread reads only Link's and Epona's
+  colliders, and only with `draw` (`CollectNativeGrassColliders`: the player list head and the first 16
+  background actors).
+- **Drawing** (`gfx_deko3d_grass.cpp`): instanced draws into the scene target, before its first
+  non-opaque scene draw (or before its display transfer). They use the viewport, scissor
+  (dynamic resolution, widescreen) and depth compare of that target's opaque world draws.
+  The camera is each source draw's own model-to-clip, so interpolated frames match. Fog comes
+  from the draw's PICA fog LUT and light from its decoded PICA vertex lights, per vertex.
+  Depth follows the PICA `gl_FragDepth` mapping: a fragment variant writes it when the mapping is
+  not the raster depth. Wind and the bend away from Link and Epona are computed in the vertex shader.
+- **Shaders:** `tools/oot3d/deko3d_grass/gen.py` compiles `grass_vsh.glsl` and the two fragment
+  variants with uam into `gfx_deko3d_grass_dksh.h` (not in `deko3d.pack`). Rerun it after editing a
+  shader.
+- **Measuring** (`logs/deko3d.txt`, every 600 frames):
+  - `grass: frame N draw fps60 | ... placements P queued Q tufts T (max) retained X MiB | sources ms
+    placements ms`: the render-thread cost of finding sources and matching placements.
+  - `grass: frame N drawn D/600 frames | visible V (max, budget) tufts blades draws clusters
+    visible/tested over_budget | worker W ms/cull | render draw R ms/frame | gpu G ms/frame (max)`.
+    `gpu` is the time between two GPU timestamps around the grass draws, approximate.
+  - The game thread's cost shows in `perf.txt` (`guest`/`game_pair_ms`) as before; the GPU's in
+    `dkperf` `busy_ms`.
+- Budget estimates `[INF]`: GPU 0.6-1.2 ms per frame at the 2.25 floor at 60 fps, 1.5-3 ms at 30 fps.
+  Worker 0.3-1 ms per cull. Render thread well under 0.1 ms per frame for the draw plus the existing
+  `sources`/`placements` cost. Game thread: a few guest reads per step.
+- Tests: `oot3d_grass_switch_tests` (thinning, profile budgets, config file, culling and the instance
+  stream) and the `grass` guards in `test_bug_guards.py`.
+- To check on the console (Kokiri Forest, Hyrule Field, Lon Lon Ranch, Kakariko Village): grass
+  stands on the grass textures and sinks into the ground at the same depth as the native ground, in
+  front of and behind Link correctly; fog colours it like the ground at a distance; it bends away
+  from Link and Epona; no popping at the screen edges when the camera turns; DRS and widescreen keep
+  it aligned; the two `grass:` lines appear.
+
 ## Next steps
 
 - Future ideas (user request, 2026-10-17):
-  - "Light grass" for the Switch: simplified OpenGL version of the PC NRI renderer's procedural grass
-    (fewer blades, only near the camera, no expensive interaction), optional via `config/grass`, intended for 30 FPS mode.
+  - "Light grass" for the Switch: done on deko3d (see "Grass on deko3d" above).
   - Other PC effects (toon shading, outlines, wider FOV) adapted to GL, if they fit on the GPU.
   - Mods: test community HD texture packs (Citra/Azahar format) in the texture
     replacement system (`.o3tu`/PICA), after the video memory fix; replacement of data files

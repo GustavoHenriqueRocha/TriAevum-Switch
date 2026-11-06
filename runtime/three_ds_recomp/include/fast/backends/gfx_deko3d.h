@@ -101,10 +101,14 @@ struct Deko3dSwapTimes {
 };
 Deko3dSwapTimes Deko3dLastSwapTimes();
 
-// config/grass (mod, off without the file): grass sources and placements on
-// the Switch from the Graphics JSON the game hands at start (the product
-// preset, triaevum_product_graphics.inc). p7a: CPU side only, logged to
-// logs/deko3d.txt; nothing is drawn yet.
-void Deko3dConfigureGrass(std::string_view graphicsJson);
+// config/grass (off without the file; SWITCH_PORT.md "Grass on deko3d"):
+// grass sources and placements on the Switch from the Graphics JSON the game
+// hands at start (the product preset, triaevum_product_graphics.inc), with
+// the Switch profile of the frame rate (fps60: config/fps60 at start). "draw"
+// in the file also draws the tufts; anything else only logs the placements.
+void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60);
+// config/grass = draw: the game thread reads Link's and Epona's colliders for
+// the bend (CollectNativeGrassColliders). False in every other case.
+bool Deko3dGrassWantsColliders();
 bool Deko3dTakeGpuFrame(Deko3dGpuFrame& frame);
 } // namespace Fast

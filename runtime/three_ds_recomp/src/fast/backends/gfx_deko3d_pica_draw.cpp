@@ -410,6 +410,12 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         ++mCounters.PicaDrawsSkipped;
         return true;
     }
+    if (mGrassDraws && draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Scene &&
+        draw.Composition.Layer != Renderer3ds::PicaCompositionLayer::OpaqueWorld) {
+        // config/grass = draw: before the first non-opaque scene draw into
+        // the target whose opaque world was just drawn (once per frame).
+        DrawGrass(key, *target);
+    }
 
     const uint64_t shadersLoadedBefore = mShaders.Stats().Loaded;
     const PicaProgram program = ResolvePicaProgram(draw);
@@ -623,6 +629,11 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         return false;
     }
     dkCmdBufSetScissors(cmd, 0, &dkScissor, 1);
+    if (mGrassDraws && draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Scene &&
+        draw.Composition.Layer == Renderer3ds::PicaCompositionLayer::OpaqueWorld && draw.DepthTestEnabled &&
+        draw.DepthWriteEnabled) {
+        RememberGrassScene(target, viewport, dkScissor, DekoCompareOp(draw.DepthCompare));
+    }
     mDevice.Checkpoint("draw.viewport");
 
     const auto primitive = static_cast<DkPrimitive>(DekoPrimitive(draw.Topology));
@@ -694,6 +705,11 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
             BindWindowTarget();
         }
         return reject("deko3d display image memory");
+    }
+    if (mGrassDraws) {
+        // config/grass = draw: a scene with no non-opaque draw gets its grass
+        // here, before the copy reads the target (and its Version).
+        DrawGrass(*key, *source);
     }
     const PicaDisplayCopy copy{source->Id, source->Version, plan.SourceWidth, plan.SourceHeight, plan.Linear};
     DkCmdBuf cmd = mDevice.Cmd();

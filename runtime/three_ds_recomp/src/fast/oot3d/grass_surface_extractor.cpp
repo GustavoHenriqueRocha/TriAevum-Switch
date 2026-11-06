@@ -441,6 +441,15 @@ static std::vector<GrassAnchor> ExtractAnchors(
     if (!surface.TriangleSources.empty() && surface.TriangleSources.size() != surface.Indices.size() / 3U)
         return anchors;
     const uint32_t limit = budget;
+    const auto& view = surface.PlacementView;
+    // A camera-independent placement whose budget bites samples up to
+    // kGrassCandidateHeadroom times the budget, then thins the survivors of
+    // the mask and the spacing to `limit` by rank (ThinGrassAnchorsToLimit):
+    // the density drops evenly and the budget is filled. A view-focused
+    // placement keeps exact quotas, so a larger quota only adds blades to the
+    // ones already shown (its progressive prefix); it never exceeds `limit`.
+    const uint32_t candidateLimit = view.Enabled ? limit : static_cast<uint32_t>(std::min<uint64_t>(
+        uint64_t{limit} * kGrassCandidateHeadroom, std::numeric_limits<uint32_t>::max()));
     anchors.reserve(std::min<uint32_t>(limit, 4096U));
     const GrassTextureWrap wrapS = ResolveGrassTextureWrap(
         rule.Wrap, surface.MaterialWrapS);
@@ -452,7 +461,6 @@ static std::vector<GrassAnchor> ExtractAnchors(
     std::vector<uint32_t> candidateCounts(surface.Indices.size() / 3U);
     std::vector<double> viewWeights(candidateCounts.size());
     double totalViewWeight = 0.0;
-    const auto& view = surface.PlacementView;
     const auto frustum = BuildGrassFrustumRadiusScale(view.WorldToClip);
     uint64_t totalCandidates = 0U;
     for (size_t triangle = 0; triangle + 2U < surface.Indices.size(); triangle += 3U) {
@@ -500,12 +508,12 @@ static std::vector<GrassAnchor> ExtractAnchors(
             demands[i] = {candidateCounts[i], 0.1 * candidateCounts[i] / static_cast<double>(totalCandidates) +
                 0.9 * viewWeights[i] / totalViewWeight};
         }
-        viewQuotas = AllocateGrassBudget(demands, limit);
+        viewQuotas = AllocateGrassBudget(demands, candidateLimit);
     }
     uint64_t candidatePrefix = 0U;
-    const auto quotaAt = [totalCandidates, limit](uint64_t prefix) -> uint64_t {
-        return totalCandidates <= limit ? prefix : static_cast<uint64_t>(
-            static_cast<double>(prefix) * limit / static_cast<double>(totalCandidates));
+    const auto quotaAt = [totalCandidates, candidateLimit](uint64_t prefix) -> uint64_t {
+        return totalCandidates <= candidateLimit ? prefix : static_cast<uint64_t>(
+            static_cast<double>(prefix) * candidateLimit / static_cast<double>(totalCandidates));
     };
     std::vector<uint32_t> selectedCounts(candidateCounts.size());
     uint64_t totalSelected = 0U;
@@ -659,10 +667,39 @@ static std::vector<GrassAnchor> ExtractAnchors(
         }
     }
     const auto kept = ResolveMinimumSpacing(pending, generation.MinimumSpacing, workers);
-    anchors.reserve(std::min<size_t>(limit, pending.size()));
-    for (size_t index = 0; index < pending.size() && anchors.size() < limit; ++index)
+    anchors.reserve(std::min<size_t>(candidateLimit, pending.size()));
+    for (size_t index = 0; index < pending.size(); ++index)
         if (kept[index]) anchors.push_back(pending[index].Anchor);
+    ThinGrassAnchorsToLimit(anchors, limit);
     return anchors;
+}
+
+void ThinGrassAnchorsToLimit(std::vector<GrassAnchor>& anchors, uint32_t limit) {
+    if (anchors.size() <= limit) return;
+    if (limit == 0U) {
+        anchors.clear();
+        return;
+    }
+    // splitmix64 of the stable id: uniform, and unrelated to the LOD value
+    // GrassStableVisibilityValue derives from the same id (thinning by that
+    // value would keep only the anchors the far LOD retains longest).
+    const auto rank = [](const GrassAnchor& anchor, size_t index) {
+        uint64_t z = ((uint64_t{anchor.StableId} << 32U) ^ 0x6a09e667f3bcc909ULL) + 0x9e3779b97f4a7c15ULL;
+        z = (z ^ (z >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+        z = (z ^ (z >> 27U)) * 0x94d049bb133111ebULL;
+        z ^= z >> 31U;
+        // Equal ids resolve by position in the list: still deterministic.
+        return std::pair<uint64_t, uint32_t>{z, static_cast<uint32_t>(index)};
+    };
+    std::vector<std::pair<uint64_t, uint32_t>> keys(anchors.size());
+    for (size_t index = 0; index < anchors.size(); ++index) keys[index] = rank(anchors[index], index);
+    auto threshold = keys;
+    std::nth_element(threshold.begin(), threshold.begin() + (limit - 1U), threshold.end());
+    const auto last = threshold[limit - 1U];
+    size_t write = 0U;
+    for (size_t index = 0; index < anchors.size(); ++index)
+        if (keys[index] <= last) anchors[write++] = anchors[index];
+    anchors.resize(write);
 }
 
 bool GrassPlacementViewNeedsRefresh(const GrassPlacementView& previous, const GrassPlacementView& current) noexcept {
