@@ -463,23 +463,37 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                 if (archive->Id == kFsSaveDataArchiveId && mConfig.Filesystem) {
                     success = mConfig.Filesystem->RemoveFile(relative->generic_string(), &removed);
                 } else if (archive->Id == kFsSaveDataArchiveId) {
+                    // archive->Root / *relative, as in OpenFile and CreateFile: the
+                    // decoded path has no root and no "..". No canonical() or
+                    // absolute(): the console's root "sdmc:/switch/oot3dre/savedata"
+                    // is relative to std::filesystem, which puts the cwd in front
+                    // of it and names a path that does not exist, so erasing a file
+                    // slot failed and the game called its fatal-error handler.
+                    // A symlink or other non-directory below the root is refused.
                     std::error_code error;
-                    std::error_code rootError;
-                    const auto root = std::filesystem::weakly_canonical(archive->Root, rootError);
-                    const auto target = root / *relative;
-                    const auto parent = std::filesystem::weakly_canonical(target.parent_path(), error);
-                    const auto within = parent.lexically_relative(root);
-                    bool contained = !rootError && !error && !within.empty() && !within.is_absolute();
-                    for (const auto& part : within) contained = contained && part != "..";
-                    if (contained) {
-                        const auto status = std::filesystem::symlink_status(target, error);
-                        if (status.type() == std::filesystem::file_type::not_found &&
-                            (!error || error == std::errc::no_such_file_or_directory)) {
-                            success = true;
-                        } else if (!error && std::filesystem::is_regular_file(status)) {
-                            removed = std::filesystem::remove(target, error);
-                            success = !error;
+                    auto target = archive->Root;
+                    bool missing = false;
+                    bool contained = true;
+                    for (auto part = relative->begin(); part != relative->end(); ++part) {
+                        target /= *part;
+                        const auto type = std::filesystem::symlink_status(target, error).type();
+                        if (type == std::filesystem::file_type::not_found) {
+                            missing = true;
+                            break;
                         }
+                        const auto expected = std::next(part) == relative->end()
+                                                  ? std::filesystem::file_type::regular
+                                                  : std::filesystem::file_type::directory;
+                        if (error || type != expected) {
+                            contained = false;
+                            break;
+                        }
+                    }
+                    if (missing) {
+                        success = true;
+                    } else if (contained) {
+                        removed = std::filesystem::remove(target, error);
+                        success = !error;
                     }
                 }
                 result = success ? (removed ? kResultSuccess : kFsFileNotFound) : kFsCommandNotAllowed;

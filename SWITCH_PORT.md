@@ -36,6 +36,7 @@ Bugs that kept the Switch from running (they only showed up on the console; Eden
 | Game in slow motion (½ speed) | 60 refreshes/s expected, but 1 per presentation at 30 Hz | up to 4 refreshes per presentation |
 | Settings not saving | Horizon FS does not rename over an existing file | remove then rename |
 | Crash with warm-up on a thread | nvc0 contexts share a push buffer without a lock | warm-up on the render thread |
+| Game closed when erasing a file on the file select screen | the host's DeleteFile made the save root `sdmc:/switch/oot3dre/savedata` canonical; std::filesystem treats devoptab paths as relative and put the cwd in front, so every delete failed and the game called its fatal-error handler | delete `save root / path`, as OpenFile and CreateFile do (`oot3d_native_a32_ctr_fs_tests`) |
 
 Performance and usability:
 

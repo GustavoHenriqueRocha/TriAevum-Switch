@@ -606,6 +606,17 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
           r'ReadTopScreenWidePageState\(memory, &page\) &&\s+page\.ItemsActive\s+'
           r'\? NativeA32TouchPresentation::TopScreenWideItemsPage'),
+    # --- 05/11: erasing a save file on the file select screen closed the game ---
+    # The guest deletes "data:/save0N.bin" (worker 0x41E7B8) and sends any failed
+    # result to its fatal-error handler. The host's DeleteFile made the save root
+    # "sdmc:/switch/oot3dre/savedata" canonical: std::filesystem treats it as
+    # relative and put the cwd in front, so the delete always failed on Horizon.
+    Guard("erasing a save file on the file select screen closed the game (DeleteFile canonicalized the sdmc:/ save root)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'kFsDeleteFileRequest\) \{.*?auto target = archive->Root;\s+bool missing = false;.*?'
+          r'removed = std::filesystem::remove\(target, error\);',
+          "oot3d_native_a32_ctr_fs_tests (TestSlotEraseWithRelativeSaveRoot)",
+          forbid=r'std::filesystem::(weakly_canonical|canonical|absolute)\('),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay
