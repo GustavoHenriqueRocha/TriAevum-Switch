@@ -140,6 +140,7 @@ size_t gGpuFrameCount = 0U;
 std::atomic<uint64_t> gPerfSubmits{0};
 std::atomic<uint64_t> gPerfCommandBytes{0};
 std::atomic<bool> gPerfSyncCheck{false};
+std::atomic<uint64_t> gPerfImageBarriers{0};
 // config/deko3d_zcull: the mode and the per-frame ZCULL counters
 // (DkCounter_ZcullStats: four raw 32-bit hardware counters, ZcullStats0-3,
 // reset at frame top), summed over the window.
@@ -928,6 +929,10 @@ void Device::CountSwapAcquire() {
     gSwapAcquires.fetch_add(1, std::memory_order_relaxed);
 }
 
+void Device::CountImageBarrier() {
+    gPerfImageBarriers.fetch_add(1, std::memory_order_relaxed);
+}
+
 // After the slot's fence: its frame's timestamps are written.
 void Device::CollectTimestamps(uint32_t slotIndex) {
     FrameSlot& slot = mSlots[slotIndex];
@@ -1063,6 +1068,8 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
         << " tail_ms=" << static_cast<double>(tailNs) / splitCount / 1.0e6
         << " submits_per_frame=" << static_cast<double>(submits) / count
         << " command_kib_per_frame=" << static_cast<double>(commandBytes) / count / 1024.0
+        << " image_barriers_per_frame="
+        << static_cast<double>(gPerfImageBarriers.exchange(0, std::memory_order_relaxed)) / count
         << CpuWaitReport("fence", gFenceWait) << CpuWaitReport("acquire", gAcquireWait)
         << CpuWaitReport("present", gPresentWait) << CpuWaitReport("submit", gSubmitWait)
         << CpuWaitReport("queue_buffer", gQueueBufferWait)

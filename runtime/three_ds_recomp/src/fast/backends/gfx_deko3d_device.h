@@ -125,6 +125,9 @@ class Device {
     [[nodiscard]] bool Zcull() const noexcept { return mZcull; }
     // FinishRender acquired it (no draw reached the window before the pacer).
     void CountSwapAcquire();
+    // A barrier that waits for earlier work (texture uploads, descriptor
+    // writes): dkperf image_barriers_per_frame.
+    void CountImageBarrier();
 
     // Hands the commands recorded so far to the GPU.
     void Submit();

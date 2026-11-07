@@ -276,9 +276,16 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     uint32_t mLinearClampSampler = 0;
     bool mCullInvert = false;    // config/deko3d_cull_invert
     // config/deko3d_barrier (diagnosis): the barrier after new images, as
-    // words "full|primitives|fragments|none image descriptors shader l2".
+    // words "full|primitives|fragments|none image descriptors shader l2
+    // frame". Default Full + Image|Descriptors: uploads and descriptor
+    // writes touch neither shader code, global memory nor uniforms (those
+    // are fresh stream memory per draw; new code sets its own Shader flag
+    // through ShaderStore::TakeCodeWritten). Full stays: the copy engine's
+    // writes must land before the 3D engine samples them.
     DkBarrier mImageBarrierMode = DkBarrier_Full;
-    uint32_t mImageBarrierFlags = DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors | DkInvalidateFlags_Shader;
+    uint32_t mImageBarrierFlags = DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors;
+    // "frame": also the barrier at each frame's first draw (before 07/11).
+    bool mFrameBarrier = false;
     bool mFlipY = true;          // config/deko3d_flip_y ("0": the p6 orientation, upside down)
     // Every viewport goes through here: deko3d 0.5.0 always flips clip-space
     // y in the viewport (y up, like GL) while OriginUpperLeft stores row 0 at

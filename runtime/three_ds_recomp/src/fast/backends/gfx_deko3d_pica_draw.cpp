@@ -194,8 +194,9 @@ void GfxRenderingAPIDeko3d::InitPica() {
         mImageBarrierFlags |= has("descriptors") ? static_cast<uint32_t>(DkInvalidateFlags_Descriptors) : 0U;
         mImageBarrierFlags |= has("shader") ? static_cast<uint32_t>(DkInvalidateFlags_Shader) : 0U;
         mImageBarrierFlags |= has("l2") ? static_cast<uint32_t>(DkInvalidateFlags_L2Cache) : 0U;
-        Deko3d::Log("pica: image barrier \"%s\" (mode %d, flags %x)", barrier->c_str(),
-                    static_cast<int>(mImageBarrierMode), mImageBarrierFlags);
+        mFrameBarrier = has("frame");
+        Deko3d::Log("pica: image barrier \"%s\" (mode %d, flags %x, frame %d)", barrier->c_str(),
+                    static_cast<int>(mImageBarrierMode), mImageBarrierFlags, mFrameBarrier ? 1 : 0);
     }
     PicaSamplerKey linear;
     linear.MinLinear = true;
@@ -222,9 +223,10 @@ void GfxRenderingAPIDeko3d::FlushPicaInvalidations() {
     DkBarrier mode = DkBarrier_None;
     if (mResources.TakeInvalidate()) {
         // New images were written by copies (or descriptors changed) since
-        // the last draw: wait for them, then drop stale cached lines. Once
-        // per frame at least (BeginFrame), which also covers the uniform
-        // cache over the reused stream memory.
+        // the last draw: wait for them, then drop stale cached lines. Not
+        // forced per frame (PicaResources::BeginFrame: the queue flush's
+        // postSubmitFlush covers CPU writes, uniforms included) unless
+        // config/deko3d_barrier says "frame".
         mode = mImageBarrierMode;
         flags |= mImageBarrierFlags;
     }
@@ -234,6 +236,9 @@ void GfxRenderingAPIDeko3d::FlushPicaInvalidations() {
     if (flags != 0U || mode != DkBarrier_None) {
         mDevice.Checkpoint("barrier.before", static_cast<uint64_t>(mode), flags);
         dkCmdBufBarrier(mDevice.Cmd(), mode, flags);
+        if (mode != DkBarrier_None) {
+            mDevice.CountImageBarrier(); // dkperf image_barriers_per_frame
+        }
         mDevice.Checkpoint("barrier.after", static_cast<uint64_t>(mode), flags);
     }
 }

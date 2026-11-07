@@ -1892,6 +1892,42 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   zcull=1 zcull_stats=...` and `scene_ms` against (a); look at decals (floor markings, shadows' blobs,
   Deku Tree spider webs) for missing square tiles. Delete the file if any tile is missing.
 
+### Fewer deko3d barriers (07/11)
+Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.cpp`, `gpu_transfer.cpp`):
+- `dkCmdBufBarrier(Full)` = semaphore WFI + a gpfifo entry with NoPrefetch: everything before finishes and
+  command prefetch stops. `DkInvalidateFlags_Shader` invalidates the shader *instruction, global-data and
+  constant (uniform)* caches. Every `dkQueueFlush` (the backend flushes at each `Device::Submit`, twice a
+  frame) appends `postSubmitFlush`: a barrier with no wait that invalidates image, shader, descriptor and
+  L2 caches ahead of the next submitted commands.
+1. **No barrier at every frame's first draw.** `PicaResources::BeginFrame` set the upload flag every frame,
+   so the first draw paid a Full barrier with Image|Descriptors|Shader. The cache part is what
+   `postSubmitFlush` already does (CPU writes of the new frame, uniforms in recycled stream memory included:
+   the slot's fence was waited and an invalidation follows that frame's work). The wait part guards
+   nothing: the GPU-written images read later (the display copy, save-state/target copies) have their own
+   Full barriers before and after, uploads set the flag themselves. `config/deko3d_barrier` gains the word
+   `frame` to bring it back (A/B; e.g. `full image descriptors shader frame` = the old behaviour).
+2. **Uploads no longer invalidate shader caches.** Default flags are Image|Descriptors (was |Shader): texture
+   uploads and descriptor writes touch no code, global memory or uniform (those are fresh stream memory per
+   draw and in steady state never had a per-draw invalidation anyway); new shader code still adds Shader
+   through `ShaderStore::TakeCodeWritten`. The barrier stays Full: the texture copy runs on the copy engine
+   (`BlitCopyEngine`, `LaunchDma` non-pipelined) and must land before the 3D engine samples it.
+3. **Pack images batched at frame top.** The flag is consumed lazily at the next draw, so all uploads
+   recorded before one draw already shared one barrier; the per-texture drains came from pack images
+   finishing while a frame draws (each polled and uploaded at the draw that used it). Now a native texture
+   whose pack image is still decoding is not polled mid-frame: `UploadReadyReplacements` (end of
+   `BeginFrame`) polls every such texture drawn last frame and uploads all finished ones together, under the
+   16 MiB per-frame cap (the rest stays pending). The HD image appears one frame later at most. Natives seen
+   for the first time (and pack images already decoded then) still upload at their draw.
+- Logs: `dkperf image_barriers_per_frame=` (Full barriers issued for uploads/descriptors, per frame),
+  deko3d.txt `resources` line `pack images=N (again N, at frame top N)`.
+- Saving: −0.05 to −0.2 ms per frame steady (one Full barrier and the Shader invalidation per frame),
+  more while pack images stream [estimate].
+- Guards: the Full + Image|Descriptors default, every submit flushed, pack images only at frame top.
+- Console check (1 minute): HD textures on, walk into a new area: `image_barriers_per_frame` well under 1 in
+  steady windows (was at least 1), `at frame top` grows while loading; no texture briefly showing stale or
+  garbage contents. If anything looks wrong, `config/deko3d_barrier` with `full image descriptors shader
+  frame` restores the old barriers for comparison.
+
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
   field; default `0.1.0-dev`) and `OOT3D_RELEASE_BUILD` (monotonic integer; default 0). Both go

@@ -188,6 +188,18 @@ GUARDS = [
           r'"sdmc:/switch/oot3dre/config/deko3d_zcull", "rb"\)\) \{\s+std::fclose\(file\);\s+mZcull = true;\s+\}.*?'
           r'if \(!mZcull\) \{\s+queueMaker\.flags \|= DkQueueFlags_DisableZcull;',
           test="oot3d_deko3d_backend_tests (TestDepthBreakdown: the depth line that measures it)"),
+    # --- 07/11: deko3d barriers. Uploads still need the Full barrier (copy engine before 3D sampling). ---
+    Guard("deko3d uploads: a Full barrier with Image|Descriptors invalidation before the next draw",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_api.h",
+          r'DkBarrier mImageBarrierMode = DkBarrier_Full;\s+'
+          r'uint32_t mImageBarrierFlags = DkInvalidateFlags_Image \| DkInvalidateFlags_Descriptors;'),
+    Guard("deko3d: every queue submit is flushed (postSubmitFlush is what replaces the frame-top barrier)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'dkQueueSubmitCommands\(mQueue, list\);\s+dkQueueFlush\(mQueue\);'),
+    Guard("deko3d pack images: finished ones upload at frame top, never one barrier per draw mid-frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'Evict\(\);\s+UploadReadyReplacements\(\);\s+\}',
+          forbid=r'PollOrQueue\(\s*native\.PackHash, static_cast<uint16_t>\(view\.Width\)'),
     # --- 06/11: L3+R3 > Video > FPS (30 <-> 60 interpolated) applied only after a restart ---
     # Both choices simulate at 30 Hz; the launch fixed the pacing mode and the 30 FPS launch's
     # native30_no_interpolation contract forbade interpolation, so the menu only wrote config/fps60.
