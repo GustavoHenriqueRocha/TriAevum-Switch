@@ -926,6 +926,12 @@ void NativeA32WindowSession::Setup() {
   offload = Oot3dNativeGame::ReadNativeOffloadOptions();
   submissionQueue.SetLeanCapture(offload.Capture);
   picaFrontend.SetInPlaceDrawPackets(offload.Capture);
+  // config/capture_delta: only what changed per draw on this thread.
+  {
+    const bool captureDelta = Oot3dNativeGame::ReadNativeCaptureDelta();
+    submissionQueue.SetCaptureDelta(captureDelta);
+    picaFrontend.SetCaptureDelta(captureDelta);
+  }
   picaPresentationScheduler.SetMoveFreeFinish(offload.Plan);
 #if defined(__SWITCH__)
   if (offload.Perf) {

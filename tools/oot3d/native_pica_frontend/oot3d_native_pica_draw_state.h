@@ -247,5 +247,10 @@ struct Oot3dPicaDecodedDrawState {
 bool DecodeOot3dPicaDrawState(const Oot3dPicaDrawPacket& packet,
                               Oot3dPicaDecodedDrawState& state,
                               std::string* error = nullptr);
+// The same from the register file and the trigger kind (the frontend's
+// live state, before any packet holds a copy).
+bool DecodeOot3dPicaDrawState(const std::array<uint32_t, 0x300>& registers,
+                              bool indexed, Oot3dPicaDecodedDrawState& state,
+                              std::string* error = nullptr);
 
 } // namespace Oot3dNativeGame

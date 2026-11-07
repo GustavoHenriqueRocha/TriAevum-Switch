@@ -377,6 +377,20 @@ def summarize_offload(windows: list[Window]) -> None:
         parts = ("frame_head", "refresh_prep", "ui_submit", "kernel_reacquire", "input_poll")
         print("    outside the phases: " + ", ".join(f"{key} {fmt(mean(key), 3)}" for key in parts)
               + " ms/frame")
+    if any("cap_regs_us" in m for m in marked):
+        # "capture:" block: sub-stages of pica_capture_ms per draw
+        # (config/capture_delta; SWITCH_PORT.md "Capture delta").
+        stages = ("regs", "uniforms", "packet", "decode", "vertex", "texture", "enqueue")
+        print(f"    capture per draw (capture_delta={int(num(marked[-1], 'capture_delta'))}): "
+              + ", ".join(f"{key} {fmt(mean('cap_' + key + '_us'), 2)}" for key in stages)
+              + f" us (hashing {fmt(mean('cap_hash_us'), 2)} us inside); state"
+              f" {fmt(mean('cap_state_kb'), 0)} KiB/frame, replayed elsewhere"
+              f" {fmt(mean('cap_materialize_us'), 2)} us/draw; placeholder plan {fmt(mean('cap_plan_us'), 2)} us/draw")
+        print(f"    command lists {fmt(mean('list_ms'))} ms/frame ({fmt(mean('lists'), 0)} lists,"
+              f" {fmt(mean('list_kwords'), 1)} K words); lighting LUT {fmt(mean('lut_ms'), 3)} ms/frame"
+              f" ({fmt(mean('lut_hashes'), 1)} hashes, {fmt(mean('lut_reuses'), 1)} reused,"
+              f" {fmt(mean('lut_copies'), 1)} copies); table copies {fmt(mean('table_copies'), 1)},"
+              f" same-value writes skipped {fmt(mean('same_value_writes'), 0)} per frame")
 
 
 def summarize_cadence(windows: list[Window], seconds: float) -> None:

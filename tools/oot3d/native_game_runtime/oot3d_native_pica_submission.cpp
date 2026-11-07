@@ -1,5 +1,6 @@
 #include "oot3d_native_pica_submission.h"
 #include "oot3d_cpu_phase_probe.h"
+#include "oot3d_native_capture_clock.h"
 #include "oot3d_native_pica_transfer.h"
 
 #include <algorithm>
@@ -362,7 +363,7 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
         std::memcmp(cached->second.Bytes->data(), source->data(),
                     source->size()) == 0) ||
        (cached->second.Bytes == nullptr &&
-        cached->second.ContentHash == HashSnapshotBytes(*source)));
+        cached->second.ContentHash == HashTimed(*source)));
   const bool cacheHit =
       versionHit || contentMatch;
   if (compared && cached->second.Bytes == nullptr) mCounters.HashedBytes += source->size();
@@ -403,7 +404,7 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
       // Only a savestate reads it (CaptureState hashes the bytes then).
       entry.ContentHashValid = false;
     } else {
-      entry.ContentHash = HashSnapshotBytes(*source);
+      entry.ContentHash = HashTimed(*source);
       mCounters.HashedBytes += source->size();
     }
     entry.ContentVersion = mNextGeometryContentVersion++;
@@ -866,7 +867,7 @@ bool Oot3dNativePicaSubmissionQueue::CaptureTextureResources(
                std::memcmp(cached->second.SourceBytes->data(),
                            source->data(), source->size()) == 0) ||
               (cached->second.SourceBytes == nullptr &&
-               cached->second.SourceHash == HashSnapshotBytes(*source))));
+               cached->second.SourceHash == HashTimed(*source))));
         if (mRuntimeProfilingEnabled) {
             if (compared) mRuntimeProfile.TextureSnapshotComparedBytes += source->size();
             if (cacheHit) {
@@ -910,19 +911,19 @@ bool Oot3dNativePicaSubmissionQueue::CaptureTextureResources(
                 // the resolved bytes are the source bytes.
                 const std::span<const uint8_t> resolved(*entry.ResolvedBytes);
                 entry.BaseLevelContentHash =
-                    HashSnapshotBytes(resolved.first(*baseLevelBytes));
-                entry.ContentHash = ContinueSnapshotHash(
+                    HashTimed(resolved.first(*baseLevelBytes));
+                entry.ContentHash = ContinueHashTimed(
                     entry.BaseLevelContentHash, resolved.subspan(*baseLevelBytes));
                 mCounters.HashedBytes += resolved.size();
                 if (entry.SourceBytes == entry.ResolvedBytes) {
                     entry.SourceHash = entry.ContentHash;
                 } else {
-                    entry.SourceHash = HashSnapshotBytes(*entry.SourceBytes);
+                    entry.SourceHash = HashTimed(*entry.SourceBytes);
                     mCounters.HashedBytes += entry.SourceBytes->size();
                 }
             } else {
-            entry.SourceHash = HashSnapshotBytes(*entry.SourceBytes);
-            entry.ContentHash = HashSnapshotBytes(*entry.ResolvedBytes);
+            entry.SourceHash = HashTimed(*entry.SourceBytes);
+            entry.ContentHash = HashTimed(*entry.ResolvedBytes);
             mCounters.HashedBytes += entry.SourceBytes->size() + entry.ResolvedBytes->size();
             if (!baseLevelBytes.has_value() || *baseLevelBytes > entry.ResolvedBytes->size()) {
                 SetError(error, "PICA texture base mip is invalid");
@@ -932,7 +933,7 @@ bool Oot3dNativePicaSubmissionQueue::CaptureTextureResources(
             // Savestate restore rebuilds that payload and these derived hashes.
             entry.BaseLevelContentHash = *baseLevelBytes == entry.ResolvedBytes->size()
                 ? entry.ContentHash
-                : HashSnapshotBytes(std::span<const uint8_t>(*entry.ResolvedBytes).first(*baseLevelBytes));
+                : HashTimed(std::span<const uint8_t>(*entry.ResolvedBytes).first(*baseLevelBytes));
             if (*baseLevelBytes != entry.ResolvedBytes->size())
                 mCounters.HashedBytes += *baseLevelBytes;
             }
@@ -951,37 +952,66 @@ bool Oot3dNativePicaSubmissionQueue::CaptureTextureResources(
     return true;
 }
 
+namespace {
+
+// The packet's own fields as a source: a copied packet takes the same path
+// as the frontend's source (the same bytes, TestPacketSource).
+Oot3dPicaDrawPacketSource SourceOfPacket(const Oot3dPicaDrawPacket& packet) {
+    Oot3dPicaDrawPacketSource source;
+    source.CommandListAddress = packet.CommandListAddress;
+    source.CommandListOffsetWords = packet.CommandListOffsetWords;
+    source.CompositionDomain = packet.CompositionDomain;
+    source.Composition = packet.Composition;
+    source.LightBinding = &packet.LightBinding;
+    source.Indexed = packet.Indexed;
+    source.Registers = &packet.Registers;
+    source.VertexShader = &packet.VertexShader;
+    source.GeometryShader = &packet.GeometryShader;
+    source.FogLut = &packet.FogLut;
+    source.ProcTexLuts = &packet.ProcTexLuts;
+    source.LightingLuts = packet.LightingLuts;
+    source.DefaultAttributes = &packet.DefaultAttributes;
+    return source;
+}
+
+constexpr size_t kPacketStateBytes =
+    sizeof(Oot3dPicaDrawPacket::Registers) +
+    2U * sizeof(Oot3dPicaShaderState::FloatUniforms) +
+    sizeof(Oot3dPicaDrawPacket::DefaultAttributes);
+
+} // namespace
+
+void Oot3dNativePicaSubmissionQueue::SetCaptureDelta(bool enabled) {
+    std::lock_guard guard(mQueueMutex);
+    MaterializePendingLocked();
+    mCaptureDelta = enabled;
+}
+
+void Oot3dNativePicaSubmissionQueue::MaterializePendingLocked() {
+    if (mDeltaLog == nullptr || mDeltaLog->Entries() == 0U) return;
+    mDeltaLog->MaterializeAll(mPendingDraws);
+    mDeltaLog->Reset();
+}
+
+uint64_t Oot3dNativePicaSubmissionQueue::HashTimed(
+    std::span<const uint8_t> bytes) {
+    const uint64_t started = CaptureTicks();
+    const uint64_t hash = HashSnapshotBytes(bytes);
+    mCounters.HashTicks += CaptureTicks() - started;
+    return hash;
+}
+
+uint64_t Oot3dNativePicaSubmissionQueue::ContinueHashTimed(
+    uint64_t hash, std::span<const uint8_t> bytes) {
+    const uint64_t started = CaptureTicks();
+    hash = ContinueSnapshotHash(hash, bytes);
+    mCounters.HashTicks += CaptureTicks() - started;
+    return hash;
+}
+
 bool Oot3dNativePicaSubmissionQueue::SubmitDrawPacket(
     const Oot3dPicaDrawPacket& packet, std::string* error) {
-    CpuPhaseProbe::Scope cpuLock(CpuPhaseProbe::Phase::QueueLock);
-    std::lock_guard guard(mQueueMutex);
-    cpuLock.Stop();
-    const auto countersStart = RuntimeProfileClock::now();
-    const auto totalStart =
-        mRuntimeProfilingEnabled ? RuntimeProfileClock::now()
-                                 : RuntimeProfileClock::time_point{};
-    if (mRuntimeProfilingEnabled) {
-        ++mRuntimeProfile.DrawCalls;
-    }
-    const auto phaseStart =
-        mRuntimeProfilingEnabled ? RuntimeProfileClock::now()
-                                 : RuntimeProfileClock::time_point{};
-    // Construct the very large PICA packet directly from its source.  The
-    // previous default construction zeroed both 4096-word shader stores and
-    // immediately overwrote them with the packet copy on every draw.
-    mPendingDraws.emplace_back(mNextSubmissionId, packet);
-    if (mRuntimeProfilingEnabled) {
-        mRuntimeProfile.PacketCopyNanoseconds +=
-            RuntimeProfileElapsedNanoseconds(phaseStart);
-    }
-    const bool submitted = SubmitDrawLocked(mPendingDraws.back(), error);
-    if (mRuntimeProfilingEnabled) {
-        mRuntimeProfile.TotalNanoseconds +=
-            RuntimeProfileElapsedNanoseconds(totalStart);
-    }
-    ++mCounters.Draws;
-    mCounters.Nanoseconds += RuntimeProfileElapsedNanoseconds(countersStart);
-    return submitted;
+    return SubmitDrawPacketSource(SourceOfPacket(packet), error);
 }
 
 bool Oot3dNativePicaSubmissionQueue::SubmitDrawPacketSource(
@@ -999,14 +1029,52 @@ bool Oot3dNativePicaSubmissionQueue::SubmitDrawPacketSource(
     const auto phaseStart =
         mRuntimeProfilingEnabled ? RuntimeProfileClock::now()
                                  : RuntimeProfileClock::time_point{};
-    // The packet is made from the frontend state right here: the same bytes
-    // as the frontend's own packet copied in, one ~11 KiB copy less.
-    mPendingDraws.emplace_back(mNextSubmissionId, source);
+    // The packet is made from the frontend state right here, where the
+    // queue keeps it; its register file, float uniforms and default
+    // attributes are copied next (or recorded as a delta after the capture).
+    uint64_t ticks = CaptureTicks();
+    auto& submission = mPendingDraws.emplace_back(
+        mNextSubmissionId, source, Oot3dPicaStateArraysDeferred{});
+    uint64_t now = CaptureTicks();
+    mCounters.PacketTicks += now - ticks;
+    const bool delta = mCaptureDelta && source.DirtyLines != nullptr;
+    if (!delta) {
+        ticks = now;
+        submission.Packet.Registers = *source.Registers;
+        now = CaptureTicks();
+        mCounters.RegisterTicks += now - ticks;
+        ticks = now;
+        submission.Packet.VertexShader.FloatUniforms =
+            source.VertexShader->FloatUniforms;
+        submission.Packet.GeometryShader.FloatUniforms =
+            source.GeometryShader->FloatUniforms;
+        submission.Packet.DefaultAttributes = *source.DefaultAttributes;
+        mCounters.UniformTicks += CaptureTicks() - ticks;
+        mCounters.StateBytes += kPacketStateBytes;
+    }
     if (mRuntimeProfilingEnabled) {
         mRuntimeProfile.PacketCopyNanoseconds +=
             RuntimeProfileElapsedNanoseconds(phaseStart);
     }
-    const bool submitted = SubmitDrawLocked(mPendingDraws.back(), error);
+    const bool submitted = SubmitDrawLocked(submission, source, error);
+    if (submitted && delta) {
+        // Only what changed since the previous entry (everything for the
+        // first entry of a log); the consumer materializes the arrays.
+        if (mDeltaLog == nullptr) {
+            mDeltaLog = Oot3dPicaCaptureDeltaLogPool::Acquire(mDeltaPool);
+        }
+        Oot3dPicaCaptureDeltaLog::AppendCost cost;
+        const uint32_t entry = mDeltaLog->Append(source, cost);
+        mPendingDraws.back().DeltaEntry = entry;
+        mCounters.RegisterTicks += cost.RegisterTicks;
+        mCounters.UniformTicks += cost.UniformTicks;
+        mCounters.StateBytes += cost.Bytes;
+        if (mDeltaLog->Keyframe(entry)) {
+            ++mCounters.Keyframes;
+        } else {
+            ++mCounters.DeltaDraws;
+        }
+    }
     if (mRuntimeProfilingEnabled) {
         mRuntimeProfile.TotalNanoseconds +=
             RuntimeProfileElapsedNanoseconds(totalStart);
@@ -1017,15 +1085,22 @@ bool Oot3dNativePicaSubmissionQueue::SubmitDrawPacketSource(
 }
 
 bool Oot3dNativePicaSubmissionQueue::SubmitDrawLocked(
-    Oot3dPicaDrawSubmission& submission, std::string* error) {
-    const Oot3dPicaDrawPacket& packet = submission.Packet;
+    Oot3dPicaDrawSubmission& submission,
+    const Oot3dPicaDrawPacketSource& source, std::string* error) {
     auto phaseStart =
         mRuntimeProfilingEnabled ? RuntimeProfileClock::now()
                                  : RuntimeProfileClock::time_point{};
-    if (!DecodeOot3dPicaDrawState(packet, submission.State, error)) {
+    // From the frontend's registers: the same words the packet holds (or
+    // will hold, with capture delta).
+    uint64_t ticks = CaptureTicks();
+    if (!DecodeOot3dPicaDrawState(*source.Registers, source.Indexed,
+                                  submission.State, error)) {
         mPendingDraws.pop_back();
         return false;
     }
+    uint64_t now = CaptureTicks();
+    mCounters.DecodeTicks += now - ticks;
+    ticks = now;
     if (mRuntimeProfilingEnabled) {
         mRuntimeProfile.DecodeNanoseconds +=
             RuntimeProfileElapsedNanoseconds(phaseStart);
@@ -1037,6 +1112,9 @@ bool Oot3dNativePicaSubmissionQueue::SubmitDrawLocked(
         return false;
     }
     cpuVertex.Stop();
+    now = CaptureTicks();
+    mCounters.VertexTicks += now - ticks;
+    ticks = now;
     if (mRuntimeProfilingEnabled) {
         mRuntimeProfile.VertexCaptureNanoseconds +=
             RuntimeProfileElapsedNanoseconds(phaseStart);
@@ -1048,6 +1126,9 @@ bool Oot3dNativePicaSubmissionQueue::SubmitDrawLocked(
         return false;
     }
     cpuTexture.Stop();
+    now = CaptureTicks();
+    mCounters.TextureTicks += now - ticks;
+    ticks = now;
     if (mRuntimeProfilingEnabled) {
         mRuntimeProfile.TextureCaptureNanoseconds +=
             RuntimeProfileElapsedNanoseconds(phaseStart);
@@ -1080,6 +1161,7 @@ bool Oot3dNativePicaSubmissionQueue::SubmitDrawLocked(
         mPendingDisplayTransfers.push_back(std::move(*transfer));
         transfer = mRestoredDisplayTransfersAwaitingTarget.erase(transfer);
     }
+    mCounters.EnqueueTicks += CaptureTicks() - ticks;
     if (mRuntimeProfilingEnabled) {
         mRuntimeProfile.EnqueueNanoseconds +=
             RuntimeProfileElapsedNanoseconds(phaseStart);
@@ -1277,6 +1359,7 @@ Oot3dNativePicaSubmissionQueue::PendingDraws() const {
 std::vector<Oot3dPicaDrawSubmission>
 Oot3dNativePicaSubmissionQueue::TakePendingDraws() {
     std::lock_guard guard(mQueueMutex);
+    MaterializePendingLocked();
     std::vector<Oot3dPicaDrawSubmission> draws;
     draws.swap(mPendingDraws);
     return draws;
@@ -1285,8 +1368,23 @@ Oot3dNativePicaSubmissionQueue::TakePendingDraws() {
 void Oot3dNativePicaSubmissionQueue::TakePendingDraws(
     std::vector<Oot3dPicaDrawSubmission>& destination) {
     std::lock_guard guard(mQueueMutex);
+    MaterializePendingLocked();
     destination.clear();
     destination.swap(mPendingDraws);
+}
+
+void Oot3dNativePicaSubmissionQueue::TakePendingDraws(
+    std::vector<Oot3dPicaDrawSubmission>& destination,
+    std::shared_ptr<Oot3dPicaCaptureDeltaLog>& deltaLog) {
+    std::lock_guard guard(mQueueMutex);
+    destination.clear();
+    destination.swap(mPendingDraws);
+    deltaLog.reset();
+    if (mDeltaLog != nullptr && mDeltaLog->Entries() != 0U) {
+        // The next delta draw starts a new log with a keyframe.
+        deltaLog = std::move(mDeltaLog);
+        mDeltaLog = nullptr;
+    }
 }
 
 std::span<const Oot3dPicaCompletionSubmission>
@@ -1332,6 +1430,7 @@ Oot3dPicaSubmissionBatch
 Oot3dNativePicaSubmissionQueue::TakePendingBatch() {
     std::lock_guard guard(mQueueMutex);
     Oot3dPicaSubmissionBatch batch;
+    MaterializePendingLocked();
     batch.Draws.swap(mPendingDraws);
     batch.Completions.swap(mPendingCompletions);
     batch.DisplayTransfers.swap(mPendingDisplayTransfers);
@@ -1767,6 +1866,7 @@ bool Oot3dNativePicaSubmissionQueue::RestoreState(
         }
         mHardwareWrites.clear();
         mPendingDraws.clear();
+        if (mDeltaLog != nullptr) mDeltaLog->Reset();
         mPendingCompletions.clear();
         mPendingDisplayTransfers.clear();
         mPendingMemoryFills.clear();

@@ -89,6 +89,7 @@ void Oot3dPicaDeferredPlanBuilder::BatchRecycler::operator()(
     // Release what the batch still references (submission snapshots, plans
     // nobody took) but keep every vector's capacity.
     batch->Submissions.clear();
+    batch->Delta.reset();
     for (size_t index = 0; index < batch->Status.size(); ++index) {
         if (batch->Status[index] == Status::Built) {
             batch->Plans[index] = {};
@@ -107,7 +108,8 @@ void Oot3dPicaDeferredPlanBuilder::BatchRecycler::operator()(
 
 std::shared_ptr<Oot3dPicaDeferredPlanBatch>
 Oot3dPicaDeferredPlanBuilder::BeginBatch(
-    std::vector<Oot3dPicaDrawSubmission>& drained) {
+    std::vector<Oot3dPicaDrawSubmission>& drained,
+    std::shared_ptr<Oot3dPicaCaptureDeltaLog> delta) {
     std::unique_ptr<Oot3dPicaDeferredPlanBatch> storage;
     {
         std::lock_guard lock(mPool->Mutex);
@@ -130,6 +132,7 @@ Oot3dPicaDeferredPlanBuilder::BeginBatch(
     // queue fills it next, without regrowing.
     batch->Submissions.clear();
     batch->Submissions.swap(drained);
+    batch->Delta = std::move(delta);
     const size_t count = batch->Submissions.size();
     batch->Slots.resize(count);
     batch->Status.assign(count, Oot3dPicaDeferredPlanBatch::SlotStatus::Unused);
@@ -291,6 +294,11 @@ uint64_t Oot3dPicaDeferredPlanBuilder::BuildSlotLocked(
     batch.Errors[index].clear();
     bool built = false;
     try {
+        // Capture delta: the submission's register file, uniforms and
+        // default attributes, from the log (every earlier slot on the way).
+        if (batch.Delta != nullptr) {
+            batch.Delta->MaterializeThrough(batch.Submissions, index);
+        }
         built = BuildOot3dPicaVulkanDrawPlanAndConsumeResources(
             batch.Submissions[index], batch.Plans[index],
             &batch.Errors[index], &mShaderCache);

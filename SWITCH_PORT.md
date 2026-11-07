@@ -3926,6 +3926,90 @@ core on, in `visual_present`, `pica_submit_host_ms` and `total_ms`; shared table
 in `pica_capture_ms`/`guest`; the LRU change saves ~0.4 ms per eviction, which shows up only where
 `geometry_evictions` is non-zero (room changes, effects at new addresses).
 
+### Capture delta and capture sub-stages: `config/capture_delta` (2026-11-07)
+logs18 (test.10): capturing each draw on the game thread (`pica_capture_ms`) costs 19–25 µs per draw,
+2.1–3.4 ms per step, and grows with the draw count, which is what rises in Kokiri Forest, Forest Temple
+room 8 and bush cutting. The bytes copied into snapshots are small (`capture_copy_kb` ≈ 8 KiB per
+frame, `capture_hash_kb` ≈ 0), so the cost is per draw, not per byte of guest data.
+
+**`perf.txt` `capture:` group** (same line, after `offload:`). µs per draw of the queue's part of
+`pica_capture_ms`:
+- `cap_regs_us`: the register file into the packet, or into the delta log.
+- `cap_uniforms_us`: float uniforms and default attributes.
+- `cap_packet_us`: the rest of the packet (shared tables, composition).
+- `cap_decode_us`, `cap_vertex_us`, `cap_texture_us`, `cap_enqueue_us`: the other stages.
+- `cap_hash_us`: content hashing inside the vertex and texture stages.
+
+Also: `cap_state_kb` (KiB of register/uniform/attribute state written on the game thread per frame),
+`cap_delta_draws`/`cap_keyframes` per frame, `cap_materialize_us`/`cap_materialized` (the replay off
+the game thread, µs per draw and draws per frame), `cap_plan_us` (the placeholder plan, `pica_plan`, per
+draw), `list_ms`/`lists`/`list_kwords` (the frontend's whole command-list walk, captures included),
+`lut_ms`/`lut_hashes`/`lut_reuses`/`lut_copies` (lighting LUT: 24 KiB hashes and 24 KiB copy-on-write
+copies), `table_copies` and `same_value_writes`. On the Switch the stages are timed with the system
+counter (`cntpct_el0`, `oot3d_native_capture_clock.h`), seven reads per draw. `perf_report.py`
+prints them under `offload`.
+
+**Capture delta** (`config/capture_delta`: no file = on, `0` = off; desktop `TRIAEVUM_CAPTURE_DELTA=1`):
+- The frontend marks the 64-byte lines it writes: 48 lines of registers, 24 per float-uniform file,
+  4 of default attributes (`Oot3dPicaStateDirtyLines`). The queue builds the packet without those
+  three arrays and appends only the dirty lines to a log (`oot3d_native_pica_capture_delta.{h,cpp}`).
+  The first draw of every drain pass is a keyframe with all 100 lines. The draw state is decoded from
+  the frontend's registers.
+- The 6.4 KiB copy per draw leaves the game thread. Whoever consumes the draws first replays the log
+  in draw order and writes the arrays: the plan builder under its build lock, before the slot it
+  builds (worker on core 1, or the render thread for a late plan); the serial path at the drain; and
+  every other take of the queue (`TakePendingDraws`, `TakePendingBatch`).
+- Table writes of the value already present are skipped: shader program and swizzle words, fog and
+  procedural tables, lighting LUT entries. There is no copy-on-write, and the LUT hash stays valid.
+- A lighting LUT whose uploads restored an earlier content takes that table object and its hash.
+  The check is an incremental XOR fingerprint per entry plus a byte compare, against the last 8
+  hashed tables, instead of hashing 24 KiB byte by byte again.
+- Every packet keeps the same bytes and hashes as with the switch off. Only shared-table identities
+  (`MutationIdentity`, LUT object) may be older objects with the same content.
+
+**Exactness proof:** `oot3d_native_capture_delta_tests` (in `run.sh`).
+- *Streams:* seeded command streams shaped like the game's. They contain:
+  - material registers with byte masks and grouped bursts, and vertex-uniform bursts in float24 and
+    float32;
+  - geometry-shader mirroring toggles and default attributes;
+  - lighting LUT uploads that repeat and alternate contents;
+  - fog, procedural, program and swizzle uploads;
+  - composition spans and failing draws;
+  - guest memory writes between lists, through the store cards.
+- *Runs:* each stream is replayed through the real frontend, queue and guest memory three times: off,
+  on, and on with copied packets.
+- *Compared byte for byte:* register file, both uniform files, default attributes, shader words,
+  every table, LUT content and hash, decoded state, every snapshot with its hashes and versions. The
+  frontend and queue savestates are also compared, and then restored mid-stream.
+- *Delivery paths:* the queue's take, log replay in random prefixes, and the deferred plan builder.
+  The builder runs with the worker on and off and resolves plans in random order. Its plans are
+  compared with serial plans of the reference draws: visual identity, uniforms, shader sources, and
+  identical errors.
+- *Result:* 4 seeds × 400 lists, about 20,000 draws and 10,000 plans (about 90 % build), all identical.
+
+**Host bench** (`oot3d_native_capture_delta_tests --bench`, Release, Ryzen, 87 draws per frame, steady
+room). With the switch off → on:
+- capture: 3.11 → 2.10–2.37 µs per draw;
+- registers + uniforms: 0.58 → 0.11 µs;
+- rest of the packet: 0.32 → 0.14–0.18 µs (fewer zeroed arrays);
+- state written: 6.25 → 1.23 KiB per draw;
+- the command-list walk: 11.8 → 4.2–4.6 µs per draw, nearly all of it the LUT hash (6.1 → 0.09 µs).
+  This assumes the synthetic stream's LUT uploads: one draw in 5 uploads a table, from 3 contents per
+  table.
+- The replay costs 0.37–0.42 µs per draw on the consumer's thread.
+
+Vertex and texture snapshots (about 0.9 + 0.5 µs) are now the largest stages.
+
+**Estimate for the console** (×5–10 host → A57, not measured): about 3–6 µs per draw of the 20–25 µs
+capture, so 0.3–0.5 ms per host frame or 0.6–1.0 ms per step at 90–130 draws. If the game re-uploads
+lighting LUTs as the synthetic stream does, that saves another 30+ µs per hashed table, and `lut_ms`
+shows whether it does.
+
+**Console A/B (one minute):** create `config/capture_delta` with `0`, then remove it, at the same
+place and clock: Kokiri Forest, room 8 with the Deku Babas, cutting bushes. Compare `pica_capture_ms`,
+the `cap_*` stages, `list_ms`, `lut_ms`/`lut_hashes`, `game_pair_ms` and `guest`. With it on,
+`cap_state_kb` falls about fivefold and `cap_materialize_us` appears; the image must be identical.
+
 ### Status as of 2026-10-17 (best version so far)
 - PGO (2nd collection) + lean mode + PICA plans on core 1 + render thread on core 2 + audio on its own thread.
 - Measured at 30 FPS, 2× scale: 29.9 FPS average, 93% of the time at 30, logic ~11 ms per step.
