@@ -556,11 +556,13 @@ TEST(Oot3dGrassInstanceStream, NothingWithoutBudgetOrPlacements) {
 // ---- Hyrule Field at Near: the grass around Link (07/11 videos, log16) -----
 
 // A camera like the field camera behind Link: `height` above the ground at
-// eye.z, pitched down by `pitchDegrees`, 16:9. Clip w is the view depth.
-std::array<float, 16> FieldCamera(const std::array<float, 3>& eye, float pitchDegrees) {
+// eye.z, pitched down by `pitchDegrees`, 16:9 (or `aspect`), 45 degrees
+// vertical (or `verticalDegrees`). Clip w is the view depth.
+std::array<float, 16> FieldCamera(const std::array<float, 3>& eye, float pitchDegrees, float verticalDegrees = 45.0F,
+                                  float aspect = 16.0F / 9.0F) {
     const float pitch = pitchDegrees * 3.14159265F / 180.0F;
-    const float sy = 1.0F / std::tan(22.5F * 3.14159265F / 180.0F); // 45 degrees vertical
-    const float sx = sy / (16.0F / 9.0F);
+    const float sy = 1.0F / std::tan(0.5F * verticalDegrees * 3.14159265F / 180.0F);
+    const float sx = sy / aspect;
     const std::array<float, 3> right{1.0F, 0.0F, 0.0F}, up{0.0F, std::cos(pitch), std::sin(pitch)},
         forward{0.0F, -std::sin(pitch), std::cos(pitch)};
     const auto dot = [&](const std::array<float, 3>& a) { return a[0] * eye[0] + a[1] * eye[1] + a[2] * eye[2]; };
@@ -1193,9 +1195,10 @@ TEST(Oot3dGrassLod, FocalLengthIsAPixelWidthOfA1200By720Target) {
 TEST(Oot3dGrassLod, LevelsRegroupTheSameInstancesByDistance) {
     const auto placementWorld = FieldPlacement(30.0F);
     const std::array<float, 3> eye{0.0F, 100.0F, 0.0F};
-    const auto camera = FieldCamera(eye, 12.0F);
-    GrassStreamPlacement placement{placementWorld, camera, eye};
+    // 45 degrees vertical at 16:9, and the game's 60 degrees at the top screen's 5:3.
+    for (const auto& camera : {FieldCamera(eye, 12.0F), FieldCamera(eye, 12.0F, 60.0F, 5.0F / 3.0F)})
     for (const auto distance : {GrassSwitchDistance::Near, GrassSwitchDistance::Far, GrassSwitchDistance::Area}) {
+        GrassStreamPlacement placement{placementWorld, camera, eye};
         auto settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(true, distance));
         std::vector<GrassStreamInstance> off(GrassSwitchStreamCapacity()), on(GrassSwitchStreamCapacity());
         std::vector<GrassStreamRange> offRanges, onRanges;
@@ -1252,7 +1255,7 @@ TEST(Oot3dGrassLod, LevelsRegroupTheSameInstancesByDistance) {
         EXPECT_EQ(next, count);
         EXPECT_EQ(perKind[static_cast<size_t>(GrassStreamKind::Blades)] + perKind[0] + perKind[2] + perKind[3], count);
         for (uint32_t i = 0; i < offStats.Instances(); ++i) verticesOff += 15U;
-        std::cout << "  lod " << GrassSwitchDistanceWord(distance) << ": " << count << " instances, near "
+        std::cout << "  lod " << GrassSwitchDistanceWord(distance) << " focal " << GrassLodFocal(camera) << ": " << count << " instances, near "
                   << perKind[static_cast<size_t>(GrassStreamKind::Blades)] << " l5 " << perKind[0] << " l3 "
                   << perKind[2] << " l1 " << perKind[3] << ", vertices " << verticesOn << " (test.9 " << verticesOff
                   << ")\n";
