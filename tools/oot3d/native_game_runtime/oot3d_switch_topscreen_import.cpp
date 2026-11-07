@@ -247,9 +247,12 @@ Outcome DownloadAndBuild(SwitchConsoleScreen& screen, std::string* failure) {
 }
 
 // An official archive the player put in sdmc:/switch/oot3dre/, and the
-// release its name stands for (IdentifyArchiveFile checks it).
+// release its name stands for (IdentifyArchiveFile checks it); the newest
+// release when there are several.
 std::optional<std::pair<fs::path, const ts::Archive*>> LocalArchive() {
-    for (const ts::Archive& archive : ts::KnownArchives()) {
+    const auto known = ts::KnownArchives();
+    for (auto it = known.rbegin(); it != known.rend(); ++it) {
+        const ts::Archive& archive = *it;
         const fs::path path = Root() / archive.FileName;
         std::error_code error;
         if (fs::is_regular_file(path, error)) return std::pair{path, &archive};

@@ -22,12 +22,19 @@ namespace ri = RomImport;
 constexpr Archive kArchives[] = {
     {"3.0", "SingleScreen_3.0", "singlescreen_30.zip", 28'883'512,
      "5668640fec8dc2b47b4516fd0b871c4d7d90ca1c2203acc2a22adb59aaab5993", nullptr, 0, nullptr},
-    // The HD UI atlas is byte-identical in the EUR, USA and JPN folders.
+    // The HD UI atlas is byte-identical in the EUR, USA and JPN folders. 3.2.1
+    // (GameBanana file 1875895) was deleted when 3.2.2 replaced it; both carry
+    // the same custom_ui01.ctxb, Latin font and HD UI atlas.
     {"3.2.1", "SingleScreen_3.2.1", "singlescreen_321.zip", 56'466'735,
-     "737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0",
-     "https://gamebanana.com/dl/1875895", 7'007'958,
+     "737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0", nullptr, 7'007'958,
+     "082582da95930114a149db8fa3c14e8be546d7df1b003c71c81bbbc2d4fde71e"},
+    {"3.2.2", "SingleScreen_3.2.2", "singlescreen_322.zip", 56'493'832,
+     "d07f5ae7a77b83951836d80a000a9625a5e2da52ae0fa262d9b44409fda31aa0",
+     "https://gamebanana.com/dl/1879915", 7'007'958,
      "082582da95930114a149db8fa3c14e8be546d7df1b003c71c81bbbc2d4fde71e"},
 };
+// The download is the newest release.
+constexpr const Archive& kDownloadArchive = kArchives[std::size(kArchives) - 1];
 
 constexpr const char* kUiAtlasSha256 = "20290e417c56973cd19daa1f61a6c3963f075d61776db3d996954ee3296d07d8";
 // Azahar's name for the custom_ui01 replacement (its CityHash, ETC1A4).
@@ -594,7 +601,7 @@ void Seek(std::FILE* file, std::uint64_t offset) {
 
 } // namespace
 
-const Archive& DownloadArchive() { return kArchives[1]; }
+const Archive& DownloadArchive() { return kDownloadArchive; }
 std::span<const Archive> KnownArchives() { return kArchives; }
 
 OfferSetting ParseOfferSetting(std::string_view text) {
@@ -1199,8 +1206,8 @@ const Archive* IdentifyArchiveFile(const fs::path& path, std::string* error,
     if (!candidate) {
         if (error)
             *error = path.filename().string() + " is " + std::to_string(size) +
-                     " bytes, not a known Single Screen Experience release (3.2.1 is " +
-                     std::to_string(DownloadArchive().Bytes) + " bytes)";
+                     " bytes, not a known Single Screen Experience release (" + DownloadArchive().Version +
+                     " is " + std::to_string(DownloadArchive().Bytes) + " bytes)";
         return nullptr;
     }
     ri::Sha256 hash;

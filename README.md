@@ -33,7 +33,7 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
   lets you download and install it but not share it. The first start offers to download it from
   GameBanana (56 MB) and builds the HUD textures, the HD HUD art and the HD text font from your game
   files: A downloads, B asks again next time, X never asks (L3+R3 → Updates turns the offer back on).
-  Without internet, download `singlescreen_321.zip` from that page on a PC and copy it into
+  Without internet, download `singlescreen_322.zip` from that page on a PC and copy it into
   `switch/oot3dre/`. Without the mod the game still runs, with the game's own HUD art.
 
 ### HD textures (optional)

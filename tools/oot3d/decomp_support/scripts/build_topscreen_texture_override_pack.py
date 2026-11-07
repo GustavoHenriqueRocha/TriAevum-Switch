@@ -3,7 +3,7 @@
 
 Accepts the official TopScreen 2.1.1 archive (localized CTXB overrides plus
 custom_menu00/custom_font00) or a verified "Single Screen Experience" 3.x
-archive, 3.0 or 3.2.1 (custom_ui01 relocated into the 2.1.1 profile-texture
+archive, 3.0, 3.2.1 or 3.2.2 (custom_ui01 relocated into the 2.1.1 profile-texture
 layout).
 """
 
@@ -53,7 +53,9 @@ INVALID_ROMFS_OFFSET = 0xFFFFFFFF
 # 3.2.1 (dl/1875895, singlescreen_321.zip) keeps the 3.0 layout under its own
 # root and the byte-identical custom_ui01.ctxb; it only adds
 # romfs/menu/hud_rupee00.ctxb, a texture the original game does not have
-# (only the mod's code.ips reads it), so both build the same pack.
+# (only the mod's code.ips reads it), so both build the same pack. 3.2.2
+# (dl/1879915, singlescreen_322.zip) replaced 3.2.1, which GameBanana deleted;
+# it has the same custom_ui01.ctxb and builds the same pack.
 # Archive root directory -> (archive bytes, archive SHA-256).
 TOPSCREEN_3X_ARCHIVES = {
     "SingleScreen_3.0": (
@@ -62,6 +64,9 @@ TOPSCREEN_3X_ARCHIVES = {
     "SingleScreen_3.2.1": (
         56_466_735,
         "737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0"),
+    "SingleScreen_3.2.2": (
+        56_493_832,
+        "d07f5ae7a77b83951836d80a000a9625a5e2da52ae0fa262d9b44409fda31aa0"),
 }
 TOPSCREEN_30_UI_ATLAS_SHA256 = (
     "20290e417c56973cd19daa1f61a6c3963f075d61776db3d996954ee3296d07d8")

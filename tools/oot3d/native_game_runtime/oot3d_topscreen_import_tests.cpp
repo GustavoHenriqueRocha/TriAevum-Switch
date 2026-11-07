@@ -349,12 +349,19 @@ void TestZip(const fs::path& directory) {
 
 void TestArchiveRoot(const fs::path& directory) {
     const fs::path path = directory / "roots.zip";
+    WriteFile(path, MakeZip({{"SingleScreen_3.2.2/USA/a", Text("x"), false}}));
+    {
+        ts::ZipReader zip(path);
+        const ts::Archive* root = ts::FindArchiveRoot(zip);
+        CHECK(root != nullptr && std::string_view(root->Version) == "3.2.2");
+        CHECK(root == &ts::DownloadArchive());
+    }
+    // 3.2.1 (no longer downloadable) is still recognized.
     WriteFile(path, MakeZip({{"SingleScreen_3.2.1/USA/a", Text("x"), false}}));
     {
         ts::ZipReader zip(path);
         const ts::Archive* root = ts::FindArchiveRoot(zip);
-        CHECK(root != nullptr && std::string_view(root->Version) == "3.2.1");
-        CHECK(root == &ts::DownloadArchive());
+        CHECK(root != nullptr && std::string_view(root->Version) == "3.2.1" && root->Url == nullptr);
     }
     WriteFile(path, MakeZip({{"TopScreen2.1.1/EUR/a", Text("x"), false}}));
     {
@@ -366,9 +373,14 @@ void TestArchiveRoot(const fs::path& directory) {
         ts::ZipReader zip(path);
         CHECK_THROWS(ts::FindArchiveRoot(zip), "mixes");
     }
-    CHECK(ts::KnownArchives().size() == 2);
-    CHECK(ts::DownloadArchive().Bytes == 56'466'735);
-    CHECK(std::string_view(ts::DownloadArchive().Url) == "https://gamebanana.com/dl/1875895");
+    CHECK(ts::KnownArchives().size() == 3);
+    CHECK(ts::DownloadArchive().Bytes == 56'493'832);
+    CHECK(std::string_view(ts::DownloadArchive().Sha256) ==
+          "d07f5ae7a77b83951836d80a000a9625a5e2da52ae0fa262d9b44409fda31aa0");
+    CHECK(std::string_view(ts::DownloadArchive().Url) == "https://gamebanana.com/dl/1879915");
+    CHECK(std::string_view(ts::DownloadArchive().FileName) == "singlescreen_322.zip");
+    // Every release that carries the HD UI atlas carries the same one.
+    CHECK(std::string_view(ts::KnownArchives()[1].UiAtlasHdSha256) == ts::DownloadArchive().UiAtlasHdSha256);
 }
 
 void TestRomFs(const fs::path& directory) {
@@ -421,7 +433,7 @@ void TestPackRejections(const fs::path& directory) {
     ts::RomFsImage romfs(romfsPath);
     const fs::path path = directory / "pack.zip";
     // Only an EUR atlas: a USA RomFS finds none.
-    WriteFile(path, MakeZip({{"SingleScreen_3.2.1/EUR/Emulator/load/mods/0004000000033600/romfs/menu/custom_ui01.ctxb",
+    WriteFile(path, MakeZip({{"SingleScreen_3.2.2/EUR/Emulator/load/mods/0004000000033600/romfs/menu/custom_ui01.ctxb",
                               Text("ctxb"), true}}));
     {
         ts::ZipReader zip(path);
@@ -431,7 +443,7 @@ void TestPackRejections(const fs::path& directory) {
         CHECK_THROWS(ts::BuildTexturePack(zip, ts::DownloadArchive(), romfs, "KOR"), "unsupported");
     }
     // The 3DS Hardware target is also accepted.
-    WriteFile(path, MakeZip({{"SingleScreen_3.2.1/USA/3DS Hardware/luma/titles/0004000000033500/romfs/menu/custom_ui01.ctxb",
+    WriteFile(path, MakeZip({{"SingleScreen_3.2.2/USA/3DS Hardware/luma/titles/0004000000033500/romfs/menu/custom_ui01.ctxb",
                               Text("ctxb"), false}}));
     {
         ts::ZipReader zip(path);
@@ -444,11 +456,11 @@ void TestFontPack(const fs::path& directory) {
     const Bytes native = FontBytes(16);
     WriteFile(romfsPath, MakeRomFs({{"message/us/ltn16.qbf", native}}));
     ts::RomFsImage romfs(romfsPath);
-    const std::string hdPath = "SingleScreen_3.2.1/USA/Emulator/load/mods/0004000000033500/romfs/message/us/ltn16.qbf";
+    const std::string hdPath = "SingleScreen_3.2.2/USA/Emulator/load/mods/0004000000033500/romfs/message/us/ltn16.qbf";
     const fs::path path = directory / "fonts.zip";
     const Bytes hd = FontBytes(64);
     WriteFile(path, MakeZip({{hdPath, hd, true},
-                             {"SingleScreen_3.2.1/USA/Emulator/load/mods/0004000000033500/exefs/code.ips",
+                             {"SingleScreen_3.2.2/USA/Emulator/load/mods/0004000000033500/exefs/code.ips",
                               Text("DO NOT IMPORT"), false}}));
     {
         ts::ZipReader zip(path);
@@ -531,9 +543,10 @@ void TestOffer() {
     CHECK(!ts::ShouldOffer(false, false, true, OfferSetting::Never));
     CHECK(!ts::ShouldOffer(true, false, true, OfferSetting::Never));
     // A local archive: always without a pack; with one, only to add the HD
-    // atlas, and only from a release that carries it (3.2.1, not 3.0).
+    // atlas, and only from a release that carries it (3.2.x, not 3.0).
     const ts::Archive& v30 = ts::KnownArchives()[0];
-    const ts::Archive& v321 = ts::DownloadArchive();
+    const ts::Archive& v321 = ts::KnownArchives()[1];
+    CHECK(ts::ShouldBuildFromLocalArchive(true, false, ts::DownloadArchive()));
     CHECK(std::string_view(v30.Version) == "3.0" && v30.UiAtlasHdSha256 == nullptr);
     CHECK(ts::ShouldBuildFromLocalArchive(false, false, v30));
     CHECK(ts::ShouldBuildFromLocalArchive(false, false, v321));
@@ -708,17 +721,23 @@ void TestWriteAndIdentify(const fs::path& directory) {
     CHECK_THROWS(ts::WriteFileVerified(directory / "absent" / "x.o3tu", Text("x")), "cannot write");
 
     std::string error;
-    WriteFile(directory / "singlescreen_321.zip", Text("too short"));
-    CHECK(ts::IdentifyArchiveFile(directory / "singlescreen_321.zip", &error) == nullptr);
-    CHECK(error.find("not a known Single Screen Experience release") != std::string::npos);
+    WriteFile(directory / "singlescreen_322.zip", Text("too short"));
+    CHECK(ts::IdentifyArchiveFile(directory / "singlescreen_322.zip", &error) == nullptr);
+    CHECK(error.find("not a known Single Screen Experience release (3.2.2 is 56493832 bytes)") != std::string::npos);
     CHECK(ts::IdentifyArchiveFile(directory / "absent.zip", &error) == nullptr);
     // Right size, wrong content (GameBanana replacing the file).
-    WriteFile(directory / "singlescreen_321.zip", Bytes(ts::DownloadArchive().Bytes));
+    WriteFile(directory / "singlescreen_322.zip", Bytes(ts::DownloadArchive().Bytes));
     std::uint64_t lastDone = 0;
-    CHECK(ts::IdentifyArchiveFile(directory / "singlescreen_321.zip", &error,
+    CHECK(ts::IdentifyArchiveFile(directory / "singlescreen_322.zip", &error,
                                   [&](std::uint64_t done, std::uint64_t) { lastDone = done; }) == nullptr);
     CHECK(lastDone == ts::DownloadArchive().Bytes);
+    CHECK(error.find("is not the official 3.2.2 archive") != std::string::npos);
+    // The 3.2.1 size is still identified as 3.2.1.
+    WriteFile(directory / "singlescreen_321.zip", Bytes(ts::KnownArchives()[1].Bytes));
+    CHECK(ts::IdentifyArchiveFile(directory / "singlescreen_321.zip", &error) == nullptr);
     CHECK(error.find("is not the official 3.2.1 archive") != std::string::npos);
+    fs::remove(directory / "singlescreen_321.zip");
+    fs::remove(directory / "singlescreen_322.zip");
 }
 
 std::string Sha256Of(const Bytes& data) { return ri::Hex(ri::Sha256Of(data)); }

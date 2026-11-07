@@ -60,9 +60,9 @@ struct Archive {
     const char* UiAtlasHdSha256;
 };
 
-// The release the console downloads (3.2.1, GameBanana file 1875895).
+// The release the console downloads (3.2.2, GameBanana file 1879915).
 [[nodiscard]] const Archive& DownloadArchive();
-// Every release the builder accepts (3.0 and 3.2.1: the same custom_ui01).
+// Every release the builder accepts (3.0, 3.2.1 and 3.2.2: the same custom_ui01).
 [[nodiscard]] std::span<const Archive> KnownArchives();
 
 inline constexpr const char* kModName = "OoT3D: Single Screen Experience";

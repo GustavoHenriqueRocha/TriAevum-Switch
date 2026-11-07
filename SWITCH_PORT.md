@@ -119,8 +119,8 @@ Performance and usability:
   focus and restarted on return (HOME, sleep) or when its data stalls.
   Stick, touch and gyro add up in the same aim; turning with the stick or a touch drag never
   changes how the gyro maps afterwards (it used to invert pitch after ~180° of stick/touch turn).
-- **TopScreen 3.x**: 2.1.1 was removed from GameBanana; the importer now accepts the 3.0 and 3.2.1
-  packages, and the Switch build downloads 3.2.1 and builds the pack itself (below).
+- **TopScreen 3.x**: 2.1.1 was removed from GameBanana; the importer now accepts the 3.0, 3.2.1 and
+  3.2.2 packages, and the Switch build downloads 3.2.2 and builds the pack itself (below).
 - **USA ROM** accepted in the build (the project's own canonical USA→EUR adapter).
 - **Input paths** configurable via `OOT3D_OPERATIONAL_<variable>` (previously hardcoded to the author's Windows).
 - Original icon for the `.nro` (`res/switch/icon.jpg`).
@@ -177,17 +177,18 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
   mod's HD HUD art; everything is rebuilt from the archive and the old files stay until the new ones
   are written. L3+R3 > Updates > HUD textures > "Offer the download at the
   next start" writes `ask` for players who skipped; it takes effect at the next start.
-- A downloads `https://gamebanana.com/dl/1875895` (version 3.2.1; GameBanana redirects to its CDN)
+- A downloads `https://gamebanana.com/dl/1879915` (version 3.2.2; GameBanana redirects to its CDN)
   on a worker thread with the updater's HTTPS code (`oot3d_switch_network.{h,cpp}`: sockets and
   libcurl only while it runs, HTTPS only, certificates checked by the system), to
-  `singlescreen_321.zip.partial`, with a progress bar, B to cancel and auto-sleep off. The body may
-  not exceed 56,466,735 bytes and is hashed while it streams; size and SHA-256
-  (`737807fd…c77aa0`) must match. The archive is then read for three entries only, the pack,
+  `singlescreen_322.zip.partial`, with a progress bar, B to cancel and auto-sleep off. The body may
+  not exceed 56,493,832 bytes and is hashed while it streams; size and SHA-256
+  (`d07f5ae7…fda31aa0`) must match. The archive is then read for three entries only, the pack,
   the font coverage and the HD UI atlas are built from `game/romfs.bin`, and the download is deleted.
-- An official archive the player copied to `sdmc:/switch/oot3dre/` (`singlescreen_321.zip`, or
-  3.0's `singlescreen_30.zip`) is verified and used without network or question, and left there.
+- An official archive the player copied to `sdmc:/switch/oot3dre/` (`singlescreen_322.zip`, 3.2.1's
+  `singlescreen_321.zip` or 3.0's `singlescreen_30.zip`; the newest when there are several) is
+  verified and used without network or question, and left there.
   With a pack already installed it is only used to add a missing HD UI atlas, and only a release
-  that carries one (3.2.1; 3.0's is not pinned, so a 3.0 install is offered the 3.2.1 download).
+  that carries one (3.2.x; 3.0's is not pinned, so a 3.0 install is offered the 3.2.2 download).
 - Written to `config/`, each through `<name>.partial`, read back and compared, then moved over
   the old file (removed first: Horizon cannot rename over a file): `font_coverage.zip`,
   `topscreen_import.json` (mod, author, page, license, archive/pack/font SHA-256 and the HD UI
@@ -198,7 +199,7 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
   an HTTP error ("the server answered HTTP 404"), a stalled transfer (30 s below 1 KiB/s), too
   little free space, or a different file from GameBanana. If the mod is updated and the link
   serves a new archive, it is cut off at the expected length or fails the SHA-256 check ("GameBanana
-  sent a different file than the 3.2.1 release this game knows"); supporting it needs a new
+  sent a different file than the 3.2.2 release this game knows"); supporting it needs a new
   release with the new pin and, if the layout changed, builder changes. The failure screen offers
   A try again, B start without the textures, X never ask again, and explains how to copy the
   archive from a PC.
@@ -206,7 +207,7 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
   (`oot3d_native_a32_window_setup.cpp`) and uses it from 480 output pixels high, so the Switch
   (720p) uses it: the mod's 64x64 Latin `ltn16.qbf` covers the native 16x16 glyphs, paired by
   character. Its `sys8.qbf` uses an encoding the pairing does not support and is not imported.
-- HD UI atlas: the archive's `SingleScreen_3.2.1/<region>/Emulator/load/textures/<title>/UI/
+- HD UI atlas: the archive's `SingleScreen_3.2.x/<region>/Emulator/load/textures/<title>/UI/
   tex1_512x256_1FAF9B5B2ADF6038_13_mip0.png` (Azahar's name for `custom_ui01`, 4096x2048,
   7,007,958 bytes, SHA-256 `082582da…d4fde71e`, byte-identical in the EUR, USA and JPN folders) is
   checked, decoded (8-bit RGBA PNG, own zlib decoder), reduced to 3x the native 512x256 atlas
