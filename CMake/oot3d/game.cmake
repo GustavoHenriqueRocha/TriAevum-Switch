@@ -95,6 +95,13 @@ add_executable(oot3d_fps_counter_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_fps_counter_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_fps_counter_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Landing roll (N64) at the fall action's landing (config/no_landing_roll; header-only).
+add_executable(oot3d_landing_roll_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_landing_roll_tests.cpp
+)
+target_compile_features(oot3d_landing_roll_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_landing_roll_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Texture pack size cap, mipmaps and the HD textures setting (pure parts).
 add_executable(oot3d_texture_pack_scale_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_texture_pack_scale_tests.cpp
@@ -428,6 +435,7 @@ if (TARGET oot3d_native_a32_aot OR TARGET oot3d_native_whole_aot OR
         tools/oot3d/native_game_runtime/oot3d_native_pcm_diagnostics.cpp
         tools/oot3d/native_game_runtime/oot3d_native_controls_settings_panel.cpp
         tools/oot3d/native_game_runtime/oot3d_game_language_panel.cpp
+        tools/oot3d/native_game_runtime/oot3d_gameplay_settings_panel.cpp
         tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp
         tools/oot3d/native_game_runtime/oot3d_savestate_panel.cpp
         tools/oot3d/native_game_runtime/oot3d_savestate_settings.cpp
