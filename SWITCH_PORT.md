@@ -248,6 +248,47 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
   message and the log's path, then closes the application through AM (`__nx_applet_exit_mode = 1`,
   as Exit game does). Returning to the homebrew loader made it abort (`hbl + 0x3810`, 2001-0106).
 
+### TopScreen 3.2.2 and the mod's HD HUD images (07/11)
+
+- **Download.** GameBanana deleted 3.2.1 (file 1875895: `dl/1875895` now redirects to the mod page)
+  when 3.2.2 replaced it, so the console download failed. The console now downloads 3.2.2
+  (`https://gamebanana.com/dl/1879915`, `singlescreen_322.zip`, 56,493,832 bytes, SHA-256
+  `d07f5ae7a77b83951836d80a000a9625a5e2da52ae0fa262d9b44409fda31aa0`); 3.2.1 and 3.0 zips copied to
+  `switch/oot3dre/` still build (the newest is used). The 7,007,958 bytes in the 3.2.1 entry were
+  never a download: they are the HD UI atlas PNG's size. Against the archived 3.2 (`dl/1873594`), 3.2.2
+  only changes the six `code.ips`; `custom_ui01.ctxb`, `ltn16.qbf` and the PNGs are byte-identical.
+  From the canonical EUR and raw USA Rev 1 RomFS, 3.2.2 builds pack `6e79f87d…22ea7f` (as 3.0/3.2.1)
+  and HD atlas pixels `f8be9f0e…`, C++ and Python alike.
+- **The mod's other HD images.** 3.2 and 3.2.2 ship three Azahar PNGs per region, all byte-identical
+  across EUR/USA/JPN: `tex1_512x256_1FAF9B5B2ADF6038_13_mip0.png` (custom_ui01, already imported),
+  `tex1_512x256_BB00B25B152582B6_4_mip0.png` (8,970,114 bytes, `1237d061…`) and
+  `tex1_128x128_8064FDFB5065B51D_4_mip0.png` (478,849 bytes, `baf550ec…`). The names are Azahar's
+  legacy hash (detiled, rows flipped) of the game's own English `menu_top_parts00.ctxb` (hearts, magic
+  meter, B label and icon, touch buttons, pause pages) and of `menu_cursor00.ctxb`; TopScreen 3.x leaves
+  both CTXBs unchanged, so on Azahar they replace them. The import now also extracts these two, reduces
+  them to 3x (1536x768, 384x384; coverage against the RomFS textures 4.3% and 7.8% off, about 47-50%
+  upside down, so not flipped) and writes `config/topscreen_hd/<same name>`; the Switch launch passes
+  `--topscreen-hd-textures` beside the pack, and the HUD draws an image when Azahar's legacy hash of
+  the request matches its name and the player's texture pack has no image of it (the pack wins; while
+  it decodes, the image stands in). 3.2.1's images are not pinned (its archive cannot be checked).
+  "HD art installed" is now the atlas plus these images (`HdArtInstalled`): older installs are offered
+  the download again.
+- **Identity of overridden textures.** This port's O3TU rewrites `menu_top_parts00`/`menu_cursor00`
+  (the 2.1.1 sprites in their 2.1.1 rectangles), and the HUD looked texture-pack images up by the
+  rewritten bytes (English `menu_top_parts00`: legacy hash `6C570A11…` instead of the game's
+  `BB00B25B…`), so neither HenrikoMagnifico's nor the mod's image ever applied: hearts (lavender empty
+  hearts), the B label and the cursor kept the game's 1x art. The UI texture provider now names the
+  request after the game's own bytes (decoding them too for formats 5 and up), while the override's
+  pixels stay the stand-in.
+- What the screenshots on the mod page show: the Kokiri Forest one (blue-grey empty hearts, white
+  D-pad outline) is the HD art (custom_ui01 HD atlas and the `BB00B25B` image); the Epona one (lavender
+  hearts, dark D-pad outline with tick marks) is the 1x art (the native `menu_top_parts00` and the 1x
+  `custom_ui01` rect 3 (385,108,29,29)). The D-pad's centre is transparent in both; its colour is the
+  scene. The archive has no other art sets: only `<region>/<Emulator|3DS Hardware>`, no optional
+  folders; "Project Restoration HUD style" is a layout option of the mod's code, drawn from the same
+  atlas. Item icons and rupee digits (`num_all00`, legacy hash `FABD759BB95C1C6A`) have no image in the
+  mod; a texture pack that has them (HenrikoMagnifico's does) applies as before.
+
 ## How to build (Linux)
 
 1. devkitPro (`switch-dev switch-sdl2 switch-mesa switch-glad switch-zlib`), `cmake`, Python 3 with `capstone`.
