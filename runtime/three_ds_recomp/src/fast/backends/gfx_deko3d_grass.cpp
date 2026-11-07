@@ -279,15 +279,19 @@ struct GrassState {
     uint64_t RasterDraws = 0, DepthDraws = 0;
     uint64_t CullInstances = 0, CullInstancesMax = 0, CullThinned = 0;
     uint64_t EmptyFrames = 0;   // a draw point with a cull result but nothing of it drawn
-    uint64_t NoResultFrames = 0; // a draw point before the first cull finished
+    uint64_t NoResultFrames = 0; // a draw point before the scene's first cull finished
     uint64_t FreshBase = 0, StaleBase = 0;
     // The game's area (GrassArea) the placements of this frame belong to.
     uint32_t Area = 0xffffffffU;
     uint32_t DrawnArea = 0xffffffffU;
-    // Culls dropped before drawing (GrassCullFitsFrame): of another area, or
-    // with no placement in common with this frame's; and cull ranges drawn
-    // with their placement as drawn into another target this frame.
-    uint64_t AreaChanges = 0, ForeignOtherArea = 0, ForeignNoPlacement = 0, OtherTargetRanges = 0;
+    // Area and scene changes (CheckGrassArea); culls of another scene dropped
+    // and draw points whose cull had none of the frame's placements (kept for
+    // the next frame, GrassCullForDrawPoint); cull ranges drawn with their
+    // placement as drawn into another target this frame.
+    uint64_t AreaChanges = 0, SceneChanges = 0, ForeignOtherScene = 0, NoPlacementFrames = 0, OtherTargetRanges = 0;
+    // Draw points without grass right after one with grass, in one scene.
+    Oot3d::GrassGapCounter Gaps;
+    uint64_t GapsBase = 0;
     // In-between frames, and those that had the real frame's placements but
     // none of its source draws to take their camera from.
     uint64_t InBetweenFrames = 0, InBetweenWithoutCamera = 0;
@@ -558,14 +562,19 @@ void GrassNoteSample(bool synthetic, uint64_t frame) {
     else if (state->InBetweenFrame == frame) state->InBetweenFrame = ~0ULL;
 }
 
-// A scene or room change: the drawn cull, the sources' memo (whose geometry
-// identities the new area may reuse) and this frame's placements are
-// dropped, so no grass of the previous area is ever drawn in the new one.
+// A scene change: the drawn cull, the sources' memo (whose geometry
+// identities the new scene may reuse) and this and the last real frame's
+// placements are dropped, so no grass of the previous scene is ever drawn in
+// the new one. A room change within the scene keeps them all
+// (ClassifyGrassAreaChange): the previous room's ground is still drawn.
 void CheckGrassArea(GrassState& state) {
     const uint32_t area = gGrassArea.load(std::memory_order_relaxed);
-    if (area == state.Area) return;
+    const auto change = Oot3d::ClassifyGrassAreaChange(state.Area, area);
+    if (change == Oot3d::GrassAreaChange::None) return;
     state.Area = area;
     ++state.AreaChanges;
+    if (change == Oot3d::GrassAreaChange::Room) return;
+    ++state.SceneChanges;
     state.Slots.Reset();
     state.Current = {};
     state.Sources = std::make_unique<Oot3d::PicaGrassSourceState>();
@@ -758,9 +767,10 @@ void GrassEndFrame(uint64_t frame) {
         // the culls selected.
         Log("grass: frame %llu fragment raster %llu draws, depth-writing %llu | culls fresh %llu stale %llu "
             "(frames that redrew an older cull), no result %llu, nothing drawn %llu | cull instances %.0f "
-            "(max %llu) thinned %.0f | distance=%s full %.0f max %.0f | area %s scene %d room %d, changes %llu, "
-            "foreign culls dropped %llu (other area %llu, no shared placement %llu), ranges drawn with another "
-            "target's placement %llu | empty placements %u | in-between frames %llu (without a camera %llu)",
+            "(max %llu) thinned %.0f | distance=%s full %.0f max %.0f | area %s scene %d room %d, changes %llu "
+            "(scene %llu), foreign culls dropped %llu (other scene), without a shared placement %llu, gaps %llu, "
+            "ranges drawn with another target's placement %llu | empty placements %u | in-between frames %llu "
+            "(without a camera %llu)",
             static_cast<unsigned long long>(frame), static_cast<unsigned long long>(state->RasterDraws),
             static_cast<unsigned long long>(state->DepthDraws),
             static_cast<unsigned long long>(state->Slots.FreshFrames - state->FreshBase),
@@ -773,10 +783,10 @@ void GrassEndFrame(uint64_t frame) {
             static_cast<double>(state->Stream.DrawDistance), state->DrawnArea == 0xffffffffU ? "none" : "drawn",
             state->DrawnArea == 0xffffffffU ? -1 : static_cast<int>(state->DrawnArea >> 8U),
             state->DrawnArea == 0xffffffffU ? -1 : static_cast<int>(static_cast<int8_t>(state->DrawnArea & 0xffU)),
-            static_cast<unsigned long long>(state->AreaChanges),
-            static_cast<unsigned long long>(state->ForeignOtherArea + state->ForeignNoPlacement),
-            static_cast<unsigned long long>(state->ForeignOtherArea),
-            static_cast<unsigned long long>(state->ForeignNoPlacement),
+            static_cast<unsigned long long>(state->AreaChanges), static_cast<unsigned long long>(state->SceneChanges),
+            static_cast<unsigned long long>(state->ForeignOtherScene),
+            static_cast<unsigned long long>(state->NoPlacementFrames),
+            static_cast<unsigned long long>(state->Gaps.Gaps - state->GapsBase),
             static_cast<unsigned long long>(state->OtherTargetRanges), state->Placements->Stats().Empty,
             static_cast<unsigned long long>(state->InBetweenFrames),
             static_cast<unsigned long long>(state->InBetweenWithoutCamera));
@@ -796,7 +806,9 @@ void GrassEndFrame(uint64_t frame) {
     state->CullInstances = state->CullInstancesMax = state->CullThinned = 0;
     state->EmptyFrames = state->NoResultFrames = 0;
     state->FreshBase = state->Slots.FreshFrames;
-    state->AreaChanges = state->ForeignOtherArea = state->ForeignNoPlacement = state->OtherTargetRanges = 0;
+    state->AreaChanges = state->SceneChanges = state->ForeignOtherScene = state->NoPlacementFrames = 0;
+    state->OtherTargetRanges = 0;
+    state->GapsBase = state->Gaps.Gaps;
     state->InBetweenFrames = state->InBetweenWithoutCamera = 0;
     state->StaleBase = state->Slots.StaleFrames;
 }
@@ -876,21 +888,22 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
     uint32_t draws = 0U;
     uint64_t visible = 0U;
     bool timed = false;
-    // A cull of another area, or with none of its placements among this
-    // frame's (by identity, whatever target this frame draws into), is
-    // dropped: never drawn with this frame's cameras.
-    if (state->Current.Valid) {
-        const auto fit = Oot3d::GrassCullFitsFrame(state->Current.Area, state->Area, state->Current.Identities,
+    // A cull of another scene is dropped: never drawn with this frame's
+    // cameras. One with none of its placements among this frame's (by
+    // identity, whatever target this frame draws into) is left out of this
+    // frame only. A cull of the previous room of the scene is drawn.
+    const auto pick = Oot3d::GrassCullForDrawPoint(state->Slots, frame, state->Current.Area, state->Area,
+                                                   state->Current.Identities,
                                                    [&](uint64_t identity) { return state->Frame.Has(identity); });
-        if (fit != Oot3d::GrassCullFit::Draw) {
-            ++(fit == Oot3d::GrassCullFit::OtherArea ? state->ForeignOtherArea : state->ForeignNoPlacement);
-            state->Slots.Reset();
-            state->Current = {};
-        }
+    if (pick.Fit == Oot3d::GrassCullFit::OtherScene) {
+        ++state->ForeignOtherScene;
+        state->Current = {};
+    } else if (pick.Fit == Oot3d::GrassCullFit::NoPlacement) {
+        ++state->NoPlacementFrames;
     }
-    const auto drawnSlot = state->Slots.Draw(frame);
-    if (!drawnSlot) ++state->NoResultFrames;
-    else state->DrawnArea = state->Area;
+    const auto drawnSlot = pick.Slot;
+    if (!pick.Fit || pick.Fit == Oot3d::GrassCullFit::OtherScene) ++state->NoResultFrames;
+    if (drawnSlot) state->DrawnArea = state->Area;
     const auto& current = state->Current;
     const auto timestamp = [&](uint32_t index) {
         dkCmdBufReportCounter(cmd, DkCounter_Timestamp,
@@ -1005,6 +1018,7 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
         }
     }
     if (drawnSlot && draws == 0U && (current.Stats.Tufts + current.Stats.Blades) != 0U) ++state->EmptyFrames;
+    state->Gaps.DrawPoint(state->Area, drawnSlot.has_value(), draws != 0U);
     if (timed) {
         timestamp(2U);
         state->TimestampPending[mDevice.Slot()] = true;

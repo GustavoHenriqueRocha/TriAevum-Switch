@@ -2380,6 +2380,8 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
     frame (`Deko3dSetGrassArea`, only with `draw`). A scene or room change drops the drawn cull, the
     sources' memo and the frame's placements. A cull of another area, or of none of this frame's
     placements, is dropped before drawing (`GrassCullFitsFrame`), counted as `foreign culls dropped`.
+    (After test.8 only a scene change drops them, and only a cull of another scene is forgotten; see
+    below.)
   - *60 fps flicker:* in-between frames interpolate the view in the vertex uniforms but not the
     light binding's camera, so the world transform the source memo checks drifted and those frames lost
     their sources (no draw point: ~40% of frames). A memoized source now keeps its world transform and
@@ -2446,6 +2448,39 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   - Tests: `oot3d_grass_switch_tests` (`Oot3dGrassTwinsAtLoad`: a fresh process, no store, no area
     before, with the preset's rules: the entrance's ground has rule 10 at the first ask; every row is
     of a preset rule with its channel and the best row wins) and two guards.
+- **After test.8 (07/11, a flicker on entering the Forest Temple):** the user saw the grass flicker
+  once on walking from Sacred Forest Meadow into the temple. log16's window of the entry (frames
+  27000-27599): `area drawn scene 3 room 1, changes 5, foreign culls dropped 4 (other area 2, no
+  shared placement 2)`, `no result 15`, worker max 5.51 ms; `hitches.txt` puts room 1 at frame
+  27573 (`scene=0x03:bmori1 room=1`), and the next window still draws the entrance's grass in room 1
+  (`drawn 273/600`, `area drawn scene 3 room 1`).
+  - *Cause:* round 3 treated a room change like a scene change: it dropped the drawn cull, the
+    sources' memo and the placements of this and the last real frame. The entrance's ground (room 0)
+    stays drawn from room 1 (both rooms are loaded across a room transition), so the frame of the
+    change had no cull; a cull still in flight from room 0 was dropped on arrival as another area's
+    (`other area`), so the next frame had none either, and an fps60 in-between frame right after the
+    change lost its placements and camera. A drawn frame, one or two without grass, drawn again: the
+    flicker. A cull without a shared placement (`no shared placement`, frames drawn before the
+    temple's own culls, render lag) was also forgotten, costing the frame after it its grass.
+  - *Fix* (`grass_stream_handoff.h`): `ClassifyGrassAreaChange` tells a room change from a scene
+    change; `CheckGrassArea` drops everything only on a scene change (leaving gameplay counts as one).
+    A room change keeps the cull, the memo and the placements: the memo's key holds the geometry's
+    content version, so a room loaded into another room's memory never finds an old entry, and
+    the placements are found by identity, so a cull draws only the grounds the frame drew.
+    `GrassCullFitsFrame` compares scenes: a cull of another scene is dropped and forgotten (the title
+    demo's grass in the temple entrance stays fixed). `GrassCullForDrawPoint` leaves a cull without
+    any of the frame's placements out of that frame only and keeps it for the next. So once the
+    grass has appeared in a scene, every draw point has a cull: `no result` counts only the start
+    of a scene, before its first cull, where the grass appears once.
+  - *Log:* the third `grass:` line now ends with `area drawn scene S room R, changes C (scene N),
+    foreign culls dropped F (other scene), without a shared placement P, gaps G, ...`. `gaps` counts
+    draw points without a cull right after one that drew grass, in the same scene (a flicker); it
+    should be 0.
+  - Tests: `oot3d_grass_switch_tests` (`Oot3dGrassAreaChange`: the entry as a frame sequence, the
+    meadow, its fade-out outside gameplay, the load, the entrance's placement being built, room 0
+    -> 1 -> 0 -> 1 with a late worker at each change. test.8's rules give frames without a cull after
+    the grass appeared, the new ones none, with every frame from each scene's first cull drawn and no
+    cull of another scene drawn) and guards.
 - **Shaders:** `tools/oot3d/deko3d_grass/gen.py` compiles `grass_vsh.glsl` and the two fragment
   variants with uam into `gfx_deko3d_grass_dksh.h` (not in `deko3d.pack`). Rerun it after editing a
   shader.
@@ -2458,8 +2493,10 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
     `tufts` split it (near single blades first, then the cards).
   - `grass: frame N fragment raster R draws, depth-writing D | culls fresh F stale S (frames that
     redrew an older cull), no result X, nothing drawn E | cull instances I (max) thinned T | distance
-    full A max B`. `depth-writing` should be 0 unless the scene uses w-buffering; `nothing drawn`
-    counts draw points that had a cull result but drew none of it (should be 0).
+    full A max B | area ... gaps G`. `depth-writing` should be 0 unless the scene uses w-buffering;
+    `nothing drawn` counts draw points that had a cull result but drew none of it (should be 0);
+    `no result` counts draw points before a scene's first cull and `gaps` draw points without a cull
+    right after grass (should be 0).
   - The game thread's cost shows in `perf.txt` (`guest`/`game_pair_ms`) as before; the GPU's in
     `dkperf` `busy_ms`.
 - Budget estimates `[INF]`: GPU 0.6-1.2 ms per frame at the 2.25 floor at 60 fps, 1.5-3 ms at 30 fps

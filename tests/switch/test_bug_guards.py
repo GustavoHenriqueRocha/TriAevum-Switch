@@ -585,8 +585,8 @@ GUARDS = [
           r'state->SourceFrame != frame \|\|\s+state->SourceNamespace != key\.Namespace \|\| state->SourceColorAddress != key\.ColorAddress\)',
           test="oot3d_grass_switch_tests (Oot3dGrassHandoff)"),
     Guard("grass popped: a frame must draw the newest finished cull, a late worker never empties it",
-          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
-          r'const auto drawnSlot = state->Slots\.Draw\(frame\);',
+          "runtime/three_ds_recomp/include/fast/oot3d/grass_stream_handoff.h",
+          r'if \(fit != GrassCullFit::Draw\) return \{std::nullopt, fit\};\s+return \{slots\.Draw\(frame\), fit\};',
           test="oot3d_grass_switch_tests (Oot3dGrassHandoff)"),
     Guard("grass GPU: the PICA depth goes into clip z; gl_FragDepth (no early-Z) only for w-buffered draws",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
@@ -611,16 +611,26 @@ GUARDS = [
     Guard("grass: the display copy must see the grass draw's Version (else a lean repeat skips the copy)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'DrawGrass\(\*key, \*source\);\s+\}\s+const PicaDisplayCopy copy\{source->Id, source->Version'),
-    Guard("grass of the title demo drawn in the temple entrance: a cull of another area is dropped, never drawn",
+    Guard("grass of the title demo drawn in the temple entrance: a cull of another scene is dropped, never drawn",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
-          r'Oot3d::GrassCullFitsFrame\(state->Current\.Area, state->Area,.*?!= Oot3d::GrassCullFit::Draw\) \{\s+'
-          r'\+\+\(fit == Oot3d::GrassCullFit::OtherArea \? state->ForeignOtherArea : state->ForeignNoPlacement\);\s+'
-          r'state->Slots\.Reset\(\);',
-          test="oot3d_grass_switch_tests (Oot3dGrassForeignCull)"),
-    Guard("grass: a scene or room change drops the drawn cull and the sources' memo",
+          r'const auto pick = Oot3d::GrassCullForDrawPoint\(state->Slots, frame, state->Current\.Area, state->Area,.*?'
+          r'if \(pick\.Fit == Oot3d::GrassCullFit::OtherScene\) \{\s+\+\+state->ForeignOtherScene;\s+'
+          r'state->Current = \{\};.*?const auto drawnSlot = pick\.Slot;',
+          test="oot3d_grass_switch_tests (Oot3dGrassAreaChange, Oot3dGrassForeignCull)"),
+    Guard("grass: a scene change drops the drawn cull, the sources' memo and the placements",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
-          r'if \(area == state\.Area\) return;.*?state\.Slots\.Reset\(\);\s+state\.Current = \{\};\s+'
-          r'state\.Sources = std::make_unique'),
+          r'if \(change == Oot3d::GrassAreaChange::Room\) return;\s+\+\+state\.SceneChanges;\s+'
+          r'state\.Slots\.Reset\(\);\s+state\.Current = \{\};\s+state\.Sources = std::make_unique'),
+    # --- 07/11: the grass flickered once entering the Forest Temple (log16, test.8) ---
+    Guard("grass flickered at a room change: a room change within a scene must keep the drawn cull (the old room's ground stays drawn)",
+          "runtime/three_ds_recomp/include/fast/oot3d/grass_stream_handoff.h",
+          r'return GrassSameScene\(before, now\) \? GrassAreaChange::Room : GrassAreaChange::Scene;',
+          test="oot3d_grass_switch_tests (EnteringTheForestTempleDrawsItsGrassOnceAndKeepsIt)"),
+    Guard("grass flickered: a cull without a shared placement is left out of one frame, never forgotten",
+          "runtime/three_ds_recomp/include/fast/oot3d/grass_stream_handoff.h",
+          r'if \(fit == GrassCullFit::OtherScene\) slots\.Reset\(\);\s+'
+          r'if \(fit != GrassCullFit::Draw\) return \{std::nullopt, fit\};',
+          test="oot3d_grass_switch_tests (ACullOfAnotherSceneIsNeverDrawnEvenWithASharedPlacement)"),
     Guard("grass flickered at 60 fps: in-between frames must keep their sources (model-to-clip of the frame, world kept)",
           "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
           r'RefreshGrassMemoDraw\(mesh, draw, state\.Memo\.CameraInverse\(draw\)\) \|\| RefreshMemoClip\(mesh, draw\)',
