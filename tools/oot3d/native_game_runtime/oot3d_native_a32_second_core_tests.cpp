@@ -1155,12 +1155,79 @@ void TestSecondCoreLine() {
     Require(line ==
                 "second_core: dsp_pumped=0.00 dsp_flushed=0.00 dsp_late=0 dsp_wait_ms=0.500 "
                 "dsp_core1=7.00 dsp_core1_ms=1.000 core1_lock_wait_ms=2.000 "
-                "core1_preempted_ms=3.000 core0_saved_ms=4.500",
+                "core1_preempted_ms=3.000 core0_saved_ms=4.500 core1_wakes=0.0 "
+                "core1_empty_wakes=0.0",
             "second_core line: " + line);
+    now.SecondCoreIdleWakes = 30U;
+    now.SecondCoreEmptyWakes = 25U;
+    Require(FormatNativeA32SecondCoreLine(now, start, {}, 10U)
+                .ends_with(" core1_wakes=3.0 core1_empty_wakes=2.5"),
+            "second_core line: idle wakes per frame");
     now.SecondCoreCpuKnown = false;
     Require(FormatNativeA32SecondCoreLine(now, start, {}, 1U).find("core1_preempted_ms=na") !=
                 std::string::npos,
             "unknown CPU time: preemption na");
+}
+
+// config/kernel_wake: the game thread's SVCs (each a guest exit and a kernel
+// lock retake) must not wake the idle second core, whose thread waits on an
+// event; without it each exit notifies the kernel waiters. Either way the
+// second core's thread wakes for the signal and the guest results match.
+void TestQuietWakes(bool quiet) {
+    constexpr uint32_t kCalls = 2000U;
+    constexpr uint32_t kSvcGetSystemTick = 0x28U;
+    Program& program = Programs().emplace_back(kText);
+    const uint32_t spinner = program.Here();  // r8 = calls
+    program.Svc(kSvcGetSystemTick);
+    program.Op(SubsImm(8, 8, 1));
+    program.Branch(Condition::Ne, spinner);
+    program.Svc(kSvcExitThread);
+    const uint32_t parked = program.Here();
+    program.Op(AddImm(9, 0, 0));
+    EmitWait(program, 8);  // the event at kData + 8
+    program.Op(MovImm(5, 1));
+    program.Op(Str(5, 9, 12));
+    program.Svc(kSvcExitThread);
+    Guest guest(program.Seal());
+    guest.Boot(spinner, kData);
+    guest.process.PrimaryThreadState().r[8] = kCalls;
+    const uint32_t event = guest.CreateEvent();
+    guest.Write32(kData + 8U, event);
+    TwoCores cores(guest.process);
+    const uint32_t id = guest.CreateThread(parked, 1, kData);
+    Require(SecondCore::WaitKernelFor(std::chrono::seconds(10), [&] {
+                return guest.process.ThreadStatus(id) == NativeA32ThreadStatus::Waiting;
+            }),
+            "the second-core thread did not park on its event");
+    const auto before = guest.process.GuestThreadProfile();
+    cores.RunUntil([&] { return Terminated(guest.process, 0); });
+    const auto after = guest.process.GuestThreadProfile();
+    const uint64_t wakes = after.SecondCoreIdleWakes - before.SecondCoreIdleWakes;
+    Require(after.SvcCalls[0] - before.SvcCalls[0] == kCalls + 1U,
+            "the game thread's SVCs were not counted");
+    // The game thread's time per SVC round trip (guest exit, lock retake,
+    // SVC, scheduler, re-entry) and its share retaking the kernel lock.
+    const double perCallUs =
+        static_cast<double>(NativeA32ProfileTicksToNanoseconds(after.Ticks[0] - before.Ticks[0])) /
+        1000.0 / kCalls;
+    const double lockUs = static_cast<double>(NativeA32ProfileTicksToNanoseconds(
+                              after.LockTicks[0] - before.LockTicks[0])) /
+                          1000.0 / kCalls;
+    std::cout << "    kernel_wake " << (quiet ? "on" : "off") << ": " << wakes
+              << " idle wakes of the second core over " << kCalls
+              << " game-thread SVCs; game thread " << perCallUs << " us per SVC round trip, "
+              << lockUs << " us of it retaking the kernel lock\n";
+    if (quiet) {
+        Require(wakes <= 2U, "an idle second core woke at the game thread's SVCs");
+    }
+    GuestState signal{};
+    signal.r[0] = event;
+    guest.Svc(kSvcSignalEvent, signal);
+    Require(SecondCore::WaitKernelFor(std::chrono::seconds(10),
+                                      [&] { return Terminated(guest.process, id); }),
+            "the signal did not wake the second core");
+    cores.Stop();
+    Require(guest.Read32(kData + 12U) == 1U, "the woken thread ran on");
 }
 
 } // namespace
@@ -1179,17 +1246,25 @@ int main(int argc, char** argv) {
     TestMonitorInactive();
     TestMonitorSemantics();
     TestMonitorTwoThreads(sizes.ExclusivePairs);
-    TestSchedulerExclusion();
-    TestGuestCounter(sizes.GuestIncrements);
-    TestEventPingPong(sizes.PingPongRounds);
-    TestArbitration(sizes.ArbitrationItems);
-    TestArbitrationDecrement();
-    TestSleepTimeout();
-    TestSecondCoreFault();
-    TestSavestate();
+    // Every two-core test with config/kernel_wake off and on: the same guest
+    // results, fewer wakes.
+    for (const bool quiet : {false, true}) {
+        SecondCore::gQuietWakes = quiet;
+        std::cout << "  kernel_wake " << (quiet ? "on" : "off") << '\n';
+        TestSchedulerExclusion();
+        TestGuestCounter(sizes.GuestIncrements);
+        TestEventPingPong(sizes.PingPongRounds);
+        TestArbitration(sizes.ArbitrationItems);
+        TestArbitrationDecrement();
+        TestSleepTimeout();
+        TestSecondCoreFault();
+        TestSavestate();
+        TestIdleWorkFault();
+        TestDspOnSecondCore(sizes.DspRefreshes);
+        TestQuietWakes(quiet);
+    }
+    SecondCore::gQuietWakes = false;
     TestSecondCoreLine();
-    TestIdleWorkFault();
-    TestDspOnSecondCore(sizes.DspRefreshes);
     std::cout << "oot3d_native_a32_second_core_tests: ok\n";
     return 0;
 }

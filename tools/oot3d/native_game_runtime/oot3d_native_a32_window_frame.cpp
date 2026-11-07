@@ -2126,11 +2126,16 @@ bool NativeA32WindowSession::RunFrame() {
       perf << '\n';
       // Host ms per host frame each guest thread held the game thread
       // (dispatch + its SVCs' host services) and thread switches per frame
-      // (its own line; NativeA32GuestThreadProfile).
+      // (its own line; NativeA32GuestThreadProfile), then the same time split
+      // into guest code, SVCs, kernel-lock retakes and scheduling, with the
+      // game thread's costliest SVCs (guest_kernel:).
       {
         static Oot3dNativeGame::NativeA32GuestThreadProfile previousThreads{};
         perf << Oot3dNativeGame::FormatNativeA32GuestThreadsLine(
                     process, previousThreads, runFrameCount, hostFrames)
+             << '\n'
+             << Oot3dNativeGame::FormatNativeA32GuestKernelLine(process, previousThreads,
+                                                                hostFrames)
              << '\n';
         previousThreads = process.GuestThreadProfile();
       }

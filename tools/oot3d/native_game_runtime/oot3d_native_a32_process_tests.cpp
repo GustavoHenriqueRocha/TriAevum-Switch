@@ -683,6 +683,35 @@ void TestGuestThreadProfile() {
                "guest_thread: id=3 entry=0x00123456 prio=0x18 processor=-2 "
                "stack_top=0x0FF00000",
            "guest_thread log line format");
+
+    // The split of each thread's time: SVCs (2 ms each), guest code, the
+    // rest the scheduler's; no kernel-lock retakes without the second core.
+    for (const uint32_t id : {0U, 1U}) {
+        const uint64_t svcNs =
+            Oot3dNativeGame::NativeA32ProfileTicksToNanoseconds(profile.SvcTicks[id]);
+        Expect(profile.SvcCalls[id] == (id == 0U ? 2U : 1U) &&
+                   svcNs >= profile.SvcCalls[id] * 2'000'000U &&
+                   profile.GuestTicks[id] + profile.SvcTicks[id] <= profile.Ticks[id] &&
+                   profile.LockTicks[id] == 0U,
+               "per-thread split: SVC calls and time inside the thread's time");
+    }
+    Expect(profile.SvcCallsByImmediate[1] == 1U && profile.SvcCallsByImmediate[2] == 1U &&
+               profile.SvcCallsByImmediate[3] == 1U &&
+               profile.SvcTicksByImmediate[1] + profile.SvcTicksByImmediate[2] +
+                       profile.SvcTicksByImmediate[3] ==
+                   profile.SvcTicks[0] + profile.SvcTicks[1],
+           "the game thread's SVCs by immediate");
+    const std::string kernel =
+        Oot3dNativeGame::FormatNativeA32GuestKernelLine(process, start, 1U);
+    Expect(kernel.starts_with("guest_kernel: svc_calls=3.00 svc_ms=") &&
+               kernel.find(" lock_ms=0.000 0:guest=") != std::string::npos &&
+               kernel.find(",calls=2.00 1:guest=") != std::string::npos &&
+               kernel.find(",calls=1.00 top=0x0") != std::string::npos &&
+               kernel.find(" 2:") == std::string::npos,
+           ("guest_kernel line: " + kernel).c_str());
+    Expect(Oot3dNativeGame::FormatNativeA32GuestKernelLine(process, profile, 150U) ==
+               "guest_kernel: svc_calls=0.00 svc_ms=0.000 lock_ms=0.000",
+           "a window where no guest thread ran lists none");
 }
 
 // Ported from coccofresco/TriAevum 034405bd (GPL-3.0-or-later),

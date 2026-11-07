@@ -55,6 +55,16 @@ inline uint32_t gStopRequests = 0U;
 inline int gStopOwner = -1;
 inline uint32_t gStopDepth = 0U;
 inline uint32_t gKernelWaiters = 0U;
+// WorldStop constructors waiting for the other cores to leave guest code and
+// their SVCs: the only waits that depend on gInGuest and gInKernel.
+inline uint32_t gStopWaiters = 0U;
+// config/kernel_wake (oot3d_native_kernel_options.h): a core leaving guest
+// code or a second-core SVC wakes the kernel waiters only while a world stop
+// waits for it, and the game thread resuming one of its own threads does not
+// wake them. Off: every such change wakes them (the idle second core then
+// woke at each of the game thread's SVCs, retook the kernel lock and handed
+// it back). Set before SetActive(true).
+inline bool gQuietWakes = false;
 
 [[nodiscard]] inline bool Active() noexcept {
     return gActive.load(std::memory_order_acquire);
@@ -69,6 +79,7 @@ inline void SetActive(bool active) noexcept {
     gStopOwner = -1;
     gStopDepth = 0U;
     gKernelWaiters = 0U;
+    gStopWaiters = 0U;
     gActive.store(active, std::memory_order_release);
 }
 
@@ -229,7 +240,7 @@ inline void EnterGuest() {
 // Kernel lock held. The calling core left guest code.
 inline void LeaveGuest() {
     --gInGuest[tProcessor];
-    NotifyKernel();
+    if (!gQuietWakes || gStopWaiters != 0U) NotifyKernel();
 }
 
 // Kernel lock held. The second core's SVC handling: it may release the lock
@@ -240,7 +251,7 @@ class KernelSection final {
     KernelSection() noexcept { ++gInKernel[tProcessor]; }
     ~KernelSection() {
         --gInKernel[tProcessor];
-        NotifyKernel();
+        if (!gQuietWakes || gStopWaiters != 0U) NotifyKernel();
     }
     KernelSection(const KernelSection&) = delete;
     KernelSection& operator=(const KernelSection&) = delete;
@@ -256,6 +267,7 @@ class WorldStop final {
     WorldStop() : mActive(Active()) {
         if (!mActive) return;
         LockKernel();
+        ++gStopWaiters;
         WaitKernel([] {
             return (gStopOwner < 0 || gStopOwner == static_cast<int>(tProcessor)) &&
                    !OtherCoresInKernel();
@@ -264,6 +276,7 @@ class WorldStop final {
         ++gStopDepth;
         ++gStopRequests;
         WaitKernel([] { return !OtherCoresInGuest(); });
+        --gStopWaiters;
     }
     ~WorldStop() {
         if (!mActive) return;

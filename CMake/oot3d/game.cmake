@@ -161,6 +161,18 @@ add_executable(oot3d_guest_spike_profile_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_guest_spike_profile_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_guest_spike_profile_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Guest block profile (config/guest_profile): reports from its writer thread,
+# never holding the game thread.
+add_executable(oot3d_native_guest_profile_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_guest_profile_tests.cpp
+    tools/oot3d/native_game_runtime/oot3d_native_guest_profile.cpp
+)
+target_compile_features(oot3d_native_guest_profile_tests PRIVATE cxx_std_20)
+target_include_directories(oot3d_native_guest_profile_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/oot3d/native_a32_runtime/upstream)
+target_link_libraries(oot3d_native_guest_profile_tests PRIVATE Threads::Threads)
+oot3d_target_defaults(oot3d_native_guest_profile_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Frame spikes (logs/spikes.txt), vsync clock and the vsync-anchored pacer
 # (config/frame_spikes, config/pacer_vsync; --report prints the drift table).
 add_executable(oot3d_frame_spike_tests EXCLUDE_FROM_ALL

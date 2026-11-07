@@ -1240,6 +1240,86 @@ scheduler. Absent = the previous single-thread code paths exactly (nothing below
   and run the target with `--stress` under `setarch "$(uname -m)" -R` (TSan rejects the
   high-entropy ASLR mappings; in a container that needs `--security-opt seccomp=unconfined`).
 
+### Guest kernel: time per thread split, quiet wakes, cheaper SVCs (`config/kernel_wake`, `config/kernel_svc`, 11/07)
+The test.10 guest profile (`logs18b`) charged 11–27 µs to each SVC stub (ArbitrateAddress
+`0x0030E280` 19.5 µs, WaitSynchronizationN 27 µs, SleepThread `0x004221C8` 11.7 µs, LightEvent's
+inline ArbitrateAddress `0x0030B384` 11.5 µs), several times what the host services do, and with
+the second core on `core1_lock_ms` was ~5 ms per host frame.
+- **Cause** (second core on): every guest exit of the game thread (`LeaveGuest`: each SVC, block
+  limit and fallback) and every `ResumeThread` notified the kernel condition, on which the idle
+  second core sleeps most of the frame. It woke, queued for the kernel lock the game thread holds
+  through the SVC, got it when the game thread released it to re-enter guest code (Horizon
+  mutexes hand ownership to the waiter), so the game thread's next exit waited for core 1 to be
+  scheduled, re-test its predicate and sleep again. Host test (`TestQuietWakes`, Debug, 4 runs):
+  218–348 such wakes per 2000 game-thread SVCs and 9.5–18.4 µs per SVC round trip off, 0 wakes
+  and 3.9–4.9 µs on.
+- **`config/kernel_wake`** (absent = on, `0` = the previous path; desktop
+  `TRIAEVUM_KERNEL_WAKE=1` or `TRIAEVUM_KERNEL_FAST=1`; only matters with `config/second_core`):
+  a core's guest exit and the end of a second-core SVC notify only while a `WorldStop` waits
+  (`gStopWaiters`; only its predicates read `gInGuest`/`gInKernel`), and the game thread readying
+  one of its own threads does not notify (no waiter's predicate becomes true by it: the second
+  core's idle work only waits longer). Everything else still notifies: a second-core thread
+  readied, DSP frames queued, a core-0 thread above the main thread parking, stop requests,
+  faults. Notifications only make a host thread re-test its predicate, so the guest sees the same
+  scheduling and results. `perf.txt` `second_core:` gains `core1_wakes=` and
+  `core1_empty_wakes=` (wakes of its idle wait per host frame, and those that found nothing).
+- **`config/kernel_svc`** (absent = on): ArbitrateAddress and SleepThread no longer build their
+  SVC event's name per call (4–6 allocations): the event keeps its numbers and the history writes
+  the same text when read (`NativeA32CtrSvcEventName`, also in the unserved-request fault);
+  `LookupHandle` goes through an 8-entry cache valid only while the handle table is unchanged
+  (every create/close moves its version on), so it returns the scan's first match. Always:
+  WaitSynchronizationN builds its name in place and keeps its handles on the stack.
+- **`perf.txt` `guest_kernel:`** (always, after `guest_threads:`), per host frame:
+  `svc_calls= svc_ms= lock_ms=` (the game thread's SVCs and kernel-lock retakes), then for each
+  thread that ran `<id>:guest=,svc=,lock=,sched=,calls=` (ms in its guest code, in its SVCs' host
+  services, retaking the kernel lock after guest code, the scheduler's rest; on the second core
+  `svc` is the whole exit and `lock` lies outside its `guest_threads` time), then
+  `top=<imm>:<calls>x<us per call>us,…` (the game thread's six costliest SVCs). Cost: two or
+  three `cntpct_el0` reads per dispatch and two per SVC.
+- **Guest thread 4 stays on the game thread.** It is most likely nngx's GSP interrupt receiver
+  (`ReceiverThreadFunc` 0x00401C00: its stack top 0x005B6108 is the thread setup's
+  `object + 0x1078` for the nngx object next to 0x005B50B0; it waits on the interrupt event,
+  clears it, drains the queue with LDREX/STREX and runs the registered callbacks under a
+  recursive lock, then signals waiters with ArbitrateAddress). Moving it to core 1 was not done:
+  - it asked for processor -2, the process's own core: on the 3DS it never runs beside the main
+    thread, it preempts it. Run concurrently, every piece of game state its callbacks share with
+    the main thread could interleave in ways the game never met; the result would depend on host
+    timing and could not be shown identical (thread 6 asked for processor 1 and was written for
+    that);
+  - the second core runs without block-entry hooks, product mod and native-function callbacks
+    (projection policy, TopScreen routing, PICA composition hooks, guest profile); renderer code
+    reached through its callbacks would skip them;
+  - its work is SVC-dense (wait, clear, signal per interrupt, GSP requests from callbacks) and on
+    the main thread's critical path (the main thread waits for its signals), while core 0 holds
+    the kernel lock for all its host work: core 1 already waits ~5 ms per frame for it.
+  The `guest_kernel:` line shows its guest/SVC split on the console.
+- **Tests**: `oot3d_native_a32_second_core_tests` runs every two-core test with
+  `kernel_wake` off and on (same guest results) plus `TestQuietWakes` (2000 game-thread SVCs: 0
+  idle wakes of the second core with it on); `oot3d_native_a32_ctr_host_tests` runs every test
+  with `kernel_svc` off and on, and `TestFastSvcEquivalence` drives the same random sequence
+  (ArbitrateAddress of every type and invalid ones, sleeps, WaitSynchronizationN, events, handles
+  closed and created between lookups) through both and compares results, registers, guest state,
+  kernel state and the SVC history after every call; `oot3d_native_a32_process_tests` checks the
+  split and the `guest_kernel:` line.
+
+### Guest profile written off the game thread (`config/guest_profile`, 11/07)
+`logs18b`: every 900 host frames the guest profile's report (walk of ~1 M code slots, sort,
+formatting, SD write) ran on the game thread right after the `FrameEnd` mark: 0.41–0.47 s
+frames, and one of 3.36 s that tripped the hang watchdog (`hang.txt`, `progress=6301` = the
+7th dump). Now:
+- At a dump the game thread swaps its counters with the writer's zeroed set (two vector swaps),
+  copies the frame-level totals and formats the override counters' appendix, then hands over.
+  The **writer thread** (a pthread, so a service thread at 0x3B on cores 1–2) folds the counters
+  into its totals (`window=0`; with `window=1` it reports them alone), zeroes them for the next
+  swap, sorts and writes the same report as before.
+- While the writer is still on the previous report (a slow SD write) the dump waits for a later
+  frame instead of blocking (`try_lock`); the session's end writes the last counters.
+- The function map is read once at `Start` (boot), shared read-only by the writer and the spike
+  profile. Memory: one more counter set (12 MB) while the profile is on.
+- Test: `oot3d_native_guest_profile_tests` (cumulative and window reports, the appendix, the last
+  report at the end; a report stuck on a FIFO nobody reads: the next dump returns at once and
+  goes out later).
+
 ### fastmem window, phase 1: `config/fastmem_window` (11/06; on by default since phase 2)
 Phase 1 of fastmem (one load or store into a flat window instead of the page-table walk; ~11
 AArch64 instructions and three chained loads per guest load today). Phase 1 only lays the window
