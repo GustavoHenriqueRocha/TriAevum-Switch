@@ -10,28 +10,38 @@
 
 namespace Oot3dNativeGame {
 
-// Presented-frame rate. Counts presented frames, including the fps60
-// interpolated ones, and closes an average every `windowSeconds`; the
-// window's worst interval shows hitches the average hides.
+// New-image rate. Called once per presented refresh with the number of new
+// images (a game step's frame or an interpolated in-between frame) that
+// reached the screen since the previous call; a repeat of the previous image
+// (a dropped in-between frame, a reused snapshot) passes 0. Each image counts
+// once however many refreshes it stays, so 60 with the in-betweens dropped
+// reads ~30, not the refresh rate. Closes an average every `windowSeconds`;
+// the window's worst is the longest time one image stayed on screen (a held
+// frame at 60 Hz reads 33.3 ms), which shows hitches the average hides.
 class FpsCounter {
 public:
   explicit FpsCounter(double windowSeconds = 0.5) : mWindowSeconds(windowSeconds) {}
 
-  // A frame presented at `nowSeconds` (monotonic clock).
+  // A refresh presented at `nowSeconds` (monotonic clock) with `newImages`
+  // new images since the previous call.
   // Returns true when a window closed and the values changed.
-  bool Observe(double nowSeconds) {
-    if (mLastSeconds < 0.0) {
-      mLastSeconds = mWindowStartSeconds = nowSeconds;
+  bool Observe(double nowSeconds, uint32_t newImages) {
+    if (mWindowStartSeconds < 0.0) {
+      mWindowStartSeconds = mLastImageSeconds = nowSeconds;
       return false;
     }
-    mWorstMs = std::max(mWorstMs, (nowSeconds - mLastSeconds) * 1000.0);
-    mLastSeconds = nowSeconds;
-    ++mFrames;
+    if (newImages != 0U) {
+      mWorstMs = std::max(mWorstMs, (nowSeconds - mLastImageSeconds) * 1000.0);
+      mLastImageSeconds = nowSeconds;
+      mImages += newImages;
+    }
     const double elapsed = nowSeconds - mWindowStartSeconds;
     if (elapsed < mWindowSeconds) return false;
-    mFps = static_cast<double>(mFrames) / elapsed;
-    mShownWorstMs = mWorstMs;
-    mFrames = 0U;
+    mFps = static_cast<double>(mImages) / elapsed;
+    // An image still on screen counts with the time it has stayed so far
+    // (a frozen picture shows in `max`).
+    mShownWorstMs = std::max(mWorstMs, (nowSeconds - mLastImageSeconds) * 1000.0);
+    mImages = 0U;
     mWorstMs = 0.0;
     mWindowStartSeconds = nowSeconds;
     return true;
@@ -42,12 +52,12 @@ public:
 
 private:
   double mWindowSeconds;
-  double mLastSeconds = -1.0;
-  double mWindowStartSeconds = 0.0;
+  double mWindowStartSeconds = -1.0;
+  double mLastImageSeconds = 0.0;
   double mWorstMs = 0.0;
   double mShownWorstMs = 0.0;
   double mFps = 0.0;
-  uint32_t mFrames = 0U;
+  uint64_t mImages = 0U;
 };
 
 // The overlay's two lines. A negative `speed` (no guest refresh was owed in
@@ -96,7 +106,8 @@ inline void FormatPerfOverlayClockLine(char *out, size_t size,
 }
 
 // On-screen performance overlay (L3+R3 > Video, config/fps_counter): the
-// presented FPS and worst frame interval of the last window, the game speed
+// new images per second and the longest time one image stayed on screen in
+// the last window (FpsCounter), the game speed
 // (guest refreshes run / refreshes owed, from the presentation scheduler's
 // per-frame counts; the drops are the time the game lost) and the clocks.
 // Game thread only; the text is formatted only when a window closes.
@@ -106,10 +117,11 @@ public:
     FormatPerfOverlayClockLine(mClockLine, sizeof(mClockLine), mClocks);
   }
 
-  // A presented frame. True when a window closed: FrameLine() changed and
-  // the caller should pass the latest clocks to SetClocks().
-  bool ObserveFrame(double nowSeconds) {
-    if (!mFps.Observe(nowSeconds)) return false;
+  // A presented refresh and the new images shown since the previous one
+  // (FpsCounter::Observe). True when a window closed: FrameLine() changed
+  // and the caller should pass the latest clocks to SetClocks().
+  bool ObserveFrame(double nowSeconds, uint32_t newImages) {
+    if (!mFps.Observe(nowSeconds, newImages)) return false;
     const double speed =
         mOwed == 0U ? -1.0 : static_cast<double>(mRun) / static_cast<double>(mOwed);
     mRun = 0U;

@@ -674,6 +674,10 @@ private:
   // Render thread -> game thread: the cadence is locked at 30 (the game
   // thread then runs both refreshes of a step in one host frame).
   std::atomic<bool> cadenceLockedThirty{false};
+  // New images presented (a step's frame or an interpolated in-between
+  // frame, not a repeat of the previous one); the render thread counts them
+  // in FinishRenderFrameCost, the performance overlay reads the total.
+  std::atomic<uint64_t> newImagesPresented{0U};
   // Game thread: the previous host frame, for the governor's game-thread
   // cost (busy = duration minus the waits for the renderer).
   struct HostFrameCost {

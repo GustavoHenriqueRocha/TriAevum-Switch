@@ -28,34 +28,78 @@ using namespace Oot3dNativeGame;
 
 void FpsCounterWindows() {
   {
+    // A steady 30 FPS setting: a new image every second refresh.
     FpsCounter counter;
     bool closed = false;
-    for (int frame = 0; frame <= 30; ++frame) closed |= counter.Observe(frame / 30.0);
+    for (int refresh = 0; refresh <= 30; ++refresh)
+      closed |= counter.Observe(refresh / 60.0, refresh % 2 == 0 ? 1U : 0U);
     Require(closed, "0.5 s window closes at 30 FPS");
-    Require(Near(counter.Fps(), 30.0, 0.01), "exactly 30 FPS");
-    Require(Near(counter.WorstFrameMs(), 33.33, 0.01), "worst frame 33.3 ms");
+    Require(Near(counter.Fps(), 30.0, 0.01), "30 FPS setting reads 30");
+    Require(Near(counter.WorstFrameMs(), 33.33, 0.01), "each image stays 33.3 ms");
   }
   {
-    // 60 FPS with a 50 ms hitch: the average barely changes, the worst frame shows it.
+    // 60 with every in-between shown: a new image every refresh.
+    FpsCounter counter;
+    for (int refresh = 0; refresh <= 30; ++refresh) counter.Observe(refresh / 60.0, 1U);
+    Require(Near(counter.Fps(), 60.0, 0.01), "full 60 reads 60");
+    Require(Near(counter.WorstFrameMs(), 16.67, 0.01), "each image stays 16.7 ms");
+  }
+  {
+    // 60 with a 50 ms hitch: the average barely changes, the worst image shows it.
     FpsCounter counter;
     double now = 0.0;
-    counter.Observe(now);
+    counter.Observe(now, 1U);
     for (int frame = 0; frame < 40; ++frame) {
       now += frame == 20 ? 0.050 : 1.0 / 60.0;
-      counter.Observe(now);
+      counter.Observe(now, 1U);
     }
     Require(counter.Fps() > 55.0 && counter.Fps() < 60.0, "average with a hitch");
     Require(Near(counter.WorstFrameMs(), 50.0, 0.01), "50 ms hitch shows up");
   }
   {
-    // The next window restarts the worst frame.
+    // The next window restarts the worst image.
     FpsCounter counter;
     double now = 0.0;
-    counter.Observe(now);
-    now += 0.2; counter.Observe(now);
-    for (int frame = 0; frame < 60; ++frame) { now += 1.0 / 60.0; counter.Observe(now); }
-    Require(Near(counter.WorstFrameMs(), 16.67, 0.01), "worst frame resets each window");
+    counter.Observe(now, 1U);
+    now += 0.2; counter.Observe(now, 1U);
+    for (int frame = 0; frame < 60; ++frame) { now += 1.0 / 60.0; counter.Observe(now, 1U); }
+    Require(Near(counter.WorstFrameMs(), 16.67, 0.01), "worst image resets each window");
   }
+  {
+    // An image still on screen when the window closes counts its time so far.
+    FpsCounter counter;
+    counter.Observe(0.0, 1U);
+    for (int refresh = 1; refresh <= 30; ++refresh) counter.Observe(refresh / 60.0, 0U);
+    Require(Near(counter.Fps(), 0.0, 0.01), "frozen picture reads 0");
+    Require(Near(counter.WorstFrameMs(), 500.0, 0.01), "frozen picture shows in max");
+  }
+}
+
+// logs16b session 2, Sacred Forest Meadow (spot05) at 60 FPS, level=dropped:
+// per 150 refreshes step_frames=75 interp_frames=1 interp_dropped=74 (perf.txt
+// fps=60.0). Each refresh shows a step, then a dropped in-between repeats it,
+// except one in-between that was drawn.
+void DroppedInBetweens() {
+  PerfOverlay overlay;
+  overlay.ObserveFrame(0.0, 1U);
+  bool closed = false;
+  for (int refresh = 1; refresh <= 150; ++refresh) {
+    const bool step = refresh % 2 == 0;
+    const uint32_t newImages = step || refresh == 75 ? 1U : 0U;
+    overlay.ObserveRefreshes(step ? 1U : 0U, step ? 1U : 0U, 0U);
+    closed |= overlay.ObserveFrame(refresh / 60.0, newImages);
+  }
+  Require(closed, "windows closed");
+  // The last 0.5 s window (refreshes 121-150): 15 steps, no in-between.
+  Require(Same(overlay.FrameLine(), "30.0 FPS  max 33.3 ms  speed 100%"),
+          "60 with the in-betweens dropped reads 30, held image 33.3 ms");
+
+  FpsCounter counter(150.0 / 60.0);
+  counter.Observe(0.0, 1U);
+  for (int refresh = 1; refresh <= 150; ++refresh)
+    counter.Observe(refresh / 60.0, refresh % 2 == 0 || refresh == 75 ? 1U : 0U);
+  // 75 steps + 1 in-between in 2.5 s.
+  Require(Near(counter.Fps(), 76.0 / 2.5, 0.01), "spot05 window reads 30.4, not 60");
 }
 
 void StockTable() {
@@ -151,7 +195,7 @@ void Overlay() {
     bool closed = false;
     for (int frame = 0; frame <= 15; ++frame) {
       if (frame > 0) overlay.ObserveRefreshes(2U, 2U, frame == 10 ? 1U : 0U);
-      closed |= overlay.ObserveFrame(frame / 30.0);
+      closed |= overlay.ObserveFrame(frame / 30.0, 1U);
     }
     Require(closed, "window closed");
     // 30 run of 31 owed = 96.8%.
@@ -163,22 +207,22 @@ void Overlay() {
     // A refresh that couldn't run (the loop stopped early) counts as lost;
     // the next window starts its count over.
     PerfOverlay overlay;
-    overlay.ObserveFrame(0.0);
+    overlay.ObserveFrame(0.0, 1U);
     for (int frame = 1; frame <= 30; ++frame) {
       overlay.ObserveRefreshes(frame <= 15 ? 1U : 2U, 2U, 0U);
-      overlay.ObserveFrame(frame / 60.0);
+      overlay.ObserveFrame(frame / 60.0, 1U);
     }
     Require(Same(overlay.FrameLine(), "60.0 FPS  max 16.7 ms  speed 75%"), "half the frames ran one of two");
     for (int frame = 31; frame <= 60; ++frame) {
       overlay.ObserveRefreshes(1U, 1U, 0U);
-      overlay.ObserveFrame(frame / 60.0);
+      overlay.ObserveFrame(frame / 60.0, 1U);
     }
     Require(Same(overlay.FrameLine(), "60.0 FPS  max 16.7 ms  speed 100%"), "count resets per window");
   }
   {
     // Frames that owed nothing (preparation screen, interpolated frames only).
     PerfOverlay overlay;
-    for (int frame = 0; frame <= 30; ++frame) overlay.ObserveFrame(frame / 60.0);
+    for (int frame = 0; frame <= 30; ++frame) overlay.ObserveFrame(frame / 60.0, 1U);
     Require(Same(overlay.FrameLine(), "60.0 FPS  max 16.7 ms  speed --"), "no refresh owed");
   }
   Require(!PerfOverlayEnabled().load(), "overlay off until the Video tab loads config/fps_counter");
@@ -212,6 +256,7 @@ void GpuPerformance() {
 
 int main() {
   FpsCounterWindows();
+  DroppedInBetweens();
   StockTable();
   Lines();
   Overlay();
