@@ -1,5 +1,6 @@
 #include "oot3d/renderer/azahar_texture_pack.h"
 #include "oot3d/renderer/azahar_hud_image_list.h"
+#include "oot3d/renderer/pica_texture_decode.h"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -703,10 +704,11 @@ TEST_F(Oot3dAzaharTexturePackTest, HudImagesAskedAheadAreReadyAtFirstSight) {
                   FormatHudImageEntry({hash, 16U, 8U}));
     }
     // Asked ahead again (the next revision): nothing more to decode.
-    EXPECT_EQ(runtime.ResolveOrQueue(ahead).State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(runtime.ResolveOrQueue(ahead).State, AzaharTextureResolveState::Pending);
+    runtime.WaitForPendingLoads();
     EXPECT_EQ(runtime.HudStatus().PreloadQueued, 1U);
 
-    // Ahead, but the HUD comes before the decode ends: a late first sight.
+    // Ahead, but the HUD comes before the image is ready: a late first sight.
     AzaharTextureRequest slowAhead{16U, 8U, 0U, 0U, slowNative, {}};
     slowAhead.UserInterface = true;
     slowAhead.Ahead = true;
@@ -717,9 +719,52 @@ TEST_F(Oot3dAzaharTexturePackTest, HudImagesAskedAheadAreReadyAtFirstSight) {
     runtime.WaitForPendingLoads();
     EXPECT_EQ(runtime.ResolveOrQueue(slowHud).State, AzaharTextureResolveState::Ready);
     status = runtime.HudStatus();
-    EXPECT_EQ(status.PreloadQueued, 2U);
-    EXPECT_EQ(status.PreloadDecoded, 2U);
+    EXPECT_EQ(status.PreloadDecoded, status.PreloadQueued);
     EXPECT_EQ(status.OnSightDecodes, late ? 1U : 0U);
+    EXPECT_TRUE(late);
+}
+
+// An ahead request carries only the encoded bytes; for a legacy-hash pack
+// (Henriko's 1080p pack) the HUD worker decodes them to hash, so the image
+// found is the one the HUD's own request (with its decoded texels) asks for.
+TEST_F(Oot3dAzaharTexturePackTest, HudImagesAskedAheadMatchALegacyHashPack) {
+    using namespace Oot3d::Renderer;
+    const auto pack = Root / "hudlegacy";
+    std::filesystem::create_directories(pack);
+    {
+        std::ofstream output(pack / "pack.json");
+        output << nlohmann::json{{"options", {{"skip_mipmap", true}, {"flip_png_files", true}, {"use_new_hash", false}}}};
+    }
+    // An 8x8 ETC1A4 texture (format 13, the item icon atlas's): 4 blocks.
+    std::array<uint8_t, 64> native{};
+    for (size_t index = 0; index < native.size(); ++index) native[index] = static_cast<uint8_t>(index * 29U + 7U);
+    std::vector<uint8_t> rgba8;
+    ASSERT_TRUE(DecodePicaTextureRgba8(13U, 8U, 8U, native, rgba8));
+    const AzaharTextureRequest decoded{8U, 8U, 13U, 0U, native, rgba8};
+    const uint64_t legacy = ComputeAzaharTextureHash(decoded, false);
+    ASSERT_NE(legacy, 0U);
+    ASSERT_NE(legacy, ComputeAzaharTextureHash(decoded, true));
+    WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, legacy, 13U, 0U), 32U, 32U,
+                          std::vector<uint8_t>(32U * 32U * 4U, 120U));
+    AzaharTexturePackRuntime runtime;
+    runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack,
+                       .MaxReplacementScale = 2U, .GenerateMipmaps = true});
+    runtime.WaitForPendingLoads();
+    AzaharTextureRequest ahead{8U, 8U, 13U, 0U, native, {}};
+    ahead.UserInterface = true;
+    ahead.Ahead = true;
+    EXPECT_EQ(runtime.ResolveOrQueue(ahead).State, AzaharTextureResolveState::Pending);
+    runtime.WaitForPendingLoads();
+    AzaharTextureRequest hud = decoded;
+    hud.UserInterface = true;
+    const auto first = runtime.ResolveOrQueue(hud);
+    ASSERT_EQ(first.State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(first.NativeHash, legacy);
+    EXPECT_EQ(first.Replacement->Width, 24U);
+    const auto status = runtime.HudStatus();
+    EXPECT_EQ(status.PreloadQueued, 1U);
+    EXPECT_EQ(status.PreloadDecoded, 1U);
+    EXPECT_EQ(status.OnSightDecodes, 0U);
 }
 
 } // namespace

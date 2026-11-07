@@ -1751,10 +1751,8 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   by `shrink_texture_pack.py --hud 3`: 512x256 atlases 3.26 s / 0.32 s, 256x256 1.90 s / 0.14 s,
   128x128 (8) 0.37 s / 0.03 s, 256x32 0.13 s / 0.015 s; RAM 4.5 MiB per 512x256 at the 3x cap (as
   much as decoding it later). The console's A57 is several times slower [not measured]; the
-  `hud pack` line of `logs/deko3d.txt` gives the real figures: `listed=` lines, `preloaded=N/M in
-  T ms (K KiB)` (worker time from the index to the last of them) and `first sight=N (wait max
-  T ms)` (HUD images decoded while the HUD waited; 0 from the second start if nothing new was
-  seen).
+  `hud pack` line of `logs/deko3d.txt` gives the real figures (fields below, "HUD art from the
+  first frame, first start included").
 - **Memory:** unchanged in total (HUD images were already kept for the session); they are decoded
   earlier.
 - Tests: `oot3d_azahar_texture_pack_tests` (`HudImagesDoNotWaitBehindWorldImages`,
@@ -1762,6 +1760,66 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   standalone build since host GCC 12 cannot link that target), `oot3d_n64_ui_renderer_tests`
   (`TestHeldFirstDraws`), `oot3d_native_ui_texture_provider_tests`, `oot3d_texture_pack_scale_tests`
   (list format, damaged lines, limit, pruning); three guards.
+
+### HUD art from the first frame, first start included (07/11, test.8)
+- **Symptom (test.8):** "the HUD textures still make a quick noticeable update". `log16/deko3d.txt`,
+  the first start with test.8: `hud pack (frame): listed=2 preloaded=0/0 in 0 ms (0 KiB); first
+  sight=2 (wait max 263 ms)`, later `listed=3 … first sight=3`. The list was empty (first start), so
+  nothing was decoded ahead: the two HUD images were first asked for when the HUD appeared, held
+  (not drawn) up to 263 ms, about 16 frames at 60 FPS: the elements appeared late.
+- **Cause:** a HUD image was only asked for at its first draw (`N64UiFast3dRenderer::PrepareTextures`)
+  or, from the second start, from `config/texture_pack_hud`. The HUD's textures are fixed, though:
+  the TopScreen HUD draws pause_top_page (hearts, rupees, button art), item_icons (every item icon
+  is a region of this one 512x512 atlas, `AppendTopScreenNativeItemIconCopies`) and number_glyphs,
+  plus custom_ui01, item_page (pause edge) and ocarina_page (ocarina lane); the game loads them with
+  the pause UI (`PauseUi_LoadSharedTextureAssets`, from `PauseUi_Init`; the pause UI's Omote/Ura
+  selector already runs on the title screen). Also, the UI renderer's provider is the ocarina text
+  runtime, which did not pass the pack's generation through (`Revision()` stayed 0), so the
+  renderer never re-resolved its textures when the index became ready or HD textures changed.
+- **Fix:**
+  - Every frame until done, `Oot3dNativeUiLifecycleBridge::HudTexturesAhead` lists those textures
+    the game has loaded, in the order the player first sees them, and
+    `N64UiFast3dRenderer::RequestAhead` asks the provider for one of them per frame
+    (`UiTextureProvider::RequestAhead`), once per UI texture revision: a revision is the pack's
+    generation, which changes when its index is ready, so a request made while the pack was still
+    indexing is made again. A texture the HUD already drew at this revision is not asked for.
+  - The native provider identifies the texture as for a draw (guest CTXB, after the TopScreen
+    override) but does not decode it: the pack request is marked `Ahead`
+    (`AzaharTextureRequest::Ahead`), copies the encoded base level and returns. The HUD worker
+    hashes it (decoding it first for a legacy-hash pack such as Henriko's, formats 5 and up) and
+    queues its image, counted as decoded ahead, and listed in `config/texture_pack_hud` as before.
+  - `TopScreenOcarinaTextRuntime` passes `Revision()` and `RequestAhead` through to the native
+    provider (also makes turning HD textures on or off refresh the HUD at once, as documented).
+  - An item equipped for the first time is another region of the item_icons atlas: no new texture.
+- **Which images (USA ROM, Henriko 5.0a 1080p):** all six are in the pack (hashed from the RomFS's
+  `menu/01_US_ENGLISH/*.ctxb` with the runtime's own code): menu_top_parts00 `BB00B25B152582B6`,
+  icon_item_menu00 `CF461E58E637A97A`, num_all00 `FABD759BB95C1C6A`, menu_item_parts00
+  `18DDBB03B81C1D60`, menu_okarina_parts00 `439913BD09FA2671` (custom_ui01 is TopScreen's: not in
+  that pack, the HD UI atlas stands in).
+- **Start-up cost:** game thread: one texture per frame, a guest read of its encoded bytes (at most
+  256 KiB), the TopScreen override check and a copy; no decode [sub-millisecond: INFERENCE, not
+  measured on the console]. HUD worker (PC, WSL host, -O2), shrunk pack (`--hud 3`) / as installed:
+  pause_top_page 61 / 516 ms, item_icons 102 / 880 ms, number_glyphs 5 / 64 ms, item_page 23 / 786
+  ms, ocarina_page 50 / 449 ms, i.e. 0.24 s / 2.7 s, plus 2-10 ms each to identify (ETC1A4
+  decode and hash of item_icons: 10 ms). The console is several times slower [not measured]; the
+  title screen lasted ~90 s in log16. RAM at the 3x cap: 4.5 + 9 + 1.1 MiB for the HUD's own
+  three, 2.25 + 4.5 MiB for item_page and ocarina_page (21.4 MiB): the same images the session
+  decoded anyway when first shown (the HUD's image cache is kept for the session), now from the
+  title screen on; the last two are held earlier than before (until the first pause / ocarina).
+- **Log:** `hud pack (…): listed=N ahead=D/Q in T ms (K KiB); first sight=S (wait max W ms)`:
+  `ahead=` images queued (Q) and decoded (D) ahead of the HUD's first frame, from the list and
+  the requests above; `T` the time from the index to the last of them; `first sight=` HUD images
+  the HUD asked for before they were ready (held), with the longest wait. Expected on a fresh start:
+  `first sight=0`.
+- Tests: `oot3d_azahar_texture_pack_tests` (`HudImagesAskedAheadAreReadyAtFirstSight`: empty list,
+  ready on the HUD's first request, listed; a first sight during the ahead decode counts as late;
+  `HudImagesAskedAheadMatchALegacyHashPack`: ETC1A4 hashed on the worker matches the HUD's own
+  request; standalone build as above), `oot3d_n64_ui_renderer_tests` (`TestRequestAhead`: one per
+  call, again at a new revision, the HUD's first frame not held and the pack's size, a first equip
+  resolves nothing, and the same HUD without ahead requests held), `oot3d_native_ui_texture_provider_tests`
+  (ahead requests not decoded, overridden bytes), `oot3d_native_ui_lifecycle_bridge_tests` (the
+  list, its order and completeness), `oot3d_top_screen_ocarina_text_runtime_tests` (pass-through);
+  three guards.
 
 ### Toon and per-pixel lighting (deko3d): L3+R3 > Video > Lighting (`config/lighting`, off by default)
 - **Switch:** `sdmc:/switch/oot3dre/config/lighting`, first word `toon` or `perpixel`; absent, empty or

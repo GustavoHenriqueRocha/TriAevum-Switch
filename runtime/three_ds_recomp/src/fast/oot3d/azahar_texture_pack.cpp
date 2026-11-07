@@ -2,6 +2,7 @@
 #include "oot3d/renderer/azahar_hud_image_list.h"
 #include "oot3d/renderer/azahar_texture_scale.h"
 #include "fast/renderer/content_hash.h"
+#include "oot3d/renderer/pica_texture_decode.h"
 #include "azahar_pbr_materials.h"
 
 #include <nlohmann/json.hpp>
@@ -510,6 +511,13 @@ struct LoadJob {
     // A HUD image decoded ahead of its first draw (from the HUD list, or
     // asked for Ahead by the UI).
     bool Preload = false;
+    // An ahead HUD request not identified yet (AzaharTextureRequest::Ahead):
+    // its encoded base level, PICA format and the pack's hash mode. The HUD
+    // worker hashes it (decoding it for a legacy hash) and queues its image,
+    // so asking ahead costs the caller a copy, not a decode.
+    std::vector<uint8_t> AheadNative;
+    uint8_t AheadFormat = 0;
+    bool AheadUsesNewHash = true;
     std::optional<IndexedAzaharPbrMaterial> Material;
     AzaharMaterialIdentity Identity;
     std::shared_ptr<std::promise<AzaharImageLoadResult>> EditorImage;
@@ -618,6 +626,7 @@ class AzaharTexturePackRuntime::Impl {
             std::scoped_lock lock(mMutex);
             if (!mConfigured) return {};
             if (!mIndexReady) return {AzaharTextureResolveState::Pending, 0U, nullptr};
+            if (request.UserInterface && request.Ahead) return QueueAheadLocked(request);
             dumpEnabled = mConfiguration.DumpTextures;
             loadEnabled = mConfiguration.LoadCustomTextures;
             dumpUsesNewHash = mDumpUsesNewHash;
@@ -648,8 +657,7 @@ class AzaharTexturePackRuntime::Impl {
         if (!loadEnabled) return {AzaharTextureResolveState::Disabled, hash, nullptr, true, loadUsesNewHash};
         std::scoped_lock lock(mMutex);
         if (generation != mGeneration || !mConfiguration.LoadCustomTextures) return {};
-        return QueueOrPollLocked(hash, {request.Width, request.Height}, request.UserInterface,
-                                 request.UserInterface && request.Ahead);
+        return QueueOrPollLocked(hash, {request.Width, request.Height}, request.UserInterface);
     }
 
     AzaharTextureResolveResult PollQueued(uint64_t hash) const {
@@ -796,6 +804,49 @@ class AzaharTexturePackRuntime::Impl {
     }
 
   private:
+    // An ahead HUD request (index ready): a copy of its encoded base level is
+    // identified on the HUD worker (IdentifyAhead); its image is queued then.
+    AzaharTextureResolveResult QueueAheadLocked(const AzaharTextureRequest& request) {
+        if (!mConfiguration.LoadCustomTextures) return {};
+        if (request.NativeBytes.empty()) return {AzaharTextureResolveState::Failed, 0U, nullptr};
+        LoadJob job;
+        job.Generation = mGeneration;
+        job.Options = DecodeOptions{{request.Width, request.Height}, kUiTextureMaxScale, false};
+        job.UserInterface = true;
+        job.Preload = true;
+        job.AheadNative.assign(request.NativeBytes.begin(), request.NativeBytes.end());
+        job.AheadFormat = request.NativeFormat;
+        job.AheadUsesNewHash = mPack.UseNewHash;
+        mUiLoadJobs.push_back(std::move(job));
+        ++mPendingLoads;
+        mUiWorkAvailable.notify_one();
+        return {AzaharTextureResolveState::Pending, 0U, nullptr, false, mPack.UseNewHash};
+    }
+    // The pack's hash of an ahead HUD request, then its image queued ahead
+    // (if the pack has one) behind the HUD images already queued.
+    void IdentifyAhead(const LoadJob& job) {
+        AzaharTextureRequest request{static_cast<uint16_t>(job.Options.Native.Width),
+                                     static_cast<uint16_t>(job.Options.Native.Height), job.AheadFormat, 0U,
+                                     job.AheadNative, {}};
+        std::vector<uint8_t> rgba8;
+        std::string error;
+        uint64_t hash = 0U;
+        // Azahar's legacy hash of a format without a byte layout of its own
+        // (5 and up) is over the decoded texels.
+        if (job.AheadUsesNewHash || job.AheadFormat < 5U ||
+            DecodePicaTextureRgba8(job.AheadFormat, request.Width, request.Height, job.AheadNative, rgba8, &error)) {
+            request.NativeRgba8 = rgba8;
+            hash = ComputeAzaharTextureHash(request, job.AheadUsesNewHash, &error);
+        }
+        std::scoped_lock lock(mMutex);
+        if (!error.empty()) {
+            mLastError = "HUD texture asked for ahead: " + error;
+        } else if (job.Generation == mGeneration && mConfiguration.LoadCustomTextures) {
+            (void)QueueOrPollLocked(hash, job.Options.Native, true, true);
+        }
+        --mPendingLoads;
+        mIdle.notify_all();
+    }
     // Queues the decode of an indexed image that is neither cached, failed
     // nor already queued, then reports its state. HUD images have their own
     // cache (another size cap and no mips than a world texture of the hash)
@@ -1096,7 +1147,11 @@ class AzaharTexturePackRuntime::Impl {
                     continue;
                 }
             }
-            Load(load);
+            if (!load.AheadNative.empty()) {
+                IdentifyAhead(load);
+            } else {
+                Load(load);
+            }
         }
     }
     void WorkerMain() {

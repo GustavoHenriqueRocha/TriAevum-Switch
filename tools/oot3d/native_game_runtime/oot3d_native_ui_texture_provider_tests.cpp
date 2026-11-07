@@ -338,6 +338,7 @@ int main() {
     std::vector<std::uint8_t> requested;
     std::uint8_t requestedFormat = 0xFFU;
     bool requestedAhead = false;
+    std::size_t requestedRgbaBytes = 0U;
     std::uint64_t packRevision = 7U;
     const auto replacement =
         std::make_shared<const std::vector<std::uint8_t>>(24U * 24U * 4U, 0x40U);
@@ -347,6 +348,7 @@ int main() {
                              request.encoded_base_level.end());
             requestedFormat = request.native_pica_format;
             requestedAhead = request.ahead;
+            requestedRgbaBytes = request.rgba8.size();
             Oot3dNativeUiCustomTexture custom;
             custom.state = packState;
             if (packState == Oot3dNativeUiCustomTexture::State::Ready) {
@@ -393,12 +395,14 @@ int main() {
                 pixels.rgba8.front() == 0xFFU,
             "without a custom texture the native pixels did not come back");
     // Asked for ahead of its first draw: the source sees the same identity,
-    // marked ahead; no pixels are handed out nor counted as resolves.
+    // marked ahead and not decoded (the pack hashes it on its worker); no
+    // pixels are handed out nor counted as resolves.
     requested.clear();
     packState = Oot3dNativeUiCustomTexture::State::Pending;
     const auto statsBefore = profileTextureProvider.Stats();
     profileTextureProvider.RequestAhead(profileTextureIdentity);
     Require(requestedAhead && requested == profileTexturePayload && requestedFormat == 0U &&
+                requestedRgbaBytes == 0U &&
                 profileTextureProvider.Stats().custom_texture_ahead == 1U &&
                 profileTextureProvider.Stats().resolve_calls == statsBefore.resolve_calls &&
                 profileTextureProvider.Stats().custom_texture_pending == statsBefore.custom_texture_pending,
@@ -427,6 +431,15 @@ int main() {
                 std::equal(requested.begin(), requested.end(),
                            replacementPayload.begin()),
             "native UI custom texture was not identified by its overridden bytes");
+    // Asked for ahead: the same overridden bytes, not decoded.
+    const auto resolvedBytes = requested;
+    Require(memory.WriteBytes(0x14000000U, originalPayload),
+            "could not restore the native override fixture");
+    requested.clear();
+    overrideProvider.RequestAhead(identity);
+    Require(requestedAhead && requested == resolvedBytes && requestedRgbaBytes == 0U &&
+                overrideProvider.Stats().custom_texture_ahead == 1U,
+            "a native UI texture asked for ahead was not identified by its overridden bytes");
 
     // The HUD's choice between the player's pack and the HD UI atlas.
     {

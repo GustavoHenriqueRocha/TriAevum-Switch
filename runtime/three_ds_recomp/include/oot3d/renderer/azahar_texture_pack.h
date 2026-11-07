@@ -48,8 +48,9 @@ struct AzaharTextureRequest {
     // hash. The UI renderer keeps its own copy; ReleaseDecoded does not apply.
     bool UserInterface = false;
     // A HUD texture asked for before its first draw (the UI renderer's
-    // RequestAhead): its decode is queued as one decoded ahead, and it does
-    // not count as a first sight. Only with UserInterface.
+    // RequestAhead): only NativeBytes is needed; a copy is hashed on the HUD
+    // worker, whose image is then queued as one decoded ahead (not a first
+    // sight). Answers Pending without a hash. Only with UserInterface.
     bool Ahead = false;
 };
 
