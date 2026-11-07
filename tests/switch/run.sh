@@ -92,6 +92,9 @@ result test_topscreen_30_pack "$code"
 python3 "$here/test_perpixel_lighting.py" > /tmp/switch-perpixel.$$ 2>&1; code=$?
 grep -E '^(FAIL|ERROR)' /tmp/switch-perpixel.$$ | sed 's/^/  /'; rm -f /tmp/switch-perpixel.$$
 result test_perpixel_lighting "$code"
+python3 "$here/test_tev_passthrough.py" > /tmp/switch-tevskip.$$ 2>&1; code=$?
+grep -E '^(FAIL|ERROR)' /tmp/switch-tevskip.$$ | sed 's/^/  /'; rm -f /tmp/switch-tevskip.$$
+result test_tev_passthrough "$code"
 python3 "$repo/tools/switch/test_shrink_texture_pack.py" > /tmp/switch-shrink.$$ 2>&1; code=$?
 grep -E '^(FAIL|ERROR)' /tmp/switch-shrink.$$ | sed 's/^/  /'; rm -f /tmp/switch-shrink.$$
 result test_shrink_texture_pack "$code"

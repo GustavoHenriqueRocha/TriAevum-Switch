@@ -3,16 +3,19 @@
 It runs the functions of a GLSL text on the CPU with IEEE single precision
 (every float result is rounded to binary32, overflow gives infinity). min, max
 and clamp follow the Maxwell FMNMX rule (a NaN operand yields the other one);
-pow is exp2(y * log2(x)) like the hardware. Enough of GLSL 4.3 for the deko3d
-per-pixel lighting text (gfx_deko3d_lighting.cpp): structs, uniform blocks,
-inputs, functions with in/out parameters, if/for/return/continue/break, the
-vector types with swizzles, and the built-ins that text uses.
+pow is exp2(y * log2(x)) like the hardware; fma rounds once (FFMA). Enough of
+GLSL 4.3 for the deko3d per-pixel lighting text (gfx_deko3d_lighting.cpp) and
+the TEV stages of the generated fragment texts (test_tev_passthrough.py):
+structs, uniform blocks, inputs, functions with in/out parameters,
+if/for/return/continue/break, the vector types with swizzles, and the
+built-ins those texts use.
 
     program = Program(text)
     program.globals["pica_view"] = Vec([0.0, 0.0, -1.0])
     result = program.call("pica_surface_primary", Vec([0.5, 0.5, 0.5]), ...)
 """
 import math
+from fractions import Fraction
 import re
 import struct
 
@@ -46,6 +49,28 @@ def _mul(a, b):
         return f32(a * b)
     except (OverflowError, ValueError):
         return math.nan
+
+
+def _round_f32(exact):
+    """A rational rounded once to binary32 (nearest, ties to even)."""
+    if exact == 0:
+        return 0.0
+    sign = -1.0 if exact < 0 else 1.0
+    magnitude = abs(exact)
+    exponent = magnitude.numerator.bit_length() - magnitude.denominator.bit_length()
+    if Fraction(2) ** exponent > magnitude:
+        exponent -= 1
+    exponent = max(exponent, -126)               # subnormals keep the 2^-149 step
+    step = Fraction(2) ** (exponent - 23)
+    mantissa = round(magnitude / step)           # Fraction rounds half to even
+    return f32(sign * float(mantissa * step))    # exact in binary64; f32 handles overflow
+
+
+def _fma(a, b, c):
+    """fma() with one rounding (FFMA)."""
+    if any(math.isnan(v) or math.isinf(v) for v in (a, b, c)):
+        return f32(a * b + c) if not ((a == 0.0 and math.isinf(b)) or (b == 0.0 and math.isinf(a))) else math.nan
+    return _round_f32(Fraction(a) * Fraction(b) + Fraction(c))
 
 
 def _fmin(a, b):
@@ -873,6 +898,9 @@ class _Interpreter:
 
     def _b_clamp(self, x, low, high):
         return self._b_min(self._b_max(x, low), high)
+
+    def _b_fma(self, a, b, c):
+        return self._map(lambda x, y, z: _fma(float(x), float(y), float(z)), a, b, c)
 
     def _b_abs(self, x):
         return self._map(abs, x)

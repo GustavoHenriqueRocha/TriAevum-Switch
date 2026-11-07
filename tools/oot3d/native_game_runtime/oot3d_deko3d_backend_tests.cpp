@@ -87,6 +87,32 @@ void TestShaderPack() {
   shortPack.resize(70);
   Require(!index.Parse(shortPack, &error), "blob past the end fails");
   Require(!index.Parse({}, &error), "empty fails");
+
+  // tevskip: header and entry flags (0 in older packs, whose words were reserved).
+  Require(index.Parse(MakePack(10, 20), &error) && index.Flags() == 0U &&
+              index.CountWithFlag(kShaderPackFlagTevPassthroughSkip) == 0U,
+          "older pack: no flags");
+  auto flagged = MakePack(10, 20);
+  Put32(flagged, 12, kShaderPackFlagTevPassthroughSkip);
+  Put32(flagged, 16 + 24 + 20, kShaderPackFlagTevPassthroughSkip); // second entry's flags
+  Require(index.Parse(flagged, &error) && index.Flags() == kShaderPackFlagTevPassthroughSkip &&
+              index.CountWithFlag(kShaderPackFlagTevPassthroughSkip) == 1U && index.Count() == 2U,
+          "flagged pack: header flag and one flagged entry");
+  Require(!index.Parse({}, &error) && index.Flags() == 0U, "a failed parse clears the flags");
+
+  // config/deko3d_pack: a file name in shadercache/, nothing else.
+  Require(ShaderPackNameFromConfig("deko3d_reference.pack") == std::optional<std::string>("deko3d_reference.pack"),
+          "reference pack name");
+  Require(ShaderPackNameFromConfig("  deko3d.pack \r\n") == std::optional<std::string>("deko3d.pack"),
+          "spaces and CR ignored");
+  Require(!ShaderPackNameFromConfig("../deko3d.pack").has_value(), "no path");
+  Require(!ShaderPackNameFromConfig("sub/deko3d.pack").has_value(), "no directory");
+  Require(!ShaderPackNameFromConfig(".pack").has_value() && !ShaderPackNameFromConfig(".hidden.pack").has_value(),
+          "no leading dot");
+  Require(!ShaderPackNameFromConfig("deko3d.txt").has_value() && !ShaderPackNameFromConfig("").has_value(),
+          "must end in .pack");
+  Require(!ShaderPackNameFromConfig(std::string(70, 'a') + ".pack").has_value(), "at most 64 characters");
+  Require(kDefaultShaderPackName == "deko3d.pack", "default pack");
 }
 
 // p6f on the console: lighting shaders with 4096 bytes of scratch and the queue with the

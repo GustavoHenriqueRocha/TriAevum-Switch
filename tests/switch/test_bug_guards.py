@@ -1451,6 +1451,27 @@ GUARDS = [
           r'result\.Kind = ResolveStoppedThreadRunKind\(\s+result\.Kind, AllThreadsTerminated\(\)\);',
           "oot3d_native_a32_process_tests (TestThreadExitWhileOthersWait)",
           forbid=r'if \(AllThreadsTerminated\(\)\) \{\s+result\.Kind = NativeA32ProcessRunKind::Terminated;'),
+    # --- 07/11: tevskip, pass-through TEV stages compiled as copies in deko3d.pack ---
+    # The binary must stay under the unmodified text's key (the console hashes the text it
+    # generates); stage 0's "previous" source is another input; a `precise` copy stopped uam
+    # folding the earlier clamps into .sat (+24 instructions on some texts).
+    Guard("tevskip: pass-through rewrite keyed by the unmodified text, stage 0 left alone, copies not precise",
+          "tools/oot3d/deko3d_shader_pack.py",
+          r'stage >= 1 and rgb_ok and match\["expr"\] == "combiner_output\.rgb".*?'
+          r'stage >= 1 and alpha_ok and match\["expr"\] == "combiner_output\.a".*?'
+          r'source, \(colors, alphas, stages\) = skip_tev_passthrough\(text\).*?'
+          r'compiled\[key\] = \(stage, source, flags\).*?entries\[key\] = \(stage, blob, flags\)',
+          "tests/switch/test_tev_passthrough.py",
+          forbid=r'shader_text_key\(\w+, source\)|precise vec3 color_output_\{stage\} = combiner_output\.rgb'),
+    # From the fork author's a7424d3b: the pack read byte by byte delayed the boot.
+    Guard("deko3d.pack read byte by byte delayed the boot (fork a7424d3b: one read)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
+          r'std::ios::binary \| std::ios::ate\);.*?file\.read\(reinterpret_cast<char\*>\(bytes\.data\(\)\)',
+          forbid=r'std::vector<uint8_t> bytes\(\(std::istreambuf_iterator'),
+    Guard("tevskip: config/deko3d_pack picks the pack and deko3d.txt says which and whether it skips TEV stages",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
+          r'ShaderPackNameFromConfig\(line\).*?tev_passthrough=%s',
+          "oot3d_deko3d_backend_tests (TestShaderPack)"),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay

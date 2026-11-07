@@ -8,10 +8,19 @@
 // Pure code: tested on the host (oot3d_deko3d_backend_tests).
 //
 // Layout (little endian):
-//   header  { u32 magic "DKP1"; u32 version (1); u32 count; u32 reserved }
-//   entries { u64 key; u32 offset; u32 size; u32 stage; u32 reserved } x count,
+//   header  { u32 magic "DKP1"; u32 version (1); u32 count; u32 flags }
+//   entries { u64 key; u32 offset; u32 size; u32 stage; u32 flags } x count,
 //           sorted by key, unique
 //   blobs   DKSH files at their offsets (from the start of the file)
+// Flags (0 in packs made before tevskip, which wrote the words as reserved):
+//   kShaderPackFlagTevPassthroughSkip: the entry's DKSH was compiled from its
+//   text with the pass-through TEV stages written as copies (the pack tool's
+//   skip_tev_passthrough; exact, tests/switch/test_tev_passthrough.py); the
+//   header has it when any entry has it. The key stays the unmodified text's.
+//
+// Which pack is read: shadercache/deko3d.pack, or the file named by the first
+// line of config/deko3d_pack (e.g. deko3d_reference.pack, built without the
+// rewrite, for an A/B of the same session's places).
 
 #include <algorithm>
 #include <cstdint>
@@ -44,6 +53,34 @@ inline uint64_t ShaderTextKey(ShaderStage stage, std::string_view text) {
 constexpr uint32_t kShaderPackMagic = 0x31504B44U; // "DKP1"
 constexpr uint32_t kShaderPackVersion = 1U;
 constexpr uint32_t kDkshMagic = 0x48534B44U;       // "DKSH"
+constexpr uint32_t kShaderPackFlagTevPassthroughSkip = 1U;
+constexpr std::string_view kDefaultShaderPackName = "deko3d.pack";
+
+// The pack file name config/deko3d_pack's first line selects in shadercache/:
+// surrounding spaces and CR ignored; only [A-Za-z0-9._-] ending in ".pack",
+// not starting with '.', at most 64 characters (no path). Anything else (or no
+// file): nothing, and the default pack is read.
+[[nodiscard]] inline std::optional<std::string> ShaderPackNameFromConfig(std::string_view line) {
+    while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) {
+        line.remove_prefix(1);
+    }
+    while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r' || line.back() == '\n')) {
+        line.remove_suffix(1);
+    }
+    constexpr std::string_view suffix = ".pack";
+    if (line.size() <= suffix.size() || line.size() > 64U || line.front() == '.' ||
+        line.substr(line.size() - suffix.size()) != suffix) {
+        return std::nullopt;
+    }
+    for (const char c : line) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
+                        c == '_' || c == '-';
+        if (!ok) {
+            return std::nullopt;
+        }
+    }
+    return std::string(line);
+}
 
 // Per-warp scratch (local memory) the queue gives every shader
 // (DkQueueMaker::perWarpScratchMemorySize, a multiple of 0x200): the lit
@@ -90,7 +127,7 @@ struct ShaderPackEntry {
     uint32_t Offset = 0;
     uint32_t Size = 0;
     uint32_t Stage = 0;
-    uint32_t Reserved = 0;
+    uint32_t Flags = 0;
 };
 static_assert(sizeof(ShaderPackEntry) == 24);
 
@@ -101,12 +138,14 @@ class ShaderPackIndex {
     bool Parse(std::vector<uint8_t> bytes, std::string* error) {
         mBytes.clear();
         mEntries.clear();
+        mFlags = 0;
         const auto fail = [&](const char* why) {
             if (error != nullptr) {
                 *error = why;
             }
             mBytes.clear();
             mEntries.clear();
+            mFlags = 0;
             return false;
         };
         uint32_t header[4]{};
@@ -148,6 +187,7 @@ class ShaderPackIndex {
             }
         }
         mBytes = std::move(bytes);
+        mFlags = header[3];
         return true;
     }
 
@@ -169,10 +209,22 @@ class ShaderPackIndex {
     [[nodiscard]] size_t Count() const noexcept {
         return mEntries.size();
     }
+    // Header flags (kShaderPackFlag*).
+    [[nodiscard]] uint32_t Flags() const noexcept {
+        return mFlags;
+    }
+
+    // Entries whose flags have every bit of `flag`.
+    [[nodiscard]] size_t CountWithFlag(uint32_t flag) const noexcept {
+        return static_cast<size_t>(std::count_if(mEntries.begin(), mEntries.end(), [flag](const ShaderPackEntry& entry) {
+            return (entry.Flags & flag) == flag;
+        }));
+    }
 
   private:
     std::vector<uint8_t> mBytes;
     std::vector<ShaderPackEntry> mEntries;
+    uint32_t mFlags = 0;
 };
 
 } // namespace Fast::Deko3d

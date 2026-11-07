@@ -8,8 +8,15 @@ Inputs (any combination, repeatable):
                 the deko3d backend compiles);
   --glsl DIR    texts the game recorded because they were missing from the pack
                 (logs/deko3d_shaders/{vert,frag}_<key>.glsl);
-  --pack FILE   a previous pack (its entries are kept).
+  --pack FILE   a previous pack (its entries are kept, except the ones of a
+                text above compiled in the other pass-through mode).
 
+  --keep-tev-passthrough   compiles every text as it is (deko3d_reference.pack,
+                the config/deko3d_pack A/B). By default a fragment stage's
+                pass-through TEV stages are compiled as copies (exact; see
+                skip_tev_passthrough), each such entry has flag 1, and so has
+                the header when any entry does. Keys are always the
+                unmodified texts'.
   --lighting-variants TOOL   also builds the toon and per-pixel variants of every
                 fragment text (config/lighting, gfx_deko3d_lighting.h) with TOOL
                 (oot3d_deko3d_lighting_variants: the console's own mutation) and
@@ -27,6 +34,7 @@ runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_shader_pack.h.
 import argparse
 import concurrent.futures
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -63,28 +71,36 @@ def read_pgs1(path: Path):
 
 
 def read_pack(path: Path) -> dict:
+    """Entries by key: (stage, DKSH, flags)."""
     data = path.read_bytes()
     magic, version, count, _ = struct.unpack_from("<IIII", data, 0)
     if magic != PACK_MAGIC or version != PACK_VERSION:
         raise SystemExit(f"{path}: not a DKP1 v1 pack")
     entries = {}
     for index in range(count):
-        key, offset, size, stage, _ = struct.unpack_from("<QIIII", data, 16 + 24 * index)
-        entries[key] = (stage, data[offset:offset + size])
+        key, offset, size, stage, flags = struct.unpack_from("<QIIII", data, 16 + 24 * index)
+        entries[key] = (stage, data[offset:offset + size], flags)
     return entries
+
+
+def pack_flags(entries: dict) -> int:
+    flags = 0
+    for _, _, entry_flags in entries.values():
+        flags |= entry_flags
+    return flags
 
 
 def write_pack(path: Path, entries: dict) -> None:
     keys = sorted(entries)
-    header = struct.pack("<IIII", PACK_MAGIC, PACK_VERSION, len(keys), 0)
+    header = struct.pack("<IIII", PACK_MAGIC, PACK_VERSION, len(keys), pack_flags(entries))
     offset = len(header) + 24 * len(keys)
     table = bytearray()
     blobs = bytearray()
     for key in keys:
-        stage, blob = entries[key]
+        stage, blob, flags = entries[key]
         pad = (-(offset + len(blobs))) % 256
         blobs += b"\0" * pad
-        table += struct.pack("<QIIII", key, offset + len(blobs), len(blob), stage, 0)
+        table += struct.pack("<QIIII", key, offset + len(blobs), len(blob), stage, flags)
         blobs += blob
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_bytes(header + table + blobs)
@@ -99,6 +115,131 @@ def dksh_scratch(blob: bytes):
     if programs == 0 or programs_off + 24 > len(blob):
         return None
     return struct.unpack_from("<I", blob, programs_off + 20)[0]
+
+
+# ---- TEV pass-through stages -------------------------------------------------
+# The fragment generator (oot3d_native_pica_fragment_shader_gen.cpp) writes all
+# six combiner stages; each rounds its colour and alpha to 8 bits
+# (byteround3/byteround1: four floor per stage, F2F on Maxwell). A stage N >= 1
+# whose colour (or alpha) is exactly (`precise` absent in texts older than
+# lighting3, still in the reference pack)
+#     precise vec3 color_output_N = byteround3(clamp(combiner_output.rgb, vec3(0.0), vec3(1.0)));
+#     precise float alpha_output_N = byteround1(clamp(combiner_output.a, 0.0, 1.0));
+# with scale 1 (`color_output_N * 1.0` in its combiner_output line) returns its
+# input unchanged: that input is the previous stage's 8-bit result times 1, 2
+# or 4, clamped to [0, 1], and rounding and clamping such a value again gives
+# the same float (tests/switch/test_tev_passthrough.py proves it in binary32
+# for every byte, scale, division and reciprocal form, fused or not). The pack
+# compiles such a channel as a plain copy; the binary stays under the key of
+# the unmodified text, so the runtime lookup, the lighting variants and the
+# texts consoles record as missing are unchanged.
+# The fork author's light uber shader skips trailing pass-through stages by the
+# same rule: TriAevum-Switch commit 6884c113 by Gustavo Henrique Rocha
+# (origin/deko3d, gfx_deko3d uber TEV; 4096 GPU cases, 0 differences),
+# licence as the repository (LICENSE).
+# Stage 0 is never rewritten: its "previous" source stands for another input
+# (oot3d_native_pica_fragment_shader_gen.cpp, stage == 0 source remap).
+PACK_FLAG_TEV_PASSTHROUGH_SKIP = 1   # header word 3 (gfx_deko3d_shader_pack.h kShaderPackFlagTevPassthroughSkip)
+
+# The two byteround definitions the generator has written (TevExpressions::
+# ByteRoundHelpers now, the unqualified one before): the proof covers both.
+_BYTEROUND_HELPERS = (
+    b"vec3 byteround3(vec3 value) { precise vec3 scaled=value*255.0; precise vec3 biased=scaled+0.5; "
+    b"return floor(biased)/255.0; }\n"
+    b"float byteround1(float value) { precise float scaled=value*255.0; precise float biased=scaled+0.5; "
+    b"return floor(biased)/255.0; }\n",
+    b"vec3 byteround3(vec3 value) { return floor(value * 255.0 + 0.5) / 255.0; }\n"
+    b"float byteround1(float value) { return floor(value * 255.0 + 0.5) / 255.0; }\n",
+)
+_TEV_COLOR = re.compile(r"(?P<indent>[ \t]*)(?P<q>(?:precise )?)vec3 color_output_(?P<stage>\d+) = "
+                        r"byteround3\(clamp\((?P<expr>.*), vec3\(0\.0\), vec3\(1\.0\)\)\);")
+_TEV_ALPHA = re.compile(r"(?P<indent>[ \t]*)(?P<q>(?:precise )?)float alpha_output_(?P<stage>\d+) = "
+                        r"byteround1\(clamp\((?P<expr>.*), 0\.0, 1\.0\)\);")
+_TEV_OUTPUT = re.compile(r"(?P<indent>[ \t]*)combiner_output = vec4\(clamp\(color_output_(?P<stage>\d+) \* "
+                         r"(?P<cs>[124])\.0, vec3\(0\.0\), vec3\(1\.0\)\), clamp\(alpha_output_(?P=stage) \* "
+                         r"(?P<as>[124])\.0, 0\.0, 1\.0\)\);")
+_TEV_BUFFER = re.compile(r"[ \t]*(combiner_buffer = next_combiner_buffer;|"
+                         r"next_combiner_buffer\.rgb = combiner_output\.rgb;|"
+                         r"next_combiner_buffer\.a = combiner_output\.a;)")
+
+
+def _single_call(expr: str) -> bool:
+    """True if no parenthesis of expr closes one it did not open (so the
+    generator's byteround(clamp(expr, ...)) really wraps the whole stage)."""
+    depth = 0
+    for char in expr:
+        depth += char == "("
+        depth -= char == ")"
+        if depth < 0:
+            return False
+    return depth == 0
+
+
+def skip_tev_passthrough(text: bytes):
+    """The text with every pass-through colour/alpha of a stage >= 1 written as
+    a copy, and (colour channels, alpha channels, whole stages) rewritten.
+
+    Line by line: `rgb_ok`/`alpha_ok` say combiner_output's channel holds a
+    stage's 8-bit result times 1, 2 or 4, clamped (it was last written by a
+    generator combiner_output line whose operands were byteround outputs or
+    copies of such a channel). Only the generator's buffer lines may follow
+    it; any other line clears both, so nothing a lighting or toon variant
+    inserts is ever trusted. Texts without one of the generator's byteround
+    definitions (each exactly once) are returned unchanged."""
+    if sum(text.count(helper) for helper in _BYTEROUND_HELPERS) != 1 or text.count(b"vec3 byteround3(") != 1 \
+            or text.count(b"float byteround1(") != 1:
+        return text, (0, 0, 0)
+    lines = text.decode("latin-1").split("\n")
+    rgb_ok = alpha_ok = False
+    color = alpha = None   # (stage, line index, pass-through, qualifier) of the stage being read
+    colors = alphas = stages = 0
+    for index, line in enumerate(lines):
+        match = _TEV_COLOR.fullmatch(line)
+        if match and _single_call(match["expr"]):
+            stage = int(match["stage"])
+            color = (stage, index, stage >= 1 and rgb_ok and match["expr"] == "combiner_output.rgb", match["q"])
+            alpha = None
+            continue
+        match = _TEV_ALPHA.fullmatch(line)
+        if match and _single_call(match["expr"]) and color is not None and color[1] == index - 1 \
+                and int(match["stage"]) == color[0]:
+            stage = int(match["stage"])
+            alpha = (stage, index, stage >= 1 and alpha_ok and match["expr"] == "combiner_output.a", match["q"])
+            continue
+        match = _TEV_OUTPUT.fullmatch(line)
+        if match and color is not None and alpha is not None and alpha[1] == index - 1 \
+                and int(match["stage"]) == color[0]:
+            stage = color[0]
+            indent = match["indent"]
+            color_copy = color[2] and match["cs"] == "1"
+            alpha_copy = alpha[2] and match["as"] == "1"
+            # The copies are not `precise`: a precise copy would make the
+            # earlier stages' clamps exact through combiner_output, and uam
+            # then stops folding them into the multiply's saturate (two
+            # FMNMX per channel instead; measured +24 instructions on some
+            # texts). Every transformation left to it here is exact anyway
+            # (x * 1.0, clamp -> .sat, powers of two times 1/255).
+            if color_copy:
+                lines[color[1]] = f"{indent}vec3 color_output_{stage} = combiner_output.rgb;"
+                colors += 1
+            if alpha_copy:
+                lines[alpha[1]] = f"{indent}float alpha_output_{stage} = combiner_output.a;"
+                alphas += 1
+            stages += color_copy and alpha_copy
+            if color_copy or alpha_copy:
+                rgb = f"color_output_{stage}" if color_copy else \
+                    f"clamp(color_output_{stage} * {match['cs']}.0, vec3(0.0), vec3(1.0))"
+                a = f"alpha_output_{stage}" if alpha_copy else \
+                    f"clamp(alpha_output_{stage} * {match['as']}.0, 0.0, 1.0)"
+                lines[index] = f"{indent}combiner_output = vec4({rgb}, {a});"
+            rgb_ok = alpha_ok = True
+            color = alpha = None
+            continue
+        if _TEV_BUFFER.fullmatch(line) and color is None:
+            continue
+        rgb_ok = alpha_ok = False
+        color = alpha = None
+    return "\n".join(lines).encode("latin-1"), (colors, alphas, stages)
 
 
 def lighting_variants(tool: str, texts: dict) -> dict:
@@ -146,6 +287,8 @@ def main() -> int:
     parser.add_argument("--glsl", action="append", default=[], type=Path)
     parser.add_argument("--pack", action="append", default=[], type=Path)
     parser.add_argument("--lighting-variants", metavar="TOOL")
+    parser.add_argument("--keep-tev-passthrough", action="store_true",
+                        help="compile the texts unmodified (the reference pack)")
     parser.add_argument("-o", "--output", type=Path)
     parser.add_argument("--uam", default="/opt/devkitpro/tools/bin/uam")
     parser.add_argument("-j", "--jobs", type=int, default=min(8, os.cpu_count() or 1))
@@ -187,16 +330,36 @@ def main() -> int:
     if args.lighting_variants:
         variants = lighting_variants(args.lighting_variants, texts)
         texts.update(variants)
-    pending = {key: value for key, value in texts.items() if key not in entries}
+    # What uam compiles for each key, and the entry flags that gives.
+    compiled = {}
+    rewritten = [0, 0, 0, 0]   # texts, colour channels, alpha channels, whole stages
+    for key, (stage, text) in texts.items():
+        source, flags = text, 0
+        if stage == FRAGMENT and not args.keep_tev_passthrough:
+            source, (colors, alphas, stages) = skip_tev_passthrough(text)
+            if source != text:
+                flags = PACK_FLAG_TEV_PASSTHROUGH_SKIP
+                rewritten = [rewritten[0] + 1, rewritten[1] + colors, rewritten[2] + alphas, rewritten[3] + stages]
+        compiled[key] = (stage, source, flags)
+    fragments = sum(1 for stage, _ in texts.values() if stage == FRAGMENT)
+    if fragments and args.keep_tev_passthrough:
+        print(f"tev pass-through: kept in all {fragments} fragment texts (reference pack)")
+    elif fragments:
+        print(f"tev pass-through: skipped in {rewritten[0]} of {fragments} fragment texts "
+              f"({rewritten[1]} colour and {rewritten[2]} alpha channels, {rewritten[3]} whole stages)")
+    pending = {key: value for key, value in compiled.items()
+               if key not in entries or entries[key][2] != value[2]}
     failed = 0
     scratch = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        futures = {pool.submit(compile_stage, args.uam, stage, text): (key, stage)
-                   for key, (stage, text) in pending.items()}
+        futures = {pool.submit(compile_stage, args.uam, stage, source): (key, stage, flags)
+                   for key, (stage, source, flags) in pending.items()}
         for future in concurrent.futures.as_completed(futures):
-            key, stage = futures[future]
+            key, stage, flags = futures[future]
             blob, error = future.result()
             if blob is None:
+                # A previous entry of the key (the other pass-through mode,
+                # equally exact) stays.
                 failed += 1
                 print(f"FAILED {STAGE_NAMES[stage]} {key:016x}: {error[:400]}", file=sys.stderr)
                 continue
@@ -207,11 +370,13 @@ def main() -> int:
                       f"(limit {PER_WARP_SCRATCH_LIMIT})", file=sys.stderr)
                 continue
             scratch.append(need)
-            entries[key] = (stage, blob)
+            entries[key] = (stage, blob, flags)
     write_pack(args.output, entries)
-    vertex = sum(1 for stage, _ in entries.values() if stage == VERTEX)
+    vertex = sum(1 for stage, _, _ in entries.values() if stage == VERTEX)
+    flagged = sum(1 for _, _, flags in entries.values() if flags & PACK_FLAG_TEV_PASSTHROUGH_SKIP)
     print(f"{args.output}: {len(entries)} shaders ({vertex} vertex, {len(entries) - vertex} fragment), "
-          f"{len(pending) - failed} compiled now, {failed} failures, {args.output.stat().st_size // 1024} KiB")
+          f"{len(pending) - failed} compiled now, {failed} failures, {args.output.stat().st_size // 1024} KiB, "
+          f"flags {pack_flags(entries)} ({flagged} with pass-through stages skipped)")
     if scratch:
         print(f"scratch per warp of the stages compiled now: max {max(scratch)} bytes, "
               f"{sum(1 for need in scratch if need > 0)} use some (limit {PER_WARP_SCRATCH_LIMIT})")

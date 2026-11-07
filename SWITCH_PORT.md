@@ -2184,6 +2184,58 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   (no blocks, no garbage after a room change or a DRS step); save a state and load it: the restored frame is
   right; take an album screenshot. `dkperf busy_ms`/`scene_ms` against a run with `deko3d_compression` = `0`.
 
+### Pass-through TEV stages skipped in the pack (`config/deko3d_pack`, 07/11, on by default)
+- **Why:** the fragment generator writes all six combiner stages, each rounded to 8 bits (`byteround3`/
+  `byteround1`: four `floor` = `F2F` per stage, a quarter-rate instruction on Maxwell). Most stages only pass
+  the previous result on: of the 1412 fragment texts the pack compiles (271 recorded `.src`, 11 console-missing,
+  1130 toon/per-pixel variants), every one has 4-10 pass-through channels (colour or alpha of stages 1-5);
+  315 have all five stages pass-through.
+- **What:** `tools/oot3d/deko3d_shader_pack.py` (`skip_tev_passthrough`), just before uam: a stage N ≥ 1 whose
+  colour is `byteround3(clamp(combiner_output.rgb, vec3(0.0), vec3(1.0)))` (alpha: `byteround1(clamp(
+  combiner_output.a, 0.0, 1.0))`) with scale 1 becomes `vec3 color_output_N = combiner_output.rgb;` and its
+  `combiner_output` line uses it unclamped. Only when the line before is the previous stage's generator line
+  (or its buffer lines): anything a variant inserts between stages ends the chain. Stage 0 is never touched.
+  The DKSH is stored under the key of the **unmodified** text, so the console's lookup, the lighting variants
+  and the texts consoles record as missing are unchanged; no generator change, no shard-visible change.
+  Same rule as the fork author's light uber shader (`6884c113`, trailing stages), credited in the tool.
+- **Exact:** a stage's input is the previous stage's 8-bit result `fl(k/255)` (uam emits `* 0x3B808081`,
+  `fl(1/255)`) times 1, 2 or 4, clamped; rounding and clamping it again gives the same float.
+  `tests/switch/test_tev_passthrough.py`: every byte × scale × (division, reciprocal) × (separate, fused
+  multiply-add) in binary32 (a reciprocal one ulp off would fail: checked); and the stages of real texts
+  (12 in `tests/switch/data/tev_passthrough/`, the 137 boot/title/Kokiri profile texts, and with
+  `TEV_PASSTHROUGH_TEXTS=<dir>` all 1412 pack texts, 237 distinct changed chains) run by `glsl_eval.py`
+  before/after with four byteround forms on random inputs: the same bits for every stage's output and the
+  combiner buffer. The copies are deliberately **not** `precise`: a precise copy made the earlier stages'
+  clamps exact through `combiner_output`, uam then stopped folding them into the multiply's `.sat` (two
+  `FMNMX` per channel, +24 instructions on some texts); what remains for the compiler (`x * 1.0`, clamp →
+  `.sat`, powers of two times 1/255) is exact [INFERENCE: from the SASS, not a GPU run].
+- **Measured offline** (uam `-r` + envydis gm107 of all 1412 texts, `~/oot3d-work/tevskip`): static
+  instructions per program, median (the TEV code is straight-line):
+
+  | texts | instructions | `F2F` floor | registers |
+  |---|---|---|---|
+  | recorded (271) | 206 → 138 (−67, −32%; min −16, max −81) | 32 → 15 | 13 → 13 |
+  | console-missing (11) | 200 → 131 (−75) | 32 → 13 | 12 → 12 |
+  | toon/per-pixel variants (1130) | 632 → 567 (−67, −11%) | 34 → 17 | 22 → 22 |
+
+  By pass-through channels: 4 → −16, 6 → −48, 8 → −63, 10 → −80 instructions (median).
+- **Expected saving** [INFERENCE, not measured]: counting `F2F` at 4 issue slots, a Native-lit pixel costs
+  ~39% fewer shader cycles, a Per-pixel one ~23%; if shader ALU is 30-60% of `scene_ms`, that is about
+  1.5-4 ms per frame at 3.0 and 307 MHz (8-20% of the scene).
+- **A/B:** the build makes `deko3d.pack` (rewrite) and `deko3d_reference.pack` (same keys, `--keep-tev-
+  passthrough`). `config/deko3d_pack`, first line a file name in `shadercache/` (`[A-Za-z0-9._-]`, ending
+  `.pack`), picks the pack at start; missing or bad falls back to `deko3d.pack`. Pack header word 3 and each
+  entry's last word carry flag 1 (`kShaderPackFlagTevPassthroughSkip`; 0 in older packs). `deko3d.txt` at start:
+  `shaders: pack deko3d.pack flags=1 tev_passthrough=skip (1412 stages compiled with pass-through TEV stages
+  skipped)` or `... deko3d_reference.pack flags=0 tev_passthrough=keep (0 ...)`. The pack is read in one
+  call (fork `a7424d3b`, credited) instead of byte by byte.
+- **Console check (1 minute, full resolution, 60 FPS):** Temple of Time, Forest Temple room 8, Sacred Forest
+  Meadow, 20 s still each; then write `deko3d_reference.pack` into `config/deko3d_pack`, restart, repeat. Compare
+  `dkperf busy_ms`/`scene_ms` and `perf.txt gpu_ms_step`; the picture must not change (screenshot the same
+  spot with each pack).
+- Code: `deko3d_shader_pack.py`, `gfx_deko3d_shader_pack.h`, `gfx_deko3d_shaders.cpp`; tests
+  `test_tev_passthrough.py`, `oot3d_deko3d_backend_tests` (TestShaderPack); guards "tevskip: ...".
+
 ### Per-pixel dots: 8x4-pixel tiles of wrong lighting (0.1.2-test.7, Per-pixel only)
 - **Seen:** dark, white or coloured (cyan, blue, magenta) dashes on Link's trousers and face, the Temple
   of Time platform, the Forest Temple and Hyrule Field's ground; gone on Native; flickering.
