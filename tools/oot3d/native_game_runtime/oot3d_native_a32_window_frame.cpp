@@ -235,6 +235,14 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
   dynamicResolutionActive = options.DynamicResolution &&
                             backendScale.Supported &&
                             pacing.Resolution.MinScale < pacing.Resolution.MaxScale;
+  // deko3d times its frames itself, nothing hidden: its own thresholds
+  // (log16: the GL calibration kept every 60 FPS area at the floor).
+  bool drsDeko3dTiming = false;
+#if defined(__SWITCH__)
+  drsDeko3dTiming = Fast::Deko3dRendererSelected();
+#endif
+  if (drsDeko3dTiming)
+    Oot3dNativeGame::UseDeko3dDynamicResolutionTiming(pacing.Resolution);
   backendScale.Requested = 0.0F;
   drsRenderBusyAverageMs = 0.0;
   // Presentation cadence (config/fps60_mode): legacy at any rate but 60.
@@ -246,11 +254,16 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
   if (options.DynamicResolution)
     std::fprintf(stderr,
                  "TRIAEVUM_DYNAMIC_RESOLUTION active=%d supported=%d "
-                 "max=%.2f min=%.2f budget_ms=%.1f\n",
+                 "max=%.2f min=%.2f budget_ms=%.1f timing=%s down=%.2f "
+                 "up=%.2f hidden_ms=%.1f\n",
                  dynamicResolutionActive ? 1 : 0,
                  backendScale.Supported ? 1 : 0, pacing.Resolution.MaxScale,
                  dynamicResolution.Config().MinScale,
-                 dynamicResolution.BudgetMs());
+                 dynamicResolution.BudgetMs(),
+                 drsDeko3dTiming ? "deko3d" : "gl",
+                 dynamicResolution.Config().DownFraction,
+                 dynamicResolution.Config().UpFraction,
+                 dynamicResolution.Config().HiddenGpuMs);
   {
     std::lock_guard lock(interpolationPerfMutex);
     interpolationPerf.DrsActive = dynamicResolutionActive;

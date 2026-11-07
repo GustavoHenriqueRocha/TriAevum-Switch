@@ -50,7 +50,31 @@
 // 13-28% at 28-30 and 33-80% above. Down at pair + 3 > 28.3 (pair > 25.3),
 // up when the pair predicted at the scale above + 3 <= 26.7 (pair <= 23.7).
 //
-// Pure logic (no GL, no clock): oot3d_native_dynamic_resolution_tests.cpp.
+// deko3d (log16, 0.1.2-test.8, 07/11): every 60 FPS window sat at the floor
+// 2.25, title screen and Temple of Time included, while 30 FPS drew 3.00.
+// The calibration above is the GL timer's: down at a timed pair > 25.3 ms
+// (step frame > 12.7), up from 2.25 only with a step frame <= 10.1 ms. The
+// deko3d device times its frames itself (busy = scene + tail,
+// gfx_deko3d_device.cpp) and nothing of the pair is hidden from it: room 8
+// of the Forest Temple held 60 FPS with no in-between frame dropped and no
+// late step at busy 16.8 ms a frame (a timed pair of 33.2 of 33.3), and the
+// governor drops exactly where the timed pair passes the budget. The light
+// areas at 2.25 (title, Temple of Time: 11.1-11.9 ms a step frame, a pair
+// of 22-24 = 67-71%) could never climb. UseDeko3dDynamicResolutionTiming:
+// no hidden part, down above 92% (30.7 ms, 2.7 ms before the governor's
+// drop), up when the predicted pair fits 82% (27.3 ms: from 2.25 with a
+// step frame <= 11.9 ms). Measured cost against scale with Per-pixel
+// lighting (the same spot at 30 FPS, 3.00, and 60 FPS, 2.25): the Temple of
+// Time's scene 10.8 -> 19.5 ms (x1.81, area x1.78: no fixed part), room 8's
+// 16.2 -> 25.2 (x1.55: about 0.3 fixed); the model's 0.35 errs at most ~7%
+// low on one step up, inside the 82 -> 92% gap with room for noise (84%
+// went back and forth at the edge with +-6% jitter in the replay tests).
+// 3.00 itself costs 16-20 ms a frame there: more than a 60 Hz refresh, so
+// at 60 FPS the light areas settle at 2.5 (2.75 from ~10.4 ms at 2.25, 3.00
+// from ~8.5).
+//
+// Pure logic (no GL, no clock): oot3d_native_dynamic_resolution_tests.cpp
+// (TestLog16Deko3dReplay replays log16's windows).
 
 #include <algorithm>
 #include <array>
@@ -82,6 +106,15 @@ struct DynamicResolutionConfig {
   // fraction of the budget.
   double GpuBoundFraction = 0.65;
 };
+
+// deko3d's own frame timing (see the top: log16). The GL backend keeps the
+// defaults above.
+inline void UseDeko3dDynamicResolutionTiming(
+    DynamicResolutionConfig &config) noexcept {
+  config.HiddenGpuMs = 0.0;
+  config.DownFraction = 0.92;
+  config.UpFraction = 0.82;
+}
 
 // Default lowest scale: three steps below the configured one (3 -> 2.25).
 inline constexpr float kDynamicResolutionDefaultSteps = 3.0F;

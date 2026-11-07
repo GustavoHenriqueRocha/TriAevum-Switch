@@ -1083,6 +1083,15 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_dynamic_resolution.h",
           r'double HiddenGpuMs = 3\.0;.*?pairMs \+= std::max\(0\.0, mConfig\.HiddenGpuMs\);',
           "oot3d_native_dynamic_resolution_tests (TestTour19WaterTempleHiddenGpu)"),
+    Guard("log16 (test.8): deko3d DRS sat at 2.25 at 60 FPS everywhere (GL calibration: 3 ms hidden, down 85%, up 80%)",
+          "tools/oot3d/native_game_runtime/oot3d_native_dynamic_resolution.h",
+          r'UseDeko3dDynamicResolutionTiming\(\s*DynamicResolutionConfig &config\) noexcept \{\s+'
+          r'config\.HiddenGpuMs = 0\.0;\s+config\.DownFraction = 0\.92;\s+config\.UpFraction = 0\.82;',
+          "oot3d_native_dynamic_resolution_tests (TestLog16Deko3dReplay, TestDeko3dSteadyAreasHoldOneLevel)"),
+    Guard("log16 (test.8): the session gives deko3d its own DRS calibration",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'drsDeko3dTiming = Fast::Deko3dRendererSelected\(\);.*?'
+          r'if \(drsDeko3dTiming\)\s+Oot3dNativeGame::UseDeko3dDynamicResolutionTiming\(pacing\.Resolution\);'),
     Guard("tour19 (pgo5n): vsync clock failed (vsync_rc=0x1272) and pacer_vsync was left without a source",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'if \(!vsyncStarted && vsyncClock\.StartAcquireFallback\(\)\)',
