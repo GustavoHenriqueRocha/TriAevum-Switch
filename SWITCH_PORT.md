@@ -4096,6 +4096,65 @@ core on, in `visual_present`, `pica_submit_host_ms` and `total_ms`; shared table
 in `pica_capture_ms`/`guest`; the LRU change saves ~0.4 ms per eviction, which shows up only where
 `geometry_evictions` is non-zero (room changes, effects at new addresses).
 
+### Plan build cost per draw: `config/plan_*` (07/11)
+When Link cuts bushes (`logs18a` `perf.txt` window 27300, 133 draws per step), the render thread
+used 27.2 ms per step frame (`rt_ms_step`; 8.3 ms in the calm window just after). The plan fields
+explain most of it: `plan_late_draws=10392` in 150 host frames (78 per step) built on the render
+thread at `plan_late_ms` 6.41 ms per host frame, `plan_lock_wait_render_ms` 1.81 and
+`plan_lock_wait_worker_ms` 7.59, with `plan_resolve_locks` ≈ `plan_late_draws` and the worker idle 55% of
+the window (`plan_worker_idle_ms` 19.1). The whole step's draws arrive in one batch with the frame;
+the worker and the render thread then walk the same slots in the same order under one build mutex,
+taking turns: the builds are serial and each turn adds a mutex handoff. A plan build costs ~90–110 µs
+per draw on the console (worker 6.59 ms per host frame, CPU-time from `plan_cpu`).
+
+Host profile (callgrind on a warm cache, `oot3d_native_pica_plan_build_tests --bench` stream): 60% of
+a build's instructions are `BuildOot3dPicaCanonicalDrawIdentity`, seven byte-serial FNV hashes over the
+register file, 96 float uniforms, the fog table and the lighting registers; 14% is zeroing (`plan = {}`
+builds a zeroed 9.5 KB temporary and moves it over the plan); 9% the fragment uniform state (256 float
+divisions for the fog table). On the A57 an FNV byte is a dependent 64-bit multiply (~5 cycles).
+
+- **Canonical identity only where it is read** (`Oot3dPicaPlanBuildOptions::CanonicalIdentity`). The
+  identity is read by the Vulkan backend, the semantic trace and the scene-frame statistics; deko3d never
+  reads it (guard), and a plan restored from a visual savestate already has none. On deko3d without the
+  semantic trace or extended diagnostics it is left empty. The shader cache learns exactly what it
+  learned before (its structural entries still carry the vertex program id). Kill switch:
+  `config/plan_full_identity`.
+- **In-place build** (`InPlace`): the plan is destroyed and value-initialised in place (what `plan = {}`
+  leaves, one zeroing instead of a temporary and a move), both uniform states are written into the plan
+  (`BuildOot3dPica{Vertex,Fragment}UniformStateInto`), and the converted fog table is reused from the
+  thread's previous draw when the 128 raw words are equal. Kill switch: `config/plan_copy_build`.
+- **Parallel builds** (`oot3d_native_pica_deferred_plan.cpp`). The build mutex now only claims a slot
+  (`Building`) and publishes it; the build itself runs outside it, with a second mutex held around each
+  shader-cache access (structural, vertex, fragment and uber, fixed binding). A frame resolve builds every
+  pending slot itself while the worker builds others, then takes the slots the worker was building,
+  waiting for them only at the end (`plan_slot_waits`). Each slot is still built exactly once.
+  Kill switch: `config/plan_one_lock` (the previous single mutex and runs of 32).
+- Cache order: with parallel builds the shader cache fills in the order builds reach it, not draw order,
+  so a key must determine its program. `TestKeysDetermineSources` checks it over random streams
+  (vertex, specialized and parametric fragment programs).
+- **`perf.txt`**: `plan_identity`, `plan_in_place`, `plan_parallel` (options in use), `plan_worker_draws`
+  (worker builds per host frame), `plan_us_draw` (mean build time per draw, worker and late builds),
+  `plan_slot_waits` and `plan_slot_wait_ms` (resolve waited for a slot the worker was building). Startup
+  line `TRIAEVUM_PLAN_BUILD canonical_identity= in_place= parallel=`. Desktop: `TRIAEVUM_PLAN_BUILD=legacy`
+  turns all three off.
+- **Exactness**: `oot3d_native_pica_plan_build_tests` builds random draw streams (TEV materials, lighting
+  setups, fog changes, program uploads, textures with and without capture hashes or copy producers,
+  refused draws) with a frozen copy of the previous builder (`oot3d_native_pica_vulkan_plan_reference.inc`)
+  and with each of the 8 option sets, plan objects reused draw after draw, and compares every field of every
+  plan, the build result and error, the consumed resources and the cache counters. Parallel resolves with
+  the worker and 1–3 resolving threads must give the old plans (also under TSan). The deferred-plan and
+  soak tests run the console options too (`parallel` in the soak test: heap bytes per draw 2084 vs 2071).
+- Host bench (-O2, warm caches): build 12.3 → 5.4 µs per draw (identity −54%, in-place −5% more); a
+  133-draw frame published at once and resolved beside the worker: 4.51 → 0.75 ms (85 draws: 3.02 → 0.46).
+  Console estimate [inference, ×7–8 host → A57 from `plan_us_draw` 90–110]: ~50 µs less per plan build on
+  core 1 and core 2, and in the bush case 6–7.5 ms less render-thread time per step frame
+  (`rt_ms_step` 27 → ~20–21; `plan_late_ms` and the lock waits shrink, `plan_slot_wait_ms` stays small).
+- Other per-draw render-thread costs found while tracing (not changed here): the deko3d backend streams
+  every draw's vertices and indices again each frame (no geometry cache), packs, compares and copies the
+  1.6 + 6.1 KB uniform blocks per draw (3.6 KB of the fragment block is unused by specialized programs),
+  re-emits all vertex state, and the scheduler inserts each draw in two `unordered_set`s (two heap
+  allocations per draw).
+
 ### Status as of 2026-10-17 (best version so far)
 - PGO (2nd collection) + lean mode + PICA plans on core 1 + render thread on core 2 + audio on its own thread.
 - Measured at 30 FPS, 2× scale: 29.9 FPS average, 93% of the time at 30, logic ~11 ms per step.

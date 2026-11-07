@@ -42,6 +42,10 @@ uint64_t ComputeOot3dPicaVertexShaderStateKey(
 Oot3dPicaVertexUniformState BuildOot3dPicaVertexUniformState(
     const Oot3dPicaDrawPacket& packet);
 
+// The same state written into `uniforms`, which must be default-constructed.
+void BuildOot3dPicaVertexUniformStateInto(const Oot3dPicaDrawPacket& packet,
+                                          Oot3dPicaVertexUniformState& uniforms);
+
 bool GenerateOot3dPicaVertexShader(
     const Oot3dPicaDrawPacket& packet,
     const Oot3dPicaDecodedDrawState& state,

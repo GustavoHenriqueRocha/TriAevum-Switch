@@ -55,6 +55,13 @@ uint64_t ComputeOot3dPicaFragmentShaderStateKey(
 Oot3dPicaFragmentUniformState BuildOot3dPicaFragmentUniformState(
     const Oot3dPicaDrawPacket& packet);
 
+// The same uniform state written into `uniforms`, which must be
+// default-constructed. reuseFogTable: the converted fog table comes from
+// this thread's previous call when the raw table is equal (exact).
+void BuildOot3dPicaFragmentUniformStateInto(
+    const Oot3dPicaDrawPacket& packet, Oot3dPicaFragmentUniformState& uniforms,
+    bool reuseFogTable);
+
 // OfflineSource emits identical code without draw-time uniforms or resident
 // lighting LUTs. It rejects missing data that would be embedded into source.
 bool GenerateOot3dPicaFragmentShader(

@@ -228,9 +228,12 @@ double Median(std::vector<double> values) {
     return values.empty() ? 0.0 : values[values.size() / 2U];
 }
 
-RunResult Run(bool deferred, bool worker) {
+// planBuild: the console's plan build options (no canonical identity, in
+// place, worker and render thread building in parallel; config/plan_*).
+RunResult Run(bool deferred, bool worker, bool planBuild = false) {
     Oot3dPicaVulkanShaderSourceCache cache;
     Oot3dPicaDeferredPlanBuilder builder(cache);
+    if (planBuild) builder.SetBuildOptions(false, true, true);
     builder.Configure(deferred, worker);
     Frontend frontend;
     Oot3dPicaVisualFrameAccumulator accumulator;
@@ -377,6 +380,8 @@ int main() {
     Report("worker", withWorker);
     const auto renderOnly = Run(true, false);
     Report("render-thread", renderOnly);
+    const auto parallel = Run(true, true, true);
+    Report("parallel", parallel);
     // Total heap traffic of the deferred path (every thread) stays within a
     // small per-draw overhead of the serial build: no per-draw default packet
     // (64 KiB of fresh shader storage) and no per-pass multi-megabyte vectors.
@@ -386,9 +391,9 @@ int main() {
             bytes += static_cast<double>(run.Frames[frame].AllocatedBytes);
         return bytes / kWindow / kDrawsPerFrame;
     };
-    std::printf("heap bytes per draw (whole process): serial=%.0f worker=%.0f render=%.0f\n",
-                total(serial), total(withWorker), total(renderOnly));
-    for (const auto* run : {&withWorker, &renderOnly}) {
+    std::printf("heap bytes per draw (whole process): serial=%.0f worker=%.0f render=%.0f parallel=%.0f\n",
+                total(serial), total(withWorker), total(renderOnly), total(parallel));
+    for (const auto* run : {&withWorker, &renderOnly, &parallel}) {
         Require(total(*run) <= total(serial) + 512.0,
                 "deferred planning allocates per draw beyond the serial build");
         // Batches are recycled: a handful ever allocated, none left alive.

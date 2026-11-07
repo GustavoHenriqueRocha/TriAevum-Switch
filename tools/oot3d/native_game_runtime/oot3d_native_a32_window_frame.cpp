@@ -1543,6 +1543,39 @@ bool NativeA32WindowSession::RunFrame() {
              << " plan_worker_idle_ms="
              << perFrameMs(planStats.WorkerIdleNanoseconds,
                            windowPlanStats.WorkerIdleNanoseconds);
+        // Plan build cost per draw (config/plan_full_identity,
+        // config/plan_copy_build, config/plan_one_lock): the options in use,
+        // the worker's builds per host frame, the mean build time per draw
+        // (worker and late builds) and, with parallel builds, how often and
+        // how long (ms per host frame) a resolve waited for a slot the
+        // worker was still building.
+        {
+          const auto options = picaPlanBuilder.Options();
+          const uint64_t builds =
+              (planStats.WorkerBuilds - windowPlanStats.WorkerBuilds) +
+              (planStats.ConsumerBuilds - windowPlanStats.ConsumerBuilds);
+          const uint64_t buildNanoseconds =
+              (planStats.WorkerBuildNanoseconds -
+               windowPlanStats.WorkerBuildNanoseconds) +
+              (planStats.ConsumerBuildNanoseconds -
+               windowPlanStats.ConsumerBuildNanoseconds);
+          perf << " plan_identity=" << (options.CanonicalIdentity ? 1 : 0)
+               << " plan_in_place=" << (options.InPlace ? 1 : 0)
+               << " plan_parallel=" << (picaPlanBuilder.Parallel() ? 1 : 0)
+               << " plan_worker_draws="
+               << static_cast<double>(planStats.WorkerBuilds -
+                                      windowPlanStats.WorkerBuilds) /
+                      hostFrames
+               << " plan_us_draw="
+               << (builds != 0U ? static_cast<double>(buildNanoseconds) /
+                                      1.0e3 / static_cast<double>(builds)
+                                : 0.0)
+               << " plan_slot_waits="
+               << (planStats.ConsumerSlotWaits - windowPlanStats.ConsumerSlotWaits)
+               << " plan_slot_wait_ms="
+               << perFrameMs(planStats.ConsumerSlotWaitNanoseconds,
+                             windowPlanStats.ConsumerSlotWaitNanoseconds);
+        }
         windowPlanStats = planStats;
       }
       // Waits between threads, ms per host frame: the guest blocked by the

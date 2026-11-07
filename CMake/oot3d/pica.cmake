@@ -379,6 +379,16 @@ target_link_libraries(oot3d_native_pica_visual_cull_tests PRIVATE
     oot3d_native_pica_vulkan_plan)
 oot3d_target_defaults(oot3d_native_pica_visual_cull_tests FOLDER Tests)
 
+# Plan build cost per draw (config/plan_*): every option set against a frozen
+# copy of the previous builder, parallel builds under several resolving
+# threads (run with TSan too; --bench for the cost per draw and per resolve).
+add_executable(oot3d_native_pica_plan_build_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_pica_plan_build_tests.cpp
+)
+target_link_libraries(oot3d_native_pica_plan_build_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_pica_plan_build_tests FOLDER Tests)
+
 add_executable(oot3d_native_pica_vulkan_plan_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_vulkan_plan_tests.cpp
 )
