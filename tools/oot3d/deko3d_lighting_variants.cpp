@@ -1,5 +1,5 @@
-// Writes the deko3d lighting variants (toon, per-pixel) of PICA fragment
-// texts for the pack: the same mutation the console applies before it looks a
+// Writes the deko3d lighting variants (toon; per-pixel, one per PerPixelPath)
+// of PICA fragment texts for the pack: the same mutation the console applies before it looks a
 // variant up (gfx_deko3d_lighting.h). Input: a directory of GLSL 4.3 fragment
 // texts (frag_<key>.glsl, as the game records them); output: one
 // frag_<variant key>.glsl per variant, which
@@ -42,18 +42,24 @@ int main(int argc, char** argv) {
         ++texts;
         for (const auto mode : {LightingMode::Toon, LightingMode::PerPixel}) {
             Tally& tally = mode == LightingMode::Toon ? toon : perPixel;
-            const auto variant = Fast::Deko3d::LightingFragmentVariant(mode, text);
-            if (!variant) {
-                ++tally.Unsupported;
-                std::printf("unsupported %s %s\n", Fast::Deko3d::LightingModeName(mode), name.c_str());
-                continue;
+            const size_t paths = mode == LightingMode::Toon ? 1U : static_cast<size_t>(Fast::Deko3d::PerPixelPath::Count);
+            for (size_t index = 0; index < paths; ++index) {
+                const auto path = static_cast<Fast::Deko3d::PerPixelPath>(index);
+                const auto variant = Fast::Deko3d::LightingFragmentVariant(mode, text, path);
+                if (!variant) {
+                    ++tally.Unsupported;
+                    std::printf("unsupported %s %s %s\n", Fast::Deko3d::LightingModeName(mode),
+                                Fast::Deko3d::PerPixelPathName(path), name.c_str());
+                    break;
+                }
+                const uint64_t key = Fast::Deko3d::ShaderTextKey(Fast::Deko3d::ShaderStage::Fragment, *variant);
+                char out[64];
+                std::snprintf(out, sizeof(out), "frag_%016llx.glsl", static_cast<unsigned long long>(key));
+                std::ofstream(output / out, std::ios::binary | std::ios::trunc) << *variant;
+                std::printf("%s %s %s %s\n", Fast::Deko3d::LightingModeName(mode), Fast::Deko3d::PerPixelPathName(path),
+                            name.c_str(), out);
+                ++tally.Written;
             }
-            const uint64_t key = Fast::Deko3d::ShaderTextKey(Fast::Deko3d::ShaderStage::Fragment, *variant);
-            char out[64];
-            std::snprintf(out, sizeof(out), "frag_%016llx.glsl", static_cast<unsigned long long>(key));
-            std::ofstream(output / out, std::ios::binary | std::ios::trunc) << *variant;
-            std::printf("%s %s %s\n", Fast::Deko3d::LightingModeName(mode), name.c_str(), out);
-            ++tally.Written;
         }
     }
     std::printf("lighting variants: %u fragment texts; toon %u (%u unsupported); perpixel %u (%u unsupported)\n",

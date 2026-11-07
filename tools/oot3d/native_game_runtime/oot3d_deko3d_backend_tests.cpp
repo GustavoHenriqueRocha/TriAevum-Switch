@@ -148,8 +148,8 @@ void TestFrameBreakdown() {
   window.Current.Count(PicaBaseClass::Parametric, true, false, 1000000U);
   window.Current.Count(PicaBaseClass::Parametric, false, true, 500000U);
   window.Current.Count(PicaBaseClass::Normal, true, true, 250000U);
-  window.Current.CountSurfaceLighting(2U, true);
-  window.Current.CountSurfaceLighting(9U, false); // above the trim: the last bucket
+  window.Current.CountSurfaceLighting(2U, true, 1U, 1000000U);
+  window.Current.CountSurfaceLighting(9U, false, 7U, 250000U); // above the trim / path range: the last bucket
   window.EndFrame();
   Require(window.Current.Classes[1].Draws == 0U && window.Last.Classes[1].Draws == 2U &&
               window.Last.Classes[1].Lit == 1U && window.Last.Classes[1].Pixels == 1500000U &&
@@ -158,6 +158,9 @@ void TestFrameBreakdown() {
   Require(window.Last.LitOpaque == 1U && window.Last.LitTranslucent == 1U, "lit opaque vs translucent");
   Require(window.Last.LitPointLights[2] == 1U && window.Last.LitPointLights[4] == 1U && window.Last.LitRim == 1U,
           "points per lit draw and rim");
+  Require(window.Last.LitPaths[0] == 0U && window.Last.LitPaths[1] == 1U && window.Last.LitPaths[2] == 1U &&
+              window.Last.LitPathPixels[1] == 1000000U && window.Last.LitPathPixels[2] == 250000U,
+          "per-pixel draws and pixels by variant path");
   window.Current.Count(PicaBaseClass::Spilling, false, false, 100U);
   window.EndFrame();
   Require(window.Frames == 2U && window.Sum.Classes[1].Draws == 2U && window.Sum.Classes[0].Draws == 1U &&
@@ -169,7 +172,8 @@ void TestFrameBreakdown() {
   Require(FormatPicaClassDraws(window.Sum, 2U).find("parametric=1/") != std::string::npos &&
               FormatPicaClassDraws(window.Sum, 2U).find("px=0.75/0.50M") != std::string::npos,
           "window average per frame");
-  Require(FormatPicaLitDraws(window.Sum, 1U) == "opaque=1 translucent=1 points 0/1/2/3/4=0/0/1/0/1 rim=1",
+  Require(FormatPicaLitDraws(window.Sum, 1U) ==
+              "opaque=1 translucent=1 points 0/1/2/3/4=0/0/1/0/1 rim=1 paths g/e/b=0/1/1 px=0.00/1.00/0.25M",
           FormatPicaLitDraws(window.Sum, 1U).c_str());
   window.StartWindow();
   Require(window.Frames == 0U && window.Sum.Classes[1].Draws == 0U && window.Last.Classes[0].Draws == 1U,

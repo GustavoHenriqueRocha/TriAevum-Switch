@@ -3,12 +3,16 @@
 
 The per-pixel fragment code reads its interpolants once, at the top of the
 body, and has no lane-dependent branch (SWITCH_PORT.md "Per-pixel dots: 8x4
-tiles"). These tests run the shipped GLSL on the CPU (glsl_eval.py, binary32,
-Maxwell min/max) and check:
-  - valid inputs: the same bytes as the 0.1.2-test.7 text (data/perpixel_lighting_test7.glsl)
-    on every path (native lights, environment, scene points and directionals, baked, rim);
+tiles"); its light loops are written out and the rim's view and Fresnel terms
+are computed once per pixel (SWITCH_PORT.md "Cheaper per-pixel lighting").
+These tests run the shipped GLSL on the CPU (glsl_eval.py, binary32, Maxwell
+min/max) and check:
+  - valid inputs: the same floats as the 0.1.2-test.8 text (data/perpixel_lighting_test8.glsl)
+    and the same bytes as the 0.1.2-test.7 text (data/perpixel_lighting_test7.glsl) on every
+    path (native lights, environment, scene points and directionals, baked, rim);
   - degenerate inputs (zero or opposite normals, the eye at the fragment, a light at the
     surface, a zero radius, grazing angles, infinite or NaN interpolants): finite, in [0, 1];
+    finite ones also give test.8's floats;
   - the interpolants are read only in pica_surface_fragment(), and every branch condition
     is uniform (the block's members, loop counters).
 
@@ -28,6 +32,7 @@ from glsl_eval import Program, Vec, is_finite  # noqa: E402
 REPO = HERE.parent.parent
 SOURCE = REPO / "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting.cpp"
 REFERENCE = HERE / "data/perpixel_lighting_test7.glsl"
+REFERENCE_TEST8 = HERE / "data/perpixel_lighting_test8.glsl"
 INPUTS = ("pica_view", "pica_surface_normal", "pica_surface_tint")
 
 
@@ -119,6 +124,33 @@ def random_block(rng, program):
     return block_copy
 
 
+def path_of(block):
+    """ClassifyPerPixelSurface (gfx_deko3d_lighting.cpp), the same comparisons in binary32."""
+    environment = block["environment_parameters"].c[3] != 0.0
+    native_direct = block["environment_parameters"].c[0] != 0.0
+    rim = block["rim"].c
+    scene_rim = rim[0] > 0.0 and rim[2] == 2.0
+    control = block["control"].c
+    if not environment or native_direct or scene_rim or control[2] != 0:
+        return 0
+    if block["baked_reference_up"].c[3] != 0.0:
+        return 2
+    if control[0] != 0 or (control[3] & 1) == 0:
+        return 1
+    return 0
+
+
+def shipped_shape(rng, block):
+    """Most of the time, the shape of the shipped scene profiles (the specialized paths)."""
+    if rng.random() < 0.7:
+        block["environment_parameters"].c[3] = 1.0
+        block["environment_parameters"].c[0] = 0.0
+        block["control"].c[2] = 0
+        if block["rim"].c[2] == 2.0 and rng.random() < 0.8:
+            block["rim"] = Vec([block["rim"].c[0], block["rim"].c[1], 1.0, block["rim"].c[3]])
+    return block
+
+
 class PerPixelLighting(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -126,15 +158,23 @@ class PerPixelLighting(unittest.TestCase):
         cls.body = raw_string("kPerPixelBody")
         cls.current = Program(cls.declarations)
         cls.reference = Program(REFERENCE.read_text())
+        cls.test8 = Program(REFERENCE_TEST8.read_text())
+        constant = "const uint pica_surface_path = 0u;"
+        assert cls.declarations.count(constant) == 1
+        cls.paths = [cls.current] + [Program(cls.declarations.replace(constant, f"const uint pica_surface_path = {n}u;"))
+                                     for n in (1, 2)]
 
-    def evaluate_current(self, block, native, normal, view, tint):
-        program = self.current
+    @staticmethod
+    def evaluate_fragment(program, block, native, normal, view, tint):
         program.globals["pica_surface"] = block
         program.globals["pica_surface_normal"] = Vec(normal)
         program.globals["pica_view"] = Vec(view)
         program.globals["pica_surface_tint"] = Vec(tint)
         fragment = program.call("pica_surface_fragment")
         return program.call("pica_surface_primary", Vec(native), fragment)
+
+    def evaluate_current(self, block, native, normal, view, tint):
+        return self.evaluate_fragment(self.current, block, native, normal, view, tint)
 
     def evaluate_reference(self, block, native, normal, view, tint):
         program = self.reference
@@ -144,6 +184,47 @@ class PerPixelLighting(unittest.TestCase):
         program.globals["pica_surface_tint"] = Vec(tint)
         normal_view = program.call("pica_surface_unit", Vec(normal))
         return program.call("pica_surface_primary", Vec(native), normal_view)
+
+    def test_valid_inputs_match_test8_exactly(self):
+        """Every float of every path equals test.8's (the shipped text before the
+        written-out loops and the once-per-pixel rim terms)."""
+        rng = random.Random(20261108)
+        paths = set()
+        for case in range(1500):
+            block = random_block(rng, self.current)
+            native = [rng.uniform(0.0, 1.0) for _ in range(3)]
+            normal = [v * rng.uniform(0.3, 1.5) for v in random_direction(rng)]
+            view = [rng.uniform(-200, 200), rng.uniform(-200, 200), rng.uniform(-900, -5)]
+            tint = [rng.uniform(0.0, 1.0) for _ in range(3)] + [1.0]
+            ours = self.evaluate_current(block, native, normal, view, tint)
+            theirs = self.evaluate_fragment(self.test8, block, native, normal, view, tint)
+            self.assertEqual(ours.c, theirs.c, f"case {case}")
+            paths.add((block["baked_reference_up"].c[3] != 0.0, block["control"].c[0], block["control"].c[1],
+                       block["control"].c[2], block["control"].c[3], block["environment_parameters"].c[3] != 0.0,
+                       block["environment_parameters"].c[0] != 0.0, block["rim"].c[2]))
+        self.assertGreater(len(paths), 300, "the random blocks cover the shader's paths")
+
+    def test_path_variants_match_test8_exactly(self):
+        """The path variants (compile-time pica_surface_path, PerPixelFragmentVariant) give
+        test.8's floats on every block ClassifyPerPixelSurface gives them."""
+        rng = random.Random(20261109)
+        hits = [0, 0, 0]
+        for case in range(1500):
+            block = shipped_shape(rng, random_block(rng, self.current))
+            path = path_of(block)
+            hits[path] += 1
+            native = [rng.uniform(0.0, 1.0) for _ in range(3)]
+            normal = [v * rng.uniform(0.3, 1.5) for v in random_direction(rng)]
+            view = [rng.uniform(-200, 200), rng.uniform(-200, 200), rng.uniform(-900, -5)]
+            tint = [rng.uniform(0.0, 1.0) for _ in range(3)] + [1.0]
+            ours = self.evaluate_fragment(self.paths[path], block, native, normal, view, tint)
+            theirs = self.evaluate_fragment(self.test8, block, native, normal, view, tint)
+            self.assertEqual(ours.c, theirs.c, f"case {case}, path {path}")
+        self.assertTrue(all(count > 150 for count in hits), f"every path is exercised: {hits}")
+        # Outside the evaluated function: the body runs and the fog contribution
+        # applies whenever the environment is on, which both paths require.
+        for name in ("kPerPixelBody", "kPerPixelFogAfter"):
+            self.assertIn("pica_surface_path != 0u || ", raw_string(name))
 
     def test_valid_inputs_match_test7(self):
         rng = random.Random(20261107)
@@ -179,7 +260,7 @@ class PerPixelLighting(unittest.TestCase):
         }
         for name, (normal, view) in cases.items():
             for case in range(25):
-                block = random_block(rng, self.current)
+                block = shipped_shape(rng, random_block(rng, self.current))
                 # A scene point and a native point light at the fragment, one with a zero radius.
                 points = block["scene_points"]
                 points[0] = {"position_radius": Vec([-v if math.isfinite(v) else 0.0 for v in view] + [300.0]),
@@ -192,9 +273,15 @@ class PerPixelLighting(unittest.TestCase):
                 self.assertTrue(is_finite(result) and all(0.0 <= c <= 1.0 for c in result.c),
                                 f"{name}, case {case}: {result}")
                 if all(math.isfinite(v) for v in normal + view):
-                    # Finite degenerate inputs keep test.7's guards (no rim on a zero normal, ...).
+                    # Finite degenerate inputs keep test.7's guards (no rim on a zero normal, ...)
+                    # and test.8's floats.
                     reference = self.evaluate_reference(block, [0.5, 0.5, 0.5], normal, view, tint)
                     self.assertEqual(byteround3(result), byteround3(reference), f"{name}, case {case}")
+                    test8 = self.evaluate_fragment(self.test8, block, [0.5, 0.5, 0.5], normal, view, tint)
+                    self.assertEqual(result.c, test8.c, f"{name}, case {case}")
+                    path = path_of(block)
+                    special = self.evaluate_fragment(self.paths[path], block, [0.5, 0.5, 0.5], normal, view, tint)
+                    self.assertEqual(special.c, test8.c, f"{name}, case {case}, path {path}")
 
     def test_interpolants_read_once_at_the_top(self):
         code = re.sub(r"//[^\n]*", "", self.declarations)
@@ -214,8 +301,10 @@ class PerPixelLighting(unittest.TestCase):
     def test_branches_are_uniform(self):
         """Every if/for condition and every ternary that guards a return reads only the
         block (pica_surface.*), loop counters and constants: no lane-dependent branch."""
-        # `light` is a copy of pica_surface.lights[slot] (pica_surface_light).
-        uniform = re.compile(r"(pica_surface|light)\.[\w\[\]\.]+|\b(slot|count|native_direct|min|u?int)\b|"
+        # `light` is a copy of pica_surface.lights[slot] (pica_surface_light); pica_surface_path
+        # is the variant's compile-time constant.
+        uniform = re.compile(r"(pica_surface|light)\.[\w\[\]\.]+|\b(slot|count|native_direct|min|u?int|"
+                             r"pica_surface_path)\b|"
                              r"\d+\.\d*(e[-+]?\d+)?|\d+u?|[\s()!=<>&|+\-*.,]+")
 
         def conditions(text):
