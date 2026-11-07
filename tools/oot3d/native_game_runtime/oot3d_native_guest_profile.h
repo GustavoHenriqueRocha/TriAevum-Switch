@@ -113,6 +113,10 @@ public:
     // to the writer, waits until it has written everything and stops it.
     // false if the last write failed. Also run by the destructor.
     bool FinishReports();
+    // Blocks until the writer has no report queued or in progress (tests;
+    // a dump's try_lock can still miss the writer between two waits, which
+    // only moves the report to a later frame).
+    void WaitWriterIdle();
     // Reports written, and dumps that waited for a later frame because the
     // writer was still busy.
     [[nodiscard]] uint64_t ReportsWritten() const noexcept {

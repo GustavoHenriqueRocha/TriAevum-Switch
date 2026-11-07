@@ -383,14 +383,16 @@ void GuestBlockProfiler::StopWriter() {
     mWriter.join();
 }
 
+void GuestBlockProfiler::WaitWriterIdle() {
+    std::unique_lock lock(mWriterMutex);
+    mWriterChanged.wait(lock, [this] { return mSnapshotState == SnapshotState::Spare; });
+}
+
 bool GuestBlockProfiler::FinishReports() {
     if (!mWriter.joinable()) return mLastWriteOk;
     // Frames measured since the last report: one more, from here.
     if (mFrameSeen && mSampledSinceReport != 0U) QueueReport(true);
-    {
-        std::unique_lock lock(mWriterMutex);
-        mWriterChanged.wait(lock, [this] { return mSnapshotState == SnapshotState::Spare; });
-    }
+    WaitWriterIdle();
     StopWriter();
     return mLastWriteOk;
 }

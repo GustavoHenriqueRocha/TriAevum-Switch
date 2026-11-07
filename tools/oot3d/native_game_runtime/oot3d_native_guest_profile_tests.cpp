@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -74,7 +75,10 @@ void Enter(GuestBlockProfiler& profiler, uint32_t pc, uint32_t times) {
 void WaitForReports(const GuestBlockProfiler& profiler, uint64_t reports) {
     const auto deadline = Clock::now() + std::chrono::seconds(30);
     while (profiler.ReportsWritten() < reports) {
-        Require(Clock::now() < deadline, "the writer did not write the report");
+        Require(Clock::now() < deadline,
+                "the writer did not write report " + std::to_string(reports) + " (written " +
+                    std::to_string(profiler.ReportsWritten()) + ", postponed " +
+                    std::to_string(profiler.ReportsPostponed()) + ")");
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
@@ -138,6 +142,7 @@ void TestReports(bool window) {
     Enter(profiler, kBase + 0x10U, 1U);
     profiler.OnHostFrame(1U);
     Enter(profiler, kBase, 2U);
+    profiler.WaitWriterIdle();  // the dump's try_lock then finds it waiting
     profiler.OnHostFrame(2U);  // report 1
     WaitForReports(profiler, 1U);
     const Report first = ReadReport(output);
@@ -155,6 +160,7 @@ void TestReports(bool window) {
     Enter(profiler, kBase + 0x10U, 4U);
     Enter(profiler, kBase + 0x20U, 1U);
     profiler.OnHostFrame(3U);
+    profiler.WaitWriterIdle();
     profiler.OnHostFrame(4U);  // report 2
     WaitForReports(profiler, 2U);
     const Report second = ReadReport(output);
@@ -182,6 +188,7 @@ void TestReports(bool window) {
 }
 
 #if defined(__unix__)
+#define OOT3D_GUEST_PROFILE_FIFO_TEST 1
 // A report the writer cannot finish (its file a FIFO nobody reads yet) must
 // not hold the game thread: the next dump waits for a later frame.
 void TestWriterNeverBlocksTheGameThread() {
@@ -192,6 +199,7 @@ void TestWriterNeverBlocksTheGameThread() {
     Require(profiler.Start(Options(fifo, 1U, false), kBase, 0x100U), "start");
     profiler.OnHostFrame(0U);
     Enter(profiler, kBase, 1U);
+    profiler.WaitWriterIdle();
     profiler.OnHostFrame(1U);  // the writer now blocks opening the FIFO
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     const auto start = Clock::now();
@@ -209,11 +217,16 @@ void TestWriterNeverBlocksTheGameThread() {
     std::thread reader([&] {
         while (!stop.load()) {
             const int fd = open(fifo.c_str(), O_RDONLY);
-            if (fd < 0) break;
+            if (fd < 0) {
+                if (errno == EINTR) continue;  // TSan's signals
+                break;
+            }
             std::string text;
             char buffer[4096];
-            ssize_t got = 0;
-            while ((got = read(fd, buffer, sizeof(buffer))) > 0) {
+            for (;;) {
+                const ssize_t got = read(fd, buffer, sizeof(buffer));
+                if (got < 0 && errno == EINTR) continue;
+                if (got <= 0) break;
                 text.append(buffer, static_cast<size_t>(got));
             }
             close(fd);
@@ -222,6 +235,7 @@ void TestWriterNeverBlocksTheGameThread() {
         done = true;
     });
     WaitForReports(profiler, 1U);
+    profiler.WaitWriterIdle();
     profiler.OnHostFrame(3U);  // the postponed dump goes out now
     Require(profiler.FinishReports() && profiler.ReportsWritten() == 2U,
             "every report written");
@@ -246,7 +260,7 @@ void TestWriterNeverBlocksTheGameThread() {
 int main() {
     TestReports(false);
     TestReports(true);
-#if defined(__unix__)
+#if defined(OOT3D_GUEST_PROFILE_FIFO_TEST)
     TestWriterNeverBlocksTheGameThread();
 #endif
     std::cout << "oot3d_native_guest_profile_tests: ok\n";
