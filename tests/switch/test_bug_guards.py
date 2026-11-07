@@ -142,7 +142,41 @@ GUARDS = [
     Guard("second core: Run() drops the kernel lock only for the dispatch",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
           r'if \(concurrent\) SecondCore::EnterGuest\(\);.*?const SecondCore::KernelRelease release;\s+'
-          r'exit = DispatchGuest\(state, dispatchBudget, false\);\s+\}\s+if \(concurrent\) SecondCore::LeaveGuest\(\);'),
+          r'guestStart = ReadThreadProfileCounter\(\);\s+'
+          r'exit = DispatchGuest\(state, dispatchBudget, false\);\s+'
+          r'guestEnd = ReadThreadProfileCounter\(\);\s+\}\s+'
+          r'ChargeDispatch\(guestStart, guestEnd,\s+concurrent \? ReadThreadProfileCounter\(\) : guestEnd\);\s+'
+          r'if \(concurrent\) SecondCore::LeaveGuest\(\);'),
+    # --- 11/07 (Profile18): the idle second core woke at every game-thread SVC (LeaveGuest
+    # notified the kernel condition), retook the kernel lock the game thread needed next and
+    # handed it back; core1_lock_ms 5 ms/frame, SVC stubs 11-27 us. config/kernel_wake ---
+    Guard("kernel_wake: a guest exit wakes the kernel waiters only while a world stop waits for it",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_second_core.h",
+          r'inline void LeaveGuest\(\) \{\s+--gInGuest\[tProcessor\];\s+'
+          r'if \(!gQuietWakes \|\| gStopWaiters != 0U\) NotifyKernel\(\);.*?'
+          r'LockKernel\(\);\s+\+\+gStopWaiters;.*?WaitKernel\(\[\] \{ return !OtherCoresInGuest\(\); \}\);\s+'
+          r'--gStopWaiters;',
+          test="oot3d_native_a32_second_core_tests (TestQuietWakes, every two-core test with it off and on)"),
+    Guard("kernel_wake: only config/kernel_wake (Switch: absent = on) sets the quiet wakes",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'Oot3dNativeGame::SecondCore::gQuietWakes = kernelOptions\.Wake;'),
+    Guard("kernel_svc: a hot SVC's name is written when the history is read, never lost",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
+          r'mSnapshot\.push_back\(\(\*candidate\)->Event\);\s+MaterializeSvcEventName\(mSnapshot\.back\(\)\);.*?'
+          r'request=" << std::quoted\(NativeA32CtrSvcEventName\(\*event\)\)',
+          test="oot3d_native_a32_ctr_host_tests (TestFastSvcEquivalence; every test with it off and on)"),
+    # --- 11/07 (logs18b): the guest profile's report (walk, sort, SD write) ran on the game
+    # thread every 900 host frames: 0.41-0.47 s stalls, one of 3.36 s tripped the hang watchdog ---
+    Guard("guest profile: the report is sorted and written by its writer thread, not the game thread",
+          "tools/oot3d/native_game_runtime/oot3d_native_guest_profile.cpp",
+          r'if \(QueueReport\(false\)\) \{.*?mCounts\.swap\(mSnapshot\.Counts\);\s+mTicks\.swap\(mSnapshot\.Ticks\);.*?'
+          r'const bool ok = WriteReport\(mSnapshot\);',
+          forbid=r'WriteReport\(hostFrame\)',
+          test="oot3d_native_guest_profile_tests"),
+    Guard("guest_kernel: perf.txt line splitting each guest thread's time (guest, SVC, lock, scheduler)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'FormatNativeA32GuestKernelLine\(process, previousThreads,\s+hostFrames\)',
+          test="oot3d_native_a32_process_tests (TestGuestThreadProfile)"),
     Guard("second core: the DSP mix updates the shared regions in place only while the sound thread is parked",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'if \(secondCore && runGuest\) \{.*?process\.WaitSecondCoreIdle\(kSecondCoreDspWait\)',

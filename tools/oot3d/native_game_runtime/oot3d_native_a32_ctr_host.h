@@ -25,6 +25,18 @@ struct Oot3dGspCommandPacket;
 enum class Oot3dPicaCompositionDomain : uint8_t;
 enum class Oot3dPicaInterruptId : uint8_t;
 
+// How an SVC event's Name is made. Text: Name holds it. The others
+// (NativeA32CtrHostConfig::FastSvc, the hot SVCs) leave Name empty and keep
+// its numbers in NameWords; NativeA32CtrSvcEventName writes the same text,
+// and every event the history hands out (Events) carries it in Name.
+enum class NativeA32CtrSvcEventNameKind : uint8_t {
+    Text,
+    ArbitrateAddress,     // address, type, value
+    SleepThreadTimed,     // nanoseconds, ticks, wake tick
+    SleepThreadInfinite,
+    SleepThreadYield,     // nanoseconds
+};
+
 struct NativeA32CtrSvcEvent {
     uint32_t Immediate = 0;
     uint32_t Pc = 0;
@@ -32,7 +44,12 @@ struct NativeA32CtrSvcEvent {
     bool Handled = false;
     std::string Name;
     uint32_t Detail = 0;
+    NativeA32CtrSvcEventNameKind NameKind = NativeA32CtrSvcEventNameKind::Text;
+    std::array<uint64_t, 3> NameWords{};
 };
+
+// The event's name, also for one that keeps its numbers.
+std::string NativeA32CtrSvcEventName(const NativeA32CtrSvcEvent& event);
 
 namespace detail {
 
@@ -248,6 +265,10 @@ struct NativeA32CtrHostConfig {
         0, 6700, -6700, 0, 6700, -6700, 0, 6700, -6700,
     };
     bool RetainFullSvcHistory = false;
+    // config/kernel_svc (oot3d_native_kernel_options.h): the hot SVCs keep
+    // their event's numbers instead of building its name, and handle lookups
+    // go through an exact cache. Guest results are the same either way.
+    bool FastSvc = false;
     // CTR RTC published in the shared page (0x1FF81000), in milliseconds
     // of local time since the CTR "1900" epoch, which nn::fnd::DateTime
     // places 36525 days before 2000-01-01 (ms since 2000 + 3155760000000).
@@ -487,6 +508,16 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     NativeA32CtrHostConfig mConfig;
     NativeA32CtrRuntimeProfile mRuntimeProfile;
     std::vector<HandleRecord> mHandles;
+    // FastSvc: LookupHandle's cache. An entry is valid while its Version is
+    // mHandlesVersion, which every CreateHandle and CloseHandle moves on, so
+    // it always names the first matching record, as the scan would.
+    struct HandleCacheEntry {
+        uint32_t Value = 0;
+        uint32_t Index = 0;
+        uint64_t Version = 0;
+    };
+    mutable std::array<HandleCacheEntry, 8> mHandleCache{};
+    uint64_t mHandlesVersion = 1;
     std::vector<ArbiterWaiter> mArbiterWaiters;
     std::vector<SynchronizationWaiter> mSynchronizationWaiters;
     std::vector<SleepWaiter> mSleepWaiters;

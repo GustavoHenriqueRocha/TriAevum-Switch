@@ -149,10 +149,22 @@ struct NativeA32ProcessTimingStats {
 // is the time other host threads of its core preempted it.
 // Ticks are the ARM system counter on the Switch, nanoseconds on the host.
 // Threads with an id at or above the last slot share it ("other").
+// Per thread, Ticks splits into GuestTicks (inside guest code), SvcTicks (its
+// SVCs' host services; on the second core the whole exit: SVC and
+// scheduling) and, on the game thread, LockTicks (retaking the kernel lock
+// after guest code while the second core is on) plus the scheduler's rest.
+// A second-core thread's LockTicks are outside its Ticks (SecondCoreLockTicks
+// sums them). SvcCallsByImmediate/SvcTicksByImmediate: the game thread's SVCs.
 inline constexpr size_t kNativeA32GuestThreadSlots = 32U;
 inline constexpr int32_t kNativeA32UnknownProcessor = INT32_MIN;
 struct NativeA32GuestThreadProfile {
     std::array<uint64_t, kNativeA32GuestThreadSlots> Ticks{};
+    std::array<uint64_t, kNativeA32GuestThreadSlots> GuestTicks{};
+    std::array<uint64_t, kNativeA32GuestThreadSlots> SvcTicks{};
+    std::array<uint64_t, kNativeA32GuestThreadSlots> LockTicks{};
+    std::array<uint64_t, kNativeA32GuestThreadSlots> SvcCalls{};
+    std::array<uint64_t, 256> SvcCallsByImmediate{};
+    std::array<uint64_t, 256> SvcTicksByImmediate{};
     // Requested processor per thread id, from CreateThread (not saved state:
     // kNativeA32UnknownProcessor for threads a restore brought in, unless the
     // savestate was made with the second core on).
@@ -166,6 +178,10 @@ struct NativeA32GuestThreadProfile {
     uint64_t SecondCoreCpuTicks = 0;
     bool SecondCoreCpuKnown = false;
     uint64_t SecondCoreLockWaitNanoseconds = 0;
+    // Wakes of the second core's idle wait, and those that found nothing to
+    // run (config/kernel_wake removes most of them).
+    uint64_t SecondCoreIdleWakes = 0;
+    uint64_t SecondCoreEmptyWakes = 0;
 };
 uint64_t NativeA32ProfileTicksToNanoseconds(uint64_t ticks) noexcept;
 // The perf.txt line for one window: "guest_threads: host_frames=<n>
@@ -176,6 +192,14 @@ std::string FormatNativeA32GuestThreadsLine(
     const NativeA32Process& process,
     const NativeA32GuestThreadProfile& windowStart, uint64_t hostFrameCount,
     uint64_t windowHostFrames);
+// The perf.txt line splitting each thread's host time, per host frame of the
+// window: "guest_kernel: svc_calls=<n> svc_ms=<ms> lock_ms=<ms>" (the game
+// thread's SVCs and kernel-lock retakes), then per thread that ran
+// " <id>:guest=<ms>,svc=<ms>,lock=<ms>,sched=<ms>,calls=<n>" and the game
+// thread's costliest SVCs " top=<imm>:<calls>x<us per call>us,...".
+std::string FormatNativeA32GuestKernelLine(
+    const NativeA32Process& process,
+    const NativeA32GuestThreadProfile& windowStart, uint64_t windowHostFrames);
 // The game-log line of one guest CreateThread.
 std::string FormatNativeA32GuestThreadCreated(
     uint32_t id, uint32_t entryAddress, uint32_t priority, int32_t processorId,
@@ -189,13 +213,15 @@ struct NativeA32SecondCoreDspWindow {
 };
 // The perf.txt line "second_core: dsp_pumped= dsp_flushed= dsp_late=
 // dsp_wait_ms= dsp_core1= dsp_core1_ms= core1_lock_wait_ms=
-// core1_preempted_ms= core0_saved_ms=", per host frame of the window:
+// core1_preempted_ms= core0_saved_ms= core1_wakes= core1_empty_wakes=", per
+// host frame of the window:
 // dsp_core1 the frames the second core delivered (idle work) and their ms;
 // core1_lock_wait_ms all its waits for the kernel lock; core1_preempted_ms
 // its busy wall time (guest code, SVCs, DSP frames) minus those waits minus
 // its host thread's CPU time ("na" where unknown); core0_saved_ms the CPU
 // time it worked (busy wall time minus lock waits where unknown) minus
-// dsp_wait_ms.
+// dsp_wait_ms; core1_wakes the wakes of its idle wait, core1_empty_wakes
+// those that found nothing to run.
 std::string FormatNativeA32SecondCoreLine(const NativeA32GuestThreadProfile& now,
                                           const NativeA32GuestThreadProfile& windowStart,
                                           const NativeA32SecondCoreDspWindow& dsp,
@@ -400,8 +426,14 @@ class NativeA32Process {
                                    NativeA32HostResult hostResult,
                                    const oot3d::recomp::a32::ExecutionResult& exit,
                                    uint32_t defaultResumePc);
-    void ChargeSecondCore(uint32_t threadId, uint64_t busyTicks,
-                          uint64_t lockTicks) noexcept;
+    // One second-core dispatch of `threadId`: guest code, its exit (SVC and
+    // scheduling) and the kernel-lock retake between them.
+    void ChargeSecondCore(uint32_t threadId, uint64_t guestTicks, uint64_t exitTicks,
+                          uint64_t lockTicks, bool svc) noexcept;
+    // The game thread's dispatch of the current thread: guest code, then the
+    // kernel-lock retake.
+    void ChargeDispatch(uint64_t guestStart, uint64_t guestEnd,
+                        uint64_t relocked) noexcept;
     // Kernel lock held: the second core's idle work is due (its threads all
     // waiting, no stop or fault, no auxiliary work, the work pending).
     [[nodiscard]] bool SecondCoreIdleWorkDue() const;
@@ -449,8 +481,19 @@ class NativeA32Process {
     uint64_t mThreadRecordGeneration = 0;
     std::optional<NativeA32ProcessRunResult> mSecondCoreFault;
     PendingFallback mSecondCorePendingFallback;
+    // Per thread (slots as mThreadProfile): busy ticks and their split.
     std::array<std::atomic<uint64_t>, kNativeA32GuestThreadSlots>
         mSecondCoreThreadTicks{};
+    std::array<std::atomic<uint64_t>, kNativeA32GuestThreadSlots>
+        mSecondCoreThreadGuestTicks{};
+    std::array<std::atomic<uint64_t>, kNativeA32GuestThreadSlots>
+        mSecondCoreThreadExitTicks{};
+    std::array<std::atomic<uint64_t>, kNativeA32GuestThreadSlots>
+        mSecondCoreThreadLockTicks{};
+    std::array<std::atomic<uint64_t>, kNativeA32GuestThreadSlots>
+        mSecondCoreThreadSvcCalls{};
+    std::atomic<uint64_t> mSecondCoreIdleWakes{0};
+    std::atomic<uint64_t> mSecondCoreEmptyWakes{0};
     std::atomic<uint64_t> mSecondCoreTicks{0};
     std::atomic<uint64_t> mSecondCoreLockTicks{0};
     NativeA32SecondCoreIdleWork mSecondCoreIdleWork;

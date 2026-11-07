@@ -4,6 +4,7 @@
 #include "oot3d_gameplay_settings_panel.h"
 #include "oot3d_landing_roll.h"
 #include "oot3d_native_guest_overrides.h"
+#include "oot3d_native_kernel_options.h"
 #include "oot3d_switch_threads.h"
 #include "oot3d_switch_guest_window.h"
 #if defined(__SWITCH__)
@@ -275,6 +276,21 @@ void NativeA32WindowSession::Setup() {
   };
   hostConfig.DetailedSvcDiagnostics = launch.ExtendedDiagnostics;
   hostConfig.ProfileRuntime = launch.ProfileA32Runtime;
+  // Guest kernel fast paths (config/kernel_*, oot3d_native_kernel_options.h).
+  const Oot3dNativeGame::NativeKernelOptions kernelOptions =
+      Oot3dNativeGame::ReadNativeKernelOptions();
+  hostConfig.FastSvc = kernelOptions.Svc;
+  Oot3dNativeGame::SecondCore::gQuietWakes = kernelOptions.Wake;
+  {
+    const std::string line = std::string("kernel_fast: wake=") +
+                             (kernelOptions.Wake ? "1" : "0") +
+                             " svc=" + (kernelOptions.Svc ? "1" : "0");
+#if defined(__SWITCH__)
+    SPDLOG_WARN("{}", line);
+#else
+    std::fprintf(stderr, "%s\n", line.c_str());
+#endif
+  }
   auto &hostServices = hostServicesStorage.emplace(std::move(hostConfig));
   frameRateContract =
       Oot3dNativeGame::ResolveNativeFrameRateContract(

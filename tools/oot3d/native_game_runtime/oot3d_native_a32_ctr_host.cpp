@@ -11,6 +11,39 @@
 
 namespace Oot3dNativeGame {
 
+std::string NativeA32CtrSvcEventName(const NativeA32CtrSvcEvent& event) {
+    const auto& words = event.NameWords;
+    switch (event.NameKind) {
+    case NativeA32CtrSvcEventNameKind::Text:
+        return event.Name;
+    case NativeA32CtrSvcEventNameKind::ArbitrateAddress: {
+        std::string name = "ArbitrateAddress:address=0x";
+        AppendHex8(name, static_cast<uint32_t>(words[0]));
+        name += ":type=" + std::to_string(static_cast<uint32_t>(words[1])) +
+                ":value=" + std::to_string(static_cast<int32_t>(words[2]));
+        return name;
+    }
+    case NativeA32CtrSvcEventNameKind::SleepThreadTimed:
+        return "SleepThread:nanoseconds=" + std::to_string(static_cast<int64_t>(words[0])) +
+               ":ticks=" + std::to_string(words[1]) + ":wake=" + std::to_string(words[2]);
+    case NativeA32CtrSvcEventNameKind::SleepThreadInfinite:
+        return "SleepThread:infinite";
+    case NativeA32CtrSvcEventNameKind::SleepThreadYield:
+        return "SleepThread:yield=" + std::to_string(static_cast<int64_t>(words[0]));
+    }
+    return event.Name;
+}
+
+namespace {
+
+void MaterializeSvcEventName(NativeA32CtrSvcEvent& event) {
+    if (event.NameKind == NativeA32CtrSvcEventNameKind::Text) return;
+    event.Name = NativeA32CtrSvcEventName(event);
+    event.NameKind = NativeA32CtrSvcEventNameKind::Text;
+}
+
+} // namespace
+
 detail::NativeA32CtrSvcEventHistory::NativeA32CtrSvcEventHistory(
     bool retainFullHistory, bool collectIpcNameCounts,
     size_t threadCapacityHint)
@@ -61,6 +94,7 @@ void detail::NativeA32CtrSvcEventHistory::push_back(
         ++mIpcNameCounts[event.Name];
     }
     if (mRetainFullHistory) {
+        MaterializeSvcEventName(event);
         mFullEvents.push_back(std::move(event));
         return;
     }
@@ -125,6 +159,7 @@ detail::NativeA32CtrSvcEventHistory::Events() const {
     for (auto candidate = mSnapshotCandidates.begin(); candidate != uniqueEnd;
          ++candidate) {
         mSnapshot.push_back((*candidate)->Event);
+        MaterializeSvcEventName(mSnapshot.back());
     }
     mSnapshotDirty = false;
     return mSnapshot;
@@ -257,11 +292,27 @@ uint32_t NativeA32CtrHostServices::CreateHandle(
         mNextGeneration = 1;
     }
     mHandles.push_back({value, object});
+    ++mHandlesVersion;
     return value;
 }
 
 const NativeA32CtrHostServices::HandleRecord*
 NativeA32CtrHostServices::LookupHandle(uint32_t handle) const {
+    if (mConfig.FastSvc) {
+        // An entry holds the first match's index while the table is
+        // unchanged (any create or close moves the version on).
+        auto& entry = mHandleCache[(handle ^ (handle >> 15U)) % mHandleCache.size()];
+        if (entry.Version == mHandlesVersion && entry.Value == handle) {
+            return &mHandles[entry.Index];
+        }
+        for (size_t index = 0; index < mHandles.size(); ++index) {
+            if (mHandles[index].Value == handle) {
+                entry = {handle, static_cast<uint32_t>(index), mHandlesVersion};
+                return &mHandles[index];
+            }
+        }
+        return nullptr;
+    }
     for (const auto& record : mHandles) {
         if (record.Value == handle) {
             return &record;
@@ -282,11 +333,7 @@ bool NativeA32CtrHostServices::IsHandleType(uint32_t handle,
 
 std::optional<std::string>
 NativeA32CtrHostServices::LookupHandleType(uint32_t handle) const {
-    for (const auto& record : mHandles) {
-        if (record.Value == handle) {
-            return record.Object->Type;
-        }
-    }
+    if (const auto* record = LookupHandle(handle)) return record->Object->Type;
     return std::nullopt;
 }
 
@@ -490,6 +537,7 @@ bool NativeA32CtrHostServices::CloseHandle(uint32_t handle) {
     for (auto record = mHandles.begin(); record != mHandles.end(); ++record) {
         if (record->Value == handle) {
             mHandles.erase(record);
+            ++mHandlesVersion;
             return true;
         }
     }
@@ -598,7 +646,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvc(
             std::ostringstream error;
             error << "TRIAEVUM_HOST_REQUEST_UNSERVED svc=0x" << std::hex << immediate
                   << " pc=0x" << state.r[15] << std::dec << " thread=" << context.ThreadId;
-            if (event) error << " request=" << std::quoted(event->Name)
+            if (event) error << " request=" << std::quoted(NativeA32CtrSvcEventName(*event))
                              << " detail=0x" << std::hex << event->Detail;
             std::fprintf(stderr, "%s\n", error.str().c_str());
             return {NativeA32HostAction::Fault, std::nullopt, 0U, error.str()};
@@ -665,7 +713,10 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             static_cast<uint64_t>(state.r[0]) |
             (static_cast<uint64_t>(state.r[1]) << 32U);
         const int64_t nanoseconds = static_cast<int64_t>(rawNanoseconds);
-        event.Name = "SleepThread";
+        // config/kernel_svc: the event keeps its numbers (name written when
+        // read, NativeA32CtrSvcEventName).
+        const bool numbersOnly = mConfig.FastSvc;
+        if (!numbersOnly) event.Name = "SleepThread";
         if (nanoseconds > 0) {
             const uint64_t ticks =
                 NanosecondsToCtrTicks(static_cast<uint64_t>(nanoseconds));
@@ -679,19 +730,31 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             });
             mSleepWaiters.push_back(
                 {&context.Process, context.ThreadId, wakeTick});
-            event.Name += ":nanoseconds=" + std::to_string(nanoseconds) +
-                          ":ticks=" + std::to_string(ticks) +
-                          ":wake=" + std::to_string(wakeTick);
+            if (numbersOnly) {
+                event.NameKind = NativeA32CtrSvcEventNameKind::SleepThreadTimed;
+                event.NameWords = {rawNanoseconds, ticks, wakeTick};
+            } else {
+                event.Name += ":nanoseconds=" + std::to_string(nanoseconds) +
+                              ":ticks=" + std::to_string(ticks) +
+                              ":wake=" + std::to_string(wakeTick);
+            }
             event.Detail = static_cast<uint32_t>(ticks);
             event.Handled = true;
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
         }
         if (nanoseconds == -1) {
-            event.Name += ":infinite";
+            if (numbersOnly) {
+                event.NameKind = NativeA32CtrSvcEventNameKind::SleepThreadInfinite;
+            } else {
+                event.Name += ":infinite";
+            }
             event.Handled = true;
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
+        } else if (numbersOnly) {
+            event.NameKind = NativeA32CtrSvcEventNameKind::SleepThreadYield;
+            event.NameWords[0] = rawNanoseconds;
         } else {
             event.Name += ":yield=" + std::to_string(nanoseconds);
         }
@@ -810,16 +873,21 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
         mSvcEvents.push_back(std::move(event));
         return {NativeA32HostAction::Resume};
     case 0x22: {
-        event.Name = "ArbitrateAddress";
         const auto* record = LookupHandle(state.r[0]);
         const uint32_t address = state.r[1];
         const uint32_t type = state.r[2];
         const int32_t value = static_cast<int32_t>(state.r[3]);
         event.Detail = type;
-        event.Name += ":address=0x";
-        AppendHex8(event.Name, address);
-        event.Name += ":type=" + std::to_string(type) +
-                      ":value=" + std::to_string(value);
+        if (mConfig.FastSvc) {
+            // config/kernel_svc: the name is written when read.
+            event.NameKind = NativeA32CtrSvcEventNameKind::ArbitrateAddress;
+            event.NameWords = {address, type, state.r[3]};
+        } else {
+            event.Name = "ArbitrateAddress:address=0x";
+            AppendHex8(event.Name, address);
+            event.Name += ":type=" + std::to_string(type) +
+                          ":value=" + std::to_string(value);
+        }
         if (record == nullptr || record->Object->Type != "address_arbiter" ||
             type > 4U || !memory.IsMapped(address, sizeof(uint32_t))) {
             mSvcEvents.push_back(std::move(event));
@@ -965,32 +1033,36 @@ NativeA32HostResult NativeA32CtrHostServices::HandleSvcImpl(
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};
         }
-        std::vector<const HandleRecord*> handles;
-        handles.reserve(handleCount);
-        std::string detail = waitAll ? ":all" : ":any";
+        // The name is built in place (one allocation); a failed read or an
+        // unknown handle leaves only "WaitSynchronizationN".
+        constexpr size_t kNameLength = sizeof("WaitSynchronizationN") - 1U;
+        std::array<const HandleRecord*, 0x40U> handleRecords{};
+        const std::span<const HandleRecord* const> handles(handleRecords.data(), handleCount);
+        event.Name.reserve(kNameLength + 4U + handleCount * 32U);
+        event.Name += waitAll ? ":all" : ":any";
         for (uint32_t index = 0; index < handleCount; ++index) {
             uint32_t handle = 0;
             if (!memory.Read32(handlesAddress + index * sizeof(uint32_t),
                                &handle)) {
+                event.Name.resize(kNameLength);
                 mSvcEvents.push_back(std::move(event));
                 return {NativeA32HostAction::Wait};
             }
-            detail += index == 0 ? ":0x" : ",0x";
-            AppendHex8(detail, handle);
-            const auto type = LookupHandleType(handle);
-            detail += "=";
-            detail += type.value_or("invalid");
+            event.Name += index == 0 ? ":0x" : ",0x";
+            AppendHex8(event.Name, handle);
             const auto* record = LookupHandle(handle);
+            event.Name += '=';
             if (record == nullptr) {
+                event.Name.resize(kNameLength);
                 mSvcEvents.push_back(std::move(event));
                 return {NativeA32HostAction::Wait};
             }
-            handles.push_back(record);
+            event.Name += record->Object->Type;
+            handleRecords[index] = record;
             if (index == 0) {
                 event.Detail = handle;
             }
         }
-        event.Name += detail;
         const auto isReady = [&](const HandleRecord* record) {
             return IsKernelObjectReady(*record->Object, context.ThreadId,
                                        context.Process);
