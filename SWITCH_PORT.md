@@ -1538,8 +1538,8 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - FPS = new images per 0.5 s window: a game step's frame or an fps60 in-between frame, each counted once
   however many refreshes it stays (a dropped in-between, which repeats the step image, is not one); `max`
   = longest time one image stayed on screen in the window (a held frame at 60 Hz reads 33.3 ms; an image
-  still up at the window's end counts its time so far); `speed` = guest refreshes run / refreshes owed (run
-  + dropped by the presentation scheduler), `--` when none was owed (loading screens). Text formatted only
+  still up at the window's end counts its time so far); `speed` = guest refreshes run / refreshes owed
+  (run plus dropped by the presentation scheduler), `--` when none was owed (loading screens). Text formatted only
   when a window closes (`oot3d_fps_counter.h`, tests in `oot3d_fps_counter_tests.cpp`).
 - Needs ImGui on the window: with deko3d and `config/serial_presentation` nothing ImGui draws shows.
 
