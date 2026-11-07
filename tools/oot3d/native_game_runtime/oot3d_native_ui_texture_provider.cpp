@@ -298,6 +298,21 @@ bool Oot3dNativeA32UiTextureProvider::Resolve(
     const oot3d::ui::UiTextureIdentity& identity,
     oot3d::ui::UiTexturePixels& pixels, std::string* error) const {
     ++mStats.resolve_calls;
+    return ResolvePixels(identity, pixels, error, false);
+}
+
+void Oot3dNativeA32UiTextureProvider::RequestAhead(
+    const oot3d::ui::UiTextureIdentity& identity) const {
+    if (!mCustomTextures.resolve) {
+        return;
+    }
+    oot3d::ui::UiTexturePixels pixels;
+    (void)ResolvePixels(identity, pixels, nullptr, true);
+}
+
+bool Oot3dNativeA32UiTextureProvider::ResolvePixels(
+    const oot3d::ui::UiTextureIdentity& identity,
+    oot3d::ui::UiTexturePixels& pixels, std::string* error, bool ahead) const {
     pixels = {};
     if (error != nullptr) {
         error->clear();
@@ -318,7 +333,7 @@ bool Oot3dNativeA32UiTextureProvider::Resolve(
             }
             ++mStats.profile_asset_resolves;
             ApplyCustomTexture(profileTexture->NativePicaFormat,
-                               profileTexture->EncodedPayload, pixels);
+                               profileTexture->EncodedPayload, pixels, ahead);
             return true;
         }
     }
@@ -490,7 +505,7 @@ bool Oot3dNativeA32UiTextureProvider::Resolve(
         }
     }
     if (!generatedText) {
-        ApplyCustomTexture(encoding->native_pica_format, coverageBytes, pixels);
+        ApplyCustomTexture(encoding->native_pica_format, coverageBytes, pixels, ahead);
     }
     return true;
 }
@@ -547,7 +562,7 @@ Oot3dNativeUiCustomTexture ChooseUiCustomTexture(
 
 void Oot3dNativeA32UiTextureProvider::ApplyCustomTexture(
     std::uint8_t nativePicaFormat, std::span<const std::uint8_t> encoded,
-    oot3d::ui::UiTexturePixels& pixels) const {
+    oot3d::ui::UiTexturePixels& pixels, bool ahead) const {
     if (!mCustomTextures.resolve) {
         return;
     }
@@ -558,8 +573,13 @@ void Oot3dNativeA32UiTextureProvider::ApplyCustomTexture(
     }
     const auto custom = mCustomTextures.resolve({
         pixels.width, pixels.height, nativePicaFormat,
-        encoded.first(baseBytes), pixels.rgba8,
+        encoded.first(baseBytes), pixels.rgba8, ahead,
     });
+    if (ahead) {
+        // Only to start the replacement's preparation: no pixels wanted.
+        ++mStats.custom_texture_ahead;
+        return;
+    }
     if (custom.state == Oot3dNativeUiCustomTexture::State::None) {
         return;
     }

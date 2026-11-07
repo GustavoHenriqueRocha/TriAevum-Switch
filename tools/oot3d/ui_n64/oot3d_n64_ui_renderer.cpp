@@ -187,6 +187,7 @@ void N64UiFast3dRenderer::Release() noexcept {
     prepared_keys_.clear();
     provisional_keys_.clear();
     hold_polls_.clear();
+    ahead_keys_.clear();
     held_keys_.clear();
     staged_textures_.clear();
 }
@@ -317,6 +318,39 @@ void N64UiFast3dRenderer::Stage(PreparedUiTextures prepared) {
         failed_textures_.erase(key);
         staged_textures_.insert_or_assign(std::move(key), std::move(texture));
     }
+}
+
+bool N64UiFast3dRenderer::RequestAhead(
+    std::span<const UiTextureIdentity> identities) {
+    if (texture_provider_ == nullptr) {
+        return true;
+    }
+    const std::uint64_t revision = texture_provider_->Revision();
+    if (revision != ahead_revision_) {
+        ahead_revision_ = revision;
+        ahead_keys_.clear();
+    }
+    // A key prepared at this revision was resolved already (its first sight).
+    const bool preparedCurrent = prepared_revision_ == revision;
+    bool requested = false;
+    for (const UiTextureIdentity& identity : identities) {
+        if (identity.semantic_name.empty()) {
+            continue;
+        }
+        std::string key = BuildUiTextureCacheKey(identity);
+        if (ahead_keys_.contains(key) ||
+            (preparedCurrent && prepared_keys_.contains(key))) {
+            continue;
+        }
+        if (requested) {
+            return false;
+        }
+        texture_provider_->RequestAhead(identity);
+        ++stats_.ahead_requests;
+        ahead_keys_.insert(std::move(key));
+        requested = true;
+    }
+    return true;
 }
 
 PreparedUiTextures N64UiFast3dRenderer::PrepareTextures(

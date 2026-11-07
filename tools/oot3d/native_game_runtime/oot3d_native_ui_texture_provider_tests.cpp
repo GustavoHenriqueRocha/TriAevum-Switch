@@ -337,6 +337,7 @@ int main() {
     std::shared_ptr<const std::vector<std::uint8_t>> standIn;
     std::vector<std::uint8_t> requested;
     std::uint8_t requestedFormat = 0xFFU;
+    bool requestedAhead = false;
     std::uint64_t packRevision = 7U;
     const auto replacement =
         std::make_shared<const std::vector<std::uint8_t>>(24U * 24U * 4U, 0x40U);
@@ -345,6 +346,7 @@ int main() {
             requested.assign(request.encoded_base_level.begin(),
                              request.encoded_base_level.end());
             requestedFormat = request.native_pica_format;
+            requestedAhead = request.ahead;
             Oot3dNativeUiCustomTexture custom;
             custom.state = packState;
             if (packState == Oot3dNativeUiCustomTexture::State::Ready) {
@@ -390,6 +392,27 @@ int main() {
                 !pixels.provisional && pixels.width == 8U &&
                 pixels.rgba8.front() == 0xFFU,
             "without a custom texture the native pixels did not come back");
+    // Asked for ahead of its first draw: the source sees the same identity,
+    // marked ahead; no pixels are handed out nor counted as resolves.
+    requested.clear();
+    packState = Oot3dNativeUiCustomTexture::State::Pending;
+    const auto statsBefore = profileTextureProvider.Stats();
+    profileTextureProvider.RequestAhead(profileTextureIdentity);
+    Require(requestedAhead && requested == profileTexturePayload && requestedFormat == 0U &&
+                profileTextureProvider.Stats().custom_texture_ahead == 1U &&
+                profileTextureProvider.Stats().resolve_calls == statsBefore.resolve_calls &&
+                profileTextureProvider.Stats().custom_texture_pending == statsBefore.custom_texture_pending,
+            "a texture asked for ahead was not offered to the custom source as ahead");
+    Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels, &error) && !requestedAhead &&
+                pixels.provisional,
+            "a first draw after an ahead request was marked ahead");
+    packState = Oot3dNativeUiCustomTexture::State::None;
+    // Without a custom source there is nothing to start.
+    const auto packlessBefore = packlessProvider.Stats();
+    packlessProvider.RequestAhead(menuAtlasIdentity);
+    Require(packlessProvider.Stats().profile_asset_absent == packlessBefore.profile_asset_absent &&
+                packlessProvider.Stats().custom_texture_ahead == 0U,
+            "an ahead request without a custom source read the texture");
 
     // Native CTXB textures are identified after the TopScreen override, as
     // the game with that mod installed would upload them.

@@ -47,6 +47,10 @@ struct AzaharTextureRequest {
     // without a mip chain, and cached apart from a world texture of the same
     // hash. The UI renderer keeps its own copy; ReleaseDecoded does not apply.
     bool UserInterface = false;
+    // A HUD texture asked for before its first draw (the UI renderer's
+    // RequestAhead): its decode is queued as one decoded ahead, and it does
+    // not count as a first sight. Only with UserInterface.
+    bool Ahead = false;
 };
 
 struct AzaharTextureReplacement {
@@ -145,10 +149,11 @@ struct AzaharTexturePackStatus {
 };
 
 // HUD images (AzaharTextureRequest::UserInterface) since the index was last
-// built: those decoded ahead from the configuration's HudImageList (the
-// start-up cost: worker time from the index to the last of them, and their
-// RGBA8 size) and those decoded on first sight (each one drew without its pack
-// art until ready: the longest wait from its request to its image).
+// built: those decoded ahead of their first draw, from the configuration's
+// HudImageList or asked for Ahead by the UI (the start-up cost: time from the
+// index to the last of them, and their RGBA8 size), and those the HUD asked
+// for before they were decoded (each one drawn late: the longest wait from
+// that request to its image).
 struct AzaharHudPackStatus {
     size_t Listed = 0;
     size_t PreloadQueued = 0;

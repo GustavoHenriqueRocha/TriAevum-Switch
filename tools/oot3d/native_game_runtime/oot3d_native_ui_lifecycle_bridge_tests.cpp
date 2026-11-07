@@ -126,6 +126,38 @@ int main() {
                    oot3d::ui::UiPauseSharedTextureSlot::HudAtlas)
                .has_value(),
           "an absent native shared texture was reported as available");
+  // The HUD's textures to ask for ahead: those the game has loaded, in the
+  // order the player first sees them.
+  {
+    bool complete = true;
+    auto ahead = bridge.HudTexturesAhead(true, &complete);
+    Require(!complete && ahead.size() == 3U &&
+                ahead[0].semantic_name == "oot3d/native/pause_shared/pause_top_page" &&
+                ahead[0].guest_surface_address == 0x1400789AU &&
+                ahead[1].semantic_name == "oot3d/topscreen/3.0/ui_atlas" &&
+                ahead[2].semantic_name == "oot3d/native/pause_shared/item_page",
+            "the HUD textures ahead did not list the loaded ones only");
+    constexpr std::uint32_t kSlots = 0x0055B490U;
+    // ItemIcons (10), NumberGlyphs (9), OcarinaPage (5).
+    Require(memory.Write32(kSlots + 10U * 4U, 0x00560400U) && memory.Write32(0x0056044CU, 0x1400A000U) &&
+                memory.Write32(kSlots + 9U * 4U, 0x00560500U) && memory.Write32(0x0056054CU, 0x1400B000U) &&
+                memory.Write32(kSlots + 5U * 4U, 0x00560600U) && memory.Write32(0x0056064CU, 0x1400C000U),
+            "cannot seed the HUD's item, number and ocarina textures");
+    ahead = bridge.HudTexturesAhead(true, &complete);
+    Require(complete && ahead.size() == 6U &&
+                ahead[1].semantic_name == "oot3d/native/pause_shared/item_icons" &&
+                ahead[1].guest_resource_address == 0x00560400U &&
+                ahead[2].semantic_name == "oot3d/native/pause_shared/number_glyphs" &&
+                ahead[3].semantic_name == "oot3d/topscreen/3.0/ui_atlas" &&
+                ahead[5].semantic_name == "oot3d/native/pause_shared/ocarina_page",
+            "the TopScreen HUD textures ahead are not complete and in order");
+    ahead = bridge.HudTexturesAhead(false, &complete);
+    Require(complete && ahead.size() == 3U && ahead[2].semantic_name == "oot3d/native/pause_shared/number_glyphs",
+            "the two-screen HUD asked for TopScreen textures ahead");
+    Require(memory.Write32(kSlots + 10U * 4U, 0U) && memory.Write32(kSlots + 9U * 4U, 0U) &&
+                memory.Write32(kSlots + 5U * 4U, 0U),
+            "cannot restore the shared texture fixture");
+  }
   Require(!bridge.NativeFrontendPresentationActive(),
           "frontend presentation was active before semantic capture");
   Require(!bridge.NativeGameplayPresentationActive(),

@@ -38,6 +38,8 @@ struct N64UiRendererStats {
     // with the game's own pixels until the replacement came).
     std::uint64_t held_draws = 0;
     std::uint64_t holds_expired = 0;
+    // Textures asked for ahead of their first draw (RequestAhead).
+    std::uint64_t ahead_requests = 0;
 };
 
 struct UiTexturePixels {
@@ -65,6 +67,12 @@ class UiTextureProvider {
     // Changes whenever previously resolved payloads may have become stale
     // (for example a texture pack was turned on, off or reloaded).
     virtual std::uint64_t Revision() const noexcept { return 0U; }
+    // Starts preparing the final payload of a texture before its first
+    // Resolve (a texture pack image decodes on its worker meanwhile), without
+    // returning pixels. Nothing to start by default.
+    virtual void RequestAhead(const UiTextureIdentity& identity) const {
+        (void)identity;
+    }
 };
 
 // A texture payload read from its provider ahead of the Render that first
@@ -125,6 +133,13 @@ class N64UiFast3dRenderer {
     // renders nothing still owns them for its next Render). A payload
     // prepared again replaces the resident texture of the same key.
     void Stage(PreparedUiTextures prepared);
+    // Asks the provider ahead for the first of `identities` (in order) not
+    // asked for nor prepared at the provider's current Revision: one per
+    // call, so the cost (a read and decode of the game's texture to identify
+    // it) is spread over frames. A new Revision asks for every one again: a
+    // texture pack that finished indexing queues their decodes then. Returns
+    // whether every one of them has been asked for at this Revision.
+    bool RequestAhead(std::span<const UiTextureIdentity> identities);
     // Render without reading the provider: first uses consume `prepared`.
     bool Render(std::span<const UiPrimitive> primitives,
                 std::uint32_t framebufferWidth,
@@ -156,6 +171,9 @@ class N64UiFast3dRenderer {
     std::uint32_t provisional_poll_ = 0;
     // Keys whose first draws are held, and the calls they were polled at.
     std::unordered_map<std::string, std::uint32_t> hold_polls_;
+    // Keys asked for ahead and the provider revision they were asked at.
+    std::unordered_set<std::string> ahead_keys_;
+    std::uint64_t ahead_revision_ = 0;
     // Rendering side: held keys without a resident texture (not drawn).
     std::unordered_set<std::string> held_keys_;
     // Rendering side: prepared payloads not consumed yet.

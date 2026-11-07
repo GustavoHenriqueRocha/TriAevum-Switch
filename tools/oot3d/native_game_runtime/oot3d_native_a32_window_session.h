@@ -508,6 +508,9 @@ private:
   std::optional<Oot3dNativeGame::TopScreenWideItemsRuntime> wideItemsStorage;
   std::optional<oot3d::ui::Fast3dUiRenderBackend> uiRenderBackendStorage;
   std::optional<oot3d::ui::N64UiFast3dRenderer> n64UiRendererStorage;
+  // The UI texture revision at which every HUD texture was asked for ahead
+  // of its first draw (N64UiFast3dRenderer::RequestAhead); none yet: empty.
+  std::optional<std::uint64_t> hudTexturesAheadRevision;
   std::array<std::vector<oot3d::ui::UiPrimitive>, oot3d::ui::kUiSubsystemCount> lastTopScreenPrimitivesBySubsystem;
   Oot3dNativeGame::NativeA32InputTimeline inputTimeline{};
   Oot3dNativeGame::GraphicsSettingsSchedule graphicsSettingsSchedule{};

@@ -10,7 +10,9 @@ void Require(bool condition, const char *message) {
 class Textures final : public oot3d::ui::UiTextureProvider {
 public:
   mutable unsigned Resolutions = 0;
+  mutable unsigned AheadRequests = 0;
   unsigned FailAt = 0;
+  std::uint64_t Generation = 5;
   bool Resolve(const oot3d::ui::UiTextureIdentity &, oot3d::ui::UiTexturePixels &pixels,
                std::string *) const override {
     if (++Resolutions == FailAt) return false;
@@ -18,6 +20,8 @@ public:
     pixels.rgba8.assign(8 * 8 * 4, 255);
     return true;
   }
+  std::uint64_t Revision() const noexcept override { return Generation; }
+  void RequestAhead(const oot3d::ui::UiTextureIdentity &) const override { ++AheadRequests; }
 };
 }
 
@@ -32,6 +36,13 @@ int main() {
           "cannot seed message/language");
   Textures textures;
   TopScreenOcarinaTextRuntime runtime(memory, textures);
+  // The UI renderer's provider: the native textures' revision (a texture
+  // pack's generation) and ahead requests pass through.
+  Require(runtime.Revision() == 5, "the native textures' revision did not pass through");
+  textures.Generation = 6;
+  runtime.RequestAhead(oot3d::ui::UiTextureIdentity{0, 0, "oot3d/native/pause_shared/item_icons"});
+  Require(runtime.Revision() == 6 && textures.AheadRequests == 1 && textures.Resolutions == 0,
+          "an ahead request did not pass through to the native textures");
   TopScreenOcarinaGeometry geometry;
   Require(runtime.Prepare(geometry, &error) && !runtime.NeedsExecution(),
           "inactive ocarina scheduled guest work");

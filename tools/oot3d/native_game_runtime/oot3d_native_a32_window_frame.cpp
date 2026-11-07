@@ -1193,6 +1193,20 @@ bool NativeA32WindowSession::RunFrame() {
   hostWorkRelease.emplace();
   const auto uiSubmitStart = std::chrono::steady_clock::now();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::UiSubmit);
+  // The HUD's texture pack images decode before its first frame: its
+  // textures are asked for ahead, one per frame, as soon as the game has
+  // loaded them (title screen), and again at each new UI texture revision
+  // (the pack's index ready, HD textures turned on or off).
+  if (const auto revision = nativeUiTextureProviderStorage->Revision();
+      hudTexturesAheadRevision != revision) {
+    bool complete = false;
+    const auto ahead = uiLifecycleBridge.HudTexturesAhead(
+        launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen,
+        &complete);
+    if (n64UiRenderer.RequestAhead(ahead) && complete) {
+      hudTexturesAheadRevision = revision;
+    }
+  }
   for (std::size_t subsystemIndex = 0;
        subsystemIndex < oot3d::ui::kUiSubsystemCount; ++subsystemIndex) {
     const auto subsystem =

@@ -3,8 +3,9 @@
 // The HUD images of the player's texture pack, remembered between sessions
 // (config/texture_pack_hud on the Switch): one line per HUD texture the pack
 // replaced, `<hash, 16 hex digits> <native width> <native height>`. The pack
-// worker decodes these as soon as its index is ready, so the HUD's first draw
-// already has its pack art; a HUD image decoded on first sight is appended.
+// worker decodes these as soon as its index is ready, before the UI can ask
+// for them (N64UiFast3dRenderer::RequestAhead, once the game has loaded its
+// HUD textures); each HUD image decoded and not listed yet is appended.
 // Header-only and free of the runtime, checked on the host
 // (oot3d_texture_pack_scale_tests).
 

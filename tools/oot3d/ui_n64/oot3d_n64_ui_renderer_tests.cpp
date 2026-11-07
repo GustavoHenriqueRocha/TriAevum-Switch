@@ -2,7 +2,9 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -260,12 +262,118 @@ void TestHeldFirstDraws() {
     }
 }
 
+// A texture pack as the HUD sees it: an image is queued when asked for
+// (ahead, or on its first Resolve) once the pack's index is ready, and is
+// ready when the worker has decoded it (Decode). Until then the game's own
+// pixels stand in (held at a first sight). The index becoming ready is a new
+// revision.
+class AsyncPackProvider final : public oot3d::ui::UiTextureProvider {
+  public:
+    bool Resolve(const oot3d::ui::UiTextureIdentity& identity, oot3d::ui::UiTexturePixels& pixels,
+                 std::string*) const override {
+        ++resolves;
+        const bool isReady = ready.count(identity.semantic_name) != 0U;
+        if (!isReady) {
+            ++notReadyResolves;
+            if (indexReady) queued.insert(identity.semantic_name);
+        }
+        const uint16_t extent = isReady ? 6U : 2U;
+        pixels.width = extent;
+        pixels.height = extent;
+        pixels.rgba8.assign(std::size_t(extent) * extent * 4U, 0xFF);
+        pixels.provisional = !isReady;
+        pixels.native_stand_in = !isReady;
+        return true;
+    }
+    std::uint64_t Revision() const noexcept override { return indexReady ? 2U : 1U; }
+    void RequestAhead(const oot3d::ui::UiTextureIdentity& identity) const override {
+        ++aheadCalls;
+        if (indexReady && ready.count(identity.semantic_name) == 0U) queued.insert(identity.semantic_name);
+    }
+    // The pack worker decodes what is queued.
+    void Decode() {
+        ready.insert(queued.begin(), queued.end());
+        queued.clear();
+    }
+    bool indexReady = false;
+    mutable std::unordered_set<std::string> queued, ready;
+    mutable int resolves = 0, notReadyResolves = 0, aheadCalls = 0;
+};
+
+// test.8: on the first start (empty HUD list) two HUD images were first seen
+// in play and held up to 263 ms. The HUD's textures are asked for ahead from
+// the title screen on (again once the pack's index is ready), so the HUD's
+// first frame draws the pack's art; an item equipped for the first time is
+// another region of the item atlas, already drawn.
+void TestRequestAhead() {
+    using namespace oot3d::ui;
+    std::vector<UiTextureIdentity> hud(3U);
+    hud[0].semantic_name = "oot3d/native/pause_shared/pause_top_page";
+    hud[1].semantic_name = "oot3d/native/pause_shared/item_icons";
+    hud[2].semantic_name = "oot3d/native/pause_shared/number_glyphs";
+    std::vector<UiPrimitive> firstFrame;
+    for (const auto& identity : hud) {
+        firstFrame.push_back(TexturedPrimitive(identity.semantic_name));
+        firstFrame.back().uv = {0.0F, 0.0F, 0.0625F, 0.0625F};
+    }
+    const auto frame = [](N64UiFast3dRenderer& renderer, const std::vector<UiPrimitive>& primitives) {
+        std::string error;
+        Require(renderer.Render(primitives, 400, 240, N64UiCanvasMode::NativeTopScreen400x240,
+                                renderer.PrepareTextures(primitives), &error),
+                "ahead UI rendering failed: " + error);
+    };
+    {
+        AsyncPackProvider provider;
+        SizingBackend backend;
+        N64UiFast3dRenderer renderer(backend, &provider);
+        // Title screen, the pack still indexing: one request per call.
+        Require(!renderer.RequestAhead(hud) && !renderer.RequestAhead(hud) && renderer.RequestAhead(hud) &&
+                    provider.aheadCalls == 3 && renderer.Stats().ahead_requests == 3U,
+                "the HUD textures were not asked for ahead one per call");
+        Require(renderer.RequestAhead(hud) && provider.aheadCalls == 3,
+                "a texture was asked for ahead twice at one revision");
+        Require(provider.queued.empty() && provider.resolves == 0, "asking ahead resolved pixels");
+        // The index is ready (a new revision): asked again, now queued.
+        provider.indexReady = true;
+        for (int call = 0; call < 3; ++call) (void)renderer.RequestAhead(hud);
+        Require(provider.aheadCalls == 6 && provider.queued.size() == 3U,
+                "a new revision did not ask for the HUD textures again");
+        // Decoded during the title screen; the HUD's first frame.
+        provider.Decode();
+        frame(renderer, firstFrame);
+        Require(provider.notReadyResolves == 0 && renderer.Stats().held_draws == 0U &&
+                    backend.widths == std::vector<uint16_t>({6U, 6U, 6U}) && backend.drawn.size() == 3U,
+                "the HUD's first frame did not draw the pack's art");
+        // An item equipped for the first time: another region of the atlas.
+        std::vector<UiPrimitive> equipped = firstFrame;
+        equipped[1].uv = {0.5F, 0.25F, 0.0625F, 0.0625F};
+        const int resolves = provider.resolves;
+        frame(renderer, equipped);
+        Require(provider.resolves == resolves && backend.widths.size() == 3U && backend.drawn.size() == 6U &&
+                    renderer.Stats().held_draws == 0U,
+                "a first equip changed the HUD's item texture");
+        // Drawn already: not asked for ahead again.
+        Require(renderer.RequestAhead(hud) && provider.aheadCalls == 6, "a drawn texture was asked for ahead");
+    }
+    {
+        // Without asking ahead (test.8): the first frame holds the HUD.
+        AsyncPackProvider provider;
+        provider.indexReady = true;
+        SizingBackend backend;
+        N64UiFast3dRenderer renderer(backend, &provider);
+        frame(renderer, firstFrame);
+        Require(renderer.Stats().held_draws == 3U && backend.widths.empty(),
+                "the reference HUD without ahead requests was not held");
+    }
+}
+
 } // namespace
 
 int main() {
     using namespace oot3d::ui;
     TestProvisionalTextures();
     TestHeldFirstDraws();
+    TestRequestAhead();
     Require(N64UiSolidShaderId0() != 0U &&
                 N64UiTexturedShaderId0() != 0U &&
                 N64UiSolidShaderId0() != N64UiTexturedShaderId0(),
