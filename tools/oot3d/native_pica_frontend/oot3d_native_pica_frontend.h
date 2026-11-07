@@ -57,6 +57,13 @@ class Oot3dPicaSharedArray final {
         return mStorage->Values[index];
     }
 
+    // Range access: const reads the shared storage; the mutable form first
+    // takes its own copy, as operator[] does.
+    [[nodiscard]] const Value* begin() const noexcept { return data(); }
+    [[nodiscard]] const Value* end() const noexcept { return data() + Size; }
+    [[nodiscard]] Value* begin() { return data(); }
+    [[nodiscard]] Value* end() { return data() + Size; }
+
     [[nodiscard]] const Array& Values() const noexcept {
         return mStorage->Values;
     }
@@ -235,13 +242,18 @@ struct Oot3dPicaShaderState {
     size_t SwizzleWordCount = 0;
 };
 
+// Procedural texture and fog tables: uploaded rarely and referenced by every
+// draw, so each packet shares them copy-on-write (Oot3dPicaSharedArray)
+// instead of copying their 4 KiB per draw on the guest's GX command.
 struct Oot3dPicaProcTexLutState {
-    std::array<uint32_t, 128> Noise{};
-    std::array<uint32_t, 128> ColorMap{};
-    std::array<uint32_t, 128> AlphaMap{};
-    std::array<uint32_t, 256> Color{};
-    std::array<uint32_t, 256> ColorDifference{};
+    Oot3dPicaSharedArray<uint32_t, 128> Noise;
+    Oot3dPicaSharedArray<uint32_t, 128> ColorMap;
+    Oot3dPicaSharedArray<uint32_t, 128> AlphaMap;
+    Oot3dPicaSharedArray<uint32_t, 256> Color;
+    Oot3dPicaSharedArray<uint32_t, 256> ColorDifference;
 };
+
+using Oot3dPicaFogLut = Oot3dPicaSharedArray<uint32_t, 128>;
 
 struct Oot3dPicaLightingLutState {
     static constexpr size_t TableCount = 24U;
@@ -278,7 +290,7 @@ struct Oot3dPicaDrawPacketSource {
     const std::array<uint32_t, 0x300>* Registers = nullptr;
     const Oot3dPicaShaderState* VertexShader = nullptr;
     const Oot3dPicaShaderState* GeometryShader = nullptr;
-    const std::array<uint32_t, 128>* FogLut = nullptr;
+    const Oot3dPicaFogLut* FogLut = nullptr;
     const Oot3dPicaProcTexLutState* ProcTexLuts = nullptr;
     std::shared_ptr<const Oot3dPicaLightingLutState> LightingLuts;
     const std::array<std::array<float, 4>, 16>* DefaultAttributes = nullptr;
@@ -305,7 +317,7 @@ struct Oot3dPicaDrawPacket {
         const std::array<uint32_t, 0x300>& registers,
         const Oot3dPicaShaderState& vertexShader,
         const Oot3dPicaShaderState& geometryShader,
-        const std::array<uint32_t, 128>& fogLut,
+        const Oot3dPicaFogLut& fogLut,
         const Oot3dPicaProcTexLutState& procTexLuts,
         std::shared_ptr<const Oot3dPicaLightingLutState> lightingLuts,
         const std::array<std::array<float, 4>, 16>& defaultAttributes)
@@ -327,7 +339,7 @@ struct Oot3dPicaDrawPacket {
     std::array<uint32_t, 0x300> Registers{};
     Oot3dPicaShaderState VertexShader;
     Oot3dPicaShaderState GeometryShader;
-    std::array<uint32_t, 128> FogLut{};
+    Oot3dPicaFogLut FogLut;
     Oot3dPicaProcTexLutState ProcTexLuts;
     std::shared_ptr<const Oot3dPicaLightingLutState> LightingLuts;
     std::array<std::array<float, 4>, 16> DefaultAttributes{};
@@ -444,7 +456,7 @@ class Oot3dNativePicaFrontend {
     std::vector<Oot3dPicaInterruptId> mPendingInterrupts;
     Oot3dPicaShaderState mVertexShader;
     Oot3dPicaShaderState mGeometryShader;
-    std::array<uint32_t, 128> mFogLut{};
+    Oot3dPicaFogLut mFogLut;
     Oot3dPicaProcTexLutState mProcTexLuts;
     std::shared_ptr<Oot3dPicaLightingLutState> mLightingLuts =
         std::make_shared<Oot3dPicaLightingLutState>();

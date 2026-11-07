@@ -987,6 +987,39 @@ int main(int argc, char** argv) {
                 procTexUploadedPacket.ProcTexLuts.ColorMap[0] == procTexValue0,
             "PICA procedural texture LUT upload did not preserve native "
             "index and table modulo semantics");
+    // The procedural and fog tables are shared copy-on-write: draws with no
+    // table write between them share one copy (no 4 KiB copy per draw), and
+    // a later table write never reaches a packet already submitted.
+    Require(procTexFrontend->SubmitGspCommand(procTexDraw, fogDrawCommands, &error),
+            error);
+    {
+        const auto& packets = procTexFrontend->PendingDrawPackets();
+        const auto& first = packets[packets.size() - 2U];
+        const auto& second = packets.back();
+        Require(first.ProcTexLuts.ColorMap.data() == second.ProcTexLuts.ColorMap.data() &&
+                    first.ProcTexLuts.Color.data() == second.ProcTexLuts.Color.data() &&
+                    first.FogLut.data() == second.FogLut.data(),
+                "PICA procedural/fog tables were copied into every draw");
+    }
+    constexpr uint32_t changedProcTexValue0 = 0x00000321U;
+    // Table 2 (color map), index 0, then one data write.
+    constexpr std::array<uint32_t, 4> changedProcTexUpload{
+        (2U << 8U) | 0U, 0x000F00AFU, changedProcTexValue0, 0x000F00B0U};
+    procTexUpload.Parameters[1] =
+        static_cast<uint32_t>(changedProcTexUpload.size() * sizeof(uint32_t));
+    Require(procTexFrontend->SubmitGspCommand(procTexUpload, changedProcTexUpload, &error) &&
+                procTexFrontend->SubmitGspCommand(procTexDraw, fogDrawCommands, &error),
+            error);
+    {
+        const auto& packets = procTexFrontend->PendingDrawPackets();
+        const auto& before = packets[packets.size() - 2U];
+        const auto& after = packets.back();
+        Require(before.ProcTexLuts.ColorMap[0] == procTexValue0 &&
+                    after.ProcTexLuts.ColorMap[0] == changedProcTexValue0 &&
+                    after.ProcTexLuts.ColorMap[127] == procTexValue127 &&
+                    before.ProcTexLuts.Color.data() == after.ProcTexLuts.Color.data(),
+                "PICA procedural texture LUT draw snapshots are not immutable");
+    }
 
     auto procTexPacket = fragmentPacket;
     procTexPacket.Registers[0x080U] = (1U << 10U) | (1U << 8U);

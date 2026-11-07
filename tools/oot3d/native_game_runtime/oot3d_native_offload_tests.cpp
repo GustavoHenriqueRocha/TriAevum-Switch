@@ -214,10 +214,12 @@ bool SamePacket(const Oot3dPicaDrawPacket& a, const Oot3dPicaDrawPacket& b) {
            a.LightBinding == b.LightBinding &&
            a.Indexed == b.Indexed && a.Registers == b.Registers &&
            SameShader(a.VertexShader, b.VertexShader) &&
-           SameShader(a.GeometryShader, b.GeometryShader) && a.FogLut == b.FogLut &&
-           a.ProcTexLuts.Noise == b.ProcTexLuts.Noise && a.ProcTexLuts.ColorMap == b.ProcTexLuts.ColorMap &&
-           a.ProcTexLuts.AlphaMap == b.ProcTexLuts.AlphaMap && a.ProcTexLuts.Color == b.ProcTexLuts.Color &&
-           a.ProcTexLuts.ColorDifference == b.ProcTexLuts.ColorDifference &&
+           SameShader(a.GeometryShader, b.GeometryShader) && a.FogLut.Values() == b.FogLut.Values() &&
+           a.ProcTexLuts.Noise.Values() == b.ProcTexLuts.Noise.Values() &&
+           a.ProcTexLuts.ColorMap.Values() == b.ProcTexLuts.ColorMap.Values() &&
+           a.ProcTexLuts.AlphaMap.Values() == b.ProcTexLuts.AlphaMap.Values() &&
+           a.ProcTexLuts.Color.Values() == b.ProcTexLuts.Color.Values() &&
+           a.ProcTexLuts.ColorDifference.Values() == b.ProcTexLuts.ColorDifference.Values() &&
            a.LightingLuts == b.LightingLuts &&
            std::memcmp(a.DefaultAttributes.data(), b.DefaultAttributes.data(),
                        sizeof(a.DefaultAttributes)) == 0;
@@ -539,7 +541,8 @@ void TestFrontendSource(uint64_t seed) {
                     x.VertexShader.Program.Values() == y.VertexShader.Program.Values() &&
                     std::memcmp(x.VertexShader.FloatUniforms.data(), y.VertexShader.FloatUniforms.data(),
                                 sizeof(x.VertexShader.FloatUniforms)) == 0 &&
-                    x.FogLut == y.FogLut &&
+                    x.FogLut.Values() == y.FogLut.Values() &&
+                    x.ProcTexLuts.Color.Values() == y.ProcTexLuts.Color.Values() &&
                     std::memcmp(x.DefaultAttributes.data(), y.DefaultAttributes.data(),
                                 sizeof(x.DefaultAttributes)) == 0 &&
                     x.LightingLuts->PackedEntries == y.LightingLuts->PackedEntries &&
