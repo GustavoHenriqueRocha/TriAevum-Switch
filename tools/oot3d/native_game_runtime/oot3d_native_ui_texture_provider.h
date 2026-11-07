@@ -58,6 +58,8 @@ struct Oot3dNativeUiTextureProviderStats {
     std::uint64_t profile_asset_absent = 0;
     std::uint64_t custom_texture_replacements = 0;
     std::uint64_t custom_texture_pending = 0;
+    // Textures offered to the custom source ahead of their first draw.
+    std::uint64_t custom_texture_ahead = 0;
 };
 
 // A decoded UI texture offered to a custom texture source (a texture pack,
@@ -70,6 +72,9 @@ struct Oot3dNativeUiCustomTextureRequest {
     std::uint8_t native_pica_format = 0;
     std::span<const std::uint8_t> encoded_base_level;
     std::span<const std::uint8_t> rgba8;
+    // Asked for before the texture's first draw (RequestAhead): the source
+    // starts preparing its replacement; the result is not used.
+    bool ahead = false;
 };
 
 struct Oot3dNativeUiCustomTexture {
@@ -131,6 +136,10 @@ class Oot3dNativeA32UiTextureProvider final
                  oot3d::ui::UiTexturePixels& pixels,
                  std::string* error = nullptr) const override;
     std::uint64_t Revision() const noexcept override;
+    // Identifies the texture as Resolve does and offers it to the custom
+    // texture source (a texture pack queues its decode), without pixels.
+    // Nothing without a custom texture source.
+    void RequestAhead(const oot3d::ui::UiTextureIdentity& identity) const override;
 
     const Oot3dNativeUiTextureProviderStats& Stats() const noexcept;
     void SetGeneratedTextureTransform(Oot3dNativePicaSubmissionQueue::TextureSnapshotTransform transform) {
@@ -144,9 +153,12 @@ class Oot3dNativeA32UiTextureProvider final
     }
 
   private:
+    bool ResolvePixels(const oot3d::ui::UiTextureIdentity& identity,
+                       oot3d::ui::UiTexturePixels& pixels, std::string* error,
+                       bool ahead) const;
     void ApplyCustomTexture(std::uint8_t nativePicaFormat,
                             std::span<const std::uint8_t> encoded,
-                            oot3d::ui::UiTexturePixels& pixels) const;
+                            oot3d::ui::UiTexturePixels& pixels, bool ahead) const;
 
     const Oot3dPicaPhysicalMemoryView& mMemory;
     const TopScreenTextureOverridePack* mTextureOverrides = nullptr;

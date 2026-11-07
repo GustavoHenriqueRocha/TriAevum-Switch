@@ -1272,6 +1272,21 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_ui_texture_provider.cpp",
           r'pixels\.provisional = true;\s+pixels\.native_stand_in = custom\.rgba8 == nullptr;',
           "oot3d_n64_ui_renderer_tests (TestHeldFirstDraws), oot3d_native_ui_texture_provider_tests"),
+    # --- 07/11 (test.8): first start, empty HUD list: two HUD images first seen in play, held up to 263 ms ---
+    Guard("the HUD's textures are asked for ahead of its first frame (title screen), one per frame, again per revision",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'uiLifecycleBridge\.HudTexturesAhead\(.*?n64UiRenderer\.RequestAhead\(ahead\) && complete',
+          "oot3d_n64_ui_renderer_tests (TestRequestAhead), oot3d_native_ui_lifecycle_bridge_tests"),
+    Guard("the UI renderer's provider (ocarina text runtime) passes the pack revision and ahead requests through",
+          "tools/oot3d/native_game_runtime/oot3d_top_screen_ocarina_text_runtime.h",
+          r'Revision\(\) const noexcept override \{ return mNativeTextures\.Revision\(\); \}.*?'
+          r'mNativeTextures\.RequestAhead\(identity\);',
+          "oot3d_top_screen_ocarina_text_runtime_tests"),
+    Guard("an ahead HUD request queues its pack decode as one decoded ahead",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'\.UserInterface = true,\s+\.Ahead = request\.ahead,',
+          "oot3d_azahar_texture_pack_tests (HudImagesAskedAheadAreReadyAtFirstSight), "
+          "oot3d_native_ui_texture_provider_tests"),
     # --- 05/11: inventory taps one slot off (pause Items/Gear/Map, TopScreen) ---
     # The touch scaled the 400-wide top screen down to the 320-wide touch
     # screen, but TopScreen draws the page one pixel per pixel at X + 40 (the

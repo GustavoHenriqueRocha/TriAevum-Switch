@@ -691,6 +691,35 @@ Oot3dNativeUiLifecycleBridge::NativeActiveFileSelectTextureIdentity() const {
       source, guestTextureAddress, "oot3d/native/localized/file_select_active"};
 }
 
+std::vector<oot3d::ui::UiTextureIdentity>
+Oot3dNativeUiLifecycleBridge::HudTexturesAhead(bool topScreen,
+                                               bool *complete) const {
+  using Slot = oot3d::ui::UiPauseSharedTextureSlot;
+  std::vector<oot3d::ui::UiTextureIdentity> identities;
+  bool all = true;
+  const auto add = [&](Slot slot) {
+    if (auto identity = NativePauseSharedTextureIdentity(slot))
+      identities.push_back(std::move(*identity));
+    else
+      all = false;
+  };
+  add(Slot::PauseTopPage);
+  add(Slot::ItemIcons);
+  add(Slot::NumberGlyphs);
+  if (topScreen) {
+    if (mTopScreenUiAtlasAvailable) {
+      oot3d::ui::UiTextureIdentity uiAtlas;
+      uiAtlas.semantic_name = kTopScreen30UiAtlasSemantic;
+      identities.push_back(std::move(uiAtlas));
+    }
+    add(Slot::ItemPage);
+    add(Slot::OcarinaPage);
+  }
+  if (complete != nullptr)
+    *complete = all;
+  return identities;
+}
+
 void Oot3dNativeUiLifecycleBridge::CaptureState() {
   const NativeA32UiMemoryReader reader(mMemory);
   const auto capture = oot3d::ui::CaptureOot3dUiState(reader, mRoots);

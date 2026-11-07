@@ -2,6 +2,7 @@
 #include "oot3d/renderer/azahar_hud_image_list.h"
 #include "oot3d/renderer/azahar_texture_scale.h"
 #include "fast/renderer/content_hash.h"
+#include "oot3d/renderer/pica_texture_decode.h"
 #include "azahar_pbr_materials.h"
 
 #include <nlohmann/json.hpp>
@@ -507,9 +508,16 @@ struct LoadJob {
     IndexedTexture Texture;
     DecodeOptions Options;
     bool UserInterface = false;
-    // A HUD image decoded ahead from the HUD list (not seen yet this session).
+    // A HUD image decoded ahead of its first draw (from the HUD list, or
+    // asked for Ahead by the UI).
     bool Preload = false;
-    std::chrono::steady_clock::time_point Queued;
+    // An ahead HUD request not identified yet (AzaharTextureRequest::Ahead):
+    // its encoded base level, PICA format and the pack's hash mode. The HUD
+    // worker hashes it (decoding it for a legacy hash) and queues its image,
+    // so asking ahead costs the caller a copy, not a decode.
+    std::vector<uint8_t> AheadNative;
+    uint8_t AheadFormat = 0;
+    bool AheadUsesNewHash = true;
     std::optional<IndexedAzaharPbrMaterial> Material;
     AzaharMaterialIdentity Identity;
     std::shared_ptr<std::promise<AzaharImageLoadResult>> EditorImage;
@@ -587,6 +595,7 @@ class AzaharTexturePackRuntime::Impl {
         mMaterialCache.clear();
         mFailedLoadHashes.clear();
         mFailedUiLoadHashes.clear();
+        mHudWaiting.clear();
         mFailedMaterialHashes.clear();
         mDumpedHashes.clear();
         const auto title = Hex16(mConfiguration.TitleId);
@@ -617,6 +626,7 @@ class AzaharTexturePackRuntime::Impl {
             std::scoped_lock lock(mMutex);
             if (!mConfigured) return {};
             if (!mIndexReady) return {AzaharTextureResolveState::Pending, 0U, nullptr};
+            if (request.UserInterface && request.Ahead) return QueueAheadLocked(request);
             dumpEnabled = mConfiguration.DumpTextures;
             loadEnabled = mConfiguration.LoadCustomTextures;
             dumpUsesNewHash = mDumpUsesNewHash;
@@ -794,10 +804,54 @@ class AzaharTexturePackRuntime::Impl {
     }
 
   private:
+    // An ahead HUD request (index ready): a copy of its encoded base level is
+    // identified on the HUD worker (IdentifyAhead); its image is queued then.
+    AzaharTextureResolveResult QueueAheadLocked(const AzaharTextureRequest& request) {
+        if (!mConfiguration.LoadCustomTextures) return {};
+        if (request.NativeBytes.empty()) return {AzaharTextureResolveState::Failed, 0U, nullptr};
+        LoadJob job;
+        job.Generation = mGeneration;
+        job.Options = DecodeOptions{{request.Width, request.Height}, kUiTextureMaxScale, false};
+        job.UserInterface = true;
+        job.Preload = true;
+        job.AheadNative.assign(request.NativeBytes.begin(), request.NativeBytes.end());
+        job.AheadFormat = request.NativeFormat;
+        job.AheadUsesNewHash = mPack.UseNewHash;
+        mUiLoadJobs.push_back(std::move(job));
+        ++mPendingLoads;
+        mUiWorkAvailable.notify_one();
+        return {AzaharTextureResolveState::Pending, 0U, nullptr, false, mPack.UseNewHash};
+    }
+    // The pack's hash of an ahead HUD request, then its image queued ahead
+    // (if the pack has one) behind the HUD images already queued.
+    void IdentifyAhead(const LoadJob& job) {
+        AzaharTextureRequest request{static_cast<uint16_t>(job.Options.Native.Width),
+                                     static_cast<uint16_t>(job.Options.Native.Height), job.AheadFormat, 0U,
+                                     job.AheadNative, {}};
+        std::vector<uint8_t> rgba8;
+        std::string error;
+        uint64_t hash = 0U;
+        // Azahar's legacy hash of a format without a byte layout of its own
+        // (5 and up) is over the decoded texels.
+        if (job.AheadUsesNewHash || job.AheadFormat < 5U ||
+            DecodePicaTextureRgba8(job.AheadFormat, request.Width, request.Height, job.AheadNative, rgba8, &error)) {
+            request.NativeRgba8 = rgba8;
+            hash = ComputeAzaharTextureHash(request, job.AheadUsesNewHash, &error);
+        }
+        std::scoped_lock lock(mMutex);
+        if (!error.empty()) {
+            mLastError = "HUD texture asked for ahead: " + error;
+        } else if (job.Generation == mGeneration && mConfiguration.LoadCustomTextures) {
+            (void)QueueOrPollLocked(hash, job.Options.Native, true, true);
+        }
+        --mPendingLoads;
+        mIdle.notify_all();
+    }
     // Queues the decode of an indexed image that is neither cached, failed
     // nor already queued, then reports its state. HUD images have their own
     // cache (another size cap and no mips than a world texture of the hash)
-    // and their own queue and worker.
+    // and their own queue and worker; a HUD request (not ahead) that finds
+    // its image still decoding is remembered as a first sight drawn late.
     AzaharTextureResolveResult QueueOrPollLocked(uint64_t hash, TextureSize native, bool userInterface = false,
                                                  bool preload = false) {
         const auto indexed = mIndex.find(hash);
@@ -818,12 +872,15 @@ class AzaharTexturePackRuntime::Impl {
                               : DecodeOptions{native, mConfiguration.MaxReplacementScale, mConfiguration.GenerateMipmaps};
             job.UserInterface = userInterface;
             job.Preload = preload;
-            job.Queued = std::chrono::steady_clock::now();
+            if (preload) ++mHud.PreloadQueued;
             (userInterface ? mUiLoadJobs : mLoadJobs).push_back(std::move(job));
             ++mPendingLoads;
             (userInterface ? mUiWorkAvailable : mWorkAvailable).notify_one();
         }
-        return PollLocked(hash, userInterface);
+        auto result = PollLocked(hash, userInterface);
+        if (userInterface && !preload && result.State == AzaharTextureResolveState::Pending)
+            mHudWaiting.try_emplace(hash, std::chrono::steady_clock::now());
+        return result;
     }
     AzaharTextureResolveResult PollLocked(uint64_t hash, bool userInterface = false) const {
         if (!mConfigured || !mConfiguration.LoadCustomTextures) return {};
@@ -929,13 +986,13 @@ class AzaharTexturePackRuntime::Impl {
                                                                     const std::vector<HudImageEntry>& listed) {
         mHud = {};
         mHudListed.clear();
+        mHudWaiting.clear();
         mHudPreloadStart = std::chrono::steady_clock::now();
         if (configuration.HudImageList.empty()) return std::nullopt;
         auto kept = PruneHudImageList(listed, [&](uint64_t hash) { return mIndex.contains(hash); });
         for (const auto& entry : kept) {
             mHudListed.insert(entry.Hash);
             (void)QueueOrPollLocked(entry.Hash, {entry.Width, entry.Height}, true, true);
-            if (mPendingUiLoadGenerations.contains(entry.Hash)) ++mHud.PreloadQueued;
         }
         mHud.Listed = kept.size();
         if (kept.size() == listed.size()) return std::nullopt;
@@ -1029,6 +1086,7 @@ class AzaharTexturePackRuntime::Impl {
                     if (!failure.empty()) {
                         failed.insert(job.Hash);
                         mLastError = std::move(failure);
+                        if (job.UserInterface) mHudWaiting.erase(job.Hash);
                     }
                 }
                 pending.erase(found);
@@ -1039,15 +1097,17 @@ class AzaharTexturePackRuntime::Impl {
                 return;
             }
         }
-        // A HUD image seen for the first time: the next start decodes it ahead.
+        // A HUD image not listed yet: the next start decodes it as soon as the
+        // index is ready, before the UI has the game's texture to ask for.
         // Off the lock (an SD write), before the load counts as done.
         std::ofstream(hudList, std::ios::binary | std::ios::app) << FormatHudImageEntry(hudEntry);
         std::scoped_lock lock(mMutex);
         --mPendingLoads;
         mIdle.notify_all();
     }
-    // HUD statistics of a decoded HUD image; true (with its list line in
-    // `entry`) when the HUD list does not have it yet.
+    // HUD statistics of a decoded HUD image (decoded ahead, and/or asked for
+    // by the HUD before it was ready); true (with its list line in `entry`)
+    // when the HUD list does not have it yet.
     bool RecordHudImageLocked(const LoadJob& job, const AzaharTextureReplacement& replacement, HudImageEntry& entry) {
         const auto now = std::chrono::steady_clock::now();
         const auto micros = [](auto duration) {
@@ -1057,9 +1117,11 @@ class AzaharTexturePackRuntime::Impl {
             ++mHud.PreloadDecoded;
             mHud.PreloadBytes += replacement.Rgba8 ? replacement.Rgba8->size() : 0U;
             mHud.PreloadMicros = micros(now - mHudPreloadStart);
-        } else {
+        }
+        if (const auto waiting = mHudWaiting.find(job.Hash); waiting != mHudWaiting.end()) {
             ++mHud.OnSightDecodes;
-            mHud.OnSightWaitMaxMicros = std::max(mHud.OnSightWaitMaxMicros, micros(now - job.Queued));
+            mHud.OnSightWaitMaxMicros = std::max(mHud.OnSightWaitMaxMicros, micros(now - waiting->second));
+            mHudWaiting.erase(waiting);
         }
         const auto width = job.Options.Native.Width, height = job.Options.Native.Height;
         if (mConfiguration.HudImageList.empty() || mHudListed.size() >= kHudImageListLimit || width == 0U ||
@@ -1085,7 +1147,11 @@ class AzaharTexturePackRuntime::Impl {
                     continue;
                 }
             }
-            Load(load);
+            if (!load.AheadNative.empty()) {
+                IdentifyAhead(load);
+            } else {
+                Load(load);
+            }
         }
     }
     void WorkerMain() {
@@ -1166,11 +1232,13 @@ class AzaharTexturePackRuntime::Impl {
         mPendingMaterialGenerations;
     std::unordered_set<uint64_t> mFailedLoadHashes, mFailedUiLoadHashes, mFailedMaterialHashes, mDumpedHashes;
     std::deque<LoadJob> mLoadJobs, mUiLoadJobs;
-    // HUD statistics since the index was built, the HUD list's hashes and
-    // when its images were queued.
+    // HUD statistics since the index was built, the HUD list's hashes, when
+    // the index was ready (the start of the ahead decodes), and the HUD images
+    // asked for by the HUD while still decoding, with the first such request.
     AzaharHudPackStatus mHud;
     std::unordered_set<uint64_t> mHudListed;
     std::chrono::steady_clock::time_point mHudPreloadStart;
+    std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> mHudWaiting;
     std::deque<DumpJob> mDumpJobs;
     size_t mPendingLoads = 0U, mPendingDumps = 0U, mDumpedCount = 0U, mUnsupportedFiles = 0U;
     std::string mLastError;

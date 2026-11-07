@@ -142,6 +142,17 @@ public:
   NativeActiveFileSelectTextureIdentity() const;
   std::optional<uint32_t> NativePauseSharedTextureGuestAddress(
       oot3d::ui::UiPauseSharedTextureSlot slot) const;
+  // The textures the HUD presentation (BuildTopScreenPresentation with
+  // `topScreen`, else BuildShadowPresentation) draws through the UI
+  // renderer, in the order the player first sees them: the HUD's own
+  // (pause_top_page, item_icons, number_glyphs; then custom_ui01 when the
+  // TopScreen pack has it), then the pause edge's item_page and the ocarina
+  // lane's ocarina_page. Only those the game has loaded (the pause-shared
+  // CTXBs, from the title screen on); `complete` tells whether that is all.
+  // For N64UiFast3dRenderer::RequestAhead: their texture pack images decode
+  // before the HUD's first frame.
+  std::vector<oot3d::ui::UiTextureIdentity> HudTexturesAhead(bool topScreen,
+                                                             bool *complete) const;
 
   const NativeUiLifecycleBridgeStats &Stats() const noexcept;
   const oot3d::ui::N64IntegratedUiRuntime &Runtime() const noexcept;

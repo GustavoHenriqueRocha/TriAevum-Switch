@@ -1073,8 +1073,12 @@ romfs, reusing the `AzaharTexturePackRuntime` that already existed for Vulkan:
   replacement of any size draws with the same coordinates; the HD atlas stands in while a decode is
   pending (polled every 8 frames), a texture with only its native pixels is held (not drawn, polled
   every frame, at most `kUiHoldPolls`). HUD images decode on their own pack worker and are listed in
-  `config/texture_pack_hud`, decoded ahead at the next start; the pack generation is the provider's
-  `Revision`.
+  `config/texture_pack_hud`, decoded ahead at the next start; from the title screen on the frame
+  asks for the HUD's textures ahead (`HudTexturesAhead` → `N64UiFast3dRenderer::RequestAhead`, one
+  per frame and per revision; the pack request is `Ahead`: the HUD worker hashes a copy of the
+  encoded bytes and queues the image), so they are ready before the HUD's first frame. The pack
+  generation is the provider's `Revision` (the ocarina text runtime, the renderer's provider, passes
+  it through).
 - **HD font** doesn't need the pack: `config/font_coverage.zip` is already backend-neutral; generate the
   coverage for the ROM's region (`message/eu/` on EU; the ready-made zip covered only `message/us`).
 

@@ -1174,7 +1174,8 @@ void NativeA32WindowSession::Setup() {
   // uploads do (same identity, same async decode) while HD textures are on,
   // reduced to 3x native (kUiTextureMaxScale) whatever "HD texture size"
   // says. The pack's generation changes when HD textures are turned on or
-  // off, so the UI renderer resolves its textures again at once.
+  // off, so the UI renderer resolves its textures again at once. A request
+  // ahead of the first draw (N64UiFast3dRenderer::RequestAhead) only queues.
   nativeUiTextureProvider.SetCustomTextureSource({
       [uiHdAtlas](const Oot3dNativeGame::Oot3dNativeUiCustomTextureRequest &request) {
         const auto pack = Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ResolveOrQueue({
@@ -1185,6 +1186,7 @@ void NativeA32WindowSession::Setup() {
             .NativeBytes = request.encoded_base_level,
             .NativeRgba8 = request.rgba8,
             .UserInterface = true,
+            .Ahead = request.ahead,
         });
         return Oot3dNativeGame::ChooseUiCustomTexture(pack, request, uiHdAtlas.get());
       },

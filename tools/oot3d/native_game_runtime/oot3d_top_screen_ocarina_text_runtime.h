@@ -23,6 +23,12 @@ public:
   void Append(std::vector<oot3d::ui::UiPrimitive> &output) const;
   bool Resolve(const oot3d::ui::UiTextureIdentity &identity,
                oot3d::ui::UiTexturePixels &pixels, std::string *error) const override;
+  // The native textures' revision (a texture pack's generation) and ahead
+  // requests pass through: this runtime is the UI renderer's provider.
+  std::uint64_t Revision() const noexcept override { return mNativeTextures.Revision(); }
+  void RequestAhead(const oot3d::ui::UiTextureIdentity &identity) const override {
+    mNativeTextures.RequestAhead(identity);
+  }
   std::uint64_t Builds() const noexcept { return mBuilds; }
   std::uint64_t Releases() const noexcept { return mReleases; }
 
