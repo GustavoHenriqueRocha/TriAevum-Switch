@@ -111,9 +111,14 @@ struct PicaFrameDraws {
     uint64_t LitOpaque = 0;        // lit draws without blending
     uint64_t LitTranslucent = 0;   // lit draws with blending
     // Per-pixel lit draws by the scene point lights their block carries
-    // (0-4, kMaximumSurfacePointLights) and those with the rim light on.
+    // (0-4, kMaximumSurfacePointLights) and those with the rim light on, and
+    // by the fragment variant's path (Deko3d::PerPixelPath: generic,
+    // environment, baked) with their pixels.
     std::array<uint64_t, 5> LitPointLights{};
     uint64_t LitRim = 0;
+    static constexpr size_t kSurfacePaths = 3U;
+    std::array<uint64_t, kSurfacePaths> LitPaths{};
+    std::array<uint64_t, kSurfacePaths> LitPathPixels{};
     // Depth (config/deko3d_zcull study): depth-writing draws that pass
     // every fragment (ALWAYS or test off), those of them covering the whole
     // target, and depth-tested draws whose program writes gl_FragDepth.
@@ -150,9 +155,12 @@ struct PicaFrameDraws {
             ++(translucent ? LitTranslucent : LitOpaque);
         }
     }
-    void CountSurfaceLighting(uint32_t pointLights, bool rim) noexcept {
+    void CountSurfaceLighting(uint32_t pointLights, bool rim, size_t path, uint64_t pixels) noexcept {
         ++LitPointLights[std::min<size_t>(pointLights, LitPointLights.size() - 1U)];
         LitRim += rim ? 1U : 0U;
+        path = std::min(path, kSurfacePaths - 1U);
+        ++LitPaths[path];
+        LitPathPixels[path] += pixels;
     }
     PicaFrameDraws& operator+=(const PicaFrameDraws& other) noexcept {
         for (size_t i = 0; i < Classes.size(); ++i) {
@@ -167,6 +175,10 @@ struct PicaFrameDraws {
             LitPointLights[i] += other.LitPointLights[i];
         }
         LitRim += other.LitRim;
+        for (size_t i = 0; i < kSurfacePaths; ++i) {
+            LitPaths[i] += other.LitPaths[i];
+            LitPathPixels[i] += other.LitPathPixels[i];
+        }
         DepthAlwaysWrites += other.DepthAlwaysWrites;
         DepthAlwaysFull += other.DepthAlwaysFull;
         FragDepthTested += other.FragDepthTested;
@@ -220,15 +232,21 @@ struct PicaFrameDrawWindow {
     return text;
 }
 
-// "opaque=N translucent=N points 0/1/2/3/4=a/b/c/d/e rim=N" of the lit draws.
+// "opaque=N translucent=N points 0/1/2/3/4=a/b/c/d/e rim=N paths g/e/b=a/b/c px=a/b/cM" of the lit
+// draws (paths: per-pixel variants generic/environment/baked, draws and viewport-in-scissor pixels).
 [[nodiscard]] inline std::string FormatPicaLitDraws(const PicaFrameDraws& draws, uint64_t frames) {
     const double divisor = frames == 0U ? 1.0 : static_cast<double>(frames);
     const auto per = [&](uint64_t value) { return static_cast<double>(value) / divisor; };
-    char text[192];
-    std::snprintf(text, sizeof(text), "opaque=%.0f translucent=%.0f points 0/1/2/3/4=%.0f/%.0f/%.0f/%.0f/%.0f rim=%.0f",
+    const auto mpx = [&](uint64_t value) { return static_cast<double>(value) / divisor * 1.0e-6; };
+    char text[288];
+    std::snprintf(text, sizeof(text),
+                  "opaque=%.0f translucent=%.0f points 0/1/2/3/4=%.0f/%.0f/%.0f/%.0f/%.0f rim=%.0f "
+                  "paths g/e/b=%.0f/%.0f/%.0f px=%.2f/%.2f/%.2fM",
                   per(draws.LitOpaque), per(draws.LitTranslucent), per(draws.LitPointLights[0]),
                   per(draws.LitPointLights[1]), per(draws.LitPointLights[2]), per(draws.LitPointLights[3]),
-                  per(draws.LitPointLights[4]), per(draws.LitRim));
+                  per(draws.LitPointLights[4]), per(draws.LitRim), per(draws.LitPaths[0]), per(draws.LitPaths[1]),
+                  per(draws.LitPaths[2]), mpx(draws.LitPathPixels[0]), mpx(draws.LitPathPixels[1]),
+                  mpx(draws.LitPathPixels[2]));
     return text;
 }
 

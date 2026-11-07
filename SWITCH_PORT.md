@@ -1858,8 +1858,9 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   it runs at 30 or 60 fps. **Kept native for cost:** draws that write no depth (`PerPixelCostAdmits`;
   the blend flag alone does not exclude a draw: the game blends most solid geometry, and the first
   version of this rule left per-pixel 0 lit draws in logs14), and, in both modes, draws whose base
-  fragment program spills (none in the pack now; their variants would spill too). The Scene lights tab says so. Points 3-4 and every
-  rim evaluation sit behind their own uniform branches (same sums in the same order).
+  fragment program spills (none in the pack now; their variants would spill too). The Scene lights tab says so. Every
+  optional term (native lights, points, directionals, rim) sits behind its own uniform branch, and the
+  shipped profiles' blocks use a specialized path variant (see "Cheaper per-pixel lighting").
 - **Lighting > Scene lights under per-pixel (0.1.2-test.2 said "needs the Modern lighting model"):**
   active by one rule (`SceneEnvironmentActive`: capability, Modern model, not Authentic, no native
   override). Live through the published environment: Use scene environment, Preserve scene
@@ -1872,7 +1873,7 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - **Variants come from the pack:** a variant is the deterministic mutation of the text the native draw
   uses (specialized or parametric), looked up by its own `ShaderTextKey`. Offline,
   `oot3d_deko3d_lighting_variants` (the console's own mutation code) writes the toon and per-pixel
-  variants of every known fragment text and `tools/oot3d/deko3d_shader_pack.py --lighting-variants
+  variants (the three per-pixel paths) of every known fragment text and `tools/oot3d/deko3d_shader_pack.py --lighting-variants
   <tool>` compiles them with the other texts. A variant the pack lacks is recorded like any missing
   stage (`logs/deko3d_shaders/{vert,frag}_<key>.glsl`) and that draw keeps both native shaders (never
   a mixed pair). The per-pixel **vertex** variant depends on the draw's vertex hooks, which exist only
@@ -1894,8 +1895,9 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   each change, and with every `programs (frame)` line while a mode is on (or was):
   `lighting (frame): mode=… variants found=… missing=… unsupported=…; draws lit=… native=…
   ineligible=… (spilling base=… no depth write=…)` (variants: distinct shaders resolved; draws: cumulative),
-  then `per frame lit opaque=… translucent=… points 0/1/2/3/4=… rim=… | avg of N …` (lit draws of the
-  last frame, then the average since the previous line; points: per-pixel draws by scene point lights).
+  then `per frame lit opaque=… translucent=… points 0/1/2/3/4=… rim=… paths g/e/b=… px=…M | avg of N …` (lit draws of the
+  last frame, then the average since the previous line; points: per-pixel draws by scene point lights; paths:
+  per-pixel draws and their pixels by fragment variant path, generic/environment/baked).
   `programs (frame)` ends with `per frame spill=D/L px=P/LP M parametric=… normal=… | avg of N …`: draws
   and lit draws by base fragment program class (spilling, parametric, specialized) and their pixels
   (viewport inside scissor, millions; an upper bound). `missing` > 0 means the pack did not cover the
@@ -2082,6 +2084,67 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
 - Code: `gfx_deko3d_lighting_draw.cpp`, `gfx_deko3d_lighting.h` (`PerPixelRefusal`, `FrameKindLighting`),
   `gfx_deko3d.cpp` (`ApplyPicaLighting`, `ApplyLightingSettings`, `LogLightingCounters`),
   `gfx_deko3d_grass.cpp` (`PublishPicaFrameTemporalSample`). Guard "lighting by frame kind".
+
+### Cheaper per-pixel lighting: path variants (0.1.2-test.8 report, `logs16`, 07/11)
+- **Seen:** Per-pixel at 60 FPS is the GPU limit in busy rooms. Forest Temple room 8 (`bmori1 room=8`):
+  `dkperf busy_ms` median 14.0 ms at `drs_scale` 2.25, whole windows saturated at 16.7 ms (host frames
+  32400-34200), 25.7 ms per frame at 30 FPS / 3.00; 305 of its 380 late frames are render-caused. Its lit
+  draws (38-55 per frame, every one blended) cover 63% of the frame's viewport pixels (`px=25.92/40.82M`,
+  an upper bound), all with the same block shape: `control=1/x/0/0 env=1 rim=0.4 baked=0`, 0, 1 or 3 points.
+  The audit's "+32 ms" was test.7 (184 interpolations per variant, fixed in test.8) at two samples per line
+  [INFERENCE: not measurable again, no Native run of room 8 since].
+- **What a pixel executed** (uam `-r` + envydis of the per-pixel variants of 29 pack texts, and a partial
+  evaluator of the SASS that follows the warp-uniform branches for a given block, `~/oot3d-work/ppcost/tools`):
+  test.8 added 269 issued instructions per pixel on room 8's path to a 198-instruction base (median; 340 with
+  1 point, 486 with 3), and 43 registers (13 in the base). About 85 of the 269 were branch bookkeeping
+  (`SSY`/`SYNC`/`BRA` and their tests) of block tests whose answer never changes in the shipped profiles:
+  every profile in `environments/` has native direct 0, only the key directional, rim `independent`. The
+  loops (points, directionals, native and environment lights) also loaded their members by computed index.
+- **Fix (shader text and one hook; output the same floats as test.8):**
+  - loops written out with constant slots (no loop control, no indexed loads), count tests nested; the
+    rim's view and Fresnel terms once per pixel behind the rim's branch (were per light); each shared term
+    computed in the one path that uses it; a baked fill light without gain (all profiles) skipped (it added
+    zeros).
+  - `const uint pica_surface_path` in the text: 0 (generic, any block), 1 (environment: environment on, no
+    native direct light, no scene directionals, no scene-light rim, not baked, lit through the environment
+    model), 2 (the same, baked). The constant settles those tests at compile time. `Deko3d::
+    ClassifyPerPixelSurface` picks the path from the draw's built block; `ApplyPicaLighting` then uses that
+    path's variant when the pack has it, else the generic one (a missing path variant is recorded like any
+    missing stage). The offline tool writes all three per text.
+- **Numbers (median over the pack texts; added issued instructions per pixel on each path):**
+
+  | | test.8 | now, generic | now, path |
+  |---|---|---|---|
+  | static instructions / GPRs | 2803 / 43 | 1827 / 38 | 595 / 22 (environment), 667 / 28 (baked) |
+  | branches (`BRA` / `SSY`) | 42 / 51 | 12 / 43 | 3 / 8, 4 / 8 |
+  | room 8, 0 / 1 / 3 points | 269 / 340 / 486 | 243 / 295 / 405 | 159 / 206 / 306 |
+  | baked (Hyrule Field), 0 / 1 point | 308 / 379 | 249 / 301 | 214 / 261 |
+  | rim from scene lights, 3 native lights, 2 points (generic only) | 967 | 727 | — |
+
+  `frag_3555e8fa561f9ca5` (Link): 516 → 402 issued per pixel in room 8, 43 → 22 GPRs.
+- **Expected [estimate, not measured]:** room 8's lit pixel 575 → 430 instructions (its 0/1/3-point mix),
+  about −21% of the frame's fragment ALU; 22 registers instead of 43 allow 64 warps per SM instead of 42.
+  `busy_ms` in room 8 at 2.25: 14.0 → about 11.5-12.5 ms, and the saturated windows below 16.7 ms.
+- **Tests:** `tests/switch/test_perpixel_lighting.py` evaluates the text against the frozen test.8 text
+  (`tests/switch/data/perpixel_lighting_test8.glsl`): the same floats on 1500 random blocks over every path,
+  on 1500 blocks through the path variant their classification picks (the Python mirror of
+  `ClassifyPerPixelSurface`), and on the degenerate inputs; still the same bytes as test.7.
+  `oot3d_deko3d_lighting_tests` (`TestPerPixel`, `TestPerPixelPaths`: classification and path texts),
+  `oot3d_deko3d_backend_tests` (`TestFrameBreakdown`: the per-path counters). Guards "per-pixel cost".
+- **`deko3d.pack` must be rebuilt** (`deko3d_shader_pack.py --lighting-variants`): 864 per-pixel texts
+  (three per fragment text); the path variants are small, so the pack grows about 10% [estimate].
+- **Risk:** the evaluator checks GLSL semantics; the GPU compiler may fuse multiply-adds differently in
+  the generic and the path texts (folded constants), so a channel may differ by one step of 255 now and
+  then [INFERENCE]. Draws whose block leaves the shipped shape (Scene lights tab: native direct light, rim
+  from scene lights, environment off) use the generic variant, which is still cheaper than test.8.
+- **Check (one minute):** after the pack rebuild, Per-pixel, 60 FPS, Forest Temple room 8 for about a
+  minute. `logs/deko3d.txt`: `lighting (frame)` shows `paths g/e/b=0/N/0` (the environment path for the
+  lit draws) and `missing=0`; `logs/perf.txt`: `dkperf busy_ms` in the `bmori1 room=8` windows against
+  logs16 (14.0 median at 2.25, windows stuck at 16.7), and fewer render-late frames in `hitches.txt`. The
+  picture must look the same.
+- Code: `gfx_deko3d_lighting.cpp` (text, `ClassifyPerPixelSurface`, `PerPixelFragmentVariant(text, path)`),
+  `gfx_deko3d_lighting.h`, `gfx_deko3d.cpp` (`ResolveLightingFragment`, `ApplyPicaLighting`),
+  `gfx_deko3d_programs.h` (counters), `tools/oot3d/deko3d_lighting_variants.cpp`.
 
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP

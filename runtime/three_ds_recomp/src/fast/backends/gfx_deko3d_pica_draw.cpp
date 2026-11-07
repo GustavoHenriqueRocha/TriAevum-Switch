@@ -672,7 +672,8 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         const uint64_t pixels = x1 > x0 && y1 > y0 ? static_cast<uint64_t>((x1 - x0) * (y1 - y0)) : 0U;
         mFrameDraws.Current.Count(program.Base, program.Lit, draw.Blend.Enabled, pixels);
         if (program.SurfaceLighting) {
-            mFrameDraws.Current.CountSurfaceLighting(mSurfaceLighting.Control[1], mSurfaceLighting.Rim[0] > 0.0F);
+            mFrameDraws.Current.CountSurfaceLighting(mSurfaceLighting.Control[1], mSurfaceLighting.Rim[0] > 0.0F,
+                                                     static_cast<size_t>(program.SurfacePath), pixels);
         }
         // How depth is reset and how many tested draws write gl_FragDepth
         // (config/deko3d_zcull, logs/deko3d.txt "depth" line).

@@ -14,6 +14,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <limits>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -307,18 +309,48 @@ void TestPerPixel() {
               variant->find("pica_point_shadow(") == std::string::npos,
           "perpixel: no placed lights, water or shadows");
   Require(variant->find("min(pica_surface.control.y, 4u)") != std::string::npos, "perpixel: at most 4 points");
-  // lighting3: points 3-4 and every rim evaluation behind uniform branches.
-  Require(variant->find("slot < min(count, 2u)") != std::string::npos &&
-              variant->find("    if (count > 2u) {\n        for (uint slot = 2u; slot < count; ++slot)") !=
-                  std::string::npos,
-          "perpixel: points 3-4 behind their own branch");
+  // Points 2-4 nested behind the previous count test (written out, no loop),
+  // and every rim-weight evaluation behind the rim's uniform branch.
+  Require(variant->find("            if (count > 2u) {\n                color += pica_surface_scene_point(2u, "
+                        "fragment);\n                if (count > 3u) color += pica_surface_scene_point(3u, "
+                        "fragment);") != std::string::npos,
+          "perpixel: points 3-4 behind their own branches");
+  Require(Fast::Deko3d::PerPixelFragmentDeclarations().find("for (") == std::string_view::npos,
+          "perpixel: no loop in the per-pixel declarations");
   for (size_t at = variant->find("pica_surface_rim_weight("); at != std::string::npos;
        at = variant->find("pica_surface_rim_weight(", at + 1U)) {
     const size_t line = variant->rfind('\n', at);
     const bool declaration = variant->compare(line + 1U, 6U, "float ") == 0;
-    Require(declaration || variant->rfind("if (pica_surface.rim.x > 0.0)", at) > variant->rfind(';', at),
+    Require(declaration ||
+                variant->rfind("pica_surface.rim.x > 0.0 && pica_surface.rim.z == 2.0)", at) >
+                    variant->rfind(';', at),
             "perpixel: rim weight only behind the rim branch");
   }
+  // Paths: the same text but the pica_surface_path constant; from the native
+  // text or from any per-pixel variant (idempotent per path).
+  using Fast::Deko3d::PerPixelPath;
+  Require(variant->find("const uint pica_surface_path = 0u;") != std::string::npos, "perpixel: generic path 0");
+  for (const auto path : {PerPixelPath::Environment, PerPixelPath::Baked}) {
+    const auto special = Fast::Deko3d::PerPixelFragmentVariant(kNative, path);
+    Require(special.has_value(), "perpixel path applies");
+    const std::string constant =
+        "const uint pica_surface_path = " + std::to_string(static_cast<int>(path)) + "u;";
+    Require(Replace(*special, constant, "const uint pica_surface_path = 0u;") == *variant,
+            "perpixel path: only the constant differs");
+    Require(*Fast::Deko3d::PerPixelFragmentVariant(*special, path) == *special, "perpixel path: idempotent");
+    Require(*Fast::Deko3d::PerPixelFragmentVariant(*special) == *variant, "perpixel path: back to generic");
+    Require(*Fast::Deko3d::LightingFragmentVariant(Fast::Deko3d::LightingMode::PerPixel, kNative, path) == *special,
+            "perpixel path through LightingFragmentVariant");
+    Require(Fast::Deko3d::ShaderTextKey(Fast::Deko3d::ShaderStage::Fragment, *special) !=
+                Fast::Deko3d::ShaderTextKey(Fast::Deko3d::ShaderStage::Fragment, *variant),
+            "perpixel path: its own pack key");
+  }
+  Require(!Fast::Deko3d::PerPixelFragmentVariant(kNative, PerPixelPath::Count).has_value(), "no path past Count");
+  // A per-pixel text without the constant (recorded before the paths) only has the generic path.
+  const std::string old = Replace(*variant, "const uint pica_surface_path = 0u;\n", "");
+  Require(*Fast::Deko3d::PerPixelFragmentVariant(old) == old &&
+              !Fast::Deko3d::PerPixelFragmentVariant(old, PerPixelPath::Environment).has_value(),
+          "perpixel: a text without the path constant stays generic");
   // Per-pixel cost: draws that write depth, blended or not (the game blends
   // most solid geometry; the blend flag must not exclude them).
   Require(Fast::Deko3d::PerPixelCostAdmits(true), "depth write: per-pixel");
@@ -487,6 +519,56 @@ void TestVertexVariantNeedsHooks() {
           "vertex variant: none without valid hooks");
 }
 
+// The per-pixel paths a block may use: the shipped scene profiles' shape
+// (environment on, native direct 0, no scene directionals, rim off or
+// independent) and nothing else; NaN members keep the generic variant.
+void TestPerPixelPaths() {
+  using Fast::Deko3d::ClassifyPerPixelSurface;
+  using Fast::Deko3d::PerPixelPath;
+  Fast::Renderer3ds::PicaSurfaceLightingUniforms shipped{};
+  shipped.Control = {1U, 3U, 0U, 0U};
+  shipped.EnvironmentParameters = {0.0F, 0.4F, 1.0F, 1.0F};
+  shipped.Rim = {0.4F, 2.5F, 1.0F, 0.25F};
+  Require(ClassifyPerPixelSurface(shipped) == PerPixelPath::Environment, "shipped profile: environment path");
+  auto block = shipped;
+  block.BakedReferenceUp = {0.0F, 1.0F, 0.0F, 1.0F};
+  Require(ClassifyPerPixelSurface(block) == PerPixelPath::Baked, "baked surface: baked path");
+  block.Control[0] = 0U;
+  block.Control[3] = 1U;
+  Require(ClassifyPerPixelSurface(block) == PerPixelPath::Baked, "baked: the preserve flag does not matter");
+  block = shipped;
+  block.Rim = {};
+  Require(ClassifyPerPixelSurface(block) == PerPixelPath::Environment, "rim off: environment path");
+  block.Control = {0U, 0U, 0U, 0U};
+  Require(ClassifyPerPixelSurface(block) == PerPixelPath::Environment, "not native lit, not preserving: environment");
+  block.Control[3] = 1U;
+  Require(ClassifyPerPixelSurface(block) == PerPixelPath::Generic, "preserved native appearance: generic");
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const std::pair<const char*, void (*)(Fast::Renderer3ds::PicaSurfaceLightingUniforms&)> generic[] = {
+      {"environment off", [](auto& b) { b.EnvironmentParameters[3] = 0.0F; }},
+      {"native direct light", [](auto& b) { b.EnvironmentParameters[0] = 0.5F; }},
+      {"scene directionals", [](auto& b) { b.Control[2] = 1U; }},
+      {"rim from the scene lights", [](auto& b) { b.Rim[2] = 2.0F; }},
+  };
+  for (const auto& [name, change] : generic) {
+    for (const bool baked : {false, true}) {
+      block = shipped;
+      block.BakedReferenceUp[3] = baked ? 1.0F : 0.0F;
+      change(block);
+      Require(ClassifyPerPixelSurface(block) == PerPixelPath::Generic, name);
+    }
+  }
+  block = shipped;
+  block.EnvironmentParameters[0] = nan;
+  Require(ClassifyPerPixelSurface(block) == PerPixelPath::Generic, "NaN native direct: generic");
+  block = shipped;
+  block.Rim = {0.0F, 2.5F, 2.0F, 0.0F};
+  Require(ClassifyPerPixelSurface(block) == PerPixelPath::Environment, "scene-light rim at zero intensity is off");
+  Require(std::string_view(Fast::Deko3d::PerPixelPathName(PerPixelPath::Baked)) == "baked" &&
+              std::string_view(Fast::Deko3d::PerPixelPathName(PerPixelPath::Generic)) == "generic",
+          "path names");
+}
+
 } // namespace
 
 int main() {
@@ -496,6 +578,7 @@ int main() {
   TestOffIsNative();
   TestToon();
   TestPerPixel();
+  TestPerPixelPaths();
   TestBlockLayoutAndBinding();
   TestLookupAndFallback();
   TestVertexVariantNeedsHooks();

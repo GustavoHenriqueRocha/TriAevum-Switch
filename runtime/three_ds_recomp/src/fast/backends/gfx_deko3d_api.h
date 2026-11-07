@@ -202,6 +202,8 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
         // config/lighting perpixel: the draw binds mSurfaceLighting at
         // Deko3d::kSurfaceLightingBinding.
         bool SurfaceLighting = false;
+        // The per-pixel fragment variant's path (Deko3d::ClassifyPerPixelSurface).
+        Deko3d::PerPixelPath SurfacePath = Deko3d::PerPixelPath::Generic;
     };
     // The shaders of a draw (package 3); no draw ever compiles.
     PicaProgram ResolvePicaProgram(const GfxNativePicaDrawView& draw);
@@ -213,8 +215,10 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     void ApplyLightingSettings();
     void ApplyPicaLighting(const GfxNativePicaDrawView& draw, std::string_view fragmentSource,
                            Renderer3ds::PicaShaderSourceIdentity fragmentIdentity, PicaProgram& program);
+    // Toon, or per-pixel of `path` (one cache per mode and path).
     const DkShader* ResolveLightingFragment(Deko3d::LightingMode mode, std::string_view canonical,
-                                            Renderer3ds::PicaShaderSourceIdentity identity);
+                                            Renderer3ds::PicaShaderSourceIdentity identity,
+                                            Deko3d::PerPixelPath path = Deko3d::PerPixelPath::Generic);
     const DkShader* ResolvePerPixelVertex(const GfxNativePicaDrawView& draw);
     void LogLightingCounters(const char* when);
     void LogPicaProgramCounters(const char* when);
@@ -307,14 +311,14 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     // Issued draws by base program class (logs/deko3d.txt, per frame).
     Deko3d::PicaFrameDrawWindow mFrameDraws;
     // config/lighting: the mode in use, the live settings revision applied,
-    // the variants per native fragment identity (one cache per mode) and per
-    // vertex identity and hooks, the frame's environment profile (per-pixel)
-    // and the block of the draw being prepared.
+    // the variants per native fragment identity (one cache per mode, and per
+    // per-pixel path) and per vertex identity and hooks, the frame's
+    // environment profile (per-pixel) and the block of the draw being prepared.
     Deko3d::LightingMode mLightingMode = Deko3d::LightingMode::Off;
     uint64_t mLightingRevision = 0;
     Deko3d::LightingCounters mLightingCounters{};
     Deko3d::PicaStageCache<DkShader> mToonFragments;
-    Deko3d::PicaStageCache<DkShader> mPerPixelFragments;
+    std::array<Deko3d::PicaStageCache<DkShader>, static_cast<size_t>(Deko3d::PerPixelPath::Count)> mPerPixelFragments;
     struct PerPixelVertex {
         Renderer3ds::PicaShaderSourceIdentity Identity;
         Renderer3ds::PicaVertexShaderHookLayout Hooks;

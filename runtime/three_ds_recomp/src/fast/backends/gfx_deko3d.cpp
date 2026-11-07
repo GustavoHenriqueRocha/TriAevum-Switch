@@ -91,7 +91,7 @@ void GfxRenderingAPIDeko3d::Shutdown() {
         mVertexStages.Clear();
         mFragmentStages.Clear();
         mToonFragments.Clear();
-        mPerPixelFragments.Clear();
+        for (auto& cache : mPerPixelFragments) cache.Clear();
         mPerPixelVertices.clear();
         mTargets.Shutdown();
         mPendingFills.clear();
@@ -455,20 +455,21 @@ void GfxRenderingAPIDeko3d::ApplyLightingSettings() {
 }
 
 const DkShader* GfxRenderingAPIDeko3d::ResolveLightingFragment(Deko3d::LightingMode mode, std::string_view canonical,
-                                                               Renderer3ds::PicaShaderSourceIdentity identity) {
+                                                               Renderer3ds::PicaShaderSourceIdentity identity,
+                                                               Deko3d::PerPixelPath path) {
     if (canonical.empty()) {
         return nullptr;
     }
     if (!identity.Available()) {
         identity = Renderer3ds::IdentifyPicaShaderSource(canonical);
     }
-    auto& cache = mode == Deko3d::LightingMode::Toon ? mToonFragments : mPerPixelFragments;
+    auto& cache = mode == Deko3d::LightingMode::Toon ? mToonFragments : mPerPixelFragments[static_cast<size_t>(path)];
     return cache.Get(identity, [&]() -> const DkShader* {
         std::string translated;
         std::string error;
         std::optional<std::string> variant;
         if (Renderer3ds::TranslatePicaShaderToOpenGl43(canonical, translated, &error)) {
-            variant = Deko3d::LightingFragmentVariant(mode, translated);
+            variant = Deko3d::LightingFragmentVariant(mode, translated, path);
         }
         return Deko3d::ResolveLightingVariant<DkShader>(
             Deko3d::ShaderStage::Fragment, variant,
@@ -555,6 +556,20 @@ void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw,
             return;
         }
     }
+    // The block's path variant (same output, fewer instructions and
+    // registers) when the pack has it; otherwise the generic one.
+    Deko3d::PerPixelPath path = Deko3d::PerPixelPath::Generic;
+    if (vertex != nullptr && fragment != nullptr) {
+        path = Deko3d::ClassifyPerPixelSurface(mSurfaceLighting);
+        if (path != Deko3d::PerPixelPath::Generic) {
+            if (const DkShader* special = ResolveLightingFragment(Deko3d::LightingMode::PerPixel, fragmentSource,
+                                                                  fragmentIdentity, path)) {
+                fragment = special;
+            } else {
+                path = Deko3d::PerPixelPath::Generic;
+            }
+        }
+    }
     const auto choice =
         Deko3d::ChooseLightingProgram<DkShader>(program.Vertex, program.Fragment, vertex, fragment, mLightingCounters);
     if (choice.Lit) {
@@ -566,6 +581,7 @@ void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw,
     program.Fragment = choice.Fragment;
     program.Lit = choice.Lit;
     program.SurfaceLighting = choice.Lit;
+    program.SurfacePath = choice.Lit ? path : Deko3d::PerPixelPath::Generic;
 }
 
 void GfxRenderingAPIDeko3d::LogLightingCounters(const char* when) {

@@ -148,12 +148,32 @@ inline constexpr std::string_view kPerPixelVariantMarker = "// OOT3D_DEKO3D_PER_
 [[nodiscard]] std::string_view PerPixelFragmentFogBefore() noexcept;
 [[nodiscard]] std::string_view PerPixelFragmentFogAfter() noexcept;
 
+// The per-pixel fragment variant's path (the GLSL constant pica_surface_path):
+// a variant for any block, and two whose compile-time constants settle the
+// block tests of the shipped scene profiles (environment on, no native direct
+// light, no scene directionals, no rim from the scene lights; not baked and lit
+// through the environment model, or baked). Same output as Generic on the
+// blocks ClassifyPerPixelSurface gives them; fewer instructions and registers.
+enum class PerPixelPath : uint8_t {
+    Generic = 0,
+    Environment = 1,
+    Baked = 2,
+    Count,
+};
+
+[[nodiscard]] const char* PerPixelPathName(PerPixelPath path) noexcept;
+// The path a draw's (trimmed, rim-assigned) block may use.
+[[nodiscard]] PerPixelPath ClassifyPerPixelSurface(const Renderer3ds::PicaSurfaceLightingUniforms& block) noexcept;
+
 // The variant of a GLSL 4.3 PICA fragment text, or nothing when the text has
 // no place for it (and for LightingMode::Off). A text that already is this
-// mode's variant is returned unchanged (idempotent).
+// mode's variant is returned unchanged (idempotent); a per-pixel variant text
+// gets the requested path.
 [[nodiscard]] std::optional<std::string> ToonFragmentVariant(std::string_view text);
-[[nodiscard]] std::optional<std::string> PerPixelFragmentVariant(std::string_view text);
-[[nodiscard]] std::optional<std::string> LightingFragmentVariant(LightingMode mode, std::string_view text);
+[[nodiscard]] std::optional<std::string> PerPixelFragmentVariant(std::string_view text,
+                                                                 PerPixelPath path = PerPixelPath::Generic);
+[[nodiscard]] std::optional<std::string> LightingFragmentVariant(LightingMode mode, std::string_view text,
+                                                                 PerPixelPath path = PerPixelPath::Generic);
 
 // The per-pixel vertex variant of a canonical (pre-translation) PICA vertex
 // text: the surface normal and tint outputs at the hooks' main-body end. The
