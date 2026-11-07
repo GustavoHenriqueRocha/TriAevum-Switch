@@ -149,6 +149,22 @@ std::atomic<uint64_t> gPerfImageBarriers{0};
 std::atomic<bool> gPerfZcull{false};
 std::array<std::atomic<uint64_t>, 4> gPerfZcullStats{};
 std::atomic<uint64_t> gPerfZcullFrames{0};
+// ZCULL invalidations around draws whose program writes gl_FragDepth.
+std::atomic<uint64_t> gPerfZcullInvalidates{0};
+// dkperf fs_px / passed_px: DkCounter_FragmentShaderInvocations and
+// DkCounter_SamplesPassed from frame top to scene end (before the acquire),
+// summed over the frames that reported them; opaque_ms: frame top to the
+// first translucent world draw (MarkOpaqueEnd), over the frames that had one.
+std::atomic<uint64_t> gPerfFsInvocations{0};
+std::atomic<uint64_t> gPerfSamplesPassed{0};
+std::atomic<uint64_t> gPerfCountedFrames{0};
+std::atomic<uint64_t> gPerfOpaqueNs{0};
+std::atomic<uint64_t> gPerfOpaqueFrames{0};
+// config/deko3d_clear_draw: on, and the depth resets by what they became.
+std::atomic<bool> gPerfClearDraw{false};
+std::atomic<uint64_t> gPerfResets{0};
+std::atomic<uint64_t> gPerfDepthClears{0};
+std::atomic<uint64_t> gPerfFullClears{0};
 
 // Report timestamps count GPU ticks (614.4 MHz on the Tegra X1).
 constexpr uint64_t GpuTicksToNs(uint64_t ticks) {
@@ -156,11 +172,18 @@ constexpr uint64_t GpuTicksToNs(uint64_t ticks) {
 }
 constexpr uint32_t kTimestampBytes = 16U; // DkCounter report: value, timestamp
 // Per slot: frame top, scene end (before the acquire), after the acquire, frame end,
-// then the ZCULL counters (config/deko3d_zcull, four words).
+// then the ZCULL counters (config/deko3d_zcull, four words), the fragment
+// shader invocations and samples passed at frame top and at scene end, and the
+// timestamp at the first translucent world draw.
 // The acquire makes the GPU wait for the display to release the image; that wait
 // is not GPU work, so busy = scene + tail.
 constexpr uint32_t kZcullStatsOffset = 4U * kTimestampBytes;
-constexpr uint32_t kTimestampSlotBytes = 5U * kTimestampBytes;
+constexpr uint32_t kFsTopOffset = 5U * kTimestampBytes;
+constexpr uint32_t kFsSceneOffset = 6U * kTimestampBytes;
+constexpr uint32_t kPassedTopOffset = 7U * kTimestampBytes;
+constexpr uint32_t kPassedSceneOffset = 8U * kTimestampBytes;
+constexpr uint32_t kOpaqueOffset = 9U * kTimestampBytes;
+constexpr uint32_t kTimestampSlotBytes = 10U * kTimestampBytes;
 static_assert(kFramesInFlight * kTimestampSlotBytes <= DK_MEMBLOCK_ALIGNMENT, "timestamps fit one block");
 
 uint64_t NowNanoseconds() {
@@ -207,6 +230,20 @@ void NotePresentedTopScene(uint32_t width, uint32_t height, uint32_t lineSamples
     gPerfTopScene.store(static_cast<uint64_t>(width) << 32U | static_cast<uint64_t>(height & 0x3FFFFFFFU) << 2U |
                             (lineSamples & 3U),
                         std::memory_order_relaxed);
+}
+
+void SetPerfClearDraw(bool enabled) {
+    gPerfClearDraw.store(enabled, std::memory_order_relaxed);
+}
+
+void NoteResetDraw(uint8_t action) {
+    gPerfResets.fetch_add(1, std::memory_order_relaxed);
+    if (action >= 1U) {
+        gPerfDepthClears.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (action >= 2U) {
+        gPerfFullClears.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 Device::~Device() {
@@ -508,12 +545,17 @@ void Device::BeginFrame() {
     slot.CommandUsed = kCommandChunkBytes + kCommandGuardBytes;
     mStats.CommandBytes += kCommandChunkBytes;
     if (mTimestamps != nullptr) {
-        dkCmdBufReportCounter(mCmd, DkCounter_TimestampPipelineTop,
-                              dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes);
+        const DkGpuAddr reports = dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes;
+        dkCmdBufReportCounter(mCmd, DkCounter_TimestampPipelineTop, reports);
+        // Overdraw: fragment shader runs and samples that passed the depth
+        // and stencil tests, frame top to scene end (dkperf fs_px, passed_px).
+        dkCmdBufReportCounter(mCmd, DkCounter_FragmentShaderInvocations, reports + kFsTopOffset);
+        dkCmdBufReportCounter(mCmd, DkCounter_SamplesPassed, reports + kPassedTopOffset);
         if (mZcull) {
             dkCmdBufResetCounter(mCmd, DkCounter_ZcullStats);
         }
     }
+    mOpaqueMarked = false;
     mWindowSlot = -1;
     mRecorded = false;
     mFrameOpen = true;
@@ -535,6 +577,10 @@ const DkImageView& Device::AcquireWindow(AcquireHook hook) {
     if (mWindowSlot < 0) {
         // The scene recorded so far goes to the GPU before the wait.
         if (mTimestamps != nullptr) {
+            const DkGpuAddr reports = dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes;
+            dkCmdBufReportCounter(mCmd, DkCounter_FragmentShaderInvocations, reports + kFsSceneOffset);
+            dkCmdBufReportCounter(mCmd, DkCounter_SamplesPassed, reports + kPassedSceneOffset);
+            mSlots[mSlot].Counted = true;
             dkCmdBufReportCounter(mCmd, DkCounter_Timestamp,
                                   dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kTimestampBytes);
         }
@@ -957,6 +1003,24 @@ void Device::CountImageBarrier() {
     gPerfImageBarriers.fetch_add(1, std::memory_order_relaxed);
 }
 
+void Device::InvalidateZcull() {
+    // InvalidateZcullNoWfi (deko3d 0.5 gpu_base.cpp): in order with the
+    // draws, no wait for idle.
+    dkCmdBufBarrier(mCmd, DkBarrier_None, DkInvalidateFlags_Zcull);
+    gPerfZcullInvalidates.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Device::MarkOpaqueEnd() {
+    if (!mFrameOpen || mOpaqueMarked || mTimestamps == nullptr || mWindowSlot >= 0) {
+        return;
+    }
+    mOpaqueMarked = true;
+    // DkCounter_Timestamp: written once the work before it is done.
+    dkCmdBufReportCounter(mCmd, DkCounter_Timestamp,
+                          dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kOpaqueOffset);
+    mSlots[mSlot].OpaqueTimed = true;
+}
+
 // After the slot's fence: its frame's timestamps are written.
 void Device::CollectTimestamps(uint32_t slotIndex) {
     FrameSlot& slot = mSlots[slotIndex];
@@ -975,11 +1039,37 @@ void Device::CollectTimestamps(uint32_t slotIndex) {
         }
         gPerfZcullFrames.fetch_add(1, std::memory_order_relaxed);
     }
+    const auto* reports = static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(mTimestamps)) + slotIndex * kTimestampSlotBytes;
+    const auto value = [&](uint32_t offset, uint32_t word) {
+        uint64_t result = 0;
+        std::memcpy(&result, reports + offset + word * 8U, sizeof(result));
+        return result;
+    };
+    if (slot.Counted) {
+        slot.Counted = false;
+        const uint64_t fsTop = value(kFsTopOffset, 0U);
+        const uint64_t fsScene = value(kFsSceneOffset, 0U);
+        const uint64_t passedTop = value(kPassedTopOffset, 0U);
+        const uint64_t passedScene = value(kPassedSceneOffset, 0U);
+        if (fsScene >= fsTop && passedScene >= passedTop) {
+            gPerfFsInvocations.fetch_add(fsScene - fsTop, std::memory_order_relaxed);
+            gPerfSamplesPassed.fetch_add(passedScene - passedTop, std::memory_order_relaxed);
+            gPerfCountedFrames.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (slot.OpaqueTimed) {
+        slot.OpaqueTimed = false;
+        const uint64_t top = value(0U, 1U);
+        const uint64_t opaque = value(kOpaqueOffset, 1U);
+        if (opaque > top) {
+            gPerfOpaqueNs.fetch_add(GpuTicksToNs(opaque - top), std::memory_order_relaxed);
+            gPerfOpaqueFrames.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     if (!slot.Timed) {
         return;
     }
     slot.Timed = false;
-    const auto* reports = static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(mTimestamps)) + slotIndex * kTimestampSlotBytes;
     uint64_t t[4] = {};
     for (uint32_t i = 0; i < 4U; ++i) {
         std::memcpy(&t[i], reports + i * kTimestampBytes + 8U, sizeof(t[i]));
@@ -1105,6 +1195,30 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
         << " top_line_samples=" << (topScene & 3U)
         << " sync_check=" << (gPerfSyncCheck.load(std::memory_order_relaxed) ? 1 : 0)
         << " zcull=" << (gPerfZcull.load(std::memory_order_relaxed) ? 1 : 0);
+    {
+        // Overdraw, frame top to scene end: fragment shader runs and samples
+        // passing depth/stencil per pixel of the presented top scene
+        // (top_w x top_h; every scene target counts, the top one dominates);
+        // opaque_ms: frame top to the first translucent world draw (before
+        // grass), averaged over the frames that had one.
+        const uint64_t counted = gPerfCountedFrames.exchange(0, std::memory_order_relaxed);
+        const uint64_t fs = gPerfFsInvocations.exchange(0, std::memory_order_relaxed);
+        const uint64_t passed = gPerfSamplesPassed.exchange(0, std::memory_order_relaxed);
+        const uint64_t opaqueFrames = gPerfOpaqueFrames.exchange(0, std::memory_order_relaxed);
+        const uint64_t opaqueNs = gPerfOpaqueNs.exchange(0, std::memory_order_relaxed);
+        const double pixels = static_cast<double>(topScene >> 32U) * static_cast<double>((topScene & 0xFFFFFFFFU) >> 2U);
+        const double perPixel = counted != 0U && pixels > 0.0 ? 1.0 / (static_cast<double>(counted) * pixels) : 0.0;
+        out << " fs_px=" << static_cast<double>(fs) * perPixel << " passed_px=" << static_cast<double>(passed) * perPixel
+            << " opaque_ms="
+            << (opaqueFrames != 0U ? static_cast<double>(opaqueNs) / static_cast<double>(opaqueFrames) / 1.0e6 : 0.0);
+        // config/deko3d_clear_draw: on/off, then per frame the depth resets
+        // seen and those turned into a depth clear (full_clears: the colour
+        // cleared too and the draw skipped), whether on or not.
+        out << " clear_draw=" << (gPerfClearDraw.load(std::memory_order_relaxed) ? 1 : 0)
+            << " resets=" << static_cast<double>(gPerfResets.exchange(0, std::memory_order_relaxed)) / count
+            << " depth_clears=" << static_cast<double>(gPerfDepthClears.exchange(0, std::memory_order_relaxed)) / count
+            << " full_clears=" << static_cast<double>(gPerfFullClears.exchange(0, std::memory_order_relaxed)) / count;
+    }
     if (gPerfZcull.load(std::memory_order_relaxed)) {
         // Raw ZcullStats0-3 per frame (hardware counters, meaning not
         // documented by deko3d: compare runs, all zero = ZCULL idle).
@@ -1116,6 +1230,9 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
                 << static_cast<uint64_t>(static_cast<double>(gPerfZcullStats[i].exchange(0, std::memory_order_relaxed)) /
                                          zcullCount);
         }
+        // Invalidations around gl_FragDepth draws (decals), per frame.
+        out << " zcull_invalidates="
+            << static_cast<double>(gPerfZcullInvalidates.exchange(0, std::memory_order_relaxed)) / count;
     }
     out << " build=" << kDeko3dBuildTag;
     return out.str();

@@ -10,6 +10,7 @@
 // ImGui (the FPS counter) drawn on the window (gfx_deko3d_ui.cpp).
 
 #if defined(__SWITCH__)
+#include "fast/backends/gfx_deko3d_clear_draw.h"
 #include "fast/backends/gfx_deko3d_lighting.h"
 #include "fast/backends/gfx_deko3d_programs.h"
 #include "fast/backends/gfx_rendering_api.h"
@@ -235,6 +236,8 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     void FlushPicaInvalidations();
     bool RecordPicaDraw(const GfxNativePicaDrawView& draw, const PicaProgram& program,
                         const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target);
+    // `reset draw:` line of a depth reset's plan (config/deko3d_clear_draw).
+    void LogPicaResetDraw(const GfxNativePicaDrawView& draw, const Deko3d::PicaClearDrawPlan& plan);
     void DrawPicaScanout(const GfxNativePicaDisplayTransferView& transfer, const Deko3d::PicaDisplay& display,
                          const Deko3d::PicaTransferPlan& plan, float allocScale);
     // Opens the device frame (if needed) and starts the resources' frame
@@ -281,6 +284,16 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     const DkShader* mScanoutFragment = nullptr;
     uint32_t mLinearClampSampler = 0;
     bool mCullInvert = false;    // config/deko3d_cull_invert
+    // config/deko3d_clear_draw (off by default, gfx_deko3d_clear_draw.h): the
+    // frame's depth reset (a full-target ALWAYS draw) turned into fast clears
+    // where that is provably exact.
+    bool mClearDraw = false;
+    // `reset draw:` lines (logs/deko3d.txt): when the plan changes (at most
+    // kResetLineLimit), and at the first reset after each periodic log.
+    static constexpr uint32_t kResetLineLimit = 64U;
+    uint64_t mResetSignature = ~0ULL;
+    uint32_t mResetLines = 0U;
+    bool mResetLineDue = false;
     // config/deko3d_barrier (diagnosis): the barrier after new images, as
     // words "full|primitives|fragments|none image descriptors shader l2
     // frame". Default Full + Image|Descriptors: uploads and descriptor

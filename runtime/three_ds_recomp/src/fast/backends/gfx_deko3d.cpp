@@ -659,6 +659,8 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
     Deko3d::Log("depth (%s): zcull=%d per frame %s | avg of %llu %s", when, mDevice.Zcull() ? 1 : 0,
                 Deko3d::FormatPicaDepthDraws(frames.Last, 1U).c_str(), static_cast<unsigned long long>(frames.Frames),
                 Deko3d::FormatPicaDepthDraws(frames.Sum, frames.Frames).c_str());
+    // The next depth reset writes its `reset draw:` line (config/deko3d_clear_draw).
+    mResetLineDue = true;
     LogLightingCounters(when);
     mFrameDraws.StartWindow();
     const auto& resources = mResources.Stats();

@@ -17,6 +17,7 @@
 #include "fast/oot3d/pica_uniform_layout.h"
 #include "fast/renderer3ds/pica_draw_coverage.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
+#include "fast/backends/gfx_deko3d_clear_draw.h"
 #include "gfx_deko3d_api.h"
 #include "gfx_deko3d_scanout_dksh.h"
 #include "gfx_opengl_pica_scale.h"
@@ -180,6 +181,16 @@ void GfxRenderingAPIDeko3d::InitPica() {
     if (const auto invert = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_cull_invert")) {
         mCullInvert = invert->empty() || (*invert)[0] != '0';
     }
+    // config/deko3d_clear_draw: present (and not "0") turns the depth reset
+    // into fast clears where provable (SWITCH_PORT.md, "Depth reset as fast clears").
+    if (const auto clear = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_clear_draw")) {
+        mClearDraw = clear->empty() || (*clear)[0] != '0';
+    } else if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_clear_draw", "rb")) {
+        std::fclose(file); // an empty file has no first line
+        mClearDraw = true;
+    }
+    Deko3d::SetPerfClearDraw(mClearDraw);
+    Deko3d::Log("pica: clear draw %s", mClearDraw ? "on (config/deko3d_clear_draw)" : "off");
     if (const auto flip = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_flip_y")) {
         mFlipY = flip->empty() || (*flip)[0] != '0';
     }
@@ -418,6 +429,12 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         ++mCounters.PicaShadowProducersSkipped;
         ++mCounters.PicaDrawsSkipped;
         return true;
+    }
+    if (draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Scene &&
+        draw.Composition.Layer == Renderer3ds::PicaCompositionLayer::TransparentWorld) {
+        // dkperf opaque_ms: the frame's first translucent world draw (once
+        // per frame), before grass.
+        mDevice.MarkOpaqueEnd();
     }
     if (mGrassDraws && draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Scene &&
         draw.Composition.Layer == Renderer3ds::PicaCompositionLayer::TransparentWorld) {
@@ -662,13 +679,15 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         RememberGrassScene(target, viewport, dkScissor, DekoCompareOp(draw.DepthCompare));
     }
     mDevice.Checkpoint("draw.viewport");
+    // The viewport inside the scissor (the scissor is inside the target extent).
+    const int64_t x0 = std::max<int64_t>(viewport.X, dkScissor.x);
+    const int64_t y0 = std::max<int64_t>(viewport.Y, dkScissor.y);
+    const int64_t x1 = std::min<int64_t>(int64_t{viewport.X} + viewport.Width, int64_t{dkScissor.x} + dkScissor.width);
+    const int64_t y1 = std::min<int64_t>(int64_t{viewport.Y} + viewport.Height, int64_t{dkScissor.y} + dkScissor.height);
+    const bool writesFragDepth = Deko3d::PicaDrawWritesFragDepth(program.Pick == Deko3d::PicaProgramPick::Uber,
+                                                                 draw.WBuffering, draw.DepthRange, draw.NearPlane);
     {
-        // Per-frame breakdown (logs/deko3d.txt): the viewport inside the scissor.
-        const int64_t x0 = std::max<int64_t>(viewport.X, dkScissor.x);
-        const int64_t y0 = std::max<int64_t>(viewport.Y, dkScissor.y);
-        const int64_t x1 = std::min<int64_t>(int64_t{viewport.X} + viewport.Width, int64_t{dkScissor.x} + dkScissor.width);
-        const int64_t y1 =
-            std::min<int64_t>(int64_t{viewport.Y} + viewport.Height, int64_t{dkScissor.y} + dkScissor.height);
+        // Per-frame breakdown (logs/deko3d.txt).
         const uint64_t pixels = x1 > x0 && y1 > y0 ? static_cast<uint64_t>((x1 - x0) * (y1 - y0)) : 0U;
         mFrameDraws.Current.Count(program.Base, program.Lit, draw.Blend.Enabled, pixels);
         if (program.SurfaceLighting) {
@@ -680,27 +699,107 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         mFrameDraws.Current.CountDepth(
             depthStencil.depthTestEnable != 0U, draw.DepthWriteEnabled,
             !draw.DepthTestEnabled || draw.DepthCompare == Renderer3ds::PicaCompareFunction::Always,
-            pixels >= static_cast<uint64_t>(target.Extent.Width) * target.Extent.Height,
-            Deko3d::PicaDrawWritesFragDepth(program.Pick == Deko3d::PicaProgramPick::Uber, draw.WBuffering,
-                                            draw.DepthRange, draw.NearPlane));
+            pixels >= static_cast<uint64_t>(target.Extent.Width) * target.Extent.Height, writesFragDepth);
     }
 
     const auto primitive = static_cast<DkPrimitive>(DekoPrimitive(draw.Topology));
-    if (draw.Indexed) {
-        const uint32_t indexSize = draw.IndicesAre16Bit ? 2U : 1U;
-        if (res.IndexStream == DK_GPU_ADDR_INVALID || res.IndexBytes % indexSize != 0U) {
-            if (mCounters.PicaDrawsRejected++ < 10U) {
-                Deko3d::Log("draw rejected: PICA indexed draw has no/partial indices");
-            }
-            return false;
+    const uint32_t indexSize = draw.IndicesAre16Bit ? 2U : 1U;
+    if (draw.Indexed && (res.IndexStream == DK_GPU_ADDR_INVALID || res.IndexBytes % indexSize != 0U)) {
+        if (mCounters.PicaDrawsRejected++ < 10U) {
+            Deko3d::Log("draw rejected: PICA indexed draw has no/partial indices");
         }
+        return false;
+    }
+
+    // The frame's depth reset (gfx_deko3d_clear_draw.h): a depth-writing
+    // draw that passes every depth test over the whole target. Planned (and
+    // logged) whether config/deko3d_clear_draw is on or not; applied when on.
+    const bool coversTarget = x0 <= 0 && y0 <= 0 && x1 >= static_cast<int64_t>(target.Extent.Width) &&
+                              y1 >= static_cast<int64_t>(target.Extent.Height);
+    if (Deko3d::PicaDrawIsDepthReset(draw, coversTarget)) {
+        Deko3d::PicaClearDrawContext context;
+        context.Specialized = program.Pick == Deko3d::PicaProgramPick::Specialized;
+        context.LightingVariant = program.Lit;
+        context.WritesFragDepth = writesFragDepth;
+        context.ViewportCoversTarget = true;
+        context.ViewportWidth = static_cast<double>(viewport.Width);
+        context.ViewportHeight = static_cast<double>(viewport.Height);
+        context.CullInvert = mCullInvert;
+        context.StencilWrites = stencilWrites;
+        const Deko3d::PicaClearDrawPlan plan = Deko3d::PlanPicaClearDraw(draw, context);
+        LogPicaResetDraw(draw, plan);
+        const auto action = mClearDraw ? plan.Action : Deko3d::PicaClearDrawAction::Draw;
+        Deko3d::NoteResetDraw(static_cast<uint8_t>(action));
+        if (action != Deko3d::PicaClearDrawAction::Draw) {
+            // The scissor is the target extent here (coversTarget), which
+            // bounds the clears exactly as it bounds the draw; the bound
+            // depth state still writes depth (the clear does not depend on it).
+            if (action == Deko3d::PicaClearDrawAction::FullClear && plan.ColorMask != 0U) {
+                dkCmdBufClearColorFloat(cmd, 0, plan.ColorMask, plan.ClearColor[0], plan.ClearColor[1],
+                                        plan.ClearColor[2], plan.ClearColor[3]);
+            }
+            // deko3d's ZcullClearDepth (0 or 1: its fast ZCULL clear) starts
+            // ZCULL from a known state.
+            dkCmdBufClearDepthStencil(cmd, true, plan.ClearDepth, 0x00, 0);
+            mDevice.Checkpoint("draw.reset_clear");
+            if (action == Deko3d::PicaClearDrawAction::FullClear) {
+                (void)key;
+                return true; // target.Version already moved, as for the draw
+            }
+            depthStencil.depthWriteEnable = 0;
+            dkCmdBufBindDepthStencilState(cmd, &depthStencil);
+        }
+    }
+
+    // config/deko3d_zcull: ZCULL tests a draw at its raster depth, and deko3d
+    // 0.5 never sets ZcullTestMask for programs that write gl_FragDepth (Mesa
+    // nvc0 writes 0x11): a decal pulled forward by its depth offset can be
+    // rejected by whole tiles, and its written depth can leave ZCULL's view of
+    // the tiles wrong. Invalidated before and after such a draw when it tests
+    // or writes depth (InvalidateZcullNoWfi: ZCULL culls nothing it no longer
+    // knows until the next depth clear).
+    const bool zcullGuard =
+        mDevice.Zcull() && writesFragDepth && (depthStencil.depthWriteEnable != 0U ||
+                                               (depthStencil.depthTestEnable != 0U &&
+                                                depthStencil.depthCompareOp != DkCompareOp_Always));
+    if (zcullGuard) {
+        mDevice.InvalidateZcull();
+    }
+    if (draw.Indexed) {
         dkCmdBufBindIdxBuffer(cmd, draw.IndicesAre16Bit ? DkIdxFormat_Uint16 : DkIdxFormat_Uint8, res.IndexStream);
         dkCmdBufDrawIndexed(cmd, primitive, res.IndexBytes / indexSize, 1, 0, draw.BaseVertex, 0);
     } else {
         dkCmdBufDraw(cmd, primitive, draw.VertexCount, 1, 0, 0);
     }
+    if (zcullGuard) {
+        mDevice.InvalidateZcull();
+    }
     (void)key;
     return true;
+}
+
+void GfxRenderingAPIDeko3d::LogPicaResetDraw(const GfxNativePicaDrawView& draw,
+                                             const Deko3d::PicaClearDrawPlan& plan) {
+    // A plan's identity: what it became, why (the reasons are literals), and
+    // the facts behind it (not the colour value: a fading colour would
+    // spend every line).
+    uint64_t signature = static_cast<uint64_t>(plan.Action) | static_cast<uint64_t>(plan.Coverage.Status) << 4U |
+                         static_cast<uint64_t>(plan.Depth.Form) << 12U |
+                         static_cast<uint64_t>(plan.Color.Source) << 16U |
+                         static_cast<uint64_t>(plan.Color.Ambiguous ? 1U : 0U) << 20U |
+                         static_cast<uint64_t>(plan.AlphaTest) << 24U;
+    signature ^= static_cast<uint64_t>(reinterpret_cast<uintptr_t>(plan.Why)) * 0x9E3779B97F4A7C15ULL;
+    signature ^= static_cast<uint64_t>(reinterpret_cast<uintptr_t>(plan.ColorWhy)) * 0xC2B2AE3D27D4EB4FULL;
+    const bool changed = signature != mResetSignature;
+    mResetSignature = signature;
+    const bool logChange = changed && mResetLines < kResetLineLimit;
+    if (!logChange && !mResetLineDue) {
+        return;
+    }
+    mResetLines += logChange ? 1U : 0U;
+    mResetLineDue = false;
+    Deko3d::Log("reset draw: frame %llu %s", static_cast<unsigned long long>(mDevice.Frame()),
+                Deko3d::FormatPicaResetDraw(draw, plan).c_str());
 }
 
 bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplayTransferView& transfer,

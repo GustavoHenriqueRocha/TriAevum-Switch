@@ -282,6 +282,7 @@ class Program:
         self.functions = {}
         self.globals = {}
         self.global_types = {}
+        self.fused_fma = True  # fma(): one rounding (False: product rounded first)
         self._parse(_Stream(tokenize(text)))
 
     # -- declarations --
@@ -919,6 +920,10 @@ class _Interpreter:
         return self._b_min(self._b_max(x, low), high)
 
     def _b_fma(self, a, b, c):
+        # One rounding of the exact a * b + c (FFMA). Program.fused_fma = False
+        # rounds the product first (unfused), for the clear-draw variants.
+        if not self.program.fused_fma:
+            return self.binary("+", self.binary("*", a, b), c)
         return self._map(lambda x, y, z: _fma(float(x), float(y), float(z)), a, b, c)
 
     def _b_abs(self, x):

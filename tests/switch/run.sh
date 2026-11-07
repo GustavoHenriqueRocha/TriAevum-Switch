@@ -17,6 +17,7 @@ JOBS="${JOBS:-3}"
 # Switch runtime unit tests (host CMake targets).
 UNIT_TESTS=(
     oot3d_deko3d_backend_tests
+    oot3d_deko3d_clear_draw_tests
     oot3d_deko3d_lighting_tests
     oot3d_graphics_settings_schedule_tests
     oot3d_grass_switch_tests
@@ -122,6 +123,14 @@ else
             > "$HOST_BUILD/$test.log" 2>&1
         result "$test" $?
     done
+    # config/deko3d_clear_draw: the constant-colour proof against the GLSL (binary32, glsl_eval.py).
+    binary="$(find "$HOST_BUILD" -type f -executable -name oot3d_deko3d_clear_draw_tests -print -quit)"
+    if [[ -n "$binary" ]]; then
+        python3 "$here/test_clear_draw_tev.py" "$binary" > "$HOST_BUILD/test_clear_draw_tev.log" 2>&1
+        result test_clear_draw_tev $?
+    else
+        result test_clear_draw_tev 1
+    fi
 fi
 
 echo "== DSP mixing with the Switch flags (devkitA64 + qemu-aarch64)"
