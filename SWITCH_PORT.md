@@ -3000,6 +3000,102 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   from Link and Epona; no popping at the screen edges when the camera turns; DRS and widescreen keep
   it aligned; the two `grass:` lines appear.
 
+### Grass on deko3d: cost per tuft, `config/grass_lod` (07/11)
+
+Test.9 drew every tuft as 15 unindexed vertices (5 blade triangles, one instance per tuft) and each
+vertex repeated the whole tuft's work: wind and gust (2 `sin`), the bend away from Link and Epona
+(a loop over up to 4 capsules), the camera-facing card, 3 `sin` hashes, the ground normal decode,
+3 lights and fog. log16/logs16b: about 0.17 us of GPU per tuft at 307 MHz, near and far alike, so
+the cost is per vertex, not per pixel (Whole area 3.3/7.0/10.6 ms for 20.6k/41.8k/63.1k tufts).
+
+| `config/grass_lod` | What happens |
+|---|---|
+| absent, any other word (default) | on: a tuft pass, then the blades, far tufts with fewer blades |
+| `0`, `off`, `false` | test.9's grass exactly (`grass_vsh.glsl`, instanced, 5 blades everywhere) |
+
+L3+R3 > Video > "Grass detail" writes the file and publishes the choice: the next cull job culls for
+it and every cull is drawn the way it was culled, so it switches live (one session, A/B).
+
+- **Tuft pass** (`grass_tuft_vsh.glsl`): one point per tuft, the rasterizer off; it does the shared
+  work of `grass_vsh.glsl` once and writes a 64-byte `GrassTuft` (base, height, the card's
+  camera-facing half width, the bend, the lit root and tip colours, the blades' seed, the level
+  coordinate). A `DkBarrier_Primitives` (plus the texture/L1 invalidate) then orders it before the
+  blade draws. Every frame, in-between frames included, at the draw point, with this frame's
+  camera, wind time and colliders. *Why not the cull worker:* its instances are drawn for several
+  frames (stale culls, fps60 in-between frames with another camera), so wind, Link's bend, the
+  camera-facing card and fog written by it would move at the cull rate, one frame late.
+  *Why not a compute dispatch:* the device's queue is created graphics-only
+  (`gfx_deko3d_device.cpp`); a vertex program with storage writes needs no queue change and runs in
+  the same place. Two tuft buffers (2 x 65536 x 64 B = 8 MiB, GPU only, made at the first cull
+  with levels) are taken in turn by the draw points that run the pass: the one written was last
+  read before the previous pass's barrier.
+- **Blade draws** (`grass_lod_vsh.glsl`): no instancing; vertex v is corner v % 3 of blade
+  (v / 3) % n of tuft v / 3n, so the vertices of several tufts fill a warp (an instance of 15, 9 or
+  3 vertices would otherwise leave lanes idle if the hardware gives each instance its own warp).
+  `v / 3n` is one float multiply, exact for every vertex of a 65536-tuft draw (checked
+  exhaustively). The tuft's colour is `mix(root, tip, y)` (test.9's colour is linear in the height
+  y, checked by running its lines); fog stays per vertex.
+  - *Near draw* (`GRASS_LOD_NEAR`): single blades within 400 units and their turn into tufts to
+    600, as `grass_vsh.glsl` (per-blade facing and light per vertex), with the cull margin (the
+    current camera's distance decides the turn). Near Link the grass looks as in test.9.
+  - *Far draws:* 5, 3 or 1 blades per tuft. Between levels the blades that stay move to and widen
+    into their slot of the next layout and the others narrow to nothing where they stand; the card
+    keeps its width and the blades' summed width (so the covered area) stays 0.84 of the card at
+    every step. At the end of a morph the layout is the next level's, so the draw a tuft is in
+    changes where both draw the same triangles (no pop; `test_grass_lod.py`).
+- **Levels:** the level coordinate runs 0 (5 blades) -> 1 (3) -> 2 (1) as the projected width of a
+  5-blade slot (2 x the packed half width, so the thinning's widening counts) on a 1200x720 target
+  falls from 2.4 to 1.8 px, then from 1.2 to 0.9 px (`kGrassLodPixels`; `GrassLodFocal` takes the
+  focal length from the frame's world-to-clip matrix, so it follows the camera's field of view, not
+  the dynamic resolution). It is 0 up to 800 units (`GrassLodMinimumDistance`: past the single-blade
+  turn and twice the cull margin there) and reaches 2 at most at 1200. The tuft pass computes it
+  per frame; the cull worker (`GrassLodKind`) puts a tuft in the draw its coordinate needs at its
+  distance less the cull margin (64 + 6%), so a camera that comes that much nearer before the next
+  cull still finds every blade it needs. Host field (`Oot3dGrassLod`), instances near / 5 / 3 / 1
+  blades: with the game's 60 degrees at 5:3 (focal 624 px), Near 5958 -> 2377/2331/1250/0, Far
+  16000 -> 4285/2179/6559/2977, Whole area 34273 -> 2377/1124/3228/27544 (blade vertices 514095 ->
+  164199); with a 45 degree 16:9 camera (focal 815 px) Near 5250 -> 2172/2947/131/0.
+- **Integer hash:** lowbias32 (Chris Wellons, hash-prospector, public domain), the same mix as
+  `MixGrassBits`; one hash per blade gives its 3 random values (10, 11 and 11 bits put into a
+  float's mantissa, no conversion). The blades' jitter therefore differs from test.9's (another
+  random layout, the same distribution).
+- **Cost per tuft** `[INF]` (uam + envydis, gm107 instructions per program; quarter-rate =
+  `mufu`/conversions, weighted x4): test.9 536 instructions (45 quarter-rate) x 15 vertices ~ 10.1k;
+  with levels: tuft pass 336 (26) once ~ 0.41k, far blade program 193 (6) per vertex ~ 0.21k, near
+  program 456 (27) ~ 0.54k. Per tuft: near ~ 8.5k (0.84x test.9), 5 blades ~ 3.6k (0.36x),
+  3 blades ~ 2.3k (0.23x), 1 blade ~ 1.0k (0.10x), plus 5/3/1 triangles. Scaled from 0.17 us per
+  tuft: about 0.14 / 0.06 / 0.04 / 0.02 us. Host field, 60 degrees: Near ~ 1.0 -> 0.5 ms (the near
+  draw is two thirds of what is left); Whole area ~ 5.8 -> 1.0 ms for 34k tufts (63k tufts: ~10.6
+  -> ~2 ms). If test.9 was limited by instances of 15 vertices per 32-lane warp (an instance per
+  warp), the saving is larger.
+- **What changes on screen** (60 degrees, 1200x720): from ~9-12 m from the camera (where a test.9
+  blade is under ~2 px wide) tufts turn into 3 blades, 5/3 wider; in Far and Whole area from ~14-19 m
+  into 1 blade, 5x wider (the same covered area, fewer sub-pixel slivers). Thinned tufts at Near
+  (already wider) stay at 1.4-2.2 px slots: 3 blades or part way there. Every blade's random jitter
+  differs from test.9's (another layout, the same distribution); colours may differ by under 1/255
+  from rounding. Single blades and their turn into tufts (within ~6-7 m), so the grass around Link,
+  are test.9's.
+- **Log** (`deko3d.txt`): at start and on each switch `grass: lod on (config/grass_lod): ...` or
+  `grass: lod off (config/grass_lod = 0): ...`; the second `grass:` line ends with `gpu G ms/frame
+  (max, samples; blades B tufts T pass P) | lod on|off (L/D drawn frames) near N l5 A l3 B l1 C
+  vertices V pass_points Q`: instances per drawn frame per draw (off: near = test.9's blades, l5 =
+  its tufts), blade vertices per drawn frame (3 x blades x instances) and tuft-pass points; `pass`
+  is the tuft pass's GPU time, `blades`/`tufts` the near and far draws. `LOD OFF (setup failed)`
+  means the tuft memory or a shader was missing: test.9's grass is drawn then.
+- **Shaders:** `gen.py` builds `grass_tuft_vsh.glsl` and the two variants of `grass_lod_vsh.glsl`
+  (pasting `grass_lod_common.glsl` at their `#include` lines) into `gfx_deko3d_grass_dksh.h`; test.9's
+  three stages come out byte for byte as before. `deko3d.pack` is not involved (no rebuild).
+- Tests: `tests/switch/test_grass_lod.py` (`glsl_eval.py` runs `grass_lod_common.glsl`: level
+  changes show the same blades, the covered width through a morph, 5 blades unmorphed are test.9's
+  tuft, the coordinate equals the cull worker's, lowbias32 and the blade randoms, the vertex index
+  division for every vertex, the colour ramp); `oot3d_grass_switch_tests` (`Oot3dGrassLod`: config
+  file, coordinate samples, focal length, the levels regroup exactly the instances of test.9 and
+  each draw holds for a camera up to the cull margin nearer); `grass_lod` guards.
+- Console A/B (full resolution, 60 FPS, Grass On): in Hyrule Field at Near and Whole area, Kokiri
+  Forest and Sacred Forest Meadow, switch "Grass detail" every ~20 s and compare the second
+  `grass:` line's `gpu` (and `pass`/`tufts`) and `l3`/`l1`/`vertices`, and `dkperf` `busy_ms`.
+  Watch for pops 8-20 m away while walking and riding.
+
 ## Next steps
 
 - Future ideas (user request, 2026-10-17):

@@ -65,10 +65,19 @@ struct GrassStreamSettings {
     // stream is one frame newer than the one it was culled with.
     float CullMargin = 64.0F;
     float CullMarginPerDistance = 0.06F;
+    // config/grass_lod: the stream's kinds are the draws of grass_lod_vsh.glsl
+    // (GrassStreamKind); off, test.9's two kinds of grass_vsh.glsl.
+    bool Lod = false;
 };
 [[nodiscard]] GrassStreamSettings GrassStreamSettingsFromProfile(const GrassSwitchProfile& profile) noexcept;
 
-enum class GrassStreamKind : uint8_t { Tufts, Blades };
+// The draw an instance goes to. config/grass_lod off: Tufts and Blades
+// (single blades within SingleBladeDistance), both grass_vsh.glsl. On:
+// Blades are the near draw (single blades and their turn into tufts, with
+// the cull margin), Tufts the 5-blade far draw, Tufts3 and Tufts1 the 3-
+// and 1-blade ones (GrassLodLevel).
+enum class GrassStreamKind : uint8_t { Tufts, Blades, Tufts3, Tufts1 };
+inline constexpr uint32_t kGrassStreamKinds = 4U;
 
 // Instances [First, First + Count) of one placement, drawn as one kind.
 struct GrassStreamRange {
@@ -84,7 +93,10 @@ struct GrassStreamStats {
     uint64_t AnchorsTested = 0U;
     uint32_t Tufts = 0U;
     uint32_t Blades = 0U;
-    // Of Tufts + Blades, the fill tufts (the rest are the placement's own).
+    // config/grass_lod on: the 3- and 1-blade far tufts (Tufts holds the 5-blade ones).
+    uint32_t Tufts3 = 0U;
+    uint32_t Tufts1 = 0U;
+    // Of the instances, the fill tufts (the rest are the placement's own).
     uint32_t Fill = 0U;
     // Kept tufts of visible clusters outside the frustum (not drawn).
     uint32_t OffScreen = 0U;
@@ -92,6 +104,7 @@ struct GrassStreamStats {
     uint32_t ClustersOverBudget = 0U;
     // Anchors past FullDensityDistance left out by the distance thinning.
     uint64_t AnchorsThinned = 0U;
+    [[nodiscard]] uint32_t Instances() const noexcept { return Tufts + Blades + Tufts3 + Tufts1; }
 };
 
 // The share of tufts kept at `distance` (1 up to FullDensityDistance).
@@ -131,6 +144,44 @@ inline constexpr float kGrassThinGrowth = 0.1F;
 inline constexpr float kGrassMaxWidthScale = 3.0F;
 [[nodiscard]] float GrassStreamWidthScale(float retention) noexcept;
 
+// ---- config/grass_lod: levels of detail (SWITCH_PORT.md "Grass on deko3d: cost per tuft")
+//
+// A tuft's level coordinate runs from 0 (5 blades) through 1 (3 blades) to
+// 2 (1 blade) as the projected width of a blade slot (2 x its half width,
+// on a 1200x720 target) falls from kGrassLodPixels[0] to [3]; between the
+// levels it turns from one into the next (grass_lod_blade). It stays 0 up
+// to GrassLodMinimumDistance and reaches 2 at most 1.5x that far, so the
+// near draw (single blades turning into tufts) never needs a level.
+// grass_tuft_vsh.glsl computes it each frame (grass_lod_coordinate); the
+// cull worker picks the draw from it at the tuft's distance less the cull
+// margin (the camera may come nearer before the next cull), so a tuft is
+// drawn with at least the blades it needs and changes draw only where both
+// layouts are the same.
+inline constexpr std::array<float, 4> kGrassLodPixels{2.4F, 1.8F, 1.2F, 0.9F};
+struct GrassLodParameters {
+    // Pixels per world unit at distance 1 on a 1200x720 target (GrassLodFocal).
+    float Focal = 0.0F;
+    float MinimumDistance = 800.0F;
+    float RampInverse = 1.0F / 400.0F;
+};
+// 600 x the smaller of the clip x and y scales over the clip w scale of a
+// world-to-clip matrix (column-major): a pixel width at 1200x720 (5:3, the
+// long side is the one with the smaller scale), whichever way the PICA
+// target is turned. 0 for a degenerate matrix (no levels).
+[[nodiscard]] float GrassLodFocal(const std::array<float, 16>& positionToClip) noexcept;
+// Where the levels may start: past the near draw and twice its cull margin.
+[[nodiscard]] float GrassLodMinimumDistance(const GrassStreamSettings& settings) noexcept;
+[[nodiscard]] GrassLodParameters GrassLodParametersFor(const GrassStreamSettings& settings,
+                                                       const std::array<float, 16>& positionToClip) noexcept;
+// grass_lod_coordinate of grass_lod_common.glsl, in [0, 2].
+[[nodiscard]] float GrassLodCoordinate(const GrassLodParameters& lod, float distance, float halfWidth) noexcept;
+// The far draw of a tuft whose coordinate is `coordinate`: the fewest blades whose
+// layout still shows it (Tufts below 1, Tufts3 below 2, else Tufts1).
+[[nodiscard]] GrassStreamKind GrassLodKind(float coordinate) noexcept;
+// Blades per tuft of a draw (5, 3, 1) and the blades it turns into.
+[[nodiscard]] uint32_t GrassLodBlades(GrassStreamKind kind) noexcept;
+[[nodiscard]] uint32_t GrassLodTargetBlades(GrassStreamKind kind) noexcept;
+
 // Owns its scratch, so a frame allocates nothing once the sizes settled.
 class GrassInstanceStreamBuilder {
   public:
@@ -147,13 +198,16 @@ class GrassInstanceStreamBuilder {
     };
     struct Selected {
         uint32_t Anchor = 0U;
-        uint16_t Bucket = 0U; // placement * 2 + kind
+        uint32_t Bucket = 0U; // placement * kGrassStreamKinds + kind
         uint8_t Fade = 255U;
         uint8_t WidthScale = 64U; // x 1/64
         uint8_t Child = 0U;       // 0: the tuft itself, else its fill tuft
     };
     std::vector<Candidate> mCandidates;
     std::vector<Selected> mSelected;
+    // config/grass_lod on: the instances, packed when selected (their
+    // packed half width and place pick the level).
+    std::vector<GrassStreamInstance> mPacked;
     std::vector<uint32_t> mBucketCounts;
 };
 
