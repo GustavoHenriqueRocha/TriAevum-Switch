@@ -1062,13 +1062,46 @@ void BenchCapture(size_t draws) {
     }
 }
 
+// The steady state of a room: the same draws every frame over unchanged
+// memory (every snapshot a version hit), as perf.txt shows on the console
+// (index ranges reused by every draw, a few KiB copied per frame).
+void BenchCaptureSteady(size_t drawsPerFrame, size_t frames) {
+    std::mt19937_64 random(13U);
+    CaptureRun run;
+    run.Lean = true;
+    FillMemory(run.Memory, random);
+    run.Make();
+    std::vector<Oot3dPicaDrawPacket> packets;
+    for (size_t draw = 0; draw < drawsPerFrame; ++draw) packets.push_back(MakePacket(random));
+    std::string error;
+    std::vector<Oot3dPicaDrawSubmission> drained;
+    double us = 0.0;
+    for (size_t frame = 0; frame < frames; ++frame) {
+        const auto started = Clock::now();
+        for (const auto& packet : packets) (void)run.Submit(packet, &error);
+        us += MicrosecondsSince(started);
+        run.Queue->TakePendingDraws(drained);
+        drained.clear();
+    }
+    const auto counters = run.Queue->Counters();
+    std::printf("bench capture steady %.3f us/draw (copied %.2f KiB/draw, geometry misses %.3f/draw)\n",
+                us / static_cast<double>(drawsPerFrame * frames),
+                counters.CopiedBytes / 1024.0 / static_cast<double>(drawsPerFrame * frames),
+                static_cast<double>(counters.GeometryMisses) / static_cast<double>(drawsPerFrame * frames));
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     const bool bench = argc > 1 && std::string_view(argv[1]) == "--bench";
+    if (argc > 1 && std::string_view(argv[1]) == "--bench-steady") {
+        BenchCaptureSteady(100U, 6000U);
+        return 0;
+    }
     if (bench) {
         BenchPlan(200U, 300U);
         BenchCapture(60000U);
+        BenchCaptureSteady(100U, 600U);
         return 0;
     }
     TestParser();
