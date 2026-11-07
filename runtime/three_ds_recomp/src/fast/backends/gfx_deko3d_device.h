@@ -74,6 +74,12 @@ void FlushLog();
 // the last presented top-screen scene target and its samples per presented
 // line (1 or 2, config/deko3d_line_samples). Render thread.
 void NotePresentedTopScene(uint32_t width, uint32_t height, uint32_t lineSamples);
+// dkperf clear_draw / resets / depth_clears / full_clears (config/deko3d_clear_draw,
+// gfx_deko3d_clear_draw.h): whether it is on, and each depth reset of a frame
+// with what it became (0 draw, 1 depth clear, 2 colour and depth clear).
+// Render thread.
+void SetPerfClearDraw(bool enabled);
+void NoteResetDraw(uint8_t action);
 
 struct StreamSpan {
     void* Cpu = nullptr;
@@ -135,6 +141,12 @@ class Device {
     // A barrier that waits for earlier work (texture uploads, descriptor
     // writes): dkperf image_barriers_per_frame.
     void CountImageBarrier();
+    // config/deko3d_zcull: ZCULL invalidated around a draw whose program
+    // writes gl_FragDepth (dkperf zcull_invalidates).
+    void InvalidateZcull();
+    // dkperf opaque_ms: a timestamp at the frame's first translucent world
+    // draw (once per frame; the frame top to it).
+    void MarkOpaqueEnd();
 
     // Hands the commands recorded so far to the GPU.
     void Submit();
@@ -184,6 +196,8 @@ class Device {
         bool Timed = false; // its frame top and end timestamps were recorded
         bool Split = false; // and the two around the acquire
         bool ZcullTimed = false; // config/deko3d_zcull: its ZCULL stats were reported
+        bool Counted = false;    // fragment shader / samples passed at frame top and scene end
+        bool OpaqueTimed = false; // the timestamp at the first translucent world draw
         FrameTag Tag; // Deko3dTagFrame of the frame
     };
     void CollectTimestamps(uint32_t slot);
@@ -226,6 +240,7 @@ class Device {
     int mWindowSlot = -1;
     bool mFrameOpen = false;
     bool mRecorded = false;
+    bool mOpaqueMarked = false; // MarkOpaqueEnd ran this frame
     bool mSyncCheck = false;
     bool mSyncFailed = false;
     bool mSyncFailurePending = false;

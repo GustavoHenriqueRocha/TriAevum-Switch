@@ -188,6 +188,21 @@ GUARDS = [
           r'"sdmc:/switch/oot3dre/config/deko3d_zcull", "rb"\)\) \{\s+std::fclose\(file\);\s+mZcull = true;\s+\}.*?'
           r'if \(!mZcull\) \{\s+queueMaker\.flags \|= DkQueueFlags_DisableZcull;',
           test="oot3d_deko3d_backend_tests (TestDepthBreakdown: the depth line that measures it)"),
+    # --- 07/11: depth reset as fast clears (config/deko3d_clear_draw), off by default, only where provable ---
+    Guard("clear draw: the depth reset becomes clears only with config/deko3d_clear_draw (off by default)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'const auto action = mClearDraw \? plan\.Action : Deko3d::PicaClearDrawAction::Draw;',
+          test="oot3d_deko3d_clear_draw_tests, test_clear_draw_tev.py"),
+    Guard("clear draw: a constant colour only away from 8-bit rounding boundaries (float32 must agree)",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_clear_draw.h",
+          r'inline constexpr double kPicaTevRoundMargin = 0\.01;.*?'
+          r'if \(std::fabs\(scaled - std::floor\(scaled\) - 0\.5\) < kPicaTevRoundMargin\) \{\s+return false;',
+          test="oot3d_deko3d_clear_draw_tests (TestConstantTevAgainstFloat32), test_clear_draw_tev.py"),
+    Guard("ZCULL: draws whose program writes gl_FragDepth invalidate ZCULL around them (decal tiles)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'const bool zcullGuard =\s+mDevice\.Zcull\(\) && writesFragDepth.*?'
+          r'if \(zcullGuard\) \{\s+mDevice\.InvalidateZcull\(\);\s+\}\s+if \(draw\.Indexed\).*?'
+          r'if \(zcullGuard\) \{\s+mDevice\.InvalidateZcull\(\);'),
     # --- 07/11: deko3d barriers. Uploads still need the Full barrier (copy engine before 3D sampling). ---
     Guard("deko3d uploads: a Full barrier with Image|Descriptors invalidation before the next draw",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_api.h",

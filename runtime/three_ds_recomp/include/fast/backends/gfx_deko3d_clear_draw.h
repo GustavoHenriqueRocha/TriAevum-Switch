@@ -542,8 +542,8 @@ struct Point {
 } // namespace ClearDrawDetail
 
 // viewportWidth/Height: the viewport in target pixels (pixel centres are half
-// a pixel inside its edges). cullEnabled/keepCounterClockwise: the draw's
-// NativeCullMode; cullInvert: config/deko3d_cull_invert.
+// a pixel inside its edges). Culling follows the draw's NativeCullMode;
+// cullInvert: config/deko3d_cull_invert (then culled draws are not proven).
 [[nodiscard]] inline PicaResetCoverage ProvePicaResetCoverage(const Renderer3ds::PicaDrawView& draw, double viewportWidth,
                                                               double viewportHeight, bool cullInvert) noexcept {
     using namespace ClearDrawDetail;
