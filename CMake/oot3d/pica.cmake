@@ -679,3 +679,21 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 set_property(TARGET oot3d_native_pica_vulkan_bridge_tests PROPERTY FOLDER Tests)
+
+# deko3d per-pixel lighting of fps60 in-between frames: two real frames
+# through the prepared transition, the bridge's draw view and the backend's
+# per-pixel decision (Deko3d::BuildPerPixelSurface).
+add_executable(oot3d_deko3d_inbetween_lighting_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_deko3d_inbetween_lighting_tests.cpp
+    runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting.cpp
+    runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting_draw.cpp
+    runtime/three_ds_recomp/src/fast/oot3d/directional_shadows.cpp
+    runtime/three_ds_recomp/src/fast/oot3d/pica_toon_shader.cpp)
+target_include_directories(oot3d_deko3d_inbetween_lighting_tests PRIVATE
+    tools/oot3d/native_pica_frontend)
+target_link_libraries(oot3d_deko3d_inbetween_lighting_tests PRIVATE
+    oot3d_native_pica_vulkan_bridge
+    ThreeDsRecomp::Renderer3dsPicaCore)
+target_compile_options(oot3d_deko3d_inbetween_lighting_tests PRIVATE
+    "${WARNING_OVERRIDE}")
+set_property(TARGET oot3d_deko3d_inbetween_lighting_tests PROPERTY FOLDER Tests)

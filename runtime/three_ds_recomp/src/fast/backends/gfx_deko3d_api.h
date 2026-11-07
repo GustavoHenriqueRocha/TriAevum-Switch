@@ -216,7 +216,6 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     const DkShader* ResolveLightingFragment(Deko3d::LightingMode mode, std::string_view canonical,
                                             Renderer3ds::PicaShaderSourceIdentity identity);
     const DkShader* ResolvePerPixelVertex(const GfxNativePicaDrawView& draw);
-    bool BuildSurfaceLighting(const GfxNativePicaDrawView& draw);
     void LogLightingCounters(const char* when);
     void LogPicaProgramCounters(const char* when);
     // Package 5 (gfx_deko3d_pica_draw.cpp).
@@ -325,6 +324,15 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     Renderer3ds::PicaEnvironmentLighting mLightingEnvironment{};
     std::optional<Renderer3ds::PicaSurfaceLightingView> mLightingView;
     Renderer3ds::PicaSurfaceLightingUniforms mSurfaceLighting{};
+    // Per-pixel draws by frame kind (logs/deko3d.txt "lighting real" and
+    // "lighting in-between"):
+    // the temporal sample the draws belong to (PublishPicaFrameTemporalSample)
+    // is an fps60 in-between frame, or a real one.
+    bool mInBetweenSample = false;
+    Deko3d::FrameKindLighting mRealLighting{};
+    Deko3d::FrameKindLighting mInBetweenLighting{};
+    // Scene environment changes logged (on/off, scope, rim), at most 64.
+    uint32_t mEnvironmentChangesLogged = 0;
     bool mDeviceReady = false;
     std::vector<Deko3dFramebuffer> mFramebuffers;
     std::vector<std::unique_ptr<Deko3dShaderProgram>> mShaderPrograms;

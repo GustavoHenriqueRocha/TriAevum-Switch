@@ -32,6 +32,7 @@
 #include "fast/renderer3ds/pica_surface_lighting.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -39,6 +40,10 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+
+namespace Fast::Renderer3ds {
+struct PicaDrawView;
+}
 
 namespace Fast::Deko3d {
 
@@ -185,6 +190,84 @@ struct LightingCounters {
     uint64_t DrawsSpillingBase = 0;
     uint64_t DrawsNoDepthWrite = 0;
 };
+
+// Why a draw keeps its native shading under per-pixel lighting (the first
+// rule it fails, in the order the backend checks them).
+enum class PerPixelRefusal : uint8_t {
+    None = 0,
+    NotSceneWorld,      // not a scene draw of a layer that takes surface lighting
+    NoSurfaceProgram,   // its vertex program has no typed surface/transform hooks
+    NoDepthWrite,       // PerPixelCostAdmits
+    FragmentOperation,  // not the ordinary colour/depth fragment operation
+    NoUniforms,         // its packed vertex uniforms are too short
+    NotPerspective,     // UsesPicaPerspectiveProjection refused its projection
+    NotRelightable,     // authored appearance (unlit, additive)
+    NativeLights,       // its native light uniforms could not be read
+    NoCamera,           // the block needs the world-to-view and has none (or a singular one)
+    Block,              // BuildPicaSurfaceLightingUniforms refused it otherwise
+    Count,
+};
+
+[[nodiscard]] const char* PerPixelRefusalName(PerPixelRefusal refusal) noexcept;
+
+// Per-pixel draws of one frame kind: real (step and native) frames and
+// fps60 in-between frames (PublishPicaFrameTemporalSample's Synthetic), so
+// logs/deko3d.txt shows whether the in-between frames light like the real ones.
+struct FrameKindLighting {
+    uint64_t Samples = 0; // temporal samples published (frames of this kind)
+    uint64_t Lit = 0;
+    uint64_t Native = 0;
+    uint64_t Ineligible = 0;
+    std::array<uint64_t, static_cast<size_t>(PerPixelRefusal::Count)> Refusals{};
+    PerPixelRefusal FirstRefusal = PerPixelRefusal::None;
+    // The block of the first lit draw (what the variant's body branches on):
+    // control (native lit, points, directionals, flags), environment
+    // enabled (w), rim intensity, baked reference (w).
+    struct BlockSummary {
+        std::array<uint32_t, 4> Control{};
+        float Environment = 0.0F;
+        float Rim = 0.0F;
+        float Baked = 0.0F;
+    };
+    std::optional<BlockSummary> FirstLit;
+
+    void Refuse(PerPixelRefusal refusal) noexcept {
+        ++Ineligible;
+        ++Refusals[static_cast<size_t>(refusal)];
+        if (FirstRefusal == PerPixelRefusal::None) FirstRefusal = refusal;
+    }
+    // Lit draws whose block has the scene environment off (w = 0) or no rim:
+    // a frame lit like native shading counts here whatever its kind.
+    uint64_t LitWithoutEnvironment = 0;
+    uint64_t LitWithoutRim = 0;
+    void Light(const Renderer3ds::PicaSurfaceLightingUniforms& block) noexcept {
+        ++Lit;
+        if (block.EnvironmentParameters[3] == 0.0F) ++LitWithoutEnvironment;
+        if (block.Rim[0] <= 0.0F) ++LitWithoutRim;
+        if (!FirstLit)
+            FirstLit = BlockSummary{block.Control, block.EnvironmentParameters[3], block.Rim[0],
+                                    block.BakedReferenceUp[3]};
+    }
+};
+
+// "frames=F lit=L (no env E, no rim R) native=N ineligible=I first=<reason>
+// (reason=count ...) block control=a/b/c/d env=E rim=R baked=B" (the first
+// lit draw's block).
+[[nodiscard]] std::string FormatFrameKindLighting(const FrameKindLighting& kind);
+
+// The per-pixel admission of a draw before its variants are resolved
+// (upstream's surfaceCandidate: scene domain, world layer, typed surface
+// program; then PerPixelCostAdmits).
+[[nodiscard]] PerPixelRefusal AdmitPerPixelDraw(const Renderer3ds::PicaDrawView& draw) noexcept;
+
+// The surface block of an admitted draw (upstream's per-pixel admission and
+// block, trimmed, with the rim on the draws PicaDrawReceivesRimLight admits),
+// or why it keeps native shading. `view` caches the camera of the last draw
+// (rebuilt when the draw's world-to-view differs).
+[[nodiscard]] PerPixelRefusal BuildPerPixelSurface(const Renderer3ds::PicaDrawView& draw,
+                                                   const Renderer3ds::PicaEnvironmentLighting& environment,
+                                                   std::optional<Renderer3ds::PicaSurfaceLightingView>& view,
+                                                   Renderer3ds::PicaSurfaceLightingUniforms& block);
 
 // Per-pixel shading only for draws that write depth: a depth-less draw
 // (translucency, effects) is shaded again under what covers it. The blend
