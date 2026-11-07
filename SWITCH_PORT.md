@@ -85,10 +85,9 @@ Performance and usability:
   native X 76 instead of 32). During gameplay a tap on a TopScreen HUD control
   presses the control it pictures while the finger is down: X, Y, Item I (ZR), Item II (ZL), B,
   and the D-pad direction of the action icons around the cross (View/Navi, Ocarina, boots...).
-  Under the Restoration HUD, Item I/II are the ZR+X/ZR+Y chords: their icons keep a circle
-  (Item II shares the A circle that moves into its lane; the Item I circle is drawn only while the
-  game draws an Item I icon) but a tap on them presses nothing; the layout, not what is drawn,
-  decides.
+  Under the Restoration HUD, Item I/II are the ZR+X/ZR+Y chords and have no lane of their own
+  (they show in the X/Y lanes while ZR is held, see "Restoration HUD: Item I/II under X/Y while
+  ZR is held"); a tap never presses ZR/ZL there: the layout, not what is drawn, decides.
   Each finger hit-tests where it lands (several fingers at once). The first finger that lands
   outside every control aims by dragging (bow, slingshot, hookshot, first-person view), added to
   the right stick and the gyro like PC mouse aim: `aim.touch_enabled` (default on) and
@@ -288,6 +287,59 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
   folders; "Project Restoration HUD style" is a layout option of the mod's code, drawn from the same
   atlas. Item icons and rupee digits (`num_all00`, legacy hash `FABD759BB95C1C6A`) have no image in the
   mod; a texture pack that has them (HenrikoMagnifico's does) applies as before.
+
+### Restoration HUD: Item I/II under X/Y while ZR is held (07/11)
+
+- **Report.** L3+R3 > HUD > Restoration "just moves things around": the bomb (Item I, the ZR item
+  in Normal) stood on the right of the four buttons with no button letter, no count, and no button
+  that used it (video `2026110710411900-…` at 28 s).
+- **What the mod does (3.2.2 EUR `code.ips`, decoded from the patched `code.bin`).** The option text
+  (0x00611786) is "First Person: `\r` / Items I/II: `\x0c`+`\x0e`/`\x0f` / Gears menu: `\x0c`+`\x13` /
+  Map menu: `\x0c`+`\x14` / Ocarina: `\x0c`+`\x12`"; the input code settles the glyphs. The Restoration
+  flag is bit 0 of the option word, cached at 0x00613FA8. The item-query hooks
+  (0x005D0D80..0x005D0F0C) drop ZR/ZL under Restoration and read the chord flags that 0x005DDC10..
+  0x005DDC70 set from HID held: ZR (0x8000) with X (0x400) is Item I, with Y (0x800) Item II (so
+  `\x0c` = ZR, `\x0e`/`\x0f` = X/Y): the chords the port already had. The layout (Restoration only):
+  - item icons (0x005DFDAC, 0x005E0AC0..0x005E0AF8): Item I/II hidden unless ZR is held; with ZR
+    held Item I is moved (-24,-24) from the right lane to the X lane and Item II from the bottom lane
+    to the Y lane, and the X and Y item icons are hidden;
+  - labels (0x005E02A4, 0x005E0408..0x005E0470): with ZR held the X/Y labels become custom_ui01 rect
+    22 "I" (131,231) and rect 23 "II" (150,231), one unit higher;
+  - ammo counts (0x005E1D6C..0x005E1D9C, 0x005E2154; positions 0x0060E7C4/0x0060E7D4): with ZR held
+    Item I's count is drawn at the X position (358,20) and Item II's at the Y position (334,44), the
+    X/Y counts hidden; without ZR the Item I/II counts are hidden;
+  - slot items (0x005D21B4..0x005D21D8): with ZR held X and Y (slots 1, 2) have no item (0xFF), so
+    ZR+X uses Item I alone.
+  The right lane (382,44) is the A button's: 0x005C8EB0..0x005C8ED8 moves the native A button (its
+  circle and action text, the "Quest" render buffer bound at 0x004FC660 that the port transforms in
+  `TransformTopScreenQuestGeometry`, quads centred at x 330..398, y > 150) to (382,44) under
+  Restoration, (288,24) in Normal, right of B (B's circle, quad 4, sits at (248,24) in Normal with
+  its label at (227,10), and goes to (358,68) under Restoration with the label at (337,54)). So
+  Restoration is X top, Y left, A right, B bottom, as the buttons sit. 0x005C9024 hides A while ZR is
+  held unless 0x005CBE08(2) finds that action on a D-pad slot, and 0x005E09EC then draws region 4
+  (the D-pad lane icon) at (382,44): the "Ocarina: ZR+A" of the option text.
+- **What the port did.** It had the chords, but drew the native Item I icon in its Normal lane (the
+  right one) at all times, with a circle and no label, and drew Item I/II counts at the right/bottom
+  positions while ZR was held; Item II's icon would share the bottom lane with the moved A circle and
+  B; X/Y kept their own items under the chord.
+- **Change** (Restoration only; Normal is unchanged, its tests and guards hold):
+  `ResolveTopScreenItemIconPlacement` and `ResolveTopScreenAmmoCounterPosition`
+  (`oot3d_top_screen_mod_profile_hud.cpp`) give the mod's placements; the item copies, the X/Y labels
+  (`BuildTopScreenAuxiliaryTouchGeometry(…, zrHeld)`) and the counters follow them; the Item I/II lanes
+  get no circle (B's circle keeps lane 3); lanes 2/3 press with the chords, not ZR/ZL alone; the
+  slot-item hook returns no item for X/Y while ZR is held (`TopScreenSlotItemQuery::RestorationZrHeld`).
+  So on the Switch: hold ZR, the X lane shows Item I labelled "I" with its count, the Y lane Item II
+  labelled "II"; ZR+X uses Item I, ZR+Y Item II. ZL's item (Item II in Normal) is the Y lane's under
+  ZR. Tests: `oot3d_top_screen_hud_touch_tests` (`TestRestorationItemLanes`,
+  `TestEveryItemIconHasACircle`), `oot3d_top_screen_mod_profile_tests` (labels, counters, lane presses).
+  A follow-up moves the A button to the right lane under Restoration (`TopScreenQuestGeometryContext
+  ::HudLayout`, set by the bridge); in Normal it stays at (288,24). Until then the port left A at its
+  Normal spot, left of the diamond (the report's "A to the left").
+- **Not ported:** hiding A while ZR is held and drawing the Ocarina there (ZR+A): the port has no
+  ZR+A Ocarina input, so A stays visible and ZR+A is still A.
+- **Credit.** These Restoration rules come from the "Single Screen Experience" mod (GameBanana
+  695893), decoded from its 3.2.2 EUR `code.ips` at the addresses above. The port reimplements the
+  behaviour; no mod code or data is copied, and the source comments say so where it lands.
 
 ## How to build (Linux)
 

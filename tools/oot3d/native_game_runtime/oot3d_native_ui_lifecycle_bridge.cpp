@@ -236,6 +236,7 @@ bool Oot3dNativeUiLifecycleBridge::ApplyTopScreenGuestHook(uint32_t guestPc,
   }
   context.HudScale = mTopScreenConfig.HudScale;
   context.HudMarginX = static_cast<float>(mTopScreenConfig.HudMarginX);
+  context.HudLayout = mTopScreenConfig.HudLayout;
   context.HudMarginY = static_cast<float>(mTopScreenConfig.HudMarginY);
   TopScreenQuestRenderBufferStats stats;
   if (!TransformTopScreenQuestRenderBuffer(mMemory, renderBuffer, context,
@@ -356,8 +357,9 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
     std::string touchStateError;
     if (ReadTopScreenTouchDynamicState(mMemory, mTopScreenInput, &touchState,
                                        &touchStateError)) {
-      // Item icons first (appended below, after the labels): the Restoration
-      // Item I circle is drawn only around a drawn Item I icon.
+      // Item icons first (appended below, after the labels); their opacity
+      // feeds the D-pad presentation. Restoration shows Item I/II in the X/Y
+      // lanes only while ZR is held.
       TopScreenNativeItemOpacity itemOpacity;
       std::vector<oot3d::ui::UiPrimitive> itemIconCopies;
       const auto itemIcons = NativePauseSharedTextureIdentity(
@@ -366,11 +368,12 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
         std::string itemCopyError;
         (void)AppendTopScreenNativeItemIconCopies(
             mMemory, touchState.VerticalOffsets, touchState.Alpha, *itemIcons,
-            itemIconCopies, &itemCopyError, false, &itemOpacity);
+            itemIconCopies, &itemCopyError, false, &itemOpacity,
+            mTopScreenConfig.HudLayout, mTopScreenInput.ZrHeld);
       }
       auto touchGeometry = BuildTopScreenTouchClusterGeometry(
           touchState.VerticalOffsets, touchState.Alpha,
-          mTopScreenConfig.HudLayout, itemOpacity.ItemIDrawn);
+          mTopScreenConfig.HudLayout);
       if (!mTopScreenConfig.RenderDpadIcons) {
         touchGeometry.Alpha[5] = 0.0F;
       }
@@ -388,7 +391,7 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
         auxiliaryInputs.SuppressBCopies = mTopScreenTouchCopies.SuppressBCopies;
         auto auxiliaryGeometry = BuildTopScreenAuxiliaryTouchGeometry(
                 auxiliaryInputs, touchState.VerticalOffsets, touchState.Alpha,
-                mTopScreenConfig.HudLayout);
+                mTopScreenConfig.HudLayout, mTopScreenInput.ZrHeld);
         auxiliaryGeometry.Quads[4].Visible = false;
         (void)AppendTopScreenAuxiliaryTouchPresentation(
             auxiliaryGeometry, uiAtlas, output);
