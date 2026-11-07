@@ -566,9 +566,12 @@ void Oot3dNativeA32UiTextureProvider::ApplyCustomTexture(
     const bool pending = custom.state == Oot3dNativeUiCustomTexture::State::Pending;
     if (pending) {
         // The native pixels (or the source's stand-in) are drawn while the
-        // replacement decodes; the texture is resolved again.
+        // replacement decodes; the texture is resolved again. Without a
+        // stand-in the native pixels are the old art: the renderer holds the
+        // first draws instead (N64UiFast3dRenderer, kUiHoldPolls).
         ++mStats.custom_texture_pending;
         pixels.provisional = true;
+        pixels.native_stand_in = custom.rgba8 == nullptr;
     }
     constexpr std::uint32_t kMaxExtent = 16384U;
     if (custom.rgba8 == nullptr || custom.width == 0U || custom.height == 0U ||
