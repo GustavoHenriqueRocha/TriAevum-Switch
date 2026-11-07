@@ -167,9 +167,11 @@ struct DynamicResolutionStats {
 
 class DynamicResolutionController {
 public:
-  // pairBudgetMs: two presentation periods (33.3 ms at 60 Hz).
-  void Configure(const DynamicResolutionConfig &config,
-                 double pairBudgetMs) noexcept {
+  // pairBudgetMs: two presentation periods (33.3 ms at 60 Hz). startScale:
+  // the scale to begin at (0: MaxScale); between two levels, the lower one,
+  // so a start never lies above it.
+  void Configure(const DynamicResolutionConfig &config, double pairBudgetMs,
+                 float startScale = 0.0F) noexcept {
     mConfig = config;
     if (!(mConfig.StepScale > 0.0F))
       mConfig.StepScale = 0.25F;
@@ -180,6 +182,11 @@ public:
     mLevels = std::min<uint32_t>(mLevels, kMaxLevels - 1U);
     mBudgetMs = pairBudgetMs > 0.0 ? pairBudgetMs : 1000.0 / 30.0;
     mLevel = 0U;
+    if (startScale > 0.0F && startScale < mConfig.MaxScale)
+      mLevel = std::min<uint32_t>(
+          mLevels, static_cast<uint32_t>(std::ceil(
+                       (mConfig.MaxScale - startScale) / mConfig.StepScale -
+                       1.0e-3)));
     mAverageMs = 0.0;
     mSettle = 0U;
     mOver = 0U;

@@ -1092,6 +1092,11 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'drsDeko3dTiming = Fast::Deko3dRendererSelected\(\);.*?'
           r'if \(drsDeko3dTiming\)\s+Oot3dNativeGame::UseDeko3dDynamicResolutionTiming\(pacing\.Resolution\);'),
+    Guard("log16 (test.8): a 30 -> 60 switch restarted DRS at 3.00 (room 8: 16 and 23 in-between frames dropped)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'dynamicResolutionMemory\.Leave\(interpolationPacingRateHz, dynamicResolution\);.*?'
+          r'pacing\.ResolutionStartScale = dynamicResolutionMemory\.StartScale\(\s*rateHz, !firstConfiguration, pacing\.Resolution\);',
+          "oot3d_native_cadence_governor_tests (TestLiveRateSwitchKeepsSixtyScale)"),
     Guard("tour19 (pgo5n): vsync clock failed (vsync_rc=0x1272) and pacer_vsync was left without a source",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'if \(!vsyncStarted && vsyncClock\.StartAcquireFallback\(\)\)',

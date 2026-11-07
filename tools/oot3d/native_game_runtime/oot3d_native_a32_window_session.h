@@ -658,6 +658,9 @@ private:
   // Dynamic resolution of the top-screen scene (render thread).
   Oot3dNativeGame::DynamicResolutionController dynamicResolution;
   bool dynamicResolutionActive = false;
+  // The scale 60 FPS last ran at: a switch back to 60 begins there
+  // (oot3d_native_rate_pacing.h; log16).
+  Oot3dNativeGame::RatePacingResolutionMemory dynamicResolutionMemory;
   // Render-thread busy time per frame (no acquire wait), averaged: a
   // governor that sheds with this above the GPU is CPU-bound and fewer
   // pixels do not help (dynamic resolution ignores that shedding).

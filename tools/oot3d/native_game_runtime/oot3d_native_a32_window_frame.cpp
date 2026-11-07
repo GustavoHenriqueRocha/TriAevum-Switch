@@ -203,6 +203,9 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
   // boundary, or the PC's F1 menu): every governor starts over as at a start
   // at this rate (oot3d_native_rate_pacing.h).
   const bool firstConfiguration = !interpolationPacingConfigured;
+  // The scale 60 FPS last ran at (a switch back to 60 begins there).
+  if (!firstConfiguration && dynamicResolutionActive)
+    dynamicResolutionMemory.Leave(interpolationPacingRateHz, dynamicResolution);
   interpolationPacingConfigured = true;
   interpolationPacingRateHz = rateHz;
   const auto &options = interpolationPacingOptions;
@@ -243,6 +246,8 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
 #endif
   if (drsDeko3dTiming)
     Oot3dNativeGame::UseDeko3dDynamicResolutionTiming(pacing.Resolution);
+  pacing.ResolutionStartScale = dynamicResolutionMemory.StartScale(
+      rateHz, !firstConfiguration, pacing.Resolution);
   backendScale.Requested = 0.0F;
   drsRenderBusyAverageMs = 0.0;
   // Presentation cadence (config/fps60_mode): legacy at any rate but 60.

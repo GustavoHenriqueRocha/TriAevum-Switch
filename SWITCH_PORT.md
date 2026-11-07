@@ -1591,8 +1591,9 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
     history (previous/latest visual frame, prepared transition, continuity tracker), as a start does;
   - `EnsureInterpolationPacing` sees the new rate and calls `ConfigureRatePacing`
     (`oot3d_native_rate_pacing.h`): in-between governor (pair budget 33.3 ms at 60, 66.7 at 30; learned
-    step cost and ratios forgotten), dynamic resolution (same pair budget, back to the top scale, the
-    hidden-GPU bias unchanged at 3 ms, render-busy average reset), cadence governor (`config/fps60_mode`
+    step cost and ratios forgotten), dynamic resolution (same pair budget; a switch to 60 begins at
+    the scale 60 last ran at in the session, or the floor, a switch to 30 at the top: see "Dynamic
+    resolution on deko3d" below; render-busy average reset), cadence governor (`config/fps60_mode`
     at 60, legacy at 30; lock, miss window, game pairs and the last present forgotten). Only the
     cumulative perf counters carry on;
   - grass (deko3d, `config/grass`): the other rate's profile (`Deko3dSetGrassFrameRate`: distances and
@@ -1609,8 +1610,9 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   `rate_hz`; hitches and spikes already use the live rate. `boot-status.txt` follows the current
   `presentation_rate_hz`/`visual_interpolation`. A perf window that contains the switch mixes both rates.
 - Tests: `oot3d_native_cadence_governor_tests` (`TestLiveRateSwitchMatchesFreshStart`: a session that
-  ran heavy at one rate, switched, decides exactly as a fresh start at the other for light and heavy
-  loads, both ways; `TestLiveRateSwitchFirstPresents`), `triaevum_presentation_clock_tests` (the
+  ran heavy at one rate, switched, decides exactly as a fresh start at the other, given the same
+  start scale, for light and heavy loads, both ways; `TestLiveRateSwitchKeepsSixtyScale`;
+  `TestLiveRateSwitchFirstPresents`), `triaevum_presentation_clock_tests` (the
   choice, the simulation contract at both rates, no catch-up refreshes, pacer restart),
   `oot3d_grass_switch_tests` (`FrameRateSwitchesLiveAsAStartWould`) and the `FPS in L3+R3 > Video`
   guards.
@@ -2740,6 +2742,14 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   heavy stretches (13-21 ms at 2.25) at 2.25 as before; whole session 2.31-2.33 mean instead of 2.25;
   about 40 scale changes in 11 minutes (most in the title's changing shots); pairs over budget (an
   in-between frame the governor drops) 29-40 more step frames than at the fixed 2.25, of 17839.
+- **Switching 30 → 60 (L3+R3 > Video > FPS):** the controller used to start over at 3.00 on every
+  switch, as at a session start, and step down from there. In room 8 (25.8 ms a frame at 3.00) that
+  descent took 3 downs and dropped 16 and 23 in-between frames, with 12 and 6 late steps (windows 32250
+  and 34800, `drs_downs=3`). Now `RatePacingResolutionMemory` (`oot3d_native_rate_pacing.h`) keeps the
+  scale 60 FPS used when the session left it, and a switch to 60 begins there
+  (`DynamicResolutionController::Configure` start scale, rounded down to a level). If the session never
+  ran at 60, the switch begins at the floor. From there the controller climbs as usual when there is
+  room. A switch to 30 and the session's first start (at either rate) still begin at the top.
 - **Log:** `drs_pair_ms` in `perf.txt` no longer includes the 3 ms on deko3d: about twice
   `gpu_ms_step` (log16: twice plus 3). The stderr start line (not in the console's log files)
   `TRIAEVUM_DYNAMIC_RESOLUTION ... timing=deko3d down=0.92 up=0.82 hidden_ms=0.0`.
@@ -2748,13 +2758,19 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   at its step frames with jitter and its `busy_max`, real fixed share 0 and 0.3: title and Temple
   of Time ≥ 2.45 mean, room 8 at 2.25, at most 50 more over-budget steps, at most 6 bounces),
   `TestDeko3dSteadyAreasHoldOneLevel` (steady areas 8-17 ms, fixed share 0-0.5, ±4-8% jitter and
-  spikes: at most one change after 20 s, no bounce, the level held fits). Two guards "log16
+  spikes: at most one change after 20 s, no bounce, the level held fits);
+  `oot3d_native_cadence_governor_tests` `TestLiveRateSwitchKeepsSixtyScale` (room 8 standing at
+  15 ms, 60 → 30 → 60: back at 2.25 at once with no pair over budget, where the old start at 3.00
+  gave at least 10; an area left at 2.5 comes back at 2.5 and still climbs to 3.00 when light; a
+  session started at 30 enters 60 at the floor; start scales round down). Three guards "log16
   (test.8)". No shader change, no `deko3d.pack` rebuild.
 - **Console check (1 minute, 60 FPS, Per-pixel):** title screen 20 s,
   the Temple of Time standing 20 s, Forest Temple room 8 20 s. `perf.txt`: Temple of Time windows
   `drs_scale` 2.5 (2.75 at times) with `dkperf top_w=600` (660), `level=full`, `interp_dropped` 0-2;
   title the same in its light shots (its heavier shots, 13-18 ms at 2.25 in log16, stay at 2.25);
   room 8 `drs_scale=2.25`, `interp_dropped`/`late_steps` no higher than log16's room 8 windows.
+  Then, still in room 8, switch to 30, wait 10 s and switch back to 60: the window with the switch
+  back shows `drs_downs=0` (log16: 3), `drs_scale=2.25`, and few `interp_dropped` (log16: 16 and 23).
 
 ### fps60 cadence: regularity before average, `config/fps60_mode` (2026-10-17)
 - **Diagnosis** (`switch-logs/integ2b`, CPU 1785, 4.5 min at 60, 52 FPS average): in the

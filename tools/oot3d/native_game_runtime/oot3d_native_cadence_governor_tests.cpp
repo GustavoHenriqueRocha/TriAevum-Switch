@@ -787,7 +787,9 @@ void ReportFrameSlots() {
 // the in-between governor, dynamic resolution and the cadence governor of a
 // session that ran at one rate, reconfigured for the other at a frame
 // boundary, must behave exactly as a start at the new rate (same budgets,
-// interpolation level, scale, lock, holds), whatever they learned before.
+// interpolation level, scale, lock, holds), whatever they learned before;
+// the one exception is the scale a switch to 60 begins at
+// (RatePacingResolutionMemory), given to both as their start.
 struct RateRig {
   InterpolationPacingGovernor Pacing;
   DynamicResolutionController Drs;
@@ -887,14 +889,15 @@ std::vector<double> DriveRate(RateRig &rig, uint32_t rateHz, double stepMs,
   return trace;
 }
 
-void CheckFreshRateState(const RateRig &rig, uint32_t rateHz) {
+void CheckFreshRateState(const RateRig &rig, uint32_t rateHz,
+                         uint32_t drsLevel = 0U) {
   const double pair = 2000.0 / rateHz;
   CHECK(std::abs(rig.Pacing.PairBudgetMs() - pair) < 1.0e-9);
   CHECK(std::abs(rig.Pacing.DecisionBudgetMs() - pair) < 1.0e-9);
   CHECK(std::abs(rig.Drs.BudgetMs() - pair) < 1.0e-9);
   CHECK(rig.Pacing.StepCostMs() == 0.0);
   CHECK(rig.Pacing.Level() == rig.Pacing.PreferredLevel());
-  CHECK(rig.Drs.Level() == 0U && rig.Drs.AveragePairMs() == 0.0);
+  CHECK(rig.Drs.Level() == drsLevel && rig.Drs.AveragePairMs() == 0.0);
   CHECK(rig.Cadence.Cadence() == PresentCadence::Sixty);
   CHECK(rig.Cadence.GamePairMeanMs() == 0.0);
   CHECK(rig.Cadence.Config().Mode ==
@@ -903,7 +906,7 @@ void CheckFreshRateState(const RateRig &rig, uint32_t rateHz) {
 }
 
 void TestLiveRateSwitchMatchesFreshStart() {
-  const auto config = LiveRateConfig();
+  const auto baseConfig = LiveRateConfig();
   struct Load {
     double StepMs, GamePairMs;
   };
@@ -913,7 +916,8 @@ void TestLiveRateSwitchMatchesFreshStart() {
   for (const uint32_t from : {30U, 60U}) {
     const uint32_t to = from == 60U ? 30U : 60U;
     RateRig switched;
-    ConfigureRatePacing(from, config, switched.Pacing, switched.Drs,
+    RatePacingResolutionMemory memory;
+    ConfigureRatePacing(from, baseConfig, switched.Pacing, switched.Drs,
                         switched.Cadence);
     (void)DriveRate(switched, from, from == 60U ? heavy60.StepMs : heavy30.StepMs,
                     from == 60U ? heavy60.GamePairMs : heavy30.GamePairMs, 600);
@@ -923,15 +927,20 @@ void TestLiveRateSwitchMatchesFreshStart() {
     CHECK(switched.Cadence.GamePairMeanMs() > 0.0);
     if (from == 60U)
       CHECK(switched.Cadence.DropsInBetween());
-    // The frame boundary: L3+R3 > Video > FPS applied.
+    // The frame boundary: L3+R3 > Video > FPS applied. 60 never ran before
+    // a switch from 30: the floor; a switch to 30 starts at the top.
+    memory.Leave(from, switched.Drs);
+    auto config = baseConfig;
+    config.ResolutionStartScale = memory.StartScale(to, true, config.Resolution);
+    const uint32_t drsLevel = to == 60U ? switched.Drs.LowestLevel() : 0U;
     ConfigureRatePacing(to, config, switched.Pacing, switched.Drs,
                         switched.Cadence);
-    CheckFreshRateState(switched, to);
+    CheckFreshRateState(switched, to, drsLevel);
 
     RateRig fresh;
     fresh.Now = switched.Now;
     ConfigureRatePacing(to, config, fresh.Pacing, fresh.Drs, fresh.Cadence);
-    CheckFreshRateState(fresh, to);
+    CheckFreshRateState(fresh, to, drsLevel);
     for (const Load load : {light, to == 60U ? heavy60 : heavy30}) {
       const auto expected = DriveRate(fresh, to, load.StepMs, load.GamePairMs, 400);
       const auto actual = DriveRate(switched, to, load.StepMs, load.GamePairMs, 400);
@@ -940,12 +949,113 @@ void TestLiveRateSwitchMatchesFreshStart() {
   }
   // Back and forth: 30 -> 60 -> 30 ends as a start at 30.
   RateRig rig;
-  ConfigureRatePacing(30U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  ConfigureRatePacing(30U, baseConfig, rig.Pacing, rig.Drs, rig.Cadence);
   (void)DriveRate(rig, 30U, heavy30.StepMs, heavy30.GamePairMs, 300);
-  ConfigureRatePacing(60U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  ConfigureRatePacing(60U, baseConfig, rig.Pacing, rig.Drs, rig.Cadence);
   (void)DriveRate(rig, 60U, heavy60.StepMs, heavy60.GamePairMs, 300);
-  ConfigureRatePacing(30U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  ConfigureRatePacing(30U, baseConfig, rig.Pacing, rig.Drs, rig.Cadence);
   CheckFreshRateState(rig, 30U);
+}
+
+// log16 (07/11): a 30 -> 60 switch in Forest Temple room 8 restarted dynamic
+// resolution at 3.00 and dropped 16 and 23 in-between frames on the way down
+// (windows 32250, 34800). A switch to 60 begins at the scale 60 last ran at
+// (or the floor), so a toggle never begins above what 60 sustained.
+// Room 8 standing: 15 ms a step frame at 2.25 (pair 30 of 33.3), a real
+// fixed share of 0.3 (log16: 16.2 -> 25.2 ms between 2.25 and 3.00).
+void TestLiveRateSwitchKeepsSixtyScale() {
+  auto base = LiveRateConfig();
+  UseDeko3dDynamicResolutionTiming(base.Resolution);
+  const auto realMs = [](double at225, double fixed, float scale) {
+    const double area = scale / 2.25;
+    return at225 * (fixed + (1.0 - fixed) * area * area);
+  };
+  // `steps` step frames at rateHz; returns those whose pair passed the
+  // budget (an in-between frame the governor drops).
+  const auto drive = [&](RateRig &rig, uint32_t rateHz, double at225,
+                         int steps) {
+    int over = 0;
+    for (int step = 0; step < steps; ++step) {
+      const double stepMs = realMs(at225, 0.3, rig.Drs.Scale());
+      const double pair = rateHz == 60U ? 2.0 * stepMs : stepMs;
+      const bool shedding = pair > rig.Drs.BudgetMs();
+      over += shedding ? 1 : 0;
+      (void)rig.Drs.ObservePair(pair, shedding);
+    }
+    return over;
+  };
+  const auto configureAt = [&](RateRig &rig, RatePacingResolutionMemory &memory,
+                               uint32_t from, uint32_t to, bool remember) {
+    memory.Leave(from, rig.Drs);
+    auto config = base;
+    if (remember)
+      config.ResolutionStartScale = memory.StartScale(to, true, config.Resolution);
+    ConfigureRatePacing(to, config, rig.Pacing, rig.Drs, rig.Cadence);
+  };
+  for (const bool remember : {true, false}) {
+    RateRig rig;
+    RatePacingResolutionMemory memory;
+    // A session start at 60 still begins at the top and settles at 2.25.
+    ConfigureRatePacing(60U, base, rig.Pacing, rig.Drs, rig.Cadence);
+    CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+    (void)drive(rig, 60U, 15.0, 600);
+    CHECK(std::abs(rig.Drs.Scale() - 2.25F) < 1.0e-4F);
+    // 60 -> 30: the top (one picture per 66.7 ms fits at 3.00).
+    configureAt(rig, memory, 60U, 30U, remember);
+    CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+    CHECK(drive(rig, 30U, 15.0, 300) == 0);
+    CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+    // 30 -> 60: back at 2.25 at once, no pair over budget.
+    configureAt(rig, memory, 30U, 60U, remember);
+    const float start = rig.Drs.Scale();
+    const int over = drive(rig, 60U, 15.0, 300);
+    if (remember) {
+      CHECK(std::abs(start - 2.25F) < 1.0e-4F);
+      CHECK(over == 0);
+      CHECK(rig.Drs.Stats().Changes == 3U); // only the start's descent
+    } else {
+      // Before the fix: from 3.00, a burst of dropped in-between frames.
+      CHECK(std::abs(start - 3.0F) < 1.0e-4F);
+      CHECK(over >= 10);
+    }
+    CHECK(std::abs(rig.Drs.Scale() - 2.25F) < 1.0e-4F);
+  }
+  // An area left at 2.5 (12 ms a step frame at 2.25): the switch back begins
+  // at 2.5 (not 3.00) and climbs on its own when there is room.
+  {
+    RateRig rig;
+    RatePacingResolutionMemory memory;
+    ConfigureRatePacing(60U, base, rig.Pacing, rig.Drs, rig.Cadence);
+    (void)drive(rig, 60U, 12.0, 600);
+    CHECK(std::abs(rig.Drs.Scale() - 2.5F) < 1.0e-4F);
+    configureAt(rig, memory, 60U, 30U, true);
+    configureAt(rig, memory, 30U, 60U, true);
+    CHECK(std::abs(rig.Drs.Scale() - 2.5F) < 1.0e-4F);
+    CHECK(drive(rig, 60U, 12.0, 300) == 0);
+    CHECK(std::abs(rig.Drs.Scale() - 2.5F) < 1.0e-4F);
+    CHECK(drive(rig, 60U, 8.0, 600) == 0);
+    CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  }
+  // A session that starts at 30: the first switch to 60 begins at the floor.
+  {
+    RateRig rig;
+    RatePacingResolutionMemory memory;
+    ConfigureRatePacing(30U, base, rig.Pacing, rig.Drs, rig.Cadence);
+    (void)drive(rig, 30U, 15.0, 300);
+    configureAt(rig, memory, 30U, 60U, true);
+    CHECK(std::abs(rig.Drs.Scale() - 2.25F) < 1.0e-4F);
+    CHECK(drive(rig, 60U, 15.0, 300) == 0);
+  }
+  // Start scales between levels round down; out of range clamps.
+  DynamicResolutionController c;
+  c.Configure(base.Resolution, 2000.0 / 60.0, 2.6F);
+  CHECK(std::abs(c.Scale() - 2.5F) < 1.0e-4F);
+  c.Configure(base.Resolution, 2000.0 / 60.0, 1.0F);
+  CHECK(std::abs(c.Scale() - 2.25F) < 1.0e-4F);
+  c.Configure(base.Resolution, 2000.0 / 60.0, 4.0F);
+  CHECK(std::abs(c.Scale() - 3.0F) < 1.0e-4F);
+  c.Configure(base.Resolution, 2000.0 / 60.0, 2.75F);
+  CHECK(std::abs(c.Scale() - 2.75F) < 1.0e-4F);
 }
 
 // The first presents after a switch are measured against the new period
@@ -1024,6 +1134,7 @@ int main(int argc, char **argv) {
   TestEarlyFrameSlotAbsorbsLongSteps();
   TestLiveRateSwitchMatchesFreshStart();
   TestLiveRateSwitchFirstPresents();
+  TestLiveRateSwitchKeepsSixtyScale();
   if (argc > 1 && std::strcmp(argv[1], "--report") == 0)
     Report();
   if (gFailures != 0) {
