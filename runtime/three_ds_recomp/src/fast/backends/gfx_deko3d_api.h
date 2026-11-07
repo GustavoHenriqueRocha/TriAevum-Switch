@@ -217,6 +217,9 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
                                             Renderer3ds::PicaShaderSourceIdentity identity);
     const DkShader* ResolvePerPixelVertex(const GfxNativePicaDrawView& draw);
     void LogLightingCounters(const char* when);
+    // A temporal sample opens (PublishPicaFrameTemporalSample): its frame
+    // kind, and the one-frame lighting transients of the samples before it.
+    void BeginLightingSample(bool inBetween);
     void LogPicaProgramCounters(const char* when);
     // Package 5 (gfx_deko3d_pica_draw.cpp).
     void InitPica();
@@ -333,6 +336,10 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     Deko3d::FrameKindLighting mInBetweenLighting{};
     // Scene environment changes logged (on/off, scope, rim), at most 64.
     uint32_t mEnvironmentChangesLogged = 0;
+    // One-frame per-pixel transients of the presented samples
+    // ("lighting transient:" lines, at most 48).
+    Deko3d::LightingTransientWatch mLightingWatch;
+    uint32_t mTransientsLogged = 0;
     bool mDeviceReady = false;
     std::vector<Deko3dFramebuffer> mFramebuffers;
     std::vector<std::unique_ptr<Deko3dShaderProgram>> mShaderPrograms;
