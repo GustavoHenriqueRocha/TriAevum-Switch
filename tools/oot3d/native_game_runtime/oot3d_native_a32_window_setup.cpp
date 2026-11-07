@@ -1155,6 +1155,8 @@ void NativeA32WindowSession::Setup() {
   // from the mod's 4096x2048 redraw reduced to 3x): it replaces the exact
   // native ui_atlas bytes, and a texture pack image of that atlas wins. A
   // missing or unusable file keeps the native atlas.
+  // Ported from upstream TriAevum (coccofresco/TriAevum commit 14edc1eb,
+  // GPL-3.0-or-later).
   std::shared_ptr<const Oot3dNativeGame::Oot3dUiHdAtlas> uiHdAtlas;
   if (!launch.TopScreenUiAtlasHdPath.empty() && topScreenTextureOverridePackPointer != nullptr) {
     const auto *native = topScreenTextureOverridePack.FindProfileTexture("oot3d/topscreen/3.0/ui_atlas");

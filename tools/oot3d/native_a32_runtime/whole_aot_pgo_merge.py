@@ -19,8 +19,10 @@ directory the use build reads (-DOOT3D_WHOLE_AOT_PROFILE_FILE).
 Then the object summary is filled in: __gcov_info_to_gcda writes runs = 0 and
 sum_max = 0, and GCC's -fprofile-use derives its hot / never-executed
 thresholds from them (with zeros every block counts as hot). As libgcov's own
-dump would, runs = number of sessions and sum_max = the largest arc count
-(from sa2-nx's tools/pgo_summary.py).
+dump would, runs = number of sessions and sum_max = the largest arc count.
+records() and fill_summaries() are adapted from sa2-nx's tools/pgo_summary.py
+at commit adf3a4ee (https://github.com/ChanseyIsTheBest/sa2-nx,
+ChanseyIsTheBest, GPL-3.0).
 
 A lone ``.stream.tmp`` (no ``.stream`` beside it) is skipped: it is a first
 dump cut short or, rarely, a complete dump cut between remove and rename, and

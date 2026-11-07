@@ -1587,8 +1587,9 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   (TestFallbackBoundary), `tools/oot3d/ptbr/test_ptbr.py`; guards in `tests/switch/test_bug_guards.py`.
 
 ### Game code on 2 MB pages (`config/no_code_hugepages`, 2026-11-05)
-- **What.** Ported from sa2-nx (`sdk/src/ui/switch_code_blocks.cpp`, from kameo-nx and the Torchlight
-  port; GPL-3.0 like this fork): `oot3d_switch_code_pages.cpp`. hbloader maps the NRO at a random
+- **What.** Adapted from sa2-nx (`sdk/src/ui/switch_code_blocks.cpp`, from kameo-nx and the Torchlight
+  port; BSD-3-Clause as part of sa2-nx's SDK, notice in `LICENSES/sa2-nx-SDK-BSD-3-Clause.txt`):
+  `oot3d_switch_code_pages.cpp`. hbloader maps the NRO at a random
   address whose virtual and physical addresses do not line up modulo 2 MB, so the kernel maps the
   133.8 MB `.text` with 4 KB pages and the game thread misses the instruction TLB constantly
   (Torchlight measured +115 ns per instruction-fetch TLB miss on 4 KB pages, +7 ns on 2 MB blocks;
@@ -3505,8 +3506,27 @@ Tools and distribution:
 
 ## References and credits
 
-- [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum) — original project (GPL-3.0).
-- TopScreen / Single Screen Experience — [GameBanana 695893](https://gamebanana.com/mods/695893).
+- [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum) — original project (GPL-3.0-or-later);
+  [GustavoHenriqueRocha/TriAevum-Switch](https://github.com/GustavoHenriqueRocha/TriAevum-Switch) —
+  the Switch port this English fork comes from (branch `deko3d`, base `311d8fd7`). Upstream work
+  ported later names its commit in the source (`68d527c6`, `14edc1eb`).
+- TopScreen / Single Screen Experience by M-1 — [GameBanana 695893](https://gamebanana.com/mods/695893)
+  (CC BY-NC-ND 4.0): layouts and rules reimplemented from its `code.ips`, no code or art copied; the
+  player's console downloads it.
+- [sa2-nx](https://github.com/ChanseyIsTheBest/sa2-nx) (ChanseyIsTheBest) — code adapted: the 2 MB code
+  pages (`sdk/src/ui/switch_code_blocks.cpp`, BSD-3-Clause, from kameo-nx and the Torchlight port's
+  findings), the PGO stream dump (`app/src/sa2_pgo.cpp`, GPL-3.0) and the profile summary
+  (`tools/pgo_summary.py`, GPL-3.0). Findings only: store cards, the flat dispatch table, the
+  fastmem slack, the shard compiler settings.
+- [nfsmw-nx](https://github.com/StevensND/nfsmw-nx) (StevensND), [usf4-nx](https://github.com/Thorhax/usf4-nx)
+  and [masseffect-nx](https://github.com/nebadasSwifty/masseffect-nx) — findings only: the console PGO
+  method, the fastmem window recipe (`guest_memory_switch`), the 460.8 MHz apm configuration, ZCULL
+  and thread-placement measurements.
+- [zeldaret/oot](https://github.com/zeldaret/oot) (no license) — the N64 landing-roll rule and the
+  actor overlay names, behaviour and names only.
+- Azahar (GPL-2.0-or-later) — the on-console dump import (`oot3d_rom_import.cpp`) ports TriAevum's
+  `ctr_rom.py`/`oot3d_region_assets.py`, which adapt Azahar's NCCH LZSS and RomFS hash; the Switch
+  changes to the Azahar audio files are listed in `docs/AZAHAR_AUDIO_PROVENANCE.md`.
 - [centollOS/SwitchWaker](https://github.com/centollOS/SwitchWaker) and
   [SwitchWakerHD](https://github.com/centollOS/SwitchWakerHD) — Mesa cache patches,
   thread placement and the Switch performance study that guided several changes.

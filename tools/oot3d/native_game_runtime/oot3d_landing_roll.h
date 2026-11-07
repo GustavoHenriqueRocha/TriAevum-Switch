@@ -20,6 +20,12 @@
 // FUN_002bc420 is skipped as on N64). Every other landing runs the game's own
 // code. The decision and the field reads are plain code, tested on the host
 // (oot3d_landing_roll_tests).
+//
+// Reference only: the rule (thresholds 80/800, stick forward, not carrying,
+// lock-on first) and the identifiers in the comments come from reading the
+// zeldaret/oot decompilation (https://github.com/zeldaret/oot, z_player.c).
+// That repository carries no license, so no code is copied: the decision
+// below is written from the behaviour and checked against the OoT3D code.
 
 #include <atomic>
 #include <cstdint>

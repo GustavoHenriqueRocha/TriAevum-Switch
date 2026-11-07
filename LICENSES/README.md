@@ -21,6 +21,8 @@ their imported source.
 | Zstandard 1.5.6 (statically linked) | BSD-3-Clause (upstream is dual BSD/GPL-2.0; used under BSD) | `LICENSES/zstd-BSD-3-Clause.txt` |
 | libcurl 7.69.1 (devkitPro switch-curl, statically linked into the Switch NRO for the updater) | curl license (MIT/X style) | `LICENSES/curl.txt` |
 | Mbed TLS 2.28 mbedcrypto (devkitPro switch-mbedtls, statically linked into the Switch NRO for SHA-256) | Apache-2.0 OR GPL-2.0-or-later | `LICENSES/mbedtls.txt` |
+| sa2-nx SDK code adapted in `oot3d_switch_code_pages.cpp` (Switch NRO) | BSD-3-Clause | `LICENSES/sa2-nx-SDK-BSD-3-Clause.txt` |
+| sa2-nx app/tools code adapted in `oot3d_whole_aot_pgo.cpp` and `whole_aot_pgo_merge.py` | GPL-3.0 | Root `LICENSE` (GPL-3.0 text) |
 | Microsoft Visual C++ runtime for shaderc | Microsoft runtime redistribution terms | `LICENSES/Microsoft-Visual-Cpp-Runtime.md` |
 | NXVK probe | GPL-2.0-or-later | `ports/switch_vulkan_probe/COPYING` |
 | shaderc shared runtime | Apache-2.0 | `LICENSES/shaderc-Apache-2.0.txt` |

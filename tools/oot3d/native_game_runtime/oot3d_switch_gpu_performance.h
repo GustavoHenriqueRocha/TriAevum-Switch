@@ -13,6 +13,12 @@
 //
 // The file helpers and the choice of the configuration to restore are plain
 // code, tested on the host (oot3d_fps_counter_tests).
+//
+// Reference, no code copied: choosing 0x92220008 through apm follows the
+// findings in masseffect-nx's sdk/src/ui/switch_apm.cpp and
+// docs/platform-notes.md (https://github.com/nebadasSwifty/masseffect-nx;
+// BSD-3-Clause as part of its SDK, the docs GPL-3.0), also used by usf4-nx
+// and nfsmw-nx.
 
 #include <cstdint>
 #include <filesystem>

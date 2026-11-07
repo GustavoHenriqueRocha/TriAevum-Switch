@@ -1,3 +1,9 @@
+// Copyright Citra Emulator Project / Azahar Emulator Project
+// Copyright TriAevum contributors
+// SPDX-License-Identifier: GPL-2.0-or-later
+// C++ port of tools/triaevum_release/ctr_rom.py and oot3d_region_assets.py
+// (GPL-2.0-or-later; Azahar provenance in oot3d_rom_import.h).
+
 #include "oot3d_rom_import.h"
 
 #include <algorithm>

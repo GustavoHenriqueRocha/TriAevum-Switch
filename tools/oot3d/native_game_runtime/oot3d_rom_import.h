@@ -18,6 +18,16 @@
 // supported_revisions.json and input_coverage/coverage.json). Only decrypted
 // dumps are accepted; there is no key or decryption support.
 //
+// Provenance: ctr_rom.py (Copyright Citra Emulator Project / Azahar Emulator
+// Project, Copyright TriAevum contributors) and oot3d_region_assets.py
+// (Copyright TriAevum contributors) are GPL-2.0-or-later, and so are the parts
+// of oot3d_rom_import.cpp ported from them. ctr_rom.py adapts the bounds and
+// backwards-LZSS decode of Azahar's src/core/file_sys/ncch_container.cpp
+// (LZSS_Decompress); the RomFS name hash of oot3d_region_assets.py follows
+// Azahar's src/core/file_sys/layered_fs.cpp (CalcHash, itself from 3dbrew),
+// both at Azahar revision beb5681ee7f85586501b16b083a961b707092cd7
+// (https://github.com/azahar-emu/azahar). See THIRD_PARTY_NOTICES.md.
+//
 // Pure standard C++ (std::filesystem and stdio), so it builds on the host.
 
 #include <array>

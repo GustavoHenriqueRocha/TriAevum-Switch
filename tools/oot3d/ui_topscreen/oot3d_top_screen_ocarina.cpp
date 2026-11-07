@@ -379,9 +379,12 @@ BuildTopScreenOcarinaNavigationGeometry(std::int8_t direction) noexcept {
     quad.Position = {kCentersX[index] - 13.0F,
                      204.0F - 13.0F + (active[index] ? 2.0F : 0.0F)};
     quad.Size = {26.0F, 26.0F};
-    // SingleScreen 3.0 0x005CBFB8: custom_ui01 arrow, rect 7 (46,124) drawn
-    // from x + 2 (right) or mirrored from x + 28 (left), 26 px. The 2.1.1
-    // drew its own arrow at (486, 230) of its replaced menu_top_parts00.
+    // SingleScreen 3.0 0x005CBFB8 ("Single Screen Experience" by M-1,
+    // GameBanana 695893, CC BY-NC-ND 4.0; layout decoded from its code.ips,
+    // no code or art copied, the art is the player's download): custom_ui01
+    // arrow, rect 7 (46,124) drawn from x + 2 (right) or mirrored from
+    // x + 28 (left), 26 px. The 2.1.1 drew its own arrow at (486, 230) of its
+    // replaced menu_top_parts00.
     quad.AtlasOrigin = {left ? 74.0F : 48.0F, 124.0F};
     quad.AtlasSize = {left ? -26.0F : 26.0F, 26.0F};
     const float rgb = active[index] ? 1.0F : 0.6F;
