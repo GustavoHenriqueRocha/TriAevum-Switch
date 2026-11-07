@@ -451,14 +451,16 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
         return;
     }
     // Rule textures' signatures are kept across sessions (as on PC, beside the
-    // shader pack): a ground that takes its rule from a twin drawn in another
-    // area then grows grass in a session that starts there (a save in the
-    // Forest Temple had none until Sacred Forest Meadow was visited).
+    // shader pack), and the twins of the preset's rule textures are built in
+    // (GrassKnownTwins): a ground that takes its rule from a twin drawn in
+    // another area grows grass from the first frame of a session that starts
+    // there (a save in the Forest Temple had none until Sacred Forest Meadow
+    // was visited, in that session or, with the store, in an earlier one).
     const size_t kept = Oot3d::GrassTextureSourceCache::Instance().SetSignatureStore(
         "sdmc:/switch/oot3dre/shadercache/grass_texture_signatures.bin");
     Deko3d::Log("grass: %zu rule texture signatures kept from earlier sessions "
-                "(shadercache/grass_texture_signatures.bin)",
-                kept);
+                "(shadercache/grass_texture_signatures.bin), %zu built-in twins of the rule textures",
+                kept, Oot3d::GrassKnownTwins().size());
     ApplyProfile(*state, fps60, Oot3d::ReadGrassSwitchDistance(config));
     state->Placements = std::make_unique<Oot3d::PicaGrassPlacements>(state->Profile.RetainedBytes);
     Deko3d::Log("grass: on (config/grass = %s), %zu rules, %.0f tufts/m2 of %u blades, at most %u per placement, "

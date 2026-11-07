@@ -6,6 +6,7 @@
 #include <cmath>
 #include <istream>
 #include <ostream>
+#include <tuple>
 
 namespace Fast::Oot3d {
 namespace {
@@ -291,23 +292,44 @@ const GrassTwinRules::Entry& GrassTwinRules::Resolve(
     auto& source = mSource != nullptr ? *mSource : GrassTextureSourceCache::Instance();
     if (!own) {
         const auto twin = source.Find(hash, false);
-        entry.Complete = twin != nullptr;
-        for (size_t i = 0; twin != nullptr && i < rules.size(); ++i) {
-            const auto& rule = rules[i];
+        // Found offline for the preset's rules: the same answer as the
+        // signatures, before the rule's texture has been drawn.
+        const auto known = std::equal_range(
+            GrassKnownTwins().begin(), GrassKnownTwins().end(), GrassKnownTwin{hash, width, height},
+            [](const GrassKnownTwin& a, const GrassKnownTwin& b) {
+                return std::tie(a.TwinHash, a.TwinWidth, a.TwinHeight) <
+                       std::tie(b.TwinHash, b.TwinWidth, b.TwinHeight);
+            });
+        for (const auto& rule : rules) {
             // Configured rules only: an inherited rule is never inherited.
             if (rule.InheritedFrom != 0U) continue;
-            const auto original = source.Find(rule.Target.Rgba8Hash, true);
-            if (original == nullptr) {
+            float score = -1.0F, sampleScale = 1.0F, sampleOffset = 0.0F;
+            const auto original = twin != nullptr ? source.Find(rule.Target.Rgba8Hash, true) : nullptr;
+            const auto offline = std::find_if(known.first, known.second, [&](const GrassKnownTwin& k) {
+                return k.RuleHash == rule.Target.Rgba8Hash && k.Channel == rule.Channel &&
+                       (rule.Target.Width == 0U || rule.Target.Width == k.RuleWidth) &&
+                       (rule.Target.Height == 0U || rule.Target.Height == k.RuleHeight);
+            });
+            if (original != nullptr) {
+                score = GrassTextureTwinScore(*original, *twin);
+                if (score >= kGrassTextureTwinThreshold) {
+                    const auto derived = DeriveGrassTwinRule(rule, *original, *twin, hash);
+                    sampleScale = derived.SampleScale;
+                    sampleOffset = derived.SampleOffset;
+                }
+            } else if (offline != known.second) {
+                score = offline->Score;
+                sampleScale = offline->SampleScale;
+                sampleOffset = offline->SampleOffset;
+            } else {
                 entry.Complete = false;
                 continue;
             }
-            const float score = GrassTextureTwinScore(*original, *twin);
             if (score >= kGrassTextureTwinThreshold && score > entry.Score) {
-                const auto derived = DeriveGrassTwinRule(rule, *original, *twin, hash);
                 entry.Score = score;
                 entry.SourceRuleId = rule.RuleId;
-                entry.SampleScale = derived.SampleScale;
-                entry.SampleOffset = derived.SampleOffset;
+                entry.SampleScale = sampleScale;
+                entry.SampleOffset = sampleOffset;
             }
         }
     }
