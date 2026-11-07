@@ -168,6 +168,20 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
           r'case NativeA32HostAction::Wait:\s+state\.r\[15\] = resumePc;\s+status = NativeA32ThreadStatus::Waiting;\s+'
           r'NoteCore0ThreadParked\(\);'),
+    # --- 07/11: L3+R3 > Video > GPU clock (config/gpu_performance, off by default) ---
+    # Only the handheld (Normal) configuration, only the official 0x92220008, only when asked.
+    Guard("GPU clock High: only the handheld apm configuration, the official 0x92220008",
+          "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
+          r'apmSetPerformanceConfiguration\(ApmPerformanceMode_Normal, status\.Requested\)',
+          test="oot3d_fps_counter_tests (GpuPerformance)",
+          forbid=r'apmSetPerformanceConfiguration\(ApmPerformanceMode_Boost|clkrstInitialize|pcvInitialize'),
+    Guard("GPU clock: Standard without a prior High opens no apm session (default unchanged)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
+          r'if \(!high && !sessionOpen\) \{\s+return status;'),
+    Guard("GPU clock: config/gpu_performance applied at start and from the menu",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'mGpuHigh = ReadGpuPerformanceHigh\(mConfig\);\s+if \(mGpuHigh\) mGpuStatus = ApplyGpuPerformance\(true\);.*?'
+          r'mGpuStatus = ApplyGpuPerformance\(mGpuHigh\);'),
     # --- 06/11: L3+R3 > Video > FPS (30 <-> 60 interpolated) applied only after a restart ---
     # Both choices simulate at 30 Hz; the launch fixed the pacing mode and the 30 FPS launch's
     # native30_no_interpolation contract forbade interpolation, so the menu only wrote config/fps60.

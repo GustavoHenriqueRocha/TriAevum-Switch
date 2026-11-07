@@ -1541,6 +1541,33 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   window closes (`oot3d_fps_counter.h`, tests in `oot3d_fps_counter_tests.cpp`).
 - Needs ImGui on the window: with deko3d and `config/serial_presentation` nothing ImGui draws shows.
 
+### GPU clock: L3+R3 > Video (`config/gpu_performance`, 07/11, off by default)
+- "GPU clock" combo in the Video tab: **Standard (307 MHz)** (default, file absent) or **High (460.8 MHz,
+  more battery)** (file present). Applied at once and at start (the Video panel is created at window setup
+  and applies the file then); `oot3d_switch_gpu_performance.h`, implementation in `oot3d_switch_clocks.cpp`.
+- How: the application's own apm session (`apmInitialize`, kept open for the run) and
+  `apmSetPerformanceConfiguration(ApmPerformanceMode_Normal, 0x92220008)`, the official handheld
+  configuration CPU 1020 / GPU 460.8 / memory 1331.2 MHz (switchbrew PTM services). Only the handheld
+  (Normal) configuration is touched: docked already runs the GPU at 768 MHz. Standard puts back what
+  `apmGetPerformanceConfiguration(Normal)` reported before the first change (0x00020003 if that read
+  nothing or High). Standard with no prior High opens no apm session: the default build behaves as before.
+  No clkrst/pcv (the wake-from-sleep hang stays avoided); a running sys-clk overrides whatever HOS applies.
+  libnx in `retuned-switch-prep:local` has `apmSetPerformanceConfiguration`/`apmGetPerformanceConfiguration`
+  and the weak `__nx_applet_PerformanceConfiguration` (not used: it only applies at start and only for
+  applications).
+- Log: one game-log line per change, `TRIAEVUM_GPU_PERF high=1 available=1 rc=0x0 failed=- requested=0x92220008
+  standard=0x00020003 effective=0x92220008 gpu_mhz=461 mem_mhz=1331 op_mode=handheld` (`effective` is
+  `appletGetCurrentPerformanceConfiguration` right after). If apm refuses (`failed=apmInitialize` or
+  `failed=apmSetPerformanceConfiguration` with its result code), the menu shows "Unavailable: ... refused
+  (0x...)" and the clock is unchanged.
+- Effect: up to −33% on GPU-clock-bound work [estimate]: Forest Temple room 8 step frames 14.9 ms →
+  about 10-11.5 ms [estimate]. No CPU change; battery and heat as Nintendo's own titles that use it.
+- Tests: `oot3d_fps_counter_tests` (`GpuPerformance`: the configurations' MHz, the configuration to
+  restore, the file round trip, no apm off the Switch) and three guards.
+- Console check (1 minute, without sys-clk): overlay on, choose High: the overlay's `GPU` reads 461 (was
+  307); `perf.txt` windows show `gpu_mhz=461 perf_cfg=0x92220008`; the game log has the `TRIAEVUM_GPU_PERF`
+  line. Back to Standard: `GPU 307`. Restart with High saved: the line appears at start.
+
 ### FPS: L3+R3 > Video, applied at once (`config/fps60`, 06/11)
 - **Was a bug, not a limit.** "30 FPS" and "60 FPS (interpolated)" both run the game at 30 steps a
   second (60 guest refreshes, the A32 update rate 2, the same gameplay clock); only the presentation

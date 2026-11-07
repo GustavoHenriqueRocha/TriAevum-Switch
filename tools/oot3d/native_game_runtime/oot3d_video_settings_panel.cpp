@@ -2,6 +2,7 @@
 #include "oot3d_video_settings.h"
 #include "oot3d_fps_counter.h"
 #include "oot3d_native_launch_frame_rate.h"
+#include "oot3d_switch_gpu_performance.h"
 #include "fast/backends/gfx_deko3d_lighting.h"
 #include "fast/oot3d/graphics_settings_runtime.h"
 #include "oot3d/renderer/azahar_texture_pack_settings.h"
@@ -75,6 +76,10 @@ public:
     mPackFound = PackFolderExists();
     mGrassBoot = mGrass = Fast::Oot3d::ReadGrassSwitchMode(mConfig);
     mGrassDistance = Fast::Oot3d::ReadGrassSwitchDistance(mConfig);
+    // config/gpu_performance applies at start (the panel is created once, at
+    // window setup); Standard opens no apm session.
+    mGpuHigh = ReadGpuPerformanceHigh(mConfig);
+    if (mGpuHigh) mGpuStatus = ApplyGpuPerformance(true);
   }
   const char *Label() const noexcept override { return "Video"; }
   void Draw() override {
@@ -125,6 +130,7 @@ public:
     }
     if (!mOverlayError.empty())
       ImGui::TextWrapped("Could not write config/%s.", mOverlayError.c_str());
+    DrawGpuClock();
     DrawTexturePack();
     DrawGrass();
     DrawLighting();
@@ -141,6 +147,27 @@ private:
     std::filesystem::create_directories(mConfig, error);
     std::ofstream file(mConfig / kPerfOverlayConfigName, std::ios::trunc);
     return static_cast<bool>(file);
+  }
+
+  // config/gpu_performance (oot3d_switch_gpu_performance.h): the official
+  // handheld configuration with GPU 460.8 MHz, applied at once and at start.
+  void DrawGpuClock() {
+    ImGui::Separator();
+    const char *const clocks[] = {"Standard (307 MHz)", "High (460.8 MHz, more battery)"};
+    int clock = mGpuHigh ? 1 : 0;
+    if (ImGui::Combo("GPU clock", &clock, clocks, 2)) {
+      mGpuHigh = clock == 1;
+      mGpuSaveError = !SaveGpuPerformanceHigh(mConfig, mGpuHigh);
+      mGpuStatus = ApplyGpuPerformance(mGpuHigh);
+    }
+    if (mGpuSaveError)
+      ImGui::TextWrapped("Could not write config/%s.", kGpuPerformanceConfigName);
+    if (mGpuStatus.Attempted && !mGpuStatus.Available)
+      ImGui::TextWrapped("Unavailable: %s refused (0x%X); the clock is unchanged.",
+                         mGpuStatus.FailedStep, mGpuStatus.Result);
+    ImGui::TextDisabled("Handheld only (docked already runs the GPU at 768 MHz). High is Nintendo's "
+                        "official handheld mode with a faster GPU: more frames in busy rooms, shorter "
+                        "battery life. Applies at once; sys-clk overrides it.");
   }
 
   // HD textures (config/texture_pack) and their size cap
@@ -265,6 +292,9 @@ private:
   bool mGrassDistanceError = false;
   std::string mLightingError;
   std::string mLightingIssue;
+  bool mGpuHigh = false;
+  bool mGpuSaveError = false;
+  GpuPerformanceStatus mGpuStatus;
 };
 } // namespace
 std::shared_ptr<Fast::Oot3d::GraphicsSettingsPanelTab>

@@ -9,9 +9,10 @@
 // GetCurrentPerformanceConfiguration, mapped by the table below: the stock
 // clocks, not a measurement). The handheld/dock mode and the performance mode
 // come from the applet (values libnx already keeps, no IPC). The app never
-// opens clkrst nor pcv and never changes clocks (SwitchWakerHD issue #33:
-// clkrst in the app froze the console on wake from sleep; sys-clk is what
-// changes clocks).
+// opens clkrst nor pcv (SwitchWakerHD issue #33: clkrst in the app froze the
+// console on wake from sleep; sys-clk is what overclocks). The only change
+// it can make is the opt-in official handheld configuration through apm
+// (oot3d_switch_gpu_performance.h, config/gpu_performance).
 //
 // Off the Switch the readings are empty; the table and the reading type are
 // plain data, so host tests use them.
