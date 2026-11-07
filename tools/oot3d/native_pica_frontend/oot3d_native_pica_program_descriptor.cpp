@@ -178,11 +178,11 @@ uint64_t BuildFragmentProgramId(const Oot3dPicaDrawPacket& packet,
     if ((packet.Registers[0x080U] & (1U << 10U)) != 0U &&
         (Oot3dPicaReferencesProceduralTexture(packet) ||
          shadowProcTexReferenced)) {
-        hash.AppendWords(packet.ProcTexLuts.Noise);
-        hash.AppendWords(packet.ProcTexLuts.ColorMap);
-        hash.AppendWords(packet.ProcTexLuts.AlphaMap);
-        hash.AppendWords(packet.ProcTexLuts.Color);
-        hash.AppendWords(packet.ProcTexLuts.ColorDifference);
+        hash.AppendWords(packet.ProcTexLuts.Noise.Values());
+        hash.AppendWords(packet.ProcTexLuts.ColorMap.Values());
+        hash.AppendWords(packet.ProcTexLuts.AlphaMap.Values());
+        hash.AppendWords(packet.ProcTexLuts.Color.Values());
+        hash.AppendWords(packet.ProcTexLuts.ColorDifference.Values());
     }
     hash.AppendU32(packet.Registers[0x0E0U]);
     hash.AppendU32(packet.Registers[0x104U] & 0x00000071U);
@@ -351,7 +351,7 @@ uint64_t BuildDynamicStateId(const Oot3dPicaDrawPacket& packet,
     hash.AppendU32(packet.Registers[0x0FDU]);
     hash.AppendU32(packet.Registers[0x08BU]);
     hash.AppendU32(packet.Registers[0x130U]);
-    hash.AppendWords(packet.FogLut);
+    hash.AppendWords(packet.FogLut.Values());
 
     // Lighting values and lookup-table data are uniforms. Hash the complete
     // native ranges so traces detect missing state before every field has a

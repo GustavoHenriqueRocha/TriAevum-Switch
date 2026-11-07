@@ -358,6 +358,9 @@ def summarize_offload(windows: list[Window]) -> None:
           f" ({fmt(mean('pica_capture_draws'), 0)} draws, copy {fmt(mean('capture_copy_kb'), 0)} KiB,"
           f" hash {fmt(mean('capture_hash_kb'), 0)} KiB, reused index ranges"
           f" {fmt(mean('index_range_reuses'), 0)})")
+    if any("geometry_evictions" in m for m in marked):
+        print(f"    geometry snapshots made {fmt(mean('geometry_misses'), 1)}/frame,"
+              f" cache evictions {fmt(mean('geometry_evictions'), 1)}/frame")
     print(f"    pica_submit without the guest {fmt(mean('pica_submit_host_ms'))} ms/frame;"
           f" perf.txt line on the game thread {fmt(mean('perf_line_ms'), 3)} ms/window"
           + (f"; writer {fmt(mean('perf_writer_ms'), 2)} ms/window,"
@@ -369,6 +372,11 @@ def summarize_offload(windows: list[Window]) -> None:
                if not math.isnan(mean(key)))
     print(f"    game thread outside the guest (pica_submit without guest + visual_present"
           f" + dsp_mix + frame_start): {fmt(host)} ms/frame")
+    if any("kernel_reacquire" in m for m in marked):
+        # "untimed:" block: game-thread work outside every phase above.
+        parts = ("frame_head", "refresh_prep", "ui_submit", "kernel_reacquire", "input_poll")
+        print("    outside the phases: " + ", ".join(f"{key} {fmt(mean(key), 3)}" for key in parts)
+              + " ms/frame")
 
 
 def summarize_cadence(windows: list[Window], seconds: float) -> None:

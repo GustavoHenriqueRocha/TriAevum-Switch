@@ -734,6 +734,19 @@ private:
   // or enqueue), ms, and of the PICA capture inside the guest's GX
   // commands (SubmitDrawPacket), cumulative.
   double perfLineGameMs = 0.0;
+  // Game-thread work outside the perf.txt phases (logs/perf.txt "untimed:"),
+  // cumulative seconds: RunFrame's head before host_frame_start, each
+  // refresh's input sampling and service update, the UI submission, and the
+  // kernel lock taken back after the frame start and the presentation
+  // hand-off (config/second_core: a wait for the second core's SVC).
+  struct UntimedSeconds {
+    double FrameHead = 0.0;
+    double RefreshPrep = 0.0;
+    double UiSubmit = 0.0;
+    double KernelReacquire = 0.0;
+    // Inside `input`: PollNativeA32Input alone.
+    double InputPoll = 0.0;
+  } untimed;
   // DSP HLE frames of one refresh: storage reused across refreshes.
   std::vector<int16_t> refreshAudioSamples;
   // config/audio_deferred (Switch, absent = on, "0" = off): DSP frames of

@@ -672,6 +672,7 @@ bool NativeA32WindowSession::RunFrame() {
   // Hang watchdog: one host frame of progress, then the stage markers below.
   Oot3dNativeGame::HangWatch::Advance();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameBegin);
+  const auto frameHeadStart = std::chrono::steady_clock::now();
   const auto phaseBeforeFrame = phaseTiming.Values();
   const double nestedGuestBeforeFrame = phaseTiming.GuestInsidePicaSubmitSeconds;
   const double guestClockBeforeFrame = phaseTiming.GuestClockSeconds;
@@ -860,6 +861,7 @@ bool NativeA32WindowSession::RunFrame() {
   hdFonts.SetOutputHeight(height);
   UpdateScenePresentation();
   phaseStart = std::chrono::steady_clock::now();
+  untimed.FrameHead += std::chrono::duration<double>(phaseStart - frameHeadStart).count();
   Fast::Renderer3ds::SlowStepTrace hostStartSteps("host_frame_start");
   window.GetMouseStateManager()->StartFrame();
   hostStartSteps.Mark("mouse");
@@ -968,6 +970,7 @@ bool NativeA32WindowSession::RunFrame() {
   }
   const bool hostGuiVisible =
       gui->GetMenuOrMenubarVisible() || gui->GetAnyGuiWindowVisible();
+  const auto inputPollStart = std::chrono::steady_clock::now();
   auto physicalInputFrame =
       PollNativeA32Input(window, nativeFrontendTouchEnabled,
                          ResolveNativeA32TouchPresentation(
@@ -984,6 +987,7 @@ bool NativeA32WindowSession::RunFrame() {
                              std::size_t>(oot3d::ui::UiSubsystem::GameplayHud)],
                          activeTopScreenConfig.HudLayout,
                          WidescreenMenuCornersActive());
+  untimed.InputPoll += SecondsSince(inputPollStart);
   // Exit game / Close game in the L3+R3 menu leave like an exit input: the
   // window closes and Finish discards the frames still queued, as for HOME >
   // Close (main then ends the application).
@@ -1123,7 +1127,11 @@ bool NativeA32WindowSession::RunFrame() {
   phaseTiming.RendererFrameStartSeconds += SecondsSince(rendererFrameStart);
   cpuRendererStart.Stop();
   phaseTiming.FrameStartSeconds += SecondsSince(phaseStart);
-  hostWorkRelease.reset();
+  {
+    const auto reacquireStart = std::chrono::steady_clock::now();
+    hostWorkRelease.reset();
+    untimed.KernelReacquire += SecondsSince(reacquireStart);
+  }
   const uint32_t guestRefreshIterations =
       std::max<uint32_t>(1U, guestRefreshesDue);
   uint32_t guestRefreshesRun = 0U;
@@ -1133,6 +1141,7 @@ bool NativeA32WindowSession::RunFrame() {
     const bool presentHostFrame =
         guestRefreshIndex + 1U == guestRefreshIterations;
     if (advanceGuest) {
+      const auto refreshPrepStart = std::chrono::steady_clock::now();
       if (!SampleGuestRefreshInput(
               guestRefreshIndex,
               nativeFrontendTouchEnabled,
@@ -1145,6 +1154,7 @@ bool NativeA32WindowSession::RunFrame() {
       if (!UpdateGuestServicesForRefresh(topScreenStartRoutingEligible, inputFrame)) {
         break;
       }
+      untimed.RefreshPrep += SecondsSince(refreshPrepStart);
       Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::GuestRefresh);
       RunGuestRefresh();
     }
@@ -1181,6 +1191,7 @@ bool NativeA32WindowSession::RunFrame() {
   // read guest memory only (through paths that take the kernel lock) and
   // talk to the render thread: released as the frame start.
   hostWorkRelease.emplace();
+  const auto uiSubmitStart = std::chrono::steady_clock::now();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::UiSubmit);
   for (std::size_t subsystemIndex = 0;
        subsystemIndex < oot3d::ui::kUiSubsystemCount; ++subsystemIndex) {
@@ -1242,6 +1253,7 @@ bool NativeA32WindowSession::RunFrame() {
     });
   }
 
+  untimed.UiSubmit += SecondsSince(uiSubmitStart);
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PresentSubmit);
   phaseStart = std::chrono::steady_clock::now();
   CpuProbe::Scope cpuPresent(CpuProbe::Phase::Present);
@@ -1321,7 +1333,11 @@ bool NativeA32WindowSession::RunFrame() {
       presentationFrameCount, frameCount, guestRefreshesDue != 0U);
   phaseTiming.PresentSeconds += SecondsSince(phaseStart);
   cpuPresent.Stop();
-  hostWorkRelease.reset();
+  {
+    const auto reacquireStart = std::chrono::steady_clock::now();
+    hostWorkRelease.reset();
+    untimed.KernelReacquire += SecondsSince(reacquireStart);
+  }
   ++presentationFrameCount;
   ++runFrameCount;
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::FrameEnd);
@@ -1930,6 +1946,13 @@ bool NativeA32WindowSession::RunFrame() {
              << static_cast<double>(capture.IndexRangeReuses -
                                     previousCapture.IndexRangeReuses) /
                     hostFrames
+             << " geometry_misses="
+             << static_cast<double>(capture.GeometryMisses - previousCapture.GeometryMisses) /
+                    hostFrames
+             << " geometry_evictions="
+             << static_cast<double>(capture.GeometryEvictions -
+                                    previousCapture.GeometryEvictions) /
+                    hostFrames
              << " pica_submit_host_ms="
              << ((picaSubmitSeconds - previousPicaSubmit) -
                  (phaseTiming.GuestInsidePicaSubmitSeconds - previousGuestInPica)) *
@@ -1945,6 +1968,21 @@ bool NativeA32WindowSession::RunFrame() {
         previousCapture = capture;
         previousGuestInPica = phaseTiming.GuestInsidePicaSubmitSeconds;
         previousPicaSubmit = picaSubmitSeconds;
+      }
+      // Game-thread work outside the phases above, ms per host frame.
+      {
+        static UntimedSeconds previousUntimed{};
+        const auto perFrame = [&](double now, double before) {
+          return (now - before) * 1000.0 / hostFrames;
+        };
+        perf << " untimed: frame_head=" << perFrame(untimed.FrameHead, previousUntimed.FrameHead)
+             << " refresh_prep=" << perFrame(untimed.RefreshPrep, previousUntimed.RefreshPrep)
+             << " ui_submit=" << perFrame(untimed.UiSubmit, previousUntimed.UiSubmit)
+             << " kernel_reacquire="
+             << perFrame(untimed.KernelReacquire, previousUntimed.KernelReacquire)
+             // Part of `input`: PollNativeA32Input alone (SDL pad, bindings).
+             << " input_poll=" << perFrame(untimed.InputPoll, previousUntimed.InputPoll);
+        previousUntimed = untimed;
       }
       // Totals of a Mesa built with the Horizon shader cache (absent from
       // the stock devkitPro library, hence weak).

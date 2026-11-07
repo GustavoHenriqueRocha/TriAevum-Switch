@@ -2539,6 +2539,55 @@ A/B on console: create `config/offload_plan`, `config/offload_capture`, `config/
 With `offload_perf` on, the perf.txt line is written whole at once (no longer cut off in the
 middle); to find where the game thread stopped, use the watchdog's `logs/hang.txt`.
 
+### Game-thread host work outside the guest (2026-11-06)
+Logs `logs15`/`logs15sc` (test.6, CPU 1020, Forest Temple room 8): in each `perf.txt` window, the
+`ms/frame:` fields nest as follows. `frame_start` = `host_frame_start` + `input` + `renderer_frame_start`
+(`oot3d_native_a32_window_frame.cpp`, RunFrame). `pica_submit` (RunGuestRefresh) contains `pica_plan`
+(placeholders, `FillDeferredPlan`) and `guest_in_pica`: the guest resumed after each completion
+signal. That time is also counted in `guest`, so `pica_submit_host_ms` = `pica_submit` − `guest_in_pica`.
+`pica_capture_ms` (the GX command's packet build, decode and snapshots) is inside `guest`. In room 8
+with the second core on, the game thread's work outside the guest is about 0.9 ms
+(`pica_submit_host_ms`, of which 0.56 is `pica_plan`) + 0.83 ms (`frame_start`, of which 0.66 is
+`input`) + 0.48 ms (`visual_present`), plus 2.44 ms of capture inside `guest` (24.7 µs per draw).
+
+- **Second core: no lock handoff at each render submission**
+  (`oot3d_native_render_command_stream.cpp`, Enqueue). Every `renderStream.Submit` from the frame loop
+  released and retook the kernel lock. With the second core waiting, Horizon's unlock hands the lock
+  to the waiting thread, so the game thread then waited for that core's whole SVC or DSP frame. This
+  happened in `visual_present` (two submits), in each drain pass's `PublishNativeSceneView`, and in
+  the two submits at the start of RunFrame. The lock is now released only when the submit actually
+  waits for a frame slot. Test: `oot3d_native_render_command_stream_tests` (TestKernelLockKeptUnlessWaiting).
+  A probe thread never gets the lock across 20000 submits with free slots, and does get it while a
+  submit waits for a slot. The old code fails the test.
+- **Geometry snapshot cache: O(1) LRU eviction** (`oot3d_native_pica_submission.cpp`). A miss
+  with the cache full (4096 entries) scanned every entry to find the oldest one (`std::min_element`
+  on an `unordered_map`). The cache now keeps an intrusive list in its own nodes and evicts the same
+  entry (the smallest `last_used_sequence`). The list is rebuilt after a savestate restore. Host -O2
+  bench, miss-heavy: 53.7 → 5.2 µs per draw, about 85 µs per eviction removed. Test:
+  `oot3d_native_offload_tests` (TestGeometryLru: across a draw, the evicted keys are exactly the oldest
+  of those the draw did not touch, also after a savestate round trip). New `offload:` fields:
+  `geometry_misses`, `geometry_evictions` per host frame.
+- **Procedural and fog tables shared copy-on-write** (`oot3d_native_pica_frontend.h`). Every draw
+  packet copied the 3.5 KiB procedural texture tables and the 0.5 KiB fog table, 4 of its ~10.6 KiB.
+  They are now `Oot3dPicaSharedArray` objects, like the shader programs: draws share one copy until
+  the game writes a table, and a write never reaches a packet already submitted. Test:
+  `oot3d_native_pica_frontend_tests` (draws share the tables; a later write leaves the earlier
+  snapshot intact). Host steady-state bench (`oot3d_native_offload_tests --bench-steady`, the same
+  100 draws every frame): building the packet is 32% of the capture.
+- **`perf.txt` `untimed:` block**: game-thread time outside every phase, ms per host frame:
+  `frame_head` (RunFrame before `host_frame_start`), `refresh_prep` (per refresh: input sampling and
+  service update), `ui_submit` (HUD/touch UI build and submit), `kernel_reacquire` (taking the kernel
+  lock back after the frame start and the presentation hand-off, which is a wait for the second core),
+  and `input_poll` (PollNativeA32Input alone, inside `input`). In logs15, `total_ms` exceeds the sum of
+  the phases by 0.7 ms (second core on) and 1.1 ms (second core off) per frame; this block names where
+  that time goes.
+
+Estimates for the console (not measured; scale factor ×5–10 from host to A57 at 1020 MHz,
+calibrated on `pica_plan` and `pica_capture_ms`): no lock handoff, 0.2–0.5 ms per step with the second
+core on, in `visual_present`, `pica_submit_host_ms` and `total_ms`; shared tables, ~0.3 ms per step
+in `pica_capture_ms`/`guest`; the LRU change saves ~0.4 ms per eviction, which shows up only where
+`geometry_evictions` is non-zero (room changes, effects at new addresses).
+
 ### Status as of 2026-10-17 (best version so far)
 - PGO (2nd collection) + lean mode + PICA plans on core 1 + render thread on core 2 + audio on its own thread.
 - Measured at 30 FPS, 2× scale: 29.9 FPS average, 93% of the time at 30, logic ~11 ms per step.

@@ -816,13 +816,13 @@ nlohmann::json Oot3dNativePicaFrontend::CaptureState() const {
         {"pica_registers", mPicaRegisters},
         {"vertex_shader", EncodeShaderState(mVertexShader)},
         {"geometry_shader", EncodeShaderState(mGeometryShader)},
-        {"fog_lut", mFogLut},
+        {"fog_lut", mFogLut.Values()},
         {"proctex_luts",
-         {{"noise", mProcTexLuts.Noise},
-          {"color_map", mProcTexLuts.ColorMap},
-          {"alpha_map", mProcTexLuts.AlphaMap},
-          {"color", mProcTexLuts.Color},
-          {"color_difference", mProcTexLuts.ColorDifference}}},
+         {{"noise", mProcTexLuts.Noise.Values()},
+          {"color_map", mProcTexLuts.ColorMap.Values()},
+          {"alpha_map", mProcTexLuts.AlphaMap.Values()},
+          {"color", mProcTexLuts.Color.Values()},
+          {"color_difference", mProcTexLuts.ColorDifference.Values()}}},
         {"lighting_luts", mLightingLuts->PackedEntries},
         {"default_attributes", mDefaultAttributes},
         {"vertex_uniform_queue",
@@ -910,21 +910,18 @@ bool Oot3dNativePicaFrontend::RestoreState(const nlohmann::json& state,
         mPicaRegisters = picaRegisters;
         mVertexShader = std::move(vertexShader);
         mGeometryShader = std::move(geometryShader);
-        mFogLut = state.at("fog_lut").get<decltype(mFogLut)>();
+        mFogLut = state.at("fog_lut").get<Oot3dPicaFogLut::Array>();
         mProcTexLuts = {};
         if (const auto iterator = state.find("proctex_luts");
             iterator != state.end()) {
-            mProcTexLuts.Noise =
-                iterator->at("noise").get<decltype(mProcTexLuts.Noise)>();
-            mProcTexLuts.ColorMap = iterator->at("color_map")
-                                           .get<decltype(mProcTexLuts.ColorMap)>();
-            mProcTexLuts.AlphaMap = iterator->at("alpha_map")
-                                           .get<decltype(mProcTexLuts.AlphaMap)>();
-            mProcTexLuts.Color =
-                iterator->at("color").get<decltype(mProcTexLuts.Color)>();
-            mProcTexLuts.ColorDifference =
-                iterator->at("color_difference")
-                    .get<decltype(mProcTexLuts.ColorDifference)>();
+            const auto table = [&](const char* name, auto& lut) {
+                lut = iterator->at(name).get<typename std::remove_reference_t<decltype(lut)>::Array>();
+            };
+            table("noise", mProcTexLuts.Noise);
+            table("color_map", mProcTexLuts.ColorMap);
+            table("alpha_map", mProcTexLuts.AlphaMap);
+            table("color", mProcTexLuts.Color);
+            table("color_difference", mProcTexLuts.ColorDifference);
         }
         mLightingLuts = std::move(lightingLuts);
         mDefaultAttributes = state.at("default_attributes")
