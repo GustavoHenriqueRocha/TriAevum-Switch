@@ -103,7 +103,9 @@ struct GrassTextureSignatureSource {
 // The rules in effect for each texture: its own when it has one, else the
 // rule of the rule texture it is a twin of (the best scoring). Results are
 // kept per texture until the rules' textures or channels change (their other
-// settings are read when asked) or a missing signature appears.
+// settings are read when asked); one made while signatures were missing is
+// resolved again at its next ask once new signatures exist, and keeps its
+// rule until then.
 class GrassTwinRules final {
   public:
     static GrassTwinRules& Instance();
@@ -133,6 +135,9 @@ class GrassTwinRules final {
         float SampleScale = 1.0F;
         float SampleOffset = 0.0F;
         bool Complete = true;
+        // Incomplete when new signatures appeared: resolved again at the
+        // texture's next Resolve, its rule kept until then (AllInherited).
+        bool Stale = false;
     };
     [[nodiscard]] static std::optional<GrassPlacementRule> RuleOf(
         const std::vector<GrassPlacementRule>& rules, const Entry& entry);

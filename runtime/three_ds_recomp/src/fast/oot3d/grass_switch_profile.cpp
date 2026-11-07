@@ -22,6 +22,36 @@ std::string_view FirstWord(std::string_view text) noexcept {
 std::atomic<int> gPublishedDistance{-1};
 // The menu's grass_lod choice while the game runs: -1 before any.
 std::atomic<int> gPublishedLod{-1};
+// The menu's grass_fill choice while the game runs: -1 before any.
+std::atomic<int> gPublishedFill{-1};
+
+// A file that is on when absent or holding any word but "0", "off", "false".
+bool ParseOnUnlessOff(std::optional<std::string_view> fileText) noexcept {
+    if (!fileText.has_value()) return true;
+    const std::string_view word = FirstWord(*fileText);
+    return !(word == "0" || word == "off" || word == "false");
+}
+
+bool ReadOnUnlessOff(const std::filesystem::path& file) {
+    std::ifstream stream(file);
+    if (!stream) return true;
+    std::string text;
+    std::getline(stream, text);
+    return ParseOnUnlessOff(std::string_view(text));
+}
+
+// Removes the file for on, writes "0" for off.
+bool SaveOnUnlessOff(const std::filesystem::path& configDirectory, std::string_view name, bool on) {
+    std::error_code error;
+    if (on) {
+        std::filesystem::remove(configDirectory / name, error);
+        return !error;
+    }
+    std::filesystem::create_directories(configDirectory, error);
+    std::ofstream file(configDirectory / name, std::ios::trunc);
+    file << "0\n";
+    return static_cast<bool>(file);
+}
 } // namespace
 
 GrassSwitchMode ParseGrassSwitchMode(std::optional<std::string_view> fileText) noexcept {
@@ -110,29 +140,15 @@ std::optional<GrassSwitchDistance> PublishedGrassSwitchDistance() noexcept {
 }
 
 bool ParseGrassSwitchLod(std::optional<std::string_view> fileText) noexcept {
-    if (!fileText.has_value()) return true;
-    const std::string_view word = FirstWord(*fileText);
-    return !(word == "0" || word == "off" || word == "false");
+    return ParseOnUnlessOff(fileText);
 }
 
 bool ReadGrassSwitchLod(const std::filesystem::path& configDirectory) {
-    std::ifstream file(configDirectory / "grass_lod");
-    if (!file) return true;
-    std::string text;
-    std::getline(file, text);
-    return ParseGrassSwitchLod(std::string_view(text));
+    return ReadOnUnlessOff(configDirectory / "grass_lod");
 }
 
 bool SaveGrassSwitchLod(const std::filesystem::path& configDirectory, bool on) {
-    std::error_code error;
-    if (on) {
-        std::filesystem::remove(configDirectory / "grass_lod", error);
-        return !error;
-    }
-    std::filesystem::create_directories(configDirectory, error);
-    std::ofstream file(configDirectory / "grass_lod", std::ios::trunc);
-    file << "0\n";
-    return static_cast<bool>(file);
+    return SaveOnUnlessOff(configDirectory, "grass_lod", on);
 }
 
 void PublishGrassSwitchLod(bool on) noexcept {
@@ -141,6 +157,28 @@ void PublishGrassSwitchLod(bool on) noexcept {
 
 std::optional<bool> PublishedGrassSwitchLod() noexcept {
     const int value = gPublishedLod.load(std::memory_order_relaxed);
+    if (value < 0) return std::nullopt;
+    return value == 1;
+}
+
+bool ParseGrassSwitchFill(std::optional<std::string_view> fileText) noexcept {
+    return ParseOnUnlessOff(fileText);
+}
+
+bool ReadGrassSwitchFill(const std::filesystem::path& configDirectory) {
+    return ReadOnUnlessOff(configDirectory / "grass_fill");
+}
+
+bool SaveGrassSwitchFill(const std::filesystem::path& configDirectory, bool fixed) {
+    return SaveOnUnlessOff(configDirectory, "grass_fill", fixed);
+}
+
+void PublishGrassSwitchFill(bool fixed) noexcept {
+    gPublishedFill.store(fixed ? 1 : 0, std::memory_order_relaxed);
+}
+
+std::optional<bool> PublishedGrassSwitchFill() noexcept {
+    const int value = gPublishedFill.load(std::memory_order_relaxed);
     if (value < 0) return std::nullopt;
     return value == 1;
 }
