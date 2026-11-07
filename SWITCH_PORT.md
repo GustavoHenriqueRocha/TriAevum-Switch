@@ -2187,6 +2187,69 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
 - Code: `gfx_deko3d_lighting.cpp` (text, `ClassifyPerPixelSurface`, `PerPixelFragmentVariant(text, path)`),
   `gfx_deko3d_lighting.h`, `gfx_deko3d.cpp` (`ResolveLightingFragment`, `ApplyPicaLighting`),
   `gfx_deko3d_programs.h` (counters), `tools/oot3d/deko3d_lighting_variants.cpp`.
+### Per-pixel blink at 30 and 60 FPS: what `log16` says, and the per-frame watch (0.1.2-test.8, 07/11)
+- **Seen (test.8):** with Per-pixel, models still "blink" now and then, at 30 FPS too: one frame shaded like
+  native lighting (warm, no rim).
+- **What the `log16` counters show** (`deko3d.txt`, 21 windows of 1800 frames; scenes from `perf.txt`):
+  - **Title screen (scene 0x6B, frames 300-3600):** `no env 8616` of 44731 and `no env 15300` of 57777 lit draws,
+    11-17 per frame in both frame kinds. These are the title logo's draws: the composition tracker marks the
+    logo actor `IsolatedLighting` (`IsTitleLogoActor`, `oot3d_native_pica_composition.cpp:345/482`), and
+    `BuildPerPixelSurface` lights it with its own lights, no scene environment and no rim, by design (upstream's
+    rule). Not a blink.
+  - **The 32-146 `no env` draws of the other windows** are the area changes: every `scene environment off`
+    line is followed by `on` two device frames later, and each window's count is the number of changes times one
+    frame's lit draws, the same in both kinds (5400-7200: changes at 6362 and 7016, 88 = 2 x 44; 7200-9000: 90 =
+    2 x 45; 18000-19800: three changes, 146). For those two frames the scene-view capture has no scene
+    (`NativeA32SceneViewProbe::Capture`: the new PlayState's View is not set yet), so the environment publishes
+    none. [INFERENCE] the new scene is still under its fade from black then.
+  - **`native=`** (1386/237, 4853/4362, 4889/2358) appears only in the windows through the Castle Town ruins and
+    its entrance, after `shaders: fragment de28aff122da114a not in the pack` (frame ~7018): `variants missing=1`.
+    The draws of that program keep native shaders every frame they appear (a steady fallback of one material, not a
+    flip). The text is already in `~/workshop-OOT/shaders/console-missing/`: the next `deko3d.pack` build covers it.
+  - **Steady windows** (Temple of Time at 30 FPS, 21600-25200; Hyrule Field; Forest Temple room 8): `no env 0, no
+    rim 0, native=0` in both kinds, lit draws per frame equal across kinds (47.0 vs 47.2). So in the frames that
+    blink, the per-draw decision either refuses Link's draws (`ineligible`, which the window totals cannot place in
+    one frame) or the GPU draws something other than what the CPU decided.
+- **One mechanism the code allows** (not yet seen on the console): a world model is refused as `not_scene_world`
+  when its draw arrives without its composition. The frontend tags every draw of a command list submitted in the
+  HUD phase as UI (`oot3d_native_pica_frontend.cpp`, `resolveComposition` returns nothing when the list's domain is
+  `Ui`; the domain flips at `kTopScreenGameplayCompositionPrefix` and returns to Scene at each guest refresh). A
+  scene piece the game's graphics library submits late (a speculative or completion-driven split) would then lose
+  its world layer, its light binding and per-pixel lighting for that frame. Spans can also be dropped when they
+  cross a submission (`PartiallyOverlappingSubmissions`) or rejected over an unconsumed span
+  (`OverlappingPacketSpans`).
+- **New per-frame watch (decides it on the next run):** `Deko3d::LightingTransientWatch`
+  (`gfx_deko3d_lighting_draw.cpp`) keeps the last three presented samples (one per
+  `PublishPicaFrameTemporalSample`; draws of another render-target namespace, the dependency flushes, are not
+  counted). A sample that differs from both neighbours, where both light at least 4 draws, is a transient: under
+  3/4 of their lit draws, or more lit draws without environment or rim, more native draws, or more world models lost
+  to their composition. `logs/deko3d.txt` gets one line per transient (at most 48):
+  `lighting transient: frame F (real|in-between) lit b/s/a, no env b/s/a, no rim b/s/a, native b/s/a, lost world
+  b/s/a (class=count ...; first domain=D layer=L provenance=P pc=X actor=X list=X+N)` (before/sample/after).
+  - Lost world model: refused `not_scene_world`, yet with a typed surface program and depth write
+    (`ClassifyLostWorldComposition`). Classes: `ui_list` (a list submitted in the HUD phase: UI lifecycle, no source
+    PC), `ui_span` (a UI scope's span), `no_span` (no span at all), `control_flow` (a primitive packet outside a CMB
+    pass), `atmosphere`, `other`. Domain 0 unknown, 1 scene, 2 UI; layer 0 unknown, 1 opaque, 2 transparent, 3
+    atmosphere, 4 UI; provenance 0 unknown, 1 CMB pass, 2 control flow, 3 UI lifecycle.
+  - `lighting real/in-between` lines gain `lost world=W (class=count ...) transients=T`.
+  - `perf.txt` gains `composition: spans_consumed spans_partial spans_overlapping spans_unattributed spans_evicted
+    cmb_invalid` (per window): the composition tracker's losses.
+- **Reading the next run:** a blink with a `lighting transient` line at that moment and `lost world` > 0 = the
+  composition (the class says which path; `ui_list` = the HUD-phase submission); with `no env`/`no rim` = the
+  environment; with `native` = a variant; with only `lit` lower = draws missing from the frame. A blink with no
+  transient line = the GPU side (the variant drew with a block it did not receive, or the presented image is not the
+  one drawn).
+- **Cost:** a few counters per lit draw and a three-sample comparison per frame; nothing on the game thread except
+  six subtractions per `perf.txt` window.
+- **Check (one minute):** Per-pixel, Temple of Time, Link close up: 30 s at 60 FPS, then 30 s at 30 FPS. Note
+  roughly when a blink is seen. Then `logs/deko3d.txt`: `lighting transient` lines (frame, class), the `lost world` and
+  `transients` counts of the `lighting real/in-between` lines; `logs/perf.txt`: the `composition:` group in the
+  same windows. No `deko3d.pack` rebuild needed for this change (one is pending for `frag_de28aff122da114a`).
+- Code: `gfx_deko3d_lighting.h` (`LostWorldComposition`, `LightingSample`, `LightingTransientWatch`),
+  `gfx_deko3d_lighting_draw.cpp`, `gfx_deko3d.cpp` (`ApplyPicaLighting`, `BeginLightingSample`),
+  `gfx_deko3d_grass.cpp` (`PublishPicaFrameTemporalSample`), `oot3d_native_a32_window_frame.cpp` (perf line).
+  Tests: `oot3d_deko3d_inbetween_lighting_tests` (`TestLostWorldComposition`, `TestLightingTransients`). Guards
+  "per-pixel blink (test.8)".
 
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP

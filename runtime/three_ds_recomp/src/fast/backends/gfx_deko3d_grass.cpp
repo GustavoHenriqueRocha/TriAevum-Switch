@@ -819,8 +819,7 @@ bool GfxRenderingAPIDeko3d::PublishPicaFrameTemporalSample(const Renderer3ds::Pi
     // Before the sample's draws, into the device frame that presents them.
     Deko3d::GrassNoteSample(sample.Synthetic, mDevice.Frame());
     // The sample's per-pixel draws count under its frame kind.
-    mInBetweenSample = sample.Synthetic;
-    ++(sample.Synthetic ? mInBetweenLighting : mRealLighting).Samples;
+    BeginLightingSample(sample.Synthetic);
     return true;
 }
 

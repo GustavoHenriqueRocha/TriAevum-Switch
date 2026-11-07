@@ -49,6 +49,19 @@ std::string FormatFrameKindLighting(const FrameKindLighting& kind) {
         open = true;
     }
     if (open) text += ')';
+    uint64_t lost = 0;
+    for (const uint64_t count : kind.LostWorld) lost += count;
+    text += " lost world=" + std::to_string(lost);
+    open = false;
+    for (size_t index = 0; index < kind.LostWorld.size(); ++index) {
+        if (kind.LostWorld[index] == 0U) continue;
+        text += open ? " " : " (";
+        text += LostWorldCompositionName(static_cast<LostWorldComposition>(index));
+        text += '=' + std::to_string(kind.LostWorld[index]);
+        open = true;
+    }
+    if (open) text += ')';
+    text += " transients=" + std::to_string(kind.Transients);
     if (kind.FirstLit) {
         const auto& block = *kind.FirstLit;
         char summary[96];
@@ -59,6 +72,149 @@ std::string FormatFrameKindLighting(const FrameKindLighting& kind) {
         text += summary;
     }
     return text;
+}
+
+const char* LostWorldCompositionName(LostWorldComposition lost) noexcept {
+    switch (lost) {
+        case LostWorldComposition::UiList: return "ui_list";
+        case LostWorldComposition::UiSpan: return "ui_span";
+        case LostWorldComposition::NoSpan: return "no_span";
+        case LostWorldComposition::ControlFlow: return "control_flow";
+        case LostWorldComposition::Atmosphere: return "atmosphere";
+        case LostWorldComposition::Other: return "other";
+        case LostWorldComposition::Count: break;
+    }
+    return "?";
+}
+
+std::optional<LostWorldComposition> ClassifyLostWorldComposition(const Renderer3ds::PicaDrawView& draw,
+                                                                PerPixelRefusal refusal) noexcept {
+    using Renderer3ds::PicaCompositionDomain;
+    using Renderer3ds::PicaCompositionLayer;
+    using Renderer3ds::PicaCompositionProvenance;
+    const auto& hooks = draw.TemporalVertexProgram.Hooks;
+    if (refusal != PerPixelRefusal::NotSceneWorld || hooks.SurfaceProgram() == nullptr ||
+        hooks.TransformProgram() == nullptr || !draw.DepthWriteEnabled)
+        return std::nullopt;
+    const auto& composition = draw.Composition;
+    if (draw.CompositionDomain == PicaCompositionDomain::Ui || composition.Layer == PicaCompositionLayer::Ui) {
+        // The frontend's attribution of a list submitted in the HUD phase:
+        // UI lifecycle, no source PC (oot3d_native_pica_frontend.cpp).
+        return composition.Provenance == PicaCompositionProvenance::NativeUiLifecycle && composition.SourcePc == 0U
+                   ? LostWorldComposition::UiList
+                   : LostWorldComposition::UiSpan;
+    }
+    if (composition.Layer == PicaCompositionLayer::Unknown) {
+        return composition.Provenance == PicaCompositionProvenance::NativeControlFlow
+                   ? LostWorldComposition::ControlFlow
+                   : LostWorldComposition::NoSpan;
+    }
+    if (composition.Layer == PicaCompositionLayer::Atmosphere) return LostWorldComposition::Atmosphere;
+    return LostWorldComposition::Other;
+}
+
+uint32_t LightingSample::LostTotal() const noexcept {
+    uint32_t total = 0;
+    for (const uint32_t count : Lost) total += count;
+    return total;
+}
+
+uint32_t LightingSample::LostToComposition() const noexcept {
+    return Lost[static_cast<size_t>(LostWorldComposition::UiList)] +
+           Lost[static_cast<size_t>(LostWorldComposition::UiSpan)] +
+           Lost[static_cast<size_t>(LostWorldComposition::NoSpan)] +
+           Lost[static_cast<size_t>(LostWorldComposition::ControlFlow)];
+}
+
+bool IsLightingTransient(const LightingSample& before, const LightingSample& sample,
+                         const LightingSample& after) noexcept {
+    if (before.Lit < 4U || after.Lit < 4U) return false;
+    const auto more = [](uint32_t value, uint32_t a, uint32_t b) { return value > std::max(a, b); };
+    return uint64_t{sample.Lit} * 4U < uint64_t{std::min(before.Lit, after.Lit)} * 3U ||
+           more(sample.LitWithoutEnvironment, before.LitWithoutEnvironment, after.LitWithoutEnvironment) ||
+           more(sample.LitWithoutRim, before.LitWithoutRim, after.LitWithoutRim) ||
+           more(sample.Native, before.Native, after.Native) ||
+           more(sample.LostToComposition(), before.LostToComposition(), after.LostToComposition());
+}
+
+std::string FormatLightingTransient(const LightingTransient& transient) {
+    const auto& b = transient.Before;
+    const auto& s = transient.Sample;
+    const auto& a = transient.After;
+    char text[384];
+    int length = std::snprintf(
+        text, sizeof(text),
+        "frame %llu (%s) lit %u/%u/%u, no env %u/%u/%u, no rim %u/%u/%u, native %u/%u/%u, lost world %u/%u/%u",
+        static_cast<unsigned long long>(s.DeviceFrame), s.InBetween ? "in-between" : "real", b.Lit, s.Lit, a.Lit,
+        b.LitWithoutEnvironment, s.LitWithoutEnvironment, a.LitWithoutEnvironment, b.LitWithoutRim,
+        s.LitWithoutRim, a.LitWithoutRim, b.Native, s.Native, a.Native, b.LostTotal(), s.LostTotal(),
+        a.LostTotal());
+    std::string result(text, static_cast<size_t>(std::clamp(length, 0, static_cast<int>(sizeof(text)) - 1)));
+    if (s.LostTotal() == 0U) return result;
+    bool open = false;
+    for (size_t index = 0; index < s.Lost.size(); ++index) {
+        if (s.Lost[index] == 0U) continue;
+        result += open ? " " : " (";
+        result += LostWorldCompositionName(static_cast<LostWorldComposition>(index));
+        result += '=' + std::to_string(s.Lost[index]);
+        open = true;
+    }
+    length = std::snprintf(text, sizeof(text),
+                           "; first domain=%u layer=%u provenance=%u pc=%08x actor=%llx list=%08x+%u)",
+                           s.LostDomain, s.LostLayer, s.LostProvenance, s.LostSourcePc,
+                           static_cast<unsigned long long>(s.LostActor), s.LostCommandList, s.LostOffsetWords);
+    result.append(text, static_cast<size_t>(std::clamp(length, 0, static_cast<int>(sizeof(text)) - 1)));
+    return result;
+}
+
+std::optional<LightingTransient> LightingTransientWatch::Begin(uint64_t deviceFrame, bool inBetween) {
+    std::optional<LightingTransient> transient;
+    if (mOpened) {
+        if (mClosedCount == 2U && IsLightingTransient(mClosed[0], mClosed[1], mOpen))
+            transient = LightingTransient{mClosed[0], mClosed[1], mOpen};
+        mClosed[0] = mClosed[1];
+        mClosed[1] = mOpen;
+        mClosedCount = std::min<size_t>(mClosedCount + 1U, 2U);
+    }
+    mOpen = {};
+    mOpen.DeviceFrame = deviceFrame;
+    mOpen.InBetween = inBetween;
+    mOpened = true;
+    mNamespace.reset();
+    return transient;
+}
+
+bool LightingTransientWatch::Counts(const Renderer3ds::PicaDrawView& draw) noexcept {
+    if (!mOpened) return false;
+    if (!mNamespace) mNamespace = draw.RenderTargetNamespace;
+    return *mNamespace == draw.RenderTargetNamespace;
+}
+
+void LightingTransientWatch::Lit(const Renderer3ds::PicaDrawView& draw,
+                                 const Renderer3ds::PicaSurfaceLightingUniforms& block) {
+    if (!Counts(draw)) return;
+    ++mOpen.Lit;
+    if (block.EnvironmentParameters[3] == 0.0F) ++mOpen.LitWithoutEnvironment;
+    if (block.Rim[0] <= 0.0F) ++mOpen.LitWithoutRim;
+}
+
+void LightingTransientWatch::Native(const Renderer3ds::PicaDrawView& draw) {
+    if (Counts(draw)) ++mOpen.Native;
+}
+
+void LightingTransientWatch::Refused(const Renderer3ds::PicaDrawView& draw, PerPixelRefusal refusal) {
+    const auto lost = ClassifyLostWorldComposition(draw, refusal);
+    if (!lost || !Counts(draw)) return;
+    if (mOpen.LostTotal() == 0U) {
+        mOpen.LostDomain = static_cast<uint8_t>(draw.CompositionDomain);
+        mOpen.LostLayer = static_cast<uint8_t>(draw.Composition.Layer);
+        mOpen.LostProvenance = static_cast<uint8_t>(draw.Composition.Provenance);
+        mOpen.LostSourcePc = draw.Composition.SourcePc;
+        mOpen.LostActor = draw.Composition.NativeActorIdentity;
+        mOpen.LostCommandList = draw.CommandListAddress;
+        mOpen.LostOffsetWords = draw.CommandListOffsetWords;
+    }
+    ++mOpen.Lost[static_cast<size_t>(*lost)];
 }
 
 PerPixelRefusal AdmitPerPixelDraw(const Renderer3ds::PicaDrawView& draw) noexcept {

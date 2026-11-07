@@ -335,7 +335,27 @@ GUARDS = [
           test="oot3d_deko3d_inbetween_lighting_tests"),
     Guard("lighting by frame kind: deko3d learns the frame kind from the published temporal sample",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
-          r'mInBetweenSample = sample\.Synthetic;'),
+          r'BeginLightingSample\(sample\.Synthetic\);'),
+    Guard("per-pixel blink (test.8): every per-pixel decision of a presented frame feeds the transient watch, "
+          "and a one-frame transient is logged with its device frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'const auto refuse = \[&\]\(Deko3d::PerPixelRefusal refusal\) \{.*?'
+          r'Deko3d::ClassifyLostWorldComposition\(draw, refusal\).*?mLightingWatch\.Refused\(draw, refusal\);.*?'
+          r'mLightingWatch\.Lit\(draw, mSurfaceLighting\);.*?mLightingWatch\.Native\(draw\);.*?'
+          r'void GfxRenderingAPIDeko3d::BeginLightingSample\(bool inBetween\) \{\s+mInBetweenSample = inBetween;.*?'
+          r'mLightingWatch\.Begin\(mDevice\.Frame\(\), inBetween\).*?"lighting transient: %s"',
+          test="oot3d_deko3d_inbetween_lighting_tests (TestLightingTransients)"),
+    Guard("per-pixel blink (test.8): a world model refused as not_scene_world is classified by its composition "
+          "(a list submitted in the HUD phase, a UI span, no span, control flow)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting_draw.cpp",
+          r'std::optional<LostWorldComposition> ClassifyLostWorldComposition\(.*?'
+          r'refusal != PerPixelRefusal::NotSceneWorld \|\| hooks\.SurfaceProgram\(\) == nullptr \|\|.*?'
+          r'LostWorldComposition::UiList.*?LostWorldComposition::NoSpan',
+          test="oot3d_deko3d_inbetween_lighting_tests (TestLostWorldComposition)"),
+    Guard("per-pixel blink (test.8): perf.txt reports the composition spans lost per window",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'perf << " composition: spans_consumed=".*?" spans_partial=".*?" spans_overlapping=".*?'
+          r'" spans_unattributed=".*?" spans_evicted=".*?" cmb_invalid="'),
     Guard("lighting3: logs/deko3d.txt counts each issued draw by base program class (per-frame breakdown)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'mFrameDraws\.Current\.Count\(program\.Base, program\.Lit, draw\.Blend\.Enabled, pixels\);',

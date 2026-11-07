@@ -537,10 +537,16 @@ void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw,
     // them). The decision is Deko3d::BuildPerPixelSurface's (host-tested with
     // the fps60 in-between frames); counted by frame kind.
     auto& kind = mInBetweenSample ? mInBetweenLighting : mRealLighting;
-    if (const auto refusal = Deko3d::AdmitPerPixelDraw(draw); refusal != Deko3d::PerPixelRefusal::None) {
+    const auto refuse = [&](Deko3d::PerPixelRefusal refusal) {
         if (refusal == Deko3d::PerPixelRefusal::NoDepthWrite) ++mLightingCounters.DrawsNoDepthWrite;
         ++mLightingCounters.DrawsIneligible;
         kind.Refuse(refusal);
+        if (const auto lost = Deko3d::ClassifyLostWorldComposition(draw, refusal))
+            ++kind.LostWorld[static_cast<size_t>(*lost)];
+        mLightingWatch.Refused(draw, refusal);
+    };
+    if (const auto refusal = Deko3d::AdmitPerPixelDraw(draw); refusal != Deko3d::PerPixelRefusal::None) {
+        refuse(refusal);
         return;
     }
     const DkShader* vertex = ResolvePerPixelVertex(draw);
@@ -551,8 +557,7 @@ void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw,
         if (const auto refusal = Deko3d::BuildPerPixelSurface(draw, mLightingEnvironment, mLightingView,
                                                               mSurfaceLighting);
             refusal != Deko3d::PerPixelRefusal::None) {
-            ++mLightingCounters.DrawsIneligible;
-            kind.Refuse(refusal);
+            refuse(refusal);
             return;
         }
     }
@@ -574,8 +579,10 @@ void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw,
         Deko3d::ChooseLightingProgram<DkShader>(program.Vertex, program.Fragment, vertex, fragment, mLightingCounters);
     if (choice.Lit) {
         kind.Light(mSurfaceLighting);
+        mLightingWatch.Lit(draw, mSurfaceLighting);
     } else {
         ++kind.Native;
+        mLightingWatch.Native(draw);
     }
     program.Vertex = choice.Vertex;
     program.Fragment = choice.Fragment;
@@ -614,6 +621,21 @@ void GfxRenderingAPIDeko3d::LogLightingCounters(const char* when) {
     }
     mRealLighting = {};
     mInBetweenLighting = {};
+}
+
+void GfxRenderingAPIDeko3d::BeginLightingSample(bool inBetween) {
+    mInBetweenSample = inBetween;
+    ++(inBetween ? mInBetweenLighting : mRealLighting).Samples;
+    // A sample unlike both neighbours: the one-frame blink as the CPU sees it
+    // (fewer lit draws, lit without environment or rim, native, world models
+    // lost to their composition), with the device frame that presented it.
+    if (const auto transient = mLightingWatch.Begin(mDevice.Frame(), inBetween)) {
+        ++(transient->Sample.InBetween ? mInBetweenLighting : mRealLighting).Transients;
+        if (mTransientsLogged < 48U) {
+            ++mTransientsLogged;
+            Deko3d::Log("lighting transient: %s", Deko3d::FormatLightingTransient(*transient).c_str());
+        }
+    }
 }
 
 void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {

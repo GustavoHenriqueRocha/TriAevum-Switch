@@ -2001,6 +2001,30 @@ bool NativeA32WindowSession::RunFrame() {
         previousGuestInPica = phaseTiming.GuestInsidePicaSubmitSeconds;
         previousPicaSubmit = picaSubmitSeconds;
       }
+      // Composition spans lost per window (deko3d "lighting transient" lines
+      // name the draws that lost them): spans crossing a submission,
+      // rejected over an older pending span, mesh packets outside any owner,
+      // evicted pending spans, CMB passes not recognised. Reset() (state
+      // loads) restarts the counters.
+      {
+        static Oot3dNativeGame::Oot3dNativePicaCompositionStats previousComposition{};
+        const auto& composition = picaCompositionTracker.Stats();
+        const auto delta = [](uint64_t now, uint64_t before) { return now >= before ? now - before : now; };
+        perf << " composition: spans_consumed="
+             << delta(composition.ConsumedPacketSpans, previousComposition.ConsumedPacketSpans)
+             << " spans_partial="
+             << delta(composition.PartiallyOverlappingSubmissions,
+                      previousComposition.PartiallyOverlappingSubmissions)
+             << " spans_overlapping="
+             << delta(composition.OverlappingPacketSpans, previousComposition.OverlappingPacketSpans)
+             << " spans_unattributed="
+             << delta(composition.UnattributedPacketSpans, previousComposition.UnattributedPacketSpans)
+             << " spans_evicted=" << delta(composition.EvictedPacketSpans, previousComposition.EvictedPacketSpans)
+             << " cmb_invalid="
+             << delta(composition.InvalidCmbPassEntries + composition.InvalidCmbReturnAddresses,
+                      previousComposition.InvalidCmbPassEntries + previousComposition.InvalidCmbReturnAddresses);
+        previousComposition = composition;
+      }
       // Game-thread work outside the phases above, ms per host frame.
       {
         static UntimedSeconds previousUntimed{};

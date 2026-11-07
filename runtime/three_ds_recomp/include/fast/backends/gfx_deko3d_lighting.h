@@ -230,6 +230,21 @@ enum class PerPixelRefusal : uint8_t {
 
 [[nodiscard]] const char* PerPixelRefusalName(PerPixelRefusal refusal) noexcept;
 
+// A world model per-pixel lighting refused as not_scene_world although it
+// has a typed surface program and writes depth: what its composition says
+// instead. UiList: the whole command list was submitted while the frame was
+// in its HUD phase (the frontend tags every draw of it UI); UiSpan: a UI
+// scope's span holds it; NoSpan: no span covered it (provenance unknown);
+// ControlFlow: a primitive packet outside a CMB pass; Atmosphere; Other.
+enum class LostWorldComposition : uint8_t { UiList, UiSpan, NoSpan, ControlFlow, Atmosphere, Other, Count };
+inline constexpr size_t kLostWorldCompositions = static_cast<size_t>(LostWorldComposition::Count);
+
+[[nodiscard]] const char* LostWorldCompositionName(LostWorldComposition lost) noexcept;
+
+// The class of a refused draw that is a lost world model, else nothing.
+[[nodiscard]] std::optional<LostWorldComposition> ClassifyLostWorldComposition(const Renderer3ds::PicaDrawView& draw,
+                                                                              PerPixelRefusal refusal) noexcept;
+
 // Per-pixel draws of one frame kind: real (step and native) frames and
 // fps60 in-between frames (PublishPicaFrameTemporalSample's Synthetic), so
 // logs/deko3d.txt shows whether the in-between frames light like the real ones.
@@ -268,12 +283,82 @@ struct FrameKindLighting {
             FirstLit = BlockSummary{block.Control, block.EnvironmentParameters[3], block.Rim[0],
                                     block.BakedReferenceUp[3]};
     }
+    // Lost world models (ClassifyLostWorldComposition) and one-frame
+    // transients (LightingTransientWatch) whose sample was of this kind.
+    std::array<uint64_t, kLostWorldCompositions> LostWorld{};
+    uint64_t Transients = 0;
 };
 
 // "frames=F lit=L (no env E, no rim R) native=N ineligible=I first=<reason>
-// (reason=count ...) block control=a/b/c/d env=E rim=R baked=B" (the first
-// lit draw's block).
+// (reason=count ...) lost world=W (class=count ...) transients=T block
+// control=a/b/c/d env=E rim=R baked=B" (the first lit draw's block).
 [[nodiscard]] std::string FormatFrameKindLighting(const FrameKindLighting& kind);
+
+// The per-pixel decisions of one temporal sample: one presented frame
+// (PublishPicaFrameTemporalSample opens it).
+struct LightingSample {
+    uint64_t DeviceFrame = 0;
+    bool InBetween = false;
+    uint32_t Lit = 0;
+    uint32_t LitWithoutEnvironment = 0;
+    uint32_t LitWithoutRim = 0;
+    uint32_t Native = 0;
+    std::array<uint32_t, kLostWorldCompositions> Lost{};
+    // The first lost world model: its composition and command-list place.
+    uint8_t LostDomain = 0;
+    uint8_t LostLayer = 0;
+    uint8_t LostProvenance = 0;
+    uint32_t LostSourcePc = 0;
+    uint64_t LostActor = 0;
+    uint32_t LostCommandList = 0;
+    uint32_t LostOffsetWords = 0;
+
+    [[nodiscard]] uint32_t LostTotal() const noexcept;
+    // Lost to the composition's timing or spans (not atmosphere/other).
+    [[nodiscard]] uint32_t LostToComposition() const noexcept;
+};
+
+// A sample whose per-pixel draws differ from both neighbours' where the
+// neighbours agree: fewer lit draws (under 3/4 of both), more lit draws
+// without environment or rim, more native draws or more world models lost to
+// their composition. Both neighbours must light at least 4 draws. This is
+// the one-frame per-pixel blink as the CPU sees it; a blink with no such
+// sample is on the GPU side.
+[[nodiscard]] bool IsLightingTransient(const LightingSample& before, const LightingSample& sample,
+                                       const LightingSample& after) noexcept;
+
+struct LightingTransient {
+    LightingSample Before;
+    LightingSample Sample;
+    LightingSample After;
+};
+
+// "frame F (real|in-between) lit b/s/a, no env b/s/a, no rim b/s/a, native
+// b/s/a, lost world b/s/a (class=count ...; first domain=D layer=L
+// provenance=P pc=X actor=X list=X+N)".
+[[nodiscard]] std::string FormatLightingTransient(const LightingTransient& transient);
+
+// The last three samples of the presented frames. Draws of another render
+// target namespace than the sample's first draw (the game thread's
+// dependency flushes, never presented) are not counted.
+class LightingTransientWatch {
+  public:
+    // Closes the open sample and opens the next; returns the sample before
+    // the closed one when it was a transient.
+    std::optional<LightingTransient> Begin(uint64_t deviceFrame, bool inBetween);
+    void Lit(const Renderer3ds::PicaDrawView& draw, const Renderer3ds::PicaSurfaceLightingUniforms& block);
+    void Native(const Renderer3ds::PicaDrawView& draw);
+    void Refused(const Renderer3ds::PicaDrawView& draw, PerPixelRefusal refusal);
+
+  private:
+    [[nodiscard]] bool Counts(const Renderer3ds::PicaDrawView& draw) noexcept;
+
+    std::array<LightingSample, 2> mClosed{}; // [0] older
+    size_t mClosedCount = 0;
+    LightingSample mOpen{};
+    bool mOpened = false;
+    std::optional<uint64_t> mNamespace;
+};
 
 // The per-pixel admission of a draw before its variants are resolved
 // (upstream's surfaceCandidate: scene domain, world layer, typed surface
