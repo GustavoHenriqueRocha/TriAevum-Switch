@@ -1608,6 +1608,12 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'" spans_invalid=".*?" late_lists=".*?" ui_world_draws=".*?" no_span_draws=".*?" owner_holes=".*?'
           r'"composition note: window_end="'),
+    Guard("hudscale75: the Switch's default HUD scale is 0.75 with no config (the mod's screenshots are ~0.70)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_config.h",
+          r'#ifdef __SWITCH__\s*inline constexpr float kTopScreenHudScaleDefault = 0\.75F;'),
+    Guard("hudscale75: the staged Switch config ships HUD scale 0.75",
+          "config/topscreen_ui.switch.json",
+          r'"hud_scale": 0\.75,'),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay

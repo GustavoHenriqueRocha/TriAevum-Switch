@@ -2049,6 +2049,15 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
     image: X-to-ZL 91 px for 48 units, heart pitch 21 px); the Switch default is 0.90
     (`config/topscreen_ui.switch.json`, the mod's own default), 2.71 px per unit on 720p (Y-to-ZR
     130 px). Setting: L3+R3 > HUD > HUD scale (0.70 or 0.75 for the screenshots' look).
+  - *Default now 0.75 (hudscale75):* `config/topscreen_ui.switch.json` (staged as
+    `config/topscreen_ui.json`) and the Switch code default when no config exists
+    (`kTopScreenHudScaleDefault`, `#ifdef __SWITCH__`; PC stays 0.80) are 0.75. The menu has no
+    reset-to-default. The release zip ships the author's reference `config/topscreen_ui.json`
+    (`release-fork.sh` copies `$reference/config/*`), which must say 0.75 too. An existing install
+    keeps its saved scale (0.90 or whatever it chose): the in-app updater never writes `config/`
+    (`oot3d_update_release.cpp` protected roots). Only extracting the release zip by hand over the
+    install replaces `config/topscreen_ui.json` (and every other HUD setting in it); the menu changes
+    the scale at any time. Guards: `hudscale75` in `tests/switch/test_bug_guards.py`.
   - *Labels under icons:* the X/Y/B/ZR/ZL labels and the item icons were both layer 13 and the icons
     came after, so a larger icon covered its label (the bomb over the R of ZR, the bow over Y); on the
     mod's screenshots the labels are on top. Now `kTopScreenButtonLabelLayer` (14) puts them over the

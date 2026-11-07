@@ -35,7 +35,7 @@ void Require(bool value, const char *message) {
 
 bool Near(float a, float b) { return std::abs(a - b) < 0.01F; }
 
-// config/topscreen_ui.switch.json: normal layout, scale 0.9, margins 4/1,
+// config/topscreen_ui.switch.json before 0.75 became its default: normal layout, scale 0.9, margins 4/1,
 // D-pad icons on (adult: view, ocarina, iron boots, hover boots).
 TopScreenUiConfig SwitchConfig() {
   TopScreenUiConfig config;

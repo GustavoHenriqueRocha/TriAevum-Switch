@@ -15,7 +15,13 @@ inline constexpr std::string_view kTopScreenUiLegacyConfigSchema =
     "oot3d_topscreen_ui_v1";
 inline constexpr float kTopScreenHudScaleMinimum = 0.60F;
 inline constexpr float kTopScreenHudScaleMaximum = 1.20F;
+// Switch: 0.75, near the Single Screen Experience mod's screenshots (~0.70);
+// config/topscreen_ui.switch.json ships the same value. PC keeps 0.80.
+#ifdef __SWITCH__
+inline constexpr float kTopScreenHudScaleDefault = 0.75F;
+#else
 inline constexpr float kTopScreenHudScaleDefault = 0.80F;
+#endif
 inline constexpr float kTopScreenHudScaleStep = 0.05F;
 inline constexpr std::int8_t kTopScreenHudMarginMinimum = -3;
 inline constexpr std::int8_t kTopScreenHudMarginMaximum = 16;
