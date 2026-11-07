@@ -142,6 +142,60 @@ GrassStreamInstance PackGrassFillInstance(const GrassWorldAnchor& tuft, uint32_t
     return PackGrassStreamInstance(fill, fade);
 }
 
+float GrassLodFocal(const std::array<float, 16>& m) noexcept {
+    // Row r of a column-major matrix: m[r], m[4 + r], m[8 + r].
+    const auto row = [&](int r) { return std::sqrt(m[r] * m[r] + m[4 + r] * m[4 + r] + m[8 + r] * m[8 + r]); };
+    const float w = row(3);
+    const float focal = 600.0F * std::min(row(0), row(1)) / w;
+    return std::isfinite(focal) && focal > 0.0F ? focal : 0.0F;
+}
+
+float GrassLodMinimumDistance(const GrassStreamSettings& settings) noexcept {
+    const float nearEnd = 1.5F * settings.SingleBladeDistance;
+    return nearEnd + 2.0F * (settings.CullMargin + settings.CullMarginPerDistance * nearEnd);
+}
+
+GrassLodParameters GrassLodParametersFor(const GrassStreamSettings& settings,
+                                         const std::array<float, 16>& positionToClip) noexcept {
+    GrassLodParameters lod;
+    lod.Focal = GrassLodFocal(positionToClip);
+    lod.MinimumDistance = GrassLodMinimumDistance(settings);
+    lod.RampInverse = 2.0F / lod.MinimumDistance;
+    return lod;
+}
+
+float GrassLodCoordinate(const GrassLodParameters& lod, float distance, float halfWidth) noexcept {
+    const auto& px = kGrassLodPixels;
+    const float slot = 2.0F * halfWidth * lod.Focal / std::max(distance, 1.0F);
+    const float toThree = std::clamp((px[0] - slot) / (px[0] - px[1]), 0.0F, 1.0F);
+    const float toOne = std::clamp((px[2] - slot) / (px[2] - px[3]), 0.0F, 1.0F);
+    const float limit = 2.0F * std::clamp((distance - lod.MinimumDistance) * lod.RampInverse, 0.0F, 1.0F);
+    return std::min(toThree + toOne, limit);
+}
+
+GrassStreamKind GrassLodKind(float coordinate) noexcept {
+    if (coordinate >= 2.0F) return GrassStreamKind::Tufts1;
+    if (coordinate >= 1.0F) return GrassStreamKind::Tufts3;
+    return GrassStreamKind::Tufts;
+}
+
+uint32_t GrassLodBlades(GrassStreamKind kind) noexcept {
+    switch (kind) {
+    case GrassStreamKind::Tufts3: return 3U;
+    case GrassStreamKind::Tufts1: return 1U;
+    default: return 5U;
+    }
+}
+
+uint32_t GrassLodTargetBlades(GrassStreamKind kind) noexcept {
+    switch (kind) {
+    case GrassStreamKind::Tufts: return 3U;
+    case GrassStreamKind::Tufts3:
+    case GrassStreamKind::Tufts1: return 1U;
+    default: return 5U;
+    }
+}
+
 GrassStreamStats GrassInstanceStreamBuilder::Build(std::span<const GrassStreamPlacement> placements,
                                                    const GrassStreamSettings& settings,
                                                    std::span<GrassStreamInstance> output,
@@ -150,6 +204,7 @@ GrassStreamStats GrassInstanceStreamBuilder::Build(std::span<const GrassStreamPl
     ranges.clear();
     mCandidates.clear();
     mSelected.clear();
+    mPacked.clear();
     const uint32_t budget = static_cast<uint32_t>(std::min<size_t>(settings.MaxInstances, output.size()));
     if (budget == 0U || !(settings.DrawDistance > 0.0F) || placements.size() > 0x7fffU) return stats;
 
@@ -191,7 +246,43 @@ GrassStreamStats GrassInstanceStreamBuilder::Build(std::span<const GrassStreamPl
     // The first fill tuft starts to grow here, where every tuft is kept (a
     // fill tuft of a tuft the thinning drops would appear with it, at once).
     const float fillReach = std::min(settings.FillDistance, fullDistance);
-    mBucketCounts.assign(placements.size() * 2U, 0U);
+    mBucketCounts.assign(placements.size() * kGrassStreamKinds, 0U);
+    // config/grass_lod on: near the camera the near draw (single blades
+    // and their turn into tufts, at the current camera's distance, which
+    // may be up to the cull margin nearer or farther); past it the level
+    // its coordinate needs at the cull margin nearer (GrassLodCoordinate).
+    const float nearEnd = 1.5F * settings.SingleBladeDistance;
+    const auto select = [&](const GrassStreamPlacement& placement, const GrassLodParameters& lod,
+                            uint32_t placementIndex, uint32_t anchor, bool blades, uint8_t fade, uint8_t widthScale,
+                            uint8_t child) {
+        auto kind = blades ? GrassStreamKind::Blades : GrassStreamKind::Tufts;
+        if (settings.Lod) {
+            const auto& tuft = placement.World->Anchors[anchor];
+            const auto instance = child == 0U ? PackGrassStreamInstance(tuft, fade / 255.0F, widthScale / 64.0F)
+                                              : PackGrassFillInstance(tuft, child, fade / 255.0F, settings.FillRadius);
+            const float dx = instance.PositionHeight[0] - placement.Eye[0];
+            const float dy = instance.PositionHeight[1] - placement.Eye[1];
+            const float dz = instance.PositionHeight[2] - placement.Eye[2];
+            const float own = std::sqrt(dx * dx + dy * dy + dz * dz);
+            const float margin = settings.CullMargin + settings.CullMarginPerDistance * own;
+            if (own < nearEnd + margin) {
+                kind = GrassStreamKind::Blades;
+            } else {
+                const float halfWidth = UnpackGrassHalf(static_cast<uint16_t>(instance.WidthPhaseFade & 0xffffU));
+                kind = GrassLodKind(GrassLodCoordinate(lod, own - margin, halfWidth));
+            }
+            mPacked.push_back(instance);
+        }
+        const uint32_t bucket = placementIndex * kGrassStreamKinds + static_cast<uint32_t>(kind);
+        mSelected.push_back({anchor, bucket, fade, widthScale, child});
+        ++mBucketCounts[bucket];
+        switch (kind) {
+        case GrassStreamKind::Tufts: ++stats.Tufts; break;
+        case GrassStreamKind::Blades: ++stats.Blades; break;
+        case GrassStreamKind::Tufts3: ++stats.Tufts3; break;
+        case GrassStreamKind::Tufts1: ++stats.Tufts1; break;
+        }
+    };
     for (size_t candidateIndex = 0U; candidateIndex < mCandidates.size(); ++candidateIndex) {
         if (mSelected.size() >= budget) {
             stats.ClustersOverBudget = static_cast<uint32_t>(mCandidates.size() - candidateIndex);
@@ -200,6 +291,7 @@ GrassStreamStats GrassInstanceStreamBuilder::Build(std::span<const GrassStreamPl
         const auto& candidate = mCandidates[candidateIndex];
         const auto& placement = placements[candidate.Placement];
         const auto frustum = BuildGrassFrustumRadiusScale(placement.PositionToClip);
+        const auto lod = settings.Lod ? GrassLodParametersFor(settings, placement.PositionToClip) : GrassLodParameters{};
         const auto& cluster = placement.World->Clusters[candidate.Cluster];
         const auto& culling = placement.World->CullingAnchors;
         const uint32_t end = static_cast<uint32_t>(
@@ -243,11 +335,8 @@ GrassStreamStats GrassInstanceStreamBuilder::Build(std::span<const GrassStreamPl
             // First kept at full / sqrt(visibility): grows from there.
             const float kept = visibility > 0.0F ? fullDistance / std::sqrt(visibility) : settings.DrawDistance;
             const float grown = std::min(fade, GrassGrowth(kept, distance, kGrassThinGrowth));
-            const uint16_t bucket = static_cast<uint16_t>(candidate.Placement * 2U + (blades ? 1U : 0U));
-            mSelected.push_back(
-                {anchor, bucket, static_cast<uint8_t>(std::lround(grown * 255.0F)), widthScale, 0U});
-            ++mBucketCounts[bucket];
-            ++(blades ? stats.Blades : stats.Tufts);
+            select(placement, lod, candidate.Placement, anchor, blades, static_cast<uint8_t>(std::lround(grown * 255.0F)),
+                   widthScale, 0U);
             // Fill tufts: child c (stable value v) is drawn at half height at
             // FillDistance / (c + v), so FillDistance / distance tufts in all.
             if (!(distance < fillReach)) continue;
@@ -257,34 +346,38 @@ GrassStreamStats GrassInstanceStreamBuilder::Build(std::span<const GrassStreamPl
                     fillReach / (static_cast<float>(child) + GrassFillStableValue(tuft.StableId, child));
                 const float growth = GrassGrowth(appear, distance, kGrassFillGrowth);
                 if (!(growth > 0.0F)) break; // the next ones come nearer still
-                mSelected.push_back({anchor, bucket, static_cast<uint8_t>(std::lround(std::min(fade, growth) * 255.0F)),
-                                     64U, static_cast<uint8_t>(child)});
-                ++mBucketCounts[bucket];
-                ++(blades ? stats.Blades : stats.Tufts);
+                select(placement, lod, candidate.Placement, anchor, blades,
+                       static_cast<uint8_t>(std::lround(std::min(fade, growth) * 255.0F)), 64U,
+                       static_cast<uint8_t>(child));
                 ++stats.Fill;
             }
         }
     }
 
-    // 3. Grouped by placement and kind: one instanced draw per range.
+    // 3. Grouped by placement and kind: one draw per range.
     uint32_t first = 0U;
     std::vector<uint32_t>& offsets = mBucketCounts; // counts become write cursors
     for (uint32_t bucket = 0U; bucket < offsets.size(); ++bucket) {
         const uint32_t count = offsets[bucket];
         if (count != 0U) {
-            ranges.push_back({bucket / 2U, (bucket & 1U) ? GrassStreamKind::Blades : GrassStreamKind::Tufts, first,
-                              count});
+            ranges.push_back({bucket / kGrassStreamKinds, static_cast<GrassStreamKind>(bucket % kGrassStreamKinds),
+                              first, count});
         }
         offsets[bucket] = first;
         first += count;
     }
-    for (const auto& selected : mSelected) {
-        const auto& placement = placements[selected.Bucket / 2U];
+    for (size_t index = 0U; index < mSelected.size(); ++index) {
+        const auto& selected = mSelected[index];
+        auto& slot = output[offsets[selected.Bucket]++];
+        if (settings.Lod) {
+            slot = mPacked[index];
+            continue;
+        }
+        const auto& placement = placements[selected.Bucket / kGrassStreamKinds];
         const auto& anchor = placement.World->Anchors[selected.Anchor];
-        output[offsets[selected.Bucket]++] =
-            selected.Child == 0U
-                ? PackGrassStreamInstance(anchor, selected.Fade / 255.0F, selected.WidthScale / 64.0F)
-                : PackGrassFillInstance(anchor, selected.Child, selected.Fade / 255.0F, settings.FillRadius);
+        slot = selected.Child == 0U
+                   ? PackGrassStreamInstance(anchor, selected.Fade / 255.0F, selected.WidthScale / 64.0F)
+                   : PackGrassFillInstance(anchor, selected.Child, selected.Fade / 255.0F, settings.FillRadius);
     }
     return stats;
 }

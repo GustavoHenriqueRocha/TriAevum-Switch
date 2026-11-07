@@ -76,6 +76,7 @@ public:
     mPackFound = PackFolderExists();
     mGrassBoot = mGrass = Fast::Oot3d::ReadGrassSwitchMode(mConfig);
     mGrassDistance = Fast::Oot3d::ReadGrassSwitchDistance(mConfig);
+    mGrassLod = Fast::Oot3d::ReadGrassSwitchLod(mConfig);
     // config/gpu_performance applies at start (the panel is created once, at
     // window setup); Standard opens no apm session.
     mGpuHigh = ReadGpuPerformanceHigh(mConfig);
@@ -239,6 +240,21 @@ private:
                         "about twice the GPU time of Near. Whole area: every tuft of the area, no "
                         "thinning (up to 65,000 drawn): up to 30 ms per frame in large fields such as "
                         "Hyrule Field, more than a 60 FPS frame has. Use 30 FPS with Whole area.");
+    // config/grass_lod (SWITCH_PORT.md "Grass on deko3d: cost per tuft"):
+    // applied at once (the renderer's next cull takes the published choice).
+    const char *const details[] = {"Levels (fewer, wider blades far away; default)",
+                                   "Every blade (test.9)"};
+    int detail = mGrassLod ? 0 : 1;
+    if (ImGui::Combo("Grass detail", &detail, details, 2)) {
+      mGrassLod = detail == 0;
+      mGrassLodError = !Fast::Oot3d::SaveGrassSwitchLod(mConfig, mGrassLod);
+      Fast::Oot3d::PublishGrassSwitchLod(mGrassLod);
+    }
+    if (mGrassLodError)
+      ImGui::TextWrapped("Could not write config/grass_lod.");
+    ImGui::TextDisabled("Applies at once. Levels: each tuft's wind, light and colour once per frame instead of "
+                        "for every vertex, and far tufts drawn with 3, then 1 wider blade covering the same "
+                        "ground. Every blade: the grass of test.9, for comparison.");
   }
 
   // The lighting model (graphics settings: Modern = per-pixel, toon bands
@@ -290,6 +306,8 @@ private:
   bool mGrassError = false;
   Fast::Oot3d::GrassSwitchDistance mGrassDistance = Fast::Oot3d::GrassSwitchDistance::Near;
   bool mGrassDistanceError = false;
+  bool mGrassLod = true;
+  bool mGrassLodError = false;
   std::string mLightingError;
   std::string mLightingIssue;
   bool mGpuHigh = false;

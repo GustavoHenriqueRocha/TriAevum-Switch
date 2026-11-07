@@ -52,6 +52,22 @@ enum class GrassSwitchDistance : uint8_t { Near, Far, Area };
 void PublishGrassSwitchDistance(GrassSwitchDistance distance) noexcept;
 [[nodiscard]] std::optional<GrassSwitchDistance> PublishedGrassSwitchDistance() noexcept;
 
+// config/grass_lod (L3+R3 > Video > "Grass detail", applied at once;
+// SWITCH_PORT.md "Grass on deko3d: cost per tuft"): how a tuft is drawn.
+// - On (absent file, any other word): each tuft's shared work (wind, bend,
+//   light, colour) once per frame in a tuft pass, then its blades; far
+//   tufts with 3 and then 1 wider blade (the same covered area), turning
+//   into them over a distance.
+// - Off ("0", "off", "false"): test.9's grass exactly (every vertex does
+//   all the work, 5 blades everywhere).
+[[nodiscard]] bool ParseGrassSwitchLod(std::optional<std::string_view> fileText) noexcept;
+[[nodiscard]] bool ReadGrassSwitchLod(const std::filesystem::path& configDirectory);
+// Writes config/grass_lod (removes it for On, writes "0" for Off); false when that failed.
+[[nodiscard]] bool SaveGrassSwitchLod(const std::filesystem::path& configDirectory, bool on);
+// The menu's choice while the game runs (nullopt before any). Any thread.
+void PublishGrassSwitchLod(bool on) noexcept;
+[[nodiscard]] std::optional<bool> PublishedGrassSwitchLod() noexcept;
+
 struct GrassSwitchProfile {
     // Placement: one anchor is one tuft.
     float TuftsPerSquareMeter = 40.0F;
