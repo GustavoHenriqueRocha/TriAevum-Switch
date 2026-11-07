@@ -338,7 +338,7 @@ private:
   void RestoreSavestatePicaVisualReplayState(const Oot3dNativeGame::NativeA32SavestateRuntimeState &runtime);
   Fast::Renderer3ds::PicaFrameCompositionPolicy ResolveFrameCompositionPolicy(const Fast::Oot3d::PresentationPacingPolicy& pacing);
   void PublishNativeSceneView();
-  void RequireStoppedGuest();
+  void RequireStoppedGuest(const char *access);
   std::vector<Fast::Renderer3ds::PicaTextureCopyReference> CollectGuestCopyReferences();
   void PinGpuCopyResources(const Oot3dNativeGame::Oot3dPicaVisualFrameViewSample& sample);
   bool FlushNativeDependencies();

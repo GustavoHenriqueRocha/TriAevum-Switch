@@ -4557,10 +4557,10 @@ void NativeA32WindowSession::PublishNativeSceneView() {
 // Guest memory and guest interrupts belong to the guest. The renderer
 // reaches them only from a command the guest waits for (inline or Run);
 // anything else would race the running guest, so it fails instead.
-void NativeA32WindowSession::RequireStoppedGuest() {
+void NativeA32WindowSession::RequireStoppedGuest(const char *access) {
   if (renderStream.InCommand() && !renderStream.InSynchronousCommand()) {
     throw std::runtime_error(
-        "renderer reached guest state while the guest was running");
+        std::string("renderer reached guest state while the guest was running (") + access + ")");
   }
 }
 
