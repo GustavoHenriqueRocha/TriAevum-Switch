@@ -2070,6 +2070,13 @@ bool NativeA32WindowSession::RunFrame() {
                  stats.UnmatchedPrimitivePacketExits + stats.InvalidAtmosphereCommandRanges;
         };
         perf << " spans_invalid=" << delta(invalid(composition), invalid(previousComposition));
+        // Whole CMB passes recorded, handed to the frontend, and lost
+        // (crossing a submission or another pass, or evicted).
+        perf << " passes=" << delta(composition.RecordedPassSpans, previousComposition.RecordedPassSpans)
+             << " passes_consumed=" << delta(composition.ConsumedPassSpans, previousComposition.ConsumedPassSpans)
+             << " passes_lost="
+             << delta(composition.PartialPassSpans + composition.EvictedPassSpans,
+                      previousComposition.PartialPassSpans + previousComposition.EvictedPassSpans);
         previousComposition = composition;
         // How the frontend attributed draws without a plain span hit
         // (Oot3dPicaCompositionResolveStats): late lists (kicked after the
@@ -2083,6 +2090,7 @@ bool NativeA32WindowSession::RunFrame() {
              << " ui_world_draws=" << delta(resolve.UiListWorldSpanDraws, previousResolve.UiListWorldSpanDraws)
              << " no_span_draws=" << delta(resolve.NoSpanDraws, previousResolve.NoSpanDraws)
              << " owner_holes=" << delta(resolve.SameOwnerHoleDraws, previousResolve.SameOwnerHoleDraws)
+             << " pass_draws=" << delta(resolve.PassSpanDraws, previousResolve.PassSpanDraws)
              << " bare_list_draws=" << delta(resolve.BareListDraws, previousResolve.BareListDraws);
         previousResolve = resolve;
       }

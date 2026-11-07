@@ -6,6 +6,7 @@
 #include "oot3d_native_pica_shader_gen.h"
 #include "oot3d_native_pica_affine_layout.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdlib>
@@ -582,8 +583,11 @@ int main(int argc, char** argv) {
                     stats.NoSpanDraws == 1U && stats.SameOwnerHoleDraws == 0U,
                 "late list counters");
         auto notes = late.TakeCompositionNotes();
-        Require(notes.size() == 1U && late.TakeCompositionNotes().empty(), "one note per late list");
-        const std::string text = Oot3dNativeGame::FormatOot3dPicaCompositionNote(notes[0]);
+        Require(notes.size() == 2U && late.TakeCompositionNotes().empty(), "the no-span draw and the late list");
+        Require(notes[0].Kind == Oot3dNativeGame::Oot3dPicaCompositionNoteKind::NoSpan &&
+                    notes[0].OffsetWords == 2U,
+                "the late list's no-span draw is noted");
+        const std::string text = Oot3dNativeGame::FormatOot3dPicaCompositionNote(notes[1]);
         Require(text == "late_list list=14002800+24 draw=+0 domain=2->1 spans=2 generations=7..7/8 draws=3 world=2",
                 "late list note: " + text);
 
@@ -649,8 +653,83 @@ int main(int argc, char** argv) {
         notes = holes.TakeCompositionNotes();
         Require(notes.size() == 1U && notes[0].Kind == Oot3dNativeGame::Oot3dPicaCompositionNoteKind::SameOwnerHole &&
                     notes[0].OffsetWords == 2U && notes[0].Before.Instance == 0x1234U &&
-                    notes[0].After.BeginAddress == 0x14002810U,
+                    notes[0].After.BeginAddress == 0x14002810U && notes[0].Pass.EndAddress == 0U,
                 "a hole inside one CMB owner is noted with its neighbours");
+
+        // test.10 (logs18): the hole draw lies inside its renderer's CMB pass
+        // (SubmitDrawHandle entry to return). It takes the pass's
+        // attribution and light binding, without a temporal identity;
+        // config/no_pass_span_fallback leaves it without a composition.
+        Oot3dNativeGame::Oot3dPicaCommandListCompositionSpan pass{
+            0x14002800U, 0x14002818U, owner[0].Attribution};
+        pass.Attribution.TemporalIdentity = {};
+        pass.LightBinding.WorldToView = std::array<float, 16>{0.5F};
+        pass.WriteGeneration = 3U;
+        for (const bool fallback : {true, false}) {
+            Oot3dNativeGame::Oot3dNativePicaFrontend passes;
+            passes.SetPassSpanFallback(fallback);
+            passes.SetCommandListCompositionDomain(Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene);
+            Require(passes.SetNextCommandListCompositionSpans(compositionSubmit.Parameters[0],
+                                                              compositionSubmit.Parameters[1], owner, &error),
+                    error);
+            passes.SetNextCommandListPassSpans(compositionSubmit.Parameters[0], compositionSubmit.Parameters[1],
+                                               std::span(&pass, 1U));
+            Require(passes.SubmitGspCommand(compositionSubmit, compositionCommandList, &error), error);
+            const auto& draws = passes.PendingDrawPackets();
+            Require(draws.size() == 3U &&
+                        draws[0].Composition.Layer == Oot3dNativeGame::Oot3dPicaCompositionLayer::OpaqueWorld &&
+                        draws[2].Composition.Layer == Oot3dNativeGame::Oot3dPicaCompositionLayer::OpaqueWorld,
+                    "the mesh spans still own their draws");
+            if (fallback) {
+                Require(draws[1].CompositionDomain == Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene &&
+                            draws[1].Composition.Layer == Oot3dNativeGame::Oot3dPicaCompositionLayer::OpaqueWorld &&
+                            draws[1].Composition.Provenance ==
+                                Oot3dNativeGame::Oot3dPicaCompositionProvenance::NativeCmbDrawPass &&
+                            !draws[1].Composition.TemporalIdentity.Available() &&
+                            draws[1].LightBinding == pass.LightBinding,
+                        "a draw inside a CMB pass takes the pass's composition and light binding");
+            } else {
+                Require(draws[1].Composition.Layer == Oot3dNativeGame::Oot3dPicaCompositionLayer::Unknown,
+                        "no_pass_span_fallback leaves the hole draw without a composition");
+            }
+            const auto& stats = passes.CompositionResolveStats();
+            Require(stats.NoSpanDraws == 1U && stats.SameOwnerHoleDraws == 1U &&
+                        stats.PassSpanDraws == (fallback ? 1U : 0U),
+                    "pass draws are counted only when attributed");
+            notes = passes.TakeCompositionNotes();
+            Require(notes.size() == 1U && notes[0].Pass.BeginAddress == 0x14002800U &&
+                        notes[0].Pass.WriteGeneration == 3U,
+                    "the note names the pass holding the draw");
+        }
+
+        // Pass spans are one-shot and must belong to the submitted list.
+        Oot3dNativeGame::Oot3dNativePicaFrontend other;
+        other.SetCommandListCompositionDomain(Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene);
+        Require(other.SetNextCommandListCompositionSpans(compositionSubmit.Parameters[0],
+                                                         compositionSubmit.Parameters[1], owner, &error),
+                error);
+        other.SetNextCommandListPassSpans(compositionSubmit.Parameters[0] + 0x100U, compositionSubmit.Parameters[1],
+                                          std::span(&pass, 1U));
+        Require(other.SubmitGspCommand(compositionSubmit, compositionCommandList, &error), error);
+        Require(other.PendingDrawPackets()[1].Composition.Layer == Oot3dNativeGame::Oot3dPicaCompositionLayer::Unknown &&
+                    other.CompositionResolveStats().PassSpanDraws == 0U,
+                "pass spans of another list are ignored");
+
+        // A late list notes at most 8 times; the other notes keep their budget.
+        Oot3dNativeGame::Oot3dNativePicaFrontend budget;
+        budget.SetCommandListCompositionDomain(Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui);
+        budget.SetCommandListTiming(Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene, 8U);
+        for (int index = 0; index < 20; ++index) {
+            Require(budget.SetNextCommandListCompositionSpans(compositionSubmit.Parameters[0],
+                                                              compositionSubmit.Parameters[1], lateSpans, &error),
+                    error);
+            Require(budget.SubmitGspCommand(compositionSubmit, compositionCommandList, &error), error);
+        }
+        notes = budget.TakeCompositionNotes();
+        const auto lateNotes = std::count_if(notes.begin(), notes.end(), [](const auto& note) {
+            return note.Kind == Oot3dNativeGame::Oot3dPicaCompositionNoteKind::LateList;
+        });
+        Require(lateNotes == 8 && notes.size() == 28U, "late_list notes have their own cap");
     }
 
     Oot3dNativeGame::Oot3dGspCommandPacket shaderSubmit{};

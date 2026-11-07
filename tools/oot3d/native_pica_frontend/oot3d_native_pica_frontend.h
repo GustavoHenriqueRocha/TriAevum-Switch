@@ -192,6 +192,15 @@ class Oot3dPicaCommandListCompositionProvider {
         uint32_t commandListAddress, uint32_t commandListSize,
         std::vector<Oot3dPicaCommandListCompositionSpan>& spans,
         std::string* error = nullptr) = 0;
+    // The whole native draw passes (a CMB renderer's SubmitDrawHandle) inside
+    // the submitted list, sorted and disjoint: the owner of a draw that lies
+    // in its pass but in none of its packet spans. None by default.
+    virtual bool TakeCommandListPassSpans(
+        uint32_t /*commandListAddress*/, uint32_t /*commandListSize*/,
+        std::vector<Oot3dPicaCommandListCompositionSpan>& spans) {
+        spans.clear();
+        return true;
+    }
     // The generation spans written now receive (0 = not tracked).
     [[nodiscard]] virtual uint32_t CurrentWriteGeneration() const noexcept {
         return 0U;
@@ -217,6 +226,7 @@ struct Oot3dPicaCompositionResolveStats {
     uint64_t UiListWorldSpanDraws = 0; // left UI (HUD-phase list) inside a world span
     uint64_t NoSpanDraws = 0;          // scene/unknown list with spans, draw in none
     uint64_t SameOwnerHoleDraws = 0;   // ... between two spans of one CMB owner
+    uint64_t PassSpanDraws = 0;        // ... inside a CMB pass, attributed to it
     uint64_t BareListDraws = 0;        // scene/unknown list without any span
 };
 
@@ -224,6 +234,7 @@ enum class Oot3dPicaCompositionNoteKind : uint8_t {
     LateList,      // a late list (attributed on time when enabled)
     UiListWorld,   // a HUD-phase list with world spans, kept UI
     SameOwnerHole, // a draw between two spans of the same CMB owner
+    NoSpan,        // any other scene draw in no span of a list with spans
 };
 
 struct Oot3dPicaCompositionNoteSpan {
@@ -241,7 +252,8 @@ struct Oot3dPicaCompositionNote {
     Oot3dPicaCompositionNoteKind Kind = Oot3dPicaCompositionNoteKind::LateList;
     uint32_t CommandListAddress = 0;
     uint32_t CommandListSize = 0;
-    uint32_t OffsetWords = 0; // SameOwnerHole: the draw
+    uint32_t OffsetWords = 0; // SameOwnerHole/NoSpan: the draw
+    uint32_t Vertices = 0;    // SameOwnerHole/NoSpan: the draw's vertex count
     Oot3dPicaCompositionDomain Submitted = Oot3dPicaCompositionDomain::Unknown;
     Oot3dPicaCompositionDomain Resolved = Oot3dPicaCompositionDomain::Unknown;
     uint32_t Spans = 0;
@@ -250,8 +262,9 @@ struct Oot3dPicaCompositionNote {
     uint32_t CurrentGeneration = 0;
     uint32_t Draws = 0;          // lists: draws in it
     uint32_t WorldSpanDraws = 0; // lists: draws inside a world-layer span
-    Oot3dPicaCompositionNoteSpan Before; // SameOwnerHole: the spans around the draw
+    Oot3dPicaCompositionNoteSpan Before; // SameOwnerHole/NoSpan: the spans around the draw
     Oot3dPicaCompositionNoteSpan After;
+    Oot3dPicaCompositionNoteSpan Pass;   // ... and the CMB pass holding it (EndAddress 0: none)
 };
 
 // "<kind> list=X+size draw=+N domain=a->b spans=S generations=o..n/c
@@ -474,6 +487,14 @@ class Oot3dNativePicaFrontend {
         uint32_t commandListAddress, uint32_t commandListSize,
         std::span<const Oot3dPicaCommandListCompositionSpan> spans,
         std::string* error = nullptr);
+    // The provider's CMB passes for the same next list (TakeCommandListPassSpans).
+    // A scene draw in none of the list's spans but inside a pass takes that
+    // pass's attribution and light binding (no temporal identity) when
+    // SetPassSpanFallback is on (default; off = config/no_pass_span_fallback).
+    void SetNextCommandListPassSpans(
+        uint32_t commandListAddress, uint32_t commandListSize,
+        std::span<const Oot3dPicaCommandListCompositionSpan> spans);
+    void SetPassSpanFallback(bool enabled) noexcept { mPassSpanFallback = enabled; }
     // For the next submissions: the domain the last guest refresh gave the
     // lists (what a list kicked on time gets) and the provider's current
     // write generation. A late list (IsLateCompositionCommandList) gets
@@ -491,7 +512,8 @@ class Oot3dNativePicaFrontend {
     CompositionResolveStats() const noexcept {
         return mCompositionResolveStats;
     }
-    // Notes recorded since the last call (at most 64 in all).
+    // Notes recorded since the last call (at most 64 in all, of them at most
+    // 8 late_list: a late list comes every frame).
     std::vector<Oot3dPicaCompositionNote> TakeCompositionNotes();
 
     bool WriteHardwareRegisters(uint32_t baseOffset,
@@ -559,6 +581,10 @@ class Oot3dNativePicaFrontend {
     uint32_t mCompositionSpanCommandListSize = 0;
     std::vector<Oot3dPicaCommandListCompositionSpan>
         mNextCommandListCompositionSpans;
+    uint32_t mPassSpanCommandListAddress = 0;
+    uint32_t mPassSpanCommandListSize = 0;
+    std::vector<Oot3dPicaCommandListCompositionSpan> mNextCommandListPassSpans;
+    bool mPassSpanFallback = true;
     Oot3dPicaCompositionDomain mOnTimeCompositionDomain =
         Oot3dPicaCompositionDomain::Unknown;
     uint32_t mCurrentWriteGeneration = 0;
@@ -566,6 +592,7 @@ class Oot3dNativePicaFrontend {
     Oot3dPicaCompositionResolveStats mCompositionResolveStats;
     std::vector<Oot3dPicaCompositionNote> mCompositionNotes;
     size_t mCompositionNotesRecorded = 0;
+    size_t mLateListNotesRecorded = 0;
     void NoteComposition(const Oot3dPicaCompositionNote& note);
 };
 

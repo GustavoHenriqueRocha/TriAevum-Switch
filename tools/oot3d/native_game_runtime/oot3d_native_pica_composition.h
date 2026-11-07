@@ -93,6 +93,13 @@ struct Oot3dNativePicaCompositionStats {
     uint64_t PartiallyOverlappingSubmissions = 0;
     uint64_t EvictedPacketSpans = 0;
     uint64_t ReadFailures = 0;
+    // Whole CMB draw passes (CmbRenderer_SubmitDrawHandle entry to return):
+    // the fallback owner of a draw written inside a pass but outside its
+    // mesh packets (TakeCommandListPassSpans).
+    uint64_t RecordedPassSpans = 0;
+    uint64_t ConsumedPassSpans = 0;
+    uint64_t PartialPassSpans = 0;
+    uint64_t EvictedPassSpans = 0;
 };
 
 // Observes native draw-control boundaries and exact mesh packet appends. It
@@ -109,6 +116,10 @@ class Oot3dNativePicaCompositionTracker final
         uint32_t commandListAddress, uint32_t commandListSize,
         std::vector<Oot3dPicaCommandListCompositionSpan>& spans,
         std::string* error = nullptr) override;
+    // The CMB passes inside the submitted list, sorted and disjoint.
+    bool TakeCommandListPassSpans(
+        uint32_t commandListAddress, uint32_t commandListSize,
+        std::vector<Oot3dPicaCommandListCompositionSpan>& spans) override;
     // One per native Gameplay_Draw entry (spans carry it as WriteGeneration).
     [[nodiscard]] uint32_t CurrentWriteGeneration() const noexcept override {
         return mWriteGeneration;
@@ -169,6 +180,14 @@ class Oot3dNativePicaCompositionTracker final
     std::optional<ActiveAtmosphereScope> mActiveUiScope;
     std::optional<ActivePrimitivePacket> mActivePrimitivePacket;
     std::deque<Oot3dPicaCommandListCompositionSpan> mPendingSpans;
+    // The active CMB pass's first command byte (valid only for a scene pass:
+    // no UI or atmosphere scope at its entry) and the light binding of its
+    // last mesh span.
+    uint32_t mActivePassBegin = 0;
+    bool mActivePassBeginValid = false;
+    bool mActivePassHasBinding = false;
+    Fast::Renderer3ds::PicaNativeLightBinding mActivePassBinding;
+    std::deque<Oot3dPicaCommandListCompositionSpan> mPendingPassSpans;
     Oot3dNativePicaCompositionStats mStats;
     uint32_t mWriteGeneration = 1;
 };

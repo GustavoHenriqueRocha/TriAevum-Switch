@@ -221,6 +221,11 @@ void NativeA32WindowSession::Setup() {
 #endif
     picaFrontend.SetLateCommandListsOnTime(
         !std::filesystem::exists(configDirectory / "late_lists_as_ui", ignored));
+    // A scene draw written inside a CMB pass but outside its mesh packets
+    // takes that pass's composition; config/no_pass_span_fallback leaves it
+    // without one (A/B, SWITCH_PORT.md "Per-pixel blink in test.10").
+    picaFrontend.SetPassSpanFallback(
+        !std::filesystem::exists(configDirectory / "no_pass_span_fallback", ignored));
   }
   languageSettings = std::make_shared<Oot3dNativeGame::GameLanguageSettings>(
       std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "game_language.json",
