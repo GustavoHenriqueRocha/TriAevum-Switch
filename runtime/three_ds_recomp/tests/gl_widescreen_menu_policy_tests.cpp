@@ -632,6 +632,41 @@ TEST(GlWidescreenMenuPolicy, RelocatedMenuPiecesSampleTheirTexelsAtIntegerScales
     EXPECT_FALSE(GlRelocatedMenuNearestSampling(fade, 2.0F));
 }
 
+// deko3d resolves a relocated menu piece's texture pack image as menu art
+// (gfx_deko3d_pica_resources.cpp): the file-select cards come in the title
+// scene's atmosphere layer, outside the Ui domain, and popped from the
+// game's art to the pack's at every start (test.10).
+TEST(GlWidescreenMenuPolicy, FileSelectPiecesAreRelocatedMenuDrawsInEitherDomain) {
+    GlWidescreenDrawEvidence card = RelocatedMenuDraw();
+    card.Atmosphere = true; // file select: Scene domain, atmosphere layer
+    card.Projection = GlProjectionShape::Orthographic;
+    card.PixelAnisotropy = GlNativePixelAnisotropy(
+        DecodeGlProjection(RotatedOrtho(320.0F, 240.0F)), 480.0F, 320.0F, 480U);
+    EXPECT_TRUE(GlRelocatedMenuDraw(card));
+    GlWidescreenDrawEvidence nameEntry = card;
+    nameEntry.Atmosphere = false;
+    nameEntry.UiDomain = true;
+    EXPECT_TRUE(GlRelocatedMenuDraw(nameEntry));
+    // The title scene behind it (full viewport, perspective), a full-width
+    // panel, a frame copy and the fade are not.
+    GlWidescreenDrawEvidence scene = FullViewport();
+    scene.Projection = GlProjectionShape::Perspective;
+    scene.PixelAnisotropy = 1.0F;
+    EXPECT_FALSE(GlRelocatedMenuDraw(scene));
+    GlWidescreenDrawEvidence panel = FullViewport();
+    panel.Projection = GlProjectionShape::Orthographic;
+    panel.PixelAnisotropy = 1.0F;
+    EXPECT_FALSE(GlRelocatedMenuDraw(panel));
+    GlWidescreenDrawEvidence copy = card;
+    copy.SamplesRenderedCopy = true;
+    EXPECT_FALSE(GlRelocatedMenuDraw(copy));
+    GlWidescreenDrawEvidence fade = card;
+    fade.Untextured = true;
+    EXPECT_FALSE(GlRelocatedMenuDraw(fade));
+    // The nearest-sampling rule is this one at an integer scale.
+    EXPECT_EQ(GlRelocatedMenuNearestSampling(card, 2.0F), GlRelocatedMenuDraw(card));
+}
+
 TEST(GlWidescreenMenuPolicy, ParsesTheSwitch) {
     EXPECT_FALSE(ParseGlWidescreenSetting("0\n", true));
     EXPECT_TRUE(ParseGlWidescreenSetting("1", false));

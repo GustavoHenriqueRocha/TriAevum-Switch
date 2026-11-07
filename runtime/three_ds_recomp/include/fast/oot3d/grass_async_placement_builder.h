@@ -81,7 +81,9 @@ struct GrassAsyncPlacementStats {
     uint64_t DiskHits = 0, DiskMisses = 0, DiskRejects = 0, DiskWrites = 0;
     size_t Entries = 0U;
     size_t Pending = 0U;
-    double BuildMilliseconds = 0.0;
+    double BuildMilliseconds = 0.0;     // every placement made, built or loaded
+    double DiskLoadMilliseconds = 0.0;  // of those, the ones loaded from the disk cache
+    double BuildMaxMilliseconds = 0.0;  // the longest build (not loaded)
 };
 
 // Owns immutable placement work until it can be published to the renderer.
@@ -96,7 +98,10 @@ class GrassAsyncPlacementBuilder final {
 
     [[nodiscard]] GrassAsyncPlacementResult ResolveOrQueue(GrassAsyncPlacementRequest request);
     [[nodiscard]] GrassAsyncPlacementStats Stats() const;
-    void SetCacheDirectory(std::filesystem::path directory);
+    // Placements kept on disk (GrassPersistentPlacementCache): at most
+    // `byteLimit` and `entryLimit` files; empty = none.
+    void SetCacheDirectory(std::filesystem::path directory, uint64_t byteLimit = 1024ULL * 1024 * 1024,
+                           size_t entryLimit = 128U);
     // Batch owner debounces edits. Loads/builds remain immediate; only current,
     // settled results may publish to disk. A new revision cancels queued writes.
     void SetPersistenceState(uint64_t revision, bool settled);

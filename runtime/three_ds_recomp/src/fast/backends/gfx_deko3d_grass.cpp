@@ -311,6 +311,9 @@ struct GrassState {
     double UpdateMs = 0.0, UpdateMaxMs = 0.0;
     double DrawMs = 0.0, DrawMaxMs = 0.0;
     uint64_t AnchorsMax = 0;
+    // The placement builder's totals at the last log (builds and disk loads
+    // per window).
+    Oot3d::GrassAsyncPlacementStats BuilderBase{};
     uint64_t DrawnFrames = 0;
     uint64_t Visible = 0, VisibleMax = 0, Tufts = 0, Blades = 0, Draws = 0;
     uint64_t ClustersVisible = 0, ClustersTested = 0, OverBudgetFrames = 0;
@@ -553,6 +556,18 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
     state->Fill = Oot3d::ReadGrassSwitchFill(config);
     ApplyProfile(*state, fps60, Oot3d::ReadGrassSwitchDistance(config));
     state->Placements = std::make_unique<Oot3d::PicaGrassPlacements>(state->Profile.RetainedBytes);
+    // A ground placed in an earlier visit or session loads from the SD card
+    // instead of being built again (the PC's cache; one write per new ground,
+    // 2 s after its build, on the builder worker).
+    const bool placementCache = Oot3d::ReadGrassPlacementCache(config);
+    if (placementCache) {
+        state->Placements->SetCacheDirectory("sdmc:/switch/oot3dre/shadercache/grass_placements_v1",
+                                             Oot3d::kGrassPlacementCacheBytes, Oot3d::kGrassPlacementCacheEntries);
+    }
+    Deko3d::Log("grass: placement cache %s (config/grass_placement_cache; shadercache/grass_placements_v1, at most "
+                "%llu MiB)",
+                placementCache ? "on" : "off",
+                static_cast<unsigned long long>(Oot3d::kGrassPlacementCacheBytes >> 20));
     Deko3d::Log("grass: on (config/grass = %s), %zu rules, %.0f tufts/m2 of %u blades, at most %u per placement, "
                 "%.1f MiB retained",
                 mode == Oot3d::GrassSwitchMode::Draw ? "draw" : "placements", state->Settings.Rules.size(),
@@ -846,14 +861,23 @@ void GrassEndFrame(uint64_t frame) {
     }
     const double frames = static_cast<double>(state->Frames);
     const double drawn = std::max<double>(1.0, static_cast<double>(state->DrawnFrames));
+    const auto builder = state->Placements->BuilderStats();
+    const auto& base = state->BuilderBase;
+    const uint64_t builds = builder.Builds - base.Builds, loads = builder.DiskHits - base.DiskHits;
+    const double loadMs = builder.DiskLoadMilliseconds - base.DiskLoadMilliseconds;
+    const double buildMs = builder.BuildMilliseconds - base.BuildMilliseconds - loadMs;
     Log("grass: frame %llu %s %s | rules_seen %u meshes %u placements %u queued %u tufts %llu (max %llu) "
-        "retained %.1f MiB | sources %.3f ms/frame (max %.2f, %llu published) placements %.3f ms/frame (max %.2f)",
+        "retained %.1f MiB | sources %.3f ms/frame (max %.2f, %llu published) placements %.3f ms/frame (max %.2f) | "
+        "built %llu in %.0f ms (longest %.0f ms this session), loaded %llu in %.0f ms, written %llu",
         static_cast<unsigned long long>(frame), state->Mode == Oot3d::GrassSwitchMode::Draw ? "draw" : "placements",
         state->Fps60 ? "fps60" : "fps30", stats.Rules, stats.Meshes, stats.Ready, stats.Queued,
         static_cast<unsigned long long>(stats.Anchors), static_cast<unsigned long long>(state->AnchorsMax),
         static_cast<double>(stats.ResidentBytes) / (1024.0 * 1024.0), state->ObserveMs / frames,
         state->ObserveMaxMs, static_cast<unsigned long long>(state->Published), state->UpdateMs / frames,
-        state->UpdateMaxMs);
+        state->UpdateMaxMs, static_cast<unsigned long long>(builds), buildMs, builder.BuildMaxMilliseconds,
+        static_cast<unsigned long long>(loads), loadMs,
+        static_cast<unsigned long long>(builder.DiskWrites - base.DiskWrites));
+    state->BuilderBase = builder;
     if (state->Mode == Oot3d::GrassSwitchMode::Draw) {
         const double jobs = std::max<double>(1.0, static_cast<double>(state->CullJobs));
         const double gpu = std::max<double>(1.0, static_cast<double>(state->GpuSamples));

@@ -14,6 +14,7 @@
 #include "oot3d_fps_counter.h"
 #if defined(__SWITCH__)
 #include "fast/oot3d/debug_menu.h"
+#include "oot3d/renderer/azahar_texture_pack.h"
 #endif
 #include "fast/oot3d/pica_texture_predecode.h"
 #include <imgui.h>
@@ -830,6 +831,17 @@ bool NativeA32WindowSession::RunFrame() {
   // area it was made in; a scene or room change drops it (one store).
   if (Fast::Deko3dGrassWantsColliders()) Fast::Deko3dSetGrassArea(frameArea.Scene, frameArea.Room);
   perfAreaWindow.Observe(frameArea);
+  // HD texture pack (deko3d): a scene change reaches the pack runtime on the
+  // render thread, after the previous frame's draws and before the new
+  // scene's first: its listed world images start decoding, and the renderer's
+  // hold counts its first frames (SWITCH_PORT.md "File select, world textures
+  // and grass without pop-in").
+  if (Fast::Deko3dRendererSelected() && frameArea.Scene != texturePackScene) {
+    texturePackScene = frameArea.Scene;
+    renderStream.Submit([scene = texturePackScene] {
+      ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().NoteScene(scene);
+    });
+  }
 #endif
   // Presentation cadence (config/fps60_mode): the previous host frame's
   // game-thread cost (its duration minus the waits for the renderer) goes

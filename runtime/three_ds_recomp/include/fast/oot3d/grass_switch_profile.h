@@ -84,6 +84,20 @@ void PublishGrassSwitchLod(bool on) noexcept;
 void PublishGrassSwitchFill(bool fixed) noexcept;
 [[nodiscard]] std::optional<bool> PublishedGrassSwitchFill() noexcept;
 
+// config/grass_placement_cache (read at start; SWITCH_PORT.md "File select,
+// world textures and grass without pop-in"): built placements are kept on the SD card
+// (shadercache/grass_placements_v1, GrassPersistentPlacementCache, the PC's
+// format) and a ground seen in an earlier visit or session loads its
+// placement instead of building it again.
+// - On (absent file, any other word).
+// - Off ("0", "off", "false"): every placement is built, as before.
+[[nodiscard]] bool ParseGrassPlacementCache(std::optional<std::string_view> fileText) noexcept;
+[[nodiscard]] bool ReadGrassPlacementCache(const std::filesystem::path& configDirectory);
+// The SD card's share: at most this much and this many placements (the least
+// recently used go first). Hyrule Field's ground is ~8 MiB.
+inline constexpr uint64_t kGrassPlacementCacheBytes = 256ULL << 20;
+inline constexpr size_t kGrassPlacementCacheEntries = 96U;
+
 struct GrassSwitchProfile {
     // Placement: one anchor is one tuft.
     float TuftsPerSquareMeter = 40.0F;

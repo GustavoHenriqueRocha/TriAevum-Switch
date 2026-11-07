@@ -269,7 +269,8 @@ struct GrassAsyncPlacementBuilder::Impl {
             if (job.Store) {
                 bool written = false;
                 try {
-                    written = GrassPersistentPlacementCache(job.Directory).Store(job.StoreKey, *job.Store);
+                    written = GrassPersistentPlacementCache(job.Directory, DiskByteLimit, DiskEntryLimit)
+                                  .Store(job.StoreKey, *job.Store);
                 } catch (...) {}
                 std::scoped_lock lock(Mutex);
                 --RunningJobs;
@@ -288,7 +289,7 @@ struct GrassAsyncPlacementBuilder::Impl {
             try {
                 if (diskEnabled)
                     diskKey = GrassPlacementPersistentKey(job.Request);
-                GrassPersistentPlacementCache disk(job.Directory);
+                GrassPersistentPlacementCache disk(job.Directory, DiskByteLimit, DiskEntryLimit);
                 if (diskEnabled) {
                     auto cached = disk.Load(diskKey, &diskReject);
                     if (cached && std::any_of(cached->Anchors.begin(), cached->Anchors.end(), [&](const auto& anchor) {
@@ -339,6 +340,11 @@ struct GrassAsyncPlacementBuilder::Impl {
                     Statistics.DiskMisses += diskMiss;
                     Statistics.DiskRejects += diskReject;
                     Statistics.BuildMilliseconds += elapsed;
+                    if (diskHit) {
+                        Statistics.DiskLoadMilliseconds += elapsed;
+                    } else if (!failed) {
+                        Statistics.BuildMaxMilliseconds = std::max(Statistics.BuildMaxMilliseconds, elapsed);
+                    }
                     if (failed) {
                         ++Statistics.Failures;
                     }
@@ -410,6 +416,8 @@ struct GrassAsyncPlacementBuilder::Impl {
     }
 
     std::filesystem::path Directory;
+    uint64_t DiskByteLimit = 1024ULL * 1024 * 1024;
+    size_t DiskEntryLimit = 128U;
     size_t Capacity = 1U;
     size_t ByteCapacity = 0U;
     mutable std::mutex Mutex;
@@ -545,9 +553,12 @@ void GrassAsyncPlacementBuilder::SetDiskSettleDelay(std::chrono::steady_clock::d
     mImpl->DiskSettleDelay = delay;
 }
 
-void GrassAsyncPlacementBuilder::SetCacheDirectory(std::filesystem::path directory) {
+void GrassAsyncPlacementBuilder::SetCacheDirectory(std::filesystem::path directory, uint64_t byteLimit,
+                                                   size_t entryLimit) {
     std::scoped_lock lock(mImpl->Mutex);
     mImpl->Directory = std::move(directory);
+    mImpl->DiskByteLimit = byteLimit;
+    mImpl->DiskEntryLimit = entryLimit;
 }
 
 void GrassAsyncPlacementBuilder::Clear() {
