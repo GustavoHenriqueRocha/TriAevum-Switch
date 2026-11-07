@@ -61,9 +61,11 @@ struct Oot3dNativeUiTextureProviderStats {
 };
 
 // A decoded UI texture offered to a custom texture source (a texture pack,
-// the TopScreen HD UI atlas). Its identity is the one a native PICA upload of
-// the same bytes has: the encoded base level, after any TopScreen CTXB
-// override, as the game with that mod installed would upload it.
+// the TopScreen HD UI atlas and HD images). Its identity is the one a native
+// PICA upload of the game's own texture has: the encoded base level before
+// this port's TopScreen CTXB override, since TopScreen 3.x leaves those
+// CTXBs as the game has them (texture packs and the mod's own HD images are
+// named after them). `rgba8` is that texture decoded.
 struct Oot3dNativeUiCustomTextureRequest {
     std::uint16_t width = 0;
     std::uint16_t height = 0;
@@ -96,6 +98,8 @@ std::size_t Oot3dNativePicaBaseLevelBytes(std::uint8_t nativePicaFormat,
 
 // TopScreen's HD UI atlas (--topscreen-ui-atlas-hd): the pack's native
 // oot3d/topscreen/3.0/ui_atlas redrawn at a whole multiple of its size.
+// An HD image of one of the game's textures (--topscreen-hd-textures) has
+// the same shape without `native_payload`: it is chosen by Azahar's hash.
 struct Oot3dUiHdAtlas {
     std::shared_ptr<const std::vector<std::uint8_t>> rgba8;
     std::uint32_t width = 0;
@@ -111,12 +115,13 @@ bool IsUiHdAtlasSize(std::uint32_t width, std::uint32_t height,
 
 // The HUD's custom texture for a request: the player's texture pack image
 // when it has one; otherwise the HD atlas when the request is the exact
-// native atlas. While the pack is still deciding (indexing or decoding),
-// the HD atlas (or the native pixels) stands in. `hdAtlas` may be null.
+// native atlas, or `hdImage`, the mod's HD image the caller matched to the
+// request. While the pack is still deciding (indexing or decoding), that
+// image (or the native pixels) stands in. `hdAtlas` and `hdImage` may be null.
 Oot3dNativeUiCustomTexture ChooseUiCustomTexture(
     const Oot3d::Renderer::AzaharTextureResolveResult& pack,
     const Oot3dNativeUiCustomTextureRequest& request,
-    const Oot3dUiHdAtlas* hdAtlas);
+    const Oot3dUiHdAtlas* hdAtlas, const Oot3dUiHdAtlas* hdImage = nullptr);
 
 // Reads the CTXB payload selected by the original OoT3D resource loader from
 // guest/PICA memory, then decodes its native tiled representation for upload.
@@ -144,9 +149,12 @@ class Oot3dNativeA32UiTextureProvider final
     }
 
   private:
+    // `overridden`: `encoded` is the game's own texture, which the TopScreen
+    // override replaced in `pixels`.
     void ApplyCustomTexture(std::uint8_t nativePicaFormat,
                             std::span<const std::uint8_t> encoded,
-                            oot3d::ui::UiTexturePixels& pixels) const;
+                            oot3d::ui::UiTexturePixels& pixels,
+                            bool overridden = false) const;
 
     const Oot3dPicaPhysicalMemoryView& mMemory;
     const TopScreenTextureOverridePack* mTextureOverrides = nullptr;

@@ -18,7 +18,11 @@
 #include "oot3d_whole_aot_gcov.h"
 #include <spdlog/spdlog.h>
 #endif
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include "oot3d_native_direct_aot.h"
@@ -1170,14 +1174,64 @@ void NativeA32WindowSession::Setup() {
     }
     if (decoded != nullptr) stbi_image_free(decoded);
   }
+  // The mod's HD images of the game's own HUD textures (on the Switch,
+  // config/topscreen_hd/, 3x): Azahar names them by its legacy hash of the
+  // native texture, so each is matched the way a legacy-hash pack would be.
+  struct UiHdImage {
+    uint16_t NativeWidth = 0, NativeHeight = 0;
+    uint8_t NativeFormat = 0;
+    uint64_t LegacyHash = 0;
+    Oot3dNativeGame::Oot3dUiHdAtlas Image;
+  };
+  auto uiHdImages = std::make_shared<std::vector<UiHdImage>>();
+  if (!launch.TopScreenHdTexturesPath.empty() && topScreenTextureOverridePackPointer != nullptr) {
+    std::error_code listError;
+    for (const auto &entry : std::filesystem::directory_iterator(launch.TopScreenHdTexturesPath, listError)) {
+      const std::string name = entry.path().filename().string();
+      unsigned width = 0, height = 0, format = 0;
+      unsigned long long hash = 0;
+      int consumed = 0;
+      if (std::sscanf(name.c_str(), "tex1_%ux%u_%16llX_%u_mip0.png%n", &width, &height, &hash, &format,
+                      &consumed) != 4 ||
+          static_cast<size_t>(consumed) != name.size() || width == 0U || height == 0U || width > 1024U ||
+          height > 1024U || format > 13U) {
+        continue;
+      }
+      int imageWidth = 0, imageHeight = 0, channels = 0;
+      stbi_uc *decoded = stbi_load(entry.path().string().c_str(), &imageWidth, &imageHeight, &channels, 4);
+      if (decoded == nullptr) {
+        std::fprintf(stderr, "topscreen: HD image unused: cannot decode %s (%s)\n", name.c_str(),
+                     stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown");
+        continue;
+      }
+      if (!Oot3dNativeGame::IsUiHdAtlasSize(static_cast<uint32_t>(imageWidth), static_cast<uint32_t>(imageHeight),
+                                            width, height)) {
+        std::fprintf(stderr, "topscreen: HD image unused: %s is %dx%d, not a whole multiple of %ux%u\n",
+                     name.c_str(), imageWidth, imageHeight, width, height);
+      } else {
+        UiHdImage image;
+        image.NativeWidth = static_cast<uint16_t>(width);
+        image.NativeHeight = static_cast<uint16_t>(height);
+        image.NativeFormat = static_cast<uint8_t>(format);
+        image.LegacyHash = hash;
+        image.Image.rgba8 = std::make_shared<const std::vector<uint8_t>>(
+            decoded, decoded + static_cast<size_t>(imageWidth) * static_cast<size_t>(imageHeight) * 4U);
+        image.Image.width = static_cast<uint32_t>(imageWidth);
+        image.Image.height = static_cast<uint32_t>(imageHeight);
+        uiHdImages->push_back(std::move(image));
+        std::fprintf(stderr, "topscreen: HD image %s %dx%d\n", name.c_str(), imageWidth, imageHeight);
+      }
+      stbi_image_free(decoded);
+    }
+  }
   // HUD textures resolve the player's texture pack exactly as native PICA
   // uploads do (same identity, same async decode) while HD textures are on,
   // reduced to 3x native (kUiTextureMaxScale) whatever "HD texture size"
   // says. The pack's generation changes when HD textures are turned on or
   // off, so the UI renderer resolves its textures again at once.
   nativeUiTextureProvider.SetCustomTextureSource({
-      [uiHdAtlas](const Oot3dNativeGame::Oot3dNativeUiCustomTextureRequest &request) {
-        const auto pack = Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ResolveOrQueue({
+      [uiHdAtlas, uiHdImages](const Oot3dNativeGame::Oot3dNativeUiCustomTextureRequest &request) {
+        const Oot3d::Renderer::AzaharTextureRequest identity{
             .Width = request.width,
             .Height = request.height,
             .NativeFormat = request.native_pica_format,
@@ -1185,8 +1239,21 @@ void NativeA32WindowSession::Setup() {
             .NativeBytes = request.encoded_base_level,
             .NativeRgba8 = request.rgba8,
             .UserInterface = true,
-        });
-        return Oot3dNativeGame::ChooseUiCustomTexture(pack, request, uiHdAtlas.get());
+        };
+        const auto pack = Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ResolveOrQueue(identity);
+        const Oot3dNativeGame::Oot3dUiHdAtlas *hdImage = nullptr;
+        std::optional<uint64_t> legacyHash;
+        for (const auto &image : *uiHdImages) {
+          if (image.NativeWidth != request.width || image.NativeHeight != request.height ||
+              image.NativeFormat != request.native_pica_format)
+            continue;
+          if (!legacyHash) legacyHash = Oot3d::Renderer::ComputeAzaharTextureHash(identity, false);
+          if (*legacyHash == image.LegacyHash) {
+            hdImage = &image.Image;
+            break;
+          }
+        }
+        return Oot3dNativeGame::ChooseUiCustomTexture(pack, request, uiHdAtlas.get(), hdImage);
       },
       [] { return Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Generation(); },
   });

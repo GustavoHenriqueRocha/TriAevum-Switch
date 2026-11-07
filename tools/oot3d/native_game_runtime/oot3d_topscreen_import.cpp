@@ -19,6 +19,19 @@ namespace {
 namespace fs = std::filesystem;
 namespace ri = RomImport;
 
+// The HD images 3.2 and 3.2.2 ship for Azahar beside the HD UI atlas, named
+// by Azahar's legacy hash of the game's own English menu_top_parts00 (the
+// hearts, magic meter, B label, touch buttons and pause pages) and of
+// menu_cursor00 (the cursor and tab hints). TopScreen 3.x leaves both CTXBs
+// as the game has them, so on Azahar these images replace them. 3.2.1 is
+// not pinned (its archive can no longer be checked).
+constexpr HdTexture kHdTextures32[] = {
+    {"tex1_512x256_BB00B25B152582B6_4_mip0.png", 512, 256, 8'970'114,
+     "1237d0617c4a0f5b59c12b26895a489e92b89c38898726b0b2f7dac18f1398d7"},
+    {"tex1_128x128_8064FDFB5065B51D_4_mip0.png", 128, 128, 478'849,
+     "baf550ec007e1cac3226992d4d5ca8baaa0a56af1d0e8befd5673e4af0b3704e"},
+};
+
 constexpr Archive kArchives[] = {
     {"3.0", "SingleScreen_3.0", "singlescreen_30.zip", 28'883'512,
      "5668640fec8dc2b47b4516fd0b871c4d7d90ca1c2203acc2a22adb59aaab5993", nullptr, 0, nullptr},
@@ -31,7 +44,7 @@ constexpr Archive kArchives[] = {
     {"3.2.2", "SingleScreen_3.2.2", "singlescreen_322.zip", 56'493'832,
      "d07f5ae7a77b83951836d80a000a9625a5e2da52ae0fa262d9b44409fda31aa0",
      "https://gamebanana.com/dl/1879915", 7'007'958,
-     "082582da95930114a149db8fa3c14e8be546d7df1b003c71c81bbbc2d4fde71e"},
+     "082582da95930114a149db8fa3c14e8be546d7df1b003c71c81bbbc2d4fde71e", kHdTextures32},
 };
 // The download is the newest release.
 constexpr const Archive& kDownloadArchive = kArchives[std::size(kArchives) - 1];
@@ -40,8 +53,6 @@ constexpr const char* kUiAtlasSha256 = "20290e417c56973cd19daa1f61a6c3963f075d61
 // Azahar's name for the custom_ui01 replacement (its CityHash, ETC1A4).
 constexpr const char* kUiAtlasHdFile = "tex1_512x256_1FAF9B5B2ADF6038_13_mip0.png";
 constexpr std::uint32_t kUiAtlasWidth = 512, kUiAtlasHeight = 256;
-// The largest HD atlas decoded (8x, the mod's own is 4096x2048).
-constexpr std::uint64_t kMaxUiAtlasHdPixels = 4096ULL * 2048ULL;
 constexpr const char* kUiAtlas = "menu/custom_ui01.ctxb";
 constexpr const char* kTargetRomFs[] = {"Emulator/load/mods/", "3DS Hardware/luma/titles/"};
 constexpr std::size_t kCtxbHeaderSize = 0x48;
@@ -613,12 +624,20 @@ OfferSetting ParseOfferSetting(std::string_view text) {
 
 const char* OfferSettingText(OfferSetting setting) { return setting == OfferSetting::Never ? "never" : "ask"; }
 
-bool ShouldOffer(bool packExists, bool hdAtlasExists, bool romfsExists, OfferSetting setting) {
-    return (!packExists || !hdAtlasExists) && romfsExists && setting == OfferSetting::Ask;
+bool ShouldOffer(bool packExists, bool hdArtExists, bool romfsExists, OfferSetting setting) {
+    return (!packExists || !hdArtExists) && romfsExists && setting == OfferSetting::Ask;
 }
 
-bool ShouldBuildFromLocalArchive(bool packExists, bool hdAtlasExists, const Archive& archive) {
-    return !packExists || (!hdAtlasExists && archive.UiAtlasHdSha256 != nullptr);
+bool ShouldBuildFromLocalArchive(bool packExists, bool hdArtExists, const Archive& archive) {
+    return !packExists || (!hdArtExists && archive.UiAtlasHdSha256 != nullptr && !archive.HdTextures.empty());
+}
+
+bool HdArtInstalled(const fs::path& configDirectory) {
+    std::error_code error;
+    if (!fs::is_regular_file(configDirectory / kUiAtlasHdName, error)) return false;
+    for (const HdTexture& texture : DownloadArchive().HdTextures)
+        if (!fs::is_regular_file(configDirectory / kHdTexturesDirectoryName / texture.FileName, error)) return false;
+    return true;
 }
 
 // ---- ZipReader ----
@@ -1169,26 +1188,58 @@ Bytes ExtractUiAtlasHd(const ZipReader& archive, const Archive& root, std::strin
     return data;
 }
 
-Bytes BuildUiAtlasHd(std::span<const std::uint8_t> sourcePng) {
-    Rgba8Image source = DecodePngRgba8(sourcePng, kMaxUiAtlasHdPixels);
-    if (source.Width % kUiAtlasWidth != 0 || source.Width / kUiAtlasWidth < kUiAtlasHdScale ||
-        static_cast<std::uint64_t>(source.Width) * kUiAtlasHeight !=
-            static_cast<std::uint64_t>(source.Height) * kUiAtlasWidth)
-        throw ImportError("the HD UI atlas is " + std::to_string(source.Width) + "x" +
-                          std::to_string(source.Height) + ", not a multiple of 512x256 of at least " +
-                          std::to_string(kUiAtlasHdScale) + "x");
+namespace {
+
+Bytes ReduceHdImage(std::span<const std::uint8_t> sourcePng, std::uint32_t width, std::uint32_t height,
+                    std::string_view what) {
+    // At most 8x the native size (the mod's own images are 8x).
+    Rgba8Image source = DecodePngRgba8(sourcePng, static_cast<std::uint64_t>(width) * height * 64U);
+    if (width == 0 || height == 0 || source.Width % width != 0 || source.Width / width < kUiAtlasHdScale ||
+        static_cast<std::uint64_t>(source.Width) * height != static_cast<std::uint64_t>(source.Height) * width)
+        throw ImportError(std::string(what) + " is " + std::to_string(source.Width) + "x" +
+                          std::to_string(source.Height) + ", not a multiple of " + std::to_string(width) + "x" +
+                          std::to_string(height) + " of at least " + std::to_string(kUiAtlasHdScale) + "x");
     Rgba8Image reduced;
-    reduced.Width = kUiAtlasWidth * kUiAtlasHdScale;
-    reduced.Height = kUiAtlasHeight * kUiAtlasHdScale;
+    reduced.Width = width * kUiAtlasHdScale;
+    reduced.Height = height * kUiAtlasHdScale;
     if (source.Width == reduced.Width) {
         reduced.Pixels = std::move(source.Pixels);
     } else {
         reduced.Pixels = Oot3d::Renderer::DownscaleRgba8(source.Pixels, {source.Width, source.Height},
                                                          {reduced.Width, reduced.Height});
         source.Pixels = Bytes();
-        if (reduced.Pixels.empty()) throw ImportError("could not reduce the HD UI atlas");
+        if (reduced.Pixels.empty()) throw ImportError("could not reduce " + std::string(what));
     }
     return EncodePngRgba8(reduced);
+}
+
+} // namespace
+
+Bytes BuildHdImage(std::span<const std::uint8_t> sourcePng, std::uint32_t width, std::uint32_t height) {
+    return ReduceHdImage(sourcePng, width, height, "the HD image");
+}
+
+Bytes BuildUiAtlasHd(std::span<const std::uint8_t> sourcePng) {
+    return ReduceHdImage(sourcePng, kUiAtlasWidth, kUiAtlasHeight, "the HD UI atlas");
+}
+
+std::vector<Bytes> ExtractHdTextures(const ZipReader& archive, const Archive& root, std::string_view region) {
+    std::vector<Bytes> images;
+    if (root.HdTextures.empty()) return images;
+    const char* titleId = TitleIdFor(region);
+    if (!titleId) throw ImportError("unsupported TopScreen region: " + std::string(region));
+    for (const HdTexture& texture : root.HdTextures) {
+        const std::string name = std::string(root.Root) + "/" + std::string(region) + "/Emulator/load/textures/" +
+                                 titleId + "/UI/" + texture.FileName;
+        const ZipReader::Entry* entry = archive.Find(name);
+        if (!entry) throw ImportError("archive has no HD image " + name);
+        if (entry->Size != texture.Bytes)
+            throw ImportError("unexpected HD image size " + std::to_string(entry->Size) + ": " + name);
+        Bytes data = archive.Read(*entry, kMaxEntryBytes);
+        if (Sha256Hex(data) != texture.Sha256) throw ImportError("unexpected HD image " + name);
+        images.push_back(std::move(data));
+    }
+    return images;
 }
 
 const Archive* IdentifyArchiveFile(const fs::path& path, std::string* error,
@@ -1240,6 +1291,12 @@ Outputs Build(const fs::path& archivePath, const Archive& source, const fs::path
     outputs.Pack = BuildTexturePack(archive, source, romfs, region);
     outputs.Fonts = BuildFontPack(archive, source, romfs, source.Sha256);
     if (Bytes hd = ExtractUiAtlasHd(archive, source, region); !hd.empty()) outputs.UiAtlasHd = BuildUiAtlasHd(hd);
+    std::vector<Bytes> images = ExtractHdTextures(archive, source, region);
+    for (std::size_t index = 0; index < images.size(); ++index) {
+        const HdTexture& texture = source.HdTextures[index];
+        outputs.HdTextures.push_back(BuildHdImage(images[index], texture.NativeWidth, texture.NativeHeight));
+        images[index] = Bytes();
+    }
     return outputs;
 }
 
@@ -1288,11 +1345,30 @@ void Install(const Outputs& outputs, const fs::path& configDirectory) {
         receipt.Members["ui_atlas_hd_sha256"] = Json::Of(Sha256Hex(outputs.UiAtlasHd));
         receipt.Members["ui_atlas_hd_scale"] = Json::Of(std::int64_t{kUiAtlasHdScale});
     }
+    if (!outputs.HdTextures.empty()) {
+        // The mod's HD images of the game's textures, reduced to 3x.
+        std::vector<Json> images;
+        for (std::size_t index = 0; index < outputs.HdTextures.size(); ++index) {
+            const HdTexture& texture = outputs.Source->HdTextures[index];
+            Json image = Json::Object();
+            image.Members["file"] = Json::Of(std::string(kHdTexturesDirectoryName) + "/" + texture.FileName);
+            image.Members["source_sha256"] = Json::Of(std::string(texture.Sha256));
+            image.Members["sha256"] = Json::Of(Sha256Hex(outputs.HdTextures[index]));
+            images.push_back(std::move(image));
+        }
+        receipt.Members["hd_textures"] = Json::Array(std::move(images));
+    }
     std::string text;
     receipt.Write(text, 0);
     text += '\n';
     WriteFileVerified(configDirectory / kReceiptName, std::span(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
     if (!outputs.UiAtlasHd.empty()) WriteFileVerified(configDirectory / kUiAtlasHdName, outputs.UiAtlasHd);
+    if (!outputs.HdTextures.empty()) {
+        fs::create_directories(configDirectory / kHdTexturesDirectoryName, error);
+        for (std::size_t index = 0; index < outputs.HdTextures.size(); ++index)
+            WriteFileVerified(configDirectory / kHdTexturesDirectoryName / outputs.Source->HdTextures[index].FileName,
+                              outputs.HdTextures[index]);
+    }
     WriteFileVerified(configDirectory / kPackName, outputs.Pack);
 }
 

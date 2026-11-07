@@ -54,6 +54,7 @@ void PrintOot3dNativeGameUsage() {
                  "[--ui-profile <oot3d|topscreen>] "
                  "[--topscreen-texture-overrides <textures.o3tu>] "
                  "[--topscreen-ui-atlas-hd <ui_atlas_hd.png>] "
+                 "[--topscreen-hd-textures <directory>] "
                  "[--topscreen-config <topscreen_ui.json>] "
                  "[--controls-config <oot3d_controls.json>] "
                  "[--save-data <directory>] "
@@ -137,6 +138,8 @@ bool ParseOot3dNativeGameArgs(int argc, char** argv, Oot3dNativeGameLaunch& laun
             launch.TopScreenTextureOverridePackPath = argv[++index];
         } else if (arg == "--topscreen-ui-atlas-hd" && index + 1 < argc) {
             launch.TopScreenUiAtlasHdPath = argv[++index];
+        } else if (arg == "--topscreen-hd-textures" && index + 1 < argc) {
+            launch.TopScreenHdTexturesPath = argv[++index];
         } else if (arg == "--topscreen-config" && index + 1 < argc) {
             launch.TopScreenConfigPath = argv[++index];
         } else if (arg == "--controls-config" && index + 1 < argc) {
@@ -459,13 +462,20 @@ bool ParseOot3dNativeGameArgs(int argc, char** argv, Oot3dNativeGameLaunch& laun
                 launch.TopScreenTextureOverridePackPath.string());
         }
     }
-    // A missing or unreadable HD atlas is not an error: the window setup logs
-    // it and the HUD keeps the native atlas.
+    // A missing or unreadable HD atlas or image is not an error: the window
+    // setup logs it and the HUD keeps the native art.
     if (!launch.TopScreenUiAtlasHdPath.empty() &&
         (launch.UiProfile != Oot3dNativeGame::Oot3dUiProfile::TopScreen ||
          launch.TopScreenTextureOverridePackPath.empty())) {
         throw std::runtime_error(
             "--topscreen-ui-atlas-hd requires --ui-profile topscreen and "
+            "--topscreen-texture-overrides");
+    }
+    if (!launch.TopScreenHdTexturesPath.empty() &&
+        (launch.UiProfile != Oot3dNativeGame::Oot3dUiProfile::TopScreen ||
+         launch.TopScreenTextureOverridePackPath.empty())) {
+        throw std::runtime_error(
+            "--topscreen-hd-textures requires --ui-profile topscreen and "
             "--topscreen-texture-overrides");
     }
 

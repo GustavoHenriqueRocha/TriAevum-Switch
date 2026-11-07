@@ -45,6 +45,16 @@ public:
 
 using Bytes = std::vector<std::uint8_t>;
 
+// An image the mod ships for Azahar in place of one of the game's own HUD
+// textures, named as Azahar names it (tex1_<w>x<h>_<legacy hash>_<format>_mip0.png),
+// the same in every region folder.
+struct HdTexture {
+    const char* FileName;
+    std::uint16_t NativeWidth, NativeHeight;
+    std::uint64_t Bytes;
+    const char* Sha256; // lowercase hex
+};
+
 // A verified release of the mod. Root is the archive's top directory.
 struct Archive {
     const char* Version;
@@ -58,6 +68,9 @@ struct Archive {
     // the release is not known to carry one.
     std::uint64_t UiAtlasHdBytes;
     const char* UiAtlasHdSha256;
+    // The HD images of the game's textures it is known to carry (empty: none
+    // pinned).
+    std::span<const HdTexture> HdTextures = {};
 };
 
 // The release the console downloads (3.2.2, GameBanana file 1879915).
@@ -78,21 +91,30 @@ inline constexpr const char* kReceiptName = "topscreen_import.json";
 // HUD's art at one texel per pixel on a 720p screen (--topscreen-ui-atlas-hd).
 inline constexpr const char* kUiAtlasHdName = "topscreen_ui_atlas_hd.png";
 inline constexpr std::uint32_t kUiAtlasHdScale = 3;
+// The mod's HD images of the game's own HUD textures (HdTexture), each
+// reduced to kUiAtlasHdScale x its native size under its Azahar name
+// (--topscreen-hd-textures): the HUD draws them when the player's texture
+// pack has no image of that texture.
+inline constexpr const char* kHdTexturesDirectoryName = "topscreen_hd";
+// Whether everything the download builds for the HUD art is installed in
+// `configDirectory`: the HD UI atlas and the downloaded release's HD images.
+[[nodiscard]] bool HdArtInstalled(const std::filesystem::path& configDirectory);
 // The player's answer to the start-up offer: "never" stops it; anything else
 // (or no file) offers the download at the next start when the pack or the HD
-// atlas is missing.
+// art is missing.
 inline constexpr const char* kOfferSettingName = "topscreen_offer";
 
 enum class OfferSetting { Ask, Never };
 [[nodiscard]] OfferSetting ParseOfferSetting(std::string_view text);
 [[nodiscard]] const char* OfferSettingText(OfferSetting setting);
 // Whether the start-up screen offers the download: no pack yet, or a pack
-// without the HD atlas (an install from before it was imported).
-[[nodiscard]] bool ShouldOffer(bool packExists, bool hdAtlasExists, bool romfsExists, OfferSetting setting);
+// without all of the HD art (HdArtInstalled: an install from before it was
+// imported).
+[[nodiscard]] bool ShouldOffer(bool packExists, bool hdArtExists, bool romfsExists, OfferSetting setting);
 // Whether a verified archive the player copied to switch/oot3dre/ is built
 // at start-up without asking: always without a pack; with a pack, only when
-// the HD atlas is missing and that archive carries one.
-[[nodiscard]] bool ShouldBuildFromLocalArchive(bool packExists, bool hdAtlasExists, const Archive& archive);
+// HD art is missing and that archive carries all of it.
+[[nodiscard]] bool ShouldBuildFromLocalArchive(bool packExists, bool hdArtExists, const Archive& archive);
 
 // ---- ZIP (stored or deflated entries, no ZIP64, no encryption) ----
 
@@ -198,11 +220,18 @@ struct Rgba8Image {
 // The archive's HD UI atlas PNG for `region` ("EUR", "USA" or "JPN"; the
 // release's pin is checked). Empty when the release carries none.
 [[nodiscard]] Bytes ExtractUiAtlasHd(const ZipReader& archive, const Archive& root, std::string_view region);
-// The HD atlas reduced to kUiAtlasHdScale x the native 512x256 atlas
-// (1536x768) by azahar_texture_scale's area-weighted, alpha-aware filter,
-// as a PNG. Throws when the source is not a whole multiple of 512x256 at
-// kUiAtlasHdScale or more.
+// An HD image reduced to kUiAtlasHdScale x its native `width` x `height`
+// (the UI atlas: 512x256 to 1536x768) by azahar_texture_scale's
+// area-weighted, alpha-aware filter, as a PNG. Throws when the source is not
+// a whole multiple of the native size at kUiAtlasHdScale or more.
+[[nodiscard]] Bytes BuildHdImage(std::span<const std::uint8_t> sourcePng, std::uint32_t width,
+                                 std::uint32_t height);
 [[nodiscard]] Bytes BuildUiAtlasHd(std::span<const std::uint8_t> sourcePng);
+
+// The archive's pinned HD images of the game's textures for `region`
+// (Archive::HdTextures, each checked), in the release's order.
+[[nodiscard]] std::vector<Bytes> ExtractHdTextures(const ZipReader& archive, const Archive& root,
+                                                   std::string_view region);
 
 // Size and SHA-256 of a file against a known release; nullptr and a reason
 // when it is none of them. `progress(done, total)` may be empty.
@@ -215,6 +244,9 @@ struct Outputs {
     Bytes Pack;
     Bytes Fonts;
     Bytes UiAtlasHd; // empty when the release has no HD atlas
+    // Source->HdTextures reduced by BuildHdImage, in the same order (empty
+    // when the release has none).
+    std::vector<Bytes> HdTextures;
 };
 // The outputs from a verified archive (`source`, see IdentifyArchiveFile).
 [[nodiscard]] Outputs Build(const std::filesystem::path& archive, const Archive& source,
@@ -224,8 +256,8 @@ struct Outputs {
 // (removed first: Horizon cannot rename over a file). Throws ImportError.
 void WriteFileVerified(const std::filesystem::path& path, std::span<const std::uint8_t> bytes);
 
-// Writes the font pack, the receipt, the HD atlas (when built) and the pack
-// (last: it is what the game looks for) into `configDirectory`.
+// Writes the font pack, the receipt, the HD atlas and HD images (when built)
+// and the pack (last: it is what the game looks for) into `configDirectory`.
 void Install(const Outputs& outputs, const std::filesystem::path& configDirectory);
 
 } // namespace Oot3dNativeGame::TopScreenImport
