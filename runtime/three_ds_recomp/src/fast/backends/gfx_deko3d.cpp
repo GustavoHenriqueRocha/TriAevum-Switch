@@ -4,13 +4,9 @@
 
 #if defined(__SWITCH__)
 #include "gfx_deko3d_api.h"
-#include "fast/oot3d/directional_shadows.h"
 #include "fast/oot3d/graphics_settings_runtime.h"
-#include "fast/oot3d/pica_rim_light.h"
 #include "fast/oot3d/pica_toon_shader.h"
-#include "fast/oot3d/pica_uniform_layout.h"
 #include "fast/renderer3ds/pica_gl_shader_dialect.h"
-#include "fast/renderer3ds/pica_surface_appearance.h"
 #include "oot3d/renderer/azahar_texture_pack.h"
 
 #include <switch.h>
@@ -497,55 +493,6 @@ const DkShader* GfxRenderingAPIDeko3d::ResolvePerPixelVertex(const GfxNativePica
     return shader;
 }
 
-// Upstream's per-pixel admission (gfx_vulkan_pica_draw.cpp, surfaceCandidate
-// and the authored-appearance test), then its block, trimmed.
-bool GfxRenderingAPIDeko3d::BuildSurfaceLighting(const GfxNativePicaDrawView& draw) {
-    const auto& hooks = draw.TemporalVertexProgram.Hooks;
-    const auto* surface = hooks.SurfaceProgram();
-    if (draw.CompositionDomain != Renderer3ds::PicaCompositionDomain::Scene ||
-        !Renderer3ds::PicaCompositionReceivesSurfaceLighting(draw.Composition.Layer) ||
-        draw.FragmentOperationMode != 0U || surface == nullptr || hooks.TransformProgram() == nullptr ||
-        draw.VertexUniformBytes.size() < Oot3d::kPicaPackedVertexFloatOffset ||
-        !Oot3d::UsesPicaPerspectiveProjection(draw.VertexUniformBytes)) {
-        return false;
-    }
-    uint32_t booleans = 0U;
-    std::memcpy(&booleans, draw.VertexUniformBytes.data() + Oot3d::kPicaPackedVertexBooleanMaskOffset,
-                sizeof(booleans));
-    const bool vertexLit = ((booleans >> surface->LightingBooleanUniform) & 1U) != 0U;
-    const auto appearance =
-        Renderer3ds::ClassifyPicaSurfaceAppearance(draw.Blend, vertexLit, draw.FragmentFeatures.FragmentLightingEnabled);
-    if (appearance != Renderer3ds::PicaSurfaceAppearance::Relightable) {
-        return false;
-    }
-    const auto* worldToView = draw.LightBinding.WorldToView ? &*draw.LightBinding.WorldToView : nullptr;
-    if (worldToView != nullptr && (!mLightingView || mLightingView->WorldToView != *worldToView)) {
-        mLightingView = Renderer3ds::BuildPicaSurfaceLightingView(*worldToView);
-    }
-    // A draw the title lights on its own keeps its native environment.
-    auto isolated = mLightingEnvironment;
-    isolated.Enabled = false;
-    const auto uniforms = Renderer3ds::BuildPicaSurfaceLightingUniforms(
-        hooks, booleans, draw.VertexUniformBytes.subspan(Oot3d::kPicaPackedVertexFloatOffset), draw.LightBinding,
-        draw.Composition.IsolatedLighting ? isolated : mLightingEnvironment,
-        worldToView != nullptr && mLightingView ? &*mLightingView : nullptr);
-    if (!uniforms) {
-        return false;
-    }
-    mSurfaceLighting = *uniforms;
-    if (draw.Composition.IsolatedLighting || draw.FragmentFeatures.FragmentLightingEnabled) {
-        mSurfaceLighting.BakedReferenceUp = {};
-    }
-    Deko3d::TrimSurfaceLighting(mSurfaceLighting);
-    // Scene lights > Rim light, on the draws upstream gives it to.
-    if (Oot3d::PicaDrawReceivesRimLight(mLightingEnvironment, draw.CompositionDomain, draw.Composition, draw.Blend,
-                                        appearance, draw.DepthTestEnabled, draw.DepthWriteEnabled,
-                                        draw.FragmentOperationMode)) {
-        Renderer3ds::AssignPicaSurfaceRim(mSurfaceLighting, mLightingEnvironment.Rim);
-    }
-    return true;
-}
-
 void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw, std::string_view fragmentSource,
                                               Renderer3ds::PicaShaderSourceIdentity fragmentIdentity,
                                               PicaProgram& program) {
@@ -568,29 +515,36 @@ void GfxRenderingAPIDeko3d::ApplyPicaLighting(const GfxNativePicaDrawView& draw,
         program.Lit = choice.Lit;
         return;
     }
-    // Per-pixel: both variants, then the block (only for a draw that uses them).
-    const auto& hooks = draw.TemporalVertexProgram.Hooks;
-    if (draw.CompositionDomain != Renderer3ds::PicaCompositionDomain::Scene ||
-        !Renderer3ds::PicaCompositionReceivesSurfaceLighting(draw.Composition.Layer) ||
-        hooks.SurfaceProgram() == nullptr || hooks.TransformProgram() == nullptr) {
+    // Per-pixel: both variants, then the block (only for a draw that uses
+    // them). The decision is Deko3d::BuildPerPixelSurface's (host-tested with
+    // the fps60 in-between frames); counted by frame kind.
+    auto& kind = mInBetweenSample ? mInBetweenLighting : mRealLighting;
+    if (const auto refusal = Deko3d::AdmitPerPixelDraw(draw); refusal != Deko3d::PerPixelRefusal::None) {
+        if (refusal == Deko3d::PerPixelRefusal::NoDepthWrite) ++mLightingCounters.DrawsNoDepthWrite;
         ++mLightingCounters.DrawsIneligible;
-        return;
-    }
-    if (!Deko3d::PerPixelCostAdmits(draw.DepthWriteEnabled)) {
-        ++mLightingCounters.DrawsNoDepthWrite;
-        ++mLightingCounters.DrawsIneligible;
+        kind.Refuse(refusal);
         return;
     }
     const DkShader* vertex = ResolvePerPixelVertex(draw);
     const DkShader* fragment =
         vertex != nullptr ? ResolveLightingFragment(Deko3d::LightingMode::PerPixel, fragmentSource, fragmentIdentity)
                           : nullptr;
-    if (vertex != nullptr && fragment != nullptr && !BuildSurfaceLighting(draw)) {
-        ++mLightingCounters.DrawsIneligible;
-        return;
+    if (vertex != nullptr && fragment != nullptr) {
+        if (const auto refusal = Deko3d::BuildPerPixelSurface(draw, mLightingEnvironment, mLightingView,
+                                                              mSurfaceLighting);
+            refusal != Deko3d::PerPixelRefusal::None) {
+            ++mLightingCounters.DrawsIneligible;
+            kind.Refuse(refusal);
+            return;
+        }
     }
     const auto choice =
         Deko3d::ChooseLightingProgram<DkShader>(program.Vertex, program.Fragment, vertex, fragment, mLightingCounters);
+    if (choice.Lit) {
+        kind.Light(mSurfaceLighting);
+    } else {
+        ++kind.Native;
+    }
     program.Vertex = choice.Vertex;
     program.Fragment = choice.Fragment;
     program.Lit = choice.Lit;
@@ -616,6 +570,16 @@ void GfxRenderingAPIDeko3d::LogLightingCounters(const char* when) {
                 static_cast<unsigned long long>(c.DrawsSpillingBase), static_cast<unsigned long long>(c.DrawsNoDepthWrite),
                 Deko3d::FormatPicaLitDraws(frames.Last, 1U).c_str(), static_cast<unsigned long long>(frames.Frames),
                 Deko3d::FormatPicaLitDraws(frames.Sum, frames.Frames).c_str());
+    // Per-pixel draws by frame kind since the previous line (its own line:
+    // Log cuts at 511 characters): real frames and fps60 in-between frames,
+    // each with its first refusal and the refusals by reason.
+    if (mLightingMode == Deko3d::LightingMode::PerPixel) {
+        Deko3d::Log("lighting by frame (%s): real %s | in-between %s", when,
+                    Deko3d::FormatFrameKindLighting(mRealLighting).c_str(),
+                    Deko3d::FormatFrameKindLighting(mInBetweenLighting).c_str());
+    }
+    mRealLighting = {};
+    mInBetweenLighting = {};
 }
 
 void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
