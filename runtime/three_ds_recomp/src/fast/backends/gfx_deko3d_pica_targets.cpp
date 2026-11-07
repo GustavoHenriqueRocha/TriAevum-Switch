@@ -55,7 +55,7 @@ constexpr uint32_t kDepthFlags = DkImageFlags_UsageRender | DkImageFlags_HwCompr
 // Scene colour and display images: compressed unless config/deko3d_compression
 // says "0" (Device::ColorCompression). Their readers are GPU engines only:
 // the 2D blit into the display image, the scanout's sampling, the copy
-// engine of save states and DRS resizes (as for the compressed depth).
+// engine of save states (as for the compressed depth).
 uint32_t ColorFlags(const Device& device) {
     return kRenderFlags | (device.ColorCompression() ? static_cast<uint32_t>(DkImageFlags_HwCompression) : 0U);
 }

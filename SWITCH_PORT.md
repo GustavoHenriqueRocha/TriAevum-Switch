@@ -1934,9 +1934,9 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   whose first character is `0` turns it off (A/B). Log at start: `deko3d: colour compression on|off`.
 - Every reader is a GPU engine, which reads through the compression-aware L2:
   - the display copy (2D engine `dkCmdBufBlitImage`) and the edge bands; the scanout samples the display image;
-  - save-state capture/restore and DRS resizes: copy engine (`dkCmdBufCopyImageToBuffer`/`BufferToImage`/
-    `CopyImage`), the same calls that already read and write the compressed depth; the CPU only touches the
-    linear staging buffers;
+  - save-state capture/restore: copy engine (`dkCmdBufCopyImageToBuffer`/`dkCmdBufCopyBufferToImage`), the
+    same calls that already read and write the compressed depth; the CPU only touches the linear staging
+    buffers (dynamic resolution copies nothing: it clears and redraws);
   - the mailbox: the present queue's `dkCmdBufCopyImage` into the window image.
   - Screenshots capture the window images, which stay as before: compressed only without the present
     thread, where `dkQueuePresentImage` decompresses them (`SurfaceDecompress`); with it they go to nwindow
