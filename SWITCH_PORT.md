@@ -2681,6 +2681,58 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   `gfx_deko3d.cpp`. Tests: `oot3d_native_pica_frontend_tests`, `oot3d_native_pica_composition_tests`
   (`TestWriteGeneration`), `oot3d_deko3d_inbetween_lighting_tests` (`TestLightingTransients`). Guards "blink17".
 
+### Per-pixel blink in test.10: draws a CMB renderer writes outside its mesh packets (`logs18`, 07/11)
+- **Seen (test.10 video `2026110714542300`, Temple of Time, logs18a):** frame 102 of 363 (about 14:54:14.4) differs
+  from both neighbours while they agree: the room's pillar and walls lighter, the left windows brighter and warmer,
+  the chandelier darker; Link unchanged. Crops: `~/oot3d-work/flicker18/vid/` (`crop3b.png`, `win3b.png`). The
+  other three test.10 videos show no such frame in the scene (fast camera turns, pause menu and file select only).
+- **What `logs18` says:**
+  - `ui_list` is gone: every `lighting transient` line in 18a/b/c (96 each) is `lost world 1/2/1 (no_span=1
+    atmosphere=1)`, one scene draw in no span for one game frame, in both frame kinds. `late_lists` is about 75 per
+    150 frames, one per game frame (13 draws in gameplay, 4 on the title screen): the fix moves them back every frame.
+  - The video's blink maps (hitches.txt `t=` between frames 3597 and 3893) to host frame about 3750 ± 60; the
+    transients there are frames 3739/3740 (`list=1458fa80+17712 vertices=1161`) and 3805/3806
+    (`list=144af360+7540 vertices=8700`, a whole room mesh), each `lit 48/47/48`: one lit draw falls back to native
+    lighting, which is what the frame shows.
+  - The no-span draws are game-deterministic: the title demo loses the same draws at the same frames in all three
+    sessions (frames 207/261/337/375/387/397: offsets +15894, +936, +2280, +5416, +4968, +19110).
+  - `perf.txt`: `no_span_draws` 0-12 per window in every scene, `owner_holes` about half of them; `bare_list_draws`,
+    `ui_world_draws`, `spans_partial/overlapping/unattributed/evicted` 0; `spans_invalid` only at scene loads. The 64
+    `composition note:` lines were all `late_list` of the first 300 frames, so no `same_owner_hole` note was logged.
+- **Ruled out (EUR code.bin):** the mesh span is exact (`0x00466E2C` reads the cursor through `0x002F9CA0` case
+  `0x208` = `[0x0054CC4C]`, copies `[packet+0x10]` bytes and commits them through `0x002F9C88`); the only draw
+  trigger the code emits (`0x000F022F` at `0x003135A0`) is in the primitive builder `0x00313444`, whose three callers
+  are all tracked. The product build runs every slice with `skipFirstBlockEntry=false` (`DispatchWholeAotProduct`),
+  so the mesh hook is not skipped. Between two mesh packets `0x00452808` calls `0x0032471C` (a command writer on
+  the cursor), the material vcalls `+0x24/+0x20/+0x14` and `0x002F9C74`: bytes inside the pass that no span covers.
+  Which of them carries the lost draw is not proved [INFERENCE: an owner hole lies between two mesh spans of one
+  renderer and pass, so inside that pass].
+- **Fix:** `Oot3dNativePicaCompositionTracker` records each scene CMB pass, from `CmbRenderer_SubmitDrawHandle`'s
+  entry to its return (`[0x0054CC4C]` at both), as a pass span: the pass attribution (layer, actor, projected
+  shadow), the light binding of its last mesh span, no temporal identity. Passes inside a UI or atmosphere scope are
+  not recorded. `TakeCommandListPassSpans` hands the passes of a submitted list to the frontend
+  (`SetNextCommandListPassSpans`); a scene draw in none of the list's spans but inside a pass resolves to the pass.
+  `config/no_pass_span_fallback` (file present) restores the old behaviour (A/B). A draw outside any pass is
+  unchanged.
+- **Diagnostics:** `perf.txt` `composition:` gains `passes passes_consumed passes_lost` (tracker) and `pass_draws`
+  (no-span draws resolved to their pass). Every no-span draw is noted (`no_span` or `same_owner_hole`) with
+  `vertices=`, the spans before and after it and `pass=` (the pass holding it, or `none`); `late_list` notes are
+  capped at 8 so these reach the log.
+- **Reading the next run:** `pass_draws` equal to `no_span_draws` and no `lighting transient` lines (or only with
+  `pass=none` notes) = fixed. `pass=none` notes name the remaining writers (the spans around the draw and the
+  renderer). With `config/no_pass_span_fallback` the transients come back.
+- **Check (one minute):** Per-pixel, 60 FPS, Temple of Time, stand still and turn the camera slowly over the pillars
+  and windows for 30 s. No one-frame brightening of the room. `logs/perf.txt`: `pass_draws` against `no_span_draws`,
+  the `composition note: ... no_span|same_owner_hole ... pass=` lines; `logs/deko3d.txt`: `lighting transient` lines.
+  No `deko3d.pack` rebuild needed.
+- **Risk:** a resolved draw has no temporal identity, so in an in-between frame it is drawn like a draw that has no
+  match [INFERENCE: at most a one-frame position step of that draw instead of a lighting change]. One more cursor
+  read per CMB pass entry and exit and a vector of passes per list.
+- Code: `oot3d_native_pica_composition.{h,cpp}` (pass spans), `oot3d_native_pica_frontend.{h,cpp}`
+  (`SetNextCommandListPassSpans`, `SetPassSpanFallback`, notes), `oot3d_native_a32_ctr_host_gsp.cpp`,
+  `oot3d_native_a32_window_{setup,frame}.cpp`. Tests: `oot3d_native_pica_composition_tests` (`TestPassSpans`),
+  `oot3d_native_pica_frontend_tests`. Guards "flicker18".
+
 ### Landing roll (N64): L3+R3 > Game > Gameplay (`config/no_landing_roll`, 07/11, on by default)
 - **Seen (OoT3D since 2011, GameFAQs "Link no longer rolls after jumping off a high cliff"):** after a run
   jump off a ledge, Link never rolls on landing, even with the stick held forward; he still rolls after

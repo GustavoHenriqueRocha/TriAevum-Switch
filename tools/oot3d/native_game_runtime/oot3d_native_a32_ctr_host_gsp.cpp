@@ -248,6 +248,12 @@ NativeA32HostResult NativeA32CtrHostServices::HandleGspRequest(
                                     packet.Parameters[0],
                                     packet.Parameters[1],
                                     compositionSpans, &picaError);
+                        if (submitted &&
+                            mConfig.PicaCompositionProvider->TakeCommandListPassSpans(
+                                packet.Parameters[0], packet.Parameters[1], compositionSpans)) {
+                            mConfig.PicaFrontend->SetNextCommandListPassSpans(
+                                packet.Parameters[0], packet.Parameters[1], compositionSpans);
+                        }
                     }
                 }
 #endif

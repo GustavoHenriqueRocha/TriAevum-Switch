@@ -1615,6 +1615,30 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'" spans_invalid=".*?" late_lists=".*?" ui_world_draws=".*?" no_span_draws=".*?" owner_holes=".*?'
           r'"composition note: window_end="'),
+    # --- 07/11: test.10 flicker (logs18, Temple of Time video 14:54:23 frame 102) ---
+    # Every remaining lighting transient was one scene draw in no span (no_span=1): a draw a CMB
+    # renderer writes inside its pass but outside its mesh packets lost per-pixel lighting for a
+    # game frame (the room mesh: pillar lighter, windows brighter). The tracker records the whole
+    # pass and the frontend gives such a draw its pass's composition (config/no_pass_span_fallback = old).
+    Guard("flicker18: the tracker records each scene CMB pass (SubmitDrawHandle entry to its return) as a pass span",
+          "tools/oot3d/native_game_runtime/oot3d_native_pica_composition.cpp",
+          r'if \(mActivePassBeginValid && !mActiveUiScope && !mActiveAtmosphereScope &&.*?'
+          r'span\.Attribution\.TemporalIdentity = \{\};.*?mPendingPassSpans\.push_back',
+          test="oot3d_native_pica_composition_tests (TestPassSpans)"),
+    Guard("flicker18: a scene draw in no span but inside a CMB pass takes the pass's composition",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'\+\+mCompositionResolveStats\.NoSpanDraws;.*?if \(passSpan != nullptr && mPassSpanFallback\) \{\s*'
+          r'\+\+mCompositionResolveStats\.PassSpanDraws;\s*return passSpan;',
+          test="oot3d_native_pica_frontend_tests"),
+    Guard("flicker18: the GSP submission hands the list's pass spans to the frontend",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_gsp.cpp",
+          r'TakeCommandListPassSpans\(.*?SetNextCommandListPassSpans\('),
+    Guard("flicker18: config/no_pass_span_fallback is the A/B switch of the pass fallback",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'SetPassSpanFallback\(\s*!std::filesystem::exists\(configDirectory / "no_pass_span_fallback"'),
+    Guard("flicker18: late_list notes have their own cap, so no_span notes still reach perf.txt",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'note\.Kind == Oot3dPicaCompositionNoteKind::LateList && mLateListNotesRecorded\+\+ >= 8U'),
     Guard("hudscale75: the Switch's default HUD scale is 0.75 with no config (the mod's screenshots are ~0.70)",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_config.h",
           r'#ifdef __SWITCH__\s*inline constexpr float kTopScreenHudScaleDefault = 0\.75F;'),

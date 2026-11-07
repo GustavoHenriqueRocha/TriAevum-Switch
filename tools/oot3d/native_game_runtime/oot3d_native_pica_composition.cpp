@@ -455,6 +455,29 @@ void Oot3dNativePicaCompositionTracker::ObserveBlockEntry(
     }
 
     if (mActiveCmbReturnPc.has_value() && pc == *mActiveCmbReturnPc) {
+        // The whole pass, the fallback owner of a draw its renderer wrote
+        // outside its mesh packets (perf.txt pass_draws).
+        uint32_t end = 0U;
+        if (mActivePassBeginValid && !mActiveUiScope && !mActiveAtmosphereScope &&
+            memory.Read32(kPicaCommandListCursorAddress, &end) && end > mActivePassBegin &&
+            (end & 7U) == 0U) {
+            Oot3dPicaCommandListCompositionSpan span{mActivePassBegin, end, mActiveCmbAttribution};
+            span.Attribution.TemporalIdentity = {};
+            span.Attribution.TemporalPacketBeginAddress = 0;
+            span.Attribution.NativeProjectedShadow = std::binary_search(
+                mProjectedShadowRenderers.begin(), mProjectedShadowRenderers.end(), mActiveCmbRenderer);
+            span.LightBinding = mActivePassHasBinding ? mActivePassBinding
+                                                      : mLighting.CaptureRenderer(mActiveCmbRenderer, memory);
+            span.WriteGeneration = mWriteGeneration;
+            if (mPendingPassSpans.size() == MaximumPendingSpans) {
+                mPendingPassSpans.pop_front();
+                ++mStats.EvictedPassSpans;
+            }
+            mPendingPassSpans.push_back(std::move(span));
+            ++mStats.RecordedPassSpans;
+        }
+        mActivePassBeginValid = false;
+        mActivePassHasBinding = false;
         mActiveCmbPass.reset();
         mActiveCmbReturnPc.reset();
         mActiveCmbRenderer = 0;
@@ -468,6 +491,8 @@ void Oot3dNativePicaCompositionTracker::ObserveBlockEntry(
             mActiveCmbPass.reset();
             mActiveCmbReturnPc.reset();
             mActiveCmbRenderer = 0;
+            mActivePassBeginValid = false;
+            mActivePassHasBinding = false;
             if (pass > 1U) {
                 ++mStats.InvalidCmbPassEntries;
             } else {
@@ -478,6 +503,10 @@ void Oot3dNativePicaCompositionTracker::ObserveBlockEntry(
         mActiveCmbPass = static_cast<uint8_t>(pass);
         mActiveCmbReturnPc = state.r[14];
         mActiveCmbRenderer = state.r[0];
+        mActivePassHasBinding = false;
+        mActivePassBeginValid = !mActiveUiScope && !mActiveAtmosphereScope &&
+                                memory.Read32(kPicaCommandListCursorAddress, &mActivePassBegin) &&
+                                (mActivePassBegin & 7U) == 0U;
         mActiveCmbAttribution = AttributionForCmbPass(static_cast<uint8_t>(pass));
         mActiveCmbAttribution.NativeActorGeometry = !mActorDrawStack.empty() && !mActiveUiScope;
         mActiveCmbAttribution.NativeActorIdentity =
@@ -652,6 +681,8 @@ void Oot3dNativePicaCompositionTracker::ObserveBlockEntry(
             mProjectedShadowRenderers.begin(), mProjectedShadowRenderers.end(), mActiveCmbRenderer);
         if (!mActiveUiScope) {
             span.LightBinding = mLighting.CaptureRenderer(mActiveCmbRenderer, memory);
+            mActivePassBinding = span.LightBinding;
+            mActivePassHasBinding = true;
         }
     }
     if (RecordPendingSpan(std::move(span))) {
@@ -697,6 +728,42 @@ bool Oot3dNativePicaCompositionTracker::TakeCommandListCompositionSpans(
     return true;
 }
 
+bool Oot3dNativePicaCompositionTracker::TakeCommandListPassSpans(
+    uint32_t commandListAddress, uint32_t commandListSize,
+    std::vector<Oot3dPicaCommandListCompositionSpan>& spans) {
+    spans.clear();
+    const uint64_t commandListEnd = static_cast<uint64_t>(commandListAddress) + commandListSize;
+    for (auto it = mPendingPassSpans.begin(); it != mPendingPassSpans.end();) {
+        if (!(it->BeginAddress < commandListEnd && commandListAddress < it->EndAddress)) {
+            ++it;
+            continue;
+        }
+        if (it->BeginAddress >= commandListAddress && it->EndAddress <= commandListEnd) {
+            spans.push_back(*it);
+        } else {
+            ++mStats.PartialPassSpans;
+        }
+        it = mPendingPassSpans.erase(it);
+    }
+    std::sort(spans.begin(), spans.end(),
+              [](const auto& left, const auto& right) { return left.BeginAddress < right.BeginAddress; });
+    // Passes run one after another, so their ranges are disjoint; keep the
+    // later of two that are not (a range the buffer reused).
+    size_t kept = 0;
+    for (size_t index = 0; index < spans.size(); ++index) {
+        if (kept != 0 && spans[index].BeginAddress < spans[kept - 1U].EndAddress) {
+            ++mStats.PartialPassSpans;
+            if (spans[index].WriteGeneration < spans[kept - 1U].WriteGeneration) continue;
+            spans[kept - 1U] = spans[index];
+            continue;
+        }
+        spans[kept++] = spans[index];
+    }
+    spans.resize(kept);
+    mStats.ConsumedPassSpans += kept;
+    return true;
+}
+
 void Oot3dNativePicaCompositionTracker::Reset() noexcept {
     if (++mNextTemporalLifetime == 0) ++mNextTemporalLifetime;
     mWorldTemporalLifetime = mNextTemporalLifetime;
@@ -705,6 +772,9 @@ void Oot3dNativePicaCompositionTracker::Reset() noexcept {
     mActiveCmbPass.reset();
     mActiveCmbReturnPc.reset();
     mActiveCmbRenderer = 0;
+    mActivePassBeginValid = false;
+    mActivePassHasBinding = false;
+    mPendingPassSpans.clear();
     mProjectedShadowRenderers.clear();
     mQueuedComposition.clear();
     mActorDrawStack.clear();

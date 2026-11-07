@@ -17,6 +17,7 @@ constexpr uint32_t kHardwareRegisterOffsetLimit = 0x00420000U;
 constexpr size_t kMaximumWriteBytes = 0x80U;
 constexpr size_t kMaximumCommandListBytes = 0x01000000U;
 constexpr size_t kPicaRegisterCount = 0x300U;
+constexpr uint16_t kPicaVertexCountRegister = 0x228U;
 constexpr uint16_t kPicaTriggerDraw = 0x22EU;
 constexpr uint16_t kPicaTriggerDrawIndexed = 0x22FU;
 constexpr uint16_t kPicaIrqRequest = 0x010U;
@@ -186,6 +187,7 @@ const char* CompositionNoteKindName(Oot3dPicaCompositionNoteKind kind) {
         case Oot3dPicaCompositionNoteKind::LateList: return "late_list";
         case Oot3dPicaCompositionNoteKind::UiListWorld: return "ui_list_world";
         case Oot3dPicaCompositionNoteKind::SameOwnerHole: return "same_owner_hole";
+        case Oot3dPicaCompositionNoteKind::NoSpan: return "no_span";
     }
     return "?";
 }
@@ -227,15 +229,21 @@ std::string FormatOot3dPicaCompositionNote(const Oot3dPicaCompositionNote& note)
         static_cast<unsigned>(note.Resolved), note.Spans, note.OldestGeneration,
         note.NewestGeneration, note.CurrentGeneration, note.Draws, note.WorldSpanDraws);
     std::string result(text, static_cast<size_t>(std::clamp(length, 0, static_cast<int>(sizeof(text)) - 1)));
-    if (note.Kind == Oot3dPicaCompositionNoteKind::SameOwnerHole) {
-        result += " before=" + FormatNoteSpan(note.Before);
-        result += " after=" + FormatNoteSpan(note.After);
+    if (note.Kind == Oot3dPicaCompositionNoteKind::SameOwnerHole ||
+        note.Kind == Oot3dPicaCompositionNoteKind::NoSpan) {
+        result += " vertices=" + std::to_string(note.Vertices);
+        if (note.Before.EndAddress != 0U) result += " before=" + FormatNoteSpan(note.Before);
+        if (note.After.EndAddress != 0U) result += " after=" + FormatNoteSpan(note.After);
+        result += note.Pass.EndAddress != 0U ? " pass=" + FormatNoteSpan(note.Pass) : std::string(" pass=none");
     }
     return result;
 }
 
 void Oot3dNativePicaFrontend::NoteComposition(const Oot3dPicaCompositionNote& note) {
     if (mCompositionNotesRecorded >= 64U) return;
+    // A late list comes every frame: without its own cap it used the whole
+    // budget on the title screen (logs18) before any no_span note.
+    if (note.Kind == Oot3dPicaCompositionNoteKind::LateList && mLateListNotesRecorded++ >= 8U) return;
     ++mCompositionNotesRecorded;
     mCompositionNotes.push_back(note);
 }
@@ -283,6 +291,14 @@ bool Oot3dNativePicaFrontend::SetNextCommandListCompositionSpans(
     mCompositionSpanCommandListSize = commandListSize;
     mNextCommandListCompositionSpans = std::move(validated);
     return true;
+}
+
+void Oot3dNativePicaFrontend::SetNextCommandListPassSpans(
+    uint32_t commandListAddress, uint32_t commandListSize,
+    std::span<const Oot3dPicaCommandListCompositionSpan> spans) {
+    mPassSpanCommandListAddress = commandListAddress;
+    mPassSpanCommandListSize = commandListSize;
+    mNextCommandListPassSpans.assign(spans.begin(), spans.end());
 }
 
 void Oot3dNativePicaFrontend::ApplyShaderStageRegisterSideEffects(
@@ -637,6 +653,14 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
     mCompositionSpanCommandListAddress = 0U;
     mCompositionSpanCommandListSize = 0U;
     mNextCommandListCompositionSpans.clear();
+    std::vector<Oot3dPicaCommandListCompositionSpan> passSpans;
+    if (mPassSpanCommandListAddress == commandListAddress &&
+        mPassSpanCommandListSize == commandListSize) {
+        passSpans = std::move(mNextCommandListPassSpans);
+    }
+    mPassSpanCommandListAddress = 0U;
+    mPassSpanCommandListSize = 0U;
+    mNextCommandListPassSpans.clear();
 
     // A list kicked after the next frame's HUD phase began keeps the domain
     // it would have had on time (IsLateCompositionCommandList).
@@ -683,29 +707,46 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
             return nullptr;
         }
         ++mCompositionResolveStats.NoSpanDraws;
+        // The CMB pass the draw was written in (its renderer wrote it outside
+        // its mesh packets): logs18 (test.10) had 1-12 such draws per window,
+        // half of them between two mesh spans of one renderer, each losing
+        // per-pixel lighting for one game frame (a whole room mesh in the
+        // Temple of Time video).
+        const auto pass = std::upper_bound(
+            passSpans.begin(), passSpans.end(), address,
+            [](uint64_t value, const Oot3dPicaCommandListCompositionSpan& candidate) {
+                return value < candidate.BeginAddress;
+            });
+        const Oot3dPicaCommandListCompositionSpan* passSpan =
+            pass != passSpans.begin() && address < std::prev(pass)->EndAddress ? &*std::prev(pass) : nullptr;
+        Oot3dPicaCompositionNote note;
+        note.Kind = Oot3dPicaCompositionNoteKind::NoSpan;
         if (found != compositionSpans.begin() && found != compositionSpans.end()) {
-            const auto& before = *std::prev(found);
-            const auto& after = *found;
-            const auto& a = before.Attribution;
-            const auto& b = after.Attribution;
+            const auto& a = std::prev(found)->Attribution;
+            const auto& b = found->Attribution;
             if (a.Provenance == Oot3dPicaCompositionProvenance::NativeCmbDrawPass &&
                 b.Provenance == a.Provenance && a.Layer == b.Layer &&
                 a.NativeActorIdentity == b.NativeActorIdentity &&
                 a.TemporalIdentity.Instance == b.TemporalIdentity.Instance) {
                 ++mCompositionResolveStats.SameOwnerHoleDraws;
-                Oot3dPicaCompositionNote note;
                 note.Kind = Oot3dPicaCompositionNoteKind::SameOwnerHole;
-                note.CommandListAddress = commandListAddress;
-                note.CommandListSize = commandListSize;
-                note.OffsetWords = offsetWords;
-                note.Submitted = mCommandListCompositionDomain;
-                note.Resolved = listDomain;
-                note.Spans = static_cast<uint32_t>(compositionSpans.size());
-                note.CurrentGeneration = mCurrentWriteGeneration;
-                note.Before = NoteSpan(before);
-                note.After = NoteSpan(after);
-                NoteComposition(note);
             }
+        }
+        note.CommandListAddress = commandListAddress;
+        note.CommandListSize = commandListSize;
+        note.OffsetWords = offsetWords;
+        note.Vertices = mPicaRegisters[kPicaVertexCountRegister];
+        note.Submitted = mCommandListCompositionDomain;
+        note.Resolved = listDomain;
+        note.Spans = static_cast<uint32_t>(compositionSpans.size());
+        note.CurrentGeneration = mCurrentWriteGeneration;
+        if (found != compositionSpans.begin()) note.Before = NoteSpan(*std::prev(found));
+        if (found != compositionSpans.end()) note.After = NoteSpan(*found);
+        if (passSpan != nullptr) note.Pass = NoteSpan(*passSpan);
+        NoteComposition(note);
+        if (passSpan != nullptr && mPassSpanFallback) {
+            ++mCompositionResolveStats.PassSpanDraws;
+            return passSpan;
         }
         return nullptr;
     };

@@ -239,6 +239,71 @@ void TestWriteGeneration() {
             "only bytes written before this Gameplay_Draw are late");
 }
 
+// test.10 (logs18): a draw a CMB renderer writes between its mesh packets
+// lies in no packet span. The whole pass (SubmitDrawHandle entry to its
+// return) is recorded as the draw's fallback owner; passes inside a UI or
+// atmosphere scope are not.
+void TestPassSpans() {
+    using namespace Oot3dNativeGame;
+    NativeA32Memory memory;
+    Map(memory, 0x0054C000U, 0x1000U);
+    Map(memory, 0x10000000U, 0x1000U);
+    Require(memory.Write32(0x10000010U, 0x20U), "could not seed the packet size");
+    Oot3dNativePicaCompositionTracker tracker;
+    oot3d::recomp::a32::GuestState state{};
+    const auto setCursor = [&](uint32_t cursor) {
+        Require(memory.Write32(0x0054CC4CU, cursor), "could not move the packet cursor");
+    };
+    // One pass: mesh, 0x10 bytes the renderer writes itself, mesh.
+    setCursor(0x14001000U);
+    state.r[0] = 0x10000800U;
+    state.r[1] = 0U;
+    state.r[14] = 0x002FADDCU;
+    tracker.ObserveBlockEntry(kOot3dCmbRendererSubmitDrawHandleEntry, state, memory);
+    state.r[0] = 0x10000000U;
+    tracker.ObserveBlockEntry(kOot3dMeshCommandPacketSubmitEntry, state, memory);
+    setCursor(0x14001030U);
+    tracker.ObserveBlockEntry(kOot3dMeshCommandPacketSubmitEntry, state, memory);
+    setCursor(0x14001050U);
+    tracker.ObserveBlockEntry(0x002FADDCU, state, memory);
+    // A pass inside a UI view is no scene pass.
+    state.r[14] = 0x003004E0U;
+    tracker.ObserveBlockEntry(0x0042B9F4U, state, memory);
+    state.r[0] = 0x10000800U;
+    state.r[14] = 0x002FADDCU;
+    tracker.ObserveBlockEntry(kOot3dCmbRendererSubmitDrawHandleEntry, state, memory);
+    setCursor(0x14001080U);
+    tracker.ObserveBlockEntry(0x002FADDCU, state, memory);
+    tracker.ObserveBlockEntry(0x003004E0U, state, memory);
+
+    std::vector<Oot3dPicaCommandListCompositionSpan> spans;
+    std::string error;
+    Require(tracker.TakeCommandListCompositionSpans(0x14001000U, 0x100U, spans, &error), error);
+    Require(spans.size() == 3U && spans[0].EndAddress == 0x14001020U && spans[1].BeginAddress == 0x14001030U,
+            "two mesh spans and the UI span, with the renderer's own bytes in none");
+    std::vector<Oot3dPicaCommandListCompositionSpan> passes;
+    Require(tracker.TakeCommandListPassSpans(0x14001000U, 0x100U, passes), "pass spans");
+    Require(passes.size() == 1U && passes[0].BeginAddress == 0x14001000U && passes[0].EndAddress == 0x14001050U &&
+                passes[0].Attribution.Layer == Oot3dPicaCompositionLayer::OpaqueWorld &&
+                passes[0].Attribution.Provenance == Oot3dPicaCompositionProvenance::NativeCmbDrawPass &&
+                !passes[0].Attribution.TemporalIdentity.Available() &&
+                passes[0].LightBinding == spans[0].LightBinding &&
+                passes[0].WriteGeneration == tracker.CurrentWriteGeneration(),
+            "the scene pass covers its renderer's bytes with the pass attribution");
+    Require(tracker.TakeCommandListPassSpans(0x14001000U, 0x100U, passes) && passes.empty() &&
+                tracker.Stats().RecordedPassSpans == 1U && tracker.Stats().ConsumedPassSpans == 1U,
+            "pass spans are consumed once");
+
+    // A pass crossing the submitted list is dropped and counted.
+    setCursor(0x14002000U);
+    tracker.ObserveBlockEntry(kOot3dCmbRendererSubmitDrawHandleEntry, state, memory);
+    setCursor(0x14002100U);
+    tracker.ObserveBlockEntry(0x002FADDCU, state, memory);
+    Require(tracker.TakeCommandListPassSpans(0x14002000U, 0x80U, passes) && passes.empty() &&
+                tracker.Stats().PartialPassSpans == 1U,
+            "a pass crossing the list is lost, not clipped");
+}
+
 void TestDeferredAtmosphereOwnership() {
     using namespace Oot3dNativeGame;
     NativeA32Memory memory;
@@ -826,6 +891,7 @@ int main() {
     TestSelectedLightSnapshot();
     TestProjectedShadowOwnership();
     TestWriteGeneration();
+    TestPassSpans();
     TestDeferredAtmosphereOwnership();
     TestDeferredActorOwnership();
     TestRestoredSceneLightOwnership();
