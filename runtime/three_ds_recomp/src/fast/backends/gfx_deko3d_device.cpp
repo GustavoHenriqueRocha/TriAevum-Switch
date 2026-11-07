@@ -140,16 +140,24 @@ size_t gGpuFrameCount = 0U;
 std::atomic<uint64_t> gPerfSubmits{0};
 std::atomic<uint64_t> gPerfCommandBytes{0};
 std::atomic<bool> gPerfSyncCheck{false};
+// config/deko3d_zcull: the mode and the per-frame ZCULL counters
+// (DkCounter_ZcullStats: four raw 32-bit hardware counters, ZcullStats0-3,
+// reset at frame top), summed over the window.
+std::atomic<bool> gPerfZcull{false};
+std::array<std::atomic<uint64_t>, 4> gPerfZcullStats{};
+std::atomic<uint64_t> gPerfZcullFrames{0};
 
 // Report timestamps count GPU ticks (614.4 MHz on the Tegra X1).
 constexpr uint64_t GpuTicksToNs(uint64_t ticks) {
     return ticks * 625U / 384U;
 }
 constexpr uint32_t kTimestampBytes = 16U; // DkCounter report: value, timestamp
-// Per slot: frame top, scene end (before the acquire), after the acquire, frame end.
+// Per slot: frame top, scene end (before the acquire), after the acquire, frame end,
+// then the ZCULL counters (config/deko3d_zcull, four words).
 // The acquire makes the GPU wait for the display to release the image; that wait
 // is not GPU work, so busy = scene + tail.
-constexpr uint32_t kTimestampSlotBytes = 4U * kTimestampBytes;
+constexpr uint32_t kZcullStatsOffset = 4U * kTimestampBytes;
+constexpr uint32_t kTimestampSlotBytes = 5U * kTimestampBytes;
 static_assert(kFramesInFlight * kTimestampSlotBytes <= DK_MEMBLOCK_ALIGNMENT, "timestamps fit one block");
 
 uint64_t NowNanoseconds() {
@@ -282,10 +290,20 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     }
     dkSwapchainSetSwapInterval(mSwapchain, 1);
 
-    // One queue; zcull off (it lost tiles of decals in Aurora's renderer).
+    // One queue; ZCULL off by default (it lost tiles of decals in Aurora's
+    // renderer; deko3d also never sets ZCULL_TEST_MASK for programs that
+    // write gl_FragDepth, as Mesa does). config/deko3d_zcull turns it on
+    // (SWITCH_PORT.md, "ZCULL on deko3d").
+    if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_zcull", "rb")) {
+        std::fclose(file);
+        mZcull = true;
+    }
     DkQueueMaker queueMaker;
     dkQueueMakerDefaults(&queueMaker, mDevice);
-    queueMaker.flags = DkQueueFlags_Graphics | DkQueueFlags_MediumPrio | DkQueueFlags_DisableZcull;
+    queueMaker.flags = DkQueueFlags_Graphics | DkQueueFlags_MediumPrio;
+    if (!mZcull) {
+        queueMaker.flags |= DkQueueFlags_DisableZcull;
+    }
     queueMaker.commandMemorySize = 1U << 20;
     queueMaker.flushThreshold = 128U << 10;
     // Shaders that spill need more than the default 2 KiB per warp
@@ -295,6 +313,8 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     if (mQueue == nullptr) {
         return fail("dkQueueCreate");
     }
+    Log("deko3d: zcull %s", mZcull ? "on (config/deko3d_zcull)" : "off");
+    gPerfZcull.store(mZcull, std::memory_order_relaxed);
 
     mCommandMemory = MakeBlock(kCommandSliceBytes * kFramesInFlight,
                                DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "command memory");
@@ -470,6 +490,9 @@ void Device::BeginFrame() {
     if (mTimestamps != nullptr) {
         dkCmdBufReportCounter(mCmd, DkCounter_TimestampPipelineTop,
                               dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes);
+        if (mZcull) {
+            dkCmdBufResetCounter(mCmd, DkCounter_ZcullStats);
+        }
     }
     mWindowSlot = -1;
     mRecorded = false;
@@ -553,6 +576,11 @@ void Device::EndFrame(AcquireHook hook) {
                               dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + 3U * kTimestampBytes);
         slot.Timed = true;
         slot.Tag = std::exchange(gPendingTag, FrameTag{});
+        if (mZcull) {
+            dkCmdBufReportCounter(mCmd, DkCounter_ZcullStats,
+                                  dkMemBlockGetGpuAddr(mTimestamps) + mSlot * kTimestampSlotBytes + kZcullStatsOffset);
+            slot.ZcullTimed = true;
+        }
     }
     dkCmdBufSignalFence(mCmd, &slot.Fence, true);
     const uint64_t submitBegin = NowNanoseconds();
@@ -903,7 +931,22 @@ void Device::CountSwapAcquire() {
 // After the slot's fence: its frame's timestamps are written.
 void Device::CollectTimestamps(uint32_t slotIndex) {
     FrameSlot& slot = mSlots[slotIndex];
-    if (!slot.Timed || mTimestamps == nullptr) {
+    if (mTimestamps == nullptr) {
+        return;
+    }
+    if (slot.ZcullTimed) {
+        slot.ZcullTimed = false;
+        uint32_t stats[4] = {};
+        std::memcpy(stats,
+                    static_cast<const uint8_t*>(dkMemBlockGetCpuAddr(mTimestamps)) + slotIndex * kTimestampSlotBytes +
+                        kZcullStatsOffset,
+                    sizeof(stats));
+        for (size_t i = 0; i < 4U; ++i) {
+            gPerfZcullStats[i].fetch_add(stats[i], std::memory_order_relaxed);
+        }
+        gPerfZcullFrames.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (!slot.Timed) {
         return;
     }
     slot.Timed = false;
@@ -1027,7 +1070,20 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
         << " mailbox_copies=" << gMailboxCopies.exchange(0, std::memory_order_relaxed)
         << " mailbox_dropped=" << gMailboxDropped.exchange(0, std::memory_order_relaxed)
         << " sync_check=" << (gPerfSyncCheck.load(std::memory_order_relaxed) ? 1 : 0)
-        << " build=" << kDeko3dBuildTag;
+        << " zcull=" << (gPerfZcull.load(std::memory_order_relaxed) ? 1 : 0);
+    if (gPerfZcull.load(std::memory_order_relaxed)) {
+        // Raw ZcullStats0-3 per frame (hardware counters, meaning not
+        // documented by deko3d: compare runs, all zero = ZCULL idle).
+        const uint64_t zcullFrames = gPerfZcullFrames.exchange(0, std::memory_order_relaxed);
+        const double zcullCount = zcullFrames != 0U ? static_cast<double>(zcullFrames) : 1.0;
+        out << " zcull_stats=";
+        for (size_t i = 0; i < gPerfZcullStats.size(); ++i) {
+            out << (i == 0U ? "" : "/")
+                << static_cast<uint64_t>(static_cast<double>(gPerfZcullStats[i].exchange(0, std::memory_order_relaxed)) /
+                                         zcullCount);
+        }
+    }
+    out << " build=" << kDeko3dBuildTag;
     return out.str();
 }
 void Deko3dTagFrame(uint8_t kind, double cpuMilliseconds) {

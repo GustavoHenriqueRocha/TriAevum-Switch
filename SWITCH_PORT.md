@@ -1858,6 +1858,40 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   mutations stable/idempotent/only the intended lines, off = native, lookup and fallback, block layout
   against upstream's and binding); guards in `tests/switch/test_bug_guards.py`.
 
+### ZCULL on deko3d (`config/deko3d_zcull`, 07/11, off by default)
+- **Default unchanged:** the queue keeps `DkQueueFlags_DisableZcull` ("lost tiles of decals in Aurora's
+  renderer"). With `sdmc:/switch/oot3dre/config/deko3d_zcull` present (content ignored) it is created without
+  it; deko3d then allocates the channel's ZCULL context and configures the region per depth target
+  (`gfx_deko3d_device.cpp`). Log at start: `deko3d: zcull on (config/deko3d_zcull)` / `deko3d: zcull off`.
+- **How the game resets depth:** it never clears or fills it (`fills=0 clears=0` in every logs15 line), so the
+  reset is a draw. Which draw cannot be read from the code; a new `logs/deko3d.txt` line, written with the
+  `programs` line in both modes, measures it:
+  `depth (frame): zcull=0 per frame always=N full=N fragdepth=N first none/full/partial/tested=... | avg of N ...`
+  - `always`: depth-writing draws that pass every fragment (compare ALWAYS or test off); `full`: those
+    covering the whole target.
+  - `first`: frames by the kind of their first depth-writing draw. `first ... full` near 1.00 means the reset
+    is a full-target ALWAYS draw; then turning it into a real `dkCmdBufClearDepthStencil` (what ZCULL needs to
+    start from a known state: deko3d updates ZCULL on `ZcullClearDepth` in its clear) is the next step. It is
+    not done yet: a clear is only identical if that draw writes one constant depth everywhere, which the
+    counters cannot show.
+  - `fragdepth`: depth-tested draws whose program writes `gl_FragDepth`
+    (`PicaDrawWritesFragDepth`, the generator's rule: anything but z-buffering with scale -1 and offset 0;
+    decals with a depth offset). **Likely cause of the lost decal tiles** [inference]: deko3d 0.5 writes
+    `ZcullTestMask = 0` once and never changes it, while Mesa's nvc0 sets `ZCULL_TEST_MASK = 0x11` for
+    programs that write depth; ZCULL then tests such a decal at its raster depth, not the depth it writes.
+- **Stats:** with ZCULL on, `dkperf` gains `zcull_stats=a/b/c/d`: deko3d's `DkCounter_ZcullStats` (the four
+  raw hardware counters ZcullStats0-3), reset at each frame top and reported at frame end, averaged per
+  frame. deko3d does not document their meaning: compare runs; all zero means ZCULL rejected nothing.
+  Every `dkperf` line also has `zcull=0|1`.
+- Saving: 0 to −1 ms per frame [estimate; nfsmw-nx measured about 2 ms]. Without a clear, ZCULL may start
+  each frame unknown and cull little.
+- Tests: `oot3d_deko3d_backend_tests` (`TestDepthBreakdown`; `TestFrameBreakdown` was never called and now
+  is); guard "ZCULL: off unless config/deko3d_zcull exists".
+- Console check (1 minute each): (a) without the file, Forest Temple room 8: `logs/deko3d.txt` `depth` line
+  says how depth is reset. (b) Create the file, restart, same room: `deko3d: zcull on` in deko3d.txt, `dkperf
+  zcull=1 zcull_stats=...` and `scene_ms` against (a); look at decals (floor markings, shadows' blobs,
+  Deku Tree spider webs) for missing square tiles. Delete the file if any tile is missing.
+
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
   field; default `0.1.0-dev`) and `OOT3D_RELEASE_BUILD` (monotonic integer; default 0). Both go

@@ -121,6 +121,8 @@ class Device {
     const DkImageView& AcquireWindow(AcquireHook hook);
     [[nodiscard]] bool WindowAcquired() const noexcept { return mWindowSlot >= 0; }
     [[nodiscard]] bool Mailbox() const noexcept { return mMailbox; }
+    // config/deko3d_zcull: the queue was created with ZCULL on.
+    [[nodiscard]] bool Zcull() const noexcept { return mZcull; }
     // FinishRender acquired it (no draw reached the window before the pacer).
     void CountSwapAcquire();
 
@@ -171,6 +173,7 @@ class Device {
         bool Fenced = false;
         bool Timed = false; // its frame top and end timestamps were recorded
         bool Split = false; // and the two around the acquire
+        bool ZcullTimed = false; // config/deko3d_zcull: its ZCULL stats were reported
         FrameTag Tag; // Deko3dTagFrame of the frame
     };
     void CollectTimestamps(uint32_t slot);
@@ -224,6 +227,9 @@ class Device {
     std::vector<std::string> mSyncPoints;
     bool mSyncNoWait = false;
     bool mPresentThreaded = false;
+    // config/deko3d_zcull (off by default): ZCULL on the queue, its
+    // counters reset at frame top and reported at frame end.
+    bool mZcull = false;
     std::thread mPresentThread;
     std::mutex mPresentMutex;
     std::condition_variable mPresentReady;

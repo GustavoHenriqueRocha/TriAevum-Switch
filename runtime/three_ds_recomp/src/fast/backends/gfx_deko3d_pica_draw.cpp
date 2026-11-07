@@ -662,6 +662,14 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         if (program.SurfaceLighting) {
             mFrameDraws.Current.CountSurfaceLighting(mSurfaceLighting.Control[1], mSurfaceLighting.Rim[0] > 0.0F);
         }
+        // How depth is reset and how many tested draws write gl_FragDepth
+        // (config/deko3d_zcull, logs/deko3d.txt "depth" line).
+        mFrameDraws.Current.CountDepth(
+            depthStencil.depthTestEnable != 0U, draw.DepthWriteEnabled,
+            !draw.DepthTestEnabled || draw.DepthCompare == Renderer3ds::PicaCompareFunction::Always,
+            pixels >= static_cast<uint64_t>(target.Extent.Width) * target.Extent.Height,
+            Deko3d::PicaDrawWritesFragDepth(program.Pick == Deko3d::PicaProgramPick::Uber, draw.WBuffering,
+                                            draw.DepthRange, draw.NearPlane));
     }
 
     const auto primitive = static_cast<DkPrimitive>(DekoPrimitive(draw.Topology));

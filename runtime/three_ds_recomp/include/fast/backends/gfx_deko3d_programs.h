@@ -76,6 +76,27 @@ inline constexpr size_t kPicaBaseClasses = 3U;
     return uberFragment ? PicaBaseClass::Parametric : PicaBaseClass::Normal;
 }
 
+// Whether a draw's fragment program writes gl_FragDepth (which turns early
+// depth testing off and, with ZCULL on, is tested by ZCULL at its raster
+// depth: deko3d never sets ZCULL_TEST_MASK the way Mesa does for such
+// programs). Mirrors Oot3dPicaFragmentDepthIsRasterDepth: a specialized
+// program leaves depth to fixed function only for z-buffering with scale -1
+// and offset 0; parametric (uber) programs always write it.
+[[nodiscard]] constexpr bool PicaDrawWritesFragDepth(bool uber, bool wBuffering, float depthRange,
+                                                     float nearPlane) noexcept {
+    return uber || wBuffering || depthRange != -1.0F || nearPlane != 0.0F;
+}
+
+// The kind of a frame's first depth-writing draw (how the game resets depth:
+// it never clears or fills it, logs15).
+enum class PicaFirstDepthWrite : uint8_t {
+    None,          // no draw wrote depth
+    AlwaysFull,    // ALWAYS (or test off) over the whole target: a depth clear in disguise
+    AlwaysPartial, // ALWAYS over part of the target
+    Tested,        // a real depth test
+};
+inline constexpr size_t kPicaFirstDepthWriteKinds = 4U;
+
 // Counters of one frame's issued PICA draws (counters only: a few adds per
 // draw). Pixels: the draw's viewport clipped by its scissor, in target
 // pixels (an upper bound of what it shades).
@@ -93,7 +114,32 @@ struct PicaFrameDraws {
     // (0-4, kMaximumSurfacePointLights) and those with the rim light on.
     std::array<uint64_t, 5> LitPointLights{};
     uint64_t LitRim = 0;
+    // Depth (config/deko3d_zcull study): depth-writing draws that pass
+    // every fragment (ALWAYS or test off), those of them covering the whole
+    // target, and depth-tested draws whose program writes gl_FragDepth.
+    uint64_t DepthAlwaysWrites = 0;
+    uint64_t DepthAlwaysFull = 0;
+    uint64_t FragDepthTested = 0;
+    // Frames by the kind of their first depth-writing draw (EndFrame counts
+    // None for a frame without one).
+    std::array<uint64_t, kPicaFirstDepthWriteKinds> FirstDepthWrite{};
+    bool FirstDepthSeen = false;
 
+    void CountDepth(bool testEnabled, bool writes, bool always, bool fullTarget, bool fragDepth) noexcept {
+        if (writes && always) {
+            ++DepthAlwaysWrites;
+            DepthAlwaysFull += fullTarget ? 1U : 0U;
+        }
+        if (testEnabled && !always && fragDepth) {
+            ++FragDepthTested;
+        }
+        if (writes && !FirstDepthSeen) {
+            FirstDepthSeen = true;
+            const auto kind = !always ? PicaFirstDepthWrite::Tested
+                                      : (fullTarget ? PicaFirstDepthWrite::AlwaysFull : PicaFirstDepthWrite::AlwaysPartial);
+            ++FirstDepthWrite[static_cast<size_t>(kind)];
+        }
+    }
     void Count(PicaBaseClass base, bool lit, bool translucent, uint64_t pixels) noexcept {
         auto& slot = Classes[static_cast<size_t>(base)];
         ++slot.Draws;
@@ -121,6 +167,12 @@ struct PicaFrameDraws {
             LitPointLights[i] += other.LitPointLights[i];
         }
         LitRim += other.LitRim;
+        DepthAlwaysWrites += other.DepthAlwaysWrites;
+        DepthAlwaysFull += other.DepthAlwaysFull;
+        FragDepthTested += other.FragDepthTested;
+        for (size_t i = 0; i < FirstDepthWrite.size(); ++i) {
+            FirstDepthWrite[i] += other.FirstDepthWrite[i];
+        }
         return *this;
     }
 };
@@ -135,6 +187,9 @@ struct PicaFrameDrawWindow {
     uint64_t Frames = 0;
 
     void EndFrame() noexcept {
+        if (!Current.FirstDepthSeen) {
+            ++Current.FirstDepthWrite[static_cast<size_t>(PicaFirstDepthWrite::None)];
+        }
         Last = Current;
         Sum += Current;
         ++Frames;
@@ -174,6 +229,19 @@ struct PicaFrameDrawWindow {
                   per(draws.LitOpaque), per(draws.LitTranslucent), per(draws.LitPointLights[0]),
                   per(draws.LitPointLights[1]), per(draws.LitPointLights[2]), per(draws.LitPointLights[3]),
                   per(draws.LitPointLights[4]), per(draws.LitRim));
+    return text;
+}
+
+// "always=N full=N fragdepth=N first none/full/partial/tested=a/b/c/d": the
+// depth counters per frame; `first` counts frames (fractions in a window).
+[[nodiscard]] inline std::string FormatPicaDepthDraws(const PicaFrameDraws& draws, uint64_t frames) {
+    const double divisor = frames == 0U ? 1.0 : static_cast<double>(frames);
+    const auto per = [&](uint64_t value) { return static_cast<double>(value) / divisor; };
+    char text[160];
+    std::snprintf(text, sizeof(text), "always=%.0f full=%.0f fragdepth=%.0f first none/full/partial/tested=%.2f/%.2f/%.2f/%.2f",
+                  per(draws.DepthAlwaysWrites), per(draws.DepthAlwaysFull), per(draws.FragDepthTested),
+                  per(draws.FirstDepthWrite[0]), per(draws.FirstDepthWrite[1]), per(draws.FirstDepthWrite[2]),
+                  per(draws.FirstDepthWrite[3]));
     return text;
 }
 

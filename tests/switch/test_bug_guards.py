@@ -182,6 +182,12 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
           r'mGpuHigh = ReadGpuPerformanceHigh\(mConfig\);\s+if \(mGpuHigh\) mGpuStatus = ApplyGpuPerformance\(true\);.*?'
           r'mGpuStatus = ApplyGpuPerformance\(mGpuHigh\);'),
+    # --- 07/11: ZCULL on deko3d only with config/deko3d_zcull (decal tiles lost in Aurora's renderer) ---
+    Guard("ZCULL: off unless config/deko3d_zcull exists (decal tiles lost with it on)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'"sdmc:/switch/oot3dre/config/deko3d_zcull", "rb"\)\) \{\s+std::fclose\(file\);\s+mZcull = true;\s+\}.*?'
+          r'if \(!mZcull\) \{\s+queueMaker\.flags \|= DkQueueFlags_DisableZcull;',
+          test="oot3d_deko3d_backend_tests (TestDepthBreakdown: the depth line that measures it)"),
     # --- 06/11: L3+R3 > Video > FPS (30 <-> 60 interpolated) applied only after a restart ---
     # Both choices simulate at 30 Hz; the launch fixed the pacing mode and the 30 FPS launch's
     # native30_no_interpolation contract forbade interpolation, so the menu only wrote config/fps60.

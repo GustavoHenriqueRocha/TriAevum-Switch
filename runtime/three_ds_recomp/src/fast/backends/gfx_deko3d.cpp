@@ -634,6 +634,11 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(shaders.CodeBytes >> 10),
                 Deko3d::FormatPicaClassDraws(frames.Last, 1U).c_str(), static_cast<unsigned long long>(frames.Frames),
                 Deko3d::FormatPicaClassDraws(frames.Sum, frames.Frames).c_str());
+    // How the game resets depth (it never clears it) and the draws ZCULL
+    // could mis-test (gl_FragDepth): the ZCULL study, SWITCH_PORT.md.
+    Deko3d::Log("depth (%s): zcull=%d per frame %s | avg of %llu %s", when, mDevice.Zcull() ? 1 : 0,
+                Deko3d::FormatPicaDepthDraws(frames.Last, 1U).c_str(), static_cast<unsigned long long>(frames.Frames),
+                Deko3d::FormatPicaDepthDraws(frames.Sum, frames.Frames).c_str());
     LogLightingCounters(when);
     mFrameDraws.StartWindow();
     const auto& resources = mResources.Stats();
