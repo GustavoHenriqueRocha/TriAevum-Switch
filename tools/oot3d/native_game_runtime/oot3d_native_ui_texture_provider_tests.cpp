@@ -418,8 +418,10 @@ int main() {
                 packlessProvider.Stats().custom_texture_ahead == 0U,
             "an ahead request without a custom source read the texture");
 
-    // Native CTXB textures are identified after the TopScreen override, as
-    // the game with that mod installed would upload them.
+    // Native CTXB textures are identified by the game's own bytes, before
+    // this port's TopScreen override (TopScreen 3.x leaves them unchanged, so
+    // packs and the mod's HD images name the native texture), while the
+    // override's art stays the native pixels a pending image stands in for.
     Require(memory.WriteBytes(0x14000000U, originalPayload),
             "could not restore the native override fixture");
     packState = Oot3dNativeUiCustomTexture::State::Ready;
@@ -427,11 +429,13 @@ int main() {
     requested.clear();
     Require(overrideProvider.Resolve(identity, pixels, &error) &&
                 pixels.width == 24U && !requested.empty() &&
-                requested.size() <= replacementPayload.size() &&
+                requested.size() <= originalPayload.size() &&
                 std::equal(requested.begin(), requested.end(),
-                           replacementPayload.begin()),
-            "native UI custom texture was not identified by its overridden bytes");
-    // Asked for ahead: the same overridden bytes, not decoded.
+                           originalPayload.begin()) &&
+                !std::equal(requested.begin(), requested.end(),
+                            replacementPayload.begin()),
+            "native UI custom texture was not identified by the game's own bytes");
+    // Asked for ahead: the same game's own bytes, not decoded.
     const auto resolvedBytes = requested;
     Require(memory.WriteBytes(0x14000000U, originalPayload),
             "could not restore the native override fixture");
@@ -439,7 +443,7 @@ int main() {
     overrideProvider.RequestAhead(identity);
     Require(requestedAhead && requested == resolvedBytes && requestedRgbaBytes == 0U &&
                 overrideProvider.Stats().custom_texture_ahead == 1U,
-            "a native UI texture asked for ahead was not identified by its overridden bytes");
+            "a native UI texture asked for ahead was not identified by the game's own bytes");
 
     // The HUD's choice between the player's pack and the HD UI atlas.
     {
@@ -488,6 +492,27 @@ int main() {
         chosen = ChooseUiCustomTexture(pack(AzaharTextureResolveState::Pending), otherRequest, &atlas);
         Require(chosen.state == State::Pending && chosen.rgba8 == nullptr,
                 "a pending pack image had a stand-in other than the native pixels");
+        // The mod's HD image of a game texture (matched by the caller): after
+        // the pack, and standing in while it decodes.
+        Oot3dUiHdAtlas image;
+        image.rgba8 = std::make_shared<const std::vector<std::uint8_t>>(48U * 24U * 4U, 0x55U);
+        image.width = 48U;
+        image.height = 24U;
+        chosen = ChooseUiCustomTexture(packImage, otherRequest, &atlas, &image);
+        Require(chosen.state == State::Ready && chosen.rgba8 == replacementImage->Rgba8,
+                "the player's pack did not win over the mod's HD image");
+        for (const auto state : {AzaharTextureResolveState::Disabled, AzaharTextureResolveState::Missing,
+                                 AzaharTextureResolveState::Failed}) {
+            chosen = ChooseUiCustomTexture(pack(state), otherRequest, &atlas, &image);
+            Require(chosen.state == State::Ready && chosen.width == 48U && chosen.rgba8 == image.rgba8,
+                    "the mod's HD image did not replace its texture");
+        }
+        chosen = ChooseUiCustomTexture(pack(AzaharTextureResolveState::Pending), otherRequest, &atlas, &image);
+        Require(chosen.state == State::Pending && chosen.rgba8 == image.rgba8,
+                "the mod's HD image did not stand in while the pack decodes");
+        // The exact native atlas keeps the HD atlas.
+        chosen = ChooseUiCustomTexture(pack(AzaharTextureResolveState::Missing), atlasRequest, &atlas, &image);
+        Require(chosen.rgba8 == atlas.rgba8, "an HD image replaced the HD UI atlas");
         Require(IsUiHdAtlasSize(1536U, 768U, 512U, 256U) && IsUiHdAtlasSize(4096U, 2048U, 512U, 256U) &&
                     IsUiHdAtlasSize(512U, 256U, 512U, 256U) && !IsUiHdAtlasSize(1536U, 1536U, 512U, 256U) &&
                     !IsUiHdAtlasSize(1000U, 500U, 512U, 256U) && !IsUiHdAtlasSize(0U, 0U, 512U, 256U),

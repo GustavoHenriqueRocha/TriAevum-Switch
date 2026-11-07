@@ -349,12 +349,19 @@ void TestZip(const fs::path& directory) {
 
 void TestArchiveRoot(const fs::path& directory) {
     const fs::path path = directory / "roots.zip";
+    WriteFile(path, MakeZip({{"SingleScreen_3.2.2/USA/a", Text("x"), false}}));
+    {
+        ts::ZipReader zip(path);
+        const ts::Archive* root = ts::FindArchiveRoot(zip);
+        CHECK(root != nullptr && std::string_view(root->Version) == "3.2.2");
+        CHECK(root == &ts::DownloadArchive());
+    }
+    // 3.2.1 (no longer downloadable) is still recognized.
     WriteFile(path, MakeZip({{"SingleScreen_3.2.1/USA/a", Text("x"), false}}));
     {
         ts::ZipReader zip(path);
         const ts::Archive* root = ts::FindArchiveRoot(zip);
-        CHECK(root != nullptr && std::string_view(root->Version) == "3.2.1");
-        CHECK(root == &ts::DownloadArchive());
+        CHECK(root != nullptr && std::string_view(root->Version) == "3.2.1" && root->Url == nullptr);
     }
     WriteFile(path, MakeZip({{"TopScreen2.1.1/EUR/a", Text("x"), false}}));
     {
@@ -366,9 +373,14 @@ void TestArchiveRoot(const fs::path& directory) {
         ts::ZipReader zip(path);
         CHECK_THROWS(ts::FindArchiveRoot(zip), "mixes");
     }
-    CHECK(ts::KnownArchives().size() == 2);
-    CHECK(ts::DownloadArchive().Bytes == 56'466'735);
-    CHECK(std::string_view(ts::DownloadArchive().Url) == "https://gamebanana.com/dl/1875895");
+    CHECK(ts::KnownArchives().size() == 3);
+    CHECK(ts::DownloadArchive().Bytes == 56'493'832);
+    CHECK(std::string_view(ts::DownloadArchive().Sha256) ==
+          "d07f5ae7a77b83951836d80a000a9625a5e2da52ae0fa262d9b44409fda31aa0");
+    CHECK(std::string_view(ts::DownloadArchive().Url) == "https://gamebanana.com/dl/1879915");
+    CHECK(std::string_view(ts::DownloadArchive().FileName) == "singlescreen_322.zip");
+    // Every release that carries the HD UI atlas carries the same one.
+    CHECK(std::string_view(ts::KnownArchives()[1].UiAtlasHdSha256) == ts::DownloadArchive().UiAtlasHdSha256);
 }
 
 void TestRomFs(const fs::path& directory) {
@@ -421,7 +433,7 @@ void TestPackRejections(const fs::path& directory) {
     ts::RomFsImage romfs(romfsPath);
     const fs::path path = directory / "pack.zip";
     // Only an EUR atlas: a USA RomFS finds none.
-    WriteFile(path, MakeZip({{"SingleScreen_3.2.1/EUR/Emulator/load/mods/0004000000033600/romfs/menu/custom_ui01.ctxb",
+    WriteFile(path, MakeZip({{"SingleScreen_3.2.2/EUR/Emulator/load/mods/0004000000033600/romfs/menu/custom_ui01.ctxb",
                               Text("ctxb"), true}}));
     {
         ts::ZipReader zip(path);
@@ -431,7 +443,7 @@ void TestPackRejections(const fs::path& directory) {
         CHECK_THROWS(ts::BuildTexturePack(zip, ts::DownloadArchive(), romfs, "KOR"), "unsupported");
     }
     // The 3DS Hardware target is also accepted.
-    WriteFile(path, MakeZip({{"SingleScreen_3.2.1/USA/3DS Hardware/luma/titles/0004000000033500/romfs/menu/custom_ui01.ctxb",
+    WriteFile(path, MakeZip({{"SingleScreen_3.2.2/USA/3DS Hardware/luma/titles/0004000000033500/romfs/menu/custom_ui01.ctxb",
                               Text("ctxb"), false}}));
     {
         ts::ZipReader zip(path);
@@ -444,11 +456,11 @@ void TestFontPack(const fs::path& directory) {
     const Bytes native = FontBytes(16);
     WriteFile(romfsPath, MakeRomFs({{"message/us/ltn16.qbf", native}}));
     ts::RomFsImage romfs(romfsPath);
-    const std::string hdPath = "SingleScreen_3.2.1/USA/Emulator/load/mods/0004000000033500/romfs/message/us/ltn16.qbf";
+    const std::string hdPath = "SingleScreen_3.2.2/USA/Emulator/load/mods/0004000000033500/romfs/message/us/ltn16.qbf";
     const fs::path path = directory / "fonts.zip";
     const Bytes hd = FontBytes(64);
     WriteFile(path, MakeZip({{hdPath, hd, true},
-                             {"SingleScreen_3.2.1/USA/Emulator/load/mods/0004000000033500/exefs/code.ips",
+                             {"SingleScreen_3.2.2/USA/Emulator/load/mods/0004000000033500/exefs/code.ips",
                               Text("DO NOT IMPORT"), false}}));
     {
         ts::ZipReader zip(path);
@@ -530,16 +542,19 @@ void TestOffer() {
     CHECK(!ts::ShouldOffer(true, false, false, OfferSetting::Ask));
     CHECK(!ts::ShouldOffer(false, false, true, OfferSetting::Never));
     CHECK(!ts::ShouldOffer(true, false, true, OfferSetting::Never));
-    // A local archive: always without a pack; with one, only to add the HD
-    // atlas, and only from a release that carries it (3.2.1, not 3.0).
+    // A local archive: always without a pack; with one, only to add missing
+    // HD art, and only from a release that carries all of it (3.2.2; 3.2.1's
+    // HD images are not pinned, 3.0 has no HD atlas).
     const ts::Archive& v30 = ts::KnownArchives()[0];
-    const ts::Archive& v321 = ts::DownloadArchive();
+    const ts::Archive& v321 = ts::KnownArchives()[1];
+    CHECK(ts::ShouldBuildFromLocalArchive(true, false, ts::DownloadArchive()));
     CHECK(std::string_view(v30.Version) == "3.0" && v30.UiAtlasHdSha256 == nullptr);
+    CHECK(v321.HdTextures.empty() && ts::DownloadArchive().HdTextures.size() == 2);
     CHECK(ts::ShouldBuildFromLocalArchive(false, false, v30));
     CHECK(ts::ShouldBuildFromLocalArchive(false, false, v321));
-    CHECK(ts::ShouldBuildFromLocalArchive(true, false, v321));
+    CHECK(!ts::ShouldBuildFromLocalArchive(true, false, v321));
     CHECK(!ts::ShouldBuildFromLocalArchive(true, false, v30));
-    CHECK(!ts::ShouldBuildFromLocalArchive(true, true, v321));
+    CHECK(!ts::ShouldBuildFromLocalArchive(true, true, ts::DownloadArchive()));
 }
 
 // 8-bit RGBA PNG rows with the given filter types (raw zlib stream), for the
@@ -674,6 +689,33 @@ void TestUiAtlasHd(const fs::path& directory) {
         const ts::ZipReader archive(zip("hd_other.zip", {{eur, Bytes(v321.UiAtlasHdBytes, 0x5A), true}}));
         CHECK_THROWS(ts::ExtractUiAtlasHd(archive, v321, "EUR"), "unexpected HD UI atlas");
     }
+
+    // The HD images of game textures: any native size, reduced to 3x.
+    ts::Rgba8Image cursor;
+    cursor.Width = 1024;
+    cursor.Height = 1024;
+    cursor.Pixels.assign(static_cast<std::size_t>(cursor.Width) * cursor.Height * 4, 0xC0);
+    const Bytes cursorBuilt = ts::BuildHdImage(ts::EncodePngRgba8(cursor), 128, 128);
+    const ts::Rgba8Image cursorReduced = ts::DecodePngRgba8(cursorBuilt, 1U << 22U);
+    CHECK(cursorReduced.Width == 384 && cursorReduced.Height == 384 && cursorReduced.Pixels[0] == 0xC0);
+    CHECK_THROWS(ts::BuildHdImage(ts::EncodePngRgba8(cursor), 512, 256), "not a multiple of 512x256");
+    const ts::Archive& v322 = ts::DownloadArchive();
+    const auto hdImagePath = [&](const ts::HdTexture& texture) {
+        return std::string(v322.Root) + "/USA/Emulator/load/textures/0004000000033500/UI/" + texture.FileName;
+    };
+    CHECK(std::string_view(v322.HdTextures[0].FileName) == "tex1_512x256_BB00B25B152582B6_4_mip0.png");
+    CHECK(std::string_view(v322.HdTextures[1].FileName) == "tex1_128x128_8064FDFB5065B51D_4_mip0.png");
+    {
+        const ts::ZipReader archive(zip("images_missing.zip", {{hdImagePath(v322.HdTextures[0]), Text("x")}}));
+        CHECK_THROWS(ts::ExtractHdTextures(archive, v322, "USA"), "unexpected HD image size");
+        CHECK_THROWS(ts::ExtractHdTextures(archive, v322, "EUR"), "has no HD image");
+        CHECK(ts::ExtractHdTextures(archive, ts::KnownArchives()[1], "USA").empty());
+    }
+    {
+        const ts::ZipReader archive(
+            zip("images_other.zip", {{hdImagePath(v322.HdTextures[0]), Bytes(v322.HdTextures[0].Bytes, 0x5A), true}}));
+        CHECK_THROWS(ts::ExtractHdTextures(archive, v322, "USA"), "unexpected HD image");
+    }
 }
 
 void TestInstall(const fs::path& directory) {
@@ -696,6 +738,22 @@ void TestInstall(const fs::path& directory) {
     ts::Install(outputs, config);
     CHECK(AsString(ReadFile(config / ts::kUiAtlasHdName)) == "atlas");
     CHECK(AsString(ReadFile(config / ts::kReceiptName)).find("ui_atlas_hd") == std::string::npos);
+    // The HD images go to topscreen_hd/ under their Azahar names; the HD art
+    // is complete only with all of the downloaded release's.
+    CHECK(!ts::HdArtInstalled(config));
+    outputs.HdTextures = {Text("top parts"), Text("cursor")};
+    ts::Install(outputs, config);
+    const fs::path images = config / ts::kHdTexturesDirectoryName;
+    CHECK(AsString(ReadFile(images / "tex1_512x256_BB00B25B152582B6_4_mip0.png")) == "top parts");
+    CHECK(AsString(ReadFile(images / "tex1_128x128_8064FDFB5065B51D_4_mip0.png")) == "cursor");
+    const std::string withImages = AsString(ReadFile(config / ts::kReceiptName));
+    CHECK(withImages.find("topscreen_hd/tex1_128x128_8064FDFB5065B51D_4_mip0.png") != std::string::npos);
+    CHECK(withImages.find(ts::DownloadArchive().HdTextures[0].Sha256) != std::string::npos);
+    CHECK(ts::HdArtInstalled(config));
+    fs::remove(images / "tex1_128x128_8064FDFB5065B51D_4_mip0.png");
+    CHECK(!ts::HdArtInstalled(config));
+    fs::remove(config / ts::kUiAtlasHdName);
+    CHECK(!ts::HdArtInstalled(config));
 }
 
 void TestWriteAndIdentify(const fs::path& directory) {
@@ -708,17 +766,23 @@ void TestWriteAndIdentify(const fs::path& directory) {
     CHECK_THROWS(ts::WriteFileVerified(directory / "absent" / "x.o3tu", Text("x")), "cannot write");
 
     std::string error;
-    WriteFile(directory / "singlescreen_321.zip", Text("too short"));
-    CHECK(ts::IdentifyArchiveFile(directory / "singlescreen_321.zip", &error) == nullptr);
-    CHECK(error.find("not a known Single Screen Experience release") != std::string::npos);
+    WriteFile(directory / "singlescreen_322.zip", Text("too short"));
+    CHECK(ts::IdentifyArchiveFile(directory / "singlescreen_322.zip", &error) == nullptr);
+    CHECK(error.find("not a known Single Screen Experience release (3.2.2 is 56493832 bytes)") != std::string::npos);
     CHECK(ts::IdentifyArchiveFile(directory / "absent.zip", &error) == nullptr);
     // Right size, wrong content (GameBanana replacing the file).
-    WriteFile(directory / "singlescreen_321.zip", Bytes(ts::DownloadArchive().Bytes));
+    WriteFile(directory / "singlescreen_322.zip", Bytes(ts::DownloadArchive().Bytes));
     std::uint64_t lastDone = 0;
-    CHECK(ts::IdentifyArchiveFile(directory / "singlescreen_321.zip", &error,
+    CHECK(ts::IdentifyArchiveFile(directory / "singlescreen_322.zip", &error,
                                   [&](std::uint64_t done, std::uint64_t) { lastDone = done; }) == nullptr);
     CHECK(lastDone == ts::DownloadArchive().Bytes);
+    CHECK(error.find("is not the official 3.2.2 archive") != std::string::npos);
+    // The 3.2.1 size is still identified as 3.2.1.
+    WriteFile(directory / "singlescreen_321.zip", Bytes(ts::KnownArchives()[1].Bytes));
+    CHECK(ts::IdentifyArchiveFile(directory / "singlescreen_321.zip", &error) == nullptr);
     CHECK(error.find("is not the official 3.2.1 archive") != std::string::npos);
+    fs::remove(directory / "singlescreen_321.zip");
+    fs::remove(directory / "singlescreen_322.zip");
 }
 
 std::string Sha256Of(const Bytes& data) { return ri::Hex(ri::Sha256Of(data)); }
@@ -752,6 +816,27 @@ int RealBuild(const fs::path& archive, const fs::path& romfs, const fs::path& pa
     // layout, so the texels each one covers (alpha >= 128, the 3x atlas
     // reduced to 1x) mostly agree; upside down they would not. The redraw
     // has sharper edges and lighter shadows, so they never agree fully.
+    // Covered texels (alpha >= 128, the 3x image reduced to 1x) that differ
+    // from the native texture, as is and upside down.
+    const auto coverage = [](const ts::Rgba8Image& hd, const Bytes& native, std::uint32_t width,
+                             std::uint32_t height) {
+        double mismatch = 0, flippedMismatch = 0;
+        for (std::uint32_t y = 0; y < height; ++y)
+            for (std::uint32_t x = 0; x < width; ++x) {
+                const auto covered = [&](std::uint32_t row) {
+                    int sum = 0;
+                    for (std::uint32_t dy = 0; dy < 3; ++dy)
+                        for (std::uint32_t dx = 0; dx < 3; ++dx)
+                            sum += hd.Pixels[((static_cast<std::size_t>(row) * 3 + dy) * hd.Width + x * 3 + dx) * 4 + 3];
+                    return sum >= 9 * 128;
+                };
+                const bool nativeCovered = native[(static_cast<std::size_t>(y) * width + x) * 4 + 3] >= 128;
+                mismatch += covered(y) != nativeCovered;
+                flippedMismatch += covered(height - 1 - y) != nativeCovered;
+            }
+        const double texels = static_cast<double>(width) * height;
+        return std::pair{mismatch / texels, flippedMismatch / texels};
+    };
     const ts::Rgba8Image hd = ts::DecodePngRgba8(outputs.UiAtlasHd, 1U << 22U);
     const ts::ZipReader zip(archive);
     const auto* ctxb = zip.Find(std::string(source->Root) +
@@ -759,28 +844,36 @@ int RealBuild(const fs::path& archive, const fs::path& romfs, const fs::path& pa
     if (!ctxb) throw ts::ImportError("no EUR custom_ui01.ctxb");
     const Bytes ctxbData = zip.Read(*ctxb, 1U << 20U);
     const Bytes native = ts::DecodeEtc1a4(std::span(ctxbData).subspan(0x48, 512 * 256), 512, 256);
-    double mismatch = 0, flippedMismatch = 0;
-    for (std::uint32_t y = 0; y < 256; ++y)
-        for (std::uint32_t x = 0; x < 512; ++x) {
-            const auto covered = [&](std::uint32_t row) {
-                int sum = 0;
-                for (std::uint32_t dy = 0; dy < 3; ++dy)
-                    for (std::uint32_t dx = 0; dx < 3; ++dx)
-                        sum += hd.Pixels[((static_cast<std::size_t>(row) * 3 + dy) * hd.Width + x * 3 + dx) * 4 + 3];
-                return sum >= 9 * 128;
-            };
-            const bool nativeCovered = native[(static_cast<std::size_t>(y) * 512 + x) * 4 + 3] >= 128;
-            mismatch += covered(y) != nativeCovered;
-            flippedMismatch += covered(255 - y) != nativeCovered;
-        }
-    mismatch /= 512.0 * 256.0;
-    flippedMismatch /= 512.0 * 256.0;
+    const auto [mismatch, flippedMismatch] = coverage(hd, native, 512, 256);
     std::printf("%s %ux%u %zu bytes sha256 %s, pixels sha256 %s; coverage differs from custom_ui01 on %.1f%% "
                 "of texels (%.1f%% upside down)\n",
                 atlas.empty() ? "HD UI atlas" : atlas.string().c_str(), hd.Width, hd.Height,
                 outputs.UiAtlasHd.size(), Sha256Of(outputs.UiAtlasHd).c_str(), Sha256Of(hd.Pixels).c_str(),
                 mismatch * 100.0, flippedMismatch * 100.0);
-    return hd.Width == 1536 && hd.Height == 768 && mismatch < 0.25 && mismatch * 2.0 < flippedMismatch ? 0 : 1;
+    bool ok = hd.Width == 1536 && hd.Height == 768 && mismatch < 0.25 && mismatch * 2.0 < flippedMismatch;
+    // The HD images against the English textures of the player's RomFS
+    // they are named after.
+    const ts::RomFsImage image(romfs);
+    for (std::size_t index = 0; index < outputs.HdTextures.size(); ++index) {
+        const ts::HdTexture& texture = source->HdTextures[index];
+        const std::string name = texture.NativeWidth == 512 ? "menu_top_parts00.ctxb" : "menu_cursor00.ctxb";
+        auto original = image.Read("menu/02_EU_ENGLISH/" + name);
+        if (!original) original = image.Read("menu/01_US_ENGLISH/" + name);
+        if (!original) throw ts::ImportError("no English " + name);
+        const std::size_t payload = static_cast<std::size_t>(texture.NativeWidth) * texture.NativeHeight * 2U;
+        const Bytes nativeImage = ts::DecodeRgba4Tiled(std::span(*original).subspan(0x48, payload),
+                                                       texture.NativeWidth, texture.NativeHeight);
+        const ts::Rgba8Image reduced = ts::DecodePngRgba8(outputs.HdTextures[index], 1U << 22U);
+        const auto [differs, flipped] = coverage(reduced, nativeImage, texture.NativeWidth, texture.NativeHeight);
+        if (!atlas.empty()) WriteFile(atlas.parent_path() / texture.FileName, outputs.HdTextures[index]);
+        std::printf("%s (%s) %ux%u %zu bytes sha256 %s; coverage differs from %s on %.1f%% of texels "
+                    "(%.1f%% upside down)\n",
+                    texture.FileName, name.c_str(), reduced.Width, reduced.Height, outputs.HdTextures[index].size(),
+                    Sha256Of(outputs.HdTextures[index]).c_str(), name.c_str(), differs * 100.0, flipped * 100.0);
+        ok = ok && reduced.Width == texture.NativeWidth * 3U && reduced.Height == texture.NativeHeight * 3U &&
+             differs < 0.25 && differs * 2.0 < flipped;
+    }
+    return ok ? 0 : 1;
 }
 
 } // namespace

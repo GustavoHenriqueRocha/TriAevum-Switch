@@ -1,4 +1,4 @@
-"""TopScreen 3.x (3.0, 3.2.1) import into the O3TU v2 profile-texture contract."""
+"""TopScreen 3.x (3.0, 3.2.1, 3.2.2) import into the O3TU v2 profile-texture contract."""
 
 import contextlib
 import hashlib
@@ -227,12 +227,12 @@ class TopScreen30PackTests(unittest.TestCase):
         stack.enter_context(atlas)
         return stack
 
-    def test_321_layout_builds_the_same_pack_as_30(self):
+    def test_32x_layouts_build_the_same_pack_as_30(self):
         packs = []
-        for root in ("SingleScreen_3.0", "SingleScreen_3.2.1"):
+        for root in ("SingleScreen_3.0", "SingleScreen_3.2.1", "SingleScreen_3.2.2"):
             archive = self.write_archive(root=root)
-            if root == "SingleScreen_3.2.1":
-                # 3.2.1 adds a rupee texture the original game does not have.
+            if root != "SingleScreen_3.0":
+                # 3.2.x adds a rupee texture the original game does not have.
                 with zipfile.ZipFile(archive, "a") as output:
                     output.writestr(
                         f"{root}/USA/Emulator/load/mods/0004000000033500/"
@@ -241,7 +241,9 @@ class TopScreen30PackTests(unittest.TestCase):
                 packs.append(builder.build_texture_pack(
                     archive=archive, original_romfs=self.romfs))
         self.assertEqual(packs[0], packs[1])
+        self.assertEqual(packs[0], packs[2])
         self.assertNotIn(b"RUPEE NOT IMPORTED", packs[1])
+        self.assertNotIn(b"RUPEE NOT IMPORTED", packs[2])
 
     def test_archive_mixing_3x_roots_is_rejected(self):
         archive = self.write_archive()
@@ -408,7 +410,7 @@ class TopScreen30PackTests(unittest.TestCase):
 @unittest.skipUnless(
     os.environ.get("OOT3D_TOPSCREEN_30_ARCHIVE") and
     os.environ.get("OOT3D_ORIGINAL_ROMFS_IMAGE"),
-    "set OOT3D_TOPSCREEN_30_ARCHIVE (a verified 3.0 or 3.2.1 zip) and "
+    "set OOT3D_TOPSCREEN_30_ARCHIVE (a verified 3.0, 3.2.1 or 3.2.2 zip) and "
     "OOT3D_ORIGINAL_ROMFS_IMAGE")
 class TopScreen30RealArchiveTests(unittest.TestCase):
     def test_real_archive_sprites_land_on_211_rectangles(self):

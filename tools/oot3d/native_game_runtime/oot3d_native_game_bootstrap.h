@@ -21,6 +21,12 @@ struct Oot3dNativeGameLaunch {
     // integer multiple of its size, keyed by the native atlas content. On the
     // Switch, config/topscreen_ui_atlas_hd.png (3x, built by the import).
     std::filesystem::path TopScreenUiAtlasHdPath;
+    // The TopScreen mod's HD images of the game's own HUD textures: a
+    // directory of Azahar-named PNGs (tex1_<w>x<h>_<legacy hash>_<format>_mip0.png)
+    // at an integer multiple of the native size, drawn when the player's
+    // texture pack has no image of that texture. On the Switch,
+    // config/topscreen_hd/ (3x, built by the import).
+    std::filesystem::path TopScreenHdTexturesPath;
     std::filesystem::path TopScreenConfigPath;
     std::filesystem::path ControlConfigPath;
     std::filesystem::path SaveDataDirectory;

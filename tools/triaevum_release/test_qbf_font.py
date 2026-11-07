@@ -97,7 +97,7 @@ class QbfFontTests(unittest.TestCase):
             self.assertNotIn(b"DO NOT IMPORT", first)
 
     def test_topscreen_3x_emulator_font_is_verified_then_imported(self):
-        for version in ("SingleScreen_3.0", "SingleScreen_3.2.1"):
+        for version in ("SingleScreen_3.0", "SingleScreen_3.2.1", "SingleScreen_3.2.2"):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 archive, output = root / "singlescreen.zip", root / "font.zip"

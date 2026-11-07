@@ -130,9 +130,19 @@ Experience" 3.x is. The pack builder accepts these archives, verified exactly
 
 - 3.0: 28,883,512 bytes; SHA-256
   `5668640fec8dc2b47b4516fd0b871c4d7d90ca1c2203acc2a22adb59aaab5993`.
-- 3.2.1 (`singlescreen_321.zip`, `https://gamebanana.com/dl/1875895`, the
-  current file): 56,466,735 bytes; MD5 `4ca742c16975e11c04f81c2496f21695`;
-  SHA-256 `737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0`.
+- 3.2.1 (`singlescreen_321.zip`, formerly `https://gamebanana.com/dl/1875895`;
+  GameBanana deleted the file when 3.2.2 replaced it): 56,466,735 bytes; MD5
+  `4ca742c16975e11c04f81c2496f21695`; SHA-256
+  `737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0`.
+- 3.2.2 (`singlescreen_322.zip`, `https://gamebanana.com/dl/1879915`, the
+  current file, uploaded 2026-11-07): 56,493,832 bytes; MD5
+  `16ee41b2a3ee074192a6c3d03442d215`; SHA-256
+  `d07f5ae7a77b83951836d80a000a9625a5e2da52ae0fa262d9b44409fda31aa0`. Against
+  the archived 3.2 (`dl/1873594`) only the six `code.ips` differ; every
+  texture, font and PNG is byte-identical, including the files the importer
+  reads (`custom_ui01.ctxb` `20290e41…`, `ltn16.qbf` `8b83e081…`, the HD UI
+  atlas PNG `082582da…`). From the canonical EUR RomFS and the raw USA Rev 1
+  RomFS it builds the same pack as 3.0 and 3.2.1 (`6e79f87d…` below).
 - Layout: `SingleScreen_<version>/<EUR|USA|JPN>/<Emulator|3DS Hardware>/...`.
   Each RomFS contains `menu/custom_ui01.ctxb` (byte-identical everywhere and in
   both versions, SHA-256 `20290e41...6d07d8`), `actor/zelda_link_ext.zar`,
@@ -147,7 +157,7 @@ Experience" 3.x is. The pack builder accepts these archives, verified exactly
   (2,949,460 bytes, 8 entries, 3 profile textures), byte-identical to the pack
   the p7b package built from 3.0. The raw USA Rev 1 RomFS gives the same pack.
 
-The Switch build downloads 3.2.1 and builds the pack on the console
+The Switch build downloads 3.2.2 and builds the pack on the console
 (`oot3d_topscreen_import.cpp`, a C++ port of this builder and of
 `prepare_qbf_font_pack.py`, byte-identical to both; see `SWITCH_PORT.md`).
 

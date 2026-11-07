@@ -83,14 +83,14 @@ std::string Attribution(const ts::Archive& archive) {
            "it, but not share it, so it is not included with this game.\n\n";
 }
 
-// `upgrade`: the pack exists but was built before the HD UI atlas was.
+// `upgrade`: the pack exists but was built before all of the HD art was.
 std::string Offer(bool upgrade) {
     const ts::Archive& archive = ts::DownloadArchive();
     const std::string size = std::to_string((archive.Bytes + 500'000) / 1'000'000) + " MB";
     const std::string what =
         upgrade ? "Your HUD textures were built by an earlier version. This one also\n"
-                  "builds the mod's HD HUD art (sharp buttons, D-pad and labels at\n"
-                  "720p), which needs the mod again: the console can download it\n"
+                  "builds the mod's HD HUD art (sharp buttons, D-pad, labels, hearts\n"
+                  "and cursor at 720p), which needs the mod again: the console can download it\n"
                   "from GameBanana (" + size + ") and rebuild the textures from your own\n"
                   "game data. Nothing else from the mod is installed, and the download\n"
                   "is deleted afterwards. Without it, the HUD keeps its current art.\n\n"
@@ -182,7 +182,8 @@ Outcome BuildFrom(SwitchConsoleScreen& screen, const fs::path& archivePath, cons
             (outputs.UiAtlasHd.empty() ? std::string("no HD UI atlas")
                                        : std::string(ts::kUiAtlasHdName) + " (" +
                                              std::to_string(outputs.UiAtlasHd.size()) + " bytes)") +
-            " from " + archivePath.filename().string() + " " + archive.Version);
+            ", " + std::to_string(outputs.HdTextures.size()) + " HD images in " + ts::kHdTexturesDirectoryName +
+            "/ from " + archivePath.filename().string() + " " + archive.Version);
         return Outcome::Installed;
     } catch (const std::exception& error) {
         *failure = std::string("Could not build the textures: ") + error.what() + ".";
@@ -247,9 +248,12 @@ Outcome DownloadAndBuild(SwitchConsoleScreen& screen, std::string* failure) {
 }
 
 // An official archive the player put in sdmc:/switch/oot3dre/, and the
-// release its name stands for (IdentifyArchiveFile checks it).
+// release its name stands for (IdentifyArchiveFile checks it); the newest
+// release when there are several.
 std::optional<std::pair<fs::path, const ts::Archive*>> LocalArchive() {
-    for (const ts::Archive& archive : ts::KnownArchives()) {
+    const auto known = ts::KnownArchives();
+    for (auto it = known.rbegin(); it != known.rend(); ++it) {
+        const ts::Archive& archive = *it;
         const fs::path path = Root() / archive.FileName;
         std::error_code error;
         if (fs::is_regular_file(path, error)) return std::pair{path, &archive};
@@ -262,9 +266,9 @@ std::optional<std::pair<fs::path, const ts::Archive*>> LocalArchive() {
 bool RunSwitchTopScreenImport() {
     std::error_code error;
     const bool packExists = fs::is_regular_file(Config() / ts::kPackName, error);
-    const bool hdAtlasExists = fs::is_regular_file(Config() / ts::kUiAtlasHdName, error);
+    const bool hdArtExists = ts::HdArtInstalled(Config());
     const bool romfsExists = fs::is_regular_file(Root() / "game" / "romfs.bin", error);
-    if ((packExists && hdAtlasExists) || !romfsExists) return true;
+    if ((packExists && hdArtExists) || !romfsExists) return true;
     // A download interrupted by closing the app.
     for (const ts::Archive& archive : ts::KnownArchives()) {
         fs::path partial = Root() / archive.FileName;
@@ -273,9 +277,10 @@ bool RunSwitchTopScreenImport() {
     }
     const auto setting = ts::ParseOfferSetting(ReadText(Config() / ts::kOfferSettingName));
     auto local = LocalArchive();
-    if (local && !ts::ShouldBuildFromLocalArchive(packExists, hdAtlasExists, *local->second)) local.reset();
-    if (!local && !ts::ShouldOffer(packExists, hdAtlasExists, romfsExists, setting)) return true;
-    if (packExists) Log("the pack has no HD UI atlas (" + std::string(ts::kUiAtlasHdName) + ")");
+    if (local && !ts::ShouldBuildFromLocalArchive(packExists, hdArtExists, *local->second)) local.reset();
+    if (!local && !ts::ShouldOffer(packExists, hdArtExists, romfsExists, setting)) return true;
+    if (packExists) Log("the pack is installed without all of the HD art (" + std::string(ts::kUiAtlasHdName) +
+                        ", " + ts::kHdTexturesDirectoryName + "/)");
 
     SwitchConsoleScreen& screen = StartupScreen("Ocarina of Time 3D - HUD textures");
     std::string notice;

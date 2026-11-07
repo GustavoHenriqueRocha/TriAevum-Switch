@@ -1250,7 +1250,8 @@ GUARDS = [
     Guard("HUD texture pack written last: the game only looks for the font pack beside an existing pack",
           "tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp",
           r'WriteFileVerified\(configDirectory / kFontPackName, outputs\.Fonts\);.*?'
-          r'WriteFileVerified\(configDirectory / kUiAtlasHdName, outputs\.UiAtlasHd\);\s+'
+          r'WriteFileVerified\(configDirectory / kUiAtlasHdName, outputs\.UiAtlasHd\);.*?'
+          r'outputs\.HdTextures\[index\]\);\s+\}\s+'
           r'WriteFileVerified\(configDirectory / kPackName, outputs\.Pack\);\s+\}'),
     # --- 05/11: without the TopScreen pack (player chose "not now") ---
     Guard("no TopScreen pack: the Items hint/D-pad badges asked for menu_atlas and the frame threw (game closed, hbl crash)",
@@ -1265,10 +1266,18 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'HD UI atlas unused: cannot decode.*?HD UI atlas unused: %dx%d is not a whole multiple',
           forbid=r'throw std::runtime_error\([^;]*HD UI atlas'),
-    Guard("HD UI atlas passed only beside an installed pack (--topscreen-ui-atlas-hd requires the overrides)",
+    Guard("HD UI atlas and HD images passed only beside an installed pack (--topscreen-ui-atlas-hd and "
+          "--topscreen-hd-textures require the overrides)",
           "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
           r'homebrewArgv\.erase\(homebrewArgv\.begin\(\) \+ 13, homebrewArgv\.begin\(\) \+ 15\);\s+'
-          r'\} else if \(std::filesystem::is_regular_file\(\s+"sdmc:/switch/oot3dre/config/topscreen_ui_atlas_hd\.png"\)\)'),
+          r'\} else \{\s+if \(std::filesystem::is_regular_file\(\s+"sdmc:/switch/oot3dre/config/topscreen_ui_atlas_hd\.png"\)\)'
+          r'.*?"--topscreen-hd-textures".*?\}\s+\}'),
+    Guard("HUD custom textures (packs, the mod's HD images) are named after the game's own texture, not this "
+          "port's TopScreen CTXB override (the hearts and B label kept the old art)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_texture_provider.cpp",
+          r'original = encoded;\s+switch \(mTextureOverrides->Apply\(encoded\)\).*?'
+          r'ApplyCustomTexture\(encoding->native_pica_format, original, pixels, true\);',
+          "oot3d_native_ui_texture_provider_tests (identified by the game's own bytes)"),
     Guard("HUD pack images: UI requests keep the 3x cap and their own cache (ReleaseDecoded of a world upload must not drop them)",
           "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
           r'DecodeOptions\{native, kUiTextureMaxScale, false\}',

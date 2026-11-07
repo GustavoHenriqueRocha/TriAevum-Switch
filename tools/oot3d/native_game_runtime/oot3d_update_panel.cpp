@@ -50,7 +50,7 @@ public:
     mChannel = saved.value_or(DefaultChannelFor(BuildVersion()));
     std::error_code ignored;
     mHudInstalled = std::filesystem::is_regular_file(mConfig / TopScreenImport::kPackName, ignored);
-    mHudAtlasInstalled = std::filesystem::is_regular_file(mConfig / TopScreenImport::kUiAtlasHdName, ignored);
+    mHudArtInstalled = TopScreenImport::HdArtInstalled(mConfig);
     mHudOffer = TopScreenImport::ParseOfferSetting(ReadTrimmed(mConfig / TopScreenImport::kOfferSettingName));
   }
 
@@ -189,12 +189,12 @@ private:
     ImGui::SeparatorText("HUD textures");
     ImGui::TextWrapped("Art from the mod \"%s\" by %s (%s, %s).", TopScreenImport::kModName,
                        TopScreenImport::kModAuthor, TopScreenImport::kModPage, TopScreenImport::kModLicense);
-    if (mHudInstalled && mHudAtlasInstalled) {
+    if (mHudInstalled && mHudArtInstalled) {
       ImGui::TextUnformatted("Installed, with the HD HUD art.");
       return;
     }
     if (mHudInstalled)
-      ImGui::TextWrapped("Installed without the HD HUD art (built by an earlier version). The console downloads "
+      ImGui::TextWrapped("Installed without all of the HD HUD art (built by an earlier version). The console downloads "
                          "the mod again from GameBanana (%s) at start-up to add it.",
                          Megabytes(TopScreenImport::DownloadArchive().Bytes).c_str());
     else
@@ -225,7 +225,7 @@ private:
   Channel mChannel = Channel::Stable;
   bool mChannelError = false;
   bool mHudInstalled = false;
-  bool mHudAtlasInstalled = false;
+  bool mHudArtInstalled = false;
   TopScreenImport::OfferSetting mHudOffer = TopScreenImport::OfferSetting::Ask;
   bool mHudOfferRequested = false;
   bool mHudOfferError = false;
