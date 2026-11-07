@@ -417,6 +417,12 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
     // in the first seconds and dropped in-between frames that fit.
     observe(kind, costCpuMs);
   }
+  {
+    using Kind = Oot3dNativeGame::RenderFrameKind;
+    const auto frameKind = static_cast<Kind>(kind);
+    if (frameKind == Kind::Step || frameKind == Kind::Full || frameKind == Kind::Reduced)
+      newImagesPresented.fetch_add(1U, std::memory_order_relaxed);
+  }
   std::lock_guard lock(interpolationPerfMutex);
   auto &perf = interpolationPerf;
   if (kind < perf.Frames.size()) {
@@ -875,9 +881,10 @@ bool NativeA32WindowSession::RunFrame() {
   // by StartDraw above stay under the lock.
   std::optional<Oot3dNativeGame::SecondCore::HostWaitRelease> hostWorkRelease;
   hostWorkRelease.emplace();
-  // Performance overlay (L3+R3 > Video, config/fps_counter): FPS of the
-  // presented frames (including the fps60 interpolated ones), the worst
-  // interval and the game speed of the last half second, and the clocks,
+  // Performance overlay (L3+R3 > Video, config/fps_counter): new images
+  // per second (steps and fps60 in-betweens, each once however many
+  // refreshes it stays; a dropped in-between is not one), the longest time
+  // one image stayed, the game speed of the last half second, and the clocks,
   // in the top-left corner. The flag is read every frame (the menu was drawn
   // just above, so a toggle shows in this frame); the text only changes when
   // a window closes, and the clocks come from the reader thread's cache.
@@ -894,9 +901,15 @@ bool NativeA32WindowSession::RunFrame() {
   } else {
     perfOverlayShown = true;
     auto &overlay = PerfOverlayState();
+    // Images the render thread presented since the last host frame.
+    static uint64_t overlayImagesSeen = 0U;
+    const uint64_t imagesPresented = newImagesPresented.load(std::memory_order_relaxed);
+    const auto newImages = static_cast<uint32_t>(imagesPresented - overlayImagesSeen);
+    overlayImagesSeen = imagesPresented;
     if (overlay.ObserveFrame(std::chrono::duration<double>(
                                  std::chrono::steady_clock::now().time_since_epoch())
-                                 .count())) {
+                                 .count(),
+                             newImages)) {
       overlay.SetClocks(Oot3dNativeGame::SwitchClockLatest());
     }
     // ProggyClean (13 px) scaled to a 32nd of the height: 22.5 px at 720p,
@@ -1541,6 +1554,9 @@ bool NativeA32WindowSession::RunFrame() {
              << " interp_frames=" << frames(2)
              << " interp_reduced=" << frames(3)
              << " interp_dropped=" << frames(4)
+             // New images per second (steps and in-betweens; fps counts
+             // refreshes, so a held image counts there twice).
+             << " new_fps=" << ((frames(1) + frames(2) + frames(3)) / seconds)
              << " other_frames=" << frames(0)
              << " reduced_refused=" << (current.ReducedRefused - previous.ReducedRefused)
              << " repeat_fallbacks=" << (current.RepeatFallbacks - previous.RepeatFallbacks)

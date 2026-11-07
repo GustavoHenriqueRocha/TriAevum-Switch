@@ -1535,11 +1535,29 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   top-left corner, shadowed yellow ImGui text at 1/32 of the window height:
   `59.9 FPS  max 18.2 ms  speed 100%` and `CPU 1785  GPU 768  MEM 1600  sys-clk` (MHz; `stock`
   without sys-clk, `--` when unknown).
-- FPS = presented frames (fps60 interpolated ones included) per 0.5 s window; `max` = worst game-loop
-  interval of the window; `speed` = guest refreshes run / refreshes owed (run + dropped by the
-  presentation scheduler), `--` when none was owed (loading screens). Text formatted only when a
-  window closes (`oot3d_fps_counter.h`, tests in `oot3d_fps_counter_tests.cpp`).
+- FPS = new images per 0.5 s window: a game step's frame or an fps60 in-between frame, each counted once
+  however many refreshes it stays (a dropped in-between, which repeats the step image, is not one); `max`
+  = longest time one image stayed on screen in the window (a held frame at 60 Hz reads 33.3 ms; an image
+  still up at the window's end counts its time so far); `speed` = guest refreshes run / refreshes owed (run
+  + dropped by the presentation scheduler), `--` when none was owed (loading screens). Text formatted only
+  when a window closes (`oot3d_fps_counter.h`, tests in `oot3d_fps_counter_tests.cpp`).
 - Needs ImGui on the window: with deko3d and `config/serial_presentation` nothing ImGui draws shows.
+
+#### FPS = new images, not refreshes (07/11, `fpstruth`)
+- Before, FPS counted presented refreshes, so a held image counted twice: logs16b session 2, Sacred Forest
+  Meadow (`spot05`, host frames 18150-25050) read 60 with `level=dropped step_frames=75 interp_frames=1
+  interp_dropped=74` per 150 refreshes (about 30 new images/s); log16 Kokiri Forest read a median 54.4
+  against about 37.
+- Now the render thread counts Step/Full/Reduced frames (`newImagesPresented`, in
+  `FinishRenderFrameCost`); the overlay takes the count since the previous host frame
+  (`PerfOverlay::ObserveFrame(now, newImages)`). 30 FPS setting reads 30, 60 with in-betweens 60, 60 with
+  in-betweens dropped ~30.
+- `perf.txt` interp section: new key `new_fps` = (step + full + reduced frames) / window seconds; `fps`
+  still counts refreshes, so old and new logs compare.
+- Tests: `FpsCounterWindows` (30 setting, full 60, hitch, frozen picture) and `DroppedInBetweens` (the
+  spot05 pattern reads 30.0 on the overlay, 30.4 over the 150-refresh window).
+- Console check: overlay on, 60 FPS, Sacred Forest Meadow: reads about 30-35 FPS, `max 33.3 ms`
+  (read 60.0 before); `perf.txt` there has `new_fps` ≈ 30 next to `fps=60`.
 
 ### GPU clock: L3+R3 > Video (`config/gpu_performance`, 07/11, off by default)
 - "GPU clock" combo in the Video tab: **Standard (307 MHz)** (default, file absent) or **High (460.8 MHz,
