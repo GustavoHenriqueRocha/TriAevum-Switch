@@ -32,6 +32,7 @@
 #include <functional>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <random>
@@ -39,6 +40,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <unistd.h>
@@ -345,6 +347,72 @@ void TestCapture(uint64_t seed, bool transform, size_t steps) {
                 static_cast<unsigned long long>(draws), countersA.HashedBytes / 1024.0,
                 countersB.HashedBytes / 1024.0, countersA.CopiedBytes / 1024.0,
                 static_cast<unsigned long long>(countersB.IndexRangeReuses));
+}
+
+// The full geometry cache evicts its least recently used entry (smallest
+// last_used_sequence, as the linear scan the O(1) list replaced): across a
+// draw, the removed keys are exactly the oldest of those the draw did not
+// touch, one per counted eviction, also after a savestate round trip.
+void TestGeometryLru(uint64_t seed, size_t checks) {
+    using Key = std::tuple<uint8_t, uint8_t, uint32_t, size_t>;
+    const auto entries = [](const nlohmann::json& state) {
+        std::map<Key, uint64_t> sequences;
+        for (const auto& entry : state.at("geometry_snapshot_cache")) {
+            sequences[{entry.at("kind").get<uint8_t>(), entry.at("slot").get<uint8_t>(),
+                       entry.at("physical_address").get<uint32_t>(), entry.at("size").get<size_t>()}] =
+                entry.at("last_used_sequence").get<uint64_t>();
+        }
+        return sequences;
+    };
+    std::mt19937_64 random(seed);
+    CaptureRun run;
+    run.Lean = true;
+    FillMemory(run.Memory, random);
+    run.Make();
+    std::string error;
+    // Fill the cache (4096 entries) first.
+    size_t fillDraws = 0U;
+    while (run.Queue->Counters().GeometryEvictions == 0U) {
+        Require(++fillDraws < 200000U, "the geometry cache never filled");
+        (void)run.Submit(MakePacket(random), &error);
+        if (fillDraws % 64U == 0U) (void)run.Queue->TakePendingDraws();
+    }
+    uint64_t checkedEvictions = 0U;
+    for (size_t check = 0; check < checks; ++check) {
+        if (check == checks / 2U) {
+            const auto state = run.Queue->CaptureState();
+            run.Make();
+            Require(run.Queue->RestoreState(state, &error), error);
+        }
+        // A few draws between checks: hits refresh entries, misses evict.
+        for (size_t draw = random() % 8U; draw != 0U; --draw) (void)run.Submit(MakePacket(random), &error);
+        (void)run.Queue->TakePendingDraws();
+        const auto before = entries(run.Queue->CaptureState());
+        const uint64_t evictionsBefore = run.Queue->Counters().GeometryEvictions;
+        (void)run.Submit(MakePacket(random), &error);
+        (void)run.Queue->TakePendingDraws();
+        const auto after = entries(run.Queue->CaptureState());
+        const uint64_t evicted = run.Queue->Counters().GeometryEvictions - evictionsBefore;
+        std::vector<std::pair<uint64_t, Key>> untouched;
+        std::vector<Key> removed;
+        for (const auto& [key, sequence] : before) {
+            const auto found = after.find(key);
+            if (found == after.end()) removed.push_back(key);
+            if (found == after.end() || found->second == sequence) untouched.emplace_back(sequence, key);
+        }
+        Require(removed.size() == evicted, "evicted entries and the eviction count differ");
+        std::sort(untouched.begin(), untouched.end());
+        std::vector<Key> oldest;
+        for (size_t index = 0; index < removed.size(); ++index) oldest.push_back(untouched[index].second);
+        std::sort(oldest.begin(), oldest.end());
+        Require(removed == oldest, "the cache evicted an entry that was not the least recently used");
+        Require(after.size() <= 4096U, "the geometry cache outgrew its limit");
+        checkedEvictions += evicted;
+    }
+    Require(checkedEvictions != 0U, "no eviction was checked");
+    std::printf("geometry lru seed=%llu fill_draws=%zu checked_evictions=%llu\n",
+                static_cast<unsigned long long>(seed), fillDraws,
+                static_cast<unsigned long long>(checkedEvictions));
 }
 
 void TestPacketSource() {
@@ -985,9 +1053,12 @@ void BenchCapture(size_t draws) {
             if (draw % 64U == 63U) (void)run.Queue->TakePendingDraws();
         }
         const auto counters = run.Queue->Counters();
-        std::printf("bench capture %-4s %.3f us/draw (hashed %.1f KiB/draw, copied %.1f KiB/draw)\n",
+        std::printf("bench capture %-4s %.3f us/draw (hashed %.1f KiB/draw, copied %.1f KiB/draw,"
+                    " geometry misses %.2f/draw, evictions %.2f/draw)\n",
                     lean ? "lean" : "old", us / draws, counters.HashedBytes / 1024.0 / draws,
-                    counters.CopiedBytes / 1024.0 / draws);
+                    counters.CopiedBytes / 1024.0 / draws,
+                    static_cast<double>(counters.GeometryMisses) / draws,
+                    static_cast<double>(counters.GeometryEvictions) / draws);
     }
 }
 
@@ -1004,6 +1075,7 @@ int main(int argc, char** argv) {
     TestPacketSource();
     for (uint64_t seed = 1U; seed <= 3U; ++seed) TestFrontendSource(seed);
     for (uint64_t seed = 1U; seed <= 4U; ++seed) TestCapture(seed, seed % 2U == 0U, 600U);
+    for (uint64_t seed = 1U; seed <= 2U; ++seed) TestGeometryLru(seed, 120U);
     for (uint64_t seed = 1U; seed <= 4U; ++seed) TestAccumulator(seed, 1500U);
     for (uint64_t seed = 1U; seed <= 3U; ++seed) TestPlanPaths(seed, 200U);
     TestLineWriter();

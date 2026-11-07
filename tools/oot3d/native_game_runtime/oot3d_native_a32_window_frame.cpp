@@ -1930,6 +1930,13 @@ bool NativeA32WindowSession::RunFrame() {
              << static_cast<double>(capture.IndexRangeReuses -
                                     previousCapture.IndexRangeReuses) /
                     hostFrames
+             << " geometry_misses="
+             << static_cast<double>(capture.GeometryMisses - previousCapture.GeometryMisses) /
+                    hostFrames
+             << " geometry_evictions="
+             << static_cast<double>(capture.GeometryEvictions -
+                                    previousCapture.GeometryEvictions) /
+                    hostFrames
              << " pica_submit_host_ms="
              << ((picaSubmitSeconds - previousPicaSubmit) -
                  (phaseTiming.GuestInsidePicaSubmitSeconds - previousGuestInPica)) *

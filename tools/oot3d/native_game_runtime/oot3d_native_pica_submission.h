@@ -236,6 +236,10 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
         uint64_t CopiedBytes = 0;
         uint64_t HashedBytes = 0;
         uint64_t IndexRangeReuses = 0;
+        // Geometry snapshots made anew (cache misses) and entries evicted
+        // to make room for them (the cache is full: kGeometrySnapshotCacheLimit).
+        uint64_t GeometryMisses = 0;
+        uint64_t GeometryEvictions = 0;
     };
     [[nodiscard]] CaptureCounters Counters() const noexcept {
         std::lock_guard guard(mQueueMutex);
@@ -334,6 +338,14 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
       uint64_t ContentVersion = 0;
       uint64_t SourceWriteGeneration = 0;
       uint64_t LastUsedSequence = 0;
+      // LRU order of the cache (oldest first, by LastUsedSequence), linked
+      // through the map's own nodes, whose addresses survive rehashing: a
+      // miss at the limit evicts the oldest entry in O(1) instead of scanning
+      // every entry. Maintained only by the queue (LinkGeometryNewest and
+      // UnlinkGeometry); a copied entry carries stale links.
+      GeometrySnapshotCacheEntry* LruOlder = nullptr;
+      GeometrySnapshotCacheEntry* LruNewer = nullptr;
+      const GeometrySnapshotKey* LruKey = nullptr;
     };
 
     struct TextureSnapshotKey {
@@ -410,6 +422,13 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
                                  Oot3dPicaResourceSnapshot &resource,
                                  std::string *error,
                                  GeometrySnapshotCacheEntry **entry = nullptr);
+    // The entry of `node` becomes the newest of the LRU order (linked anew;
+    // it must not be linked).
+    void LinkGeometryNewest(
+        std::pair<const GeometrySnapshotKey, GeometrySnapshotCacheEntry>& node);
+    void UnlinkGeometry(GeometrySnapshotCacheEntry& entry);
+    // Links every entry by ascending LastUsedSequence (after a restore).
+    void RebuildGeometryLru();
     bool SubmitDrawLocked(Oot3dPicaDrawSubmission& submission,
                           std::string* error);
     bool CaptureTextureResources(Oot3dPicaDrawSubmission &submission,
@@ -443,6 +462,8 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     Oot3dPicaSubmissionRuntimeProfile mRuntimeProfile;
     uint64_t mNextGeometryContentVersion = 1;
     uint64_t mGeometrySnapshotSequence = 0;
+    GeometrySnapshotCacheEntry* mGeometryLruOldest = nullptr;
+    GeometrySnapshotCacheEntry* mGeometryLruNewest = nullptr;
     uint64_t mNextSubmissionId = 1;
     uint64_t mNextCompletionId = 1;
 };

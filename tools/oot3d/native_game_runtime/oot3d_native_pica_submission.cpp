@@ -284,6 +284,53 @@ bool Oot3dNativePicaSubmissionQueue::SubmitHardwareRegisterWrite(
     return true;
 }
 
+void Oot3dNativePicaSubmissionQueue::LinkGeometryNewest(
+    std::pair<const GeometrySnapshotKey, GeometrySnapshotCacheEntry>& node) {
+  GeometrySnapshotCacheEntry& entry = node.second;
+  entry.LruKey = &node.first;
+  entry.LruOlder = mGeometryLruNewest;
+  entry.LruNewer = nullptr;
+  if (mGeometryLruNewest != nullptr) {
+    mGeometryLruNewest->LruNewer = &entry;
+  } else {
+    mGeometryLruOldest = &entry;
+  }
+  mGeometryLruNewest = &entry;
+}
+
+void Oot3dNativePicaSubmissionQueue::UnlinkGeometry(
+    GeometrySnapshotCacheEntry& entry) {
+  if (entry.LruKey == nullptr) return;  // not linked
+  if (entry.LruOlder != nullptr) {
+    entry.LruOlder->LruNewer = entry.LruNewer;
+  } else {
+    mGeometryLruOldest = entry.LruNewer;
+  }
+  if (entry.LruNewer != nullptr) {
+    entry.LruNewer->LruOlder = entry.LruOlder;
+  } else {
+    mGeometryLruNewest = entry.LruOlder;
+  }
+  entry.LruOlder = entry.LruNewer = nullptr;
+  entry.LruKey = nullptr;
+}
+
+void Oot3dNativePicaSubmissionQueue::RebuildGeometryLru() {
+  mGeometryLruOldest = mGeometryLruNewest = nullptr;
+  std::vector<std::pair<const GeometrySnapshotKey, GeometrySnapshotCacheEntry>*>
+      order;
+  order.reserve(mGeometrySnapshotCache.size());
+  for (auto& node : mGeometrySnapshotCache) {
+    node.second.LruOlder = node.second.LruNewer = nullptr;
+    node.second.LruKey = nullptr;
+    order.push_back(&node);
+  }
+  std::stable_sort(order.begin(), order.end(), [](const auto* left, const auto* right) {
+    return left->second.LastUsedSequence < right->second.LastUsedSequence;
+  });
+  for (auto* node : order) LinkGeometryNewest(*node);
+}
+
 bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
     Oot3dPicaResourceKind kind, uint8_t slot, uint32_t physicalAddress,
     uint32_t firstElement, size_t byteCount,
@@ -337,20 +384,21 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
   }
   if (!cacheHit) {
     if (cached == mGeometrySnapshotCache.end() &&
-        mGeometrySnapshotCache.size() >= kGeometrySnapshotCacheLimit) {
-      const auto oldest = std::min_element(
-          mGeometrySnapshotCache.begin(), mGeometrySnapshotCache.end(),
-          [](const auto &left, const auto &right) {
-            return left.second.LastUsedSequence < right.second.LastUsedSequence;
-          });
-      if (oldest != mGeometrySnapshotCache.end()) {
-        mGeometrySnapshotCache.erase(oldest);
-      }
+        mGeometrySnapshotCache.size() >= kGeometrySnapshotCacheLimit &&
+        mGeometryLruOldest != nullptr) {
+      // The least recently used entry (the smallest LastUsedSequence), as
+      // the linear scan this replaces chose it.
+      GeometrySnapshotCacheEntry &oldest = *mGeometryLruOldest;
+      const GeometrySnapshotKey oldestKey = *oldest.LruKey;
+      UnlinkGeometry(oldest);
+      mGeometrySnapshotCache.erase(oldestKey);
+      ++mCounters.GeometryEvictions;
     }
     GeometrySnapshotCacheEntry entry;
     entry.Bytes = std::make_shared<const std::vector<uint8_t>>(source->begin(),
                                                                source->end());
     mCounters.CopiedBytes += source->size();
+    ++mCounters.GeometryMisses;
     if (mLeanCapture) {
       // Only a savestate reads it (CaptureState hashes the bytes then).
       entry.ContentHashValid = false;
@@ -363,8 +411,13 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
     if (mNextGeometryContentVersion == 0U) {
       mNextGeometryContentVersion = 1U;
     }
-    cached =
-        mGeometrySnapshotCache.insert_or_assign(key, std::move(entry)).first;
+    if (cached != mGeometrySnapshotCache.end()) {
+      // Replaced in place: the entry keeps its node and is relinked below.
+      UnlinkGeometry(cached->second);
+      cached->second = std::move(entry);
+    } else {
+      cached = mGeometrySnapshotCache.emplace(key, std::move(entry)).first;
+    }
   } else {
     if (cached->second.Bytes == nullptr) {
       cached->second.Bytes =
@@ -373,8 +426,10 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
       mCounters.CopiedBytes += source->size();
     }
     cached->second.SourceWriteGeneration = sourceWriteGeneration.value_or(0U);
+    UnlinkGeometry(cached->second);
   }
   cached->second.LastUsedSequence = ++mGeometrySnapshotSequence;
+  LinkGeometryNewest(*cached);
   if (entryOut != nullptr) *entryOut = &cached->second;
 
   resource.Kind = kind;
@@ -1728,6 +1783,7 @@ bool Oot3dNativePicaSubmissionQueue::RestoreState(
             std::move(restoredTransfers);
         mTextureSnapshotCache = std::move(textureSnapshotCache);
         mGeometrySnapshotCache = std::move(geometrySnapshotCache);
+        RebuildGeometryLru();
         ResetSnapshotObservation();
         mNextGeometryContentVersion = nextGeometryContentVersion;
         mGeometrySnapshotSequence = geometrySnapshotSequence;
