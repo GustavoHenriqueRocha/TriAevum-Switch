@@ -1573,6 +1573,41 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_shaders.cpp",
           r'ShaderPackNameFromConfig\(line\).*?tev_passthrough=%s',
           "oot3d_deko3d_backend_tests (TestShaderPack)"),
+    # --- 07/11: test.9 "the general flickers were still happening" (logs17) ---
+    # A command list the GSP queue kicked after the next Gameplay_Draw had switched the frame to
+    # its HUD phase came through as UI: its world models lost per-pixel lighting, grass and their
+    # placement for one frame (ui_list in deko3d.txt). The tracker stamps spans with their
+    # Gameplay_Draw generation; a list whose spans all predate the current one keeps its on-time
+    # domain (config/late_lists_as_ui restores the old attribution).
+    Guard("blink17: spans carry the Gameplay_Draw generation they were written in",
+          "tools/oot3d/native_game_runtime/oot3d_native_pica_composition.cpp",
+          r'span\.WriteGeneration = mWriteGeneration;.*?'
+          r'if \(pc == kOot3dGameplayDrawEntry\) \{\s+if \(\+\+mWriteGeneration == 0U\) \+\+mWriteGeneration;',
+          test="oot3d_native_pica_composition_tests (TestWriteGeneration)"),
+    Guard("blink17: a late list (every span from an earlier Gameplay_Draw, kicked in the HUD phase) keeps its "
+          "on-time domain unless config/late_lists_as_ui",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'const bool lateList = IsLateCompositionCommandList\(\s*mCommandListCompositionDomain, compositionSpans, '
+          r'mCurrentWriteGeneration\);.*?lateList && mLateCommandListsOnTime \? mOnTimeCompositionDomain.*?'
+          r': listDomain == Oot3dPicaCompositionDomain::Ui.*?auto domain = listDomain;',
+          test="oot3d_native_pica_frontend_tests"),
+    Guard("blink17: the GSP submission gives the frontend the refresh domain and the write generation",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_gsp.cpp",
+          r'SetCommandListTiming\(.*?PicaRefreshCompositionDomain.*?CurrentWriteGeneration\(\)'),
+    Guard("blink17: config/late_lists_as_ui is the A/B switch of the late-list attribution",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'SetLateCommandListsOnTime\(\s*!std::filesystem::exists\(configDirectory / "late_lists_as_ui".*?'
+          r'hostConfig\.PicaRefreshCompositionDomain = &picaRefreshCompositionDomain;'),
+    Guard("blink17: the transient watch compares each frame kind with its own kind (at 60 FPS the real frame "
+          "and its in-between frame lose the same draw) and names the first draw lost to its composition",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting_draw.cpp",
+          r'auto& history = mHistory\[mOpen\.InBetween \? 1U : 0U\];.*?'
+          r'composition && mOpen\.LostToComposition\(\) == 0U',
+          test="oot3d_deko3d_inbetween_lighting_tests (TestLightingTransients)"),
+    Guard("blink17: perf.txt counts late lists, UI-kept world draws, scene draws in no span and invalid spans",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'" spans_invalid=".*?" late_lists=".*?" ui_world_draws=".*?" no_span_draws=".*?" owner_holes=".*?'
+          r'"composition note: window_end="'),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay

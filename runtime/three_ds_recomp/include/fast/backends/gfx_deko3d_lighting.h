@@ -304,7 +304,9 @@ struct LightingSample {
     uint32_t LitWithoutRim = 0;
     uint32_t Native = 0;
     std::array<uint32_t, kLostWorldCompositions> Lost{};
-    // The first lost world model: its composition and command-list place.
+    // The first world model lost to its composition (ui_list, ui_span,
+    // no_span, control_flow; not the steady atmosphere draws): its
+    // composition, command-list place and geometry.
     uint8_t LostDomain = 0;
     uint8_t LostLayer = 0;
     uint8_t LostProvenance = 0;
@@ -312,6 +314,8 @@ struct LightingSample {
     uint64_t LostActor = 0;
     uint32_t LostCommandList = 0;
     uint32_t LostOffsetWords = 0;
+    uint32_t LostVertices = 0;
+    uint64_t LostGeometry = 0;
 
     [[nodiscard]] uint32_t LostTotal() const noexcept;
     // Lost to the composition's timing or spans (not atmosphere/other).
@@ -334,17 +338,22 @@ struct LightingTransient {
 };
 
 // "frame F (real|in-between) lit b/s/a, no env b/s/a, no rim b/s/a, native
-// b/s/a, lost world b/s/a (class=count ...; first domain=D layer=L
-// provenance=P pc=X actor=X list=X+N)".
+// b/s/a, lost world b/s/a (class=count ...[; first domain=D layer=L
+// provenance=P pc=X actor=X list=X+N vertices=V geometry=X])" (first: the
+// first draw lost to its composition, when there is one).
 [[nodiscard]] std::string FormatLightingTransient(const LightingTransient& transient);
 
-// The last three samples of the presented frames. Draws of another render
-// target namespace than the sample's first draw (the game thread's
-// dependency flushes, never presented) are not counted.
+// The last three samples of each frame kind, compared within their kind: a
+// real frame with the real frames around it, an in-between frame with the
+// in-between frames around it. At 60 FPS an in-between frame repeats its
+// real frame's draws, so a game frame that loses a draw loses it in both
+// presented frames; compared across kinds that pair hid every such blink.
+// Draws of another render target namespace than the sample's first draw
+// (the game thread's dependency flushes, never presented) are not counted.
 class LightingTransientWatch {
   public:
-    // Closes the open sample and opens the next; returns the sample before
-    // the closed one when it was a transient.
+    // Closes the open sample and opens the next; returns the middle sample
+    // of the closed sample's kind when it was a transient.
     std::optional<LightingTransient> Begin(uint64_t deviceFrame, bool inBetween);
     void Lit(const Renderer3ds::PicaDrawView& draw, const Renderer3ds::PicaSurfaceLightingUniforms& block);
     void Native(const Renderer3ds::PicaDrawView& draw);
@@ -353,8 +362,11 @@ class LightingTransientWatch {
   private:
     [[nodiscard]] bool Counts(const Renderer3ds::PicaDrawView& draw) noexcept;
 
-    std::array<LightingSample, 2> mClosed{}; // [0] older
-    size_t mClosedCount = 0;
+    struct History {
+        std::array<LightingSample, 2> Closed{}; // [0] older
+        size_t Count = 0;
+    };
+    std::array<History, 2> mHistory{}; // [0] real, [1] in-between
     LightingSample mOpen{};
     bool mOpened = false;
     std::optional<uint64_t> mNamespace;

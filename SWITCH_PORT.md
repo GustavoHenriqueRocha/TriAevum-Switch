@@ -2569,6 +2569,71 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   Tests: `oot3d_deko3d_inbetween_lighting_tests` (`TestLostWorldComposition`, `TestLightingTransients`). Guards
   "per-pixel blink (test.8)".
 
+### Per-pixel blink in test.9: late command lists and a watch that missed 60 FPS (`logs17`, 07/11)
+- **Seen (test.9):** "the general flickers were still happening", with and without upscaling and OC.
+- **What `logs17` says** (`deko3d.txt`, `perf.txt`; device frames mapped to wall time by `hitches.txt` `t=`):
+  - The 48 `lighting transient` lines were used up by device frame 19203, before both videos. All are real
+    frames with `lit N/N-1/N` and `lost world 1/2/1 (no_span=1 atmosphere=1 ...)`: one lit draw without any span
+    for one game frame. Their `first` was the atmosphere draw every frame has (kankyo primitive, pc `003fb5ec`),
+    not the lost draw.
+  - `no_span` costs 16-45 world draws per window of ~900 real frames in every scene, and the same number in the
+    in-between kind (18/18, 45/45, 25/25). In 60 FPS windows `transients` stays 0-2: an in-between frame repeats
+    its real frame's draws, so the loss sits in both presented frames of a game frame and each had a neighbour
+    that agreed. The watch was blind to every 60 FPS blink; the 30 FPS windows show 9-19.
+  - `ui_list` (world models in a list the frontend tagged UI) appears only in the Forest Temple: 11, then 98/49,
+    88/85 and 32/30 (real/in-between) in the windows 25200-27000, 27000-28800, 37800-39600 and 39600-41400.
+    About two whole frames of lit world draws each (~50 per frame). The two videos (13:00:53 and 13:04:26) are
+    device frames 25560-27339 and 37674-39452: both inside those windows. Second video, frame ~640 (21.4 s,
+    device ~38950): the large pillar in front of Link is drawn light and textured for one frame between two dark
+    ones.
+  - `composition:` is zero for partial, overlapping, unattributed, evicted and invalid CMB spans in every window.
+- **Cause of `ui_list`:** the frontend tags every draw of a list submitted while the domain is `Ui` (UI
+  lifecycle, spans ignored). The domain turns `Ui` at `0x002E278C` inside Gameplay_Draw (and at the GameplayHud
+  presentation entries) and back to Scene/Unknown at the guest refresh; the scene lists are normally kicked after
+  the refresh [INFERENCE: world draws are Scene-domain in every steady window]. A list kicked after the next
+  Gameplay_Draw passed `0x002E278C` (when the GPU queue runs a queued request on the previous one's completion
+  [INFERENCE]) came through as UI: its world models lose per-pixel
+  lighting, grass (`gfx_deko3d_pica_draw.cpp` keeps grass to Scene-domain draws) and get the UI widescreen
+  placement evidence, for one game frame.
+- **Fix:** `Oot3dNativePicaCompositionTracker` numbers each Gameplay_Draw (`CurrentWriteGeneration`) and stamps
+  every span with the generation its bytes were written in (`WriteGeneration`). At a SubmitCommandList the GSP
+  glue gives the frontend the last refresh's domain and the current generation (`SetCommandListTiming`). A list
+  submitted in the `Ui` domain whose spans all predate the current Gameplay_Draw (`IsLateCompositionCommandList`)
+  is an earlier frame's scene: it gets the on-time domain, so its spans and draws resolve exactly as when it is
+  kicked on time. A list with any span of the current Gameplay_Draw (this frame's HUD, the pause screen) or
+  without spans is unchanged. `config/late_lists_as_ui` (file present) restores the old attribution (A/B).
+- **Not settled: `no_span`.** `CmbRenderer_SubmitDrawHandle` (`0x0030F4D0`) tail-calls `0x00452808`, which
+  issues every visible mesh through `MeshCommandPacket_Submit` (`0x00466E2C`, a copy of the packet's `+0x10`
+  bytes at `0x0054CC4C`; EUR code.bin, objdump), so a CMB draw's trigger lies in its mesh span; the draw without
+  span is something else. New counters decide it next run (below).
+- **Diagnostics (for the next run):**
+  - `LightingTransientWatch` compares each frame kind with its own kind: a real frame with the real frames
+    around it, an in-between frame with the in-between frames around it (at 60 FPS both report a lost game
+    frame). `first` names the first draw lost to its composition (`ui_list`, `ui_span`, `no_span`,
+    `control_flow`), never the atmosphere draw, with `vertices=` and `geometry=`. At most 96 lines.
+  - `perf.txt` `composition:` gains `spans_invalid` (mesh/primitive packets whose range could not be recorded:
+    misaligned, read failures, nested/unmatched primitive packets, invalid atmosphere ranges), `late_lists`,
+    `late_draws`, `ui_world_draws` (draws left UI inside a world span: HUD-phase lists that are not late),
+    `no_span_draws` (scene draws in no span of a list that has spans), `owner_holes` (of them, between two spans of
+    one CMB renderer) and `bare_list_draws` (scene draws of a list without spans).
+  - `perf.txt` lines `composition note: window_end=F <kind> list=X+size draw=+N domain=a->b spans=S
+    generations=oldest..newest/current draws=D world=W` (at most 64): `late_list`, `ui_list_world` (a HUD-phase
+    list with world spans that is not late) and `same_owner_hole` (with the spans before and after).
+- **Reading the next run:** `late_lists` > 0 and `ui_list` gone from `lighting real/in-between` = fixed; with
+  `config/late_lists_as_ui` the `ui_list` counts come back. `ui_world_draws` > 0 with `ui_list_world` notes whose
+  generations equal the current one = a mid-frame kick within one Gameplay_Draw (not covered). For `no_span`: the
+  transient's `list=X+N` against `bare_list_draws`/`no_span_draws`/`owner_holes`/`spans_invalid` in the same
+  window says whether the draw's list had no spans, fell between two spans of one model, or lost a packet range.
+- **Check (one minute):** Per-pixel, 60 FPS, Forest Temple (the rooms of `logs17`) for a minute, then 30 s at
+  30 FPS in Hyrule Field. `logs/deko3d.txt`: `ui_list` in `lighting real/in-between` and the `lighting transient`
+  lines; `logs/perf.txt`: the `composition:` group and `composition note:` lines. For the A/B, create
+  `config/late_lists_as_ui` and repeat. No `deko3d.pack` rebuild needed.
+- Code: `oot3d_native_pica_frontend.{h,cpp}` (`IsLateCompositionCommandList`, `SetCommandListTiming`,
+  `Oot3dPicaCompositionResolveStats`, notes), `oot3d_native_pica_composition.{h,cpp}` (`WriteGeneration`),
+  `oot3d_native_a32_ctr_host_gsp.cpp`, `oot3d_native_a32_window_{setup,frame}.cpp`, `gfx_deko3d_lighting{.h,_draw.cpp}`,
+  `gfx_deko3d.cpp`. Tests: `oot3d_native_pica_frontend_tests`, `oot3d_native_pica_composition_tests`
+  (`TestWriteGeneration`), `oot3d_deko3d_inbetween_lighting_tests` (`TestLightingTransients`). Guards "blink17".
+
 ### Landing roll (N64): L3+R3 > Game > Gameplay (`config/no_landing_roll`, 07/11, on by default)
 - **Seen (OoT3D since 2011, GameFAQs "Link no longer rolls after jumping off a high cliff"):** after a run
   jump off a ledge, Link never rolls on landing, even with the stick held forward; he still rolls after

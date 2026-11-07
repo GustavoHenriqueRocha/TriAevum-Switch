@@ -445,6 +445,8 @@ private:
   Oot3dNativeGame::Oot3dNativePicaFrontend picaFrontend;
   Oot3dNativeGame::Oot3dNativePicaCompositionTracker picaCompositionTracker;
   Oot3dNativeGame::Oot3dPicaCompositionDomain picaCompositionDomain{};
+  // The domain of the last refresh (hostConfig.PicaRefreshCompositionDomain).
+  Oot3dNativeGame::Oot3dPicaCompositionDomain picaRefreshCompositionDomain{};
   Oot3dNativeGame::NativeA32CtrHostConfig hostConfig;
   std::shared_ptr<Oot3dNativeGame::GameLanguageSettings> languageSettings{};
   std::filesystem::path saveDataDirectory{};

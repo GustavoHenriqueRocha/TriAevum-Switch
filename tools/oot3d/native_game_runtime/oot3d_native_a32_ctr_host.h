@@ -228,6 +228,9 @@ struct NativeA32CtrHostConfig {
     Oot3dNativePicaFrontend* PicaFrontend = nullptr;
     NativeA32CtrPicaBridge* PicaBridge = nullptr;
     const Oot3dPicaCompositionDomain* PicaCompositionDomain = nullptr;
+    // The domain the last guest refresh set (what a list kicked on time
+    // gets; Oot3dNativePicaFrontend::SetCommandListTiming).
+    const Oot3dPicaCompositionDomain* PicaRefreshCompositionDomain = nullptr;
     Oot3dPicaCommandListCompositionProvider* PicaCompositionProvider = nullptr;
     std::filesystem::path SaveDataDirectory;
     bool HeadphonesConnected = false;

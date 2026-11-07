@@ -626,12 +626,13 @@ void GfxRenderingAPIDeko3d::LogLightingCounters(const char* when) {
 void GfxRenderingAPIDeko3d::BeginLightingSample(bool inBetween) {
     mInBetweenSample = inBetween;
     ++(inBetween ? mInBetweenLighting : mRealLighting).Samples;
-    // A sample unlike both neighbours: the one-frame blink as the CPU sees it
-    // (fewer lit draws, lit without environment or rim, native, world models
-    // lost to their composition), with the device frame that presented it.
+    // A sample unlike both neighbours of its kind: the one-frame blink as
+    // the CPU sees it (fewer lit draws, lit without environment or rim,
+    // native, world models lost to their composition), with the device
+    // frame that presented it. At most 96 lines (two kinds per game frame).
     if (const auto transient = mLightingWatch.Begin(mDevice.Frame(), inBetween)) {
         ++(transient->Sample.InBetween ? mInBetweenLighting : mRealLighting).Transients;
-        if (mTransientsLogged < 48U) {
+        if (mTransientsLogged < 96U) {
             ++mTransientsLogged;
             Deko3d::Log("lighting transient: %s", Deko3d::FormatLightingTransient(*transient).c_str());
         }

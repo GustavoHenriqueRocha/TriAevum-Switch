@@ -109,6 +109,10 @@ class Oot3dNativePicaCompositionTracker final
         uint32_t commandListAddress, uint32_t commandListSize,
         std::vector<Oot3dPicaCommandListCompositionSpan>& spans,
         std::string* error = nullptr) override;
+    // One per native Gameplay_Draw entry (spans carry it as WriteGeneration).
+    [[nodiscard]] uint32_t CurrentWriteGeneration() const noexcept override {
+        return mWriteGeneration;
+    }
 
     void Reset() noexcept;
     void SetRoomShadowShellsEnabled(bool enabled) { mLighting.SetRoomShadowShellsEnabled(enabled); }
@@ -166,6 +170,7 @@ class Oot3dNativePicaCompositionTracker final
     std::optional<ActivePrimitivePacket> mActivePrimitivePacket;
     std::deque<Oot3dPicaCommandListCompositionSpan> mPendingSpans;
     Oot3dNativePicaCompositionStats mStats;
+    uint32_t mWriteGeneration = 1;
 };
 
 } // namespace Oot3dNativeGame

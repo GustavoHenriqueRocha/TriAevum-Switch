@@ -198,6 +198,47 @@ void TestProjectedShadowOwnership() {
     }
 }
 
+// Spans carry the Gameplay_Draw generation their bytes were written in, so a
+// list the GSP queue kicks after the next Gameplay_Draw began is recognised as
+// late (IsLateCompositionCommandList).
+void TestWriteGeneration() {
+    using namespace Oot3dNativeGame;
+    NativeA32Memory memory;
+    Map(memory, 0x0054C000U, 0x1000U);
+    Map(memory, 0x10000000U, 0x1000U);
+    Require(memory.Write32(0x10000010U, 0x20U), "could not seed the packet size");
+    Oot3dNativePicaCompositionTracker tracker;
+    oot3d::recomp::a32::GuestState state{};
+    uint32_t cursor = 0x14001000U;
+    const auto emit = [&] {
+        state.r[0] = 0x10000800U;
+        state.r[1] = 0U;
+        state.r[14] = 0x002FADDCU;
+        tracker.ObserveBlockEntry(kOot3dCmbRendererSubmitDrawHandleEntry, state, memory);
+        Require(memory.Write32(0x0054CC4CU, cursor), "could not move the packet cursor");
+        state.r[0] = 0x10000000U;
+        tracker.ObserveBlockEntry(kOot3dMeshCommandPacketSubmitEntry, state, memory);
+        tracker.ObserveBlockEntry(0x002FADDCU, state, memory);
+        cursor += 0x40U; // not adjacent: no coalescing
+    };
+    const uint32_t first = tracker.CurrentWriteGeneration();
+    Require(first != 0U, "generations are tracked from the start");
+    emit();
+    tracker.ObserveBlockEntry(kOot3dGameplayDrawEntry, state, memory);
+    Require(tracker.CurrentWriteGeneration() == first + 1U, "Gameplay_Draw starts a generation");
+    emit();
+    std::vector<Oot3dPicaCommandListCompositionSpan> spans;
+    std::string error;
+    Require(tracker.TakeCommandListCompositionSpans(0x14001000U, 0x80U, spans, &error), error);
+    Require(spans.size() == 2U && spans[0].WriteGeneration == first && spans[1].WriteGeneration == first + 1U,
+            "each span carries the generation it was written in");
+    Require(IsLateCompositionCommandList(Oot3dPicaCompositionDomain::Ui, std::span(spans).first(1U),
+                                         tracker.CurrentWriteGeneration()) &&
+                !IsLateCompositionCommandList(Oot3dPicaCompositionDomain::Ui, spans,
+                                              tracker.CurrentWriteGeneration()),
+            "only bytes written before this Gameplay_Draw are late");
+}
+
 void TestDeferredAtmosphereOwnership() {
     using namespace Oot3dNativeGame;
     NativeA32Memory memory;
@@ -784,6 +825,7 @@ void TestEnvironmentKeyDirection() {
 int main() {
     TestSelectedLightSnapshot();
     TestProjectedShadowOwnership();
+    TestWriteGeneration();
     TestDeferredAtmosphereOwnership();
     TestDeferredActorOwnership();
     TestRestoredSceneLightOwnership();

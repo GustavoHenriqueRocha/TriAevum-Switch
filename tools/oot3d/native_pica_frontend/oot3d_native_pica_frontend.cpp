@@ -1,6 +1,7 @@
 #include "oot3d_native_pica_frontend.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -162,6 +163,85 @@ void Oot3dNativePicaFrontend::SetDiagnosticHistoryEnabled(bool enabled) {
 void Oot3dNativePicaFrontend::SetCommandListCompositionDomain(
     Oot3dPicaCompositionDomain domain) noexcept {
     mCommandListCompositionDomain = domain;
+}
+
+bool IsLateCompositionCommandList(
+    Oot3dPicaCompositionDomain submitted,
+    std::span<const Oot3dPicaCommandListCompositionSpan> spans,
+    uint32_t currentGeneration) noexcept {
+    if (submitted != Oot3dPicaCompositionDomain::Ui || spans.empty() ||
+        currentGeneration == 0U) {
+        return false;
+    }
+    return std::all_of(spans.begin(), spans.end(), [&](const auto& span) {
+        return span.WriteGeneration != 0U &&
+               span.WriteGeneration < currentGeneration;
+    });
+}
+
+namespace {
+
+const char* CompositionNoteKindName(Oot3dPicaCompositionNoteKind kind) {
+    switch (kind) {
+        case Oot3dPicaCompositionNoteKind::LateList: return "late_list";
+        case Oot3dPicaCompositionNoteKind::UiListWorld: return "ui_list_world";
+        case Oot3dPicaCompositionNoteKind::SameOwnerHole: return "same_owner_hole";
+    }
+    return "?";
+}
+
+std::string FormatNoteSpan(const Oot3dPicaCompositionNoteSpan& span) {
+    char text[160];
+    const int length = std::snprintf(
+        text, sizeof(text),
+        "%08x..%08x layer=%u provenance=%u pc=%08x actor=%llx renderer=%llx gen=%u",
+        span.BeginAddress, span.EndAddress, static_cast<unsigned>(span.Layer),
+        static_cast<unsigned>(span.Provenance), span.SourcePc,
+        static_cast<unsigned long long>(span.Actor),
+        static_cast<unsigned long long>(span.Instance), span.WriteGeneration);
+    return std::string(text, static_cast<size_t>(std::clamp(length, 0, static_cast<int>(sizeof(text)) - 1)));
+}
+
+Oot3dPicaCompositionNoteSpan NoteSpan(const Oot3dPicaCommandListCompositionSpan& span) {
+    return {span.BeginAddress, span.EndAddress, span.Attribution.Layer,
+            span.Attribution.Provenance, span.Attribution.SourcePc,
+            span.Attribution.NativeActorIdentity,
+            span.Attribution.TemporalIdentity.Instance, span.WriteGeneration};
+}
+
+bool IsWorldCompositionLayer(Oot3dPicaCompositionLayer layer) {
+    return layer == Oot3dPicaCompositionLayer::OpaqueWorld ||
+           layer == Oot3dPicaCompositionLayer::TransparentWorld ||
+           layer == Oot3dPicaCompositionLayer::Atmosphere;
+}
+
+} // namespace
+
+std::string FormatOot3dPicaCompositionNote(const Oot3dPicaCompositionNote& note) {
+    char text[256];
+    const int length = std::snprintf(
+        text, sizeof(text),
+        "%s list=%08x+%u draw=+%u domain=%u->%u spans=%u generations=%u..%u/%u draws=%u world=%u",
+        CompositionNoteKindName(note.Kind), note.CommandListAddress, note.CommandListSize,
+        note.OffsetWords, static_cast<unsigned>(note.Submitted),
+        static_cast<unsigned>(note.Resolved), note.Spans, note.OldestGeneration,
+        note.NewestGeneration, note.CurrentGeneration, note.Draws, note.WorldSpanDraws);
+    std::string result(text, static_cast<size_t>(std::clamp(length, 0, static_cast<int>(sizeof(text)) - 1)));
+    if (note.Kind == Oot3dPicaCompositionNoteKind::SameOwnerHole) {
+        result += " before=" + FormatNoteSpan(note.Before);
+        result += " after=" + FormatNoteSpan(note.After);
+    }
+    return result;
+}
+
+void Oot3dNativePicaFrontend::NoteComposition(const Oot3dPicaCompositionNote& note) {
+    if (mCompositionNotesRecorded >= 64U) return;
+    ++mCompositionNotesRecorded;
+    mCompositionNotes.push_back(note);
+}
+
+std::vector<Oot3dPicaCompositionNote> Oot3dNativePicaFrontend::TakeCompositionNotes() {
+    return std::exchange(mCompositionNotes, {});
 }
 
 bool Oot3dNativePicaFrontend::SetNextCommandListCompositionSpans(
@@ -558,12 +638,20 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
     mCompositionSpanCommandListSize = 0U;
     mNextCommandListCompositionSpans.clear();
 
+    // A list kicked after the next frame's HUD phase began keeps the domain
+    // it would have had on time (IsLateCompositionCommandList).
+    const bool lateList = IsLateCompositionCommandList(
+        mCommandListCompositionDomain, compositionSpans, mCurrentWriteGeneration);
+    const Oot3dPicaCompositionDomain listDomain =
+        lateList && mLateCommandListsOnTime ? mOnTimeCompositionDomain
+                                            : mCommandListCompositionDomain;
+    uint32_t listDraws = 0U;
+    uint32_t listWorldSpanDraws = 0U;
+
+    // The span holding the draw at offsetWords (counted: see
+    // Oot3dPicaCompositionResolveStats). Nothing in a UI-domain list.
     const auto resolveComposition =
         [&](uint32_t offsetWords) -> const Oot3dPicaCommandListCompositionSpan* {
-        if (mCommandListCompositionDomain ==
-            Oot3dPicaCompositionDomain::Ui) {
-            return nullptr;
-        }
         const uint64_t address = static_cast<uint64_t>(commandListAddress) +
                                  static_cast<uint64_t>(offsetWords) * 4U;
         const auto found = std::upper_bound(
@@ -572,11 +660,54 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
                const Oot3dPicaCommandListCompositionSpan& span) {
                 return value < span.BeginAddress;
             });
-        if (found == compositionSpans.begin()) {
+        const Oot3dPicaCommandListCompositionSpan* span = nullptr;
+        if (found != compositionSpans.begin() &&
+            address < std::prev(found)->EndAddress) {
+            span = &*std::prev(found);
+        }
+        ++listDraws;
+        if (span != nullptr && IsWorldCompositionLayer(span->Attribution.Layer)) {
+            ++listWorldSpanDraws;
+        }
+        if (listDomain == Oot3dPicaCompositionDomain::Ui) {
+            if (span != nullptr && IsWorldCompositionLayer(span->Attribution.Layer)) {
+                ++mCompositionResolveStats.UiListWorldSpanDraws;
+            }
             return nullptr;
         }
-        const auto& candidate = *std::prev(found);
-        return address < candidate.EndAddress ? &candidate : nullptr;
+        if (span != nullptr) {
+            return span;
+        }
+        if (compositionSpans.empty()) {
+            ++mCompositionResolveStats.BareListDraws;
+            return nullptr;
+        }
+        ++mCompositionResolveStats.NoSpanDraws;
+        if (found != compositionSpans.begin() && found != compositionSpans.end()) {
+            const auto& before = *std::prev(found);
+            const auto& after = *found;
+            const auto& a = before.Attribution;
+            const auto& b = after.Attribution;
+            if (a.Provenance == Oot3dPicaCompositionProvenance::NativeCmbDrawPass &&
+                b.Provenance == a.Provenance && a.Layer == b.Layer &&
+                a.NativeActorIdentity == b.NativeActorIdentity &&
+                a.TemporalIdentity.Instance == b.TemporalIdentity.Instance) {
+                ++mCompositionResolveStats.SameOwnerHoleDraws;
+                Oot3dPicaCompositionNote note;
+                note.Kind = Oot3dPicaCompositionNoteKind::SameOwnerHole;
+                note.CommandListAddress = commandListAddress;
+                note.CommandListSize = commandListSize;
+                note.OffsetWords = offsetWords;
+                note.Submitted = mCommandListCompositionDomain;
+                note.Resolved = listDomain;
+                note.Spans = static_cast<uint32_t>(compositionSpans.size());
+                note.CurrentGeneration = mCurrentWriteGeneration;
+                note.Before = NoteSpan(before);
+                note.After = NoteSpan(after);
+                NoteComposition(note);
+            }
+        }
+        return nullptr;
     };
 
     size_t cursor = 0;
@@ -632,7 +763,7 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
                 const auto* metadata = resolveComposition(offsetWords);
                 auto composition = metadata != nullptr
                     ? metadata->Attribution
-                    : mCommandListCompositionDomain == Oot3dPicaCompositionDomain::Ui
+                    : listDomain == Oot3dPicaCompositionDomain::Ui
                         ? Oot3dPicaCompositionAttribution{
                               Oot3dPicaCompositionLayer::Ui,
                               Oot3dPicaCompositionProvenance::NativeUiLifecycle, 0U, 0U}
@@ -646,7 +777,7 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
                         composition.TemporalIdentity.Slot += address - composition.TemporalPacketBeginAddress;
                 }
                 composition.TemporalPacketBeginAddress = 0;
-                auto domain = mCommandListCompositionDomain;
+                auto domain = listDomain;
                 switch (composition.Layer) {
                     case Oot3dPicaCompositionLayer::OpaqueWorld:
                     case Oot3dPicaCompositionLayer::TransparentWorld:
@@ -742,6 +873,34 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
                 return false;
             }
         }
+    }
+    if (lateList || (listDomain == Oot3dPicaCompositionDomain::Ui &&
+                     listWorldSpanDraws != 0U)) {
+        if (lateList) {
+            ++mCompositionResolveStats.LateLists;
+            mCompositionResolveStats.LateListDraws += listDraws;
+        }
+        Oot3dPicaCompositionNote note;
+        note.Kind = lateList ? Oot3dPicaCompositionNoteKind::LateList
+                             : Oot3dPicaCompositionNoteKind::UiListWorld;
+        note.CommandListAddress = commandListAddress;
+        note.CommandListSize = commandListSize;
+        note.Submitted = mCommandListCompositionDomain;
+        note.Resolved = listDomain;
+        note.Spans = static_cast<uint32_t>(compositionSpans.size());
+        note.CurrentGeneration = mCurrentWriteGeneration;
+        if (!compositionSpans.empty()) {
+            const auto [oldest, newest] = std::minmax_element(
+                compositionSpans.begin(), compositionSpans.end(),
+                [](const auto& left, const auto& right) {
+                    return left.WriteGeneration < right.WriteGeneration;
+                });
+            note.OldestGeneration = oldest->WriteGeneration;
+            note.NewestGeneration = newest->WriteGeneration;
+        }
+        note.Draws = listDraws;
+        note.WorldSpanDraws = listWorldSpanDraws;
+        NoteComposition(note);
     }
     if (mDiagnosticHistoryEnabled) {
         mPendingGspCommands.push_back(command);
