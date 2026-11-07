@@ -1614,6 +1614,18 @@ GUARDS = [
     Guard("hudscale75: the staged Switch config ships HUD scale 0.75",
           "config/topscreen_ui.switch.json",
           r'"hud_scale": 0\.75,'),
+    # --- 11/07: Profile18 mirror natives (render loops, allocator walk, divide) ---
+    Guard("cpunatives: the mirror replacements use single-line prologues (the PGO profile of every other function in their shards stays valid)",
+          "tools/oot3d/native_a32_runtime/guest_overrides.json",
+          r'"0x00452DA4"[^\n]*"inline": true.*"0x0046E140"[^\n]*"inline": true.*"0x0046E048"[^\n]*"inline": true'
+          r'.*"0x0046D734"[^\n]*"inline": true.*"0x0046DA6C"[^\n]*"inline": true.*"0x00477D60"[^\n]*"inline": true'
+          r'.*"0x003FCA08"[^\n]*"inline": true.*"0x00466F78"[^\n]*"inline": true.*"0x00368D94"[^\n]*"inline": true'),
+    Guard("cpunatives: each mirror replacement has its own kill switch (config/guest_overrides_disable)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'config/guest_overrides_disable.*DisableOot3dGuestOverridesFromList'),
+    Guard("cpunatives: perf.txt shows the mirror replacements' executions and declines per window",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'perf << Oot3dNativeGame::FormatOot3dGuestOverridesPerfLine\(\);'),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay

@@ -33,6 +33,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace Oot3dNativeGame {
 
@@ -73,11 +74,23 @@ struct Oot3dGuestOverrideInfo {
     const char* Name = "";
     uint64_t Calls = 0;     // times the native version executed
     uint64_t Declined = 0;  // times it declined and the translation executed
+    // Per-replacement kill switch (config/guest_overrides_disable). Only the
+    // mirror replacements test it: they return "declined" (not counted) when
+    // it is set, so the translation runs.
+    bool Disabled = false;
+    // Mirror replacement (Profile18 round: the translated blocks transcribed
+    // with registers in locals); "mirror" in the disable list selects them all.
+    bool Mirror = false;
 };
 
 // Static table of the compiled overrides, with counters.
 size_t Oot3dGuestOverrideCount() noexcept;
 const Oot3dGuestOverrideInfo* Oot3dGuestOverrideTable() noexcept;
+
+// Applies a disable list: whitespace- or comma-separated hex entries
+// (0x00452DA4 or 452DA4) and/or the word "mirror" (every mirror
+// replacement). Returns how many replacements it disabled.
+size_t DisableOot3dGuestOverrides(std::string_view list) noexcept;
 
 namespace GuestOverrides {
 
@@ -103,6 +116,7 @@ OOT3D_GUEST_OVERRIDE_DECLARE(00307B50) // PicaTev_ConvertSource
 OOT3D_GUEST_OVERRIDE_DECLARE(00307DC8) // PicaCompare_ConvertFunction
 OOT3D_GUEST_OVERRIDE_DECLARE(002BBB14) // Math3D_CirSquareVsTriSquare
 OOT3D_GUEST_OVERRIDE_DECLARE(002DCEF4) // Mtx3x3_Multiply
+OOT3D_GUEST_OVERRIDE_DECLARE(00368D94) // unsigned divide with remainder
 
 #define OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(entry)                             \
     bool Override_##entry(Oot3dWholeAotFrame& frame,                          \
@@ -119,6 +133,14 @@ OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(00308604) // CsabCurve_SampleRotation: search
 OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(00303C78) // FUN_00303b24: 64-byte copy
 OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(0046700C) // MeshCommandPacket_PatchBoneUniforms: copy
 OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(003563E0) // FUN_003562c0: list traversal
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(00452DA4) // CmbRenderer_UpdateTextureTransforms: coordinators
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(0046E140) // nngx state validation: emit dirty registers
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(0046E048) // nngx state validation: emit dirty registers (2)
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(0046D734) // nngx state validation: mark registers dirty
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(0046DA6C) // nngx state validation: uniform runs
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(00477D60) // MemoryArena_AllocateAlignedBlock: free-list walk
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(003FCA08) // quad-batch builder: corner copy
+OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE(00466F78) // MeshCommandPacket_PatchBoneUniforms (whole, entry block)
 
 #undef OOT3D_GUEST_BLOCK_OVERRIDE_DECLARE
 #undef OOT3D_GUEST_OVERRIDE_DECLARE

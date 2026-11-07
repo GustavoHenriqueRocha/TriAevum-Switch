@@ -25,6 +25,15 @@
     {"entry": "0x00303C78", "function": "0x00303B24", "resume": ["0x00303CA4"], "name": "FUN_00303b24:copy", "switch_share": "0.23%"},
     {"entry": "0x0046700C", "function": "0x00466F78", "resume": ["0x0046705C"], "name": "MeshCommandPacket_PatchBoneUniforms:copy", "switch_share": "0.21%"},
     {"entry": "0x003563E0", "function": "0x003562C0", "resume": ["0x003563EC", "0x0035646C"], "name": "FUN_003562c0:walk", "switch_share": "0.55%"},
-    {"entry": "0x002DCEF4", "name": "Mtx3x3_Multiply", "inline": true, "kokiri_real_us_per_frame": "46"}
+    {"entry": "0x002DCEF4", "name": "Mtx3x3_Multiply", "inline": true, "kokiri_real_us_per_frame": "46"},
+    {"entry": "0x00452DA4", "function": "0x00452B40", "resume": ["0x00452DDC", "0x00452E50", "0x00452EC8"], "name": "CmbRenderer_UpdateTextureTransforms:coords", "inline": true, "logs18b_block_entries": "3.5M of 4.0M"},
+    {"entry": "0x0046E140", "function": "0x0046C204", "resume": ["0x0046E1F4"], "name": "NngxValidateState:emit_dirty", "inline": true, "logs18b_block_entries": "1.81M"},
+    {"entry": "0x0046E048", "function": "0x0046C204", "resume": ["0x0046E0FC"], "name": "NngxValidateState:emit_dirty2", "inline": true, "logs18b_block_entries": "0.13M+"},
+    {"entry": "0x0046D734", "function": "0x0046C204", "resume": ["0x0046D788"], "name": "NngxValidateState:mark_dirty", "inline": true, "logs18b_block_entries": "0.68M"},
+    {"entry": "0x0046DA6C", "function": "0x0046C204", "resume": ["0x0046DA84", "0x0046DB24"], "name": "NngxValidateState:uniform_runs", "inline": true, "logs18b_block_entries": "0.48M"},
+    {"entry": "0x00477D60", "function": "0x00477D30", "resume": ["0x00477D78", "0x00477E24"], "name": "MemoryArena_AllocateAlignedBlock:walk", "inline": true, "logs18b_block_entries": "0.77M"},
+    {"entry": "0x003FCA08", "function": "0x003FC2F8", "resume": ["0x003FCABC"], "name": "QuadBatch:corners", "inline": true, "logs18b_block_entries": "0.92M"},
+    {"entry": "0x00466F78", "function": "0x00466F78", "resume": ["0x00467080"], "name": "MeshCommandPacket_PatchBoneUniforms", "inline": true, "logs18b_block_entries": "0.98M"},
+    {"entry": "0x00368D94", "name": "Runtime_UnsignedDivMod", "inline": true, "logs18b_block_entries": "0.81M"}
   ]
 }

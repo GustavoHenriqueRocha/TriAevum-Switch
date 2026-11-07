@@ -106,13 +106,21 @@ def render_fixture(generated: Path, manifest: list[dict[str, object]]) -> str:
             f"Oot3dWholeAotFlow Patched_{entry:08X}(Oot3dWholeAotFrame& frame, "
             "Oot3dWholeAotContext& context, Oot3dAotArchitecturalState& state, "
             "uint32_t entryPc);")
+    # Calls from the patched copies to functions that have their own
+    # override use the renamed translation too.
+    renamed = "\n".join(patched_text)
+    for entry in functions:
+        renamed = re.sub(r"\b%s\(" % re.escape(symbols[entry]), f"Translated_{entry:08X}(", renamed)
+    patched_text = renamed.split("\n")
     cases = []
     for item in manifest:
         entry = int(item["entry"])
         if "function" in item:
             cases.append(
                 "    {0x%08XU, \"%s\", &%s, nullptr, &Patched_%08X},"
-                % (entry, item.get("name", ""), symbols[int(item["function"])], entry))
+                % (entry, item.get("name", ""),
+                   f"Translated_{int(item['function']):08X}" if int(item["function"]) in functions
+                   else symbols[int(item["function"])], entry))
         else:
             cases.append(
                 "    {0x%08XU, \"%s\", &Translated_%08X, "

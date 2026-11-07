@@ -69,6 +69,15 @@ enum OverrideIndex : size_t {
     kIdx0046700C,
     kIdx003563E0,
     kIdx002DCEF4,
+    kIdx00452DA4,
+    kIdx0046E140,
+    kIdx0046E048,
+    kIdx0046D734,
+    kIdx0046DA6C,
+    kIdx00477D60,
+    kIdx003FCA08,
+    kIdx00466F78,
+    kIdx00368D94,
     kOverrideCount,
 };
 
@@ -97,6 +106,15 @@ Oot3dGuestOverrideInfo gOverrides[kOverrideCount] = {
     {0x0046700CU, "MeshCommandPacket_PatchBoneUniforms:copy"},
     {0x003563E0U, "FUN_003562c0:walk"},
     {0x002DCEF4U, "Mtx3x3_Multiply"},
+    {0x00452DA4U, "CmbRenderer_UpdateTextureTransforms:coords", 0U, 0U, false, true},
+    {0x0046E140U, "NngxValidateState:emit_dirty", 0U, 0U, false, true},
+    {0x0046E048U, "NngxValidateState:emit_dirty2", 0U, 0U, false, true},
+    {0x0046D734U, "NngxValidateState:mark_dirty", 0U, 0U, false, true},
+    {0x0046DA6CU, "NngxValidateState:uniform_runs", 0U, 0U, false, true},
+    {0x00477D60U, "MemoryArena_AllocateAlignedBlock:walk", 0U, 0U, false, true},
+    {0x003FCA08U, "QuadBatch:corners", 0U, 0U, false, true},
+    {0x00466F78U, "MeshCommandPacket_PatchBoneUniforms", 0U, 0U, false, true},
+    {0x00368D94U, "Runtime_UnsignedDivMod", 0U, 0U, false, true},
 };
 
 constexpr uint32_t kFpscrTrapMask = 0x00379F00U; // LEN/STRIDE and exception enables
@@ -468,6 +486,44 @@ void FillBytes(NativeA32Memory& memory, uint32_t to, uint8_t value, uint32_t byt
 } // namespace
 
 size_t Oot3dGuestOverrideCount() noexcept { return kOverrideCount; }
+
+size_t DisableOot3dGuestOverrides(std::string_view list) noexcept {
+    size_t disabled = 0U;
+    size_t at = 0U;
+    while (at < list.size()) {
+        const size_t start = list.find_first_not_of(" \t\r\n,", at);
+        if (start == std::string_view::npos) break;
+        size_t end = list.find_first_of(" \t\r\n,", start);
+        if (end == std::string_view::npos) end = list.size();
+        std::string_view token = list.substr(start, end - start);
+        at = end;
+        const bool mirror = token == "mirror";
+        uint32_t entry = 0U;
+        if (!mirror) {
+            if (token.size() > 2U && token[0] == '0' && (token[1] == 'x' || token[1] == 'X')) {
+                token.remove_prefix(2U);
+            }
+            if (token.empty() || token.size() > 8U) continue;
+            bool valid = true;
+            for (const char c : token) {
+                uint32_t digit = 0U;
+                if (c >= '0' && c <= '9') digit = static_cast<uint32_t>(c - '0');
+                else if (c >= 'a' && c <= 'f') digit = static_cast<uint32_t>(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') digit = static_cast<uint32_t>(c - 'A' + 10);
+                else valid = false;
+                entry = (entry << 4U) | digit;
+            }
+            if (!valid) continue;
+        }
+        for (auto& info : gOverrides) {
+            if ((mirror ? info.Mirror : info.Entry == entry) && !info.Disabled) {
+                info.Disabled = true;
+                ++disabled;
+            }
+        }
+    }
+    return disabled;
+}
 
 const Oot3dGuestOverrideInfo* Oot3dGuestOverrideTable() noexcept {
     return gOverrides;
@@ -2917,6 +2973,989 @@ bool Override_003563E0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     }
     return Accept(kIdx);
 }
+
+// ===========================================================================
+// Mirror replacements (Profile18 plan items 2 and 5: the hottest loops of the
+// game's CPU renderer and of the runtime helpers).
+//
+// Each one is the translated blocks of its range transcribed one for one:
+// the same ReadFast/WriteFast/ReadWordsFast/WriteWordsFast calls in the same
+// order, the same lazy-flag updates with the same liveness masks, the same
+// VFP helpers and one budget unit per block entered. What changes:
+//   - the guest registers, the flags and the block budget live in locals
+//     for the whole range (in the translation every guest store through the
+//     byte-pointer window and every budget decrement may alias
+//     Oot3dAotArchitecturalState, so the registers are written back and
+//     reloaded around them);
+//   - the per-block hook gate is one Hooked() test for the whole range;
+//   - small leaf callees are inlined (with their DirectCalls count).
+// The exits are the translation's own, taken at the same point with the
+// same state: budget exhausted when entering block X -> Oot3dAotBlockLimit(X);
+// a failing access at instruction P -> Oot3dAotMemoryFault(P, address) with
+// the registers the earlier instructions of the block left; leaving the
+// range -> resume at the translated block (block replacements) or the
+// function's return flow. So nothing is validated ahead of time and, after
+// the hook test, nothing declines (except 0x00368D94's signed and
+// divide-by-zero paths, which decline before any effect: that function has
+// no memory access and its state stays in locals until the end).
+// Only the loops are replaced: the blocks that call translated functions
+// stay translated (the replacement resumes at them).
+
+constexpr uint32_t kMirrorDecline = 1U; // not a block PC (exits return a PC or 0)
+
+// LDM/STM/PUSH/POP like the translation: the one-page path, otherwise word
+// by word with the fault on the first failing word.
+inline bool MirrorLoadWords(NativeA32Memory& memory, uint32_t first, uint32_t* words,
+                            uint32_t count, uint32_t& faultAddress) noexcept {
+    if (memory.ReadWordsFast(first, words, count)) return true;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t word;
+        if (!memory.ReadFast<uint32_t>(first + 4U * i, &word)) {
+            faultAddress = first + 4U * i;
+            return false;
+        }
+        words[i] = word;
+    }
+    return true;
+}
+
+inline bool MirrorStoreWords(NativeA32Memory& memory, uint32_t first, const uint32_t* words,
+                             uint32_t count, uint32_t& faultAddress) noexcept {
+    if (memory.WriteWordsFast(first, words, count)) return true;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!memory.WriteFast<uint32_t>(first + 4U * i, words[i])) {
+            faultAddress = first + 4U * i;
+            return false;
+        }
+    }
+    return true;
+}
+
+inline uint32_t SignExtend8(uint32_t value) noexcept {
+    return static_cast<uint32_t>(static_cast<int32_t>(static_cast<int8_t>(value)));
+}
+
+inline uint32_t SignExtend16(uint32_t value) noexcept {
+    return static_cast<uint32_t>(static_cast<int32_t>(static_cast<int16_t>(value)));
+}
+
+// Locals of a mirror replacement (kIdx, context, state in scope).
+#define OOT3D_MIRROR_BEGIN(first, last)                                         \
+    if (gOverrides[kIdx].Disabled) return false;                                \
+    if (Hooked(context, (first), (last))) return Decline(kIdx);                 \
+    [[maybe_unused]] auto& memory = context.Memory;                             \
+    std::array<uint32_t, 15> R = state.R;                                       \
+    Oot3dAotLazyFlags flags = state.Flags;                                      \
+    uint32_t remaining = context.BlocksRemaining;                               \
+    Oot3dWholeAotFlow exitFlow{};                                               \
+    [[maybe_unused]] uint32_t& r0 = R[0];                                       \
+    [[maybe_unused]] uint32_t& r1 = R[1];                                       \
+    [[maybe_unused]] uint32_t& r2 = R[2];                                       \
+    [[maybe_unused]] uint32_t& r3 = R[3];                                       \
+    [[maybe_unused]] uint32_t& r4 = R[4];                                       \
+    [[maybe_unused]] uint32_t& r5 = R[5];                                       \
+    [[maybe_unused]] uint32_t& r6 = R[6];                                       \
+    [[maybe_unused]] uint32_t& r7 = R[7];                                       \
+    [[maybe_unused]] uint32_t& r8 = R[8];                                       \
+    [[maybe_unused]] uint32_t& r9 = R[9];                                       \
+    [[maybe_unused]] uint32_t& r10 = R[10];                                     \
+    [[maybe_unused]] uint32_t& r11 = R[11];                                     \
+    [[maybe_unused]] uint32_t& r12 = R[12];                                     \
+    [[maybe_unused]] uint32_t& r13 = R[13];                                     \
+    [[maybe_unused]] uint32_t& r14 = R[14]
+
+// Inside the body lambda (returns the resume PC, 0 for exitFlow, or
+// kMirrorDecline).
+#define OOT3D_MIRROR_ENTER(pc)                                                  \
+    do {                                                                        \
+        if (remaining == 0U) {                                                  \
+            exitFlow = Oot3dAotBlockLimit(context, (pc));                       \
+            return 0U;                                                          \
+        }                                                                       \
+        --remaining;                                                            \
+    } while (0)
+
+#define OOT3D_MIRROR_LOAD(type, address, pc, target)                            \
+    do {                                                                        \
+        const uint32_t mirrorAddress = (address);                               \
+        type mirrorValue;                                                       \
+        if (!memory.ReadFast<type>(mirrorAddress, &mirrorValue)) {              \
+            exitFlow = Oot3dAotMemoryFault(context, (pc), mirrorAddress);       \
+            return 0U;                                                          \
+        }                                                                       \
+        target = mirrorValue;                                                   \
+    } while (0)
+
+#define OOT3D_MIRROR_STORE(type, address, pc, value)                            \
+    do {                                                                        \
+        const uint32_t mirrorAddress = (address);                               \
+        if (!memory.WriteFast<type>(mirrorAddress, static_cast<type>(value))) { \
+            exitFlow = Oot3dAotMemoryFault(context, (pc), mirrorAddress);       \
+            return 0U;                                                          \
+        }                                                                       \
+    } while (0)
+
+#define OOT3D_MIRROR_LOAD_WORDS(first, words, count, pc)                        \
+    do {                                                                        \
+        uint32_t mirrorFault = 0U;                                              \
+        if (!MirrorLoadWords(memory, (first), (words), (count), mirrorFault)) { \
+            exitFlow = Oot3dAotMemoryFault(context, (pc), mirrorFault);         \
+            return 0U;                                                          \
+        }                                                                       \
+    } while (0)
+
+#define OOT3D_MIRROR_STORE_WORDS(first, words, count, pc)                       \
+    do {                                                                        \
+        uint32_t mirrorFault = 0U;                                              \
+        if (!MirrorStoreWords(memory, (first), (words), (count), mirrorFault)) {\
+            exitFlow = Oot3dAotMemoryFault(context, (pc), mirrorFault);         \
+            return 0U;                                                          \
+        }                                                                       \
+    } while (0)
+
+#define OOT3D_MIRROR_COMMIT()                                                   \
+    state.R = R;                                                                \
+    state.Flags = flags;                                                        \
+    context.BlocksRemaining = remaining;                                        \
+    flow = exitFlow
+
+#define OOT3D_MIRROR_END_BLOCK(exit)                                            \
+    OOT3D_MIRROR_COMMIT();                                                      \
+    resumePc = (exit);                                                          \
+    return Accept(kIdx)
+
+#define OOT3D_MIRROR_END_FUNCTION(exit)                                         \
+    if ((exit) == kMirrorDecline) return Decline(kIdx);                         \
+    OOT3D_MIRROR_COMMIT();                                                      \
+    return Accept(kIdx)
+
+// ---------------------------------------------------------------------------
+// 0x00452DA4 CmbRenderer_UpdateTextureTransforms, inner loop over the
+// texture coordinators of a mesh (blocks 0x00452DA4-0x00452EB4). Per
+// coordinator it tests three bytes of the material (+1, +4, +7 from the
+// coordinator index) and, only when one is set, calls the texture-matrix
+// and texture-swap helpers. In play almost every iteration takes the
+// call-free path (logs18b: 321,615 iterations, ~10 blocks each, the call
+// blocks below the listing threshold). Replaced: the call-free path; resumes
+// at 0x00452DDC or 0x00452E50 (the call blocks, translated) or 0x00452EC8
+// (end of the loop).
+bool Override_00452DA4(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx00452DA4;
+    static_cast<void>(frame);
+    OOT3D_MIRROR_BEGIN(0x00452DA4U, 0x00452EB4U);
+    const uint32_t exit = [&]() -> uint32_t {
+        while (true) {
+            // 0x00452DA4
+            OOT3D_MIRROR_ENTER(0x00452DA4U);
+            OOT3D_MIRROR_LOAD(uint32_t, r4 + 0xCU, 0x00452DA4U, r1);
+            r2 = r5 + 0x00000001U;
+            OOT3D_MIRROR_LOAD(uint32_t, r1 + 0x4U, 0x00452DACU, r0);
+            r0 = r0 + Oot3dAotLsl(r8, 2U);
+            OOT3D_MIRROR_LOAD(uint8_t, r0 + r2, 0x00452DB4U, r2);
+            Oot3dAotSetSubtractFlags(flags, r2, 0x00000000U, Mask(0x4U));
+            bool toDd0 = !flags.Z();
+            if (!toDd0) {
+                // 0x00452DC0
+                OOT3D_MIRROR_ENTER(0x00452DC0U);
+                r2 = r5 + 0x00000004U;
+                OOT3D_MIRROR_LOAD(uint8_t, r0 + r2, 0x00452DC4U, r0);
+                Oot3dAotSetSubtractFlags(flags, r0, 0x00000000U, Mask(0x4U));
+                toDd0 = !flags.Z();
+            }
+            if (toDd0) {
+                // 0x00452DD0
+                OOT3D_MIRROR_ENTER(0x00452DD0U);
+                r0 = 0x00000001U;
+            }
+            // 0x00452DD4
+            OOT3D_MIRROR_ENTER(0x00452DD4U);
+            Oot3dAotSetSubtractFlags(flags, r0, 0x00000000U, Mask(0xFU));
+            if (!flags.Z()) return 0x00452DDCU;
+            // 0x00452E10
+            OOT3D_MIRROR_ENTER(0x00452E10U);
+            OOT3D_MIRROR_LOAD(uint32_t, r7 + 0x0U, 0x00452E10U, r1);
+            OOT3D_MIRROR_LOAD(uint32_t, r1 + 0x8U, 0x00452E14U, r0);
+            Oot3dAotSetSubtractFlags(flags, r0, r5, Mask(0xDU));
+            if ((flags.Z()) || ((flags.N()) != (flags.V()))) {
+                r11 = 0x00000000U;
+            } else {
+                // 0x00452E24
+                OOT3D_MIRROR_ENTER(0x00452E24U);
+                r0 = r5 + Oot3dAotLsl(r5, 1U);
+                r2 = 0x00000010U;
+                r0 = r2 + Oot3dAotLsl(r0, 3U);
+                r11 = r1 + r0;
+            }
+            // 0x00452E34
+            OOT3D_MIRROR_ENTER(0x00452E34U);
+            OOT3D_MIRROR_LOAD(uint32_t, r4 + 0xCU, 0x00452E34U, r1);
+            r2 = r5 + 0x00000007U;
+            OOT3D_MIRROR_LOAD(uint32_t, r1 + 0x4U, 0x00452E3CU, r0);
+            r0 = r0 + Oot3dAotLsl(r8, 2U);
+            OOT3D_MIRROR_LOAD(uint8_t, r0 + r2, 0x00452E44U, r0);
+            r0 = SignExtend8(r0);
+            Oot3dAotSetSubtractFlags(flags, r0, 0x00000000U, Mask(0xFU));
+            if (!flags.Z()) return 0x00452E50U;
+            // 0x00452E90
+            OOT3D_MIRROR_ENTER(0x00452E90U);
+            Oot3dAotSetSubtractFlags(flags, r5, 0x00000000U, Mask(0x4U));
+            bool toEa8 = !flags.Z();
+            if (!toEa8) {
+                // 0x00452E98
+                OOT3D_MIRROR_ENTER(0x00452E98U);
+                OOT3D_MIRROR_LOAD(uint32_t, r4 + 0x10U, 0x00452E98U, r0);
+                OOT3D_MIRROR_LOAD(uint8_t, r0 + 0x1B5U, 0x00452E9CU, r0);
+                Oot3dAotSetSubtractFlags(flags, r0, 0x00000000U, Mask(0x4U));
+                toEa8 = flags.Z();
+            }
+            if (toEa8) {
+                // 0x00452EA8
+                OOT3D_MIRROR_ENTER(0x00452EA8U);
+                OOT3D_MIRROR_LOAD(uint16_t, r11 + 0x0U, 0x00452EA8U, r0);
+                r0 = SignExtend16(r0);
+                Oot3dAotSetSubtractFlags(flags, r0, 0x00000000U, Mask(0x9U));
+                if ((flags.N()) == (flags.V())) r6 = r6 + 0x00000001U;
+            }
+            // 0x00452EB4
+            OOT3D_MIRROR_ENTER(0x00452EB4U);
+            OOT3D_MIRROR_LOAD(uint32_t, r7 + 0x0U, 0x00452EB4U, r0);
+            r5 = r5 + 0x00000001U;
+            OOT3D_MIRROR_LOAD(uint32_t, r0 + 0x8U, 0x00452EBCU, r0);
+            Oot3dAotSetSubtractFlags(flags, r0, r5, Mask(0xDU));
+            if (!(!(flags.Z()) && ((flags.N()) == (flags.V())))) return 0x00452EC8U;
+        }
+    }();
+    OOT3D_MIRROR_END_BLOCK(exit);
+}
+
+// ---------------------------------------------------------------------------
+// 0x0046C204 (nngx state validation: emits the dirty PICA registers), the
+// three hottest loops (logs18b: 3.34 M of the function's 4.2 M block entries).
+// Each walks a register list (u32 indices, terminated by 0xBD) against a
+// dirty bitmap at r4 + 0x7A8 and an "enabled" byte table at r4 + 0x3F6.
+
+// 0x0046E140 and 0x0046E048: two copies of the emit loop (different list,
+// table and scratch registers). For each listed register whose dirty bit is
+// set: if enabled and its value (r4 + 0x4B4 + 4 * reg) differs from the
+// shadow (shadow base + 0x100C + 4 * reg), and the command buffer (cursor
+// [r11], end [r7]) has room, write {value, header | 0xF0000}, advance the
+// cursor and update the shadow; then clear the dirty bit. Blocks
+// base + 0x00 .. base + 0xA4, resumes at base + 0xB4. `T` is the list
+// register (r8 / r9), `X` the scratch for the end pointer (r9 / r8) and
+// `enableOffset` the stack slot holding r4 + 0x3F6 (0x814 / 0x818).
+template <uint32_t Base, size_t T, size_t X, uint32_t EnableOffset>
+inline bool EmitDirtyRegisters(size_t kIdx, Oot3dWholeAotFrame& frame,
+                               Oot3dWholeAotContext& context,
+                               Oot3dAotArchitecturalState& state,
+                               Oot3dWholeAotFlow& flow, uint32_t& resumePc) noexcept {
+    static_cast<void>(frame);
+    OOT3D_MIRROR_BEGIN(Base, Base + 0xA4U);
+    uint32_t& list = R[T];
+    uint32_t& end = R[X];
+    const uint32_t exit = [&]() -> uint32_t {
+        while (true) {
+            // base + 0x00
+            OOT3D_MIRROR_ENTER(Base);
+            OOT3D_MIRROR_LOAD(uint32_t, list + Oot3dAotLsl(r0, 2U), Base, r3);
+            r2 = r3 & 0x0000001FU;
+            r1 = Oot3dAotAsr(r3, 5U);
+            r1 = r4 + Oot3dAotLsl(r1, 2U);
+            OOT3D_MIRROR_LOAD(uint32_t, r1 + 0x7A8U, Base + 0x10U, r1);
+            {
+                const auto shifted = Oot3dAotShiftRegister(r10, 0U, r2, flags.C());
+                const uint32_t value = r1 & shifted.Value;
+                Oot3dAotSetLogicalFlags(flags, value, shifted.Carry, Mask(0x4U));
+            }
+            if (!flags.Z()) {
+                // base + 0x1C
+                OOT3D_MIRROR_ENTER(Base + 0x1CU);
+                OOT3D_MIRROR_LOAD(uint32_t, r13 + 0x810U, Base + 0x1CU, r2);
+                OOT3D_MIRROR_LOAD(uint32_t, r13 + EnableOffset, Base + 0x20U, r12);
+                r1 = r4 + Oot3dAotLsl(r3, 2U);
+                r2 = r2 + Oot3dAotLsl(r3, 2U);
+                r1 = r1 + 0x00000400U;
+                OOT3D_MIRROR_LOAD(uint8_t, r3 + r12, Base + 0x30U, r3);
+                r2 = r2 + 0x00001000U;
+                r1 = r1 + 0x000000B4U;
+                Oot3dAotSetSubtractFlags(flags, r3, 0x00000000U, Mask(0x4U));
+                r2 = r2 + 0x0000000CU;
+                if (!(flags.Z())) OOT3D_MIRROR_LOAD(uint32_t, r1 + 0x0U, Base + 0x44U, r6);
+                if (!(flags.Z())) OOT3D_MIRROR_LOAD(uint32_t, r2 + 0x0U, Base + 0x48U, r12);
+                if (!(flags.Z())) Oot3dAotSetSubtractFlags(flags, r6, r12, Mask(0x4U));
+                if (!flags.Z()) {
+                    // base + 0x54
+                    OOT3D_MIRROR_ENTER(Base + 0x54U);
+                    OOT3D_MIRROR_LOAD(uint32_t, r11 + 0x0U, Base + 0x54U, r12);
+                    OOT3D_MIRROR_LOAD(uint32_t, r7 + 0x0U, Base + 0x58U, end);
+                    Oot3dAotSetSubtractFlags(flags, r12, end, Mask(0x2U));
+                    if (!flags.C()) {
+                        // base + 0x64
+                        OOT3D_MIRROR_ENTER(Base + 0x64U);
+                        OOT3D_MIRROR_STORE(uint32_t, r12 + 0x0U, Base + 0x64U, r6);
+                        OOT3D_MIRROR_LOAD(uint32_t, list + Oot3dAotLsl(r0, 2U), Base + 0x68U, r6);
+                        OOT3D_MIRROR_LOAD(uint32_t, r14 + Oot3dAotLsl(r6, 2U), Base + 0x6CU, r6);
+                        r3 = r6 | Oot3dAotLsl(r3, 16U);
+                        OOT3D_MIRROR_STORE(uint32_t, r12 + 0x4U, Base + 0x74U, r3);
+                        r12 = r12 + 0x4U;
+                        r3 = r12 + 0x00000004U;
+                        OOT3D_MIRROR_STORE(uint32_t, r11 + 0x0U, Base + 0x7CU, r3);
+                    }
+                    // base + 0x80
+                    OOT3D_MIRROR_ENTER(Base + 0x80U);
+                    OOT3D_MIRROR_LOAD(uint32_t, r1 + 0x0U, Base + 0x80U, r1);
+                    OOT3D_MIRROR_STORE(uint32_t, r2 + 0x0U, Base + 0x84U, r1);
+                }
+                // base + 0x88
+                OOT3D_MIRROR_ENTER(Base + 0x88U);
+                OOT3D_MIRROR_LOAD(uint32_t, list + Oot3dAotLsl(r0, 2U), Base + 0x88U, r1);
+                r2 = Oot3dAotAsr(r1, 5U);
+                r1 = r1 & 0x0000001FU;
+                r2 = r4 + Oot3dAotLsl(r2, 2U);
+                OOT3D_MIRROR_LOAD(uint32_t, r2 + 0x7A8U, Base + 0x98U, r3);
+                r1 = r3 & ~(Oot3dAotShiftRegister(r10, 0U, r1, false).Value);
+                OOT3D_MIRROR_STORE(uint32_t, r2 + 0x7A8U, Base + 0xA0U, r1);
+            }
+            // base + 0xA4
+            OOT3D_MIRROR_ENTER(Base + 0xA4U);
+            r0 = r0 + 0x00000001U;
+            OOT3D_MIRROR_LOAD(uint32_t, list + Oot3dAotLsl(r0, 2U), Base + 0xA8U, r1);
+            Oot3dAotSetSubtractFlags(flags, r1, 0x000000BDU, Mask(0x7U));
+            if (flags.Z()) return Base + 0xB4U;
+        }
+    }();
+    OOT3D_MIRROR_END_BLOCK(exit);
+}
+
+bool Override_0046E140(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    return EmitDirtyRegisters<0x0046E140U, 8U, 9U, 0x814U>(kIdx0046E140, frame, context,
+                                                          state, flow, resumePc);
+}
+
+bool Override_0046E048(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    return EmitDirtyRegisters<0x0046E048U, 9U, 8U, 0x818U>(kIdx0046E048, frame, context,
+                                                          state, flow, resumePc);
+}
+
+// 0x0046D734: marks every enabled listed register dirty and invalidates its
+// shadow (shadow = ~value) so the emit loop rewrites it. Blocks 0x0046D734,
+// 0x0046D744, 0x0046D778; resumes at 0x0046D788.
+bool Override_0046D734(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx0046D734;
+    static_cast<void>(frame);
+    OOT3D_MIRROR_BEGIN(0x0046D734U, 0x0046D778U);
+    const uint32_t exit = [&]() -> uint32_t {
+        while (true) {
+            // 0x0046D734
+            OOT3D_MIRROR_ENTER(0x0046D734U);
+            OOT3D_MIRROR_LOAD(uint32_t, r3 + Oot3dAotLsl(r0, 2U), 0x0046D734U, r1);
+            OOT3D_MIRROR_LOAD(uint8_t, r1 + r12, 0x0046D738U, r2);
+            Oot3dAotSetSubtractFlags(flags, r2, 0x00000000U, Mask(0x4U));
+            if (!flags.Z()) {
+                // 0x0046D744
+                OOT3D_MIRROR_ENTER(0x0046D744U);
+                r2 = r4 + Oot3dAotLsl(r1, 2U);
+                r1 = r6 + Oot3dAotLsl(r1, 2U);
+                OOT3D_MIRROR_LOAD(uint32_t, r2 + 0x4B4U, 0x0046D74CU, r2);
+                r1 = r1 + 0x00001000U;
+                r2 = ~(r2);
+                OOT3D_MIRROR_STORE(uint32_t, r1 + 0xCU, 0x0046D758U, r2);
+                OOT3D_MIRROR_LOAD(uint32_t, r3 + Oot3dAotLsl(r0, 2U), 0x0046D75CU, r1);
+                r2 = Oot3dAotAsr(r1, 5U);
+                r1 = r1 & 0x0000001FU;
+                r2 = r4 + Oot3dAotLsl(r2, 2U);
+                OOT3D_MIRROR_LOAD(uint32_t, r2 + 0x7A8U, 0x0046D76CU, r8);
+                r1 = r8 | Oot3dAotShiftRegister(r7, 0U, r1, false).Value;
+                OOT3D_MIRROR_STORE(uint32_t, r2 + 0x7A8U, 0x0046D774U, r1);
+            }
+            // 0x0046D778
+            OOT3D_MIRROR_ENTER(0x0046D778U);
+            r0 = r0 + 0x00000001U;
+            OOT3D_MIRROR_LOAD(uint32_t, r3 + Oot3dAotLsl(r0, 2U), 0x0046D77CU, r1);
+            Oot3dAotSetSubtractFlags(flags, r1, 0x000000BDU, Mask(0x7U));
+            if (flags.Z()) return 0x0046D788U;
+        }
+    }();
+    OOT3D_MIRROR_END_BLOCK(exit);
+}
+
+// 0x0046DA6C: walks the set bits of the bitmap at r4 + 0x1B4 (bit index r6,
+// limit [r4 + 0x1B0]) grouping consecutive uniform words (r4 + 0x30 +
+// 4 * r6) into runs (start r11, length r12, source r2). Replaced: the walk;
+// resumes at 0x0046DA84 when a run must be flushed (command header plus a
+// call to 0x00303B24, translated) or at 0x0046DB24 at the end.
+bool Override_0046DA6C(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx0046DA6C;
+    static_cast<void>(frame);
+    OOT3D_MIRROR_BEGIN(0x0046DA6CU, 0x0046DB1CU);
+    const uint32_t exit = [&]() -> uint32_t {
+        uint32_t pc = 0x0046DA6CU;
+        while (true) {
+            switch (pc) {
+            case 0x0046DA6CU:
+                OOT3D_MIRROR_ENTER(0x0046DA6CU);
+                r0 = r4 + Oot3dAotLsl(r6, 2U);
+                Oot3dAotSetSubtractFlags(flags, r2, 0x00000000U, Mask(0x4U));
+                OOT3D_MIRROR_LOAD(uint32_t, r0 + 0x30U, 0x0046DA74U, r7);
+                if (!(flags.Z())) r0 = r7 - r11;
+                if (!(flags.Z())) Oot3dAotSetSubtractFlags(flags, r0, r12, Mask(0x4U));
+                if (!flags.Z()) return 0x0046DA84U;
+                pc = 0x0046DAC8U;
+                break;
+            case 0x0046DAC8U:
+                OOT3D_MIRROR_ENTER(0x0046DAC8U);
+                Oot3dAotSetSubtractFlags(flags, r2, 0x00000000U, Mask(0x6U));
+                r12 = r12 + 0x00000001U;
+                pc = flags.Z() ? 0x0046DAD4U : 0x0046DAE0U;
+                break;
+            case 0x0046DAD4U:
+                OOT3D_MIRROR_ENTER(0x0046DAD4U);
+                r11 = r7;
+                r2 = r8 + Oot3dAotLsl(r6, 4U);
+                r12 = 0x00000001U;
+                pc = 0x0046DAE0U;
+                break;
+            case 0x0046DAE0U:
+                OOT3D_MIRROR_ENTER(0x0046DAE0U);
+                OOT3D_MIRROR_LOAD(uint32_t, r4 + 0x1B0U, 0x0046DAE0U, r7);
+                r6 = r6 + 0x00000001U;
+                pc = 0x0046DAFCU;
+                break;
+            case 0x0046DAECU: {
+                OOT3D_MIRROR_ENTER(0x0046DAECU);
+                const auto shifted = Oot3dAotShiftRegister(r0, 1U, r1, flags.C());
+                r0 = shifted.Value;
+                Oot3dAotSetLogicalFlags(flags, r0, shifted.Carry, Mask(0x6U));
+                if (!(flags.Z())) r6 = r6 + 0x00000001U;
+                if (flags.Z()) r0 = r6 & ~(0x0000001FU);
+                if (flags.Z()) r6 = r0 + 0x00000020U;
+                pc = 0x0046DAFCU;
+                break;
+            }
+            case 0x0046DAFCU: {
+                OOT3D_MIRROR_ENTER(0x0046DAFCU);
+                r1 = r6 & 0x0000001FU;
+                r0 = Oot3dAotLsr(r6, 5U);
+                r0 = r4 + Oot3dAotLsl(r0, 2U);
+                OOT3D_MIRROR_LOAD(uint32_t, r0 + 0x1B4U, 0x0046DB08U, r0);
+                const auto shifted = Oot3dAotShiftRegister(r10, 0U, r1, flags.C());
+                const uint32_t value = r0 & shifted.Value;
+                Oot3dAotSetLogicalFlags(flags, value, shifted.Carry, Mask(0x4U));
+                pc = !flags.Z() ? 0x0046DB1CU : 0x0046DB14U;
+                break;
+            }
+            case 0x0046DB14U:
+                OOT3D_MIRROR_ENTER(0x0046DB14U);
+                Oot3dAotSetSubtractFlags(flags, r7, r6, Mask(0x6U));
+                pc = (flags.C() && !flags.Z()) ? 0x0046DAECU : 0x0046DB1CU;
+                break;
+            default: // 0x0046DB1C
+                OOT3D_MIRROR_ENTER(0x0046DB1CU);
+                Oot3dAotSetSubtractFlags(flags, r7, r6, Mask(0x6U));
+                if (!(flags.C() && !flags.Z())) return 0x0046DB24U;
+                pc = 0x0046DA6CU;
+                break;
+            }
+        }
+    }();
+    OOT3D_MIRROR_END_BLOCK(exit);
+}
+
+// ---------------------------------------------------------------------------
+// 0x00477D60 MemoryArena_AllocateAlignedBlock, free-list walk: skips used
+// blocks (u16 at +2 == 0) and free blocks smaller than the request (u32 at
+// +4 < r2), following +8 while the next block carries the arena tag (s16 at
+// +0 == r3). logs18b: ~360 iterations per call (191,765 loop entries for
+// ~534 calls). Blocks 0x00477D60, 0x00477D6C, 0x00477E00-0x00477E1C;
+// resumes at 0x00477D78 (candidate found: split and return, translated) or
+// 0x00477E24 (end of the list).
+bool Override_00477D60(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx00477D60;
+    static_cast<void>(frame);
+    OOT3D_MIRROR_BEGIN(0x00477D60U, 0x00477E1CU);
+    const uint32_t exit = [&]() -> uint32_t {
+        while (true) {
+            // 0x00477D60
+            OOT3D_MIRROR_ENTER(0x00477D60U);
+            OOT3D_MIRROR_LOAD(uint16_t, r1 + 0x2U, 0x00477D60U, r4);
+            Oot3dAotSetSubtractFlags(flags, r4, 0x00000000U, Mask(0x4U));
+            if (!flags.Z()) {
+                // 0x00477D6C
+                OOT3D_MIRROR_ENTER(0x00477D6CU);
+                OOT3D_MIRROR_LOAD(uint32_t, r1 + 0x4U, 0x00477D6CU, r4);
+                Oot3dAotSetSubtractFlags(flags, r4, r2, Mask(0x2U));
+                if (flags.C()) return 0x00477D78U;
+            }
+            // 0x00477E00
+            OOT3D_MIRROR_ENTER(0x00477E00U);
+            OOT3D_MIRROR_LOAD(uint32_t, r1 + 0x8U, 0x00477E00U, r1);
+            Oot3dAotSetSubtractFlags(flags, r1, 0x00000000U, Mask(0x4U));
+            bool clear = flags.Z();
+            if (!clear) {
+                // 0x00477E0C
+                OOT3D_MIRROR_ENTER(0x00477E0CU);
+                OOT3D_MIRROR_LOAD(uint16_t, r1 + 0x0U, 0x00477E0CU, r4);
+                r4 = SignExtend16(r4);
+                Oot3dAotSetSubtractFlags(flags, r4, r3, Mask(0x4U));
+                clear = !flags.Z();
+            }
+            if (clear) {
+                // 0x00477E18
+                OOT3D_MIRROR_ENTER(0x00477E18U);
+                r1 = 0x00000000U;
+            }
+            // 0x00477E1C
+            OOT3D_MIRROR_ENTER(0x00477E1CU);
+            Oot3dAotSetSubtractFlags(flags, r1, 0x00000000U, Mask(0xFU));
+            if (flags.Z()) return 0x00477E24U;
+        }
+    }();
+    OOT3D_MIRROR_END_BLOCK(exit);
+}
+
+// ---------------------------------------------------------------------------
+// 0x003FCA08 quad-batch builder (0x003FC2F8), per-corner copy of a quad into
+// the vertex streams: position (3 words) always, then optional normal (3),
+// color (4) and texcoord (2 floats: corner offset + base, VADD) streams
+// selected by stack slots 0x9C/0x98/0x94; 4 corners. Blocks 0x003FCA08-
+// 0x003FCAB0, resumes at 0x003FCABC.
+bool Override_003FCA08(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx003FCA08;
+    OOT3D_MIRROR_BEGIN(0x003FCA08U, 0x003FCAB0U);
+    auto& guest = frame.Guest;
+    const uint32_t exit = [&]() -> uint32_t {
+        while (true) {
+            // 0x003FCA08
+            OOT3D_MIRROR_ENTER(0x003FCA08U);
+            r1 = r0 + Oot3dAotLsl(r0, 1U);
+            r2 = r5 + Oot3dAotLsl(r1, 2U);
+            {
+                uint32_t words[3];
+                OOT3D_MIRROR_LOAD_WORDS(r2, words, 3U, 0x003FCA10U);
+                r3 = words[0];
+                r11 = words[1];
+                r12 = words[2];
+            }
+            {
+                const uint32_t words[3] = {r3, r11, r12};
+                OOT3D_MIRROR_STORE_WORDS(r9, words, 3U, 0x003FCA14U);
+            }
+            r9 = r9 + 0x0000000CU;
+            OOT3D_MIRROR_LOAD(uint32_t, r13 + 0x9CU, 0x003FCA1CU, r2);
+            Oot3dAotSetSubtractFlags(flags, r2, 0x00000000U, Mask(0x4U));
+            if (!flags.Z()) {
+                // 0x003FCA28
+                OOT3D_MIRROR_ENTER(0x003FCA28U);
+                r1 = r10 + Oot3dAotLsl(r1, 2U);
+                {
+                    uint32_t words[3];
+                    OOT3D_MIRROR_LOAD_WORDS(r1, words, 3U, 0x003FCA2CU);
+                    r2 = words[0];
+                    r3 = words[1];
+                    r11 = words[2];
+                }
+                {
+                    const uint32_t words[3] = {r2, r3, r11};
+                    OOT3D_MIRROR_STORE_WORDS(r6, words, 3U, 0x003FCA30U);
+                }
+                r6 = r6 + 0x0000000CU;
+            }
+            // 0x003FCA38
+            OOT3D_MIRROR_ENTER(0x003FCA38U);
+            OOT3D_MIRROR_LOAD(uint32_t, r13 + 0x98U, 0x003FCA38U, r1);
+            Oot3dAotSetSubtractFlags(flags, r1, 0x00000000U, Mask(0x4U));
+            if (!flags.Z()) {
+                // 0x003FCA44
+                OOT3D_MIRROR_ENTER(0x003FCA44U);
+                OOT3D_MIRROR_LOAD(uint32_t, r13 + 0x0U, 0x003FCA44U, r2);
+                OOT3D_MIRROR_LOAD(uint32_t, r4 + 0x1F0U, 0x003FCA48U, r1);
+                r11 = r7 + 0x00000010U;
+                r2 = r0 + Oot3dAotLsl(r2, 2U);
+                r1 = r1 + Oot3dAotLsl(r2, 4U);
+                {
+                    uint32_t words[4];
+                    OOT3D_MIRROR_LOAD_WORDS(r1, words, 4U, 0x003FCA58U);
+                    r2 = words[0];
+                    r3 = words[1];
+                    r12 = words[2];
+                    r14 = words[3];
+                }
+                {
+                    const uint32_t words[4] = {r2, r3, r12, r14};
+                    OOT3D_MIRROR_STORE_WORDS(r7, words, 4U, 0x003FCA5CU);
+                }
+                r7 = r11;
+            }
+            // 0x003FCA64
+            OOT3D_MIRROR_ENTER(0x003FCA64U);
+            OOT3D_MIRROR_LOAD(uint32_t, r13 + 0x94U, 0x003FCA64U, r1);
+            Oot3dAotSetSubtractFlags(flags, r1, 0x00000000U, Mask(0x4U));
+            if (!flags.Z()) {
+                // 0x003FCA70
+                OOT3D_MIRROR_ENTER(0x003FCA70U);
+                OOT3D_MIRROR_LOAD(uint32_t, r13 + 0x0U, 0x003FCA70U, r3);
+                OOT3D_MIRROR_LOAD(uint32_t, r4 + 0x1F4U, 0x003FCA74U, r2);
+                r1 = r4 + Oot3dAotLsl(r0, 3U);
+                r1 = r1 + 0x00000260U;
+                r2 = r2 + Oot3dAotLsl(r3, 3U);
+                OOT3D_MIRROR_LOAD(uint32_t, r1 + 0U, 0x003FCA84U, guest.vfp[0]);
+                OOT3D_MIRROR_LOAD(uint32_t, r2 + 0U, 0x003FCA88U, guest.vfp[1]);
+                OOT3D_MIRROR_LOAD(uint32_t, r2 + 4U, 0x003FCA8CU, guest.vfp[2]);
+                if ((guest.fpscr & 0x00379F00U) != 0U) {
+                    exitFlow = {Oot3dWholeAotFlowKind::Unsupported, 0x003FCA90U, 0xEE300A20U};
+                    return 0U;
+                }
+                Oot3dVfpZeroAwareAdd(guest.vfp[0], guest.vfp[0], guest.vfp[1], guest.fpscr);
+                OOT3D_MIRROR_LOAD(uint32_t, r1 + 4U, 0x003FCA94U, guest.vfp[1]);
+                if ((guest.fpscr & 0x00379F00U) != 0U) {
+                    exitFlow = {Oot3dWholeAotFlowKind::Unsupported, 0x003FCA98U, 0xEE700A81U};
+                    return 0U;
+                }
+                Oot3dVfpZeroAwareAdd(guest.vfp[1], guest.vfp[1], guest.vfp[2], guest.fpscr);
+                OOT3D_MIRROR_STORE(uint32_t, r13 + 160U, 0x003FCA9CU, guest.vfp[0]);
+                OOT3D_MIRROR_STORE(uint32_t, r13 + 164U, 0x003FCAA0U, guest.vfp[1]);
+                OOT3D_MIRROR_LOAD(uint32_t, r13 + 0xA0U, 0x003FCAA4U, r1);
+                OOT3D_MIRROR_LOAD(uint32_t, r13 + 0xA4U, 0x003FCAA8U, r2);
+                {
+                    const uint32_t words[2] = {r1, r2};
+                    OOT3D_MIRROR_STORE_WORDS(r8, words, 2U, 0x003FCAACU);
+                }
+                r8 = r8 + 8U;
+            }
+            // 0x003FCAB0
+            OOT3D_MIRROR_ENTER(0x003FCAB0U);
+            r0 = r0 + 0x00000001U;
+            Oot3dAotSetSubtractFlags(flags, r0, 0x00000004U, Mask(0x9U));
+            if ((flags.N()) == (flags.V())) return 0x003FCABCU;
+        }
+    }();
+    OOT3D_MIRROR_END_BLOCK(exit);
+}
+
+// ---------------------------------------------------------------------------
+// 0x00466F78 MeshCommandPacket_PatchBoneUniforms, whole function (12 blocks
+// plus the inlined leaf 0x002DBC48 MeshCommandPacket_ResolveOffset): finds
+// the packet's float-uniform commands (header 0x2C1, skipping 0x2C0) and
+// writes the bone matrix rows into them, in reversed word order. The words
+// are moved by VLDR/VSTR (raw bits, no arithmetic). Replaces the
+// 0x0046700C block replacement inside it when it runs.
+// Wired as a replacement of the entry block (prologue on the block_00466F78
+// label) rather than a function prologue: apply_guest_overrides.py finds a
+// function by its unmodified signature lines, which a function prologue
+// would change, and 0x0046700C's block prologue needs that. The result is
+// the same (the entry block is only reached on entry); the replacement
+// always returns the function's flow (resumePc 0; the listed resume PC
+// 0x00467080 is never used).
+bool Override_00466F78(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state, Oot3dWholeAotFlow& flow,
+                       uint32_t& resumePc) noexcept {
+    constexpr size_t kIdx = kIdx00466F78;
+    if (gOverrides[kIdx].Disabled) return false;
+    if (Hooked(context, 0x002DBC48U, 0x002DBC48U)) return Decline(kIdx);
+    OOT3D_MIRROR_BEGIN(0x00466F78U, 0x00467080U);
+    auto& v = frame.Guest.vfp;
+    const uint32_t exit = [&]() -> uint32_t {
+        // 0x00466F78
+        OOT3D_MIRROR_ENTER(0x00466F78U);
+        {
+            const uint32_t words[10] = {r4, r5, r6, r7, r8, r9, r10, r11, r12, r14};
+            OOT3D_MIRROR_STORE_WORDS(r13 - 40U, words, 10U, 0x00466F78U);
+            r13 = r13 - 40U;
+        }
+        r4 = r1;
+        r5 = r2;
+        r1 = r3 + 0x00000008U;
+        OOT3D_MIRROR_LOAD(uint32_t, r0 + 0x0U, 0x00466F88U, r0);
+        OOT3D_AOT_STAT(context.Stats.DirectCalls);
+        r14 = 0x00466F90U;
+        // 0x002DBC48 (leaf, returns to r14 = 0x00466F90)
+        OOT3D_MIRROR_ENTER(0x002DBC48U);
+        OOT3D_MIRROR_LOAD(uint32_t, r0 + 0x14U, 0x002DBC48U, r2);
+        r0 = r0 + Oot3dAotLsl(r2, 2U);
+        OOT3D_MIRROR_LOAD(uint32_t, r0 + 0x8U, 0x002DBC50U, r0);
+        r0 = r0 + r1;
+        // 0x00466F90
+        OOT3D_MIRROR_ENTER(0x00466F90U);
+        r7 = Oot3dAotLsl(r5, 2U);
+        Oot3dAotSetSubtractFlags(flags, r7, 0x00000000U, Mask(0xFU));
+        if (!((flags.Z()) || ((flags.N()) != (flags.V())))) {
+            // 0x00466F9C
+            OOT3D_MIRROR_ENTER(0x00466F9CU);
+            r10 = 0x000002C1U;
+            r11 = 0x00000001U;
+            while (true) {
+                // 0x00466FA4
+                OOT3D_MIRROR_ENTER(0x00466FA4U);
+                OOT3D_MIRROR_LOAD(uint32_t, r0 + 0x4U, 0x00466FA4U, r1);
+                r2 = static_cast<uint32_t>(static_cast<uint16_t>(Oot3dAotRor(r1, 0U)));
+                Oot3dAotSetSubtractFlags(flags, r2, 0x000002C0U, Mask(0x4U));
+                if (flags.Z()) {
+                    r0 = r0 + 0x00000008U;
+                } else {
+                    // 0x00466FB8
+                    OOT3D_MIRROR_ENTER(0x00466FB8U);
+                    Oot3dAotSetSubtractFlags(flags, r2, r10, Mask(0x4U));
+                    if (flags.Z()) {
+                        // 0x00466FC0
+                        OOT3D_MIRROR_ENTER(0x00466FC0U);
+                        OOT3D_MIRROR_LOAD(uint32_t, r4 + 12U, 0x00466FC0U, v[0]);
+                        r1 = Oot3dAotLsl(r1, 4U);
+                        OOT3D_MIRROR_STORE(uint32_t, r0 + 0U, 0x00466FC8U, v[0]);
+                        r8 = r0 + 0x00000008U;
+                        OOT3D_MIRROR_LOAD(uint32_t, r4 + 8U, 0x00466FD0U, v[0]);
+                        r6 = r11 + Oot3dAotLsr(r1, 24U);
+                        OOT3D_MIRROR_STORE(uint32_t, r8 + 0U, 0x00466FD8U, v[0]);
+                        r1 = r0 + 0x0000000CU;
+                        OOT3D_MIRROR_LOAD(uint32_t, r4 + 4U, 0x00466FE0U, v[0]);
+                        r2 = r0 + 0x00000010U;
+                        OOT3D_MIRROR_STORE(uint32_t, r1 + 0U, 0x00466FE8U, v[0]);
+                        OOT3D_MIRROR_LOAD(uint32_t, r4 + 0U, 0x00466FECU, v[0]);
+                        r3 = r4 + 0x00000010U;
+                        r1 = r6 - 0x00000001U;
+                        Oot3dAotSetSubtractFlags(flags, r1, 0x00000003U, Mask(0xFU));
+                        r0 = r0 + 0x00000014U;
+                        OOT3D_MIRROR_STORE(uint32_t, r2 + 0U, 0x00467000U, v[0]);
+                        r4 = r3;
+                        if (!((flags.Z()) || ((flags.N()) != (flags.V())))) {
+                            // 0x0046700C
+                            OOT3D_MIRROR_ENTER(0x0046700CU);
+                            r3 = r6 - 0x00000001U;
+                            r2 = r4 + 0x0000000CU;
+                            r12 = Oot3dAotAsr(r3, 31U);
+                            r1 = r0;
+                            r9 = r3 + Oot3dAotLsr(r12, 30U);
+                            r3 = Oot3dAotAsr(r9, 2U);
+                            do {
+                                // 0x00467024
+                                OOT3D_MIRROR_ENTER(0x00467024U);
+                                OOT3D_MIRROR_LOAD(uint32_t, r2 + 0U, 0x00467024U, v[0]);
+                                r5 = r1;
+                                r12 = r2;
+                                OOT3D_MIRROR_STORE(uint32_t, r5 + 0U, 0x00467030U, v[0]);
+                                OOT3D_MIRROR_LOAD(uint32_t, r12 - 4U, 0x00467034U, v[0]);
+                                Oot3dAotSetSubtractFlags(flags, r3, 0x00000001U, Mask(0x6U));
+                                r3 = r3 - 0x00000001U;
+                                OOT3D_MIRROR_STORE(uint32_t, r5 + 4U, 0x0046703CU, v[0]);
+                                OOT3D_MIRROR_LOAD(uint32_t, r12 - 8U, 0x00467040U, v[0]);
+                                r2 = r2 + 0x00000010U;
+                                OOT3D_MIRROR_STORE(uint32_t, r5 + 8U, 0x00467048U, v[0]);
+                                OOT3D_MIRROR_LOAD(uint32_t, r12 - 12U, 0x0046704CU, v[0]);
+                                r1 = r1 + 0x00000010U;
+                                OOT3D_MIRROR_STORE(uint32_t, r5 + 12U, 0x00467054U, v[0]);
+                            } while (!flags.Z());
+                            // 0x0046705C
+                            OOT3D_MIRROR_ENTER(0x0046705CU);
+                            r1 = Oot3dAotAsr(r9, 2U);
+                            r4 = r4 + Oot3dAotLsl(r1, 4U);
+                            r0 = r0 + Oot3dAotLsl(r1, 4U);
+                        }
+                        // 0x00467068
+                        OOT3D_MIRROR_ENTER(0x00467068U);
+                        r1 = r0 - r8;
+                        Oot3dAotSetLogicalFlags(flags, r1 & 0x00000007U, flags.C(), Mask(0x4U));
+                        if (!(flags.Z())) r0 = r0 + 0x00000004U;
+                        r7 = r7 - r6;
+                    }
+                }
+                // 0x00467078
+                OOT3D_MIRROR_ENTER(0x00467078U);
+                Oot3dAotSetSubtractFlags(flags, r7, 0x00000000U, Mask(0xFU));
+                if (!(!(flags.Z()) && ((flags.N()) == (flags.V())))) break;
+            }
+        }
+        // 0x00467080
+        OOT3D_MIRROR_ENTER(0x00467080U);
+        uint32_t words[10];
+        OOT3D_MIRROR_LOAD_WORDS(r13, words, 10U, 0x00467080U);
+        r4 = words[0];
+        r5 = words[1];
+        r6 = words[2];
+        r7 = words[3];
+        r8 = words[4];
+        r9 = words[5];
+        r10 = words[6];
+        r11 = words[7];
+        r12 = words[8];
+        r13 = r13 + 40U;
+        exitFlow = Oot3dAotReturned(words[9]);
+        return 0U;
+    }();
+    OOT3D_MIRROR_END_BLOCK(exit);
+}
+
+// ---------------------------------------------------------------------------
+// 0x00368D94 unsigned 32-bit divide with remainder (r0 = r0 / r1, r1 =
+// r0 % r1; the guest CPU has no divide instruction): the shift-and-subtract
+// chain of the translation, blocks 0x00368D94-0x00368EC8, with the same
+// flag updates. Registers only (no memory access), so the signed path
+// (0x00368ED4) and the divide-by-zero exit (0x00368FB0) decline before any
+// effect and run translated. logs18b: 189,565 calls, 77 % with a quotient of
+// 0 or 1 (4 blocks).
+bool Override_00368D94(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
+                       Oot3dAotArchitecturalState& state,
+                       Oot3dWholeAotFlow& flow) noexcept {
+    constexpr size_t kIdx = kIdx00368D94;
+    static_cast<void>(frame);
+    // One step "rsbs r3, r1, r0, lsr #n; subcs r0, r0, r1, lsl #n; adcs r2, r2, r2"
+    // (the flags of the ADCS are not live except where noted).
+    OOT3D_MIRROR_BEGIN(0x00368D94U, 0x00368EC8U);
+    const auto step = [&](uint32_t shift, uint8_t adcMask) {
+        const uint32_t operand = Oot3dAotLsr(r0, shift);
+        Oot3dAotSetSubtractFlags(flags, operand, r1, Mask(0x2U));
+        r3 = operand - r1;
+        if (flags.C()) r0 = r0 - Oot3dAotLsl(r1, shift);
+        r2 = Oot3dAotAddWithCarry(flags, r2, r2, flags.C(), true, Mask(adcMask));
+    };
+    const auto test = [&](uint32_t shift) {
+        const uint32_t operand = Oot3dAotLsr(r0, shift);
+        Oot3dAotSetSubtractFlags(flags, operand, r1, Mask(0x2U));
+        r3 = operand - r1;
+        return flags.C();
+    };
+    const uint32_t exit = [&]() -> uint32_t {
+        // 0x00368D94
+        OOT3D_MIRROR_ENTER(0x00368D94U);
+        {
+            const auto shifted = Oot3dAotShiftImmediate(r1, 0U, 0U, flags.C());
+            r3 = r0 | shifted.Value;
+            Oot3dAotSetLogicalFlags(flags, r3, shifted.Carry, Mask(0x8U));
+        }
+        if (flags.N()) return kMirrorDecline; // signed path
+        // 0x00368D9C
+        OOT3D_MIRROR_ENTER(0x00368D9CU);
+        if (!test(1U)) {
+            // 0x00368EB8
+            OOT3D_MIRROR_ENTER(0x00368EB8U);
+            Oot3dAotSetSubtractFlags(flags, r0, r1, Mask(0x3U));
+            r1 = r0 - r1;
+            if (flags.C()) {
+                // 0x00368EC0
+                OOT3D_MIRROR_ENTER(0x00368EC0U);
+                r0 = 0x00000001U;
+            } else {
+                // 0x00368EC8
+                OOT3D_MIRROR_ENTER(0x00368EC8U);
+                r1 = r0;
+                r0 = 0x00000000U;
+            }
+            Oot3dAotSetLogicalFlags(flags, r0, flags.C(), Mask(0xEU));
+            exitFlow = Oot3dAotReturned(r14);
+            return 0U;
+        }
+        // 0x00368DA4
+        OOT3D_MIRROR_ENTER(0x00368DA4U);
+        r2 = 0x00000000U;
+        Oot3dAotSetLogicalFlags(flags, r2, flags.C(), Mask(0x0U));
+        uint32_t pc;
+        if (!test(4U)) {
+            pc = 0x00368E84U;
+        } else {
+            // 0x00368DB0
+            OOT3D_MIRROR_ENTER(0x00368DB0U);
+            if (!test(8U)) {
+                pc = 0x00368E54U;
+            } else {
+                // 0x00368DB8
+                OOT3D_MIRROR_ENTER(0x00368DB8U);
+                if (!test(12U)) {
+                    pc = 0x00368E20U;
+                } else {
+                    // 0x00368DC0
+                    OOT3D_MIRROR_ENTER(0x00368DC0U);
+                    if (!test(16U)) {
+                        pc = 0x00368DF0U;
+                    } else {
+                        // 0x00368DC8
+                        OOT3D_MIRROR_ENTER(0x00368DC8U);
+                        r1 = Oot3dAotLsl(r1, 8U);
+                        const bool carry = test(16U);
+                        r2 = r2 | 0xFF000000U;
+                        if (carry) r2 = r2 | 0x00FF0000U;
+                        if (carry) r1 = Oot3dAotLsl(r1, 8U);
+                        if (!test(12U)) {
+                            pc = 0x00368E20U;
+                        } else {
+                            // 0x00368DE4
+                            OOT3D_MIRROR_ENTER(0x00368DE4U);
+                            Oot3dAotSetSubtractFlags(flags, 0x00000000U, r1, Mask(0x3U));
+                            r3 = 0x00000000U - r1;
+                            if (flags.C()) return kMirrorDecline; // divide by zero
+                            pc = 0x00368DECU;
+                        }
+                    }
+                }
+            }
+        }
+        while (true) {
+            switch (pc) {
+            case 0x00368DECU:
+                OOT3D_MIRROR_ENTER(0x00368DECU);
+                if (flags.C()) r1 = Oot3dAotLsr(r1, 8U);
+                [[fallthrough]];
+            case 0x00368DF0U:
+                OOT3D_MIRROR_ENTER(0x00368DF0U);
+                step(15U, 0x0U);
+                step(14U, 0x0U);
+                step(13U, 0x0U);
+                step(12U, 0x0U);
+                [[fallthrough]];
+            case 0x00368E20U:
+                OOT3D_MIRROR_ENTER(0x00368E20U);
+                step(11U, 0x0U);
+                step(10U, 0x0U);
+                step(9U, 0x0U);
+                step(8U, 0x2U);
+                if (flags.C()) {
+                    pc = 0x00368DECU;
+                    continue;
+                }
+                [[fallthrough]];
+            case 0x00368E54U:
+                OOT3D_MIRROR_ENTER(0x00368E54U);
+                step(7U, 0x0U);
+                step(6U, 0x0U);
+                step(5U, 0x0U);
+                step(4U, 0x0U);
+                [[fallthrough]];
+            default: // 0x00368E84
+                OOT3D_MIRROR_ENTER(0x00368E84U);
+                step(3U, 0x0U);
+                step(2U, 0x0U);
+                step(1U, 0x0U);
+                Oot3dAotSetSubtractFlags(flags, r0, r1, Mask(0xFU));
+                r1 = r0 - r1;
+                if (!(flags.C())) r1 = r0;
+                r0 = Oot3dAotAddWithCarry(flags, r2, r2, flags.C(), false, Mask(0x0U));
+                exitFlow = Oot3dAotReturned(r14);
+                return 0U;
+            }
+        }
+    }();
+    OOT3D_MIRROR_END_FUNCTION(exit);
+}
+
+#undef OOT3D_MIRROR_END_FUNCTION
+#undef OOT3D_MIRROR_END_BLOCK
+#undef OOT3D_MIRROR_COMMIT
+#undef OOT3D_MIRROR_STORE_WORDS
+#undef OOT3D_MIRROR_LOAD_WORDS
+#undef OOT3D_MIRROR_STORE
+#undef OOT3D_MIRROR_LOAD
+#undef OOT3D_MIRROR_ENTER
+#undef OOT3D_MIRROR_BEGIN
 
 } // namespace GuestOverrides
 } // namespace Oot3dNativeGame
