@@ -249,6 +249,10 @@ struct GrassState {
     // cull job takes it; each cull is drawn the way it was culled.
     bool Lod = true;
     Oot3d::InteractiveGrassSettings Settings;
+    // config/grass_fill (L3+R3 > Video > "Grass near Link", live): fixed
+    // fill tufts (nothing grows near Link) or test.9's growing ones; the
+    // next cull job takes it.
+    bool Fill = true;
     // Reset on an area change (its memo and geometry registry are not movable).
     std::unique_ptr<Oot3d::PicaGrassSourceState> Sources = std::make_unique<Oot3d::PicaGrassSourceState>();
     std::unique_ptr<Oot3d::PicaGrassPlacements> Placements;
@@ -455,6 +459,7 @@ void ApplyProfile(GrassState& state, bool fps60, Oot3d::GrassSwitchDistance dist
     state.Profile = Oot3d::SelectGrassSwitchProfile(fps60, distance);
     state.Stream = Oot3d::GrassStreamSettingsFromProfile(state.Profile);
     state.Stream.Lod = state.Lod;
+    state.Stream.FillFixed = state.Fill;
     Oot3d::ApplyGrassSwitchProfile(state.Profile, state.Settings);
 }
 
@@ -472,6 +477,22 @@ void LogLod(const GrassState& state) {
                 static_cast<double>(px[0]), static_cast<double>(px[1]), static_cast<double>(px[2]),
                 static_cast<double>(px[3]), static_cast<double>(Oot3d::GrassLodMinimumDistance(state.Stream)),
                 static_cast<double>(1.5F * state.Stream.SingleBladeDistance));
+}
+
+// config/grass_fill in deko3d.txt: what the next culls do.
+void LogFill(const GrassState& state) {
+    if (!state.Fill) {
+        Deko3d::Log("grass: fill grows (config/grass_fill = 0): test.9's fill tufts, each growing out of the ground "
+                    "over a quarter of its distance (%.2f per tuft at %.0f), thinned tufts growing in",
+                    static_cast<double>(Oot3d::GrassStreamFillMultiplier(state.Stream, Oot3d::kGrassLinkDistance)),
+                    static_cast<double>(Oot3d::kGrassLinkDistance));
+        return;
+    }
+    Deko3d::Log("grass: fill fixed (config/grass_fill): %.2f tufts per tuft to %.0f units wherever the camera is, "
+                "narrowing to test.9's by %.0f; nothing grows",
+                static_cast<double>(Oot3d::GrassFixedFillCount(state.Stream)),
+                static_cast<double>(Oot3d::kGrassFixedFillNear),
+                static_cast<double>(Oot3d::GrassFixedFillFar(state.Stream)));
 }
 
 void LogProfile(const GrassState& state) {
@@ -529,6 +550,7 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
                 "(shadercache/grass_texture_signatures.bin), %zu built-in twins of the rule textures",
                 kept, Oot3d::GrassKnownTwins().size());
     state->Lod = Oot3d::ReadGrassSwitchLod(config);
+    state->Fill = Oot3d::ReadGrassSwitchFill(config);
     ApplyProfile(*state, fps60, Oot3d::ReadGrassSwitchDistance(config));
     state->Placements = std::make_unique<Oot3d::PicaGrassPlacements>(state->Profile.RetainedBytes);
     Deko3d::Log("grass: on (config/grass = %s), %zu rules, %.0f tufts/m2 of %u blades, at most %u per placement, "
@@ -539,6 +561,7 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
                 static_cast<double>(state->Profile.RetainedBytes) / (1024.0 * 1024.0));
     LogProfile(*state);
     LogLod(*state);
+    LogFill(*state);
     gGrassWantsColliders = mode == Oot3d::GrassSwitchMode::Draw;
     gGrass.store(state.release(), std::memory_order_release);
 }
@@ -552,6 +575,7 @@ void Deko3dSetGrassFrameRate(bool fps60) {
     // the new distances and cap (the stream memory holds the largest cap).
     ApplyProfile(*state, fps60, state->Distance);
     LogProfile(*state);
+    LogFill(*state);
 }
 
 void Deko3dSetGrassArea(int scene, int room) {
@@ -783,6 +807,7 @@ void GrassEndFrame(uint64_t frame) {
     if (const auto distance = Oot3d::PublishedGrassSwitchDistance(); distance && *distance != state->Distance) {
         ApplyProfile(*state, state->Fps60, *distance);
         LogProfile(*state);
+        LogFill(*state);
     }
     // L3+R3 > Video > "Grass detail" (config/grass_lod) while the game runs:
     // the next cull job culls for it, and each cull is drawn its own way.
@@ -790,6 +815,13 @@ void GrassEndFrame(uint64_t frame) {
         state->Lod = *lod;
         state->Stream.Lod = *lod;
         LogLod(*state);
+    }
+    // L3+R3 > Video > "Grass near Link" (config/grass_fill): the next cull
+    // job's fill (A/B with test.9's within one session).
+    if (const auto fill = Oot3d::PublishedGrassSwitchFill(); fill && *fill != state->Fill) {
+        state->Fill = *fill;
+        state->Stream.FillFixed = *fill;
+        LogFill(*state);
     }
     UpdatePlacements(*state, frame);
     if (state->Mode == Oot3d::GrassSwitchMode::Draw && state->DrawReady) {
@@ -850,7 +882,7 @@ void GrassEndFrame(uint64_t frame) {
         // the culls selected.
         Log("grass: frame %llu fragment raster %llu draws, depth-writing %llu | culls fresh %llu stale %llu "
             "(frames that redrew an older cull), no result %llu, nothing drawn %llu | cull instances %.0f "
-            "(max %llu) thinned %.0f fill %.0f off screen %.0f | distance=%s full %.0f max %.0f fill %.0f | "
+            "(max %llu) thinned %.0f fill %.0f off screen %.0f | distance=%s full %.0f max %.0f fill %.0f %s | "
             "area %s scene %d room %d, changes %llu "
             "(scene %llu), foreign culls dropped %llu (other scene), without a shared placement %llu, gaps %llu, "
             "ranges drawn with another target's placement %llu | empty placements %u | in-between frames %llu "
@@ -866,6 +898,7 @@ void GrassEndFrame(uint64_t frame) {
             Oot3d::GrassSwitchDistanceWord(state->Distance).data(),
             static_cast<double>(state->Stream.FullDensityDistance),
             static_cast<double>(state->Stream.DrawDistance), static_cast<double>(state->Stream.FillDistance),
+            state->Stream.FillFixed ? "fixed" : "grows",
             state->DrawnArea == 0xffffffffU ? "none" : "drawn",
             state->DrawnArea == 0xffffffffU ? -1 : static_cast<int>(state->DrawnArea >> 8U),
             state->DrawnArea == 0xffffffffU ? -1 : static_cast<int>(static_cast<int8_t>(state->DrawnArea & 0xffU)),

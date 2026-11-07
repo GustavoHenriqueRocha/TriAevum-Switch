@@ -3096,6 +3096,96 @@ it and every cull is drawn the way it was culled, so it switches live (one sessi
   `grass:` line's `gpu` (and `pass`/`tufts`) and `l3`/`l1`/`vertices`, and `dkperf` `busy_ms`.
   Watch for pops 8-20 m away while walking and riding.
 
+### Grass on deko3d: nothing grows near Link, `config/grass_fill`; the temple entry flicker (07/11, after test.9)
+
+The user after test.9: "now the grass grows around Link, which we don't want" and "grass still
+flickered when I went in the temple" (Whole area, 60 FPS; logs17, videos `2026110713005300` and
+`2026110713042600`).
+
+**What grows** (video `2026110713005300`, 30 fps capture of the 60 fps output): frames 112-140, on
+the ledge at the top of Sacred Forest Meadow's stairs, the patch in front of Link fills with new
+short tufts along its near edge that grow taller as he walks to the temple door; frames 0-8, the
+camera low in the meadow's grass, a wall of tall blades fills the screen (test.9's fill is 9x the
+placement's density right in front of the camera).
+
+- *Cause:* test.9's fill (GrassFull) put FillDistance / distance tufts per tuft near the camera:
+  fill tuft c of a tuft appears at FillDistance / (c + v) and grows out of the ground over a quarter
+  of that distance, so at Near (1000) children 2-4 grow in between 250 and 500 units, right around
+  Link (~250 units from the field camera), and children 5-8 in front of the camera, as he walks.
+  A tuft the thinning keeps grows over the last 10% (past FullDensityDistance; Near and Far only).
+  GrassLod's level morphs (from 800 units) and the single blade -> tuft turn (400-600) slide blades;
+  nothing there grows.
+- *Fixed fill* (`grass_instance_stream.cpp`, `GrassFixedFillRank`): every kept tuft nearer than
+  `kGrassFixedFillNear` (450 units) brings the same fill tufts wherever the camera is: test.9's
+  multiplier at `kGrassLinkDistance` (250 units: Near and Whole area 3.56 at 60 fps, 5.69 at 30;
+  Far 7.1 / 9). The multiplier then falls to test.9's (or 1) by `GrassFixedFillFar` (one fill tuft
+  per `kGrassFixedFillPerRank` = 120 units: 757 at Near 60 fps, 1183 at Far), never past
+  FullDensityDistance. Fill tuft c with stable value v is drawn at width clamp(rank - (c - 1 + v), 0,
+  1) of its own (the widths add up to the multiplier less one), always at its full height: a
+  transition narrows or widens a tuft where it stands (`PackGrassFillInstance`'s width scale), far
+  from Link, about 3% of a tuft's width per 4 units walked. A tuft the thinning keeps widens in
+  over the same 10% instead of growing. Nearer than 250 units there are fewer fill tufts than test.9
+  had (no wall of blades in front of a low camera). CPU only: no shader change.
+- *Host field* (`Oot3dGrassNearDensity`, `Oot3dGrassNearLink`; Near, 45 degrees 16:9):
+  coverage around Link 2.97 (test.9 3.10), 600-1000 units 3.52 (3.04), 1000-1600 2.95 (2.95);
+  instances 5633 (5250; fill 1930 against 1547), drawn screen area +16%. 30 fps: 4.70 (4.89),
+  12499 instances (11085), screen area +23%. With levels and the game's 60 degrees: 6447 instances
+  (test.9's fill 5958), 86523 blade vertices. Walking 400 units in steps of 4: within 450 units no
+  instance changes at all in 35283 tuft-steps (test.9: 5687 of 27559 changed), no instance below
+  full height (test.9: 92397), past 450 at most 6% of a tuft per step. Cost `[INF]`: about +8% grass
+  instances at Near; the near draw's single blades are within 600 units either way.
+
+| `config/grass_fill` | What happens |
+|---|---|
+| absent, any other word (default) | fixed: the same fill tufts near Link at full height, narrowing away past 450 units |
+| `0`, `off`, `false` | test.9's fill exactly (fill tufts growing in, thinned tufts growing in) |
+
+L3+R3 > Video > "Grass near Link" writes the file and publishes the choice: the next cull job takes
+it (A/B in one session). `deko3d.txt`: `grass: fill fixed (config/grass_fill): 3.56 tufts per tuft to
+450 units wherever the camera is, narrowing to test.9's by 757; nothing grows` (or `grass: fill grows
+(config/grass_fill = 0) ...`) at start and on each switch of fill, FPS or distance; the third
+`grass:` line's `distance=... fill F` ends with `fixed` or `grows`.
+
+**The temple entry flicker** (logs17 `deko3d.txt`): the window of the entry from the meadow (frames
+25800-26399; `hitches.txt` puts `scene=0x03:bmori1 room=0` at frame 25883) reads `area drawn scene 3
+room 0, changes 4 (scene 2), foreign culls dropped 2 (other scene), without a shared placement 6,
+gaps 2`; the room change after it (26400-26999, room 1 at 26661) is clean (`changes 1 (scene 0)`,
+`gaps 0`): test.9's room-change fix holds. No other scene entry of the session (Hyrule Field,
+Lost Woods, Kokiri Forest, the meadow) has a draw point without a shared placement; logs16b's
+temple entry had `no shared placement 2` too.
+
+- *Cause:* the entrance's ground is the only grass grown from an inherited rule (a twin of the
+  meadow's rule 10, `GrassTwinRules`). Its entry stays incomplete while some rule textures have no
+  signature (15 of 25 in this session), and `GrassTwinRules::Sync` erased incomplete entries
+  whenever any texture was first decoded (the source cache's generation). A texture first drawn
+  after the ground in a frame (a Wolfos', an effect's) erased it between the ground's draw (a memo
+  hit: the rules are not asked) and the draw point, where `PicaGrassPlacements::Update` lists
+  `AllInherited`: the ground matched no rule, the frame had no placement, the cull none of the
+  frame's placements, and that frame and the fps60 in-between frame after it drew no grass. The
+  next frame's memo missed (its key holds the generation) and resolved the ground again: two
+  frames without grass, once per new texture seen. `rules_seen` 11 -> 10 in the next window is the
+  entry erased while the ground was not drawn (room 1). The 30 fps videos show no missing grass
+  frame (the darker whole frames 215 and 227-228 of `2026110713005300` keep their grass: lighting).
+- *Fix* (`grass_texture_twins.cpp`): new signatures mark incomplete entries stale instead of erasing
+  them; a stale entry keeps its rule (`AllInherited` lists it) and is resolved again at the
+  texture's next `Resolve` (its next memo miss), as before.
+- *Not this:* world draws attributed to UI lists (`lighting real ... lost world ... ui_list=11` in
+  the 25200-26999 lighting window, 88-98 later in bmori1) lose the ground as a grass source for a
+  frame, which makes no draw point and is not counted as a gap; that is fixed on its own
+  (`config/late_lists_as_ui`).
+
+- Tests: `oot3d_grass_switch_tests`: `Oot3dGrassTempleEntry` (the preset's rules, a fresh session,
+  the entrance's ground and textures first seen after it, as frames with fps60 in-between frames:
+  12 gaps in 240 frames before the fix, none after), `Oot3dGrassNearLink` (fill config file, the
+  multiplier and widths, nothing within 450 units changes and nothing grows walking at Near 60/30,
+  Far and Whole area, test.9's off exactly), `Oot3dGrassNearDensity` (both fills); guards.
+- `deko3d.pack`: not involved (no rebuild); the grass shaders are unchanged.
+- Console check: Hyrule Field at Near and Whole area, walk and run with the camera behind Link,
+  then look down at the grass around him: nothing should grow or appear within a few metres; switch
+  "Grass near Link" to "Grows in (test.9)" to compare. Then Sacred Forest Meadow -> Forest Temple:
+  the entrance's grass stays through the Wolfos fight; the third `grass:` line of the entry window
+  should read `without a shared placement 0, gaps 0`.
+
 ## Next steps
 
 - Future ideas (user request, 2026-10-17):

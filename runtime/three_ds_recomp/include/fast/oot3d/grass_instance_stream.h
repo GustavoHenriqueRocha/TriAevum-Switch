@@ -17,11 +17,13 @@
 // Nearer than FillDistance (at most FullDensityDistance, where every tuft is
 // kept) the same tufts per m2 cover less of the screen the nearer they are
 // (coverage ~ density x distance): each kept tuft on screen brings fill
-// tufts around it, about FillDistance / distance tufts in all (at most
-// 1 + kGrassMaxFillPerTuft), so the grass around Link covers as much of the
-// screen as the full-density band. Nothing appears or vanishes at once: a
-// fill tuft grows out of the ground over kGrassFillGrowth of its distance, a
-// thinned tuft over kGrassThinGrowth.
+// tufts around it so the grass around Link covers as much of the screen as
+// the full-density band. config/grass_fill (GrassStreamSettings::FillFixed)
+// chooses how: fixed (default), the same fill tufts at full size wherever
+// the camera is within kGrassFixedFillNear, narrowing away past it; or
+// test.9's, FillDistance / distance tufts in all (at most
+// 1 + kGrassMaxFillPerTuft), each growing out of the ground over
+// kGrassFillGrowth of its distance, a thinned tuft over kGrassThinGrowth.
 
 #include "fast/oot3d/grass_switch_profile.h"
 #include "fast/oot3d/grass_world_placement_cache.h"
@@ -68,6 +70,10 @@ struct GrassStreamSettings {
     // config/grass_lod: the stream's kinds are the draws of grass_lod_vsh.glsl
     // (GrassStreamKind); off, test.9's two kinds of grass_vsh.glsl.
     bool Lod = false;
+    // config/grass_fill: fixed (GrassFixedFillRank: nothing near the camera
+    // changes as it moves; transitions narrow, far away); off, test.9's fill
+    // and thinning edge, growing out of the ground.
+    bool FillFixed = true;
 };
 [[nodiscard]] GrassStreamSettings GrassStreamSettingsFromProfile(const GrassSwitchProfile& profile) noexcept;
 
@@ -113,16 +119,45 @@ struct GrassStreamStats {
 // Fill: at most this many more tufts per kept tuft (at most 9x the
 // placement's density, right in front of the camera).
 inline constexpr uint32_t kGrassMaxFillPerTuft = 8U;
-// A fill tuft c (1..kGrassMaxFillPerTuft) with stable value v starts to grow
-// at FillDistance / (c + v) and is full grown kGrassFillGrowth nearer; a tuft the
-// distance thinning keeps grows while the camera comes 10% nearer than the
-// distance where it is first kept. Every other tuft is drawn at full height.
+// config/grass_fill = 0 (test.9): a fill tuft c (1..kGrassMaxFillPerTuft)
+// with stable value v starts to grow at FillDistance / (c + v) and is full
+// grown kGrassFillGrowth nearer; a tuft the distance thinning keeps grows
+// while the camera comes 10% nearer than the distance where it is first
+// kept. Every other tuft is drawn at full height.
 inline constexpr float kGrassFillGrowth = 0.25F;
 inline constexpr float kGrassThinGrowth = 0.1F;
 // The tufts drawn per placement tuft at `distance` (fill included), counting
 // a fill tuft from half its growth: 1 at FillDistance, about FillDistance /
 // (1.125 distance) nearer.
 [[nodiscard]] float GrassStreamFillMultiplier(const GrassStreamSettings& settings, float distance) noexcept;
+
+// ---- config/grass_fill fixed (SWITCH_PORT.md "Grass on deko3d: nothing grows near Link")
+//
+// test.9's fill tufts grew out of the ground as the camera came nearer:
+// child c at FillDistance / (c + v), over a quarter of that distance, so
+// children 2-4 grew right around Link (250-500 units from the camera) as he
+// walked. Fixed: within kGrassFixedFillNear every tuft brings the same fill
+// tufts, about GrassFixedFillCount - 1 of them (test.9's multiplier at
+// kGrassLinkDistance, where Link stands from the field camera), whatever
+// the camera does; past it the multiplier falls to test.9's (or 1) by
+// GrassFixedFillFar, kGrassFixedFillPerRank units per fill tuft, each one
+// narrowing away where it stands (its width, never its height).
+inline constexpr float kGrassLinkDistance = 250.0F;
+inline constexpr float kGrassFixedFillNear = 450.0F;
+inline constexpr float kGrassFixedFillPerRank = 120.0F;
+// The tufts drawn per placement tuft within kGrassFixedFillNear.
+[[nodiscard]] float GrassFixedFillCount(const GrassStreamSettings& settings) noexcept;
+// Where the multiplier has come down to test.9's.
+[[nodiscard]] float GrassFixedFillFar(const GrassStreamSettings& settings) noexcept;
+// The tufts drawn per placement tuft at `distance` (fill included): the
+// count to kGrassFixedFillNear, then down to test.9's multiplier by
+// GrassFixedFillFar; 1 from FullDensityDistance on.
+[[nodiscard]] float GrassFixedFillMultiplier(const GrassStreamSettings& settings, float distance) noexcept;
+// The fill rank reached at `distance`: fill tuft c with stable value v is
+// drawn at width clamp(rank - (c - 1 + v), 0, 1), so the widths add up to
+// the multiplier less 1 on average.
+[[nodiscard]] float GrassFixedFillRank(const GrassStreamSettings& settings, float distance) noexcept;
+[[nodiscard]] float GrassFixedFillWidth(float rank, uint32_t child, float value) noexcept;
 
 // Packing helpers, exposed for the tests (GLSL unpackHalf2x16 / unpackUnorm).
 [[nodiscard]] uint16_t PackGrassHalf(float value) noexcept;
@@ -133,9 +168,10 @@ inline constexpr float kGrassThinGrowth = 0.1F;
                                                           float widthScale = 1.0F) noexcept;
 // Fill tuft `child` (1..kGrassMaxFillPerTuft) of `tuft`: a stable spot
 // within `radius` on the tuft's ground plane, its own height, facing and
-// phase, the tuft's ground colour and normal.
+// phase, the tuft's ground colour and normal; `widthScale` narrows it
+// (config/grass_fill fixed).
 [[nodiscard]] GrassStreamInstance PackGrassFillInstance(const GrassWorldAnchor& tuft, uint32_t child, float fade,
-                                                        float radius) noexcept;
+                                                        float radius, float widthScale = 1.0F) noexcept;
 // The stable value of fill tuft `child` (in [0, 1)): which fill tufts come
 // first as the camera comes nearer.
 [[nodiscard]] float GrassFillStableValue(uint32_t stableId, uint32_t child) noexcept;

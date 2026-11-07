@@ -77,6 +77,7 @@ public:
     mGrassBoot = mGrass = Fast::Oot3d::ReadGrassSwitchMode(mConfig);
     mGrassDistance = Fast::Oot3d::ReadGrassSwitchDistance(mConfig);
     mGrassLod = Fast::Oot3d::ReadGrassSwitchLod(mConfig);
+    mGrassFill = Fast::Oot3d::ReadGrassSwitchFill(mConfig);
     // config/gpu_performance applies at start (the panel is created once, at
     // window setup); Standard opens no apm session.
     mGpuHigh = ReadGpuPerformanceHigh(mConfig);
@@ -273,6 +274,20 @@ private:
     ImGui::TextDisabled("Applies at once. Levels: each tuft's wind, light and colour once per frame instead of "
                         "for every vertex, and far tufts drawn with 3, then 1 wider blade covering the same "
                         "ground. Every blade: the grass of test.9, for comparison.");
+    // config/grass_fill (SWITCH_PORT.md "Grass on deko3d: nothing grows near
+    // Link"): applied at once (the renderer's next cull takes the choice).
+    const char *const fills[] = {"Fixed (nothing grows near Link; default)", "Grows in (test.9)"};
+    int fill = mGrassFill ? 0 : 1;
+    if (ImGui::Combo("Grass near Link", &fill, fills, 2)) {
+      mGrassFill = fill == 0;
+      mGrassFillError = !Fast::Oot3d::SaveGrassSwitchFill(mConfig, mGrassFill);
+      Fast::Oot3d::PublishGrassSwitchFill(mGrassFill);
+    }
+    if (mGrassFillError)
+      ImGui::TextWrapped("Could not write config/grass_fill.");
+    ImGui::TextDisabled("Applies at once. Fixed: the same extra tufts around Link wherever he walks, at full "
+                        "height; farther away they narrow out. Grows in: the grass of test.9, whose tufts "
+                        "grew out of the ground as he came near, for comparison.");
   }
 
   // The lighting model (graphics settings: Modern = per-pixel, toon bands
@@ -326,6 +341,8 @@ private:
   bool mGrassDistanceError = false;
   bool mGrassLod = true;
   bool mGrassLodError = false;
+  bool mGrassFill = true;
+  bool mGrassFillError = false;
   std::string mLightingError;
   std::string mLightingIssue;
   bool mGpuHigh = false;

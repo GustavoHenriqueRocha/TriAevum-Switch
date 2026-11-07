@@ -269,11 +269,16 @@ void GrassTwinRules::Sync(const std::vector<GrassPlacementRule>& rules) {
         return;
     }
     // A texture whose own or rule textures' signatures were missing is
-    // resolved again once new signatures exist.
+    // resolved again once new signatures exist, at its next Resolve; until
+    // then it keeps its rule. Erasing it (0.1.2-test.9) took the Forest
+    // Temple entrance's rule away from AllInherited whenever a texture was
+    // first drawn after the ground in a frame: its placement left the frame
+    // and the grass flickered (logs17, oot3d_grass_switch_tests
+    // Oot3dGrassTempleEntry).
     if (mIncomplete) {
         if (const uint64_t generation = source.Generation(); generation != mGeneration) {
             mGeneration = generation;
-            std::erase_if(mEntries, [](const auto& entry) { return !entry.second.Complete; });
+            for (auto& [key, entry] : mEntries) entry.Stale |= !entry.Complete;
             mIncomplete = false;
         }
     }
@@ -284,7 +289,8 @@ const GrassTwinRules::Entry& GrassTwinRules::Resolve(
     uint16_t width, uint16_t height) {
     Sync(rules);
     const uint64_t key = Key(hash, width, height);
-    if (const auto found = mEntries.find(key); found != mEntries.end()) return found->second;
+    const auto found = mEntries.find(key);
+    if (found != mEntries.end() && !found->second.Stale) return found->second;
     Entry entry{hash, width, height};
     const bool own = std::any_of(rules.begin(), rules.end(), [&](const auto& rule) {
         return TargetsTexture(rule, hash, width, height);
@@ -334,6 +340,7 @@ const GrassTwinRules::Entry& GrassTwinRules::Resolve(
         }
     }
     mIncomplete |= !entry.Complete;
+    if (found != mEntries.end()) return found->second = entry;
     return mEntries.emplace(key, std::move(entry)).first->second;
 }
 

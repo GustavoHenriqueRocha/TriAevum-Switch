@@ -735,9 +735,11 @@ GUARDS = [
     # --- 07/11: grass cost per tuft, config/grass_lod (SWITCH_PORT.md "Grass on deko3d: cost per tuft") ---
     Guard("[decision] grass_lod: absent config/grass_lod means on; 0/off/false restore test.9's grass",
           "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
-          r'bool ParseGrassSwitchLod\(std::optional<std::string_view> fileText\) noexcept \{\s+'
+          r'bool ParseOnUnlessOff\(std::optional<std::string_view> fileText\) noexcept \{\s+'
           r'if \(!fileText\.has_value\(\)\) return true;.*?'
-          r'return !\(word == "0" \|\| word == "off" \|\| word == "false"\);',
+          r'return !\(word == "0" \|\| word == "off" \|\| word == "false"\);.*?'
+          r'bool ParseGrassSwitchLod\(std::optional<std::string_view> fileText\) noexcept \{\s+'
+          r'return ParseOnUnlessOff\(fileText\);',
           test="oot3d_grass_switch_tests (Oot3dGrassLod.ConfigFileMeaning)"),
     Guard("[decision] grass_lod off: a cull culled without levels is drawn by grass_vsh.glsl, instanced, as test.9",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
@@ -757,6 +759,39 @@ GUARDS = [
     Guard("grass_lod: the blade programs read the tuft buffer past the L1 (coherent)",
           "tools/oot3d/deko3d_grass/grass_lod_vsh.glsl",
           r'layout\(std430, binding = 0\) coherent readonly buffer GrassTufts'),
+    # --- 07/11: test.9's grass grew around Link; still flickered entering the Forest Temple (logs17) ---
+    Guard("[decision] grass_fill: absent config/grass_fill means fixed; 0/off/false restore test.9's fill",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
+          r'bool ParseGrassSwitchFill\(std::optional<std::string_view> fileText\) noexcept \{\s+'
+          r'return ParseOnUnlessOff\(fileText\);.*?'
+          r'bool ReadGrassSwitchFill\(const std::filesystem::path& configDirectory\) \{\s+'
+          r'return ReadOnUnlessOff\(configDirectory / "grass_fill"\);',
+          test="oot3d_grass_switch_tests (Oot3dGrassNearLink.FillConfigFileMeaning)"),
+    Guard("grass grew around Link as he walked (test.9): fixed fill tufts keep their full height and narrow, "
+          "far away, instead of growing; thinned tufts widen in",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_instance_stream.cpp",
+          r'if \(settings\.FillFixed\) \{.*?'
+          r'static_cast<uint8_t>\(std::lround\(fade \* 255\.0F\)\),\s+'
+          r'static_cast<uint8_t>\(std::lround\(widest \* thinGrowth \* 64\.0F\)\), 0U\);.*?'
+          r'const float rank = GrassFixedFillRank\(settings, distance\);.*?'
+          r'GrassFixedFillWidth\(rank, child, GrassFillStableValue\(tuft\.StableId, child\)\)',
+          test="oot3d_grass_switch_tests (Oot3dGrassNearLink.NothingGrowsNearLinkAsHeWalks)"),
+    Guard("grass grew around Link: the fixed fill is constant within kGrassFixedFillNear of the camera",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_instance_stream.cpp",
+          r'const float count = GrassFixedFillCount\(settings\);\s+'
+          r'if \(!\(distance > kGrassFixedFillNear\)\) return count;',
+          test="oot3d_grass_switch_tests (Oot3dGrassNearLink.FixedFillMultiplierAndWidths)"),
+    Guard("[decision] grass_fill is applied live: the renderer takes the menu's published choice at its next frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'if \(const auto fill = Oot3d::PublishedGrassSwitchFill\(\); fill && \*fill != state->Fill\) \{.*?'
+          r'state->Stream\.FillFixed = \*fill;'),
+    Guard("grass flickered in the Forest Temple entrance: new signatures must not erase a twin's rule "
+          "(it stays until the texture is resolved again)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_texture_twins.cpp",
+          r'for \(auto& \[key, entry\] : mEntries\) entry\.Stale \|= !entry\.Complete;.*?'
+          r'if \(found != mEntries\.end\(\) && !found->second\.Stale\) return found->second;',
+          test="oot3d_grass_switch_tests (Oot3dGrassTempleEntry.ATextureSeenAfterTheGroundKeepsTheEntrancesRule)",
+          forbid=r'std::erase_if\(mEntries, \[\]\(const auto& entry\) \{ return !entry\.second\.Complete; \}\);'),
     # --- 06/11: floors shimmered in "square pixels" on deko3d (Forest Temple, since test.3; logs15) ---
     # The shaders add the PICA LOD bias to their explicit LOD; a sampler bias adds to it again
     # (-1.7 became -3.4: level 0 far away). SWITCH_PORT.md "Floor shimmer on deko3d".

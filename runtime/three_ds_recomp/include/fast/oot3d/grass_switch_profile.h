@@ -68,6 +68,22 @@ void PublishGrassSwitchDistance(GrassSwitchDistance distance) noexcept;
 void PublishGrassSwitchLod(bool on) noexcept;
 [[nodiscard]] std::optional<bool> PublishedGrassSwitchLod() noexcept;
 
+// config/grass_fill (L3+R3 > Video > "Grass near Link", applied at once;
+// SWITCH_PORT.md "Grass on deko3d: nothing grows near Link"): how the fill
+// tufts near the camera come and go (GrassStreamSettings::FillFixed).
+// - Fixed (absent file, any other word): the same fill tufts at full size
+//   within kGrassFixedFillNear wherever the camera is; past it they narrow
+//   away, and thinned tufts widen in: nothing grows out of the ground.
+// - Off ("0", "off", "false"): test.9's fill, growing out of the ground over
+//   a quarter of its distance, and thinned tufts growing in.
+[[nodiscard]] bool ParseGrassSwitchFill(std::optional<std::string_view> fileText) noexcept;
+[[nodiscard]] bool ReadGrassSwitchFill(const std::filesystem::path& configDirectory);
+// Writes config/grass_fill (removes it for fixed, writes "0" for test.9's); false when that failed.
+[[nodiscard]] bool SaveGrassSwitchFill(const std::filesystem::path& configDirectory, bool fixed);
+// The menu's choice while the game runs (nullopt before any). Any thread.
+void PublishGrassSwitchFill(bool fixed) noexcept;
+[[nodiscard]] std::optional<bool> PublishedGrassSwitchFill() noexcept;
+
 struct GrassSwitchProfile {
     // Placement: one anchor is one tuft.
     float TuftsPerSquareMeter = 40.0F;
