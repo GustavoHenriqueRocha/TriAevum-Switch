@@ -23,6 +23,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Fast::Deko3d {
@@ -30,6 +31,7 @@ namespace Fast::Deko3d {
 struct PicaResourceStats {
     uint64_t TexturesCreated = 0;
     uint64_t TexturesEvicted = 0;
+    uint64_t TexturesEvictedForBudget = 0; // of those: least recently used over the budget (not idle 30 s)
     uint64_t TextureBytes = 0;     // live
     uint64_t TextureUploadBytes = 0;
     uint64_t TexturesPredecoded = 0; // mips from the plan worker
@@ -46,6 +48,7 @@ struct PicaResourceStats {
     uint64_t TextureReplacements = 0;    // texture pack images uploaded at their own size
     uint64_t TextureReplacementBytes = 0;
     uint64_t TextureReplacementLiveBytes = 0; // pack images resident now (part of TextureBytes)
+    uint64_t TextureReplacementReuploads = 0; // pack images uploaded again (evicted since), same pack settings
 };
 
 // What one draw binds: texture handles for bindings 1..3 and 13, the vertex
@@ -177,6 +180,8 @@ class PicaResources {
     bool mReleaseStalePack = false;            // pack images of earlier settings may still be cached
     bool mPackConfigured = false;              // the pack runtime was configured (the pack was on once)
     std::vector<Texture> mRetired;
+    // Replacement keys uploaded under the current pack settings (TextureReplacementReuploads).
+    std::unordered_set<PicaTextureKey, PicaTextureKeyHash> mReplacementKeysUploaded;
     uint64_t mReplacementBytesThisFrame = 0;   // pack uploads are spread over frames
     std::unordered_map<PicaTextureKey, Texture, PicaTextureKeyHash> mTextures;
     std::unordered_map<uint64_t, Texture> mLuts;

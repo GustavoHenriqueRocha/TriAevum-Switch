@@ -571,6 +571,19 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
           r'texture->Height >= 16 && !sources\.Contains\(\*textureHash\)\) \{.*?'
           r'sources\.ObserveDecoded\(\*textureHash, texture->Width, texture->Height, rgba\);\s+\}\s+\}'),
+    # --- 06/11: floors shimmered in "square pixels" on deko3d (Forest Temple, since test.3; logs15) ---
+    # The shaders add the PICA LOD bias to their explicit LOD; a sampler bias adds to it again
+    # (-1.7 became -3.4: level 0 far away). SWITCH_PORT.md "Floor shimmer on deko3d".
+    Guard("deko3d: the PICA LOD bias is applied once, in the shader: the sampler keeps lodBias 0",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'dkSamplerDefaults\(&sampler\);.*?sampler\.lodClampMax = .*?dkSamplerDescriptorInitialize\(&descriptor, &sampler\);',
+          test="oot3d_deko3d_backend_tests (TestSamplerAndTextureKeys)",
+          forbid=r'\.lodBias\s*='),
+    Guard("deko3d: the shader is where the PICA LOD bias is applied (the sampler has none)",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_fragment_shader_gen.cpp",
+          r'return textureLod\(pica_texture0, coord, lod \+ fragment_uniforms\.texture_lod_bias\[0\]\);.*?'
+          r'return textureLod\(pica_texture1, coord, lod \+ fragment_uniforms\.texture_lod_bias\[1\]\);.*?'
+          r'return textureLod\(pica_texture2, coord, lod \+ fragment_uniforms\.texture_lod_bias\[2\]\);'),
     # --- 26/10: dev menu without buttons on deko3d ---
     Guard("dev menu (L3+R3) opened on deko3d but didn't receive controller input (no ImGui SDL backend)",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",

@@ -637,14 +637,16 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
     mFrameDraws.StartWindow();
     const auto& resources = mResources.Stats();
     Deko3d::Log("resources (%s): draws prepared=%llu rejected=%llu; textures created=%llu evicted=%llu "
-                "live=%llu MiB predecoded=%llu failures=%llu shadow_fallbacks=%llu unsupported_wraps=%llu "
-                "luts=%llu samplers=%llu; pack images=%llu uploaded=%llu MiB live=%llu MiB; "
+                "(budget %llu) live=%llu MiB predecoded=%llu failures=%llu shadow_fallbacks=%llu "
+                "unsupported_wraps=%llu luts=%llu samplers=%llu; pack images=%llu (again %llu) uploaded=%llu MiB "
+                "live=%llu MiB; "
                 "streamed vertex=%llu index=%llu uniform=%llu KiB, uniform reuses=%llu, "
                 "stream failures=%llu",
                 when, static_cast<unsigned long long>(mCounters.PicaDrawsPrepared),
                 static_cast<unsigned long long>(mCounters.PicaDrawsRejected),
                 static_cast<unsigned long long>(resources.TexturesCreated),
                 static_cast<unsigned long long>(resources.TexturesEvicted),
+                static_cast<unsigned long long>(resources.TexturesEvictedForBudget),
                 static_cast<unsigned long long>(resources.TextureBytes >> 20),
                 static_cast<unsigned long long>(resources.TexturesPredecoded),
                 static_cast<unsigned long long>(resources.TextureFailures),
@@ -653,6 +655,7 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(resources.LutsCreated),
                 static_cast<unsigned long long>(resources.Samplers),
                 static_cast<unsigned long long>(resources.TextureReplacements),
+                static_cast<unsigned long long>(resources.TextureReplacementReuploads),
                 static_cast<unsigned long long>(resources.TextureReplacementBytes >> 20),
                 static_cast<unsigned long long>(resources.TextureReplacementLiveBytes >> 20),
                 static_cast<unsigned long long>(resources.VertexBytes >> 10),

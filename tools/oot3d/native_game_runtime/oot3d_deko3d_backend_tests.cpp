@@ -223,8 +223,7 @@ void TestSamplerAndTextureKeys() {
   Require(key.Mip == PicaMipFilter::Linear, "linear mip with chain");
   Require(key.MaxLevel == 3, "MAX_LEVEL limited to the uploaded chain (min(7, 4-1))");
   Require(key.MinLevel == 3, "BASE_LEVEL doesn't exceed MAX_LEVEL");
-  Require(key.WrapS == PicaWrap::Repeat && key.WrapT == PicaWrap::MirroredRepeat && key.LodBiasRaw == -128,
-          "wrap and bias");
+  Require(key.WrapS == PicaWrap::Repeat && key.WrapT == PicaWrap::MirroredRepeat, "wrap");
   Require(MakePicaSamplerKey(view, 1).Mip == PicaMipFilter::None, "no mip: mip filter off");
   PicaSamplerKeyHash samplerHash;
   Require(samplerHash(key) == samplerHash(MakePicaSamplerKey(view, 4)), "stable hash");
@@ -234,6 +233,17 @@ void TestSamplerAndTextureKeys() {
   Require(!(textureKey == MakePicaTextureKey(other, 0x1234)), "sampler state is part of the key (as in GL)");
   PicaTextureKeyHash textureHash;
   Require(textureHash(textureKey) == textureHash(MakePicaTextureKey(view, 0x1234)), "stable texture hash");
+  // The PICA LOD bias is applied once, by the fragment shader (textureLod(...,
+  // lod + texture_lod_bias)): the sampler carries none, or a -1.7 bias (the
+  // Forest Temple's floors) sampled at -3.4 and shimmered. So the bias is in
+  // neither key: one sampler, one texture and one pack upload for any bias.
+  auto biased = view;
+  biased.LodBiasRaw = -435; // -1.7
+  Require(MakePicaSamplerKey(biased, 4) == key && samplerHash(MakePicaSamplerKey(biased, 4)) == samplerHash(key),
+          "LOD bias is not sampler state (the shader applies it)");
+  Require(MakePicaTextureKey(biased, 0x1234) == textureKey &&
+              textureHash(MakePicaTextureKey(biased, 0x1234)) == textureHash(textureKey),
+          "one texture for every LOD bias of the same image");
   Require(ClassifyPicaTexture(view) == PicaTextureUse::Color, "type 0 = color");
   view.NativeType = 2;
   Require(ClassifyPicaTexture(view) == PicaTextureUse::Shadow2D, "type 2 in slot 0 = Shadow2D");

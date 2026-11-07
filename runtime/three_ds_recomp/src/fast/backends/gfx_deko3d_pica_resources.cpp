@@ -195,7 +195,10 @@ uint32_t PicaResources::SamplerSlot(const PicaSamplerKey& key) {
     // range is relative to it, as in GL.
     sampler.lodClampMin = 0.0F;
     sampler.lodClampMax = static_cast<float>(key.MaxLevel - key.MinLevel);
-    sampler.lodBias = static_cast<float>(key.LodBiasRaw) / 256.0F;
+    // lodBias stays 0 (dkSamplerDefaults): the fragment shaders add the PICA
+    // LOD bias to their explicit LOD (textureLod(..., lod + texture_lod_bias)),
+    // and the TSC bias adds to an explicit LOD too, so a bias here doubled it
+    // (-3.4 for the Forest Temple's -1.7: floors shimmered). gfx_deko3d_pica_plan.h.
     DkSamplerDescriptor descriptor;
     dkSamplerDescriptorInitialize(&descriptor, &sampler);
     std::memcpy(&mSamplerDescriptors[slot], &descriptor, sizeof(descriptor));
@@ -291,6 +294,7 @@ void PicaResources::ApplyTexturePackSettings() {
     // (Evict) and, with the pack on, native textures resolve again (TextureHandle).
     ++mPackEpoch;
     mReleaseStalePack = true;
+    mReplacementKeysUploaded.clear(); // every pack image uploads again by design
     if (settings.Enabled || mPackConfigured) {
         // Off: the runtime drops its decoded images and pending decodes.
         ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Configure(
@@ -363,6 +367,9 @@ void PicaResources::Evict() {
         const auto found = mTextures.find(key);
         if (found == mTextures.end()) {
             continue;
+        }
+        if (idle(found->second) <= policy.MaxIdleFrames) {
+            ++mStats.TexturesEvictedForBudget; // not idle for MaxIdleFrames: the budget took it
         }
         Forget(found->second);
         mTextures.erase(found);
@@ -603,6 +610,11 @@ DkResHandle PicaResources::UploadReplacement(const Renderer3ds::PicaTextureView&
     mStats.TextureReplacementBytes += stagingBytes;
     mStats.TextureReplacementLiveBytes += texture.Bytes;
     ++mStats.TextureReplacements;
+    if (!mReplacementKeysUploaded.insert(key).second) {
+        // Uploaded before under these settings and evicted since: the surface
+        // showed its native texture again for the frames until this upload.
+        ++mStats.TextureReplacementReuploads;
+    }
     const auto inserted = mTextures.emplace(key, texture).first;
     // The GPU copy is the one drawn now; the worker decodes the file again if it is ever evicted.
     ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ReleaseDecoded(replacement.NativeHash,
