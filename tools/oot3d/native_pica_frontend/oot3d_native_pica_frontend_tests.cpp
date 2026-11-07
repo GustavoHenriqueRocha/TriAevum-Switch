@@ -530,6 +530,129 @@ int main(int argc, char** argv) {
                 "native UI lifecycle must preserve UI ownership of its list");
     }
 
+    // A list the GSP queue kicks after the next Gameplay_Draw switched the
+    // frame to its HUD phase: every span is from an earlier generation, so
+    // the list is the earlier frame's scene and keeps its on-time domain
+    // (the per-pixel blink: its world models lost their lighting, grass and
+    // placement for one frame).
+    {
+        auto lateSpans = compositionSpans;
+        for (auto& span : lateSpans) span.WriteGeneration = 7U;
+        Require(Oot3dNativeGame::IsLateCompositionCommandList(
+                    Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui, lateSpans, 8U) &&
+                    !Oot3dNativeGame::IsLateCompositionCommandList(
+                        Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui, lateSpans, 7U) &&
+                    !Oot3dNativeGame::IsLateCompositionCommandList(
+                        Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene, lateSpans, 8U) &&
+                    !Oot3dNativeGame::IsLateCompositionCommandList(
+                        Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui, lateSpans, 0U) &&
+                    !Oot3dNativeGame::IsLateCompositionCommandList(
+                        Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui,
+                        std::span<const Oot3dNativeGame::Oot3dPicaCommandListCompositionSpan>{}, 8U),
+                "late list rule");
+        auto mixed = lateSpans;
+        mixed[1].WriteGeneration = 8U;
+        Require(!Oot3dNativeGame::IsLateCompositionCommandList(
+                    Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui, mixed, 8U),
+                "a list with bytes of the current Gameplay_Draw is this frame's");
+        auto unknown = lateSpans;
+        unknown[0].WriteGeneration = 0U;
+        Require(!Oot3dNativeGame::IsLateCompositionCommandList(
+                    Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui, unknown, 8U),
+                "untracked spans are never late");
+
+        Oot3dNativeGame::Oot3dNativePicaFrontend late;
+        late.SetCommandListCompositionDomain(Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui);
+        late.SetCommandListTiming(Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene, 8U);
+        Require(late.SetNextCommandListCompositionSpans(compositionSubmit.Parameters[0],
+                                                        compositionSubmit.Parameters[1], lateSpans, &error),
+                error);
+        Require(late.SubmitGspCommand(compositionSubmit, compositionCommandList, &error), error);
+        const auto& draws = late.PendingDrawPackets();
+        Require(draws.size() == 3U &&
+                    draws[0].CompositionDomain == Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene &&
+                    draws[0].Composition.Layer == Oot3dNativeGame::Oot3dPicaCompositionLayer::OpaqueWorld &&
+                    draws[1].CompositionDomain == Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene &&
+                    draws[1].Composition.Layer == Oot3dNativeGame::Oot3dPicaCompositionLayer::Unknown &&
+                    draws[2].CompositionDomain == Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene &&
+                    draws[2].Composition.Layer == Oot3dNativeGame::Oot3dPicaCompositionLayer::TransparentWorld,
+                "a late list is attributed as if it had been kicked on time");
+        const auto& stats = late.CompositionResolveStats();
+        Require(stats.LateLists == 1U && stats.LateListDraws == 3U && stats.UiListWorldSpanDraws == 0U &&
+                    stats.NoSpanDraws == 1U && stats.SameOwnerHoleDraws == 0U,
+                "late list counters");
+        auto notes = late.TakeCompositionNotes();
+        Require(notes.size() == 1U && late.TakeCompositionNotes().empty(), "one note per late list");
+        const std::string text = Oot3dNativeGame::FormatOot3dPicaCompositionNote(notes[0]);
+        Require(text == "late_list list=14002800+24 draw=+0 domain=2->1 spans=2 generations=7..7/8 draws=3 world=2",
+                "late list note: " + text);
+
+        // The same list with config/late_lists_as_ui: the HUD-phase
+        // attribution (every draw UI), still counted and noted.
+        Oot3dNativeGame::Oot3dNativePicaFrontend asUi;
+        asUi.SetLateCommandListsOnTime(false);
+        asUi.SetCommandListCompositionDomain(Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui);
+        asUi.SetCommandListTiming(Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene, 8U);
+        Require(asUi.SetNextCommandListCompositionSpans(compositionSubmit.Parameters[0],
+                                                        compositionSubmit.Parameters[1], lateSpans, &error),
+                error);
+        Require(asUi.SubmitGspCommand(compositionSubmit, compositionCommandList, &error), error);
+        for (const auto& draw : asUi.PendingDrawPackets()) {
+            Require(draw.CompositionDomain == Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui &&
+                        draw.Composition.Layer == Oot3dNativeGame::Oot3dPicaCompositionLayer::Ui,
+                    "late_lists_as_ui keeps the HUD-phase attribution");
+        }
+        Require(asUi.CompositionResolveStats().LateLists == 1U &&
+                    asUi.CompositionResolveStats().UiListWorldSpanDraws == 2U,
+                "late_lists_as_ui counts the world draws it leaves UI");
+        notes = asUi.TakeCompositionNotes();
+        Require(notes.size() == 1U && notes[0].Kind == Oot3dNativeGame::Oot3dPicaCompositionNoteKind::LateList &&
+                    notes[0].Resolved == Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui,
+                "late_lists_as_ui notes the late list");
+
+        // This frame's HUD-phase list (spans of the current generation) stays
+        // UI and is noted when world spans are in it.
+        Oot3dNativeGame::Oot3dNativePicaFrontend current;
+        current.SetCommandListCompositionDomain(Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui);
+        current.SetCommandListTiming(Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene, 7U);
+        Require(current.SetNextCommandListCompositionSpans(compositionSubmit.Parameters[0],
+                                                           compositionSubmit.Parameters[1], lateSpans, &error),
+                error);
+        Require(current.SubmitGspCommand(compositionSubmit, compositionCommandList, &error), error);
+        for (const auto& draw : current.PendingDrawPackets()) {
+            Require(draw.CompositionDomain == Oot3dNativeGame::Oot3dPicaCompositionDomain::Ui,
+                    "this frame's HUD-phase list stays UI");
+        }
+        notes = current.TakeCompositionNotes();
+        Require(current.CompositionResolveStats().LateLists == 0U && notes.size() == 1U &&
+                    notes[0].Kind == Oot3dNativeGame::Oot3dPicaCompositionNoteKind::UiListWorld &&
+                    notes[0].WorldSpanDraws == 2U,
+                "a HUD-phase list with world spans is noted");
+
+        // A scene draw between two spans of the same CMB renderer is a hole
+        // inside one model; a scene list without spans counts its draws.
+        auto owner = compositionSpans;
+        owner[1].Attribution = owner[0].Attribution;
+        owner[0].Attribution.TemporalIdentity.Instance = 0x1234U;
+        owner[1].Attribution.TemporalIdentity.Instance = 0x1234U;
+        Oot3dNativeGame::Oot3dNativePicaFrontend holes;
+        holes.SetCommandListCompositionDomain(Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene);
+        Require(holes.SetNextCommandListCompositionSpans(compositionSubmit.Parameters[0],
+                                                         compositionSubmit.Parameters[1], owner, &error),
+                error);
+        Require(holes.SubmitGspCommand(compositionSubmit, compositionCommandList, &error), error);
+        Require(holes.SubmitGspCommand(compositionSubmit, compositionCommandList, &error), error);
+        Require(holes.CompositionResolveStats().NoSpanDraws == 1U &&
+                    holes.CompositionResolveStats().SameOwnerHoleDraws == 1U &&
+                    holes.CompositionResolveStats().BareListDraws == 3U,
+                "holes and bare lists are counted");
+        notes = holes.TakeCompositionNotes();
+        Require(notes.size() == 1U && notes[0].Kind == Oot3dNativeGame::Oot3dPicaCompositionNoteKind::SameOwnerHole &&
+                    notes[0].OffsetWords == 2U && notes[0].Before.Instance == 0x1234U &&
+                    notes[0].After.BeginAddress == 0x14002810U,
+                "a hole inside one CMB owner is noted with its neighbours");
+    }
+
     Oot3dNativeGame::Oot3dGspCommandPacket shaderSubmit{};
     shaderSubmit.Control = 1;
     shaderSubmit.Parameters[0] = 0x14002400U;

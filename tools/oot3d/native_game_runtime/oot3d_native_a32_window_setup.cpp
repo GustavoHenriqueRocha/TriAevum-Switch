@@ -207,6 +207,21 @@ void NativeA32WindowSession::Setup() {
   picaFrontend.SetDiagnosticHistoryEnabled(false);
   picaCompositionDomain =
       Oot3dNativeGame::Oot3dPicaCompositionDomain::Unknown;
+  picaRefreshCompositionDomain = picaCompositionDomain;
+  {
+    // A list the GPU queue kicks after the next frame's HUD phase began is
+    // attributed as on time; config/late_lists_as_ui restores the HUD-phase
+    // attribution (A/B for the per-pixel blink, SWITCH_PORT.md).
+    std::error_code ignored;
+#if defined(__SWITCH__)
+    const std::filesystem::path configDirectory = "sdmc:/switch/oot3dre/config";
+#else
+    const std::filesystem::path configDirectory =
+        std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "config";
+#endif
+    picaFrontend.SetLateCommandListsOnTime(
+        !std::filesystem::exists(configDirectory / "late_lists_as_ui", ignored));
+  }
   languageSettings = std::make_shared<Oot3dNativeGame::GameLanguageSettings>(
       std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "game_language.json",
       Oot3dNativeGame::DetectGameLanguages(manifest->RomFsImagePath,
@@ -223,6 +238,7 @@ void NativeA32WindowSession::Setup() {
   hostConfig.RomFsImageSize = manifest->RomFsImageSize;
   hostConfig.PicaFrontend = &picaFrontend;
   hostConfig.PicaCompositionDomain = &picaCompositionDomain;
+  hostConfig.PicaRefreshCompositionDomain = &picaRefreshCompositionDomain;
   hostConfig.PicaCompositionProvider = &picaCompositionTracker;
   hostConfig.SaveDataDirectory =
       launch.SaveDataDirectory.empty()

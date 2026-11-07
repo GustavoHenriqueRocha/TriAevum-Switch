@@ -228,6 +228,13 @@ NativeA32HostResult NativeA32CtrHostServices::HandleGspRequest(
                             static_cast<uint32_t>(
                                 Oot3dGspCommandId::SubmitCommandList) &&
                         mConfig.PicaCompositionProvider != nullptr) {
+                        mConfig.PicaFrontend->SetCommandListTiming(
+                            mConfig.PicaRefreshCompositionDomain != nullptr
+                                ? *mConfig.PicaRefreshCompositionDomain
+                                : Oot3dPicaCompositionDomain::Unknown,
+                            mConfig.PicaRefreshCompositionDomain != nullptr
+                                ? mConfig.PicaCompositionProvider->CurrentWriteGeneration()
+                                : 0U);
                         std::vector<Oot3dPicaCommandListCompositionSpan>
                             compositionSpans;
                         submitted =

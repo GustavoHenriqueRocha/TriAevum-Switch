@@ -159,22 +159,28 @@ std::string FormatLightingTransient(const LightingTransient& transient) {
         result += '=' + std::to_string(s.Lost[index]);
         open = true;
     }
-    length = std::snprintf(text, sizeof(text),
-                           "; first domain=%u layer=%u provenance=%u pc=%08x actor=%llx list=%08x+%u)",
-                           s.LostDomain, s.LostLayer, s.LostProvenance, s.LostSourcePc,
-                           static_cast<unsigned long long>(s.LostActor), s.LostCommandList, s.LostOffsetWords);
-    result.append(text, static_cast<size_t>(std::clamp(length, 0, static_cast<int>(sizeof(text)) - 1)));
+    if (s.LostToComposition() != 0U) {
+        length = std::snprintf(text, sizeof(text),
+                               "; first domain=%u layer=%u provenance=%u pc=%08x actor=%llx list=%08x+%u "
+                               "vertices=%u geometry=%llx",
+                               s.LostDomain, s.LostLayer, s.LostProvenance, s.LostSourcePc,
+                               static_cast<unsigned long long>(s.LostActor), s.LostCommandList, s.LostOffsetWords,
+                               s.LostVertices, static_cast<unsigned long long>(s.LostGeometry));
+        result.append(text, static_cast<size_t>(std::clamp(length, 0, static_cast<int>(sizeof(text)) - 1)));
+    }
+    result += ')';
     return result;
 }
 
 std::optional<LightingTransient> LightingTransientWatch::Begin(uint64_t deviceFrame, bool inBetween) {
     std::optional<LightingTransient> transient;
     if (mOpened) {
-        if (mClosedCount == 2U && IsLightingTransient(mClosed[0], mClosed[1], mOpen))
-            transient = LightingTransient{mClosed[0], mClosed[1], mOpen};
-        mClosed[0] = mClosed[1];
-        mClosed[1] = mOpen;
-        mClosedCount = std::min<size_t>(mClosedCount + 1U, 2U);
+        auto& history = mHistory[mOpen.InBetween ? 1U : 0U];
+        if (history.Count == 2U && IsLightingTransient(history.Closed[0], history.Closed[1], mOpen))
+            transient = LightingTransient{history.Closed[0], history.Closed[1], mOpen};
+        history.Closed[0] = history.Closed[1];
+        history.Closed[1] = mOpen;
+        history.Count = std::min<size_t>(history.Count + 1U, 2U);
     }
     mOpen = {};
     mOpen.DeviceFrame = deviceFrame;
@@ -205,7 +211,8 @@ void LightingTransientWatch::Native(const Renderer3ds::PicaDrawView& draw) {
 void LightingTransientWatch::Refused(const Renderer3ds::PicaDrawView& draw, PerPixelRefusal refusal) {
     const auto lost = ClassifyLostWorldComposition(draw, refusal);
     if (!lost || !Counts(draw)) return;
-    if (mOpen.LostTotal() == 0U) {
+    const bool composition = *lost != LostWorldComposition::Atmosphere && *lost != LostWorldComposition::Other;
+    if (composition && mOpen.LostToComposition() == 0U) {
         mOpen.LostDomain = static_cast<uint8_t>(draw.CompositionDomain);
         mOpen.LostLayer = static_cast<uint8_t>(draw.Composition.Layer);
         mOpen.LostProvenance = static_cast<uint8_t>(draw.Composition.Provenance);
@@ -213,6 +220,8 @@ void LightingTransientWatch::Refused(const Renderer3ds::PicaDrawView& draw, PerP
         mOpen.LostActor = draw.Composition.NativeActorIdentity;
         mOpen.LostCommandList = draw.CommandListAddress;
         mOpen.LostOffsetWords = draw.CommandListOffsetWords;
+        mOpen.LostVertices = draw.VertexCount;
+        mOpen.LostGeometry = draw.GeometryIdentityAvailable ? draw.GeometryIdentity : 0U;
     }
     ++mOpen.Lost[static_cast<size_t>(*lost)];
 }

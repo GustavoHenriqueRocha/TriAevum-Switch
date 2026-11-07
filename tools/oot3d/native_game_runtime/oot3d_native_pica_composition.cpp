@@ -232,6 +232,9 @@ std::span<const uint32_t> Oot3dNativePicaCompositionHookPcs() noexcept {
 
 bool Oot3dNativePicaCompositionTracker::RecordPendingSpan(
     Oot3dPicaCommandListCompositionSpan span) {
+    // The Gameplay_Draw these bytes belong to (a list kicked after the next
+    // one began is late: IsLateCompositionCommandList).
+    span.WriteGeneration = mWriteGeneration;
     // Reject a crossing owner before erasing nested spans. Otherwise an invalid
     // UI range could destroy valid scene attribution even though it is rejected.
     if (span.Attribution.Layer == Oot3dPicaCompositionLayer::Ui) {
@@ -261,6 +264,7 @@ bool Oot3dNativePicaCompositionTracker::RecordPendingSpan(
             span.LightBinding == it->LightBinding && (overlaps || adjacent)) {
             span.BeginAddress = std::min(span.BeginAddress, it->BeginAddress);
             span.EndAddress = std::max(span.EndAddress, it->EndAddress);
+            span.WriteGeneration = std::max(span.WriteGeneration, it->WriteGeneration);
             it = mPendingSpans.erase(it);
             ++mStats.CoalescedPacketSpans;
             continue;
@@ -303,6 +307,7 @@ void Oot3dNativePicaCompositionTracker::ObserveBlockEntry(
         mActorDrawStack.pop_back();
     }
     if (pc == kOot3dGameplayDrawEntry) {
+        if (++mWriteGeneration == 0U) ++mWriteGeneration;
         mProjectedShadowRenderers.clear();
         mQueuedComposition.clear();
         mActorDrawStack.clear();

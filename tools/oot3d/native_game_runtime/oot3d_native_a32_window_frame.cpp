@@ -1003,6 +1003,7 @@ bool NativeA32WindowSession::RunFrame() {
       topScreenGameplayInputMode
           ? Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene
           : Oot3dNativeGame::Oot3dPicaCompositionDomain::Unknown;
+  picaRefreshCompositionDomain = picaCompositionDomain;
   bool topScreenStartRoutingEligible =
       uiLifecycleBridge.NativeGameplayPresentationActive() &&
       topScreenGameplayInputMode &&
@@ -2061,7 +2062,29 @@ bool NativeA32WindowSession::RunFrame() {
              << " cmb_invalid="
              << delta(composition.InvalidCmbPassEntries + composition.InvalidCmbReturnAddresses,
                       previousComposition.InvalidCmbPassEntries + previousComposition.InvalidCmbReturnAddresses);
+        // Mesh/primitive packets whose range could not be recorded (no span
+        // for their draws, and no other counter says so).
+        const auto invalid = [](const Oot3dNativeGame::Oot3dNativePicaCompositionStats& stats) {
+          return stats.InvalidPacketSpans + stats.ReadFailures + stats.InvalidPrimitivePacketRanges +
+                 stats.NestedPrimitivePacketEntries + stats.InvalidPrimitivePacketReturnAddresses +
+                 stats.UnmatchedPrimitivePacketExits + stats.InvalidAtmosphereCommandRanges;
+        };
+        perf << " spans_invalid=" << delta(invalid(composition), invalid(previousComposition));
         previousComposition = composition;
+        // How the frontend attributed draws without a plain span hit
+        // (Oot3dPicaCompositionResolveStats): late lists (kicked after the
+        // next frame's HUD phase began) and their draws, draws left UI inside
+        // a world span, scene draws in no span (of them inside one CMB
+        // owner), scene draws of lists without spans.
+        static Oot3dNativeGame::Oot3dPicaCompositionResolveStats previousResolve{};
+        const auto& resolve = picaFrontend.CompositionResolveStats();
+        perf << " late_lists=" << delta(resolve.LateLists, previousResolve.LateLists)
+             << " late_draws=" << delta(resolve.LateListDraws, previousResolve.LateListDraws)
+             << " ui_world_draws=" << delta(resolve.UiListWorldSpanDraws, previousResolve.UiListWorldSpanDraws)
+             << " no_span_draws=" << delta(resolve.NoSpanDraws, previousResolve.NoSpanDraws)
+             << " owner_holes=" << delta(resolve.SameOwnerHoleDraws, previousResolve.SameOwnerHoleDraws)
+             << " bare_list_draws=" << delta(resolve.BareListDraws, previousResolve.BareListDraws);
+        previousResolve = resolve;
       }
       // Game-thread work outside the phases above, ms per host frame.
       {
@@ -2140,6 +2163,13 @@ bool NativeA32WindowSession::RunFrame() {
       const std::string dkperf = Fast::Deko3dPerfReport(runFrameCount);
       if (!dkperf.empty()) {
         perf << dkperf << '\n';
+      }
+      // Late lists, HUD-phase lists with world spans and holes inside one
+      // CMB owner since the last window (at most 64 in all; the per-pixel
+      // blink, SWITCH_PORT.md).
+      for (const auto& note : picaFrontend.TakeCompositionNotes()) {
+        perf << "composition note: window_end=" << runFrameCount << ' '
+             << Oot3dNativeGame::FormatOot3dPicaCompositionNote(note) << '\n';
       }
       // The last windows are repeated in a guest fault report
       // (oot3d_native_guest_fault_report.h): guest = kNames[0], present = [13].
@@ -2314,6 +2344,7 @@ bool NativeA32WindowSession::SampleGuestRefreshInput(
         refreshedTopScreenGameplayInputMode
             ? Oot3dNativeGame::Oot3dPicaCompositionDomain::Scene
             : Oot3dNativeGame::Oot3dPicaCompositionDomain::Unknown;
+    picaRefreshCompositionDomain = picaCompositionDomain;
   }
   // Re-arm after any state restore: RestoreState replaces the memory
   // image, and the watch is diagnostic state that must not disappear with

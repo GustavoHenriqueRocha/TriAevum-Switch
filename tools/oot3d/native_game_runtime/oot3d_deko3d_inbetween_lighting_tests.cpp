@@ -473,9 +473,13 @@ void TestLostWorldComposition() {
 
 // The one-frame blink as the CPU sees it: a presented frame whose world
 // models lose their composition (a list submitted in the HUD phase), or
-// whose lit draws lose the environment, between two frames that agree. The
-// watch reports it (with the first lost draw) once its next frame is known;
-// steady frames, dependency flushes and two-frame changes are not transients.
+// whose lit draws lose the environment, between two frames of its kind that
+// agree. At 60 FPS an in-between frame repeats its real frame's draws: a game
+// frame that loses a draw loses it in both, and each kind's own neighbours
+// still show it (compared across kinds, the pair hid it: logs17). The watch
+// reports it (with the first draw lost to its composition) once the next
+// frame of its kind is known; steady frames, dependency flushes and
+// two-frame changes are not transients.
 void TestLightingTransients() {
     using namespace Fast::Deko3d;
     const auto program = CmbProgram();
@@ -484,56 +488,90 @@ void TestLightingTransients() {
     backend.Environment = SceneEnvironment();
     auto& watch = backend.Watch;
 
-    // Steady frames (with a dependency flush of lost-looking draws).
+    // 60 FPS: real (even) and in-between (odd) frames, with a dependency
+    // flush of lost-looking draws in the steady ones.
     for (uint64_t frame = 10; frame < 14; ++frame) {
         Require(!watch.Begin(frame, frame % 2U != 0U), "steady frames are not transients");
         PresentFrame(backend, link, 8, 0, Attribution::World, 3);
     }
-    // Frame 14: 6 of Link's 8 draws in a list submitted in the HUD phase.
+    // Game frame 14/15: 6 of Link's 8 draws in a list submitted in the HUD
+    // phase, in the real frame and in its in-between frame.
     Require(!watch.Begin(14, false), "frame 12 agrees with its neighbours");
     PresentFrame(backend, link, 8, 6, Attribution::UiList);
-    Require(!watch.Begin(15, true), "frame 14 is reported once frame 15 is known");
+    Require(!watch.Begin(15, true), "frame 13 agrees with its neighbours");
+    PresentFrame(backend, link, 8, 6, Attribution::UiList);
+    Require(!watch.Begin(16, false), "frame 14 is reported once real frame 16 is known");
     PresentFrame(backend, link, 8, 0, Attribution::World);
-    const auto lost = watch.Begin(16, false);
+    const auto lost = watch.Begin(17, true);
     Require(lost.has_value() && lost->Sample.DeviceFrame == 14U && !lost->Sample.InBetween &&
-                lost->Sample.Lit == 2U && lost->Before.Lit == 8U && lost->After.Lit == 8U &&
+                lost->Before.DeviceFrame == 12U && lost->After.DeviceFrame == 16U && lost->Sample.Lit == 2U &&
+                lost->Before.Lit == 8U && lost->After.Lit == 8U &&
                 lost->Sample.Lost[static_cast<size_t>(LostWorldComposition::UiList)] == 6U,
-            "a frame whose world models lost their composition is a transient");
+            "a real frame whose world models lost their composition is a transient among real frames");
     const std::string text = FormatLightingTransient(*lost);
-    Require(text == "frame 14 (real) lit 8/2/8, no env 0/0/0, no rim 0/0/0, native 0/0/0, lost world 0/6/0 "
-                    "(ui_list=6; first domain=2 layer=4 provenance=3 pc=00000000 actor=0 list=00000000+0)",
-            "transient log: " + text);
+    const std::string head = "frame 14 (real) lit 8/2/8, no env 0/0/0, no rim 0/0/0, native 0/0/0, lost world 0/6/0 "
+                             "(ui_list=6; first domain=2 layer=4 provenance=3 pc=00000000 actor=0 list=00000000+0 "
+                             "vertices=";
+    Require(text.rfind(head, 0) == 0U && text.back() == ')', "transient log: " + text);
+    PresentFrame(backend, link, 8, 0, Attribution::World);
+    const auto pair = watch.Begin(18, false);
+    Require(pair.has_value() && pair->Sample.DeviceFrame == 15U && pair->Sample.InBetween &&
+                pair->Before.DeviceFrame == 13U && pair->After.DeviceFrame == 17U && pair->Sample.Lit == 2U,
+            "its in-between frame is a transient among in-between frames");
     PresentFrame(backend, link, 8, 0, Attribution::World);
 
-    // Frame 17 (in-between): the scene environment off for one frame.
-    Require(!watch.Begin(17, true), "frame 15 follows the transient frame 14");
+    // In-between frame 19: the scene environment off for one frame.
+    Require(!watch.Begin(19, true), "frame 16 follows the transient frame 14");
     backend.Environment.Enabled = false;
     PresentFrame(backend, link, 8, 0, Attribution::World);
     backend.Environment = SceneEnvironment();
-    Require(!watch.Begin(18, false), "frame 17 is reported once frame 18 is known");
+    Require(!watch.Begin(20, false), "frame 17 follows the transient frame 15");
     PresentFrame(backend, link, 8, 0, Attribution::World);
-    const auto dark = watch.Begin(19, true);
-    Require(dark.has_value() && dark->Sample.DeviceFrame == 17U && dark->Sample.InBetween &&
+    Require(!watch.Begin(21, true), "frame 18 agrees with its neighbours");
+    PresentFrame(backend, link, 8, 0, Attribution::World);
+    const auto dark = watch.Begin(22, false);
+    Require(dark.has_value() && dark->Sample.DeviceFrame == 19U && dark->Sample.InBetween &&
                 dark->Sample.Lit == 8U && dark->Sample.LitWithoutEnvironment == 8U &&
                 dark->Sample.LitWithoutRim == 8U,
             "a frame lit without the scene environment is a transient");
     PresentFrame(backend, link, 8, 0, Attribution::World);
 
+    // 30 FPS (real frames only). The first draw lost to its composition is
+    // named, not the steady atmosphere draw before it.
+    Require(!watch.Begin(30, false), "frame 20 agrees with its neighbours");
+    PresentFrame(backend, link, 8, 1, Attribution::Atmosphere);
+    Require(!watch.Begin(31, false), "frame 22 agrees with its neighbours");
+    PresentFrame(backend, link, 1, 1, Attribution::Atmosphere);
+    PresentFrame(backend, link, 1, 1, Attribution::NoSpan);
+    PresentFrame(backend, link, 6, 0, Attribution::World);
+    Require(!watch.Begin(32, false), "frame 30 agrees with its neighbours");
+    PresentFrame(backend, link, 8, 1, Attribution::Atmosphere);
+    const auto span = watch.Begin(33, false);
+    Require(span.has_value() && span->Sample.DeviceFrame == 31U &&
+                span->Sample.Lost[static_cast<size_t>(LostWorldComposition::NoSpan)] == 1U &&
+                span->Sample.Lost[static_cast<size_t>(LostWorldComposition::Atmosphere)] == 1U &&
+                span->Sample.LostLayer == 0U && span->Sample.LostDomain == 1U,
+            "a draw without span is a transient, named past the atmosphere draw");
+    Require(FormatLightingTransient(*span).find("(no_span=1 atmosphere=1; first domain=1 layer=0 provenance=0") !=
+                std::string::npos,
+            "the first draw lost to its composition: " + FormatLightingTransient(*span));
+    PresentFrame(backend, link, 8, 0, Attribution::World);
+
     // Two frames without the environment (an area change) and a scene that
     // lights fewer than 4 draws are not one-frame transients.
-    Require(!watch.Begin(20, false), "frame 18 agrees with its neighbours");
+    Require(!watch.Begin(34, false), "frame 32 agrees with its neighbours");
     backend.Environment.Enabled = false;
     PresentFrame(backend, link, 8, 0, Attribution::World);
-    Require(!watch.Begin(21, false), "frame 19 precedes the environment going off");
+    Require(!watch.Begin(35, false), "frame 33 precedes the environment going off");
     PresentFrame(backend, link, 8, 0, Attribution::World);
     backend.Environment = SceneEnvironment();
-    Require(!watch.Begin(22, false), "the first of two frames without the environment");
+    Require(!watch.Begin(36, false), "the first of two frames without the environment");
     PresentFrame(backend, link, 3, 0, Attribution::World);
-    Require(!watch.Begin(23, false), "the second of two frames without the environment");
+    Require(!watch.Begin(37, false), "the second of two frames without the environment");
     PresentFrame(backend, link, 1, 1, Attribution::UiList);
-    Require(!watch.Begin(24, false), "frame 22 lights fewer than 4 draws");
+    Require(!watch.Begin(38, false), "frame 36 lights fewer than 4 draws");
     PresentFrame(backend, link, 3, 0, Attribution::World);
-    Require(!watch.Begin(25, false), "frame 23's neighbours light fewer than 4 draws");
+    Require(!watch.Begin(39, false), "frame 37's neighbours light fewer than 4 draws");
 
     Require(IsLightingTransient({.Lit = 8}, {.Lit = 5}, {.Lit = 8}), "5 of 8 lit draws is a dip");
     Require(!IsLightingTransient({.Lit = 8}, {.Lit = 6}, {.Lit = 8}), "6 of 8 lit draws is not a dip");
