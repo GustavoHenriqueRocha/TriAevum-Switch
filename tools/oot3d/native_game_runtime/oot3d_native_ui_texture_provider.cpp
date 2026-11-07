@@ -326,7 +326,7 @@ bool Oot3dNativeA32UiTextureProvider::ResolvePixels(
             if (ahead) {
                 // Identified by its encoded bytes: nothing to decode here.
                 ApplyCustomTexture(profileTexture->NativePicaFormat,
-                                   profileTexture->EncodedPayload, pixels, true);
+                                   profileTexture->EncodedPayload, pixels, true, false);
                 return true;
             }
             if (!Oot3d::Renderer::DecodePicaTextureRgba8(
@@ -339,7 +339,7 @@ bool Oot3dNativeA32UiTextureProvider::ResolvePixels(
             }
             ++mStats.profile_asset_resolves;
             ApplyCustomTexture(profileTexture->NativePicaFormat,
-                               profileTexture->EncodedPayload, pixels, false);
+                               profileTexture->EncodedPayload, pixels, false, false);
             return true;
         }
     }
