@@ -28,6 +28,13 @@ class Guard:
 
 
 GUARDS = [
+    # --- 11/07: Upscaling looked live on deko3d; only the OpenGL backend reads config/upscaler ---
+    Guard("Video > Upscaling: disabled with a note on deko3d (no FSR step there)",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'const bool upscalerApplies = VideoSettings::UpscalerApplies\(Fast::Deko3dRendererSelected\(\)\);\s+'
+          r'ImGui::BeginDisabled\(!upscalerApplies\);\s+if \(ImGui::Combo\("Upscaling".*?ImGui::EndDisabled\(\);\s+'
+          r'if \(!upscalerApplies\) ImGui::TextDisabled\("%s", VideoSettings::kUpscalerDeko3dNote\);',
+          test="oot3d_video_settings_tests (UpscalerApplies)"),
     # --- 11/06: fastmem phase 1, config/fastmem_window (oot3d_switch_guest_window.h) ---
     # Absent must stay today's allocation bit for bit; phase 1 must not touch a shard-visible
     # header (the 256 shards and the PGO profile stay valid).

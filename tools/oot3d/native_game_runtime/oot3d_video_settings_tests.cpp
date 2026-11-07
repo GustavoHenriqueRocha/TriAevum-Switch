@@ -86,6 +86,12 @@ int main() {
     WriteText(dir / "anisotropy", "8");
     Require(VideoSettings::Load(dir).Anisotropy, "8x counts as on");
 
+    // Upscaling only means something on OpenGL; deko3d shows it disabled.
+    Require(VideoSettings::UpscalerApplies(false), "upscaler applies on OpenGL");
+    Require(!VideoSettings::UpscalerApplies(true), "upscaler has no effect on deko3d");
+    Require(std::string(VideoSettings::kUpscalerDeko3dNote).find("deko3d") != std::string::npos,
+            "deko3d note names the renderer");
+
     std::filesystem::remove_all(dir);
   } catch (const std::exception &error) {
     std::cerr << "FAIL: " << error.what() << '\n';

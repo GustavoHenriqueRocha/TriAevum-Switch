@@ -41,6 +41,13 @@ struct VideoSettings {
 
   bool operator==(const VideoSettings &) const = default;
 
+  // Only the OpenGL backend reads upscaler/sharpen (gfx_opengl_pica.cpp);
+  // deko3d (config/renderer) has no FSR step, so the video tab shows the
+  // option disabled with kUpscalerDeko3dNote.
+  static constexpr bool UpscalerApplies(bool deko3d) { return !deko3d; }
+  static constexpr const char *kUpscalerDeko3dNote =
+      "Upscaling has no effect with the deko3d renderer (OpenGL renderer only).";
+
   // Same rule as PicaGlScale::ParseResolutionScale: a multiple of 1/4 in
   // [1, maxScale]; "," is accepted for ".".
   static float ParseScale(std::string text, float maxScale) {

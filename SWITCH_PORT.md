@@ -58,6 +58,9 @@ Performance and usability:
   `sharpen` = `0.0`–`1.0` (linear RCAS strength; with `fsr` the default is `0.2`, `0` disables RCAS);
   `anisotropy` = `2`/`4`/`8`/`16` (only PICA textures with linear filter and mipmaps).
   Order: render N× → AA → EASU → RCAS → window. Top screen only (opaque presentation).
+  OpenGL renderer only: deko3d (`config/renderer`) has no EASU/RCAS step, so L3+R3 > Video >
+  "Upscaling" is shown disabled there with the note "no effect with the deko3d renderer"
+  (`VideoSettings::UpscalerApplies`, `oot3d_video_settings_tests`).
 - **16:9 widescreen** (on by default on the console): `config/widescreen` = `0` disables (back to 5:3
   with bars), `1` enables. Only the top-screen target is widened (400→427 logical; 853 px at scale 2,
   1280 at scale 3) and the horizontal FOV grows by the same ratio through the projection hook the PC

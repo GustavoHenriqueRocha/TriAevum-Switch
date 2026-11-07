@@ -3,6 +3,7 @@
 #include "oot3d_fps_counter.h"
 #include "oot3d_native_launch_frame_rate.h"
 #include "oot3d_switch_gpu_performance.h"
+#include "fast/backends/gfx_deko3d.h"
 #include "fast/backends/gfx_deko3d_lighting.h"
 #include "fast/oot3d/graphics_settings_runtime.h"
 #include "oot3d/renderer/azahar_texture_pack_settings.h"
@@ -103,10 +104,14 @@ public:
     const char *const upscalers[] = {"FSR + sharpening (default)", "FSR without sharpening",
                                      "Linear (lightest)"};
     int upscaler = static_cast<int>(mSettings.Upscaler);
+    const bool upscalerApplies = VideoSettings::UpscalerApplies(Fast::Deko3dRendererSelected());
+    ImGui::BeginDisabled(!upscalerApplies);
     if (ImGui::Combo("Upscaling", &upscaler, upscalers, 3)) {
       mSettings.Upscaler = static_cast<VideoSettings::Upscale>(upscaler);
       changed = true;
     }
+    ImGui::EndDisabled();
+    if (!upscalerApplies) ImGui::TextDisabled("%s", VideoSettings::kUpscalerDeko3dNote);
     const char *const filters[] = {"Off", "4x (default)"};
     int anisotropy = mSettings.Anisotropy ? 1 : 0;
     if (ImGui::Combo("Anisotropic filter", &anisotropy, filters, 2)) {
