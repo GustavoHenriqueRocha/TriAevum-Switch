@@ -289,6 +289,67 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
   atlas. Item icons and rupee digits (`num_all00`, legacy hash `FABD759BB95C1C6A`) have no image in the
   mod; a texture pack that has them (HenrikoMagnifico's does) applies as before.
 
+### Fixes from upstream after beta.1c (07/11)
+
+Triage of the 125 commits that upstream `coccofresco/TriAevum` `main` (`8f69a26f`, 22/10, GPL-3.0-or-later)
+has after this fork's merge base with it (`23eac6b`, beta.1c r12). Ported commits are cherry-picked with
+`-x` (the source sha is in each message).
+
+**Ported**
+
+| Upstream | Here | What |
+|---|---|---|
+| `657e3d0f` (#104) | `bcf1f8ad` | The process faulted shortly before the end credits: the game invalidates DSP-shared buffers with dsp::DSP command 0x14 (header `0x00140082`), which the host left unserved (`TRIAEVUM_HOST_REQUEST_UNSERVED … detail=0x140082`). FlushDataCache (0x13) and InvalidateDataCache (0x14) are now validated and acknowledged like their gsp::Gpu counterparts (guest memory is coherent on the host). Test: `oot3d_native_a32_ctr_host_tests`. |
+| `034405bd` | `faf59da1` | Leaving a hint-stone vision closed the game: when the running guest thread called ExitThread and no other thread was ready, `NativeA32Process::Run` reported Terminated although the others only waited, and the window loop (`oot3d_native_a32_window.cpp`, `oot3d_native_a32_window_frame.cpp`) ended. Run reports Waiting until every thread has exited (`ResolveStoppedThreadRunKind`). Tests: `oot3d_native_a32_process_tests` (`TestStoppedThreadRunKind`, `TestThreadExitWhileOthersWait`). |
+| `e6f2ff67` | `153207ec` | Diagnostics only: "renderer reached guest state while the guest was running" names the access (memory read/write, raw copy, PPF interrupt, deferred writes). |
+
+Both fixes have guards in `tests/switch/test_bug_guards.py`.
+
+**Already in this branch**
+
+- `a4582abb` (one log per launch, null grass ActiveRects) as `05e09969`; `cf84b46b` (#80, SELECT opens
+  Save/Quit) as `06885227`.
+- `5704e15a` (#89, dungeon map floors take the D-pad and stick): fixed here on 04/11 (`311d8fd7`) the other
+  way round: `PauseDungeonMap_HandleCursorInput` (0x00442F38) is not intercepted at all, so the native floor
+  and item navigation always runs (guards forbid the hook). Upstream re-intercepts it only to keep B with the
+  mod; nothing observed here needs that.
+- `68d527c6` (#73, texture packs replace the TopScreen HUD textures): this branch's own `7f943738` (and the
+  07/11 HUD identity work above) lets packs reach the HUD.
+
+**Not ported**
+
+- SingleScreen 3.0/3.1 source port and its follow-ups (`5acf8138`, `14edc1eb`, `1c4e9f06`, `ecda6605`,
+  `898dfd11`, `379276ac`, `b0ca70f9`, `be6bf208`, `f181ec69`, `fc5ddfa6`, `5da8aa7c`, `d8ffc8f1`, `6f478bcc`,
+  `ac63eb21`, `94b293ea`, `54fe8edf`, `10366406`, `46ce35d4`), Roll Dash (`4b88e124`, `a3eeb1e2`), the Navi
+  hat redirect (`5b34bd61`, `3c2ed0f3`), the vision lists on the upper screen (`0046239c`) and Ocarina
+  Reframed (`f7b5637f`, `96fb3438`, `98a1f30a`, `669e7f98`): large features on code this branch does not
+  have (its TopScreen is the 2.1.1 port with 3.x art). The fixes in the list only repair that code. A
+  port of the 3.x profile would be its own project.
+- Grass default rules 26 and 27 (`186b1a00`): the Switch grass reads the same rules
+  (`triaevum_product_graphics.inc`), but this adds grass on two more surfaces, so it costs GPU time on the
+  console. Worth a measured round of its own.
+- Fixed x2/x3 interpolation samples (0.5, 1) instead of (0, 0.5) (`830902e7`): this branch's fps60 path
+  relies on alpha 0 being the exact previous game frame (`config/interp_exact_step`,
+  `config/interp_carry_unmatched`), so the change needs its own design and test.
+- Input-latency work for the PC's SDL/swapchain presentation (`9299fc31`, `2af66a68`), the PC window
+  (`c9b6e000`), the clang 22 developer build (`d8df14f8`), diagnostics for PC investigations (`4a8709dd`),
+  the file-select environment identity (`9be3444d`, `7d19ce99`), the in-game settings menu and photo mode
+  (`91a06ca5`), the Link remodel overlay (`9c90abb9`).
+- PC-only renderer and tooling: Vulkan/NRI and Vulkan PICA (`b830df28`, `cf2eaca3`, `7943a0a0`,
+  `b43f76a2`, `e91ee5e4`, `80d9a50b`, `45d542e2`, `1c07ff0c`, `7541876c`), shadows (`3d5e2ae1`), the
+  Enhanced shader corpus (`4d7febdf`, `cb8c5665`, `c958bb01`, `dace75f1`, `3d786374`, `0952b590`,
+  `c2ffa2d4`, `a0b3a838`, `e2f2ffa3`, `e71efe89`, `4f7250d0`, `fbcd5c6a`, `8247e9b2`, `58815b7f`,
+  `50a399d2`, `2e161cf4`), the GPU grass (`d277df25`, `cc4ebfe7`, `72514cea`, `da1177dc`, `eb5857b8`,
+  `589de532`, `74ef7bdc`, `8e84f519`, `5a4bdd4d`, `fd3a3398`, `c34dd7b0`, `14ed0534`, `8d988c02`,
+  `eb4a70c1`, `0bdc0f9d`, `3948b846`, `940bc7eb`, `93c2e14d`, `33c9e31d`, `c5707462`, `92412701`,
+  `680d148c`, `4963cc1e`, `2ebf9eec`, `28b21c0b`; the Switch grass is its own deko3d path), reflections and
+  MXAO (`b20ff67e`, `ef7dbb28`).
+- Windows, Forge, release, AppImage, docs and licence files (`eb1aef24`, `0947435e`, `f048fc2a`,
+  `f637990e`, `5701149a`, `8ab04c75`, `d67c7e7b`, `d78398ed`, `da5bec5d`, `7655c7b4`, `399ef12e`,
+  `32855408`, `a4b881da`, `1ec489b8`, `c291e707`, `17218b0c`, `0d1c5637`, `a56f9649`, `f3524220`,
+  `13a95dcc`, `16befec8`, `e53ac808`, `a741eda6`, `6fed40ae`, `48590372`, `8f69a26f`) and the merge
+  `b9f248bb`.
+
 ## How to build (Linux)
 
 1. devkitPro (`switch-dev switch-sdl2 switch-mesa switch-glad switch-zlib`), `cmake`, Python 3 with `capstone`.

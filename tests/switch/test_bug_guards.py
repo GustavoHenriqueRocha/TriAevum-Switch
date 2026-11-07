@@ -1417,6 +1417,22 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'blockEntryHooks = std::vector<uint32_t>\{[^}]*Oot3dNativeGame::kLandingRollHookPc,',
           "oot3d_landing_roll_tests"),
+    # --- 07/11: fixes from upstream coccofresco/TriAevum after beta.1c ---
+    # dsp::DSP 0x14 (header 0x00140082) went unserved shortly before the end credits
+    # (TRIAEVUM_HOST_REQUEST_UNSERVED detail=0x140082); upstream 657e3d0f (#104).
+    Guard("process faulted before the end credits (DSP InvalidateDataCache 0x14 unserved, upstream #104)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_dsp.cpp",
+          r'event\.Detail == kDspFlushDataCacheRequest \|\|\s+event\.Detail == kDspInvalidateDataCacheRequest',
+          "oot3d_native_a32_ctr_host_tests"),
+    # A guest thread's ExitThread while the others only waited made Run report
+    # Terminated, and the window loop ended the game (leaving a hint-stone vision);
+    # upstream 034405bd.
+    Guard("game closed when one guest thread exited while the others waited (hint-stone vision)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'result\.Kind = ResolveStoppedThreadRunKind\(\s+result\.Kind, AllThreadsTerminated\(\)\);.*?'
+          r'result\.Kind = ResolveStoppedThreadRunKind\(\s+result\.Kind, AllThreadsTerminated\(\)\);',
+          "oot3d_native_a32_process_tests (TestThreadExitWhileOthersWait)",
+          forbid=r'if \(AllThreadsTerminated\(\)\) \{\s+result\.Kind = NativeA32ProcessRunKind::Terminated;'),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay
