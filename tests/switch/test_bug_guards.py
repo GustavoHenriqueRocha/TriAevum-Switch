@@ -732,6 +732,31 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/oot3d/grass_texture_twin_table.cpp",
           r'\{0xd885db352c997c7bULL, 256, 256, 0x7a41e65008d2ea50ULL, 256, 256, GrassSampleChannel::Luminance,',
           test="oot3d_grass_switch_tests (TheFirstFrameOfAFreshSessionGivesTheForestTempleEntranceItsRule)"),
+    # --- 07/11: grass cost per tuft, config/grass_lod (SWITCH_PORT.md "Grass on deko3d: cost per tuft") ---
+    Guard("[decision] grass_lod: absent config/grass_lod means on; 0/off/false restore test.9's grass",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
+          r'bool ParseGrassSwitchLod\(std::optional<std::string_view> fileText\) noexcept \{\s+'
+          r'if \(!fileText\.has_value\(\)\) return true;.*?'
+          r'return !\(word == "0" \|\| word == "off" \|\| word == "false"\);',
+          test="oot3d_grass_switch_tests (Oot3dGrassLod.ConfigFileMeaning)"),
+    Guard("[decision] grass_lod off: a cull culled without levels is drawn by grass_vsh.glsl, instanced, as test.9",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'bool lod = drawnSlot && current\.Valid && current\.Lod && !state->LodFailed;.*?'
+          r'const DkShader\* shaders\[\] = \{state->Vertex,.*?'
+          r'dkCmdBufDraw\(cmd, DkPrimitive_Triangles, 3U \* state->Profile\.BladesPerTuft, range\.Count, 0, 0\);'),
+    Guard("grass_lod: no pop at a level change: the cull picks a tuft's draw at its distance less the cull margin",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_instance_stream.cpp",
+          r'if \(own < nearEnd \+ margin\) \{\s+kind = GrassStreamKind::Blades;.*?'
+          r'kind = GrassLodKind\(GrassLodCoordinate\(lod, own - margin, halfWidth\)\);',
+          test="oot3d_grass_switch_tests (Oot3dGrassLod.LevelsRegroupTheSameInstancesByDistance), "
+               "tests/switch/test_grass_lod.py (GrassLodLayout)"),
+    Guard("grass_lod: the tuft pass's writes land before a blade program reads them",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'dkCmdBufDraw\(cmd, DkPrimitive_Points, count, 1, 0, 0\);.*?'
+          r'dkCmdBufBarrier\(cmd, DkBarrier_Primitives, DkInvalidateFlags_Image\);'),
+    Guard("grass_lod: the blade programs read the tuft buffer past the L1 (coherent)",
+          "tools/oot3d/deko3d_grass/grass_lod_vsh.glsl",
+          r'layout\(std430, binding = 0\) coherent readonly buffer GrassTufts'),
     # --- 06/11: floors shimmered in "square pixels" on deko3d (Forest Temple, since test.3; logs15) ---
     # The shaders add the PICA LOD bias to their explicit LOD; a sampler bias adds to it again
     # (-1.7 became -3.4: level 0 far away). SWITCH_PORT.md "Floor shimmer on deko3d".

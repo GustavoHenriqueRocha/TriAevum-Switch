@@ -4,10 +4,11 @@
 // frame. No instancing: vertex v is corner v % 3 of blade (v / 3) % blades
 // of tuft v / (3 x blades) (vertices of several tufts share a warp), read
 // from the tuft buffer bound at the draw's first tuft.
-// - Far draws (default): `grass_lod_draw.x` blades per tuft (5, 3 or 1),
-//   turning into `grass_lod_draw.y` blades with the tuft's level coordinate
-//   (grass_lod_blade). Every tuft is a whole tuft (the cull worker leaves
-//   single blades and their turn into tufts to the near draw).
+// - Far draws (default): 5, 3 or 1 blades per tuft (1 / grass_lod_draw.x),
+//   turning into grass_lod_draw.y blades as the tuft's level coordinate
+//   passes grass_lod_draw.w (grass_lod_blade). Every tuft is a whole tuft
+//   (the cull worker leaves single blades and their turn into tufts to the
+//   near draw). The tuft's lit root and tip colours, fog per vertex.
 // - GRASS_LOD_NEAR: 5 blades, single blades within grass_distance.z turning
 //   into the tuft from there to grass_distance.w as grass_vsh.glsl does,
 //   their per-blade light per vertex (the instance read for its width

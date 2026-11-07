@@ -1120,6 +1120,147 @@ TEST(Oot3dGrassDistanceThinning, WholeAreaDrawsEveryTuftAndTheCapKeepsTheNearest
     EXPECT_LT(keptFarthest, allFarthest * 0.7F);
 }
 
+// ---- config/grass_lod (SWITCH_PORT.md "Grass on deko3d: cost per tuft") ----
+
+TEST(Oot3dGrassLod, ConfigFileMeaning) {
+    EXPECT_TRUE(ParseGrassSwitchLod(std::nullopt)); // absent: on
+    EXPECT_TRUE(ParseGrassSwitchLod(""));
+    EXPECT_TRUE(ParseGrassSwitchLod("1\n"));
+    EXPECT_TRUE(ParseGrassSwitchLod("on"));
+    EXPECT_FALSE(ParseGrassSwitchLod("0\n"));
+    EXPECT_FALSE(ParseGrassSwitchLod(" off"));
+    EXPECT_FALSE(ParseGrassSwitchLod("false"));
+    const auto dir = std::filesystem::temp_directory_path() / "oot3d_grass_lod_config";
+    std::filesystem::remove_all(dir);
+    EXPECT_TRUE(ReadGrassSwitchLod(dir));
+    ASSERT_TRUE(SaveGrassSwitchLod(dir, false));
+    EXPECT_FALSE(ReadGrassSwitchLod(dir));
+    ASSERT_TRUE(SaveGrassSwitchLod(dir, true));
+    EXPECT_FALSE(std::filesystem::exists(dir / "grass_lod"));
+    EXPECT_TRUE(ReadGrassSwitchLod(dir));
+    std::filesystem::remove_all(dir);
+    EXPECT_FALSE(PublishedGrassSwitchLod().has_value());
+    PublishGrassSwitchLod(false);
+    EXPECT_EQ(PublishedGrassSwitchLod(), false);
+    PublishGrassSwitchLod(true);
+    EXPECT_EQ(PublishedGrassSwitchLod(), true);
+}
+
+// The same samples as tests/switch/test_grass_lod.py, which checks the GLSL
+// (grass_lod_coordinate) against them.
+TEST(Oot3dGrassLod, LevelCoordinateSamples) {
+    struct Sample {
+        float Focal, Minimum, Distance, HalfWidth, Coordinate;
+    };
+    for (const auto& s : {Sample{600.0F, 800.0F, 700.0F, 1.4F, 0.0F}, Sample{600.0F, 800.0F, 900.0F, 1.4F, 0.5F},
+                          Sample{600.0F, 800.0F, 1150.0F, 1.75F, 0.9565215706825256F},
+                          Sample{600.0F, 800.0F, 1300.0F, 1.4F, 1.0F},
+                          Sample{600.0F, 800.0F, 1500.0F, 1.4F, 1.2666666507720947F},
+                          Sample{600.0F, 800.0F, 6000.0F, 1.0F, 2.0F}, Sample{900.0F, 800.0F, 1500.0F, 2.5F, 0.0F}}) {
+        GrassLodParameters lod;
+        lod.Focal = s.Focal;
+        lod.MinimumDistance = s.Minimum;
+        lod.RampInverse = 2.0F / s.Minimum;
+        EXPECT_NEAR(GrassLodCoordinate(lod, s.Distance, s.HalfWidth), s.Coordinate, 1.0e-6F) << s.Distance;
+    }
+    EXPECT_EQ(GrassLodKind(0.99F), GrassStreamKind::Tufts);
+    EXPECT_EQ(GrassLodKind(1.0F), GrassStreamKind::Tufts3);
+    EXPECT_EQ(GrassLodKind(2.0F), GrassStreamKind::Tufts1);
+    EXPECT_EQ(GrassLodBlades(GrassStreamKind::Blades), 5U);
+    EXPECT_EQ(GrassLodTargetBlades(GrassStreamKind::Blades), 5U);
+    EXPECT_EQ(GrassLodBlades(GrassStreamKind::Tufts), 5U);
+    EXPECT_EQ(GrassLodTargetBlades(GrassStreamKind::Tufts), 3U);
+    EXPECT_EQ(GrassLodBlades(GrassStreamKind::Tufts3), 3U);
+    EXPECT_EQ(GrassLodTargetBlades(GrassStreamKind::Tufts3), 1U);
+    EXPECT_EQ(GrassLodBlades(GrassStreamKind::Tufts1), 1U);
+    // Single blades turn into tufts by 600; the levels start past that and
+    // twice the cull margin there.
+    const auto settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(true, GrassSwitchDistance::Near));
+    EXPECT_EQ(GrassLodMinimumDistance(settings), 800.0F);
+}
+
+TEST(Oot3dGrassLod, FocalLengthIsAPixelWidthOfA1200By720Target) {
+    EXPECT_NEAR(GrassLodFocal(LookAlongZ({0.0F, 100.0F, 0.0F})), 600.0F, 1.0e-3F);
+    // 45 degrees vertical, 16:9: 600 x the horizontal scale, whatever the pitch.
+    const float sx = 1.0F / std::tan(22.5F * 3.14159265F / 180.0F) / (16.0F / 9.0F);
+    EXPECT_NEAR(GrassLodFocal(FieldCamera({0.0F, 100.0F, 0.0F}, 12.0F)), 600.0F * sx, 1.0e-2F);
+    EXPECT_EQ(GrassLodFocal(std::array<float, 16>{}), 0.0F);
+}
+
+// The levels only regroup the instances: the same instances (bytes) as
+// without them, each in the draw its distance (less the cull margin) asks
+// for; near Link only single blades and 5-blade tufts.
+TEST(Oot3dGrassLod, LevelsRegroupTheSameInstancesByDistance) {
+    const auto placementWorld = FieldPlacement(30.0F);
+    const std::array<float, 3> eye{0.0F, 100.0F, 0.0F};
+    const auto camera = FieldCamera(eye, 12.0F);
+    GrassStreamPlacement placement{placementWorld, camera, eye};
+    for (const auto distance : {GrassSwitchDistance::Near, GrassSwitchDistance::Far, GrassSwitchDistance::Area}) {
+        auto settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(true, distance));
+        std::vector<GrassStreamInstance> off(GrassSwitchStreamCapacity()), on(GrassSwitchStreamCapacity());
+        std::vector<GrassStreamRange> offRanges, onRanges;
+        GrassInstanceStreamBuilder builder;
+        const auto offStats = builder.Build({&placement, 1}, settings, off, offRanges);
+        settings.Lod = true;
+        const auto onStats = builder.Build({&placement, 1}, settings, on, onRanges);
+        ASSERT_EQ(offStats.Instances(), onStats.Instances());
+        EXPECT_EQ(offStats.Tufts3 + offStats.Tufts1, 0U);
+        EXPECT_EQ(offStats.Fill, onStats.Fill);
+        const uint32_t count = onStats.Instances();
+        const auto bytes = [](const GrassStreamInstance& i) {
+            std::array<uint8_t, sizeof(GrassStreamInstance)> b{};
+            std::memcpy(b.data(), &i, sizeof(i));
+            return b;
+        };
+        std::multiset<std::array<uint8_t, sizeof(GrassStreamInstance)>> offSet, onSet;
+        for (uint32_t i = 0; i < count; ++i) {
+            offSet.insert(bytes(off[i]));
+            onSet.insert(bytes(on[i]));
+        }
+        EXPECT_TRUE(offSet == onSet);
+        const auto lod = GrassLodParametersFor(settings, camera);
+        const float nearEnd = 1.5F * settings.SingleBladeDistance;
+        std::array<uint32_t, kGrassStreamKinds> perKind{};
+        uint64_t verticesOff = 0U, verticesOn = 0U;
+        uint32_t next = 0U;
+        for (const auto& range : onRanges) {
+            EXPECT_EQ(range.First, next);
+            next += range.Count;
+            perKind[static_cast<size_t>(range.Kind)] += range.Count;
+            verticesOn += uint64_t{3U * GrassLodBlades(range.Kind)} * range.Count;
+            for (uint32_t i = range.First; i < range.First + range.Count; ++i) {
+                const float d = Distance(on[i], eye);
+                const float margin = settings.CullMargin + settings.CullMarginPerDistance * d;
+                const float halfWidth = UnpackGrassHalf(static_cast<uint16_t>(on[i].WidthPhaseFade & 0xffffU));
+                if (range.Kind == GrassStreamKind::Blades) {
+                    EXPECT_LT(d, nearEnd + margin);
+                    continue;
+                }
+                ASSERT_TRUE(d >= nearEnd + margin);
+                // The cull's level holds for a camera up to the margin nearer.
+                const float coordinate = GrassLodCoordinate(lod, d - margin, halfWidth);
+                EXPECT_EQ(range.Kind, GrassLodKind(coordinate));
+                const float base = range.Kind == GrassStreamKind::Tufts3 ? 1.0F
+                                   : range.Kind == GrassStreamKind::Tufts1 ? 2.0F
+                                                                           : 0.0F;
+                for (const float nearer : {0.0F, 0.5F * margin, margin})
+                    EXPECT_GE(GrassLodCoordinate(lod, d - nearer, halfWidth), base);
+                // Around Link (within 700 units) every tuft keeps its 5 blades.
+                if (d < 700.0F) EXPECT_EQ(range.Kind, GrassStreamKind::Tufts);
+            }
+        }
+        EXPECT_EQ(next, count);
+        EXPECT_EQ(perKind[static_cast<size_t>(GrassStreamKind::Blades)] + perKind[0] + perKind[2] + perKind[3], count);
+        for (uint32_t i = 0; i < offStats.Instances(); ++i) verticesOff += 15U;
+        std::cout << "  lod " << GrassSwitchDistanceWord(distance) << ": " << count << " instances, near "
+                  << perKind[static_cast<size_t>(GrassStreamKind::Blades)] << " l5 " << perKind[0] << " l3 "
+                  << perKind[2] << " l1 " << perKind[3] << ", vertices " << verticesOn << " (test.9 " << verticesOff
+                  << ")\n";
+        // Whole area: most tufts are far away and have 1 blade.
+        if (distance == GrassSwitchDistance::Area) EXPECT_GT(perKind[3], count / 2U);
+    }
+}
+
 // A cull of the same area and placement is drawn in every frame, whatever
 // target the frame draws into (a native replay), with that target's camera;
 // another area or placement set is still dropped.

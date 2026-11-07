@@ -6,7 +6,11 @@ and clamp follow the Maxwell FMNMX rule (a NaN operand yields the other one);
 pow is exp2(y * log2(x)) like the hardware. Enough of GLSL 4.3 for the deko3d
 per-pixel lighting text (gfx_deko3d_lighting.cpp): structs, uniform blocks,
 inputs, functions with in/out parameters, if/for/return/continue/break, the
-vector types with swizzles, and the built-ins that text uses.
+vector types with swizzles, and the built-ins that text uses. For the grass
+level-of-detail text (tools/oot3d/deko3d_grass/grass_lod_common.glsl, see
+test_grass_lod.py) also: uint scalars that stay unsigned (logical >>, 32-bit
+wrap), hex literals, the bitwise compound assignments, uniform blocks without
+an instance name, floatBitsToUint and uintBitsToFloat.
 
     program = Program(text)
     program.globals["pica_view"] = Vec([0.0, 0.0, -1.0])
@@ -138,6 +142,11 @@ _VECTOR_TYPES = {
 _SCALAR_TYPES = {"float": "f", "int": "i", "uint": "u", "bool": "b"}
 
 
+class _UInt(int):
+    """A uint scalar: its kind survives arithmetic (logical >>, unsigned wrap)."""
+    __slots__ = ()
+
+
 def _convert(value, kind):
     if kind == "f":
         return f32(value) if not isinstance(value, bool) else (1.0 if value else 0.0)
@@ -155,7 +164,7 @@ def _convert(value, kind):
             if math.isinf(value):
                 return 0xFFFFFFFF
             value = int(value)
-        return int(value) & 0xFFFFFFFF
+        return _UInt(int(value) & 0xFFFFFFFF)
     return bool(value)
 
 
@@ -179,15 +188,17 @@ def _kind_of(value):
         return "b"
     if isinstance(value, float):
         return "f"
+    if isinstance(value, _UInt):
+        return "u"
     return "i"
 
 
 # ---- parsing --------------------------------------------------------------------
 
 _TOKEN = re.compile(r"""
-    (?P<num>(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?[uUfF]?)
+    (?P<num>0[xX][0-9a-fA-F]+[uU]?|(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?[uUfF]?)
   | (?P<id>[A-Za-z_]\w*)
-  | (?P<op><<=|>>=|\+\+|--|&&|\|\||==|!=|<=|>=|<<|>>|\+=|-=|\*=|/=|&=|\|=|[-+*/%<>=!&|^~?:;,.(){}\[\]])
+  | (?P<op><<=|>>=|\+\+|--|&&|\|\||==|!=|<=|>=|<<|>>|\+=|-=|\*=|/=|&=|\|=|\^=|%=|[-+*/%<>=!&|^~?:;,.(){}\[\]])
   | (?P<ws>\s+)
 """, re.X)
 
@@ -282,6 +293,12 @@ class Program:
                 block = s.take()
                 members = self._members(s)
                 self.structs[block] = members
+                if s.accept(";"):
+                    # No instance name: the members are globals.
+                    for member_type, member, array in members:
+                        self.globals[member] = _zero(member_type, self.structs, array)
+                        self.global_types[member] = member_type
+                    continue
                 instance = s.take()
                 s.take(";")
                 self.globals[instance] = _zero(block, self.structs)
@@ -627,11 +644,11 @@ class _Interpreter:
     def assignment(self, s):
         target = self.ternary(s, want_ref=True)
         op = s.peek()
-        if op in ("=", "+=", "-=", "*=", "/=") and isinstance(target, _Ref):
+        if op in ("=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=") and isinstance(target, _Ref):
             s.take()
             value = self.assignment(s)
             if op != "=":
-                value = self.binary(op[0], target.get(), value)
+                value = self.binary(op[:-1], target.get(), value)
             target.set(value)
             return target.get()
         if isinstance(target, _Ref):
@@ -739,6 +756,8 @@ class _Interpreter:
             value = self.expression(s)
             s.take(")")
             return value
+        if re.fullmatch(r"0[xX][0-9a-fA-F]+[uU]?", token):
+            return _convert(int(token.rstrip("uU"), 16), "u" if token[-1] in "uU" else "i")
         if re.fullmatch(r"(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?[uUfF]?", token):
             if token[-1] in "uU":
                 return _convert(int(token[:-1]), "u")
@@ -905,6 +924,15 @@ class _Interpreter:
         if isinstance(a, bool) or (isinstance(a, Vec) and a.kind == "b"):
             return self._map(lambda p, q, t: q if t else p, x, y, a)
         return self.binary("+", x, self.binary("*", self.binary("-", y, x), a))
+
+    def _b_floatBitsToUint(self, x):
+        return self._map(lambda v: struct.unpack("<I", struct.pack("<f", v))[0], x) if isinstance(x, Vec) else \
+            struct.unpack("<I", struct.pack("<f", x))[0]
+
+    def _b_uintBitsToFloat(self, x):
+        def one(v):
+            return struct.unpack("<f", struct.pack("<I", v & 0xFFFFFFFF))[0]
+        return Vec([one(v) for v in x.c], "f") if isinstance(x, Vec) else one(x)
 
     def _b_any(self, x):
         return any(x.c)
