@@ -189,7 +189,9 @@ Shadow2D (programas com imagem no pacote) e medir o `pica_submit` contra o GL (p
   `PicaGlMinFilter`, BASE_LEVEL = início da view, MAX_LEVEL limitado à cadeia), chave de textura
   igual à do GL (o estado do sampler faz parte), plano de mips RGBA8, slots de descritor, plano de
   vértices (todos os bindings num bloco do quadro, alinhados a 16; atributo ausente = buffer
-  constante (0,0,0,1) no slot 15) e tamanho de UBO (múltiplo de 256, até 64 KiB).
+  constante (0,0,0,1) no slot 15) e tamanho de UBO (múltiplo de 256, até 64 KiB). Desde 06/11 o
+  LOD bias da PICA não está no sampler nem na chave de textura: o shader o aplica (SWITCH_PORT.md
+  "Floor shimmer on deko3d").
 - `gfx_deko3d_pica_resources.{h,cpp}`: arrays de descritores (4096 imagens, 512 samplers; imagem 0
   = branco 1×1, 1 = R32UI 0xFFFFFFFF), textura = um `DkMemBlock` próprio + `DkImage` RGBA8 com mips
   (pré-decodificadas pelo worker de planos quando houver, senão `DecodePicaTextureMips`) subidas

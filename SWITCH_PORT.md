@@ -1677,8 +1677,9 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - **Expected cost:** more GPU memory traffic per texture (2x = 4x the texels of a native texture),
   the pack worker's PNG decodes (on its own thread; a 512x512 image of the 1080p pack is decoded and
   reduced to 256x256), and uploads capped at 16 MiB per frame (a texture shows native for a few
-  frames before its pack image). `logs/deko3d.txt` reports `pack images=` (uploaded), `uploaded=`
-  and `live=` MiB in each `resources (frame)` line. Not yet measured on the console.
+  frames before its pack image). `logs/deko3d.txt` reports `pack images=` (uploaded; `(again N)`:
+  uploaded again after an eviction), `uploaded=` and `live=` MiB in each `resources (frame)` line,
+  and `evicted=N (budget M)` the textures the budget took. Not yet measured on the console.
 - Logic: `azahar_texture_scale.{h,cpp}`, `azahar_texture_pack_settings.h`; host tests
   `oot3d_texture_pack_scale_tests` (sizes, ratios, alpha, cap 0, mip chain, settings files, the
   on/off cache rule) and the runtime's `CapsMipmapsAndReleasesReplacementsOnTheWorker`.
@@ -2334,6 +2335,50 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
 - Test: `oot3d_native_pica_visual_cull_tests` (camera turning 9°/step in a ring of pieces culled
   as in the game, camera in the view and embedded in the model): old 288 missing + 144 displaced + 144
   extra in 160 samples; with the fix 0. Still camera: sample identical to the old one.
+
+### Floor shimmer on deko3d: the PICA LOD bias applied twice (2026-11-06)
+- **Symptom** (0.1.2-test.6, `logs15`/`logs15sc`, Forest Temple; reported as "some flicker" on
+  deko3d since test.3): "square pixels flickering on the floor texture", with the HD pack on, scale
+  3.00, fps60. Not on PC (Vulkan).
+- **Cause:** the generated fragment shaders apply the PICA LOD bias themselves:
+  `textureLod(pica_textureN, coord, lod + fragment_uniforms.texture_lod_bias[N])`
+  (`oot3d_native_pica_fragment_shader_gen.cpp`, `pica_sample_texture0..2`). The deko3d sampler
+  carried the same bias again (`sampler.lodBias = LodBiasRaw / 256`, `PicaResources::SamplerSlot`),
+  copied from the GL backend's `GL_TEXTURE_LOD_BIAS`; a sampler bias adds to an explicit LOD too
+  (Vulkan spec, LOD operation: λ' = λbase + sampler.bias + shaderOp.bias, λbase = the shader's Lod;
+  GL: `TEXTURE_LOD_BIAS` likewise; deko3d writes it into the TSC). The Vulkan backend keeps
+  `mipLodBias` 0 (`gfx_vulkan_pica_textures.cpp`, `SamplerState.LodBias = 0`). The Forest Temple's
+  room models (RomFS `scene/bmori1_*_info.zsi`, texture bindings at material + 0x10, bias float at
+  + 0x10 of each) use −1.7 on 372 of 424 mipmapped bindings (−1.0 on 48), floors included
+  (`frs_yuka_02`, `frs_k_yuka_01/02` in room 8, `frs_jutan_*`). deko3d sampled them at −3.4: level 0
+  stays until a pixel covers 2^3.4 ≈ 10.6 texels (3.2 on PC and on the 3DS), so a floor seen at a
+  distance or a grazing angle undersamples its full-size level, and each texel square blinks as the
+  camera (or an fps60 in-between frame) moves. The pack's larger images make it worse.
+- **Fix:** the sampler has no LOD bias (`dkSamplerDefaults`' 0), and the bias left
+  `PicaSamplerKey` and `PicaTextureKey`: one sampler, one texture and one pack upload per image
+  whatever the bias (room 8's `frs_water_01` is sampled with −1.0 and −1.7 by one material: two
+  textures and two pack uploads before). No shader change, no `deko3d.pack` rebuild.
+- **Expected on the console** (estimate, not measured): far and grazing floors and walls as stable
+  as on PC; distant surfaces read smaller levels, a little less texture bandwidth. `resources
+  (frame)` in `deko3d.txt`: `samplers=` lower than test.6's 24–27 for the same route, `textures
+  created=` slightly lower.
+- **Other leads, checked against the code and logs15:** in-flight reuse (evictions and slot frees only
+  for entries idle 2 frames, right after the fence wait of a 2-frame ring; uploads before a full
+  barrier with image/descriptor invalidation), block decode (the shared `DecodePicaTextureRgba8`,
+  like Vulkan; a decode error would not blink), fps60 (`exact_step=1 carry_unmatched=1` in every
+  `interp:` window; in-between frames draw the same textures), depth (Z24S8, the PICA's 24 bits;
+  z-fighting makes bands, not texel squares). Native/pack swaps: `live=` never passed the 96 MiB
+  budget at the log points (max 68 MiB) and `created=` grew 13–100 per 30 s, so each swap is a
+  one-time pop, not a flicker. Two counters say it directly in the next logs:
+  `evicted=N (budget M)` (M: textures evicted for the budget, not after 30 s idle) and
+  `pack images=N (again M)` (M: pack images uploaded again under the same settings, evicted
+  meanwhile; the surface showed its native texture for the frames in between). Both should stay 0
+  in one area at the default budget; if they grow, raise `config/gl_texture_budget_mb`.
+- The GL backend (`gfx_opengl_pica.cpp`, not used on the Switch) still sets `GL_TEXTURE_LOD_BIAS` on
+  top of the shader's; Vulkan's pack images are uploaded single-level (no mips).
+- Tests: `oot3d_deko3d_backend_tests` (`TestSamplerAndTextureKeys`: a −1.7 bias gives the same
+  sampler and texture key as none); guards "the PICA LOD bias is applied once" (no `.lodBias =` in
+  `gfx_deko3d_pica_resources.cpp`) and "the shader is where the PICA LOD bias is applied".
 
 ### fps60 cadence: regularity before average, `config/fps60_mode` (2026-10-17)
 - **Diagnosis** (`switch-logs/integ2b`, CPU 1785, 4.5 min at 60, 52 FPS average): in the
