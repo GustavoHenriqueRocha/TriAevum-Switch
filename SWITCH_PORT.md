@@ -2683,8 +2683,9 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   is test.7's heavy-room sharpness (540 lines) at half its pixels, so no level is blurrier than
   test.7. The controller's pixel model still holds (area ∝ scale², both axes linear in the scale);
   its fixed part (`FixedFraction` 0.35) is now relatively larger, which only makes up-steps more
-  cautious. With every level about half as expensive, busy rooms climb to a sharper level while
-  60 FPS pairs fit, and spend less GPU than test.7 at the same level. Lost: the game's own vertical
+  cautious. (test.8 showed the controller never climbed at 60 FPS at all, for another reason: see
+  "Dynamic resolution on deko3d: its own calibration" below.) Every level spends less GPU than
+  test.7 at the same level. Lost: the game's own vertical
   2:1 averaging (Vulkan already drops it).
 - **Expected** (estimates, not measured; scene time taken as 60-75% pixel work): room 8,
   lighting off, 60 FPS: `busy_ms` 14.9 → about 9-11 at 2.25; the controller should settle at 2.5
@@ -2707,6 +2708,53 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   `TestSavestateRoundTrip`: a one-sample target saved and restored), `oot3d_native_a32_input_tests`
   (touch on the 720x1280 target); five guards "deko3d top screen at one sample per line". No shader
   change, no `deko3d.pack` rebuild.
+
+### Dynamic resolution on deko3d: its own calibration (07/11)
+- **Seen** (0.1.2-test.8, `log16`, Per-pixel, HD pack, grass Near): "30 FPS looks sharper than 60".
+  In `perf.txt` 232 of the 234 windows at 60 FPS show `drs_scale=2.25` (540 lines; the other two
+  2.5), title screen and Temple of Time included; all 25 at 30 FPS show 3.00 (720 lines).
+- **Cause: thresholds from the GL timer.** The controller (`oot3d_native_dynamic_resolution.h`) was
+  calibrated in tour17/tour19 on GL: 3 ms of GPU per pair the GL timer misses (`HiddenGpuMs`), down
+  when the pair + 3 passes 85% of 33.3 ms (a step frame over 12.7 ms), up when the pair predicted one
+  level up + 3 fits 80% (from 2.25: a step frame of at most 10.1 ms). On deko3d the device times its
+  own frames (busy = scene + tail) and nothing is hidden: room 8 held 60.0 FPS with no in-between frame
+  dropped and no late step at `busy_ms` 16.8 (windows 32400-34200, `drs_pair_ms` 36.2 = 2 x 16.6 + 3),
+  and the governor drops exactly where the timed pair passes 33.3. The title (step frame 10.4-11.4 ms,
+  windows 300-900) and the Temple of Time (10.5-11.9, windows 4950-6150 and 22500-23250) use 67-71% of
+  the pair and never met the up test. Neither CPU nor GPU held them there: the controller's own
+  thresholds did. The one climb (window 24750, step 9.7) fell back at 12.6 (window 25050).
+- **What 3.00 costs at 60:** the same spots at 30 FPS give the real cost per scale. The Temple of Time
+  at 3.00 takes 16.0-20.3 ms of GPU a frame (windows 21600-22200, 23700-24300; `scene_ms` 10.8 → 19.5
+  against 2.25: x1.81 for x1.78 the area, all pixel work with Per-pixel lighting); room 8 25.8
+  (x1.55, about 0.3 fixed). A 60 Hz frame has 16.7 ms, so 3.00 cannot hold 60 FPS in those places
+  at stock clocks with Per-pixel; the reachable level there is 2.5 (600 lines), 2.75 in lighter shots.
+- **Fix:** `UseDeko3dDynamicResolutionTiming` when `config/renderer` selects deko3d
+  (`EnsureInterpolationPacing`): no hidden part, down when the pair passes 92% (30.7 ms, 2.7 ms before
+  the governor drops in-between frames), up when the pair predicted at the next level fits 82%
+  (27.3 ms; from 2.25 a step frame of at most 11.9 ms, from 2.5 about 12.0 at 2.5). The cost model
+  keeps its 0.35 fixed part: against the measured 0-0.3 it predicts one step up at most ~7% low,
+  inside the 82 → 92% band. GL keeps the old calibration. No change at 30 FPS (the pair is one frame
+  in 66.7 ms: always 3.00).
+- **Expected** (replay of log16's windows, not measured on the console): title and Temple of Time
+  at 2.5 (2.75 when the step frame at 2.25 is under ~10.4 ms, 3.00 under ~8.5), room 8 and the other
+  heavy stretches (13-21 ms at 2.25) at 2.25 as before; whole session 2.31-2.33 mean instead of 2.25;
+  about 40 scale changes in 11 minutes (most in the title's changing shots); pairs over budget (an
+  in-between frame the governor drops) 29-40 more step frames than at the fixed 2.25, of 17839.
+- **Log:** `drs_pair_ms` in `perf.txt` no longer includes the 3 ms on deko3d: about twice
+  `gpu_ms_step` (log16: twice plus 3). The stderr start line (not in the console's log files)
+  `TRIAEVUM_DYNAMIC_RESOLUTION ... timing=deko3d down=0.92 up=0.82 hidden_ms=0.0`.
+- Tests: `oot3d_native_dynamic_resolution_tests`: `TestLog16GlCalibrationStaysAtFloor` (the bug,
+  replayed), `TestLog16Deko3dReplay` (every 60 FPS window of log16, `oot3d_native_dynamic_resolution_log16.inc`,
+  at its step frames with jitter and its `busy_max`, real fixed share 0 and 0.3: title and Temple
+  of Time ≥ 2.45 mean, room 8 at 2.25, at most 50 more over-budget steps, at most 6 bounces),
+  `TestDeko3dSteadyAreasHoldOneLevel` (steady areas 8-17 ms, fixed share 0-0.5, ±4-8% jitter and
+  spikes: at most one change after 20 s, no bounce, the level held fits). Two guards "log16
+  (test.8)". No shader change, no `deko3d.pack` rebuild.
+- **Console check (1 minute, 60 FPS, Per-pixel):** title screen 20 s,
+  the Temple of Time standing 20 s, Forest Temple room 8 20 s. `perf.txt`: Temple of Time windows
+  `drs_scale` 2.5 (2.75 at times) with `dkperf top_w=600` (660), `level=full`, `interp_dropped` 0-2;
+  title the same in its light shots (its heavier shots, 13-18 ms at 2.25 in log16, stay at 2.25);
+  room 8 `drs_scale=2.25`, `interp_dropped`/`late_steps` no higher than log16's room 8 windows.
 
 ### fps60 cadence: regularity before average, `config/fps60_mode` (2026-10-17)
 - **Diagnosis** (`switch-logs/integ2b`, CPU 1785, 4.5 min at 60, 52 FPS average): in the
