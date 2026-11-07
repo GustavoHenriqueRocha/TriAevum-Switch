@@ -644,7 +644,7 @@ TEST(Oot3dGrassHandoff, APlacementIsKeyedPerRenderTarget) {
 namespace {
 using namespace Fast::Oot3d;
 
-TEST(Oot3dGrassForeignCull, ACullOfAnotherAreaOrPlacementSetIsNeverDrawn) {
+TEST(Oot3dGrassForeignCull, ACullOfAnotherSceneOrPlacementSetIsNeverDrawn) {
     // The title demo's last cull must not be drawn in the temple entrance,
     // even when a surface there is drawn as a grass source.
     const std::vector<uint64_t> cull{11U, 12U};
@@ -652,10 +652,17 @@ TEST(Oot3dGrassForeignCull, ACullOfAnotherAreaOrPlacementSetIsNeverDrawn) {
     const auto has = [](const std::set<uint64_t>& set) { return [&set](uint64_t id) { return set.contains(id); }; };
     const uint32_t field = GrassArea(0x5E, 0), entrance = GrassArea(0x03, 0);
     EXPECT_EQ(GrassCullFitsFrame(field, field, cull, has(title)), GrassCullFit::Draw);
-    EXPECT_EQ(GrassCullFitsFrame(field, entrance, cull, has(title)), GrassCullFit::OtherArea);
+    EXPECT_EQ(GrassCullFitsFrame(field, entrance, cull, has(title)), GrassCullFit::OtherScene);
     EXPECT_EQ(GrassCullFitsFrame(entrance, entrance, cull, has(temple)), GrassCullFit::NoPlacement);
-    EXPECT_EQ(GrassCullFitsFrame(field, GrassArea(0x5E, 1), cull, has(title)), GrassCullFit::OtherArea);
+    // Another room of the scene: its placements that this frame draws are.
+    EXPECT_EQ(GrassCullFitsFrame(field, GrassArea(0x5E, 1), cull, has(title)), GrassCullFit::Draw);
+    EXPECT_EQ(GrassCullFitsFrame(field, GrassArea(0x5E, 1), cull, has(temple)), GrassCullFit::NoPlacement);
+    EXPECT_EQ(GrassCullFitsFrame(field, GrassArea(-1, 0), cull, has(title)), GrassCullFit::OtherScene);
     EXPECT_EQ(GrassArea(-1, 3), 0xffffffffU);
+    EXPECT_TRUE(ClassifyGrassAreaChange(field, GrassArea(0x5E, 1)) == GrassAreaChange::Room);
+    EXPECT_TRUE(ClassifyGrassAreaChange(field, entrance) == GrassAreaChange::Scene);
+    EXPECT_TRUE(ClassifyGrassAreaChange(field, GrassArea(-1, -1)) == GrassAreaChange::Scene);
+    EXPECT_TRUE(ClassifyGrassAreaChange(entrance, entrance) == GrassAreaChange::None);
     // After a reset nothing is drawn until a new cull finishes.
     GrassStreamSlots slots(2U);
     const auto slot = slots.BeginWrite(1);
@@ -779,7 +786,7 @@ TEST(Oot3dGrassHandoff, ACullIsDrawnIntoATargetWithoutItsOwnCopyOfThePlacement) 
     EXPECT_FALSE(other);
     EXPECT_EQ(frame.Find(5U, kBetween, kBetweenColor)->Frame, 2);
     // Real foreign culls are still dropped.
-    EXPECT_EQ(GrassCullFitsFrame(field, meadow, cull, has), GrassCullFit::OtherArea);
+    EXPECT_EQ(GrassCullFitsFrame(field, meadow, cull, has), GrassCullFit::OtherScene);
     EXPECT_EQ(GrassCullFitsFrame(meadow, meadow, std::vector<uint64_t>{90U}, has), GrassCullFit::NoPlacement);
     EXPECT_EQ(frame.Find(90U, kReal, kRealColor), nullptr);
 
@@ -795,11 +802,9 @@ TEST(Oot3dGrassHandoff, ACullIsDrawnIntoATargetWithoutItsOwnCopyOfThePlacement) 
         frame.Clear();
         frame.Add(5U, kReal, kRealColor, {static_cast<int>(index)});
         if (writing) slots.FinishWrite(*writing, index - 1U);
-        if (slots.Current() && GrassCullFitsFrame(meadow, meadow, cull, has) != GrassCullFit::Draw) {
-            ++dropped;
-            slots.Reset();
-        }
-        if (slots.Draw(index)) {
+        const auto pick = GrassCullForDrawPoint(slots, index, meadow, meadow, cull, has);
+        dropped += pick.Fit && *pick.Fit != GrassCullFit::Draw ? 1U : 0U;
+        if (pick.Slot) {
             const auto* placement =
                 frame.Find(5U, between ? kBetween : kReal, between ? kBetweenColor : kRealColor);
             if (placement != nullptr) {
@@ -813,7 +818,7 @@ TEST(Oot3dGrassHandoff, ACullIsDrawnIntoATargetWithoutItsOwnCopyOfThePlacement) 
     EXPECT_EQ(drawn, 599U);
     EXPECT_EQ(ownCamera, drawn);
     // A scene change in the middle drops it.
-    EXPECT_EQ(GrassCullFitsFrame(meadow, GrassArea(0x5B, 0), cull, has), GrassCullFit::OtherArea);
+    EXPECT_EQ(GrassCullFitsFrame(meadow, GrassArea(0x5B, 0), cull, has), GrassCullFit::OtherScene);
 }
 
 // fps60 (logs14g, Sacred Forest Meadow, 257/600 frames drawn, 330 culls
@@ -906,13 +911,13 @@ TEST(Oot3dGrassInterpolatedFrames, AnInBetweenFrameDrawsTheRealFramesPlacementsW
     // The real frame's own placement is untouched.
     EXPECT_EQ(real.Find(5U, kVisual, kColor)->PositionToClip, worldToClip(10.0F, 0.10F));
 
-    // The cull of the real frame fits the in-between frame; another area or
-    // placement set is still dropped.
+    // The cull of the real frame fits the in-between frame; another scene or
+    // placement set is still left out.
     const uint32_t meadow = GrassArea(0x56, 0);
     const auto has = [&](uint64_t identity) { return frame.Has(identity); };
     EXPECT_EQ(GrassCullFitsFrame(meadow, meadow, std::vector<uint64_t>{5U}, has), GrassCullFit::Draw);
     EXPECT_EQ(GrassCullFitsFrame(meadow, GrassArea(0x5B, 0), std::vector<uint64_t>{5U}, has),
-              GrassCullFit::OtherArea);
+              GrassCullFit::OtherScene);
     EXPECT_EQ(GrassCullFitsFrame(meadow, meadow, std::vector<uint64_t>{90U}, has), GrassCullFit::NoPlacement);
     // The reference is the real frame before: an in-between frame long after
     // it, or after an area change, has none.
@@ -953,11 +958,9 @@ TEST(Oot3dGrassInterpolatedFrames, AnInBetweenFrameDrawsTheRealFramesPlacementsW
                 slots.FinishWrite(*writing, index - 1U);
                 cull = posted;
             }
-            if (slots.Current() && GrassCullFitsFrame(meadow, meadow, cull, has) != GrassCullFit::Draw) {
-                ++dropped;
-                slots.Reset();
-            }
-            if (slots.Draw(index)) {
+            const auto pick = GrassCullForDrawPoint(slots, index, meadow, meadow, cull, has);
+            dropped += pick.Fit && *pick.Fit != GrassCullFit::Draw ? 1U : 0U;
+            if (pick.Slot) {
                 bool any = false;
                 for (const auto identity : cull) any |= frame.Find(identity, kVisual, kColor) != nullptr;
                 drawn += any ? 1U : 0U;
@@ -982,6 +985,171 @@ TEST(Oot3dGrassInterpolatedFrames, AnInBetweenFrameDrawsTheRealFramesPlacementsW
             EXPECT_EQ(drawn, 599U);
         }
     }
+}
+
+// log16 (0.1.2-test.8): the grass flickered once on entering the Forest
+// Temple. The window of the entry: `area drawn scene 3 room 1, changes 5,
+// foreign culls dropped 4 (other area 2, no shared placement 2)`, `no result
+// 15`, worker max 5.51 ms; hitches.txt: room 1 at frame 27573. A room change
+// dropped the drawn cull although the entrance's ground (room 0) stays drawn
+// from room 1, and a cull still in flight from room 0 was dropped on arrival
+// as another area's: the frames up to the next cull drew no grass between
+// frames with grass. The render thread's order per frame, as in
+// gfx_deko3d_grass.cpp: CheckGrassArea, the draw point (TakeCull, then
+// GrassCullForDrawPoint), then PostCull.
+struct GrassEntrySimulation {
+    struct Frame {
+        uint32_t Area = 0xffffffffU;
+        std::set<uint64_t> Placements; // this frame's (empty: being built)
+        bool Sources = true;           // a draw point (grass sources drawn)
+        uint32_t CullFrames = 1U;      // the cull posted after it finishes this many frames later
+    };
+    // test.8: a room change dropped the cull like a scene change, and so did
+    // a cull of another room or without a shared placement.
+    bool Test8 = false;
+    GrassStreamSlots Slots{2U};
+    uint32_t Area = 0xffffffffU;
+    struct Cull {
+        uint32_t Area = 0;
+        std::vector<uint64_t> Identities;
+    };
+    std::optional<Cull> Current;
+    struct Job {
+        uint32_t Slot = 0;
+        uint64_t Frame = 0, Ready = 0;
+        Cull Result;
+    };
+    std::optional<Job> Worker;
+    GrassGapCounter Gaps;
+    uint64_t NoResult = 0, NoResultAfterGrass = 0, Drawn = 0, ForeignDrawn = 0;
+    bool DrewInScene = false;
+
+    void Run(uint64_t index, const Frame& frame) {
+        const auto change = ClassifyGrassAreaChange(Area, frame.Area);
+        if (change != GrassAreaChange::None) {
+            Area = frame.Area;
+            if (change == GrassAreaChange::Scene) DrewInScene = false;
+            if (change == GrassAreaChange::Scene || Test8) {
+                Slots.Reset();
+                Current.reset();
+            }
+        }
+        const auto has = [&](uint64_t identity) { return frame.Placements.contains(identity); };
+        if (frame.Sources) {
+            if (Worker && Worker->Ready <= index) { // TakeCull
+                Slots.FinishWrite(Worker->Slot, Worker->Frame);
+                Current = Worker->Result;
+                Worker.reset();
+            }
+            if (Test8 && Current &&
+                (Current->Area != Area ||
+                 GrassCullFitsFrame(Current->Area, Area, Current->Identities, has) != GrassCullFit::Draw)) {
+                Slots.Reset();
+                Current.reset();
+            }
+            const std::vector<uint64_t> none;
+            const auto pick = GrassCullForDrawPoint(Slots, index, Current ? Current->Area : 0U, Area,
+                                                    Current ? Current->Identities : none, has);
+            if (pick.Fit == GrassCullFit::OtherScene) Current.reset();
+            bool drew = false;
+            if (pick.Slot) {
+                for (const auto identity : Current->Identities) drew |= has(identity);
+                if (!GrassSameScene(Current->Area, Area)) ++ForeignDrawn;
+            }
+            if (!pick.Fit || pick.Fit == GrassCullFit::OtherScene) {
+                ++NoResult;
+                NoResultAfterGrass += DrewInScene ? 1U : 0U;
+            }
+            Gaps.DrawPoint(Area, pick.Slot.has_value(), drew);
+            Drawn += drew ? 1U : 0U;
+            DrewInScene |= drew;
+        }
+        // PostCull: the worker takes one job at a time.
+        if (!Worker && !frame.Placements.empty()) {
+            if (const auto slot = Slots.BeginWrite(index))
+                Worker = Job{*slot, index, index + frame.CullFrames,
+                             {Area, std::vector<uint64_t>(frame.Placements.begin(), frame.Placements.end())}};
+        }
+    }
+};
+
+TEST(Oot3dGrassAreaChange, EnteringTheForestTempleDrawsItsGrassOnceAndKeepsIt) {
+    constexpr uint64_t kMeadow = 0x5600U, kEntrance = 0x0300U; // placement identities
+    const uint32_t meadow = GrassArea(0x56, 0), outside = GrassArea(-1, -1);
+    const uint32_t room0 = GrassArea(0x03, 0), room1 = GrassArea(0x03, 1);
+    const auto frameAt = [&](uint64_t index) {
+        GrassEntrySimulation::Frame frame;
+        if (index < 100U) {
+            frame = {meadow, {kMeadow}};
+        } else if (index < 102U) {
+            frame = {outside, {kMeadow}}; // the fade-out still draws the meadow
+        } else if (index < 105U) {
+            frame = {outside, {}, false}; // the load: nothing drawn
+        } else if (index < 108U) {
+            frame = {room0, {}}; // the entrance's placement being built
+        } else if (index < 160U) {
+            frame = {room0, {kEntrance}};
+        } else if (index < 220U) {
+            // Into the corridor (room 1), back to the doorway and in again:
+            // the entrance's ground stays drawn from room 1.
+            const bool back = index >= 170U && index < 175U;
+            frame = {back ? room0 : room1, {kEntrance}};
+        } else {
+            frame = {room1, {}, false}; // deeper in: no grass source
+        }
+        // The worker is late around each change (a first cull of up to 5.51 ms).
+        if (index == 105U || index == 108U || index == 159U || index == 169U || index == 174U) frame.CullFrames = 2U;
+        return frame;
+    };
+    for (const bool test8 : {true, false}) {
+        GrassEntrySimulation simulation;
+        simulation.Test8 = test8;
+        for (uint64_t index = 1U; index <= 260U; ++index) simulation.Run(index, frameAt(index));
+        EXPECT_EQ(simulation.ForeignDrawn, 0U) << (test8 ? "test.8" : "now");
+        EXPECT_GT(simulation.NoResult, 0U); // the start of each scene, before its first cull
+        if (test8) {
+            // The log's flicker: frames without a cull after the entrance's
+            // grass appeared, between frames with grass.
+            EXPECT_GT(simulation.NoResultAfterGrass, 0U);
+            EXPECT_GT(simulation.Gaps.Gaps, 0U);
+        } else {
+            EXPECT_EQ(simulation.NoResultAfterGrass, 0U);
+            EXPECT_EQ(simulation.Gaps.Gaps, 0U);
+            // Every draw point with a placement draws from the scene's first
+            // cull on: 2-99 in the meadow, 101 (its fade-out outside
+            // gameplay: a scene change, a new first cull), 110-219 in the
+            // temple.
+            EXPECT_EQ(simulation.Drawn, 98U + 1U + 110U);
+        }
+    }
+}
+
+// A cull of another scene is never drawn, even when its placement identity
+// is among the frame's; a cull without a shared placement is kept for the
+// next frame that has one.
+TEST(Oot3dGrassAreaChange, ACullOfAnotherSceneIsNeverDrawnEvenWithASharedPlacement) {
+    GrassStreamSlots slots(2U);
+    const std::vector<uint64_t> cull{7U};
+    const auto has = [](uint64_t identity) { return identity == 7U; };
+    const auto slot = slots.BeginWrite(1U);
+    ASSERT_TRUE(slot.has_value());
+    slots.FinishWrite(*slot, 1U);
+    const auto title = GrassArea(0x5E, 0), entrance = GrassArea(0x03, 0);
+    auto pick = GrassCullForDrawPoint(slots, 2U, title, entrance, cull, has);
+    EXPECT_FALSE(pick.Slot.has_value());
+    EXPECT_TRUE(pick.Fit == GrassCullFit::OtherScene);
+    EXPECT_FALSE(slots.Current().has_value()); // forgotten, not kept for later frames
+    pick = GrassCullForDrawPoint(slots, 3U, title, title, cull, has);
+    EXPECT_FALSE(pick.Fit.has_value());
+    const auto next = slots.BeginWrite(3U);
+    ASSERT_TRUE(next.has_value());
+    slots.FinishWrite(*next, 3U);
+    pick = GrassCullForDrawPoint(slots, 4U, entrance, entrance, cull, [](uint64_t) { return false; });
+    EXPECT_FALSE(pick.Slot.has_value());
+    EXPECT_TRUE(pick.Fit == GrassCullFit::NoPlacement);
+    pick = GrassCullForDrawPoint(slots, 5U, entrance, GrassArea(0x03, 1), cull, has);
+    ASSERT_TRUE(pick.Slot.has_value());
+    EXPECT_EQ(*pick.Slot, *next);
 }
 
 // The preset's rules as Deko3dConfigureGrass reads them (target, channel,

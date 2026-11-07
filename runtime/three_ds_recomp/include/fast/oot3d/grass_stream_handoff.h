@@ -61,9 +61,9 @@ class GrassStreamSlots {
         mFresh = false;
         return mCurrent;
     }
-    // Forgets the drawn cull (another area, or none of its placements left):
-    // nothing is drawn until a new cull finishes. Slots read by frames in
-    // flight stay protected.
+    // Forgets the drawn cull (a cull of another scene): nothing is drawn
+    // until a new cull finishes. Slots read by frames in flight stay
+    // protected.
     void Reset() noexcept {
         mCurrent.reset();
         mFresh = false;
@@ -89,23 +89,84 @@ class GrassStreamSlots {
 };
 
 // Whether a finished cull may be drawn in this frame: it was culled in the
-// same area (scene and room) and at least one of its placements (by
-// placement identity, whatever target the frame draws into) is among this
-// frame's. Each of its ranges is then drawn only if its own placement is
-// this frame's (GrassFramePlacements::Find); the rest is dropped.
-enum class GrassCullFit : uint8_t { Draw, OtherArea, NoPlacement };
-template <typename Identities, typename Contains>
-[[nodiscard]] GrassCullFit GrassCullFitsFrame(uint32_t cullArea, uint32_t frameArea, const Identities& cullIdentities,
-                                              Contains&& frameHas) {
-    if (cullArea != frameArea) return GrassCullFit::OtherArea;
-    for (const auto identity : cullIdentities)
-        if (frameHas(identity)) return GrassCullFit::Draw;
-    return GrassCullFit::NoPlacement;
-}
+// same scene and at least one of its placements (by placement identity,
+// whatever target the frame draws into) is among this frame's. Each of its
+// ranges is then drawn only if its own placement is this frame's
+// (GrassFramePlacements::Find); the rest is left out. A cull of another room
+// of the scene fits: a room's ground stays drawn from the next room (the
+// Forest Temple entrance's grass from its first corridor), and the frame's
+// placements are those of the grounds it draws.
+enum class GrassCullFit : uint8_t { Draw, OtherScene, NoPlacement };
 // Scene (s16) and room (s8) as one value; 0xffffffff outside gameplay.
 [[nodiscard]] constexpr uint32_t GrassArea(int scene, int room) noexcept {
     return scene < 0 ? 0xffffffffU : (static_cast<uint32_t>(scene) << 8U) | static_cast<uint8_t>(room);
 }
+[[nodiscard]] constexpr bool GrassSameScene(uint32_t a, uint32_t b) noexcept {
+    return (a >> 8U) == (b >> 8U);
+}
+template <typename Identities, typename Contains>
+[[nodiscard]] GrassCullFit GrassCullFitsFrame(uint32_t cullArea, uint32_t frameArea, const Identities& cullIdentities,
+                                              Contains&& frameHas) {
+    if (!GrassSameScene(cullArea, frameArea)) return GrassCullFit::OtherScene;
+    for (const auto identity : cullIdentities)
+        if (frameHas(identity)) return GrassCullFit::Draw;
+    return GrassCullFit::NoPlacement;
+}
+
+// A change of the game's area (CheckGrassArea, gfx_deko3d_grass.cpp). A
+// scene change drops the drawn cull, the sources' memo and the placements of
+// this and the last real frame: nothing of the old scene is drawn in the new
+// one. A room change within the scene drops nothing: the old room's ground
+// is still drawn there (both rooms are loaded across the transition), and
+// dropping its cull (0.1.2-test.8) left the frames up to the next cull
+// without grass (log16, Forest Temple room 0 -> 1). The memo is safe across
+// rooms: its key holds the geometry's content version, so a room loaded into
+// another room's memory never finds an old entry.
+enum class GrassAreaChange : uint8_t { None, Room, Scene };
+[[nodiscard]] constexpr GrassAreaChange ClassifyGrassAreaChange(uint32_t before, uint32_t now) noexcept {
+    if (before == now) return GrassAreaChange::None;
+    return GrassSameScene(before, now) ? GrassAreaChange::Room : GrassAreaChange::Scene;
+}
+
+// What one draw point draws: the newest finished cull if it fits the frame
+// (GrassCullFitsFrame). A cull of another scene is forgotten (Reset; the
+// caller drops it too). A cull without any of this frame's placements is
+// left out of this frame only and kept for the next: a frame that lacks its
+// placements for a moment does not cost the frames after it their grass.
+struct GrassDrawPointCull {
+    std::optional<uint32_t> Slot;    // the slot to draw; nullopt: nothing
+    std::optional<GrassCullFit> Fit; // nullopt: no cull (none finished since the scene began)
+};
+template <typename Identities, typename Contains>
+[[nodiscard]] GrassDrawPointCull GrassCullForDrawPoint(GrassStreamSlots& slots, uint64_t frame, uint32_t cullArea,
+                                                       uint32_t frameArea, const Identities& cullIdentities,
+                                                       Contains&& frameHas) {
+    if (!slots.Current()) return {};
+    const auto fit = GrassCullFitsFrame(cullArea, frameArea, cullIdentities, frameHas);
+    if (fit == GrassCullFit::OtherScene) slots.Reset();
+    if (fit != GrassCullFit::Draw) return {std::nullopt, fit};
+    return {slots.Draw(frame), fit};
+}
+
+// A flicker: a draw point with no cull to draw (no result, or none of its
+// placements in the frame) right after one that drew grass, in the same
+// scene. The log's `gaps`; 0 once grass has appeared in a scene.
+class GrassGapCounter {
+  public:
+    // `drawable`: the draw point had a fitting cull; `drewGrass`: it drew
+    // some of it.
+    void DrawPoint(uint32_t area, bool drawable, bool drewGrass) noexcept {
+        if (!GrassSameScene(area, mArea)) mDrew = false;
+        mArea = area;
+        if (!drawable && mDrew) ++Gaps;
+        mDrew = drewGrass;
+    }
+    uint64_t Gaps = 0;
+
+  private:
+    uint32_t mArea = 0xffffffffU;
+    bool mDrew = false;
+};
 
 // The model-to-clip (column-major) of a rigid OoT3D CMB draw from its packed
 // vertex uniforms (projection f[0..3], view f[4..6], model f[20..22]), y

@@ -116,7 +116,7 @@ void Deko3dSetGrassFrameRate(bool fps60);
 // the bend (CollectNativeGrassColliders). False in every other case.
 bool Deko3dGrassWantsColliders();
 // The game's scene and room (game thread, once per host frame, only while
-// Deko3dGrassWantsColliders): grass culled in another area is never drawn.
+// Deko3dGrassWantsColliders): grass culled in another scene is never drawn.
 void Deko3dSetGrassArea(int scene, int room);
 bool Deko3dTakeGpuFrame(Deko3dGpuFrame& frame);
 } // namespace Fast
