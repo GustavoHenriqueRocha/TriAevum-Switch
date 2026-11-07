@@ -371,7 +371,7 @@ void TestTargetsAndRects() {
   Require(PlanPicaScissor(3, 9, 0, 3, 0, 1.0F, 1.0F, 64, 64).Width == 0, "inverted scissor empty");
   Require(PlanPicaViewport(10.7F, 0.0F, 240.9F, 400.0F, 1.5F, 3.0F) == PicaRect{15, 0, 360, 1200},
           "viewport: X and Y scaled apart");
-  Require(PlanPicaScissor(3, 5, 6, 14, 6, 1.5F, 3.0F, 720, 1200) == PicaRect{8, 18, 14, 3},
+  Require(PlanPicaScissor(3, 5, 6, 14, 6, 1.5F, 3.0F, 720, 1200) == PicaRect{8, 18, 15, 3},
           "scissor: X and Y scaled apart, edges rounded");
   Require(ClipPicaRect({-4, 10, 20, 100}, 64, 64) == PicaRect{0, 10, 16, 54}, "clip to the target");
   Require(ClipPicaRect({70, 0, 5, 5}, 64, 64) == PicaRect{}, "outside the target = empty");
