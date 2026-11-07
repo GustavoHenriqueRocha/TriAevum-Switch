@@ -236,7 +236,6 @@ bool Oot3dNativeUiLifecycleBridge::ApplyTopScreenGuestHook(uint32_t guestPc,
   }
   context.HudScale = mTopScreenConfig.HudScale;
   context.HudMarginX = static_cast<float>(mTopScreenConfig.HudMarginX);
-  context.HudLayout = mTopScreenConfig.HudLayout;
   context.HudMarginY = static_cast<float>(mTopScreenConfig.HudMarginY);
   TopScreenQuestRenderBufferStats stats;
   if (!TransformTopScreenQuestRenderBuffer(mMemory, renderBuffer, context,
@@ -355,11 +354,10 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
         content, *texture, static_cast<std::uint8_t>(pulsePhase), output);
     TopScreenTouchDynamicState touchState;
     std::string touchStateError;
-    if (ReadTopScreenTouchDynamicState(mMemory, mTopScreenInput, &touchState,
+    if (ReadTopScreenTouchDynamicState(mMemory, &touchState,
                                        &touchStateError)) {
       // Item icons first (appended below, after the labels); their opacity
-      // feeds the D-pad presentation. Restoration shows Item I/II in the X/Y
-      // lanes only while ZR is held.
+      // feeds the D-pad presentation.
       TopScreenNativeItemOpacity itemOpacity;
       std::vector<oot3d::ui::UiPrimitive> itemIconCopies;
       const auto itemIcons = NativePauseSharedTextureIdentity(
@@ -367,13 +365,10 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
       if (itemIcons.has_value()) {
         std::string itemCopyError;
         (void)AppendTopScreenNativeItemIconCopies(
-            mMemory, touchState.VerticalOffsets, touchState.Alpha, *itemIcons,
-            itemIconCopies, &itemCopyError, false, &itemOpacity,
-            mTopScreenConfig.HudLayout, mTopScreenInput.ZrHeld);
+            mMemory, touchState.Alpha, *itemIcons, itemIconCopies,
+            &itemCopyError, false, &itemOpacity);
       }
-      auto touchGeometry = BuildTopScreenTouchClusterGeometry(
-          touchState.VerticalOffsets, touchState.Alpha,
-          mTopScreenConfig.HudLayout);
+      auto touchGeometry = BuildTopScreenTouchClusterGeometry(touchState.Alpha);
       if (!mTopScreenConfig.RenderDpadIcons) {
         touchGeometry.Alpha[5] = 0.0F;
       }
@@ -390,17 +385,13 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
                                             &auxiliaryInputError)) {
         auxiliaryInputs.SuppressBCopies = mTopScreenTouchCopies.SuppressBCopies;
         auto auxiliaryGeometry = BuildTopScreenAuxiliaryTouchGeometry(
-                auxiliaryInputs, touchState.VerticalOffsets, touchState.Alpha,
-                mTopScreenConfig.HudLayout, mTopScreenInput.ZrHeld);
+            auxiliaryInputs, touchState.Alpha);
         auxiliaryGeometry.Quads[4].Visible = false;
         (void)AppendTopScreenAuxiliaryTouchPresentation(
             auxiliaryGeometry, uiAtlas, output);
       }
       (void)AppendTopScreenTouchLabelsPresentation(
-          BuildTopScreenTouchLabelsGeometry(touchState.VerticalOffsets,
-                                            touchState.Alpha,
-                                            mTopScreenConfig.HudLayout),
-          uiAtlas, output);
+          BuildTopScreenTouchLabelsGeometry(touchState.Alpha), uiAtlas, output);
       output.insert(output.end(),
                     std::make_move_iterator(itemIconCopies.begin()),
                     std::make_move_iterator(itemIconCopies.end()));
@@ -415,9 +406,8 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
               oot3d::ui::UiPauseSharedTextureSlot::NumberGlyphs);
           numberGlyphs.has_value()) {
         std::string counterError;
-        (void)AppendTopScreenNativeCounters(
-            mMemory, touchState.VerticalOffsets, *numberGlyphs, output,
-            &counterError, &mTopScreenConfig, &mTopScreenInput);
+        (void)AppendTopScreenNativeCounters(mMemory, *numberGlyphs, output,
+                                            &counterError, &mTopScreenConfig);
       }
     }
     TopScreenNativeTouchCopyStats nativeTouchStats;

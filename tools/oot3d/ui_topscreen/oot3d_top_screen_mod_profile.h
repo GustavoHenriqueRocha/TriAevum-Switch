@@ -118,11 +118,6 @@ struct TopScreenExtendedInputFrame {
   bool ZlHeld = false;
   bool DpadLeftHeld = false;
   bool DpadRightHeld = false;
-  bool XPressed = false;
-  bool YPressed = false;
-  bool XHeld = false;
-  bool YHeld = false;
-  bool RestorationLayout = false;
   // The mapped consumer owns equipment changes; do not also synthesize
   // held D-pad input as repeated native item-slot presses.
   bool GameplayDpadActionsOwned = false;
@@ -170,9 +165,6 @@ struct TopScreenSlotItemQuery {
   bool ItemICompatibilityOverride = false;
   bool ItemIICompatibilityOverride = false;
   bool NativeSpecialStateActive = false;
-  // Restoration with ZR held: X and Y (slots 1 and 2) show and chord Item
-  // I/II, so their own items are not used (payload 0x005D21B4..0x005D21D8).
-  bool RestorationZrHeld = false;
 };
 
 // Source-level delta applied by the mod's replacement for
@@ -217,7 +209,6 @@ struct TopScreenTouchClusterGeometry {
 };
 
 struct TopScreenTouchDynamicState {
-  std::array<float, 4> VerticalOffsets{};
   float Alpha = 0.0F;
 };
 
@@ -249,14 +240,11 @@ bool ApplyTopScreenNativeTouchQuad28Layout(
     TopScreenNativeTouchQuad28LayoutStats *stats = nullptr,
     std::string *error = nullptr);
 
-// Reads the live button depression and visibility values used by the native
-// PauseTouchButton renderer. Extended ZL/ZR state is supplied by the host HID
-// path because those buttons do not exist in the original OoT3D HID frame.
-// Under Restoration lanes 2/3 press with the ZR+X/ZR+Y chords that use Item
-// I/II (payload 0x005DF068..0x005DF0C0), not with ZR/ZL alone.
-bool ReadTopScreenTouchDynamicState(
-    NativeA32Memory &memory, const TopScreenExtendedInputFrame &extendedInput,
-    TopScreenTouchDynamicState *state, std::string *error = nullptr);
+// Reads the visibility fade of the native PauseTouchButton renderer. No lane
+// moves on a press (see the definition).
+bool ReadTopScreenTouchDynamicState(NativeA32Memory &memory,
+                                    TopScreenTouchDynamicState *state,
+                                    std::string *error = nullptr);
 
 struct TopScreenPauseEdgeGeometry {
   std::array<TopScreenVec2, 2> Positions{};
@@ -279,15 +267,9 @@ TopScreenPauseEdgeGeometry BuildTopScreenPauseEdgeGeometry(
     bool dungeonMapActive = false) noexcept;
 
 // The ordinary gameplay producer at payload 0x005C9940 reuses the native
-// PauseTouchButton renderer. These are its exact six primary quads; the first
-// four retain their independently animated native vertical offsets.
-// Restoration draws no circle in the Item I/II lanes: Item I/II have no lane
-// there (ResolveTopScreenItemIconPlacement), B's circle (quad 4) takes lane 3
-// and the native A button the right lane (TransformTopScreenQuestGeometry).
-TopScreenTouchClusterGeometry BuildTopScreenTouchClusterGeometry(
-    const std::array<float, 4> &nativeVerticalOffsets,
-    float nativeAlpha,
-    TopScreenHudLayout layout = TopScreenHudLayout::Normal) noexcept;
+// PauseTouchButton renderer. These are its exact six primary quads.
+TopScreenTouchClusterGeometry
+BuildTopScreenTouchClusterGeometry(float nativeAlpha) noexcept;
 
 // Exact four-quad magic meter generated at payload 0x005C8244. The typed
 // content fields map to the original SaveContext +0x4E/+0x50/+0x47 inputs.
@@ -383,53 +365,27 @@ struct TopScreenNativeItemOpacity {
   float Ocarina = 1.0F;
 };
 
-// Where an item region of kNativeItemIconRegions (0 Item I, 1 X, 2 Y,
-// 3 Item II, 4 D-pad lane, 5 action) is drawn. SingleScreen 3.2.2 Restoration
-// (payload 0x005DFDAC..0x005DFDD4 and 0x005E0AC0..0x005E0AF8) gives Item I/II
-// no lane of their own: they are hidden until ZR is held, then Item I takes
-// the X lane and Item II the Y lane (both moved by (-24,-24): right to top,
-// bottom to left) while the X and Y item icons are hidden. Normal and the
-// regions 4 and 5 are unchanged.
-struct TopScreenItemIconPlacement {
-  bool Visible = true;
-  TopScreenVec2 Offset{};
-};
-TopScreenItemIconPlacement
-ResolveTopScreenItemIconPlacement(TopScreenHudLayout layout, bool zrHeld,
-                                  std::size_t region) noexcept;
-
+// Item regions of kNativeItemIconRegions: 0 Item I, 1 X, 2 Y, 3 Item II,
+// 4 D-pad lane, 5 action.
 bool AppendTopScreenNativeItemIconCopies(
-    NativeA32Memory &memory, const std::array<float, 4> &nativeVerticalOffsets,
-    float nativeAlpha, const oot3d::ui::UiTextureIdentity &itemIcons,
+    NativeA32Memory &memory, float nativeAlpha,
+    const oot3d::ui::UiTextureIdentity &itemIcons,
     std::vector<oot3d::ui::UiPrimitive> &output, std::string *error = nullptr,
     bool renderDpadIcons = true,
-    TopScreenNativeItemOpacity *itemOpacity = nullptr,
-    TopScreenHudLayout layout = TopScreenHudLayout::Normal,
-    bool zrHeld = false);
-
-// Ammo counters are 0 Item I, 1 Item II, 2 X, 3 Y, drawn at the positions of
-// payload tables 0x0060E7C4/0x0060E7D4 (right, bottom, top, left lane).
-// Returns the position used for `counter`, or none when it is hidden.
-// Restoration (payload 0x005E1D6C..0x005E1D9C, 0x005E2010, 0x005E2154):
-// without ZR the Item I/II counters are hidden; with ZR held Item I's count
-// takes the X position and Item II's the Y position, and the X/Y counters
-// are hidden, as their icons are.
-std::optional<std::size_t>
-ResolveTopScreenAmmoCounterPosition(TopScreenHudLayout layout, bool zrHeld,
-                                    std::size_t counter) noexcept;
+    TopScreenNativeItemOpacity *itemOpacity = nullptr);
 
 // Reconstructs the six PauseCounter instances allocated by payload
 // 0x005C9474: rupees, dungeon keys and four action-item ammo counters. Native
 // special counter geometry is copied when present; ordinary digits use the
-// original NumberGlyphs atlas and counter metrics.
+// original NumberGlyphs atlas and counter metrics. Ammo counters are 0 Item I,
+// 1 Item II, 2 X, 3 Y, drawn at the positions of payload tables
+// 0x0060E7C4/0x0060E7D4 (right, bottom, top, left lane).
 bool AppendTopScreenNativeCounters(
-    NativeA32Memory &memory, const std::array<float, 4> &nativeVerticalOffsets,
-    const oot3d::ui::UiTextureIdentity &numberGlyphs,
+    NativeA32Memory &memory, const oot3d::ui::UiTextureIdentity &numberGlyphs,
     std::vector<oot3d::ui::UiPrimitive> &output,
-    std::string *error = nullptr, const TopScreenUiConfig *config = nullptr,
-    const TopScreenExtendedInputFrame *input = nullptr);
+    std::string *error = nullptr, const TopScreenUiConfig *config = nullptr);
 
-// The button labels (ZR/ZL here, X/Y/B in the auxiliary group) draw over the
+// The button labels (R/L here, X/Y/B in the auxiliary group) draw over the
 // item icons (layer 13), as on the mod's screenshots (GameBanana 695893:
 // "ZR" over the slingshot and the bow, "Y" and "X" over their items); a pack's
 // larger icons (HenrikoMagnifico's) covered them at the icons' layer.
@@ -439,12 +395,10 @@ struct TopScreenTouchLabelsGeometry {
   std::array<TopScreenTexturedQuad, 2> Quads{};
 };
 
-// Exact two-quad label group produced by payload 0x005C9940. Vertical offsets
-// share the same native animation lanes as touch-cluster buttons 2 and 3.
-TopScreenTouchLabelsGeometry BuildTopScreenTouchLabelsGeometry(
-    const std::array<float, 4> &nativeVerticalOffsets,
-    float nativeAlpha,
-    TopScreenHudLayout layout = TopScreenHudLayout::Normal) noexcept;
+// Item I/II labels of the touch group produced by payload 0x005C9940, shown
+// as "R"/"L": the physical buttons that use those items on the Switch.
+TopScreenTouchLabelsGeometry
+BuildTopScreenTouchLabelsGeometry(float nativeAlpha) noexcept;
 
 std::size_t AppendTopScreenTouchLabelsPresentation(
     const TopScreenTouchLabelsGeometry &geometry,
@@ -476,14 +430,8 @@ bool ReadTopScreenAuxiliaryTouchInputs(NativeA32Memory &memory,
                                        std::string *error = nullptr);
 // 005E2204 starts at 1 and advances once per native 41EAE0 update.
 bool AdvanceTopScreenViewAlpha(NativeA32Memory &memory, float *alpha);
-// Restoration with ZR held labels the X/Y lanes "I"/"II" (custom_ui01 rects
-// 22/23, payload 0x005E02A4..0x005E0438): they show Item I/II then.
 TopScreenAuxiliaryTouchGeometry BuildTopScreenAuxiliaryTouchGeometry(
-    const TopScreenAuxiliaryTouchInputs &inputs,
-    const std::array<float, 4> &nativeVerticalOffsets,
-    float nativeAlpha,
-    TopScreenHudLayout layout = TopScreenHudLayout::Normal,
-    bool zrHeld = false) noexcept;
+    const TopScreenAuxiliaryTouchInputs &inputs, float nativeAlpha) noexcept;
 std::size_t AppendTopScreenAuxiliaryTouchPresentation(
     const TopScreenAuxiliaryTouchGeometry &geometry,
     const oot3d::ui::UiTextureIdentity &uiAtlas,
@@ -554,8 +502,6 @@ struct TopScreenQuestGeometryContext {
   float HudScale = 1.0F;
   float HudMarginX = 0.0F;
   float HudMarginY = 0.0F;
-  // Restoration moves the A button to the right lane (382,44).
-  TopScreenHudLayout HudLayout = TopScreenHudLayout::Normal;
 };
 
 struct TopScreenSystemMenuLayerStats {

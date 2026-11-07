@@ -113,17 +113,6 @@ private:
         ImGui::Checkbox("Render D-pad icons", &mDraft.RenderDpadIcons);
     mDirty |=
         ImGui::Checkbox("Render Items hint", &mDraft.RenderItemsHint);
-    bool normal = mDraft.HudLayout == TopScreenHudLayout::Normal;
-    if (ImGui::RadioButton("Normal HUD", normal)) {
-      mDraft.HudLayout = TopScreenHudLayout::Normal;
-      mDirty = true;
-    }
-    ImGui::SameLine();
-    if (ImGui::RadioButton("Restoration HUD", !normal)) {
-      mDraft.HudLayout = TopScreenHudLayout::Restoration;
-      mDirty = true;
-    }
-
     int scaleIndex = HudScaleIndex(mDraft.HudScale);
     if (ImGui::Combo("HUD scale", &scaleIndex, kHudScaleLabels.data(),
                      static_cast<int>(kHudScaleLabels.size()))) {

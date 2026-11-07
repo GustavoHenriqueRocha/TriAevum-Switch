@@ -204,8 +204,6 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                    NativeControlPollingState &pollingState,
                    [[maybe_unused]] std::span<const oot3d::ui::UiPrimitive>
                        topScreenHudPrimitives,
-                   [[maybe_unused]] Oot3dNativeGame::TopScreenHudLayout
-                       topScreenHudLayout,
                    bool widescreenMenuCorners) {
   using namespace Oot3dNativeGame;
   auto config = controls.Snapshot().Config;
@@ -451,7 +449,6 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
   const auto hudTargets =
       hudTouchEligible
           ? ResolveTopScreenHudTouchTargets(topScreenHudPrimitives,
-                                            topScreenHudLayout,
                                             window.GetWidth(),
                                             window.GetHeight())
           : TopScreenHudTouchTargets{};

@@ -86,11 +86,9 @@ Performance and usability:
   draw also read; test `oot3d_native_a32_input_tests`). Until 0.1.0 the touch scaled 400 to 320
   instead, so on the left of the Items page a tap selected the item to the right (first column:
   native X 76 instead of 32). During gameplay a tap on a TopScreen HUD control
-  presses the control it pictures while the finger is down: X, Y, Item I (ZR), Item II (ZL), B,
-  and the D-pad direction of the action icons around the cross (View/Navi, Ocarina, boots...).
-  Under the Restoration HUD, Item I/II are the ZR+X/ZR+Y chords and have no lane of their own
-  (they show in the X/Y lanes while ZR is held, see "Restoration HUD: Item I/II under X/Y while
-  ZR is held"); a tap never presses ZR/ZL there: the layout, not what is drawn, decides.
+  presses the control it pictures while the finger is down: X, Y, Item I (labelled R), Item II
+  (labelled L), B, and the D-pad direction of the action icons around the cross (View/Navi,
+  Ocarina, boots...).
   Each finger hit-tests where it lands (several fingers at once). The first finger that lands
   outside every control aims by dragging (bow, slingshot, hookshot, first-person view), added to
   the right stick and the gyro like PC mouse aim: `aim.touch_enabled` (default on) and
@@ -288,61 +286,41 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
   `custom_ui01` rect 3 (385,108,29,29)). The D-pad's centre is transparent in both; its colour is the
   scene. The archive has no other art sets: only `<region>/<Emulator|3DS Hardware>`, no optional
   folders; "Project Restoration HUD style" is a layout option of the mod's code, drawn from the same
-  atlas. Item icons and rupee digits (`num_all00`, legacy hash `FABD759BB95C1C6A`) have no image in the
+  atlas (the port offered it until hud18, see "HUD: Restoration removed, R/L labels, no press
+  motion"). Item icons and rupee digits (`num_all00`, legacy hash `FABD759BB95C1C6A`) have no image in the
   mod; a texture pack that has them (HenrikoMagnifico's does) applies as before.
 
-### Restoration HUD: Item I/II under X/Y while ZR is held (07/11)
+### HUD: Restoration removed, R/L labels, no press motion (hud18, test.10 report)
 
-- **Report.** L3+R3 > HUD > Restoration "just moves things around": the bomb (Item I, the ZR item
-  in Normal) stood on the right of the four buttons with no button letter, no count, and no button
-  that used it (video `2026110710411900-…` at 28 s).
-- **What the mod does (3.2.2 EUR `code.ips`, decoded from the patched `code.bin`).** The option text
-  (0x00611786) is "First Person: `\r` / Items I/II: `\x0c`+`\x0e`/`\x0f` / Gears menu: `\x0c`+`\x13` /
-  Map menu: `\x0c`+`\x14` / Ocarina: `\x0c`+`\x12`"; the input code settles the glyphs. The Restoration
-  flag is bit 0 of the option word, cached at 0x00613FA8. The item-query hooks
-  (0x005D0D80..0x005D0F0C) drop ZR/ZL under Restoration and read the chord flags that 0x005DDC10..
-  0x005DDC70 set from HID held: ZR (0x8000) with X (0x400) is Item I, with Y (0x800) Item II (so
-  `\x0c` = ZR, `\x0e`/`\x0f` = X/Y): the chords the port already had. The layout (Restoration only):
-  - item icons (0x005DFDAC, 0x005E0AC0..0x005E0AF8): Item I/II hidden unless ZR is held; with ZR
-    held Item I is moved (-24,-24) from the right lane to the X lane and Item II from the bottom lane
-    to the Y lane, and the X and Y item icons are hidden;
-  - labels (0x005E02A4, 0x005E0408..0x005E0470): with ZR held the X/Y labels become custom_ui01 rect
-    22 "I" (131,231) and rect 23 "II" (150,231), one unit higher;
-  - ammo counts (0x005E1D6C..0x005E1D9C, 0x005E2154; positions 0x0060E7C4/0x0060E7D4): with ZR held
-    Item I's count is drawn at the X position (358,20) and Item II's at the Y position (334,44), the
-    X/Y counts hidden; without ZR the Item I/II counts are hidden;
-  - slot items (0x005D21B4..0x005D21D8): with ZR held X and Y (slots 1, 2) have no item (0xFF), so
-    ZR+X uses Item I alone.
-  The right lane (382,44) is the A button's: 0x005C8EB0..0x005C8ED8 moves the native A button (its
-  circle and action text, the "Quest" render buffer bound at 0x004FC660 that the port transforms in
-  `TransformTopScreenQuestGeometry`, quads centred at x 330..398, y > 150) to (382,44) under
-  Restoration, (288,24) in Normal, right of B (B's circle, quad 4, sits at (248,24) in Normal with
-  its label at (227,10), and goes to (358,68) under Restoration with the label at (337,54)). So
-  Restoration is X top, Y left, A right, B bottom, as the buttons sit. 0x005C9024 hides A while ZR is
-  held unless 0x005CBE08(2) finds that action on a D-pad slot, and 0x005E09EC then draws region 4
-  (the D-pad lane icon) at (382,44): the "Ocarina: ZR+A" of the option text.
-- **What the port did.** It had the chords, but drew the native Item I icon in its Normal lane (the
-  right one) at all times, with a circle and no label, and drew Item I/II counts at the right/bottom
-  positions while ZR was held; Item II's icon would share the bottom lane with the moved A circle and
-  B; X/Y kept their own items under the chord.
-- **Change** (Restoration only; Normal is unchanged, its tests and guards hold):
-  `ResolveTopScreenItemIconPlacement` and `ResolveTopScreenAmmoCounterPosition`
-  (`oot3d_top_screen_mod_profile_hud.cpp`) give the mod's placements; the item copies, the X/Y labels
-  (`BuildTopScreenAuxiliaryTouchGeometry(…, zrHeld)`) and the counters follow them; the Item I/II lanes
-  get no circle (B's circle keeps lane 3); lanes 2/3 press with the chords, not ZR/ZL alone; the
-  slot-item hook returns no item for X/Y while ZR is held (`TopScreenSlotItemQuery::RestorationZrHeld`).
-  So on the Switch: hold ZR, the X lane shows Item I labelled "I" with its count, the Y lane Item II
-  labelled "II"; ZR+X uses Item I, ZR+Y Item II. ZL's item (Item II in Normal) is the Y lane's under
-  ZR. Tests: `oot3d_top_screen_hud_touch_tests` (`TestRestorationItemLanes`,
-  `TestEveryItemIconHasACircle`), `oot3d_top_screen_mod_profile_tests` (labels, counters, lane presses).
-  A follow-up moves the A button to the right lane under Restoration (`TopScreenQuestGeometryContext
-  ::HudLayout`, set by the bridge); in Normal it stays at (288,24). Until then the port left A at its
-  Normal spot, left of the diamond (the report's "A to the left").
-- **Not ported:** hiding A while ZR is held and drawing the Ocarina there (ZR+A): the port has no
-  ZR+A Ocarina input, so A stays visible and ZR+A is still A.
-- **Credit.** These Restoration rules come from the "Single Screen Experience" mod (GameBanana
-  695893), decoded from its 3.2.2 EUR `code.ips` at the addresses above. The port reimplements the
-  behaviour; no mod code or data is copied, and the source comments say so where it lands.
+- **Restoration HUD removed.** Its layout was wrong (report). L3+R3 > HUD has no layout choice; the
+  `TopScreenHudLayout` enum, `TopScreenUiConfig::HudLayout`, the ZR+X/ZR+Y chords
+  (`TopScreenExtendedInputFrame::RestorationLayout`, its X/Y fields, the X/Y slot suppression), the
+  Item I/II placements and counters under ZR, the I/II labels, the right-lane A button and the
+  untappable Item I/II lanes are gone, and so is `config/topscreen_ui.restoration.example.json`. A
+  saved `"hud_layout"` (normal or restoration) is still read and ignored, so an old file loads and
+  draws the Normal HUD; the config no longer writes the key, nor does the summary JSON.
+- **Labels R/L.** The Item I/II lanes said ZR/ZL, but on the Switch the items are on the physical R/L
+  (ZL/ZR do the game's Z-target/shield; `ConnectedPhysicalDeviceManager.cpp`). Neither
+  `custom_ui01` (HD atlas; yellow labels A, ZR, I, II, ZL, X, Y, ZL, B, START, SELECT) nor the game's
+  own `menu_top_parts00` has an R or L label; the atlas's white R and L are text-font letters of
+  another style. So the lanes draw the second letter of the existing labels: the R of ZR (rect 15,
+  from x +7.625, 7.75 wide: the R and its outline start at HD column 61 of 128, the Z ends at 60)
+  and the L of ZL (rect 14, from x +8, 6.375 wide), 16 high, at the label's 1:1 atlas scale, each
+  centred where its two-letter label was (x 372 and 347.7; y 31 and 55). Same art, colour and
+  outline as X/Y/B (`BuildTopScreenTouchLabelsGeometry`). Controls are not swapped.
+- **Press motion.** Report: R moved the ZR circle and the Y circle, L only ZL, X/Y/B/A never. The
+  2.1.1 logic lowered a lane by 2 px while its PauseTouchButton field (+0x4C X, +0x50 Y, +0x44
+  Item I held, +0x48 Item II held) was set or ZR/ZL were held, and the item icons read those four
+  offsets by item region (0 Item I, 1 X, 2 Y, 3 Item II) instead of by lane, so lane 2 (Item I,
+  ZR) moved region 2, the Y item; ZL's lane 3 matched region 3. X/Y never moved because nothing sets
+  +0x4C/+0x50 from a button. No HUD element moves on a press now: `ReadTopScreenTouchDynamicState`
+  reads only the fade, and the circles, labels, icons and counters take no offsets. Not a
+  Restoration leak: it was in Normal.
+- **Tests:** `oot3d_top_screen_mod_profile_tests` (saved `hud_layout` loads, R/L label rects and
+  centres, ZR/ZL use Item I/II alone, icons and counters stay put with the X press field set),
+  `oot3d_top_screen_hud_touch_tests` (Item I/II lanes take taps, every icon in one circle, labels
+  over icons), `oot3d_top_screen_item_dispatch_tests` (ZR leaves the X/Y slots native). Guards
+  `hud18: …`.
 
 ### Fixes from upstream after beta.1c (07/11)
 

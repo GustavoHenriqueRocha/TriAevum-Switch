@@ -196,7 +196,7 @@ int main() {
   Require(ParseTopScreenUiConfigText(
               R"({"schema":"oot3d_topscreen_ui_v2","hud_layout":"restoration","hud_scale":0.75,"hud_margin_x":8,"hud_margin_y":-2,"magic_bar_y":7,"minimap_visible":false,"render_hud":true,"render_dpad_icons":false,"render_items_hint":false,"select_action":"minimap_toggle","exit_items_to_save_screen":false,"camera_zoom_percent":130,"camera_fov_percent":115,"dpad_child":["view","ocarina","boomerang","slingshot"],"dpad_adult":["view","ocarina","iron_boots","hover_boots"],"free_camera_enabled":true,"free_camera_speed_level":5,"free_camera_smoothing":"heavy","free_camera_invert_x":true,"free_camera_invert_y":false,"c_stick_aim_speed_level":6,"c_stick_aim_invert_x":false,"c_stick_aim_invert_y":true})",
               &parsedConfig, &configError) &&
-              parsedConfig.HudLayout == TopScreenHudLayout::Restoration &&
+              // A saved Restoration layout loads; it draws the Normal HUD.
               parsedConfig.HudScale == 0.75F &&
               parsedConfig.HudMarginX == 8 &&
               parsedConfig.HudMarginY == -2 && parsedConfig.MagicBarY == 7U &&
@@ -383,16 +383,25 @@ int main() {
   std::string serializedConfig;
   Require(SerializeTopScreenUiConfigText(parsedConfig, &serializedConfig,
                                          &configError) &&
-              serializedConfig.find("\"hud_layout\": \"restoration\"") !=
-                  std::string::npos,
+              serializedConfig.find("hud_layout") == std::string::npos &&
+              serializedConfig.find("\"hud_scale\": 0.75") != std::string::npos,
           "TopScreen 2.1.1 external config did not serialize");
+  for (const char *layout : {"normal", "restoration"}) {
+    TopScreenUiConfig legacyLayout;
+    const std::string text =
+        std::string(R"({"schema":"oot3d_topscreen_ui_v2","hud_layout":")") +
+        layout + R"(","hud_scale":0.75})";
+    Require(ParseTopScreenUiConfigText(text, &legacyLayout, &configError) &&
+                legacyLayout.HudScale == 0.75F,
+            "a saved hud_layout no longer loads (Restoration falls back to "
+            "Normal)");
+  }
   const auto configRoundTripPath =
       std::filesystem::temp_directory_path() /
       "oot3d_top_screen_config_roundtrip_test.json";
   std::error_code removeError;
   std::filesystem::remove(configRoundTripPath, removeError);
   TopScreenUiConfig persistedConfig;
-  persistedConfig.HudLayout = TopScreenHudLayout::Restoration;
   persistedConfig.HudScale = 1.20F;
   persistedConfig.MinimapVisible = false;
   persistedConfig.CameraZoomPercent = 130U;
@@ -410,8 +419,6 @@ int main() {
   const auto reloadedConfigSnapshot = configRuntime.Snapshot();
   Require(reloadedConfigSnapshot.Revision ==
                   initialConfigSnapshot.Revision + 1U &&
-              reloadedConfigSnapshot.Config.HudLayout ==
-                  TopScreenHudLayout::Restoration &&
               reloadedConfigSnapshot.Config.HudScale == 1.20F &&
               !reloadedConfigSnapshot.Config.MinimapVisible &&
               reloadedConfigSnapshot.Config.FreeCameraEnabled &&
@@ -431,7 +438,6 @@ int main() {
               diskBeforeSave.HudScale == 1.20F &&
               !diskBeforeSave.MinimapVisible,
           "TopScreen live preview did not remain transient");
-  persistedConfig.HudLayout = TopScreenHudLayout::Normal;
   persistedConfig.HudScale = 0.60F;
   persistedConfig.MinimapVisible = true;
   Require(configRuntime.Apply(persistedConfig, &configError),
@@ -439,7 +445,6 @@ int main() {
   TopScreenUiConfig savedAgain;
   Require(LoadTopScreenUiConfig(configRoundTripPath, &savedAgain,
                                 &configError) &&
-              savedAgain.HudLayout == TopScreenHudLayout::Normal &&
               savedAgain.HudScale == 0.60F &&
               savedAgain.MinimapVisible,
           "TopScreen 2.1.1 config runtime edit did not round-trip");
@@ -489,20 +494,33 @@ int main() {
                   "oot3d/native/pause/item_icons",
           "extended item-button presenter lost its recovered ownership");
 
-  const auto touchLabels = BuildTopScreenTouchLabelsGeometry(
-      std::array<float, 4>{0.0F, 0.0F, 4.0F, -3.0F}, 0.5F);
-  // SingleScreen 3.0 custom_ui01 ZR (rect 15) and ZL (rect 14), 16 px.
-  Require(touchLabels.Quads[0].Position.X == 364.0F &&
-              touchLabels.Quads[0].Position.Y == 35.0F &&
-              touchLabels.Quads[1].Position.X == 340.0F &&
-              touchLabels.Quads[1].Position.Y == 52.0F &&
-              touchLabels.Quads[0].AtlasOrigin.X == 47.0F &&
+  const auto touchLabels = BuildTopScreenTouchLabelsGeometry(0.5F);
+  // The Item I/II lanes are labelled R/L, the physical buttons that use those
+  // items on the Switch: the R of custom_ui01's ZR (rect 15, (47,231)) and
+  // the L of its ZL (rect 14, (245,227)), each centred where its two-letter
+  // label was (x 372 and 347.7), at the label's 1:1 atlas scale.
+  const auto centerX = [](const TopScreenTexturedQuad &quad) {
+    return quad.Position.X + quad.Size.X * 0.5F;
+  };
+  Require(std::abs(centerX(touchLabels.Quads[0]) - 372.0F) < 0.001F &&
+              touchLabels.Quads[0].Position.Y == 31.0F &&
+              std::abs(centerX(touchLabels.Quads[1]) - 347.6875F) < 0.001F &&
+              touchLabels.Quads[1].Position.Y == 55.0F &&
+              touchLabels.Quads[0].AtlasOrigin.X == 54.625F &&
               touchLabels.Quads[0].AtlasOrigin.Y == 231.0F &&
-              touchLabels.Quads[1].AtlasOrigin.X == 245.0F &&
+              touchLabels.Quads[0].AtlasSize.X == 7.75F &&
+              touchLabels.Quads[1].AtlasOrigin.X == 253.0F &&
               touchLabels.Quads[1].AtlasOrigin.Y == 227.0F &&
-              touchLabels.Quads[1].Size.X == 16.0F &&
+              touchLabels.Quads[1].AtlasSize.X == 6.375F &&
+              touchLabels.Quads[0].Size.X == touchLabels.Quads[0].AtlasSize.X &&
+              touchLabels.Quads[1].Size.X == touchLabels.Quads[1].AtlasSize.X &&
+              touchLabels.Quads[0].Size.Y == 16.0F &&
+              touchLabels.Quads[0].AtlasOrigin.X >= 47.0F + 7.5F &&
+              touchLabels.Quads[0].AtlasOrigin.X + 7.75F <= 47.0F + 16.0F &&
+              touchLabels.Quads[1].AtlasOrigin.X >= 245.0F + 7.5F &&
+              touchLabels.Quads[1].AtlasOrigin.X + 6.375F <= 245.0F + 16.0F &&
               std::abs(touchLabels.Quads[0].Color.alpha - 0.45F) < 0.001F,
-          "touch-label geometry diverges from SingleScreen 3.0");
+          "touch labels are not R/L cut from the ZR/ZL labels");
   std::vector<oot3d::ui::UiPrimitive> touchLabelPresentation;
   const oot3d::ui::UiTextureIdentity navigationTexture{
       0x005D1000U, 0x18010000U, "oot3d/native/pause_shared/pause_top_page"};
@@ -898,25 +916,22 @@ int main() {
                                                            0x45U, 0x10U);
   Require(!compatibility[1] && !compatibility[3],
           "compatibility lane ignored the native Item II identity gate");
-  TopScreenItemQueryState restorationItemState;
-  restorationItemState.Input.RestorationLayout = true;
-  restorationItemState.Input.ZrPressed = true;
-  restorationItemState.Input.XHeld = true;
+  // Item I is R (host ZR) alone and Item II L (host ZL) alone; no chord.
+  TopScreenItemQueryState laneState;
+  laneState.Input.ZrPressed = true;
+  laneState.Input.ZrHeld = true;
   Require(ResolveTopScreenItemQuery(TopScreenItemQuery::ItemIPressed,
-                                    restorationItemState),
-          "Restoration Item I did not accept ZR pressed after X");
-  restorationItemState.Input.XHeld = false;
-  restorationItemState.Input.YHeld = true;
+                                    laneState) &&
+              !ResolveTopScreenItemQuery(TopScreenItemQuery::ItemIIPressed,
+                                         laneState),
+          "ZR did not use Item I alone");
+  laneState.Input = {};
+  laneState.Input.ZlPressed = true;
   Require(ResolveTopScreenItemQuery(TopScreenItemQuery::ItemIIPressed,
-                                    restorationItemState),
-          "Restoration Item II did not accept ZR pressed after Y");
-  restorationItemState.Input = {};
-  restorationItemState.Input.RestorationLayout = true;
-  restorationItemState.Input.ZrHeld = true;
-  restorationItemState.Input.XPressed = true;
-  Require(ResolveTopScreenItemQuery(TopScreenItemQuery::ItemIPressed,
-                                    restorationItemState),
-          "Restoration Item I did not accept X pressed after ZR");
+                                    laneState) &&
+              !ResolveTopScreenItemQuery(TopScreenItemQuery::ItemIPressed,
+                                         laneState),
+          "ZL did not use Item II alone");
 
   Require(ResolveTopScreenSlotItemId({3U, 0x22U, true, false}) == 0x45U,
           "Item I compatibility slot identity was not selected");
@@ -1250,12 +1265,11 @@ int main() {
               indicatorPrimitives[3].layer == 11U,
           "TopScreen magic meter presentation is incorrect");
 
-  const auto touchCluster =
-      BuildTopScreenTouchClusterGeometry({0.0F, 1.0F, 2.0F, 3.0F}, 0.5F);
+  const auto touchCluster = BuildTopScreenTouchClusterGeometry(0.5F);
   Require(touchCluster.Positions[0].X == 342.0F &&
               touchCluster.Positions[0].Y == 4.0F &&
               touchCluster.Positions[3].X == 342.0F &&
-              touchCluster.Positions[3].Y == 55.0F &&
+              touchCluster.Positions[3].Y == 52.0F &&
               touchCluster.Positions[4].X == 232.0F &&
               touchCluster.Positions[4].Y == 8.0F &&
               touchCluster.Positions[5].X == 16.5F &&
@@ -1306,35 +1320,14 @@ int main() {
                                      std::bit_cast<std::uint32_t>(0.6F)),
             "could not seed TopScreen touch alpha");
   }
-  TopScreenExtendedInputFrame touchInput;
-  touchInput.ZrHeld = true;
+  // Press handling: no lane moves on any press. The native X-lane field
+  // (+0x4C) is seeded pressed and nothing reads it; the circles, labels,
+  // icons and counters below stay at their rest positions.
   TopScreenTouchDynamicState dynamicTouch;
-  Require(ReadTopScreenTouchDynamicState(touchStateMemory, touchInput,
-                                         &dynamicTouch, &error) &&
-              dynamicTouch.VerticalOffsets ==
-                  std::array<float, 4>{2.0F, 0.0F, 2.0F, 0.0F} &&
+  Require(ReadTopScreenTouchDynamicState(touchStateMemory, &dynamicTouch,
+                                         &error) &&
               std::abs(dynamicTouch.Alpha - 0.6F) < 0.001F,
           "TopScreen touch dynamic state is not sourced from native gameplay");
-  {
-    // Restoration: lanes 2/3 press with the ZR+X/ZR+Y chords, not ZR alone.
-    TopScreenExtendedInputFrame chord;
-    chord.RestorationLayout = true;
-    chord.ZrHeld = true;
-    chord.ZlHeld = true;
-    TopScreenTouchDynamicState pressed;
-    Require(ReadTopScreenTouchDynamicState(touchStateMemory, chord, &pressed,
-                                           &error) &&
-                pressed.VerticalOffsets ==
-                    std::array<float, 4>{2.0F, 0.0F, 0.0F, 0.0F},
-            "Restoration pressed Item I/II lanes without the chord");
-    chord.XHeld = true;
-    chord.YHeld = true;
-    Require(ReadTopScreenTouchDynamicState(touchStateMemory, chord, &pressed,
-                                           &error) &&
-                pressed.VerticalOffsets ==
-                    std::array<float, 4>{2.0F, 0.0F, 2.0F, 2.0F},
-            "Restoration did not press Item I/II lanes with ZR+X/ZR+Y");
-  }
 
   TopScreenAuxiliaryTouchInputs auxiliaryInputs;
   auxiliaryInputs.HasPlayState = true;
@@ -1345,11 +1338,11 @@ int main() {
   auxiliaryInputs.AlternateHudRendererActive = true;
   // 005E3D88, latched at the previous native update.
   auxiliaryInputs.SuppressBCopies = true;
-  const auto auxiliaryGeometry = BuildTopScreenAuxiliaryTouchGeometry(
-      auxiliaryInputs, dynamicTouch.VerticalOffsets, dynamicTouch.Alpha);
+  const auto auxiliaryGeometry =
+      BuildTopScreenAuxiliaryTouchGeometry(auxiliaryInputs, dynamicTouch.Alpha);
   Require(auxiliaryGeometry.Quads[0].Visible &&
               auxiliaryGeometry.Quads[0].Position.X == 338.0F &&
-              auxiliaryGeometry.Quads[0].Position.Y == 8.0F &&
+              auxiliaryGeometry.Quads[0].Position.Y == 6.0F &&
               auxiliaryGeometry.Quads[2].Visible &&
               auxiliaryGeometry.Quads[2].Position.X == 227.0F &&
               auxiliaryGeometry.Quads[2].AtlasOrigin.X == 363.0F &&
@@ -1368,63 +1361,9 @@ int main() {
               auxiliaryPrimitives[3].source_quad == 38U &&
               std::abs(auxiliaryPrimitives[0].color.alpha - 0.54F) < 0.001F,
           "TopScreen group-39 auxiliary presenter is incomplete");
-  const auto restorationTouchCluster = BuildTopScreenTouchClusterGeometry(
-      {0.0F, 1.0F, 2.0F, 3.0F}, 0.5F, TopScreenHudLayout::Restoration);
-  Require(restorationTouchCluster.Alpha[0] == 0.5F &&
-              restorationTouchCluster.Alpha[1] == 0.5F &&
-              restorationTouchCluster.Alpha[2] == 0.0F &&
-              restorationTouchCluster.Alpha[3] == 0.0F &&
-              restorationTouchCluster.Positions[4].X == 342.0F &&
-              restorationTouchCluster.Positions[4].Y == 52.0F,
-          "Restoration touch-cluster geometry is incorrect");
-  const auto restorationAuxiliary = BuildTopScreenAuxiliaryTouchGeometry(
-      auxiliaryInputs, dynamicTouch.VerticalOffsets, dynamicTouch.Alpha,
-      TopScreenHudLayout::Restoration);
-  Require(restorationAuxiliary.Quads[2].Position.X == 337.0F &&
-              restorationAuxiliary.Quads[2].Position.Y == 54.0F,
-          "Restoration auxiliary control geometry is incorrect");
-  Require(restorationAuxiliary.Quads[0].AtlasOrigin.X == 207.0F &&
-              restorationAuxiliary.Quads[1].AtlasOrigin.X == 226.0F,
-          "Restoration without ZR keeps the X/Y labels");
-  {
-    // 3.2.2 0x005E0408..0x005E0470: ZR held relabels the X/Y lanes I/II
-    // (custom_ui01 rects 22/23), one unit up; Normal ignores ZR.
-    const auto held = BuildTopScreenAuxiliaryTouchGeometry(
-        auxiliaryInputs, dynamicTouch.VerticalOffsets, dynamicTouch.Alpha,
-        TopScreenHudLayout::Restoration, true);
-    Require(held.Quads[0].Visible && held.Quads[1].Visible &&
-                held.Quads[0].AtlasOrigin.X == 131.0F &&
-                held.Quads[0].AtlasOrigin.Y == 231.0F &&
-                held.Quads[1].AtlasOrigin.X == 150.0F &&
-                held.Quads[1].AtlasOrigin.Y == 231.0F &&
-                held.Quads[0].Position.X ==
-                    restorationAuxiliary.Quads[0].Position.X &&
-                held.Quads[0].Position.Y ==
-                    restorationAuxiliary.Quads[0].Position.Y - 1.0F &&
-                held.Quads[1].Position.Y ==
-                    restorationAuxiliary.Quads[1].Position.Y - 1.0F,
-            "Restoration with ZR held labels the X/Y lanes I/II");
-    const auto normal = BuildTopScreenAuxiliaryTouchGeometry(
-        auxiliaryInputs, dynamicTouch.VerticalOffsets, dynamicTouch.Alpha);
-    const auto normalHeld = BuildTopScreenAuxiliaryTouchGeometry(
-        auxiliaryInputs, dynamicTouch.VerticalOffsets, dynamicTouch.Alpha,
-        TopScreenHudLayout::Normal, true);
-    for (std::size_t index = 0; index < 4U; ++index)
-      Require(normalHeld.Quads[index].AtlasOrigin.X ==
-                      normal.Quads[index].AtlasOrigin.X &&
-                  normalHeld.Quads[index].Position.Y ==
-                      normal.Quads[index].Position.Y,
-              "Normal labels do not depend on ZR");
-  }
-  const auto restorationLabels = BuildTopScreenTouchLabelsGeometry(
-      dynamicTouch.VerticalOffsets, dynamicTouch.Alpha,
-      TopScreenHudLayout::Restoration);
-  Require(!restorationLabels.Quads[0].Visible &&
-              !restorationLabels.Quads[1].Visible,
-          "Restoration touch labels were not suppressed");
   auxiliaryInputs.TouchLayoutState = 1U;
-  const auto fixedAuxiliaryGeometry = BuildTopScreenAuxiliaryTouchGeometry(
-      auxiliaryInputs, dynamicTouch.VerticalOffsets, 1.0F);
+  const auto fixedAuxiliaryGeometry =
+      BuildTopScreenAuxiliaryTouchGeometry(auxiliaryInputs, 1.0F);
   // 2.1.1 centers it on the lane; the presentation adds the lane offset.
   // SingleScreen 3.0 draws the camera from custom_ui01 rect 6 (320,198,36,21)
   // 10 px high at its own aspect.
@@ -1540,13 +1479,15 @@ int main() {
                     sizeof(itemTranslation))),
         "could not seed TopScreen native item quad");
   }
+  // The X-lane press field is set (above): no icon moves for it, Item I
+  // (region 0) included, whose lane the 2.1.1 offsets once mixed up with X's.
   std::vector<oot3d::ui::UiPrimitive> nativeItemCopies;
   Require(AppendTopScreenNativeItemIconCopies(
-              touchStateMemory, dynamicTouch.VerticalOffsets,
-              dynamicTouch.Alpha, itemIconsTexture, nativeItemCopies, &error) &&
+              touchStateMemory, dynamicTouch.Alpha, itemIconsTexture,
+              nativeItemCopies, &error) &&
               nativeItemCopies.size() == 5U &&
               nativeItemCopies[0].destination.x == 360.0F &&
-              nativeItemCopies[0].destination.y == 24.0F &&
+              nativeItemCopies[0].destination.y == 22.0F &&
               nativeItemCopies[0].destination.width == 12.0F &&
               nativeItemCopies[0].destination.height == 12.0F &&
               std::abs(nativeItemCopies[0].uv.y - 0.2F) < 0.001F &&
@@ -1566,15 +1507,15 @@ int main() {
       "could not move the native item fixture into the D-pad lane");
   std::vector<oot3d::ui::UiPrimitive> dpadItemVisibleCopies;
   Require(AppendTopScreenNativeItemIconCopies(
-              touchStateMemory, dynamicTouch.VerticalOffsets,
-              dynamicTouch.Alpha, itemIconsTexture, dpadItemVisibleCopies,
+              touchStateMemory, dynamicTouch.Alpha, itemIconsTexture,
+              dpadItemVisibleCopies,
               &error, true) &&
               dpadItemVisibleCopies.size() == 5U,
           "enabled TopScreen D-pad icons suppressed the native D-pad lane");
   std::vector<oot3d::ui::UiPrimitive> dpadItemSuppressedCopies;
   Require(AppendTopScreenNativeItemIconCopies(
-              touchStateMemory, dynamicTouch.VerticalOffsets,
-              dynamicTouch.Alpha, itemIconsTexture, dpadItemSuppressedCopies,
+              touchStateMemory, dynamicTouch.Alpha, itemIconsTexture,
+              dpadItemSuppressedCopies,
               &error, false) &&
               dpadItemSuppressedCopies.size() == 4U,
           "disabled TopScreen D-pad icons did not suppress only its lane");
@@ -1592,8 +1533,8 @@ int main() {
   TopScreenNativeItemOpacity opacity;
   std::vector<oot3d::ui::UiPrimitive> opacityCopies;
   Require(AppendTopScreenNativeItemIconCopies(
-              touchStateMemory, dynamicTouch.VerticalOffsets,
-              dynamicTouch.Alpha, itemIconsTexture, opacityCopies,
+              touchStateMemory, dynamicTouch.Alpha, itemIconsTexture,
+              opacityCopies,
               &error, false, &opacity) &&
               opacity.ItemZr == 0.5F && opacity.ItemZl == 0.25F &&
               opacity.Ocarina == 0.0F && opacityCopies.size() == 4U,
@@ -1631,64 +1572,38 @@ int main() {
   const oot3d::ui::UiTextureIdentity numberGlyphTexture{
       0x005D2200U, 0x18022000U, "oot3d/native/pause/number_glyphs"};
   std::vector<oot3d::ui::UiPrimitive> nativeCounters;
-  Require(AppendTopScreenNativeCounters(
-              touchStateMemory, dynamicTouch.VerticalOffsets,
-              numberGlyphTexture, nativeCounters, &error) &&
+  Require(AppendTopScreenNativeCounters(touchStateMemory, numberGlyphTexture,
+                                        nativeCounters, &error) &&
               nativeCounters.size() == 6U &&
               nativeCounters[0].uv.x == 36.0F / 256.0F &&
               nativeCounters[0].uv.y == 60.0F / 128.0F &&
               nativeCounters[0].destination.y == 218.0F &&
               nativeCounters[3].descriptor_address == 0x00587958U + 0xD4U &&
               nativeCounters[4].destination.x == 389.0F &&
-              nativeCounters[4].destination.y == 49.0F &&
+              nativeCounters[4].destination.y == 47.0F &&
               nativeCounters[4].role ==
                   oot3d::ui::UiPrimitiveRole::CounterDigit,
           "TopScreen native counter reconstruction is incomplete");
   {
-    // 3.2.2 Restoration counters (0x005E1D6C..0x005E1D9C): Item I's count
-    // (42, counter 0) and X's (7, counter 2). Without ZR only X's count is
-    // drawn, in the X lane; with ZR held only Item I's, in the X lane
-    // (358,20), keeping Item I's lane-2 press offset.
+    // Item I's count (42, counter 0) and X's (7, counter 2) each stay in
+    // their own lane at rest.
     Require(touchStateMemory.Write8(kPlayState + 0x435U + 2U, 1U) &&
                 touchStateMemory.Write32(kPlayState + 0x32CU + 8U, 7U),
             "could not seed the X ammo counter");
-    TopScreenUiConfig restorationConfig;
-    restorationConfig.HudLayout = TopScreenHudLayout::Restoration;
-    TopScreenExtendedInputFrame counterInput;
-    const auto ammoDigits = [&](const TopScreenUiConfig *config) {
-      std::vector<oot3d::ui::UiPrimitive> counters;
-      Require(AppendTopScreenNativeCounters(
-                  touchStateMemory, dynamicTouch.VerticalOffsets,
-                  numberGlyphTexture, counters, &error, config, &counterInput),
-              "cannot build the Restoration ammo counters");
-      // Rupees (3 digits) and keys (1) come first.
-      return std::vector<oot3d::ui::UiPrimitive>(counters.begin() + 4,
-                                                 counters.end());
-    };
-    const auto normal = ammoDigits(nullptr);
-    // Ones digit first: 42 is '2' then '4'.
-    Require(normal.size() == 3U && normal[0].destination.x == 389.0F &&
-                normal[1].destination.x == 382.0F &&
-                normal[0].destination.y == 49.0F &&
-                normal[2].destination.x == 365.0F &&
-                normal[2].destination.y == 25.0F,
-            "Normal draws Item I's count in its lane and X's in the X lane");
-    const auto released = ammoDigits(&restorationConfig);
-    Require(released.size() == 1U && released[0].destination.x == 365.0F &&
-                released[0].destination.y == 25.0F,
-            "Restoration without ZR draws X's count only");
-    counterInput.ZrHeld = true;
-    const auto held = ammoDigits(&restorationConfig);
-    Require(held.size() == 2U && held[0].destination.x == 365.0F &&
-                held[1].destination.x == 358.0F &&
-                held[0].destination.y == 25.0F &&
-                held[1].destination.y == 25.0F,
-            "Restoration with ZR held draws Item I's count in the X lane");
-    TopScreenUiConfig normalConfig;
-    const auto normalHeld = ammoDigits(&normalConfig);
-    Require(normalHeld.size() == normal.size() &&
-                normalHeld[0].destination.x == normal[0].destination.x,
-            "Normal counters do not depend on ZR");
+    std::vector<oot3d::ui::UiPrimitive> counters;
+    Require(AppendTopScreenNativeCounters(touchStateMemory, numberGlyphTexture,
+                                          counters, &error),
+            "cannot build the ammo counters");
+    // Rupees (3 digits) and keys (1) come first; ones digit first: 42 is
+    // '2' then '4'.
+    const std::vector<oot3d::ui::UiPrimitive> ammo(counters.begin() + 4,
+                                                   counters.end());
+    Require(ammo.size() == 3U && ammo[0].destination.x == 389.0F &&
+                ammo[1].destination.x == 382.0F &&
+                ammo[0].destination.y == 47.0F &&
+                ammo[2].destination.x == 365.0F &&
+                ammo[2].destination.y == 23.0F,
+            "Item I's count is in its lane and X's in the X lane");
     Require(touchStateMemory.Write8(kPlayState + 0x435U + 2U, 0U) &&
                 touchStateMemory.Write32(kPlayState + 0x32CU + 8U, 0xFFFFFFFFU),
             "could not clear the X ammo counter");
@@ -1706,13 +1621,13 @@ int main() {
             "cannot clear ammo source translation");
   }
   std::vector<oot3d::ui::UiPrimitive> styledCounters;
-  Require(AppendTopScreenNativeCounters(touchStateMemory, dynamicTouch.VerticalOffsets,
-                                         numberGlyphTexture, styledCounters, &error) &&
+  Require(AppendTopScreenNativeCounters(touchStateMemory, numberGlyphTexture,
+                                        styledCounters, &error) &&
               styledCounters.size() == 6U &&
               styledCounters[4].role == oot3d::ui::UiPrimitiveRole::AmmoCounter &&
               styledCounters[4].destination.x == 389.0F &&
               styledCounters[5].destination.x == 382.0F &&
-              styledCounters[4].destination.y == 49.0F &&
+              styledCounters[4].destination.y == 47.0F &&
               std::abs(styledCounters[4].destination.width - 7.7F) < 0.001F,
           "styled ammo copied the native B placement instead of the destination layout");
   {
@@ -1720,9 +1635,8 @@ int main() {
     TopScreenUiConfig scaledCounterConfig;
     scaledCounterConfig.HudScale = 0.8F;
     std::vector<oot3d::ui::UiPrimitive> still;
-    Require(AppendTopScreenNativeCounters(touchStateMemory, dynamicTouch.VerticalOffsets,
-                                           numberGlyphTexture, still, &error,
-                                           &scaledCounterConfig),
+    Require(AppendTopScreenNativeCounters(touchStateMemory, numberGlyphTexture,
+                                          still, &error, &scaledCounterConfig),
             "cannot build the untranslated scaled ammo counter");
     const std::array<float, 2> digitTranslation{5.0F, -3.0F};
     Require(touchStateMemory.WriteBytes(
@@ -1732,9 +1646,8 @@ int main() {
                     sizeof(digitTranslation))),
             "cannot seed the ammo source translation");
     std::vector<oot3d::ui::UiPrimitive> moved;
-    Require(AppendTopScreenNativeCounters(touchStateMemory, dynamicTouch.VerticalOffsets,
-                                           numberGlyphTexture, moved, &error,
-                                           &scaledCounterConfig) &&
+    Require(AppendTopScreenNativeCounters(touchStateMemory, numberGlyphTexture,
+                                          moved, &error, &scaledCounterConfig) &&
                 moved.size() == still.size() && still.size() == 6U,
             "cannot build the translated scaled ammo counter");
     ApplyTopScreenHudScale(still, scaledCounterConfig);
@@ -1935,17 +1848,6 @@ int main() {
               std::abs(copiedTouchPrimitives[4].uv.height -
                        (0.9F - (0.7F + 1.0F / 256.0F))) < 0.001F,
           "native TopScreen touch-copy consumer is incorrect");
-  TopScreenUiConfig restorationCopyConfig;
-  restorationCopyConfig.HudLayout = TopScreenHudLayout::Restoration;
-  std::vector<oot3d::ui::UiPrimitive> restorationTouchCopies;
-  Require(AppendTopScreenNativeTouchCopies(
-              nativeTouchMemory, heartTexture, restorationTouchCopies, nullptr,
-              &error, &restorationCopyConfig) &&
-              restorationTouchCopies.size() == 10U &&
-              restorationTouchCopies[0].destination.x == 339.0F &&
-              restorationTouchCopies[0].destination.y == 55.0F &&
-              restorationTouchCopies[2].destination.x == 4.0F,
-          "Restoration native touch-copy transform is incorrect");
 
   ApplyTopScreenGameplayCanvas(copiedTouchPrimitives);
   Require(std::abs(copiedTouchPrimitives[0].destination.x - 229.0F) <
@@ -2153,28 +2055,6 @@ int main() {
               questQuads[1][0].X == 278.5F && questQuads[1][0].Y == 14.5F &&
               questQuads[1][0].Z == 2.0F && questQuads[2][0].X == 200.0F,
           "TopScreen quest geometry transform is incorrect");
-  {
-    // 3.2.2 0x005C8EB0..0x005C8ED8: the A button (circle and action text)
-    // sits at (288,24) in Normal and in the right lane (382,44) under
-    // Restoration; nothing else of the stream moves with the layout.
-    std::array<std::array<TopScreenVec3, 4>, 2> aButton{{
-        {{{340.0F, 160.0F, 2.0F},
-          {360.0F, 160.0F, 2.0F},
-          {340.0F, 180.0F, 2.0F},
-          {360.0F, 180.0F, 2.0F}}},
-        {{{200.0F, 100.0F, 3.0F},
-          {220.0F, 100.0F, 3.0F},
-          {200.0F, 120.0F, 3.0F},
-          {220.0F, 120.0F, 3.0F}}},
-    }};
-    TopScreenQuestGeometryContext restoration;
-    restoration.HudLayout = TopScreenHudLayout::Restoration;
-    TransformTopScreenQuestGeometry(aButton, restoration);
-    Require(aButton[0][0].X == 372.5F && aButton[0][0].Y == 34.5F &&
-                aButton[0][3].X == 391.5F && aButton[0][3].Y == 53.5F &&
-                aButton[1][0].X == 200.0F,
-            "Restoration did not put the A button in the right lane");
-  }
 
   std::array<std::array<TopScreenVec3, 4>, 1> offsetQuest{
       {{{{80.0F, 140.0F, 0.0F},
@@ -2366,13 +2246,12 @@ int main() {
           questModelMemory.Write32(0x004FC6A0U, 0U) &&
           questModelMemory.Write32(questModelOwner + 0x428U, 5U),
       "cannot seed TopScreen 1.2 Quest draw-model gates");
-  TopScreenUiConfig restorationScaledConfig;
-  restorationScaledConfig.HudLayout = TopScreenHudLayout::Restoration;
-  restorationScaledConfig.HudScale = 0.8F;
+  TopScreenUiConfig scaledQuestConfig;
+  scaledQuestConfig.HudScale = 0.8F;
   TopScreenPauseProjectionState questDrawProjection;
   Require(
       ApplyTopScreenQuestDrawModelTransform(
-          questModelMemory, questDrawScene, restorationScaledConfig,
+          questModelMemory, questDrawScene, scaledQuestConfig,
           questDrawProjection, &questModelStats, &error) &&
           questModelStats.DrawModelsTransformed == 1U &&
           questDrawProjection.QuestDrawModelAdjusted &&
@@ -2380,15 +2259,15 @@ int main() {
                                   &modelPositionXBits) &&
           questModelMemory.Read32(questChildModelPositions + 4U,
                                   &modelPositionYBits) &&
-          std::abs(std::bit_cast<float>(modelPositionXBits) - 119.2F) <
-              0.0001F &&
-          std::abs(std::bit_cast<float>(modelPositionYBits) + 48.6F) <
-              0.0001F,
-      "TopScreen 1.2 Quest draw-model transform diverged from Restoration");
+          std::abs(std::bit_cast<float>(modelPositionXBits) - 31.2F) <
+              0.0005F &&
+          std::abs(std::bit_cast<float>(modelPositionYBits) + 83.8F) <
+              0.0005F,
+      "TopScreen 1.2 Quest draw-model transform diverged");
   const auto oneShotPositionX = modelPositionXBits;
   Require(
       ApplyTopScreenQuestDrawModelTransform(
-          questModelMemory, questDrawScene, restorationScaledConfig,
+          questModelMemory, questDrawScene, scaledQuestConfig,
           questDrawProjection, &questModelStats, &error) &&
           questModelStats.DrawModelsTransformed == 0U &&
           questModelMemory.Read32(questChildModelPositions,
@@ -2401,7 +2280,7 @@ int main() {
           "cannot rebuild native counter geometry");
   questDrawProjection.QuestDrawModelAdjusted = false;
   Require(ApplyTopScreenQuestDrawModelTransform(
-              questModelMemory, questDrawScene, restorationScaledConfig,
+              questModelMemory, questDrawScene, scaledQuestConfig,
               questDrawProjection, &questModelStats, &error) &&
               questModelStats.DrawModelsTransformed == 1U &&
               questModelMemory.Read32(questChildModelPositions,
@@ -3026,16 +2905,6 @@ int main() {
               relocatedIcon.Argument2 == 239U &&
               relocatedIcon.Argument3 == 14U,
           "TopScreen pause icon ignored configured HUD margins");
-  TopScreenUiConfig restorationHud;
-  restorationHud.HudLayout = TopScreenHudLayout::Restoration;
-  restorationHud.HudScale = 1.0F;
-  relocatedIcon = {1U, 0xC5U, 3U, 4U};
-  Require(ResolveTopScreenPauseIconBuild(&relocatedIcon, restorationHud) &&
-              relocatedIcon.Argument2 == 340U &&
-              relocatedIcon.Argument3 == 55U &&
-              relocatedIcon.StackArgument0 == 28U &&
-              relocatedIcon.StackArgument1 == 28U,
-          "TopScreen restoration pause icon build transform is incorrect");
   Require(!SuppressTopScreenTouchButtonDraw(11U) &&
               SuppressTopScreenTouchButtonDraw(12U) &&
               SuppressTopScreenTouchButtonDraw(19U) &&

@@ -23,9 +23,6 @@ constexpr float kCanvasHeight = 240.0F;
 constexpr std::uint32_t kTouchClusterOwner = 0x005C9940U;
 constexpr std::uint32_t kTouchClusterLayer = 12U;
 constexpr std::uint32_t kDpadCrossQuad = 5U;
-// Item I and Item II circles (source quads 2 and 3).
-constexpr std::uint32_t kItemIQuad = 2U;
-constexpr std::uint32_t kItemIIQuad = 3U;
 // D-pad action icons, View/Navi eyes and cycle marks
 // (AppendTopScreenDpadPresentation).
 constexpr std::uint32_t kDpadIconOwner = 0x005D4A8CU;
@@ -111,12 +108,8 @@ UiRect MapTopScreenCanvasRectToWindow(const UiRect &canvas,
 
 TopScreenHudTouchTargets
 ResolveTopScreenHudTouchTargets(std::span<const UiPrimitive> hud,
-                                TopScreenHudLayout layout,
                                 std::uint32_t windowWidth,
                                 std::uint32_t windowHeight) noexcept {
-  // Restoration reads Item I/II as ZR+X/ZR+Y (TopScreenItemQuery): a tap
-  // would press a bare ZR/ZL the layout does not use, whatever is drawn.
-  const bool itemButtonsTappable = layout != TopScreenHudLayout::Restoration;
   TopScreenHudTouchTargets targets;
   UiRect cross{};
   bool crossVisible = false;
@@ -125,10 +118,6 @@ ResolveTopScreenHudTouchTargets(std::span<const UiPrimitive> hud,
         primitive.role != UiPrimitiveRole::TouchControl ||
         primitive.owner_address != kTouchClusterOwner ||
         primitive.layer != kTouchClusterLayer || !Takes(primitive)) {
-      continue;
-    }
-    if (!itemButtonsTappable && (primitive.source_quad == kItemIQuad ||
-                                 primitive.source_quad == kItemIIQuad)) {
       continue;
     }
     if (primitive.source_quad < targets.Buttons.size()) {

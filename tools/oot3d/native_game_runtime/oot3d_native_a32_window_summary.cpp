@@ -1174,9 +1174,6 @@ void WriteNativeA32WindowRuntimeSummary(const NativeA32WindowSummaryInputs &in) 
                launch.TopScreenConfigPath.empty()
                    ? nlohmann::json("built_in_defaults")
                    : nlohmann::json("external_json")},
-              {"hud_layout",
-               Oot3dNativeGame::TopScreenHudLayoutName(
-                   activeTopScreenConfig.HudLayout)},
               {"hud_scale",
                std::round(static_cast<double>(
                               activeTopScreenConfig.HudScale) *

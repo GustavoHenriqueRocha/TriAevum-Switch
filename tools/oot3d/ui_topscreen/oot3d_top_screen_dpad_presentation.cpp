@@ -129,7 +129,7 @@ std::size_t AppendTopScreenDpadPresentation(
   const bool navi = viewState.HasPlayState && viewState.StateType == 3U &&
                     viewState.StateSubtype == 2U && viewState.PlayerHudMode != 0;
   const auto view =
-      BuildTopScreenAuxiliaryTouchGeometry(viewState, {}, alpha).Quads[4];
+      BuildTopScreenAuxiliaryTouchGeometry(viewState, alpha).Quads[4];
   constexpr std::array<float, 4> kViewLaneOffsetX{1.0F, 2.0F, 0.0F, 0.0F};
   const auto firstView = std::find(actions.begin(), actions.end(), TopScreenDpadAction::View);
   std::uint32_t viewCount = 0U;

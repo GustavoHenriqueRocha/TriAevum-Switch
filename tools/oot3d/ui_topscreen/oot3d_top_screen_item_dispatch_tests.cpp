@@ -18,14 +18,9 @@ void RunTopScreenItemDispatchTests() {
     using namespace Oot3dNativeGame;
     {
         TopScreenInputCadence clock;
-        clock.ObserveGuest({.XHeld = true});
-        clock.ObserveGuest({});
-        auto snapshot = clock.Advance();
-        Check(snapshot.XPressed && !snapshot.XHeld, "short refresh tap lost or made held");
-        Check(!clock.Advance().XPressed, "short refresh tap repeated");
         clock.ObserveGuest({.DpadRightHeld = true});
         clock.ObserveGuest({});
-        snapshot = clock.Advance();
+        auto snapshot = clock.Advance();
         Check(snapshot.DpadRightPressed && !snapshot.DpadRightHeld,
               "short song browser tap lost or made held");
         Check(!clock.Advance().DpadRightPressed, "song browser tap repeated");
@@ -61,12 +56,11 @@ void RunTopScreenItemDispatchTests() {
         Check(!clock.Advance().ZrPressed, "release repeated edge");
         clock.ObserveGuest({.ZrHeld = true});
         Check(clock.Advance().ZrPressed, "release/repress lost edge");
-        clock.ObserveGuest({.DpadLeftHeld = true, .DpadRightHeld = true,
-                            .RestorationLayout = true});
+        clock.ObserveGuest({.DpadLeftHeld = true, .DpadRightHeld = true});
         snapshot = clock.Advance();
-        Check(snapshot.RestorationLayout && snapshot.DpadLeftHeld &&
-              snapshot.DpadRightHeld && !snapshot.ZrPressed,
-              "compatibility/chord fields changed at cadence boundary");
+        Check(snapshot.DpadLeftHeld && snapshot.DpadRightHeld &&
+              !snapshot.ZrPressed,
+              "compatibility fields changed at cadence boundary");
     }
     using oot3d::recomp::a32::GuestState;
     NativeA32Memory memory;
@@ -196,36 +190,18 @@ void RunTopScreenItemDispatchTests() {
     Check(!ShouldObserveTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, input, runtime) &&
           !ExecuteTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, input, runtime) &&
           state.r[0] == global, "special state did not stay native");
-    // 3.2.2 0x005D21B4: under Restoration, ZR held takes X/Y's own items
-    // (slots 1, 2) away, so ZR+X/ZR+Y use Item I/II alone.
+    // ZR (Item I) never touches the X/Y slots (1, 2): there is no ZR+X/ZR+Y
+    // chord since the Restoration HUD was removed.
     {
-        TopScreenExtendedInputFrame chord{.ZrHeld = true, .RestorationLayout = true};
+        const TopScreenExtendedInputFrame zr{.ZrHeld = true};
         Check(memory.Write8(global + 0x5C75U, 0), "clear special state");
         for (const uint32_t slot : {1U, 2U}) {
             state.r[0] = global;
             state.r[1] = slot;
-            state.r[14] = 0x123400U;
-            Check(ShouldObserveTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
-                  ExecuteTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
-                  state.r[0] == 0xFFU && state.r[15] == 0x123400U,
-                  "Restoration ZR held left X/Y their items");
+            Check(!ShouldObserveTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, zr, runtime) &&
+                  !ExecuteTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, zr, runtime) &&
+                  state.r[0] == global, "ZR held changed an X/Y slot item");
         }
-        for (const uint32_t slot : {0U, 3U, 4U}) {
-            state.r[0] = global;
-            state.r[1] = slot;
-            Check(!ExecuteTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
-                  state.r[0] == global, "Restoration ZR held changed B or Item I/II slots");
-        }
-        chord.ZrHeld = false;
-        state.r[0] = global;
-        state.r[1] = 1;
-        Check(!ShouldObserveTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
-              !ExecuteTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
-              state.r[0] == global, "Restoration without ZR changed X");
-        chord.ZrHeld = true;
-        Check(memory.Write8(global + 0x5C75U, 1), "set special state");
-        Check(!ExecuteTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
-              state.r[0] == global, "Restoration special state did not stay native");
         state.r[1] = 3;
     }
 

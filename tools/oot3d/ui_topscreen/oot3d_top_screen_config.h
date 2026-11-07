@@ -30,15 +30,6 @@ inline constexpr std::uint8_t kTopScreenCameraZoomMaximum = 170U;
 inline constexpr std::uint8_t kTopScreenCameraFovMinimum = 70U;
 inline constexpr std::uint8_t kTopScreenCameraFovMaximum = 140U;
 
-enum class TopScreenHudLayout {
-  Normal,
-  Restoration,
-};
-
-const char *TopScreenHudLayoutName(TopScreenHudLayout layout) noexcept;
-bool ParseTopScreenHudLayout(std::string_view value,
-                             TopScreenHudLayout *layout) noexcept;
-
 enum class TopScreenSelectAction : std::uint8_t {
   SaveScreen,
   MinimapToggle,
@@ -94,7 +85,6 @@ inline constexpr std::array<TopScreenDpadAction, 4>
                                 TopScreenDpadAction::HoverBoots};
 
 struct TopScreenUiConfig {
-  TopScreenHudLayout HudLayout = TopScreenHudLayout::Normal;
   float HudScale = kTopScreenHudScaleDefault;
   std::int8_t HudMarginX = 4;
   std::int8_t HudMarginY = 1;

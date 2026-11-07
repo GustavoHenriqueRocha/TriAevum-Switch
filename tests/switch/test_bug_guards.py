@@ -1475,53 +1475,35 @@ GUARDS = [
           r'removed = std::filesystem::remove\(target, error\);',
           "oot3d_native_a32_ctr_fs_tests (TestSlotEraseWithRelativeSaveRoot)",
           forbid=r'std::filesystem::(weakly_canonical|canonical|absolute)\('),
-    # --- 05/11 and 06/11: Restoration HUD drew the Item I icon on the right of
-    # the button cluster, first without a circle, then with an empty circle when
-    # no Item I was drawn. ---
-    # --- 07/11: then the right item had no button letter, no count and no
-    # button: Item I/II are the ZR+X/ZR+Y chords under Restoration. ---
-    # SingleScreen 3.2.2 (code.ips 0x005DFDAC, 0x005E0408, 0x005E1D6C, 0x005D21B4)
-    # gives Item I/II no lane: they are hidden until ZR is held, then drawn in the
-    # X/Y lanes, labelled I/II, with their counts there, while X/Y use no item of
-    # their own. Lanes 2/3 carry no circle (B's circle takes lane 3, A the right lane).
-    Guard("Restoration HUD: Item I drawn on the right with no button and no count (Item I/II show in the X/Y lanes only while ZR is held)",
+    # --- hud18 (test.10): the Restoration HUD's layout was wrong; it is removed and a
+    # saved hud_layout (normal or restoration) loads as the Normal HUD. ---
+    Guard("hud18: L3+R3 > HUD offers no Restoration layout; a saved hud_layout is read and ignored",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_config.cpp",
+          r'"schema", "hud_layout", "hud_scale"',
+          "oot3d_top_screen_mod_profile_tests (saved hud_layout loads)",
+          forbid=r'TopScreenHudLayout|ParseTopScreenHudLayout'),
+    Guard("hud18: the settings panel has no layout radio buttons",
+          "tools/oot3d/native_game_runtime/oot3d_top_screen_settings_panel.cpp",
+          r'Checkbox\("Render Items hint"',
+          forbid=r'Restoration HUD|HudLayout'),
+    # --- hud18: the HUD said ZR/ZL over the items the physical R/L use (ZR/ZL do the
+    # game's shield/Z-target). custom_ui01 has no R/L label: the second letter of its
+    # ZR (rect 15) and ZL (rect 14) labels is drawn, centred where the label was. ---
+    Guard("hud18: Item I/II lanes labelled ZR/ZL instead of the physical R/L",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
-          r'const bool itemLane = region == 0U \|\| region == 3U;\s*'
-          r'placement\.Visible = itemLane == zrHeld;\s*'
-          r'if \(itemLane && zrHeld\) \{\s*placement\.Offset = \{-24\.0F, -24\.0F\};',
-          "oot3d_top_screen_hud_touch_tests (TestRestorationItemLanes)"),
-    Guard("Restoration HUD: the item copies, X/Y labels and counters follow the layout and ZR",
-          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
-          r'itemIconCopies, &itemCopyError, false, &itemOpacity,\s*'
-          r'mTopScreenConfig\.HudLayout, mTopScreenInput\.ZrHeld\);.*?'
-          r'BuildTopScreenAuxiliaryTouchGeometry\(\s*auxiliaryInputs, touchState\.VerticalOffsets, touchState\.Alpha,\s*'
-          r'mTopScreenConfig\.HudLayout, mTopScreenInput\.ZrHeld\);',
-          "oot3d_top_screen_hud_touch_tests (TestEveryItemIconHasACircle)"),
-    Guard("Restoration HUD: Item I/II counts drawn on the right/bottom instead of the X/Y lanes",
+          r'result\.Quads\[0\] = \{alpha != 0\.0F,\s*\{372\.0F - 3\.875F, 31\.0F\},\s*'
+          r'\{7\.75F, 16\.0F\}, \{54\.625F, 231\.0F\},.*?'
+          r'\{6\.375F, 16\.0F\}, \{253\.0F, 227\.0F\},',
+          "oot3d_top_screen_mod_profile_tests (R/L labels)"),
+    # --- hud18: R (host ZR) lowered the ZR circle and the Y item; L only ZL; X/Y/A/B
+    # never. The icons read the lane offsets by item region (Item I, X, Y, Item II),
+    # so lane 2 (ZR) moved the Y icon. No lane moves on a press now. ---
+    Guard("hud18: pressing R also moved the Y item (no HUD lane moves on a press)",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
-          r'if \(zrHeld\) \{\s*return counter < 2U \? std::optional<std::size_t>\(counter \+ 2U\)',
-          "oot3d_top_screen_mod_profile_tests (Restoration counters)"),
-    Guard("Restoration HUD: ZR+X also used the X item (X/Y give up their items while ZR is held)",
-          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_items.cpp",
-          r'if \(query\.RestorationZrHeld && \(query\.Slot == 1U \|\| query\.Slot == 2U\)\) \{\s*return 0xFFU;',
-          "oot3d_top_screen_hud_touch_tests (TestRestorationItemLanes)"),
-    Guard("Restoration HUD: no circle in the Item I/II lanes (Item I/II have no lane there)",
-          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
-          r'layout == TopScreenHudLayout::Restoration && index >= 2U;',
-          "oot3d_top_screen_hud_touch_tests (TestHiddenControls)"),
-    Guard("Restoration HUD: A stayed left of the button diamond (3.2.2 puts it in the right lane)",
-          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
-          r'const float targetX = restoration \? 382\.0F : 288\.0F;\s*'
-          r'const float targetY = restoration \? 44\.0F : 24\.0F;',
-          "oot3d_top_screen_mod_profile_tests (A button right lane)"),
-    Guard("Restoration HUD: the bridge passes the layout to the A-button transform",
-          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
-          r'context\.HudLayout = mTopScreenConfig\.HudLayout;'),
-    Guard("Restoration HUD: a tap never presses ZR/ZL (the layout decides)",
-          "tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch.cpp",
-          r'itemButtonsTappable = layout != TopScreenHudLayout::Restoration;.*?'
-          r'if \(!itemButtonsTappable && \(primitive\.source_quad == kItemIQuad \|\|',
-          "oot3d_top_screen_hud_touch_tests (TestHiddenControls)"),
+          r'bool ReadTopScreenTouchDynamicState\(NativeA32Memory &memory,\s*'
+          r'TopScreenTouchDynamicState \*state,',
+          "oot3d_top_screen_mod_profile_tests (press handling)",
+          forbid=r'VerticalOffsets|kNativeButtonOffsets'),
     # --- 11/07: Landing roll (N64), L3+R3 > Game > Gameplay (config/no_landing_roll) ---
     # OoT3D keeps the run-jump animation to the ground, so its run-jump-end check (0x004BC080)
     # pre-empts the game's own roll (0x004BC120). The hook must stay in the block-entry list and

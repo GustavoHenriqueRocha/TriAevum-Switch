@@ -1,6 +1,5 @@
 {
   "schema": "oot3d_topscreen_ui_v2",
-  "hud_layout": "normal",
   "hud_scale": 0.75,
   "hud_margin_x": 4,
   "hud_margin_y": 1,

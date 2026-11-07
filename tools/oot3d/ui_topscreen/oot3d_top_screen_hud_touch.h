@@ -70,12 +70,10 @@ struct TopScreenHudTouchTargets {
 
 // Reads the controls out of the gameplay HUD primitives the host drew last
 // (lastTopScreenPrimitivesBySubsystem[GameplayHud], after HUD scale, margins
-// and clipping). Controls that are hidden or faded out are left out, and so
-// are Item I/II under the Restoration layout: there they are the ZR+X/ZR+Y
-// chords, so their circles frame the item icons but take no taps.
+// and clipping). Controls that are hidden or faded out are left out.
 [[nodiscard]] TopScreenHudTouchTargets ResolveTopScreenHudTouchTargets(
-    std::span<const oot3d::ui::UiPrimitive> hud, TopScreenHudLayout layout,
-    std::uint32_t windowWidth, std::uint32_t windowHeight) noexcept;
+    std::span<const oot3d::ui::UiPrimitive> hud, std::uint32_t windowWidth,
+    std::uint32_t windowHeight) noexcept;
 
 // The control under a window point, or None.
 [[nodiscard]] TopScreenHudTouchControl

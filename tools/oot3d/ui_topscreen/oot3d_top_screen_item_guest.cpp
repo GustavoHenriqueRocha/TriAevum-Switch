@@ -108,10 +108,7 @@ std::optional<std::uint8_t> ResolveTopScreenSlotItemOverrideGuest(
     }
     const bool itemI = slot == 3U && (*compatibility)[0];
     const bool itemII = slot == 4U && (*compatibility)[1];
-    const bool restorationChordSlot = input.RestorationLayout &&
-                                      input.ZrHeld &&
-                                      (slot == 1U || slot == 2U);
-    if (!itemI && !itemII && !restorationChordSlot) {
+    if (!itemI && !itemII) {
         return std::nullopt;
     }
 
@@ -122,7 +119,7 @@ std::optional<std::uint8_t> ResolveTopScreenSlotItemOverrideGuest(
         return std::nullopt;
     }
     return ResolveTopScreenSlotItemId(
-        {slot, 0xFFU, itemI, itemII, false, restorationChordSlot});
+        {slot, 0xFFU, itemI, itemII, false});
 }
 
 bool ApplyTopScreenAimProjectileCycleGuest(

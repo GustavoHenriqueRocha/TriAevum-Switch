@@ -1037,7 +1037,6 @@ bool NativeA32WindowSession::RunFrame() {
                          nativeControlPollingState,
                          lastTopScreenPrimitivesBySubsystem[static_cast<
                              std::size_t>(oot3d::ui::UiSubsystem::GameplayHud)],
-                         activeTopScreenConfig.HudLayout,
                          WidescreenMenuCornersActive());
   untimed.InputPoll += SecondsSince(inputPollStart);
   // Exit game / Close game in the L3+R3 menu leave like an exit input: the
@@ -2465,16 +2464,7 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
                                    Oot3dNativeGame::NativeA32HidButton::DpadUp) : 0U) |
                                topScreenButton(Oot3dNativeGame::NativeA32HidButton::DpadRight));
   }
-  sampledTopScreenInput.XHeld =
-      (topScreenButtons &
-       topScreenButton(Oot3dNativeGame::NativeA32HidButton::X)) != 0U;
-  sampledTopScreenInput.YHeld =
-      (topScreenButtons &
-       topScreenButton(Oot3dNativeGame::NativeA32HidButton::Y)) != 0U;
   sampledTopScreenInput.GameplayDpadActionsOwned = true;
-  sampledTopScreenInput.RestorationLayout =
-      activeTopScreenConfig.HudLayout ==
-      Oot3dNativeGame::TopScreenHudLayout::Restoration;
   nativeCandidateDispatch.TopScreenInputClock.ObserveGuest(sampledTopScreenInput);
   if (nativeCandidateDispatch.TopScreenUiProfile &&
       activeTopScreenConfig.FreeCameraEnabled &&

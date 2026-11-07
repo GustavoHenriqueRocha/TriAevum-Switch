@@ -35,7 +35,7 @@ class ProductGraphicsDefaultsTests(unittest.TestCase):
         config = json.loads((root / "config/topscreen_ui.example.json").read_text())
         self.assertEqual(config["hud_scale"], 0.8)
         self.assertEqual((config["hud_margin_x"], config["hud_margin_y"]), (4, 1))
-        self.assertEqual(config["hud_layout"], "normal")
+        self.assertNotIn("hud_layout", config)
         self.assertTrue(config["minimap_visible"])
         self.assertFalse(config["free_camera_enabled"])
         self.assertEqual(config["dpad_child"], ["view", "ocarina", "item_zr", "item_zl"])

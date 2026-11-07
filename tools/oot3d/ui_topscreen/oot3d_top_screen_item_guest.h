@@ -44,8 +44,8 @@ struct TopScreenAimProjectileCycleResult {
 };
 
 // Applies the TopScreen 1.2 aiming-selector delta to the original OoT3D state.
-// The caller supplies fresh D-pad Left/Right edges and may map Restoration ZL
-// to the next edge. Audio remains a caller-owned native side effect.
+// The caller supplies fresh D-pad Left/Right edges. Audio remains a
+// caller-owned native side effect.
 bool ApplyTopScreenAimProjectileCycleGuest(
     NativeA32Memory& memory, const TopScreenAimProjectileCycleInput& input,
     TopScreenAimProjectileCycleResult* result,

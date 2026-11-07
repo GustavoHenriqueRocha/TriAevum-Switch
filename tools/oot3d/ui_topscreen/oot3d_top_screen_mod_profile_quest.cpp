@@ -57,13 +57,10 @@ TopScreenQuestGeometryStats TransformTopScreenQuestGeometry(
       } else if (centerX < 398.0F && centerY > 150.0F) {
         // The A button (circle and action text). Credited to the "Single
         // Screen Experience" mod (GameBanana 695893), 3.2.2 EUR code.ips
-        // 0x005C8EB0..0x005C8ED8: (288,24) right of B, and the right lane
-        // (382,44) under Restoration (X top, Y left, A right, B bottom).
-        // Reimplemented; no mod code or data was copied.
-        const bool restoration =
-            context.HudLayout == TopScreenHudLayout::Restoration;
-        const float targetX = restoration ? 382.0F : 288.0F;
-        const float targetY = restoration ? 44.0F : 24.0F;
+        // 0x005C8EB0..0x005C8ED8: (288,24), right of B. Reimplemented; no mod
+        // code or data was copied.
+        constexpr float targetX = 288.0F;
+        constexpr float targetY = 24.0F;
         if (!context.PlayerSpecialState || centerY < 195.0F) {
           for (auto &vertex : quad) {
             vertex.X = targetX + (vertex.X - centerX) * 0.95F;
@@ -491,12 +488,8 @@ bool ApplyTopScreenQuestSubmitModelTransforms(
   const auto childCount = static_cast<std::int32_t>(childCountBits);
   if (childCount > 0) {
     const float scale = config.HudScale;
-    const float baseX = config.HudLayout == TopScreenHudLayout::Restoration
-                            ? 358.0F
-                            : 248.0F;
-    const float baseY = config.HudLayout == TopScreenHudLayout::Restoration
-                            ? 68.0F
-                            : 24.0F;
+    constexpr float baseX = 248.0F;
+    constexpr float baseY = 24.0F;
     const float targetX = 400.0F + (baseX - 400.0F) * scale -
                           static_cast<float>(config.HudMarginX);
     const float targetY = baseY * scale +
@@ -619,12 +612,8 @@ bool ApplyTopScreenQuestDrawModelTransform(
   }
 
   const float scale = config.HudScale;
-  const float baseX = config.HudLayout == TopScreenHudLayout::Restoration
-                          ? 358.0F
-                          : 248.0F;
-  const float baseY = config.HudLayout == TopScreenHudLayout::Restoration
-                          ? 68.0F
-                          : 24.0F;
+  constexpr float baseX = 248.0F;
+  constexpr float baseY = 24.0F;
   const float targetX = 400.0F + (baseX - 400.0F) * scale -
                         static_cast<float>(config.HudMarginX) + scale * 8.0F;
   const float targetY = baseY * scale +

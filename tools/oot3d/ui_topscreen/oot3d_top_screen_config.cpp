@@ -101,6 +101,8 @@ bool ReadDpadMapping(const nlohmann::json &document, std::string_view key,
 bool DecodeLegacyTopScreenUiConfig(const nlohmann::json &document,
                                    TopScreenUiConfig *config,
                                    std::string *error) {
+  // "hud_layout" (normal or restoration) is read and ignored: the
+  // Restoration HUD was removed, every saved layout draws the Normal HUD.
   constexpr std::array<std::string_view, 9> kAllowedFields{
       "schema", "hud_layout", "hud_scale", "minimap_visible",
       "n64_camera_zoom", "free_camera_enabled", "free_camera_speed",
@@ -112,13 +114,6 @@ bool DecodeLegacyTopScreenUiConfig(const nlohmann::json &document,
   }
 
   TopScreenUiConfig parsed;
-  if (document.contains("hud_layout") &&
-      (!document.at("hud_layout").is_string() ||
-       !ParseTopScreenHudLayout(document.at("hud_layout").get<std::string>(),
-                                &parsed.HudLayout))) {
-    SetError(error, "TopScreen hud_layout must be normal or restoration");
-    return false;
-  }
   if (document.contains("hud_scale")) {
     if (!document.at("hud_scale").is_number()) {
       SetError(error, "TopScreen hud_scale must be numeric");
@@ -200,6 +195,7 @@ bool DecodeTopScreenUiConfig(const nlohmann::json &document,
 
   constexpr std::array<std::string_view, 24> kAllowedFields{
       "schema",
+      // Read and ignored (the Restoration HUD was removed; see above).
       "hud_layout",
       "hud_scale",
       "hud_margin_x",
@@ -230,15 +226,6 @@ bool DecodeTopScreenUiConfig(const nlohmann::json &document,
   }
 
   TopScreenUiConfig parsed;
-  if (document.contains("hud_layout")) {
-    if (!document.at("hud_layout").is_string() ||
-        !ParseTopScreenHudLayout(
-            document.at("hud_layout").get<std::string>(), &parsed.HudLayout)) {
-      SetError(error,
-               "TopScreen hud_layout must be normal or restoration");
-      return false;
-    }
-  }
   if (document.contains("hud_scale")) {
     if (!document.at("hud_scale").is_number()) {
       SetError(error, "TopScreen hud_scale must be numeric");
@@ -359,32 +346,6 @@ bool DecodeTopScreenUiConfig(const nlohmann::json &document,
 }
 
 } // namespace
-
-const char *TopScreenHudLayoutName(TopScreenHudLayout layout) noexcept {
-  switch (layout) {
-  case TopScreenHudLayout::Normal:
-    return "normal";
-  case TopScreenHudLayout::Restoration:
-    return "restoration";
-  }
-  return "unknown";
-}
-
-bool ParseTopScreenHudLayout(std::string_view value,
-                             TopScreenHudLayout *layout) noexcept {
-  if (layout == nullptr) {
-    return false;
-  }
-  if (value == "normal") {
-    *layout = TopScreenHudLayout::Normal;
-    return true;
-  }
-  if (value == "restoration") {
-    *layout = TopScreenHudLayout::Restoration;
-    return true;
-  }
-  return false;
-}
 
 const char *TopScreenSelectActionName(TopScreenSelectAction action) noexcept {
   switch (action) {
@@ -547,7 +508,6 @@ bool SerializeTopScreenUiConfigText(const TopScreenUiConfig &config,
   }
   const nlohmann::json document{
       {"schema", kTopScreenUiConfigSchema},
-      {"hud_layout", TopScreenHudLayoutName(config.HudLayout)},
       {"hud_scale", config.HudScale},
       {"hud_margin_x", config.HudMarginX},
       {"hud_margin_y", config.HudMarginY},
