@@ -333,9 +333,20 @@ inline constexpr std::int32_t kGlWidescreenCornerHeight = 40; // rows
     return enabled;
 }
 
-// The draw is a piece of the relocated bottom screen (viewport that doesn't cover the
-// presented horizontal axis, square-pixel orthographic, with its own
-// texture) and the internal scale is an integer >= 2. Applies in both domains: the
+// A piece of the relocated bottom screen (TopScreen moves the game's lower
+// screen into a viewport of the top one): a viewport that doesn't cover the
+// presented horizontal axis, square-pixel orthographic, with its own texture.
+// File select, name entry, the Normal/Master Quest choice and the Game Over
+// panels; the file-select menu comes attributed to the title scene's
+// atmosphere layer (Scene domain), the others in the Ui domain.
+[[nodiscard]] inline bool GlRelocatedMenuDraw(const GlWidescreenDrawEvidence& evidence) noexcept {
+    return !evidence.ViewportSpansPresentedWidth && !evidence.Untextured && !evidence.SamplesRenderedCopy &&
+           evidence.Projection == GlProjectionShape::Orthographic &&
+           GlAnisotropyNear(evidence.PixelAnisotropy, 1.0F);
+}
+
+// The draw is a piece of the relocated bottom screen (GlRelocatedMenuDraw)
+// and the internal scale is an integer >= 2. Applies in both domains: the
 // name entry (keyboard and header, same seam) comes in the Ui domain, as do
 // the Game Over panels and the centered pause pages; HUD, Items, Map and
 // System cover the full width and stay linear.
@@ -343,10 +354,7 @@ inline constexpr std::int32_t kGlWidescreenCornerHeight = 40; // rows
     const GlWidescreenDrawEvidence& evidence, float resolutionScale) noexcept {
     const bool integerScale = resolutionScale >= 2.0F - 1.0e-3F &&
                               std::abs(resolutionScale - std::round(resolutionScale)) <= 1.0e-3F;
-    return integerScale && !evidence.ViewportSpansPresentedWidth &&
-           !evidence.Untextured && !evidence.SamplesRenderedCopy &&
-           evidence.Projection == GlProjectionShape::Orthographic &&
-           GlAnisotropyNear(evidence.PixelAnisotropy, 1.0F);
+    return integerScale && GlRelocatedMenuDraw(evidence);
 }
 
 // Presented horizontal axis (Y of the widened target, in target pixels) of a

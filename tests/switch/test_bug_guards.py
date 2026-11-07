@@ -220,7 +220,7 @@ GUARDS = [
           r'dkQueueSubmitCommands\(mQueue, list\);\s+dkQueueFlush\(mQueue\);'),
     Guard("deko3d pack images: finished ones upload at frame top, never one barrier per draw mid-frame",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
-          r'Evict\(\);\s+UploadReadyReplacements\(\);\s+\}',
+          r'Evict\(\);\s+BeginScene\(\);\s+UploadReadyReplacements\(\);\s+\}',
           forbid=r'PollOrQueue\(\s*native\.PackHash, static_cast<uint16_t>\(view\.Width\)'),
     # --- 07/11: colour compression (config/deko3d_compression "0" = off). The display controller can't
     # read compressed images: window images handed to nwindow without dkQueuePresentImage stay uncompressed.
@@ -1434,7 +1434,7 @@ GUARDS = [
     # --- 07/11 (test.9): pause pages showed the game's tab bar, then the pack's, on every page ---
     Guard("pause pages (PICA, Ui draws) resolve their pack images as HUD images, shared with the HUD's ahead requests",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
-          r'menu = PicaTextureIsMenuArt\(view, uiDraw, mMenuImages\);.*?\.UserInterface = menu,\s+\.Menu = menu,',
+          r'menu = PicaTextureIsMenuArt\(view, menuDraw, mMenuImages\);.*?\.UserInterface = menu,\s+\.Menu = menu,',
           "oot3d_azahar_texture_pack_tests (MenuTexturesShareTheHudImagesAndStayDecoded), "
           "oot3d_deko3d_backend_tests (TestMenuArt)"),
     Guard("a menu texture's pack image is not released after its upload (another guest address re-decoded it)",
@@ -1445,6 +1445,31 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
           r'if \(onSight\) \{\s+mUiLoadJobs\.push_front\(std::move\(job\)\);',
           "oot3d_azahar_texture_pack_tests (TexturesOnScreenGoBeforeHudImagesAskedAhead)"),
+    # --- 07/11 (pop18, after test.10): file select, world textures and grass without pop-in
+    # (SWITCH_PORT.md "File select, world textures and grass without pop-in").
+    Guard("file select (relocated bottom screen, atmosphere layer) resolves its pack images as menu art",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'draw\.Composition\.Layer == Renderer3ds::PicaCompositionLayer::Ui \|\|\s+'
+          r'\(mTexturePack && mMenuImages && !draw\.Textures\.empty\(\) && RelocatedMenuDraw\(draw\)\);',
+          "gl_widescreen_menu_policy_tests (FileSelectPiecesAreRelocatedMenuDrawsInEitherDomain)"),
+    Guard("a scene change reaches the pack runtime in frame order (scene lists, preload, hold)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'frameArea\.Scene != texturePackScene\) \{\s+texturePackScene = frameArea\.Scene;\s+'
+          r'renderStream\.Submit\(\[scene = texturePackScene\] \{\s+'
+          r'::Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.NoteScene\(scene\);',
+          "oot3d_azahar_texture_pack_tests (SceneImagesSeenOnceAreDecodedWhenTheSceneStarts)"),
+    Guard("a scene change drops the scene before's queued world decodes",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'\+\+mSceneSerial;\s+mScene\.Dropped \+= DropEarlierSceneJobsLocked\(\);',
+          "oot3d_azahar_texture_pack_tests (SceneChangesDropTheBacklogAndTheHoldWaitsForImagesOnScreen)"),
+    Guard("the hold waits only for world textures drawn native last frame, within the scene's budget",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'pack\.WaitForImages\(mHoldHashes, std::chrono::microseconds\(mHoldLeftMicros\)\);',
+          "oot3d_azahar_texture_pack_tests (SceneChangesDropTheBacklogAndTheHoldWaitsForImagesOnScreen)"),
+    Guard("deko3d grass keeps placements on the SD card (config/grass_placement_cache)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'if \(placementCache\) \{\s+state->Placements->SetCacheDirectory\(',
+          "oot3d_grass_switch_tests (Oot3dGrassPlacementCache), oot3d_grass_async_placement_builder_tests"),
     Guard("HUD button labels draw over the item icons (a pack's bigger bomb hid the R of ZR)",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
           r'primitive\.layer = kTopScreenButtonLabelLayer;.*?'

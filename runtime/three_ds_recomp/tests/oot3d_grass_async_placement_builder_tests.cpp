@@ -625,6 +625,9 @@ TEST_F(GrassDiskFixture, NewBuilderLoadsWithoutExtractionMaskDecodeOrColorSource
         (void)first.ResolveOrQueue(r);
         first.WaitForIdle();
         EXPECT_EQ(first.Stats().DiskWrites, 1);
+        // A build, not a load (deko3d's `grass:` line splits them).
+        EXPECT_GT(first.Stats().BuildMaxMilliseconds, 0.0);
+        EXPECT_EQ(first.Stats().DiskLoadMilliseconds, 0.0);
     }
     textures.Clear(); // There is no texture payload left to decode or sample.
     r.WorldIdentity = 12345;
@@ -643,6 +646,23 @@ TEST_F(GrassDiskFixture, NewBuilderLoadsWithoutExtractionMaskDecodeOrColorSource
         EXPECT_EQ(result.Placement->Identity, r.WorldIdentity);
         EXPECT_EQ(result.Placement->LastUsedFrame, 55);
         ExpectSamePlacement(*original, *result.Placement);
+        EXPECT_GT(second.Stats().DiskLoadMilliseconds, 0.0);
+        EXPECT_EQ(second.Stats().BuildMaxMilliseconds, 0.0);
+    }
+    textures.ObserveDecoded(r.LazyMaskTexture, 1, 1, rgba); // built again below
+    {
+        // The Switch's limits (config/grass_placement_cache): a placement
+        // over the byte limit is not written.
+        GrassAsyncPlacementBuilder tiny;
+        tiny.SetCacheDirectory(Directory / "tiny", 1U, 1U);
+        tiny.SetDiskSettleDelay({});
+        auto result = tiny.ResolveOrQueue(r);
+        result.WaitUntilReady();
+        ASSERT_TRUE(result.Placement);
+        (void)tiny.ResolveOrQueue(r);
+        tiny.WaitForIdle();
+        EXPECT_EQ(tiny.Stats().Builds, 1);
+        EXPECT_EQ(tiny.Stats().DiskWrites, 0);
     }
 }
 TEST_F(GrassDiskFixture, OnlySettledPlacementsAreWritten) {

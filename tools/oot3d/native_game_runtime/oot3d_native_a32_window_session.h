@@ -721,6 +721,8 @@ private:
   // The game's scene and room, read once per host frame on the game thread
   // (hitches.txt lines, perf.txt windows; oot3d_native_area.h).
   Oot3dNativeGame::NativeArea frameArea{};
+  // The scene last handed to the texture pack runtime (deko3d; -2 = none yet).
+  int texturePackScene = -2;
   Oot3dNativeGame::NativeAreaWindow perfAreaWindow;
   // Actor cost profile (config/actor_profile; oot3d_native_actor_profile.h).
   std::optional<Oot3dNativeGame::NativeActorProfile> actorProfile;

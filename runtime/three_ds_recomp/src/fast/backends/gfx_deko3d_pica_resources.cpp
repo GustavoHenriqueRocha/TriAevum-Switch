@@ -2,10 +2,14 @@
 #if defined(__SWITCH__)
 #include "gfx_deko3d_pica_resources.h"
 
+#include "fast/oot3d/gl_widescreen_menu_policy.h"
 #include "fast/oot3d/pica_texture_predecode.h"
+#include "fast/oot3d/pica_uniform_layout.h"
 #include "gfx_opengl_pica_residency.h"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -59,6 +63,33 @@ DkMipFilter ToDkMipFilter(PicaMipFilter filter) {
 
 PicaSamplerKey NearestClampKey() {
     return {};
+}
+
+// A piece of TopScreen's relocated bottom screen (Oot3d::GlRelocatedMenuDraw:
+// partial viewport, square-pixel orthographic, textured). The file-select
+// menu comes attributed to the title scene's atmosphere layer, so the Ui
+// domain alone does not find it. Only for draws outside the Ui domain with a
+// texture: one projection decode per such draw.
+bool RelocatedMenuDraw(const GfxNativePicaDrawView& draw) {
+    Oot3d::GlWidescreenDrawEvidence evidence;
+    evidence.ViewportSpansPresentedWidth =
+        draw.ViewportY <= 0.5F &&
+        draw.ViewportY + draw.ViewportHeight >= static_cast<float>(draw.FramebufferHeight) - 0.5F;
+    if (evidence.ViewportSpansPresentedWidth ||
+        draw.VertexUniformBytes.size() < Oot3d::kPicaPackedVertexFloatOffset + 4U * Oot3d::kPicaPackedVec4Bytes) {
+        return false;
+    }
+    std::array<float, 16> rows{};
+    std::memcpy(rows.data(), draw.VertexUniformBytes.data() + Oot3d::kPicaPackedVertexFloatOffset, sizeof(rows));
+    const auto projection = Oot3d::DecodeGlProjection(rows);
+    evidence.Projection = projection.Shape;
+    evidence.PixelAnisotropy =
+        Oot3d::GlNativePixelAnisotropy(projection, draw.ViewportWidth, draw.ViewportHeight, draw.FramebufferWidth);
+    evidence.Untextured = draw.Textures.empty();
+    evidence.SamplesRenderedCopy = std::any_of(draw.Textures.begin(), draw.Textures.end(), [](const auto& texture) {
+        return !texture.CopyReferences.empty();
+    });
+    return Oot3d::GlRelocatedMenuDraw(evidence);
 }
 } // namespace
 
@@ -133,9 +164,10 @@ bool PicaResources::Init(Device& device) {
         std::getline(menuSetting, menuLine);
     }
     mMenuImages = ParseTexturePackMenuSetting(menuLine, menuSettingExists);
-    Log("resources: texture pack %s (%s, cap %ux), menu textures as HUD images %s (config/texture_pack_menu)",
+    Log("resources: texture pack %s (%s, cap %ux), menu textures as HUD images %s (config/texture_pack_menu), "
+        "scene lists %s (config/texture_pack_preload), hold %u ms per scene (config/texture_pack_hold)",
         mTexturePack ? "on" : "off", mTexturePackSettings.Folder.c_str(), mTexturePackSettings.MaxScale,
-        mMenuImages ? "on" : "off");
+        mMenuImages ? "on" : "off", mTexturePackSettings.ScenePreload ? "on" : "off", mTexturePackSettings.HoldMs);
     Log("resources: %u image / %u sampler descriptors, texture budget %llu MiB", kMaxImages, kMaxSamplers,
         static_cast<unsigned long long>(mBudgetBytes >> 20));
     return true;
@@ -342,6 +374,7 @@ void PicaResources::BeginFrame(uint64_t frame) {
     // own Full barriers. config/deko3d_barrier "frame" brings it back.
     ApplyTexturePackSettings();
     Evict();
+    BeginScene();
     UploadReadyReplacements();
 }
 
@@ -371,17 +404,79 @@ void PicaResources::UploadReadyReplacements() {
             PicaTextureKey replacementKey = key;
             replacementKey.ContentHash ^= kReplacementKeySalt;
             const Renderer3ds::PicaTextureView view = native.PackView; // `native` may move on insert
-            if (UploadReplacement(view, replacementKey, *polled.Replacement, native.PackMenu) != 0U) {
+            const bool menu = native.PackMenu;
+            if (UploadReplacement(view, replacementKey, *polled.Replacement, menu) != 0U) {
                 // The native texture is never drawn again.
                 Retire(mTextures.find(key)->second);
                 mTextures.erase(key);
                 ++mStats.TextureReplacementsBatched;
+                if (!menu) {
+                    ++(mScene.Frames <= kSceneStartFrames ? mScene.SwapsAtStart : mScene.SwapsLater);
+                }
             }
             // 0: over this frame's upload cap (or no memory): stays pending.
         } else if (polled.State != ::Oot3d::Renderer::AzaharTextureResolveState::Pending) {
             native.PackPending = false;
         }
     }
+}
+
+void PicaResources::BeginScene() {
+    if (!mTexturePack) {
+        return;
+    }
+    auto& pack = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance();
+    if (const uint64_t serial = pack.SceneSerial(); serial != mSceneSerial) {
+        if (mSceneSerial != 0U || mScene.Frames != 0U) {
+            LogScene(mScene, "left");
+        }
+        mSceneSerial = serial;
+        mScene = {};
+        mHoldLeftMicros = static_cast<uint64_t>(mTexturePackSettings.HoldMs) * 1000U;
+    }
+    ++mScene.Frames;
+    // The hold: in the scene's first frames, the pack images of the world
+    // textures drawn native last frame are waited for (the render thread
+    // stops; the game thread follows once the frame queue is full, so the
+    // fade-in comes that much later), within the scene's budget.
+    if (mScene.Frames > kSceneStartFrames || mHoldLeftMicros == 0U || mScene.Frames == 1U) {
+        return;
+    }
+    mHoldHashes.clear();
+    for (const auto& [key, texture] : mTextures) {
+        if (texture.PackPending && !texture.Replacement && !texture.PackMenu && texture.PackEpoch == mPackEpoch &&
+            texture.LastUsedFrame + 1U >= mFrame) {
+            mHoldHashes.push_back(texture.PackHash);
+        }
+    }
+    if (mHoldHashes.empty()) {
+        return;
+    }
+    const auto begin = std::chrono::steady_clock::now();
+    const size_t left = pack.WaitForImages(mHoldHashes, std::chrono::microseconds(mHoldLeftMicros));
+    const auto waited = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count());
+    mHoldLeftMicros -= std::min(mHoldLeftMicros, waited);
+    ++mScene.HoldFrames;
+    mScene.HoldMicros += waited;
+    mScene.HoldTimeouts += left != 0U ? 1U : 0U;
+}
+
+void PicaResources::LogScene(const PicaSceneTextureStats& stats, const char* when) {
+    const auto pack = when[0] == 'l' ? ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().PreviousSceneStatus()
+                                     : ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().SceneStatus();
+    Log("world pack (scene %d %s, %llu frames): first draws ready=%llu native=%llu; swapped at start=%llu "
+        "later=%llu (pop-ins); hold %llu ms over %llu frames (%llu with images left); preload listed=%zu "
+        "queued=%zu decoded=%zu in %llu ms (%llu KiB) used=%zu on GPU=%zu unused=%zu over budget=%zu; "
+        "on sight=%zu, listed now=%zu, dropped=%zu",
+        pack.Scene, when, static_cast<unsigned long long>(stats.Frames), static_cast<unsigned long long>(stats.Ready),
+        static_cast<unsigned long long>(stats.NativeFirst), static_cast<unsigned long long>(stats.SwapsAtStart),
+        static_cast<unsigned long long>(stats.SwapsLater), static_cast<unsigned long long>(stats.HoldMicros / 1000U),
+        static_cast<unsigned long long>(stats.HoldFrames), static_cast<unsigned long long>(stats.HoldTimeouts),
+        pack.Listed, pack.PreloadQueued, pack.PreloadDecoded,
+        static_cast<unsigned long long>(pack.PreloadMicros / 1000U),
+        static_cast<unsigned long long>(pack.PreloadBytes >> 10), pack.PreloadUsed, pack.PreloadResident,
+        pack.PreloadUnused, pack.PreloadOverBudget, pack.OnSight, pack.Added, pack.Dropped);
 }
 
 void PicaResources::Evict() {
@@ -441,7 +536,7 @@ void PicaResources::Evict() {
     mStats.TextureBytes = mTextureBytes;
 }
 
-DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& view, bool uiDraw) {
+DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& view, bool menuDraw) {
     const DkResHandle fallback = dkMakeTextureHandle(kFallbackColorImage, kNearestSampler);
     const uint64_t contentHash = view.NativeContentHashAvailable ? view.NativeContentHash : HashBytes(view.NativeBytes);
     const PicaTextureKey key = MakePicaTextureKey(view, contentHash);
@@ -450,8 +545,16 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
     if (mTexturePack) {
         if (const auto found = mTextures.find(replacementKey); found != mTextures.end()) {
             if (found->second.PackEpoch == mPackEpoch) {
-                found->second.LastUsedFrame = mFrame;
-                return dkMakeTextureHandle(found->second.ImageSlot, found->second.SamplerSlot);
+                Texture& replacement = found->second;
+                replacement.LastUsedFrame = mFrame;
+                // Drawn in this scene with its image still on the GPU: the
+                // scene's list gets it too (the next visit decodes it ahead).
+                if (!replacement.PackMenu && replacement.SceneSerial != mSceneSerial) {
+                    replacement.SceneSerial = mSceneSerial;
+                    ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().NoteSceneImage(
+                        replacement.PackHash, static_cast<uint16_t>(view.Width), static_cast<uint16_t>(view.Height));
+                }
+                return dkMakeTextureHandle(replacement.ImageSlot, replacement.SamplerSlot);
             }
             Retire(found->second); // made at an earlier size cap
             mTextures.erase(found);
@@ -512,7 +615,7 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
     if (mTexturePack && ClassifyPicaTexture(view) == PicaTextureUse::Color) {
         const size_t baseBytes = PicaBaseLevelBytes(view.NativeFormat, view.Width, view.Height);
         if (baseBytes != 0U && baseBytes <= view.NativeBytes.size()) {
-            menu = PicaTextureIsMenuArt(view, uiDraw, mMenuImages);
+            menu = PicaTextureIsMenuArt(view, menuDraw, mMenuImages);
             pack = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ResolveOrQueue({
                 .Width = static_cast<uint16_t>(view.Width),
                 .Height = static_cast<uint16_t>(view.Height),
@@ -526,6 +629,7 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
             if (pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready && pack.Replacement != nullptr) {
                 if (const DkResHandle handle = UploadReplacement(view, replacementKey, *pack.Replacement, menu)) {
                     mStats.MenuTexturesReady += menu ? 1U : 0U;
+                    mScene.Ready += menu ? 0U : 1U;
                     return handle;
                 }
             }
@@ -542,6 +646,7 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
                           pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready;
     texture.PackMenu = menu && texture.PackPending;
     mStats.MenuTexturesNativeFirst += texture.PackMenu ? 1U : 0U;
+    mScene.NativeFirst += texture.PackPending && !menu ? 1U : 0U;
     if (texture.PackPending) {
         texture.PackView = view;
         texture.PackView.NativeBytes = {};
@@ -655,6 +760,9 @@ DkResHandle PicaResources::UploadReplacement(const Renderer3ds::PicaTextureView&
     texture.LastUsedFrame = mFrame;
     texture.Replacement = true;
     texture.PackEpoch = mPackEpoch;
+    texture.PackHash = replacement.NativeHash;
+    texture.PackMenu = menu;
+    texture.SceneSerial = mSceneSerial;
     mTextureBytes += texture.Bytes;
     mReplacementBytesThisFrame += stagingBytes;
     mStats.TextureBytes = mTextureBytes;
@@ -720,9 +828,11 @@ bool PicaResources::Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources
     }
     // Textures first: an unsupported one rejects the draw before any upload.
     out.Textures.fill(dkMakeTextureHandle(kFallbackColorImage, kNearestSampler));
-    // A draw of the game's 2D menus (`Ui` domain or layer): PicaTextureIsMenuArt.
-    const bool uiDraw = draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Ui ||
-                        draw.Composition.Layer == Renderer3ds::PicaCompositionLayer::Ui;
+    // A draw of the game's 2D menus (`Ui` domain or layer, or a piece of the
+    // relocated bottom screen such as file select): PicaTextureIsMenuArt.
+    const bool menuDraw = draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Ui ||
+                          draw.Composition.Layer == Renderer3ds::PicaCompositionLayer::Ui ||
+                          (mTexturePack && mMenuImages && !draw.Textures.empty() && RelocatedMenuDraw(draw));
     for (const auto& texture : draw.Textures) {
         if (texture.Slot >= out.Textures.size()) {
             return fail("PICA texture slot is invalid");
@@ -733,7 +843,7 @@ bool PicaResources::Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources
                 ++mStats.ShadowFallbacks;
                 out.Textures[texture.Slot] = dkMakeTextureHandle(kFallbackIntegerImage, kNearestSampler);
                 break;
-            case PicaTextureUse::Color: out.Textures[texture.Slot] = TextureHandle(texture, uiDraw); break;
+            case PicaTextureUse::Color: out.Textures[texture.Slot] = TextureHandle(texture, menuDraw); break;
         }
     }
     out.LightingLut = draw.LightingLut.PackedEntries.empty()

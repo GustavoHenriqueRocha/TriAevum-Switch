@@ -199,6 +199,14 @@ void SettingsFiles() {
   Require(configuration.HudImageList == std::filesystem::path("sdmc:/switch/oot3dre/config") / "texture_pack_hud",
           "HUD list in config/");
   Require(MakeTexturePackConfiguration(custom, {}).HudImageList.empty(), "no config directory: no HUD list");
+  // The scene lists sit beside it; config/texture_pack_preload = 0 leaves them out.
+  Require(configuration.SceneImageList ==
+              std::filesystem::path("sdmc:/switch/oot3dre/config") / "texture_pack_scenes",
+          "scene lists in config/");
+  auto noPreload = custom;
+  noPreload.ScenePreload = false;
+  Require(MakeTexturePackConfiguration(noPreload, "sdmc:/switch/oot3dre/config").SceneImageList.empty(),
+          "preload off: no scene lists");
   custom.Enabled = false;
   Require(!MakeTexturePackConfiguration(custom, {}).LoadCustomTextures, "off configures no loading");
 }
@@ -234,6 +242,67 @@ void HudImageList() {
   Require(ParseHudImageList(many).size() == kHudImageListLimit, "list limit");
 }
 
+// The scene lists: one file, a scene per line, the scene's order kept; a
+// damaged line must not stop the others and a (scene, hash) counts once,
+// while the same image may be listed for two scenes.
+void SceneImageList() {
+  const SceneImageEntry field{0x51U, {0x00C0FFEE00C0FFEEULL, 128U, 64U}};
+  const SceneImageEntry fieldGround{0x51U, {0x0000000000000AB1ULL, 256U, 256U}};
+  const SceneImageEntry forest{0x55U, {0x00C0FFEE00C0FFEEULL, 128U, 64U}};
+  std::string text = FormatSceneImageEntry(field) + FormatSceneImageEntry(fieldGround) + FormatSceneImageEntry(forest);
+  Require(text == "51 00C0FFEE00C0FFEE 128 64\n51 0000000000000AB1 256 256\n55 00C0FFEE00C0FFEE 128 64\n",
+          "scene line format");
+  Require(ParseSceneImageList(text) == std::vector<SceneImageEntry>{field, fieldGround, forest}, "scene round trip");
+  text = "51 00C0FFEE00C0FFEE 128 64\r\n"
+         "zz 00C0FFEE00C0FFEE 128 64\n"
+         "100 0000000000000AB2 16 16\n"
+         "51 0000000000000AB3 0 16\n"
+         "51 0000000000000AB4 16 2048\n"
+         "51 00C0FFEE00C0FFEE 64 64\n"
+         "51 0000000000000AB5 16 16 x\n"
+         "\n"
+         "51 0000000000000AB1 256 256\n"
+         "55 00C0FFEE00C0FFEE 128 64\n"
+         "55 0000000000000AB6 1";
+  Require(ParseSceneImageList(text) == std::vector<SceneImageEntry>{field, fieldGround, forest},
+          "damaged scene lines skipped");
+  Require(ParseSceneImageList("").empty(), "empty scene list");
+  const auto kept = PruneSceneImageList(std::vector<SceneImageEntry>{field, fieldGround, forest},
+                                        [](uint64_t hash) { return hash == 0xAB1U; });
+  Require(kept == std::vector<SceneImageEntry>{fieldGround}, "prune keeps the pack's images");
+  // A scene's lines stop at its limit, the others still read.
+  std::string many;
+  for (uint64_t hash = 1; hash <= kSceneImageListPerScene + 10U; ++hash)
+    many += FormatSceneImageEntry({0x03U, {hash, 8U, 8U}});
+  many += FormatSceneImageEntry(forest);
+  const auto limited = ParseSceneImageList(many);
+  Require(limited.size() == kSceneImageListPerScene + 1U && limited.back() == forest, "per-scene limit");
+}
+
+// config/texture_pack_preload and config/texture_pack_hold (read at start).
+void PreloadAndHoldSettings() {
+  Require(ParseTexturePackHoldMs("") == kTexturePackHoldDefaultMs, "empty hold: default");
+  Require(ParseTexturePackHoldMs("0") == 0U && ParseTexturePackHoldMs("off\r\n") == 0U, "hold off");
+  Require(ParseTexturePackHoldMs(" 600 \n") == 600U, "hold ms");
+  Require(ParseTexturePackHoldMs("99999") == kTexturePackHoldLimitMs, "hold capped below the hang watchdog");
+  Require(ParseTexturePackHoldMs("soon") == kTexturePackHoldDefaultMs, "unreadable hold: default");
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("oot3d_pack_preload_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::create_directories(root);
+  auto settings = TexturePackSettings::Load(root);
+  Require(settings.ScenePreload && settings.HoldMs == kTexturePackHoldDefaultMs, "absent files: preload and hold on");
+  std::ofstream(root / "texture_pack_preload") << "0\n";
+  std::ofstream(root / "texture_pack_hold") << "250\n";
+  settings = TexturePackSettings::Load(root);
+  Require(!settings.ScenePreload && settings.HoldMs == 250U, "files read");
+  // The Video tab's Save leaves them alone.
+  settings.Enabled = true;
+  Require(settings.Save(root).empty() && std::filesystem::exists(root / "texture_pack_preload") &&
+              std::filesystem::exists(root / "texture_pack_hold"),
+          "save keeps the start-only files");
+  std::filesystem::remove_all(root);
+}
+
 void ToggleCache() {
   using Action = TexturePackEntryAction;
   // Same epoch: nothing changed.
@@ -267,6 +336,8 @@ int main() {
   SettingsFiles();
   ToggleCache();
   HudImageList();
+  SceneImageList();
+  PreloadAndHoldSettings();
   std::puts("oot3d_texture_pack_scale_tests: ok");
   return 0;
 }

@@ -2016,6 +2016,66 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   `TexturesOnScreenGoBeforeHudImagesAskedAhead`; standalone build as above), `oot3d_deko3d_backend_tests`
   (`TestMenuArt`). `deko3d.pack` unchanged (no shader change).
 
+### File select, world textures and grass without pop-in (07/11, after test.10)
+- **Reports (test.10):** the file-select texture still pops from plain to HD on later runs; right after
+  loading into an area textures pop in; in Hyrule Field the grass pops in together with the textures.
+- **File select** (videos `2026110714541100` frames 312-318, `2026110715172100` frames 258-262: the file
+  cards are the game's cream art, then the pack's stone): the relocated bottom screen (cards, header,
+  background) comes in the title scene's atmosphere layer, Scene domain (see "File select in
+  widescreen"), so `PicaTextureIsMenuArt` never saw a menu draw: world path, decoded on sight behind the
+  title scene's images, released after the upload, every start. No `menu pack` line before the first
+  pause in logs18a/b/c; the first `resources (frame)` window (title and file select) has `pack images=36
+  (at frame top 36)`, all native first. **Fix:** a piece of the relocated bottom screen
+  (`GlRelocatedMenuDraw`: partial viewport, square-pixel orthographic, textured; the predicate the GL
+  nearest sampling already used) is a menu draw too (`RelocatedMenuDraw`, `gfx_deko3d_pica_resources.cpp`):
+  its textures resolve as HUD images (HUD worker, kept for the session, listed in `config/texture_pack_hud`,
+  decoded at the title screen of the next start). First start: decoded on sight at the front of the HUD
+  queue. Name entry and the version choice benefit too. `config/texture_pack_menu` = `0` turns it off with
+  the pause pages. RAM: the file-select images stay for the session (3x cap, a few MiB).
+- **World textures** (video `2026110714581200` frames 734-742: the market's walls and Link go from the
+  game's art to the pack's during the fade-in; `2026110714541100` frames 438-442 the Temple of Time
+  pedestal): world images were decoded only when a draw first asked, on one worker, behind the scene
+  before's queued decodes (logs18c: 313 of 342 pack images at frame top). **Fix**, three parts:
+  - *Scene lists* (`config/texture_pack_scenes`, `azahar_scene_image_list.h`): each world image a scene's
+    draws ask for (or draw from the GPU, `NoteSceneImage`) is listed for that scene, `<scene> <hash> <w> <h>`
+    (512 per scene, 16384 in all; lines of a pack no longer installed dropped at start). The game thread
+    hands the scene over at each change through the render stream (`NoteScene`, in frame order); the
+    listed images then decode on the world workers, now two (`kWorldDecodeWorkers`), so the first frames
+    find them. Images a draw asks for go before those decoded ahead. The scene before's queued decodes are
+    dropped at the change (a draw that still needs one asks again). `config/texture_pack_preload` = `0`:
+    no lists, no preload.
+  - *Hold* (`config/texture_pack_hold`, ms per scene, default 1000, `0`/`off` = never, at most 2500): in a
+    scene's first 60 frames the renderer waits at frame start for the pack images of the world textures
+    drawn native the frame before (`WaitForImages`, which moves them to the front), within the budget;
+    the game follows once the frame queue is full, so the fade-in starts that much later. Covers first
+    visits (no list yet).
+  - *RAM:* images decoded ahead stay until their first draw uploads them (then released as every world
+    image), those never drawn go at the next scene change, and no more are decoded while the unused ones
+    hold 128 MiB (`kScenePreloadBudgetBytes`; a dungeon's whole list at 3x with mips is ~65 MiB).
+    Nothing else stays resident; the list file is a few hundred KiB at most.
+- **Grass:** it does not wait for HD images: `pica_grass_source.cpp` decodes the ground's native base level
+  itself and `PicaGrassPlacements::Update` gates on that native observation. The lag is the placement
+  build: one builder worker, built again at every visit (logs18c frame 7199: `queued 4`, `no result 60`
+  entering Hyrule Field; other scenes 3-15), on the same service cores as the PNG decodes. **Fix:** the
+  PC's placement disk cache on the Switch (`config/grass_placement_cache`, default on;
+  `shadercache/grass_placements_v1`, at most 256 MiB / 96 files, least recently used out; one write per
+  new ground, 2 s after its build, on the builder worker): a ground of an earlier visit or session loads
+  instead of building. The key holds the geometry identity (guest addresses), so a scene loaded at other
+  addresses builds again `[INFERENCE]`.
+- **Log** (`deko3d.txt`): `resources: ... scene lists on (config/texture_pack_preload), hold N ms per scene`;
+  at each scene change and with the frame statistics `world pack (scene S left|now, F frames): first draws
+  ready=R native=N; swapped at start=A later=L (pop-ins); hold W ms over H frames (T with images left);
+  preload listed= queued= decoded= in ms (KiB) used= on GPU= unused= over budget=; on sight=, listed now=,
+  dropped=`. `later` is the pop-ins left in view; `native` at a second visit should be near 0. Grass:
+  `grass: placement cache on|off`, and the first `grass:` line ends `built B in X ms (longest M ms this
+  session), loaded L in Y ms, written W`.
+- Tests: `oot3d_azahar_texture_pack_tests` (`SceneImagesSeenOnceAreDecodedWhenTheSceneStarts`,
+  `SceneChangesDropTheBacklogAndTheHoldWaitsForImagesOnScreen`; standalone build), `oot3d_texture_pack_scale_tests`
+  (list format, damaged lines, limits, settings), `gl_widescreen_menu_policy_tests`
+  (`FileSelectPiecesAreRelocatedMenuDrawsInEitherDomain`), `oot3d_grass_async_placement_builder_tests`
+  (load/build split, limits), `oot3d_grass_switch_tests` (`Oot3dGrassPlacementCache`). No shader change:
+  `deko3d.pack` unchanged.
+
 ### HUD against the mod's screenshots (07/11, test.9 report)
 - **Report:** two images (`2026110713043700-…` and `2026110713045100-…`), "the normal looks better but
   they still don't look quite like the images from the mod website" (GameBanana 695893, Kokiri Forest

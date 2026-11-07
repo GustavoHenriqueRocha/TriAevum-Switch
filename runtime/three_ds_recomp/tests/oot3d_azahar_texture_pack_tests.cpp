@@ -1,5 +1,6 @@
 #include "oot3d/renderer/azahar_texture_pack.h"
 #include "oot3d/renderer/azahar_hud_image_list.h"
+#include "oot3d/renderer/azahar_scene_image_list.h"
 #include "oot3d/renderer/pica_texture_decode.h"
 
 #include <gtest/gtest.h>
@@ -900,6 +901,176 @@ TEST_F(Oot3dAzaharTexturePackTest, TexturesOnScreenGoBeforeHudImagesAskedAhead) 
     EXPECT_EQ(status.PreloadQueued, kSlowImages + 1U);
     EXPECT_EQ(status.PreloadDecoded, kSlowImages + 1U);
     EXPECT_EQ(status.OnSightDecodes, 0U);
+}
+
+// A world image a scene's draws ask for is listed for the scene; entering the
+// scene in a later session decodes its listed images before its first draw
+// asks (test.10: "right after loading into an area, textures pop in").
+// Images decoded ahead and never asked for go at the next scene change.
+TEST_F(Oot3dAzaharTexturePackTest, SceneImagesSeenOnceAreDecodedWhenTheSceneStarts) {
+    using namespace Oot3d::Renderer;
+    const auto pack = Root / "scenes";
+    std::filesystem::create_directories(pack);
+    {
+        std::ofstream output(pack / "pack.json");
+        output << nlohmann::json{{"options", {{"skip_mipmap", true}, {"flip_png_files", true}, {"use_new_hash", true}}}};
+    }
+    std::array<std::array<uint8_t, 256>, 3> natives{};
+    for (size_t image = 0; image < natives.size(); ++image) {
+        for (size_t index = 0; index < 256U; ++index) natives[image][index] = static_cast<uint8_t>(index * 7U + image * 31U);
+        WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, AzaharCityHash64(natives[image]), 0U, 0U), 16U,
+                              16U, std::vector<uint8_t>(16U * 16U * 4U, static_cast<uint8_t>(40U + image)));
+    }
+    const auto hash = [&](size_t image) { return AzaharCityHash64(natives[image]); };
+    const auto request = [&](size_t image) { return AzaharTextureRequest{8U, 8U, 0U, 0U, natives[image], {}}; };
+    const auto list = Root / "texture_pack_scenes";
+    const AzaharTexturePackConfiguration configuration{.LoadCustomTextures = true, .UserDirectory = Root,
+                                                       .LoadDirectory = pack, .MaxReplacementScale = 2U,
+                                                       .GenerateMipmaps = true, .SceneImageList = list};
+    const auto readList = [&] {
+        std::ifstream file(list, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    };
+    {
+        // First session: no list. Hyrule Field (0x51) draws images 0 and 1,
+        // Kokiri Forest (0x55) image 2 and image 0 again.
+        AzaharTexturePackRuntime runtime;
+        runtime.Configure(configuration);
+        runtime.WaitForPendingLoads();
+        runtime.NoteScene(0x51);
+        EXPECT_EQ(runtime.ResolveOrQueue(request(0)).State, AzaharTextureResolveState::Pending);
+        EXPECT_EQ(runtime.ResolveOrQueue(request(1)).State, AzaharTextureResolveState::Pending);
+        runtime.WaitForPendingLoads();
+        EXPECT_EQ(runtime.ResolveOrQueue(request(0)).State, AzaharTextureResolveState::Ready);
+        EXPECT_EQ(runtime.SceneStatus().OnSight, 2U);
+        EXPECT_EQ(runtime.SceneStatus().Added, 2U);
+        runtime.NoteScene(0x55);
+        (void)runtime.ResolveOrQueue(request(2));
+        (void)runtime.ResolveOrQueue(request(0));
+        runtime.WaitForPendingLoads();
+        EXPECT_EQ(runtime.PreviousSceneStatus().Scene, 0x51);
+        EXPECT_EQ(runtime.PreviousSceneStatus().Added, 2U);
+        // Outside gameplay nothing is listed.
+        runtime.NoteScene(-1);
+        (void)runtime.ResolveOrQueue(request(1));
+        runtime.WaitForPendingLoads();
+        EXPECT_EQ(readList(), FormatSceneImageEntry({0x51U, {hash(0), 8U, 8U}}) +
+                                  FormatSceneImageEntry({0x51U, {hash(1), 8U, 8U}}) +
+                                  FormatSceneImageEntry({0x55U, {hash(2), 8U, 8U}}) +
+                                  FormatSceneImageEntry({0x55U, {hash(0), 8U, 8U}}));
+    }
+    // A line of another pack.
+    std::ofstream(list, std::ios::binary | std::ios::app) << FormatSceneImageEntry({0x51U, {0x0123456789ABCDEFULL, 8U, 8U}});
+    {
+        // Next session: the scene starts before the index is ready (title
+        // screen save); its listed images decode once it is.
+        AzaharTexturePackRuntime runtime;
+        runtime.Configure(configuration);
+        runtime.NoteScene(0x51);
+        runtime.WaitForPendingLoads();
+        auto status = runtime.SceneStatus();
+        EXPECT_EQ(status.Listed, 2U);
+        EXPECT_EQ(status.PreloadQueued, 2U);
+        EXPECT_EQ(status.PreloadDecoded, 2U);
+        EXPECT_GT(status.PreloadBytes, 0U);
+        // The first draw finds its image: no native first.
+        const auto first = runtime.ResolveOrQueue(request(0));
+        ASSERT_EQ(first.State, AzaharTextureResolveState::Ready);
+        EXPECT_EQ(first.Replacement->Width, 16U);
+        runtime.ReleaseDecoded(hash(0), first.Replacement->Generation); // uploaded
+        status = runtime.SceneStatus();
+        EXPECT_EQ(status.PreloadUsed, 1U);
+        EXPECT_EQ(status.OnSight, 0U);
+        EXPECT_EQ(status.Added, 0U);
+        // Image 1 is never drawn: it goes at the change, counted unused.
+        runtime.NoteScene(0x55);
+        EXPECT_EQ(runtime.PreviousSceneStatus().PreloadUnused, 1U);
+        EXPECT_EQ(runtime.PollQueued(hash(1)).State, AzaharTextureResolveState::Missing);
+        runtime.WaitForPendingLoads();
+        // Kokiri Forest's image 0 is still on the GPU (drawn in the field):
+        // its copy decoded ahead is released at once.
+        runtime.NoteSceneImage(hash(0), 8U, 8U);
+        status = runtime.SceneStatus();
+        EXPECT_EQ(status.PreloadQueued, 2U);
+        EXPECT_EQ(status.PreloadResident, 1U);
+        EXPECT_EQ(runtime.PollQueued(hash(0)).State, AzaharTextureResolveState::Missing);
+        EXPECT_EQ(runtime.ResolveOrQueue(request(2)).State, AzaharTextureResolveState::Ready);
+        // The other pack's line was dropped from the file.
+        EXPECT_EQ(readList().find("0123456789ABCDEF"), std::string::npos);
+    }
+    {
+        // config/texture_pack_preload = 0: no list read, nothing listed.
+        auto off = configuration;
+        off.SceneImageList.clear();
+        AzaharTexturePackRuntime runtime;
+        runtime.Configure(off);
+        runtime.NoteScene(0x51);
+        runtime.WaitForPendingLoads();
+        EXPECT_EQ(runtime.SceneStatus().PreloadQueued, 0U);
+        EXPECT_EQ(runtime.ResolveOrQueue(request(0)).State, AzaharTextureResolveState::Pending);
+        runtime.WaitForPendingLoads();
+        EXPECT_EQ(runtime.SceneStatus().Added, 0U);
+    }
+}
+
+// Leaving a scene drops its world decodes still queued (logs18: the pop-ins
+// of a new scene waited behind the old one's backlog); an image a draw of the
+// new scene still needs is queued again. The renderer's hold moves the
+// images on screen to the front and waits for them only.
+TEST_F(Oot3dAzaharTexturePackTest, SceneChangesDropTheBacklogAndTheHoldWaitsForImagesOnScreen) {
+    using namespace Oot3d::Renderer;
+    const auto pack = Root / "backlog";
+    std::filesystem::create_directories(pack);
+    {
+        std::ofstream output(pack / "pack.json");
+        output << nlohmann::json{{"options", {{"skip_mipmap", true}, {"flip_png_files", true}, {"use_new_hash", true}}}};
+    }
+    constexpr size_t kSlowImages = 12U;
+    std::vector<uint8_t> noise(1024U * 1024U * 4U);
+    uint32_t state = 777U;
+    for (auto& value : noise) value = static_cast<uint8_t>((state = state * 1664525U + 1013904223U) >> 24U);
+    std::vector<std::array<uint8_t, 256>> slow(kSlowImages);
+    for (size_t image = 0; image < kSlowImages; ++image) {
+        for (size_t index = 0; index < 256U; ++index) slow[image][index] = static_cast<uint8_t>(index * 5U + image * 11U);
+        WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, AzaharCityHash64(slow[image]), 0U, 0U), 1024U,
+                              1024U, noise);
+    }
+    std::array<uint8_t, 256> onScreen{};
+    for (size_t index = 0; index < onScreen.size(); ++index) onScreen[index] = static_cast<uint8_t>(index * 3U + 200U);
+    const uint64_t onScreenHash = AzaharCityHash64(onScreen);
+    WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, onScreenHash, 0U, 0U), 16U, 16U,
+                          std::vector<uint8_t>(16U * 16U * 4U, 9U));
+
+    AzaharTexturePackRuntime runtime;
+    runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack,
+                       .MaxReplacementScale = 0U, .GenerateMipmaps = true});
+    runtime.WaitForPendingLoads();
+    runtime.NoteScene(0x51);
+    for (const auto& native : slow) (void)runtime.ResolveOrQueue({8U, 8U, 0U, 0U, native, {}});
+    runtime.NoteScene(0x55);
+    const auto left = runtime.PreviousSceneStatus();
+    // At most the images the world workers had started are not dropped.
+    EXPECT_GE(left.Dropped, kSlowImages - kWorldDecodeWorkers);
+    size_t dropped = 0U;
+    for (const auto& native : slow)
+        dropped += runtime.PollQueued(AzaharCityHash64(native)).State == AzaharTextureResolveState::Missing;
+    EXPECT_GE(dropped, kSlowImages - kWorldDecodeWorkers);
+    // The new scene draws them again behind a texture on screen.
+    for (const auto& native : slow) (void)runtime.ResolveOrQueue({8U, 8U, 0U, 0U, native, {}});
+    EXPECT_EQ(runtime.ResolveOrQueue({8U, 8U, 0U, 0U, onScreen, {}}).State, AzaharTextureResolveState::Pending);
+    const std::array<uint64_t, 1> hold{onScreenHash};
+    EXPECT_EQ(runtime.WaitForImages(hold, std::chrono::seconds(60)), 0U);
+    EXPECT_EQ(runtime.PollQueued(onScreenHash).State, AzaharTextureResolveState::Ready);
+    size_t stillDecoding = 0U;
+    for (const auto& native : slow)
+        stillDecoding += runtime.PollQueued(AzaharCityHash64(native)).State == AzaharTextureResolveState::Pending;
+    EXPECT_GE(stillDecoding, kSlowImages / 2U);
+    // A wait that runs out reports what is left.
+    std::vector<uint64_t> all;
+    for (const auto& native : slow) all.push_back(AzaharCityHash64(native));
+    EXPECT_GT(runtime.WaitForImages(all, std::chrono::microseconds(0)), 0U);
+    runtime.WaitForPendingLoads();
+    EXPECT_EQ(runtime.WaitForImages(all, std::chrono::microseconds(0)), 0U);
 }
 
 } // namespace

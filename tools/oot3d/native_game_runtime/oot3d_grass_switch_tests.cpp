@@ -1122,6 +1122,23 @@ TEST(Oot3dGrassNearLink, FixedFillMultiplierAndWidths) {
                 0.25F * UnpackGrassHalf(static_cast<uint16_t>(whole.WidthPhaseFade & 0xffffU)), 2.0e-3F);
 }
 
+// config/grass_placement_cache: on unless a leading 0/off/false (read at
+// start; the placements kept on the SD card).
+TEST(Oot3dGrassPlacementCache, ConfigFileMeaning) {
+    EXPECT_TRUE(ParseGrassPlacementCache(std::nullopt));
+    EXPECT_TRUE(ParseGrassPlacementCache(""));
+    EXPECT_FALSE(ParseGrassPlacementCache("0\n"));
+    EXPECT_FALSE(ParseGrassPlacementCache("off"));
+    const auto dir = std::filesystem::temp_directory_path() / "oot3d_grass_placement_cache_config";
+    std::filesystem::remove_all(dir);
+    EXPECT_TRUE(ReadGrassPlacementCache(dir));
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "grass_placement_cache") << "0\n";
+    EXPECT_FALSE(ReadGrassPlacementCache(dir));
+    std::filesystem::remove_all(dir);
+    EXPECT_GE(kGrassPlacementCacheBytes, 64ULL << 20); // a few fields' grounds at ~8 MiB each
+}
+
 TEST(Oot3dGrassNearLink, FillConfigFileMeaning) {
     EXPECT_TRUE(ParseGrassSwitchFill(std::nullopt)); // absent: fixed
     EXPECT_TRUE(ParseGrassSwitchFill(""));

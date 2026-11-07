@@ -56,6 +56,26 @@ struct PicaResourceStats {
     uint64_t MenuTexturesNativeFirst = 0;
 };
 
+// World textures of one scene visit (the pack runtime's NoteScene to the next
+// change; SWITCH_PORT.md "File select, world textures and grass without pop-in"): pack images ready
+// at the texture's first draw, natives drawn first, and when those were
+// swapped for their pack image: within the scene's first kSceneStartFrames
+// frames (its fade-in) or later, in view (the pop-ins left). The hold: frames
+// that waited for their on-screen images, the time, and waits that ended with
+// images still decoding.
+struct PicaSceneTextureStats {
+    uint64_t Frames = 0;
+    uint64_t Ready = 0;
+    uint64_t NativeFirst = 0;
+    uint64_t SwapsAtStart = 0;
+    uint64_t SwapsLater = 0;
+    uint64_t HoldFrames = 0;
+    uint64_t HoldMicros = 0;
+    uint64_t HoldTimeouts = 0;
+};
+// The frames of a scene's start (about its fade-in at 60 FPS).
+inline constexpr uint64_t kSceneStartFrames = 60U;
+
 // What one draw binds: texture handles for bindings 1..3 and 13, the vertex
 // streams and the uniform blocks (vertex binding 0, fragment binding 4).
 struct PicaDrawResources {
@@ -114,6 +134,11 @@ class PicaResources {
     void RequestInvalidate() noexcept { mInvalidate = true; }
 
     [[nodiscard]] const PicaResourceStats& Stats() const noexcept { return mStats; }
+    // The current scene's `world pack` line (frame statistics); nothing
+    // without the pack or before the first scene.
+    void LogSceneProgress() {
+        if (mTexturePack && mScene.Frames != 0U) LogScene(mScene, "now");
+    }
     [[nodiscard]] DkGpuAddr ConstantAttribute() const noexcept { return mConstantGpu; }
 
     // Image descriptors owned by others (display images of package 5).
@@ -137,11 +162,12 @@ class PicaResources {
         uint32_t SamplerSlot = 0;
         uint64_t Bytes = 0;
         uint64_t LastUsedFrame = 0;
-        uint64_t PackHash = 0;          // texture pack identity while its image is still being decoded
+        uint64_t PackHash = 0;          // texture pack identity (while decoding, and of a pack image)
         bool PackPending = false;
         bool PackMenu = false;          // resolved as a HUD image (PicaTextureIsMenuArt)
         bool Replacement = false;       // a texture pack image (under the replacement key)
         uint32_t PackEpoch = 0;         // mPackEpoch when made
+        uint64_t SceneSerial = 0;       // a pack image: the scene visit that last drew it
         // While PackPending: the view it was made from (spans empty), so
         // BeginFrame can upload the finished pack image for it.
         Renderer3ds::PicaTextureView PackView{};
@@ -156,7 +182,7 @@ class PicaResources {
     // A uniform block in this frame's stream; one equal to `last` (this
     // frame) is bound again instead of copied.
     bool StreamUniforms(std::span<const uint8_t> bytes, LastUniforms& last, DkGpuAddr& address, uint32_t& size);
-    DkResHandle TextureHandle(const Renderer3ds::PicaTextureView& texture, bool uiDraw);
+    DkResHandle TextureHandle(const Renderer3ds::PicaTextureView& texture, bool menuDraw);
     DkResHandle LightingLutHandle(const Renderer3ds::PicaLightingLutView& lut);
     // A sampled 2D image with its own memory block, its descriptor in `slot`.
     bool CreateImage(Texture& texture, DkImageFormat format, uint32_t width, uint32_t height, uint32_t levels);
@@ -178,6 +204,15 @@ class PicaResources {
     // uploaded at frame top (one barrier at the first draw for all).
     void UploadReadyReplacements();
     std::vector<PicaTextureKey> mReadyReplacements;
+    // At a scene change (the pack runtime's SceneSerial): logs the visit that
+    // ended. In the scene's first frames (config/texture_pack_hold), waits
+    // for the pack images of the world textures drawn native last frame.
+    void BeginScene();
+    void LogScene(const PicaSceneTextureStats& stats, const char* when);
+    std::vector<uint64_t> mHoldHashes;
+    uint64_t mSceneSerial = 0;
+    uint64_t mHoldLeftMicros = 0;
+    PicaSceneTextureStats mScene{};
 
     Device* mDevice = nullptr;
     DkMemBlock mDescriptors = nullptr; // image descriptors, then sampler descriptors

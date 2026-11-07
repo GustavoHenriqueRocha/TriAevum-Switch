@@ -169,6 +169,14 @@ bool ReadGrassSwitchFill(const std::filesystem::path& configDirectory) {
     return ReadOnUnlessOff(configDirectory / "grass_fill");
 }
 
+bool ParseGrassPlacementCache(std::optional<std::string_view> fileText) noexcept {
+    return ParseOnUnlessOff(fileText);
+}
+
+bool ReadGrassPlacementCache(const std::filesystem::path& configDirectory) {
+    return ReadOnUnlessOff(configDirectory / "grass_placement_cache");
+}
+
 bool SaveGrassSwitchFill(const std::filesystem::path& configDirectory, bool fixed) {
     return SaveOnUnlessOff(configDirectory, "grass_fill", fixed);
 }

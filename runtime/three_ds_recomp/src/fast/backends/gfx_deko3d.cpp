@@ -719,6 +719,11 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                     static_cast<unsigned long long>(resources.MenuTexturesNativeFirst), hud.MenuOnSightDecodes,
                     static_cast<unsigned long long>(hud.MenuOnSightWaitMaxMicros / 1000U));
     }
+    // World textures of the scene now running: ready at first draw, drawn
+    // native first and swapped (at the scene's start or later, in view), the
+    // hold, the images decoded ahead (`world pack (scene S left ...)` at each
+    // change has the visit that ended).
+    mResources.LogSceneProgress();
     const auto& targets = mTargets.Stats();
     Deko3d::Log("pica calls (%s): draws=%llu transfers=%llu presents=%llu fills=%llu clears=%llu resets=%llu "
                 "completions queued=%llu taken=%llu",

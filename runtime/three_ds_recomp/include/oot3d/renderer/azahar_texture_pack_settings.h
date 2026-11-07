@@ -10,14 +10,22 @@
 // - config/texture_pack_scale: the size cap, as a multiple of the native
 //   texture (0 = no cap, 1-8); absent = 2. Pack images above it are reduced
 //   on the pack worker.
+// - config/texture_pack_preload: `0` turns off the scene lists
+//   (config/texture_pack_scenes, azahar_scene_image_list.h) and the decode of
+//   a scene's listed images when the game enters it; absent = on.
+// - config/texture_pack_hold: how long, in ms, the renderer may wait in all
+//   for a scene's world images while its first frames draw (`0` or `off` =
+//   never); absent = 1000, at most 2500.
 //
 // The Video tab writes the files and publishes the values in
 // LiveTexturePackSettings(); the renderer applies a new revision at the start
 // of its next frame.
 
 #include "oot3d/renderer/azahar_hud_image_list.h"
+#include "oot3d/renderer/azahar_scene_image_list.h"
 #include "oot3d/renderer/azahar_texture_pack.h"
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <cstdint>
@@ -35,6 +43,11 @@ inline constexpr const char* kTexturePackDefaultFolder = "sdmc:/switch/oot3dre/t
 // 720p handheld renders at 2.25-3x the 3DS screen: about 2x texels are enough.
 inline constexpr uint32_t kTexturePackDefaultMaxScale = 2U;
 inline constexpr uint32_t kTexturePackMaxScaleLimit = 8U;
+inline constexpr const char* kTexturePackPreloadConfigName = "texture_pack_preload";
+inline constexpr const char* kTexturePackHoldConfigName = "texture_pack_hold";
+inline constexpr uint32_t kTexturePackHoldDefaultMs = 1000U;
+// The hang watchdog reports a game thread stalled for 3 s.
+inline constexpr uint32_t kTexturePackHoldLimitMs = 2500U;
 
 // A whole number 0-8 (surrounding spaces and a line end allowed); anything
 // else is `fallback`.
@@ -49,10 +62,26 @@ inline constexpr uint32_t kTexturePackMaxScaleLimit = 8U;
     return value;
 }
 
+// config/texture_pack_hold's first line: `0`/`off` = 0, a whole number of ms
+// (at most kTexturePackHoldLimitMs), anything else the default.
+[[nodiscard]] inline uint32_t ParseTexturePackHoldMs(std::string_view text) noexcept {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1U);
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r' || text.back() == '\n'))
+        text.remove_suffix(1U);
+    if (text == "off") return 0U;
+    uint32_t value = 0U;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (text.empty() || error != std::errc{} || end != text.data() + text.size()) return kTexturePackHoldDefaultMs;
+    return std::min(value, kTexturePackHoldLimitMs);
+}
+
 struct TexturePackSettings {
     bool Enabled = false;
     uint32_t MaxScale = kTexturePackDefaultMaxScale;
     std::string Folder = kTexturePackDefaultFolder;
+    // Read at start only (the Video tab does not write them).
+    bool ScenePreload = true;
+    uint32_t HoldMs = kTexturePackHoldDefaultMs;
 
     bool operator==(const TexturePackSettings&) const = default;
 
@@ -69,6 +98,16 @@ struct TexturePackSettings {
             std::string text;
             std::getline(file, text);
             settings.MaxScale = ParseTexturePackMaxScale(text, kTexturePackDefaultMaxScale);
+        }
+        if (std::ifstream file(config / kTexturePackPreloadConfigName); file) {
+            std::string text;
+            std::getline(file, text);
+            settings.ScenePreload = text.empty() || text.front() != '0';
+        }
+        if (std::ifstream file(config / kTexturePackHoldConfigName); file) {
+            std::string text;
+            std::getline(file, text);
+            settings.HoldMs = ParseTexturePackHoldMs(text);
         }
         return settings;
     }
@@ -113,7 +152,9 @@ struct TexturePackSettings {
 // The pack runtime's configuration for these settings. Mipmaps are made on
 // the pack worker: the renderer uploads as many levels as the native
 // texture samples. The HUD's pack images are remembered in
-// `config`/texture_pack_hud (azahar_hud_image_list.h) and decoded at start-up.
+// `config`/texture_pack_hud (azahar_hud_image_list.h) and decoded at start-up;
+// each scene's world images in `config`/texture_pack_scenes
+// (azahar_scene_image_list.h), decoded when the game enters the scene.
 [[nodiscard]] inline AzaharTexturePackConfiguration MakeTexturePackConfiguration(const TexturePackSettings& settings,
                                                                                  const std::filesystem::path& config) {
     AzaharTexturePackConfiguration configuration;
@@ -122,6 +163,8 @@ struct TexturePackSettings {
     configuration.MaxReplacementScale = settings.MaxScale;
     configuration.GenerateMipmaps = true;
     if (!config.empty()) configuration.HudImageList = config / kTexturePackHudListName;
+    if (!config.empty() && settings.ScenePreload)
+        configuration.SceneImageList = config / kTexturePackSceneListName;
     return configuration;
 }
 

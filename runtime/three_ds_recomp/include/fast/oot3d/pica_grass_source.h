@@ -66,6 +66,12 @@ class PicaGrassPlacements {
     // Placements of the meshes published for `frameId`.
     const std::vector<PicaGrassDrawable>& Update(uint64_t frameId, const InteractiveGrassSettings& settings);
     [[nodiscard]] const PicaGrassPlacementStats& Stats() const noexcept { return mStats; }
+    // Built placements kept on disk and loaded instead of built again
+    // (config/grass_placement_cache); the builder's totals (builds, loads).
+    void SetCacheDirectory(std::filesystem::path directory, uint64_t byteLimit, size_t entryLimit) {
+        mBuilder.SetCacheDirectory(std::move(directory), byteLimit, entryLimit);
+    }
+    [[nodiscard]] GrassAsyncPlacementStats BuilderStats() const { return mBuilder.Stats(); }
 
   private:
     GrassAsyncPlacementBuilder mBuilder;

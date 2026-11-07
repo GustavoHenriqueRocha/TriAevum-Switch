@@ -2,6 +2,7 @@
 
 #include "fast/renderer3ds/pica_pbr_material.h"
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -31,6 +32,10 @@ struct AzaharTexturePackConfiguration {
     // HUD images to decode as soon as the index is ready, and where HUD images
     // decoded on first sight are added (azahar_hud_image_list.h). Empty = none.
     std::filesystem::path HudImageList;
+    // World images remembered per scene (azahar_scene_image_list.h): decoded
+    // when the game enters the scene (NoteScene); the images a scene asks for
+    // are appended. Empty = no scene lists, no preload.
+    std::filesystem::path SceneImageList;
 
     bool operator==(const AzaharTexturePackConfiguration&) const = default;
 };
@@ -174,6 +179,36 @@ struct AzaharHudPackStatus {
     uint64_t MenuOnSightWaitMaxMicros = 0;
 };
 
+// The world images of one visit to a scene (NoteScene to the next change):
+// those of its list decoded ahead of its first draw, how many a draw then used
+// (or found already on the GPU), the ones never used (dropped at the change)
+// or left out over the RAM budget, and the images its draws asked for before
+// they were decoded.
+struct AzaharScenePackStatus {
+    int Scene = -1;
+    uint64_t Serial = 0;
+    size_t Listed = 0;            // the scene's list lines the pack has
+    size_t PreloadQueued = 0;
+    size_t PreloadDecoded = 0;
+    size_t PreloadUsed = 0;       // decoded ahead, then asked for by a draw
+    size_t PreloadResident = 0;   // decoded ahead, but the draw's image was still on the GPU
+    size_t PreloadUnused = 0;     // decoded ahead and never asked for (dropped at the change)
+    size_t PreloadOverBudget = 0; // not decoded: the scene's unused images were over the RAM budget
+    uint64_t PreloadMicros = 0;   // from the change to the last image decoded ahead
+    uint64_t PreloadBytes = 0;    // RGBA8 and mips decoded ahead
+    size_t OnSight = 0;           // asked for by a draw before decoded (the native drawn first)
+    size_t Added = 0;             // new list lines
+    size_t Dropped = 0;           // decodes of the scene before still queued at the change
+};
+
+// RAM the images decoded ahead for a scene may hold before a draw uses them
+// (released after the upload, as every world image): 3x cap with mips, a
+// dungeon's whole list is ~65 MiB.
+inline constexpr uint64_t kScenePreloadBudgetBytes = 128ULL << 20;
+// World decode workers (service threads, cores 1|2): a scene's first images
+// decode two at a time.
+inline constexpr size_t kWorldDecodeWorkers = 2U;
+
 // Azahar's modern custom-texture identity is CityHash64 over the untouched
 // native PICA upload bytes.
 [[nodiscard]] uint64_t AzaharCityHash64(std::span<const uint8_t> bytes) noexcept;
@@ -226,6 +261,23 @@ class AzaharTexturePackRuntime final {
     [[nodiscard]] AzaharTexturePackStatus Snapshot() const;
     [[nodiscard]] AzaharHudPackStatus HudStatus() const;
     [[nodiscard]] uint64_t Generation() const;
+    // The game's scene (render thread, in frame order, at each change; -1
+    // outside gameplay). The queued world decodes of the scene before are
+    // dropped (a draw asks again for what it still needs), its unused images
+    // decoded ahead are released, and the new scene's listed images are queued.
+    void NoteScene(int scene);
+    // Grows at each NoteScene change.
+    [[nodiscard]] uint64_t SceneSerial() const;
+    // The current visit, and the visit the last change ended.
+    [[nodiscard]] AzaharScenePackStatus SceneStatus() const;
+    [[nodiscard]] AzaharScenePackStatus PreviousSceneStatus() const;
+    // A world texture of the current scene drawn with its pack image still on
+    // the GPU: listed for the scene, and its copy decoded ahead released.
+    void NoteSceneImage(uint64_t nativeHash, uint16_t nativeWidth, uint16_t nativeHeight);
+    // The renderer's hold (config/texture_pack_hold): moves these world
+    // images to the front of the queue and blocks until none is decoding, at
+    // most `timeout`. Returns how many are still decoding.
+    size_t WaitForImages(std::span<const uint64_t> nativeHashes, std::chrono::microseconds timeout);
     [[nodiscard]] std::vector<AzaharMaterialCatalogEntry> MaterialCatalog() const;
     // Image imports share the existing pack worker; no file decoding in UI/frame code.
     [[nodiscard]] std::future<AzaharImageLoadResult> LoadEditorImage(std::filesystem::path path);
