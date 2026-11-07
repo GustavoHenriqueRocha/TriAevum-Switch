@@ -372,6 +372,11 @@ def summarize_offload(windows: list[Window]) -> None:
                if not math.isnan(mean(key)))
     print(f"    game thread outside the guest (pica_submit without guest + visual_present"
           f" + dsp_mix + frame_start): {fmt(host)} ms/frame")
+    if any("kernel_reacquire" in m for m in marked):
+        # "untimed:" block: game-thread work outside every phase above.
+        parts = ("frame_head", "refresh_prep", "ui_submit", "kernel_reacquire", "input_poll")
+        print("    outside the phases: " + ", ".join(f"{key} {fmt(mean(key), 3)}" for key in parts)
+              + " ms/frame")
 
 
 def summarize_cadence(windows: list[Window], seconds: float) -> None:
