@@ -5,6 +5,7 @@
 #include "fast/backends/gl_frame_profiler.h"
 
 #include <chrono>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -129,19 +130,30 @@ void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
         return;
     }
     StartWorker();
-    // config/second_core: the game thread may block below for a frame slot;
-    // the second core keeps its SVCs meanwhile (only from the frame loop's
-    // own level, never inside an SVC or a world stop).
-    const SecondCore::HostWaitRelease kernelRelease;
+    // config/second_core: the game thread releases the kernel lock (only
+    // from the frame loop's own level, never inside an SVC or a world stop)
+    // when it is about to block for a frame slot, so the second core keeps
+    // its SVCs meanwhile. A submission that does not wait keeps it: on
+    // Horizon an unlock with the second core waiting hands it the lock, and
+    // the game thread then waited for that core's whole SVC or DSP frame at
+    // every Submit. Declared before `lock`: the kernel lock is taken back
+    // only after the stream's mutex is released.
+    std::optional<SecondCore::HostWaitRelease> kernelRelease;
     std::unique_lock lock(mMutex);
     RethrowPendingFailureLocked(lock);
     if (endsFrame) {
+        const auto slotReady = [&] {
+            return mFailure != nullptr || ShutdownRequested() ||
+                   mFramesQueued < mMaxFramesInFlight;
+        };
+        if (!slotReady()) {
+            lock.unlock();
+            kernelRelease.emplace();
+            lock.lock();
+        }
         CountedWait(mProgress, lock, mProgressWaiters,
                     mWaitStats.SubmitWaits, mWaitStats.SubmitWaitNanoseconds,
-                    HangWatch::Stage::WaitFramesInFlight, [&] {
-                        return mFailure != nullptr || ShutdownRequested() ||
-                               mFramesQueued < mMaxFramesInFlight;
-                    });
+                    HangWatch::Stage::WaitFramesInFlight, slotReady);
         if (ShutdownRequested()) return;
         RethrowPendingFailureLocked(lock);
         ++mFramesQueued;
