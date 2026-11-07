@@ -1,5 +1,6 @@
 // Block-entry policy of the A32 window: widescreen projection and guest observation hooks.
 #include "oot3d_native_a32_window_shared.h"
+#include "oot3d_landing_roll.h"
 
 namespace Oot3dA32Window {
 
@@ -521,6 +522,23 @@ void ApplyNativeWidescreenProjectionPolicy(
         runtime.BlockSampleState * 1664525U + 1013904223U;
     if ((runtime.BlockSampleState & 63U) == 0U) {
       ++runtime.BlockSamples[pc];
+    }
+  }
+  // Landing roll (N64), oot3d_landing_roll.h: a run-jump landing N64 would
+  // have rolled leaves the compiled graph and resumes at the game's own roll
+  // setup in the same function and frame (registers as at this block entry).
+  if (pc == Oot3dNativeGame::kLandingRollHookPc && wholeAotExecutionActive &&
+      Oot3dNativeGame::LandingRollEnabled().load(std::memory_order_relaxed)) {
+    Oot3dNativeGame::LandingRollInputs landing;
+    if (Oot3dNativeGame::ReadLandingRollInputs(memory, state.r[4], &landing) &&
+        Oot3dNativeGame::DecideLandingRoll(landing) ==
+            Oot3dNativeGame::LandingRollChoice::Roll) {
+#if defined(OOT3D_NATIVE_DIRECT_AOT_PLUGIN)
+      Oot3dNativeGame::Oot3dWholeAotPluginObservableExit(
+          Oot3dNativeGame::kLandingRollSetupPc, state);
+#else
+      Oot3dNativeGame::Oot3dWholeAotExitAt(Oot3dNativeGame::kLandingRollSetupPc, state);
+#endif
     }
   }
   if (runtime.CollectExtendedDiagnostics &&

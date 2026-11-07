@@ -2269,6 +2269,42 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   Tests: `oot3d_deko3d_inbetween_lighting_tests` (`TestLostWorldComposition`, `TestLightingTransients`). Guards
   "per-pixel blink (test.8)".
 
+### Landing roll (N64): L3+R3 > Game > Gameplay (`config/no_landing_roll`, 07/11, on by default)
+- **Seen (OoT3D since 2011, GameFAQs "Link no longer rolls after jumping off a high cliff"):** after a run
+  jump off a ledge, Link never rolls on landing, even with the stick held forward; he still rolls after
+  walking or dropping off a ledge.
+- **Cause (EUR code.bin, Capstone):** the N64 roll branch is still in the fall action `FUN_004bba4c`
+  (`Player_Action_8084411C`): `0x004BC0E8..0x004BC160` (fallDistance `<= 80` short landing, `< 800` with
+  stick forward and nothing carried → `Player_SetupAction(Player_Action_Roll 0x00492A5C)` + the landing-roll
+  animation at 1.25, then the exit, without the fall-damage call `FUN_002bc420` at `0x004BC16C`). What
+  OoT3D dropped is the mid-air `LinkAnimation_Change(normal_landing)` (N64 `z_player.c:9604`): at
+  `0x004BBE10` it stores only actionVar2 = -1. A run jump keeps its animation (id `0x6B`) to the ground and
+  the run-jump-end check at `0x004BC080` (`ldr r0,[r4,#0x284]; cmp r0,#0x6B`) wins over lock-on, short
+  landing and roll. Player fields: animation `+0x284`, stateFlags1 `+0x1710` (carrying `0x800`, hostile
+  lock-on `0x10`, = `Player_CheckHostileLockOn` `0x003518CC`), stick ring index `+0x222A` (u8) and
+  directions `+0x2231` (s8[4], forward 0), actionVar2 `+0x2238`, fallDistance `+0x2282` (s16).
+- **Fix (no generated-code change, shards and PGO profile untouched):** `0x004BC080` is a block-entry hook
+  (`oot3d_native_a32_window_setup.cpp`); the policy (`oot3d_native_a32_projection_policy.cpp`) reads the
+  player at r4 and, when `DecideLandingRoll` (`oot3d_landing_roll.h`) says Roll, leaves the whole-AOT graph
+  with the block's registers and resumes at `0x004BC120`, the game's own roll setup in the same function
+  and stack frame. Roll = run-jump animation, actionVar2 < 0 (the fall passed the point where N64 changed
+  the animation; a jump that lands before it keeps the run-jump end on both), no hostile lock-on,
+  80 < fallDistance < 800, stick forward, not carrying. Everything else runs the game's own landing; falls
+  of 800 or more still hurt. Both PCs are block starts and dispatch entries of the title module
+  (`fork-gen-7baf1fde8b-pgo`, shard 033); the hook only diverts under whole-AOT execution (always on in
+  the product).
+- **Option:** L3+R3 > Game > Gameplay > "Landing roll (N64)", applied at once; off writes
+  `config/no_landing_roll` (`oot3d_gameplay_settings_panel.cpp`). Cost: one hook per landing.
+- **Check (one minute) [INFERENCE: heights not measured]:** Kakariko Village, climb the lookout tower ladder
+  and run off the top platform (Link auto-jumps): stick held forward → roll, no damage, no stun; stick
+  released in the air → the game's landing with the small fall damage (N64: half a heart) and the stun.
+  Any drop that costs the small damage without the stick is in the 400-800 range (800 or more costs the
+  big one, and never rolls). With the option off, holding forward gives the old OoT3D landing (no roll,
+  damage).
+- Tests: `oot3d_landing_roll_tests` (falls 80/81/400/799/800, stick forward/released/back/side, carrying,
+  lock-on, run-jump end, walked off; the same cases through guest reads at each stick-ring slot; the
+  config file). Guards "Landing roll".
+
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
   field; default `0.1.0-dev`) and `OOT3D_RELEASE_BUILD` (monotonic integer; default 0). Both go

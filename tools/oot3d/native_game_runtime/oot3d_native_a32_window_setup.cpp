@@ -1,6 +1,8 @@
 // Native A32 window session: setup (process image, host services, renderer, UI, initial state).
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
 #include "oot3d_native_a32_window_session.h"
+#include "oot3d_gameplay_settings_panel.h"
+#include "oot3d_landing_roll.h"
 #include "oot3d_native_guest_overrides.h"
 #include "oot3d_switch_threads.h"
 #include "oot3d_switch_guest_window.h"
@@ -368,6 +370,8 @@ void NativeA32WindowSession::Setup() {
       Oot3dNativeGame::kOot3dFramePacingDecisionEntry,
       Oot3dNativeGame::kOot3dFramePacingCommitEntry,
       Oot3dNativeGame::kOot3dMeshCommandPacketSubmitEntry,
+      // Landing roll (N64): the policy diverts to the game's roll setup.
+      Oot3dNativeGame::kLandingRollHookPc,
   };
   const auto actorVisibilityHooks =
       Oot3dNativeGame::NativeActorVisibilityHookPcs();
@@ -1014,6 +1018,13 @@ void NativeA32WindowSession::Setup() {
   applicationSettingsTabs.push_back(
       Oot3dNativeGame::CreateSavestatePanel(savestateLibrary));
   applicationSettingsTabs.push_back(Oot3dNativeGame::CreateGameLanguagePanel(languageSettings));
+#if defined(__SWITCH__)
+  applicationSettingsTabs.push_back(
+      Oot3dNativeGame::CreateGameplaySettingsPanel("sdmc:/switch/oot3dre/config"));
+#else
+  applicationSettingsTabs.push_back(Oot3dNativeGame::CreateGameplaySettingsPanel(
+      std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "config"));
+#endif
 #if defined(__SWITCH__)
   applicationSettingsTabs.push_back(
       Oot3dNativeGame::CreateVideoSettingsPanel("sdmc:/switch/oot3dre/config"));

@@ -1387,6 +1387,20 @@ GUARDS = [
           r'itemButtonsTappable = layout != TopScreenHudLayout::Restoration;.*?'
           r'if \(!itemButtonsTappable && \(primitive\.source_quad == kItemIQuad \|\|',
           "oot3d_top_screen_hud_touch_tests (TestHiddenControls)"),
+    # --- 11/07: Landing roll (N64), L3+R3 > Game > Gameplay (config/no_landing_roll) ---
+    # OoT3D keeps the run-jump animation to the ground, so its run-jump-end check (0x004BC080)
+    # pre-empts the game's own roll (0x004BC120). The hook must stay in the block-entry list and
+    # divert only on the decision (generated code untouched).
+    Guard("Landing roll: no roll after jumping off a ledge (run-jump end pre-empted the roll)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'pc == Oot3dNativeGame::kLandingRollHookPc && wholeAotExecutionActive &&.*?'
+          r'DecideLandingRoll\(landing\) ==\s+Oot3dNativeGame::LandingRollChoice::Roll\).*?'
+          r'Oot3dWholeAotExitAt\(Oot3dNativeGame::kLandingRollSetupPc, state\)',
+          "oot3d_landing_roll_tests"),
+    Guard("Landing roll: the hook pc is a block-entry hook",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'blockEntryHooks = std::vector<uint32_t>\{[^}]*Oot3dNativeGame::kLandingRollHookPc,',
+          "oot3d_landing_roll_tests"),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay
