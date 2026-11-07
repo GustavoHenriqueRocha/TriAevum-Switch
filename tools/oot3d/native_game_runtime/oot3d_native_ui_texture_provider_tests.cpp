@@ -365,21 +365,21 @@ int main() {
             "UI provider does not report its custom texture revision");
     Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels,
                                            &error) &&
-                pixels.provisional && pixels.width == 8U &&
+                pixels.provisional && pixels.native_stand_in && pixels.width == 8U &&
                 pixels.rgba8.front() == 0xFFU &&
                 requested == profileTexturePayload && requestedFormat == 0U,
-            "a pending custom texture did not keep provisional native pixels");
+            "a pending custom texture did not keep provisional native pixels marked as the old art");
     // A pending pack image over the HD atlas: the atlas stands in.
     standIn = std::make_shared<const std::vector<std::uint8_t>>(16U * 16U * 4U, 0x20U);
     Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels,
                                            &error) &&
-                pixels.provisional && pixels.width == 16U &&
+                pixels.provisional && !pixels.native_stand_in && pixels.width == 16U &&
                 pixels.height == 16U && pixels.rgba8 == *standIn,
-            "a pending custom texture did not draw its stand-in");
+            "a pending custom texture did not draw its stand-in (not held: it is HD art)");
     packState = Oot3dNativeUiCustomTexture::State::Ready;
     Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels,
                                            &error) &&
-                !pixels.provisional && pixels.width == 24U &&
+                !pixels.provisional && !pixels.native_stand_in && pixels.width == 24U &&
                 pixels.height == 24U && pixels.rgba8 == *replacement &&
                 profileTextureProvider.Stats().custom_texture_replacements == 1U &&
                 profileTextureProvider.Stats().custom_texture_pending == 2U,

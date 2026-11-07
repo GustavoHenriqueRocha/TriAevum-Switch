@@ -33,6 +33,11 @@ struct N64UiRendererStats {
     std::uint64_t native_texture_failures = 0;
     std::uint64_t missing_texture_resources = 0;
     std::uint64_t unsupported_texture_resources = 0;
+    // Primitives not drawn while their texture's replacement was still
+    // decoding (held first draws), and textures whose hold ran out (drawn
+    // with the game's own pixels until the replacement came).
+    std::uint64_t held_draws = 0;
+    std::uint64_t holds_expired = 0;
 };
 
 struct UiTexturePixels {
@@ -42,6 +47,11 @@ struct UiTexturePixels {
     // Valid pixels standing in for a final payload that is still being
     // prepared (a custom texture decoding); the texture is resolved again.
     bool provisional = false;
+    // Provisional pixels that are the game's own art (no HD stand-in): the
+    // replacement the player expects (a texture pack image) is decoding, so
+    // the renderer holds the texture's first draws instead of showing the old
+    // art for a moment (kUiHoldPolls).
+    bool native_stand_in = false;
 };
 
 // Backend-independent boundary for textures whose authoritative payload lives
@@ -65,10 +75,20 @@ struct PreparedUiTexture {
     std::string key;
     Status status = Status::Invalid;
     bool native = false;
+    // A first sight held (UiTexturePixels::native_stand_in): no pixels; the
+    // primitives using it are not drawn until its final pixels are staged. A
+    // resident texture of the key (an earlier revision's) keeps drawing.
+    bool held = false;
     UiTexturePixels pixels;
     std::string error;
 };
 using PreparedUiTextures = std::vector<PreparedUiTexture>;
+
+// Calls of PrepareTextures that hold a texture's first draws at most (the
+// texture is polled at each). A HUD image of the player's pack decodes on
+// its own worker in a few frames; past this the game's own pixels are drawn
+// until the replacement comes, as before.
+inline constexpr std::uint32_t kUiHoldPolls = 30U;
 
 std::uint64_t N64UiSolidShaderId0() noexcept;
 std::uint64_t N64UiTexturedShaderId0() noexcept;
@@ -97,7 +117,8 @@ class N64UiFast3dRenderer {
     // the first time. Prepared keys are remembered (until Release), so each
     // payload is read once, as Render alone would; a provisional payload is
     // resolved again on later calls, and a new provider Revision resolves
-    // every texture again.
+    // every texture again. A first sight with only the game's own pixels
+    // while its replacement decodes is held (PreparedUiTexture::held).
     [[nodiscard]] PreparedUiTextures
     PrepareTextures(std::span<const UiPrimitive> primitives);
     // Hands prepared payloads to the renderer without drawing (a frame that
@@ -122,7 +143,7 @@ class N64UiFast3dRenderer {
     };
 
     const ResidentTexture* ResolveTexture(const UiTextureIdentity& identity,
-                                          std::string* error);
+                                          std::string* error, bool* held);
     Oot3d::Renderer::UiRenderBackend& rendering_api_;
     const UiTextureProvider* texture_provider_ = nullptr;
     std::unordered_map<std::string, ResidentTexture> textures_;
@@ -133,6 +154,10 @@ class N64UiFast3dRenderer {
     std::unordered_set<std::string> provisional_keys_;
     std::uint64_t prepared_revision_ = 0;
     std::uint32_t provisional_poll_ = 0;
+    // Keys whose first draws are held, and the calls they were polled at.
+    std::unordered_map<std::string, std::uint32_t> hold_polls_;
+    // Rendering side: held keys without a resident texture (not drawn).
+    std::unordered_set<std::string> held_keys_;
     // Rendering side: prepared payloads not consumed yet.
     std::unordered_map<std::string, PreparedUiTexture> staged_textures_;
     // Per-frame scratch (storage kept between frames).

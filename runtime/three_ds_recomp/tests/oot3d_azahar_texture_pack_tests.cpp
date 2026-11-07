@@ -1,4 +1,5 @@
 #include "oot3d/renderer/azahar_texture_pack.h"
+#include "oot3d/renderer/azahar_hud_image_list.h"
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
@@ -10,6 +11,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -512,6 +514,135 @@ TEST_F(Oot3dAzaharTexturePackTest, CapsHudTexturesAtThreeTimesWithoutMipmaps) {
     runtime.WaitForPendingLoads();
     EXPECT_EQ(runtime.ResolveOrQueue(hud).State, AzaharTextureResolveState::Disabled);
     EXPECT_EQ(runtime.Snapshot().LoadedTextures, 0U);
+}
+
+// A HUD texture seen while a scene's world images decode must not wait for
+// them (test.7: the TopScreen item icons drew native for ~0.5 s at every
+// start, queued behind the world PNGs of the 1080p pack).
+TEST_F(Oot3dAzaharTexturePackTest, HudImagesDoNotWaitBehindWorldImages) {
+    using namespace Oot3d::Renderer;
+    const auto pack = Root / "busy";
+    std::filesystem::create_directories(pack);
+    {
+        std::ofstream output(pack / "pack.json");
+        output << nlohmann::json{{"options", {{"skip_mipmap", true}, {"flip_png_files", true}, {"use_new_hash", true}}}};
+    }
+    // Large world images (noise: slow to decode) and one small HUD image.
+    constexpr size_t kWorldImages = 16U;
+    constexpr uint32_t kWorldExtent = 512U;
+    std::vector<std::array<uint8_t, 256>> worldNatives(kWorldImages);
+    std::vector<uint8_t> noise(kWorldExtent * kWorldExtent * 4U);
+    uint32_t state = 12345U;
+    for (auto& value : noise) value = static_cast<uint8_t>((state = state * 1664525U + 1013904223U) >> 24U);
+    for (size_t image = 0; image < kWorldImages; ++image) {
+        for (size_t index = 0; index < 256U; ++index) worldNatives[image][index] = static_cast<uint8_t>(index * 3U + image);
+        WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, AzaharCityHash64(worldNatives[image]), 0U, 0U),
+                              kWorldExtent, kWorldExtent, noise);
+    }
+    std::array<uint8_t, 256> hudNative{};
+    for (size_t index = 0; index < hudNative.size(); ++index) hudNative[index] = static_cast<uint8_t>(index * 13U + 1U);
+    WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, AzaharCityHash64(hudNative), 0U, 0U), 24U, 24U,
+                          std::vector<uint8_t>(24U * 24U * 4U, 200U));
+
+    AzaharTexturePackRuntime runtime;
+    runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack,
+                       .MaxReplacementScale = 0U, .GenerateMipmaps = true});
+    runtime.WaitForPendingLoads();
+    for (const auto& native : worldNatives)
+        EXPECT_EQ(runtime.ResolveOrQueue({8U, 8U, 0U, 0U, native, {}}).State, AzaharTextureResolveState::Pending);
+    AzaharTextureRequest hud{8U, 8U, 0U, 0U, hudNative, {}};
+    hud.UserInterface = true;
+    EXPECT_EQ(runtime.ResolveOrQueue(hud).State, AzaharTextureResolveState::Pending);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (runtime.ResolveOrQueue(hud).State == AzaharTextureResolveState::Pending &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    EXPECT_EQ(runtime.ResolveOrQueue(hud).State, AzaharTextureResolveState::Ready);
+    // Most world images are still decoding when the HUD image is ready.
+    size_t worldPending = 0U;
+    for (const auto& native : worldNatives)
+        worldPending += runtime.PollQueued(AzaharCityHash64(native)).State == AzaharTextureResolveState::Pending;
+    EXPECT_GE(worldPending, kWorldImages / 2U);
+    const auto status = runtime.HudStatus();
+    EXPECT_EQ(status.OnSightDecodes, 1U);
+    EXPECT_EQ(status.PreloadQueued, 0U);
+    runtime.WaitForPendingLoads();
+}
+
+// The HUD images of a session are listed and decoded at the next start
+// before the HUD asks for them; lines of another pack are dropped.
+TEST_F(Oot3dAzaharTexturePackTest, HudImagesSeenOnceAreDecodedAtTheNextStart) {
+    using namespace Oot3d::Renderer;
+    const auto pack = Root / "hudlist";
+    std::filesystem::create_directories(pack);
+    {
+        std::ofstream output(pack / "pack.json");
+        output << nlohmann::json{{"options", {{"skip_mipmap", true}, {"flip_png_files", true}, {"use_new_hash", true}}}};
+    }
+    std::array<uint8_t, 512> native{};
+    for (size_t index = 0; index < native.size(); ++index) native[index] = static_cast<uint8_t>(index * 5U + 3U);
+    const uint64_t hash = AzaharCityHash64(native);
+    // 16x8 native, 8x in the pack: 48x24 at the HUD's 3x cap.
+    WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(16U, 8U, hash, 0U, 0U), 128U, 64U,
+                          std::vector<uint8_t>(128U * 64U * 4U, 90U));
+    AzaharTextureRequest hud{16U, 8U, 0U, 0U, native, {}};
+    hud.UserInterface = true;
+    const auto list = Root / "texture_pack_hud";
+    const AzaharTexturePackConfiguration configuration{.LoadCustomTextures = true, .UserDirectory = Root,
+                                                       .LoadDirectory = pack, .MaxReplacementScale = 2U,
+                                                       .GenerateMipmaps = true, .HudImageList = list};
+    const auto readList = [&] {
+        std::ifstream file(list, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    };
+    {
+        // First session: no list; the HUD image decodes on first sight and is listed.
+        AzaharTexturePackRuntime runtime;
+        runtime.Configure(configuration);
+        runtime.WaitForPendingLoads();
+        EXPECT_EQ(runtime.ResolveOrQueue(hud).State, AzaharTextureResolveState::Pending);
+        runtime.WaitForPendingLoads();
+        EXPECT_EQ(runtime.ResolveOrQueue(hud).State, AzaharTextureResolveState::Ready);
+        EXPECT_EQ(readList(), FormatHudImageEntry({hash, 16U, 8U}));
+        EXPECT_EQ(runtime.HudStatus().OnSightDecodes, 1U);
+        // Asked again (another scene): no second line.
+        (void)runtime.ResolveOrQueue(hud);
+        runtime.WaitForPendingLoads();
+        EXPECT_EQ(readList(), FormatHudImageEntry({hash, 16U, 8U}));
+    }
+    // A line of another pack in the list.
+    std::ofstream(list, std::ios::binary | std::ios::app) << FormatHudImageEntry({0x0123456789ABCDEFULL, 8U, 8U});
+    {
+        // Next start: decoded with the index, ready on the HUD's first request,
+        // at the HUD size (3x of the listed native size).
+        AzaharTexturePackRuntime runtime;
+        runtime.Configure(configuration);
+        runtime.WaitForPendingLoads();
+        const auto first = runtime.ResolveOrQueue(hud);
+        ASSERT_EQ(first.State, AzaharTextureResolveState::Ready);
+        EXPECT_EQ(first.Replacement->Width, 48U);
+        EXPECT_EQ(first.Replacement->Height, 24U);
+        EXPECT_TRUE(first.Replacement->Mips.empty());
+        const auto status = runtime.HudStatus();
+        EXPECT_EQ(status.Listed, 1U);
+        EXPECT_EQ(status.PreloadQueued, 1U);
+        EXPECT_EQ(status.PreloadDecoded, 1U);
+        EXPECT_EQ(status.PreloadBytes, 48U * 24U * 4U);
+        EXPECT_EQ(status.OnSightDecodes, 0U);
+        EXPECT_EQ(readList(), FormatHudImageEntry({hash, 16U, 8U}));
+        // The world texture of the same hash is not preloaded.
+        EXPECT_EQ(runtime.PollQueued(hash).State, AzaharTextureResolveState::Missing);
+    }
+    {
+        // HD textures off: nothing decoded, the list kept for later.
+        auto off = configuration;
+        off.LoadCustomTextures = false;
+        AzaharTexturePackRuntime runtime;
+        runtime.Configure(off);
+        runtime.WaitForPendingLoads();
+        EXPECT_EQ(runtime.HudStatus().PreloadQueued, 0U);
+        EXPECT_EQ(readList(), FormatHudImageEntry({hash, 16U, 8U}));
+    }
 }
 
 } // namespace

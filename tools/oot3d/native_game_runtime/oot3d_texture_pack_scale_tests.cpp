@@ -191,12 +191,47 @@ void SettingsFiles() {
   std::filesystem::remove_all(root);
 
   Require(TexturePackDisplayFolder(kTexturePackDefaultFolder) == "switch/oot3dre/textures", "display folder");
-  const auto configuration = MakeTexturePackConfiguration(custom);
+  const auto configuration = MakeTexturePackConfiguration(custom, "sdmc:/switch/oot3dre/config");
   Require(configuration.LoadCustomTextures && configuration.MaxReplacementScale == 2U &&
               configuration.GenerateMipmaps && configuration.LoadDirectory == kTexturePackDefaultFolder,
           "runtime configuration");
+  // The HUD list sits in config/, outside the pack folder (a pack swap keeps it).
+  Require(configuration.HudImageList == std::filesystem::path("sdmc:/switch/oot3dre/config") / "texture_pack_hud",
+          "HUD list in config/");
+  Require(MakeTexturePackConfiguration(custom, {}).HudImageList.empty(), "no config directory: no HUD list");
   custom.Enabled = false;
-  Require(!MakeTexturePackConfiguration(custom).LoadCustomTextures, "off configures no loading");
+  Require(!MakeTexturePackConfiguration(custom, {}).LoadCustomTextures, "off configures no loading");
+}
+
+// The HUD list of one session is what the next start decodes ahead: a line
+// written must read back, a damaged line must not stop the others, and a
+// hash once only (a duplicated line would queue nothing more but count twice).
+void HudImageList() {
+  const HudImageEntry icon{0x1FAF9B5B2ADF6038ULL, 32U, 32U};
+  const HudImageEntry atlas{0x00000000000000ABULL, 512U, 256U};
+  std::string text = FormatHudImageEntry(icon) + FormatHudImageEntry(atlas);
+  Require(text == "1FAF9B5B2ADF6038 32 32\n00000000000000AB 512 256\n", "list line format");
+  Require(ParseHudImageList(text) == std::vector<HudImageEntry>{icon, atlas}, "list round trip");
+  // A write cut short, CRLF, a hand edit, a size out of range, a repeat.
+  text = "1FAF9B5B2ADF6038 32 32\r\n"
+         "garbage\n"
+         "00000000000000CD 0 16\n"
+         "00000000000000CE 16 4096\n"
+         "00000000000000CF 16 16 extra\n"
+         "1FAF9B5B2ADF6038 64 64\n"
+         "\n"
+         "00000000000000AB 512 256\n"
+         "00000000000000E0 16";
+  Require(ParseHudImageList(text) == std::vector<HudImageEntry>{icon, atlas}, "damaged lines skipped");
+  Require(ParseHudImageList("").empty(), "empty list");
+  // Lines of another pack go; order kept.
+  const auto kept = PruneHudImageList(std::vector<HudImageEntry>{icon, atlas},
+                                      [](uint64_t hash) { return hash == 0xABU; });
+  Require(kept == std::vector<HudImageEntry>{atlas}, "prune keeps indexed entries");
+  // The list never grows past its limit.
+  std::string many;
+  for (uint64_t hash = 1; hash <= kHudImageListLimit + 10U; ++hash) many += FormatHudImageEntry({hash, 8U, 8U});
+  Require(ParseHudImageList(many).size() == kHudImageListLimit, "list limit");
 }
 
 void ToggleCache() {
@@ -231,6 +266,7 @@ int main() {
   MipChain();
   SettingsFiles();
   ToggleCache();
+  HudImageList();
   std::puts("oot3d_texture_pack_scale_tests: ok");
   return 0;
 }

@@ -15,6 +15,7 @@
 // LiveTexturePackSettings(); the renderer applies a new revision at the start
 // of its next frame.
 
+#include "oot3d/renderer/azahar_hud_image_list.h"
 #include "oot3d/renderer/azahar_texture_pack.h"
 
 #include <atomic>
@@ -111,13 +112,16 @@ struct TexturePackSettings {
 
 // The pack runtime's configuration for these settings. Mipmaps are made on
 // the pack worker: the renderer uploads as many levels as the native
-// texture samples.
-[[nodiscard]] inline AzaharTexturePackConfiguration MakeTexturePackConfiguration(const TexturePackSettings& settings) {
+// texture samples. The HUD's pack images are remembered in
+// `config`/texture_pack_hud (azahar_hud_image_list.h) and decoded at start-up.
+[[nodiscard]] inline AzaharTexturePackConfiguration MakeTexturePackConfiguration(const TexturePackSettings& settings,
+                                                                                 const std::filesystem::path& config) {
     AzaharTexturePackConfiguration configuration;
     configuration.LoadCustomTextures = settings.Enabled;
     configuration.LoadDirectory = settings.Folder.empty() ? kTexturePackDefaultFolder : settings.Folder;
     configuration.MaxReplacementScale = settings.MaxScale;
     configuration.GenerateMipmaps = true;
+    if (!config.empty()) configuration.HudImageList = config / kTexturePackHudListName;
     return configuration;
 }
 

@@ -147,10 +147,12 @@ class PackProvider final : public oot3d::ui::UiTextureProvider {
         pixels.height = extent;
         pixels.rgba8.assign(std::size_t(extent) * extent * 4U, 0xFF);
         pixels.provisional = !ready;
+        pixels.native_stand_in = !ready && nativeStandIn;
         return true;
     }
     std::uint64_t Revision() const noexcept override { return revision; }
     bool ready = false;
+    bool nativeStandIn = false;
     std::uint64_t revision = 1U;
     mutable int calls = 0;
 };
@@ -190,11 +192,80 @@ void TestProvisionalTextures() {
             "a new provider revision did not resolve and replace the texture");
 }
 
+// test.7: the TopScreen item icons drew the game's art for ~0.5 s, then the
+// pack's. A first sight whose replacement is decoding, with only the game's
+// pixels to show, is not drawn until the replacement comes (polled at every
+// call), for kUiHoldPolls calls at most; an earlier revision's texture of
+// the key keeps drawing meanwhile.
+void TestHeldFirstDraws() {
+    using namespace oot3d::ui;
+    const std::vector<UiPrimitive> primitives = {
+        TexturedPrimitive("oot3d/native/a"), TexturedPrimitive("oot3d/native/a")};
+    {
+        PackProvider provider;
+        provider.nativeStandIn = true;
+        SizingBackend backend;
+        N64UiFast3dRenderer renderer(backend, &provider);
+        const auto frame = [&] {
+            std::string error;
+            Require(renderer.Render(primitives, 400, 240, N64UiCanvasMode::NativeTopScreen400x240,
+                                    renderer.PrepareTextures(primitives), &error),
+                    "held UI rendering failed: " + error);
+        };
+        frame();
+        frame();
+        frame();
+        Require(backend.widths.empty() && backend.drawn.empty() && renderer.Stats().held_draws == 6U,
+                "a texture whose replacement was decoding drew the old art");
+        Require(provider.calls == 3, "a held texture was not polled at every call");
+        provider.ready = true;
+        frame();
+        Require(provider.calls == 4 && backend.widths == std::vector<uint16_t>{6U} &&
+                    backend.drawn == std::vector<uint32_t>({1U, 1U}),
+                "the replacement did not draw as soon as it was ready");
+        frame();
+        Require(provider.calls == 4, "a final texture was resolved again");
+
+        // Turned off and on again (a new revision): the resident texture
+        // keeps drawing while the replacement decodes again.
+        provider.ready = false;
+        provider.revision = 2U;
+        frame();
+        Require(backend.widths.size() == 1U && backend.deleted.empty() && backend.drawn.back() == 1U,
+                "a held revision dropped the texture that was drawing");
+        provider.ready = true;
+        frame();
+        Require(backend.widths == std::vector<uint16_t>({6U, 6U}) && backend.deleted == std::vector<uint32_t>{1U} &&
+                    backend.drawn.back() == 2U,
+                "the replacement of a new revision did not replace the resident texture");
+    }
+    {
+        // A replacement that never comes: the game's pixels after the hold.
+        PackProvider provider;
+        provider.nativeStandIn = true;
+        SizingBackend backend;
+        N64UiFast3dRenderer renderer(backend, &provider);
+        for (std::uint32_t call = 0; call < kUiHoldPolls; ++call) {
+            std::string error;
+            Require(renderer.Render(primitives, 400, 240, N64UiCanvasMode::NativeTopScreen400x240,
+                                    renderer.PrepareTextures(primitives), &error),
+                    "held UI rendering failed");
+        }
+        Require(backend.widths == std::vector<uint16_t>{2U} && backend.drawn.size() == 2U &&
+                    renderer.Stats().holds_expired == 1U && provider.calls == int(kUiHoldPolls),
+                "an expired hold did not draw the game's pixels");
+        // Then polled every few calls as any provisional texture.
+        for (int index = 0; index < 8; ++index) (void)renderer.PrepareTextures(primitives);
+        Require(provider.calls == int(kUiHoldPolls) + 1, "an expired hold was still polled at every call");
+    }
+}
+
 } // namespace
 
 int main() {
     using namespace oot3d::ui;
     TestProvisionalTextures();
+    TestHeldFirstDraws();
     Require(N64UiSolidShaderId0() != 0U &&
                 N64UiTexturedShaderId0() != 0U &&
                 N64UiSolidShaderId0() != N64UiTexturedShaderId0(),
