@@ -1591,7 +1591,8 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   the pack too, with the same hash, as `AzaharTextureRequest::UserInterface` requests: reduced to 3x
   native (`kUiTextureMaxScale`) whatever "HD texture size" says, no mip chain, cached apart from
   world textures. The pack wins over TopScreen's HD UI atlas; while the pack is indexing or decoding
-  the HD atlas (or the native texture) stands in. Turning HD textures off changes the pack
+  the HD atlas stands in, and a texture with only its native art is not drawn yet (held, see "HUD
+  art without the old art first" below). Turning HD textures off changes the pack
   generation, which the UI provider reports as its `Revision`, so the UI renderer resolves its
   textures again on the next frame and the HUD replacements go at once. The HD UI atlas is not a
   pack: it is used whenever the file exists. The UI path's memory is its own: a resident texture per
@@ -1683,6 +1684,52 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - Logic: `azahar_texture_scale.{h,cpp}`, `azahar_texture_pack_settings.h`; host tests
   `oot3d_texture_pack_scale_tests` (sizes, ratios, alpha, cap 0, mip chain, settings files, the
   on/off cache rule) and the runtime's `CapsMipmapsAndReleasesReplacementsOnTheWorker`.
+
+### HUD art without the old art first (07/11)
+- **Symptom (test.7):** with the HD pack and the TopScreen HUD, "it always shows the old one for a
+  second then pops in the new". Video `2026110706055900` (start, Temple of Time): at 13.30 s the
+  X/Y/ZR/B item icons and their counters are the game's own art, at 13.85 s the pack's; hearts,
+  rings and labels (HD UI atlas, no decode) do not change. About 0.5 s, at every start.
+- **Cause:** the TopScreen HUD is drawn by the UI renderer (`oot3d_n64_ui_renderer.cpp`), and its
+  pack images (`AzaharTextureRequest::UserInterface`) were decoded on first sight by the single pack
+  worker, in one queue with the world images. The HUD first appears as a scene fades in, when that
+  scene's world PNGs are queued (logs15p: 143 pack images in the first minute; the 1080p pack's UI
+  images are 4x-16x, a 512x256 atlas is a 6.7 MB PNG). Until its turn the native pixels stood in,
+  polled every 8 frames. Not eviction: HUD images have their own cache, untouched by the texture
+  budget and `ReleaseDecoded` (the 73 budget evictions and `again 20` of logs15p are world
+  textures), and the UI renderer keeps a resident texture per key; once decoded, a HUD image does
+  not fall back in the session (a guest address change of the same image finds it cached by hash).
+  A HUD image whose content was never seen this session (an item equipped for the first time)
+  decoded late too.
+- **Fix, three parts:**
+  - HUD images have their own worker thread (`UiWorkerMain`, own queue `mUiLoadJobs`): a HUD
+    texture waits only for other HUD images, never for a world PNG.
+  - `config/texture_pack_hud` (`azahar_hud_image_list.h`): each HUD image decoded on first sight
+    adds a line `<hash> <native width> <native height>` (256 lines at most); when the pack's index
+    is ready (title screen), the listed images the pack has are queued on the HUD worker in that
+    order, so from the second start the HUD's first draw has its pack art. Lines of a pack no
+    longer installed are dropped. HD textures off: nothing read, the file is kept.
+  - A HUD texture seen while its pack image decodes, with only its native pixels to show
+    (`UiTexturePixels::native_stand_in`; not with the HD UI atlas as stand-in, which is new art), is
+    not drawn: its primitives are skipped, it is polled at every frame and drawn as soon as the
+    image is ready, for `kUiHoldPolls` (30) frames at most, then the native pixels as before. A
+    texture already resident for the key (HD textures turned on again) keeps drawing meanwhile.
+- **Start-up cost:** no game-thread work; the HUD worker decodes during the title screen. Measured
+  on the PC (WSL host, -O2) for 9 UI images of one size, Henriko 5.0a 1080p as installed / shrunk
+  by `shrink_texture_pack.py --hud 3`: 512x256 atlases 3.26 s / 0.32 s, 256x256 1.90 s / 0.14 s,
+  128x128 (8) 0.37 s / 0.03 s, 256x32 0.13 s / 0.015 s; RAM 4.5 MiB per 512x256 at the 3x cap (as
+  much as decoding it later). The console's A57 is several times slower [not measured]; the
+  `hud pack` line of `logs/deko3d.txt` gives the real figures: `listed=` lines, `preloaded=N/M in
+  T ms (K KiB)` (worker time from the index to the last of them) and `first sight=N (wait max
+  T ms)` (HUD images decoded while the HUD waited; 0 from the second start if nothing new was
+  seen).
+- **Memory:** unchanged in total (HUD images were already kept for the session); they are decoded
+  earlier.
+- Tests: `oot3d_azahar_texture_pack_tests` (`HudImagesDoNotWaitBehindWorldImages`,
+  `HudImagesSeenOnceAreDecodedAtTheNextStart`, in the runtime's foundation tests; checked with a
+  standalone build since host GCC 12 cannot link that target), `oot3d_n64_ui_renderer_tests`
+  (`TestHeldFirstDraws`), `oot3d_native_ui_texture_provider_tests`, `oot3d_texture_pack_scale_tests`
+  (list format, damaged lines, limit, pruning); three guards.
 
 ### Toon and per-pixel lighting (deko3d): L3+R3 > Video > Lighting (`config/lighting`, off by default)
 - **Switch:** `sdmc:/switch/oot3dre/config/lighting`, first word `toon` or `perpixel`; absent, empty or

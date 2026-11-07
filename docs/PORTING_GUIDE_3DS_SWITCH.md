@@ -1070,8 +1070,11 @@ romfs, reusing the `AzaharTexturePackRuntime` that already existed for Vulkan:
   `SetCustomTextureSource` (`oot3d_native_a32_window_setup.cpp`): `ResolveOrQueue` with
   `UserInterface = true` (3x cap, no mips, own cache) while the pack is on, else TopScreen's HD UI
   atlas (`config/topscreen_ui_atlas_hd.png`) for the exact `ui_atlas` bytes. UVs are normalized, so a
-  replacement of any size draws with the same coordinates; provisional pixels stand in while a
-  decode is pending and are polled every 8 frames; the pack generation is the provider's `Revision`.
+  replacement of any size draws with the same coordinates; the HD atlas stands in while a decode is
+  pending (polled every 8 frames), a texture with only its native pixels is held (not drawn, polled
+  every frame, at most `kUiHoldPolls`). HUD images decode on their own pack worker and are listed in
+  `config/texture_pack_hud`, decoded ahead at the next start; the pack generation is the provider's
+  `Revision`.
 - **HD font** doesn't need the pack: `config/font_coverage.zip` is already backend-neutral; generate the
   coverage for the ROM's region (`message/eu/` on EU; the ready-made zip covered only `message/us`).
 

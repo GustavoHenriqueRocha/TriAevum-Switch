@@ -1132,6 +1132,22 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
           r'DecodeOptions\{native, kUiTextureMaxScale, false\}',
           "oot3d_azahar_texture_pack_tests (CapsHudTexturesAtThreeTimesWithoutMipmaps)"),
+    # --- 07/11: the TopScreen HUD showed the game's art for ~0.5 s, then the pack's ---
+    # HUD decodes waited behind a scene's world PNGs on the single pack worker.
+    Guard("HUD pack images decode on their own worker, never queued behind world images",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'\(userInterface \? mUiLoadJobs : mLoadJobs\)\.push_back\(std::move\(job\)\);.*?'
+          r'mUiWorkAvailable\.wait\(lock, \[&\] \{ return mStopping \|\| !mUiLoadJobs\.empty\(\); \}\);',
+          "oot3d_azahar_texture_pack_tests (HudImagesDoNotWaitBehindWorldImages)"),
+    Guard("Switch: the HUD's pack images are remembered in config/texture_pack_hud and decoded at start-up",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'MakeTexturePackConfiguration\(mTexturePackSettings, kConfigDirectory\).*?'
+          r'MakeTexturePackConfiguration\(settings, kConfigDirectory\)',
+          "oot3d_azahar_texture_pack_tests (HudImagesSeenOnceAreDecodedAtTheNextStart)"),
+    Guard("a HUD texture whose pack image decodes is held, not drawn with the old art (provider marks the stand-in)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_texture_provider.cpp",
+          r'pixels\.provisional = true;\s+pixels\.native_stand_in = custom\.rgba8 == nullptr;',
+          "oot3d_n64_ui_renderer_tests (TestHeldFirstDraws), oot3d_native_ui_texture_provider_tests"),
     # --- 05/11: inventory taps one slot off (pause Items/Gear/Map, TopScreen) ---
     # The touch scaled the 400-wide top screen down to the 320-wide touch
     # screen, but TopScreen draws the page one pixel per pixel at X + 40 (the
