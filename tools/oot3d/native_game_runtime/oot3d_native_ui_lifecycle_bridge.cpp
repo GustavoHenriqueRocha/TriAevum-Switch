@@ -236,6 +236,7 @@ bool Oot3dNativeUiLifecycleBridge::ApplyTopScreenGuestHook(uint32_t guestPc,
   }
   context.HudScale = mTopScreenConfig.HudScale;
   context.HudMarginX = static_cast<float>(mTopScreenConfig.HudMarginX);
+  context.HudLayout = mTopScreenConfig.HudLayout;
   context.HudMarginY = static_cast<float>(mTopScreenConfig.HudMarginY);
   TopScreenQuestRenderBufferStats stats;
   if (!TransformTopScreenQuestRenderBuffer(mMemory, renderBuffer, context,

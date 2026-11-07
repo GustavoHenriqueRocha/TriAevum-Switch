@@ -2153,6 +2153,28 @@ int main() {
               questQuads[1][0].X == 278.5F && questQuads[1][0].Y == 14.5F &&
               questQuads[1][0].Z == 2.0F && questQuads[2][0].X == 200.0F,
           "TopScreen quest geometry transform is incorrect");
+  {
+    // 3.2.2 0x005C8EB0..0x005C8ED8: the A button (circle and action text)
+    // sits at (288,24) in Normal and in the right lane (382,44) under
+    // Restoration; nothing else of the stream moves with the layout.
+    std::array<std::array<TopScreenVec3, 4>, 2> aButton{{
+        {{{340.0F, 160.0F, 2.0F},
+          {360.0F, 160.0F, 2.0F},
+          {340.0F, 180.0F, 2.0F},
+          {360.0F, 180.0F, 2.0F}}},
+        {{{200.0F, 100.0F, 3.0F},
+          {220.0F, 100.0F, 3.0F},
+          {200.0F, 120.0F, 3.0F},
+          {220.0F, 120.0F, 3.0F}}},
+    }};
+    TopScreenQuestGeometryContext restoration;
+    restoration.HudLayout = TopScreenHudLayout::Restoration;
+    TransformTopScreenQuestGeometry(aButton, restoration);
+    Require(aButton[0][0].X == 372.5F && aButton[0][0].Y == 34.5F &&
+                aButton[0][3].X == 391.5F && aButton[0][3].Y == 53.5F &&
+                aButton[1][0].X == 200.0F,
+            "Restoration did not put the A button in the right lane");
+  }
 
   std::array<std::array<TopScreenVec3, 4>, 1> offsetQuest{
       {{{{80.0F, 140.0F, 0.0F},

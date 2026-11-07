@@ -55,10 +55,19 @@ TopScreenQuestGeometryStats TransformTopScreenQuestGeometry(
           }
         }
       } else if (centerX < 398.0F && centerY > 150.0F) {
+        // The A button (circle and action text). Credited to the "Single
+        // Screen Experience" mod (GameBanana 695893), 3.2.2 EUR code.ips
+        // 0x005C8EB0..0x005C8ED8: (288,24) right of B, and the right lane
+        // (382,44) under Restoration (X top, Y left, A right, B bottom).
+        // Reimplemented; no mod code or data was copied.
+        const bool restoration =
+            context.HudLayout == TopScreenHudLayout::Restoration;
+        const float targetX = restoration ? 382.0F : 288.0F;
+        const float targetY = restoration ? 44.0F : 24.0F;
         if (!context.PlayerSpecialState || centerY < 195.0F) {
           for (auto &vertex : quad) {
-            vertex.X = 288.0F + (vertex.X - centerX) * 0.95F;
-            vertex.Y = 24.0F + (vertex.Y - centerY) * 0.95F;
+            vertex.X = targetX + (vertex.X - centerX) * 0.95F;
+            vertex.Y = targetY + (vertex.Y - centerY) * 0.95F;
           }
           ++stats.QuadsTranslated;
           ++stats.QuadsScaled;

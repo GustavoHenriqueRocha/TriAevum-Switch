@@ -282,7 +282,8 @@ TopScreenPauseEdgeGeometry BuildTopScreenPauseEdgeGeometry(
 // PauseTouchButton renderer. These are its exact six primary quads; the first
 // four retain their independently animated native vertical offsets.
 // Restoration draws no circle in the Item I/II lanes: Item I/II have no lane
-// there (ResolveTopScreenItemIconPlacement) and the A circle takes lane 3.
+// there (ResolveTopScreenItemIconPlacement), B's circle (quad 4) takes lane 3
+// and the native A button the right lane (TransformTopScreenQuestGeometry).
 TopScreenTouchClusterGeometry BuildTopScreenTouchClusterGeometry(
     const std::array<float, 4> &nativeVerticalOffsets,
     float nativeAlpha,
@@ -547,6 +548,8 @@ struct TopScreenQuestGeometryContext {
   float HudScale = 1.0F;
   float HudMarginX = 0.0F;
   float HudMarginY = 0.0F;
+  // Restoration moves the A button to the right lane (382,44).
+  TopScreenHudLayout HudLayout = TopScreenHudLayout::Normal;
 };
 
 struct TopScreenSystemMenuLayerStats {

@@ -310,10 +310,14 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
     X/Y counts hidden; without ZR the Item I/II counts are hidden;
   - slot items (0x005D21B4..0x005D21D8): with ZR held X and Y (slots 1, 2) have no item (0xFF), so
     ZR+X uses Item I alone.
-  The right lane (382,44) is not an item lane: 0x005C8EC0 moves the quads of the native HUD owner
-  0x004FC648 there under Restoration ((288,24) in Normal) and hides them while ZR is held unless
-  0x005CBE08(2) finds that action on a D-pad slot; 0x005E09EC draws region 4 (the D-pad lane icon)
-  at (382,44) in that case.
+  The right lane (382,44) is the A button's: 0x005C8EB0..0x005C8ED8 moves the native A button (its
+  circle and action text, the "Quest" render buffer bound at 0x004FC660 that the port transforms in
+  `TransformTopScreenQuestGeometry`, quads centred at x 330..398, y > 150) to (382,44) under
+  Restoration, (288,24) in Normal, right of B (B's circle, quad 4, sits at (248,24) in Normal with
+  its label at (227,10), and goes to (358,68) under Restoration with the label at (337,54)). So
+  Restoration is X top, Y left, A right, B bottom, as the buttons sit. 0x005C9024 hides A while ZR is
+  held unless 0x005CBE08(2) finds that action on a D-pad slot, and 0x005E09EC then draws region 4
+  (the D-pad lane icon) at (382,44): the "Ocarina: ZR+A" of the option text.
 - **What the port did.** It had the chords, but drew the native Item I icon in its Normal lane (the
   right one) at all times, with a circle and no label, and drew Item I/II counts at the right/bottom
   positions while ZR was held; Item II's icon would share the bottom lane with the moved A circle and
@@ -322,14 +326,20 @@ launch arguments look for the pack, `main()` calls `RunSwitchTopScreenImport()`
   `ResolveTopScreenItemIconPlacement` and `ResolveTopScreenAmmoCounterPosition`
   (`oot3d_top_screen_mod_profile_hud.cpp`) give the mod's placements; the item copies, the X/Y labels
   (`BuildTopScreenAuxiliaryTouchGeometry(…, zrHeld)`) and the counters follow them; the Item I/II lanes
-  get no circle (the A circle keeps lane 3); lanes 2/3 press with the chords, not ZR/ZL alone; the
+  get no circle (B's circle keeps lane 3); lanes 2/3 press with the chords, not ZR/ZL alone; the
   slot-item hook returns no item for X/Y while ZR is held (`TopScreenSlotItemQuery::RestorationZrHeld`).
   So on the Switch: hold ZR, the X lane shows Item I labelled "I" with its count, the Y lane Item II
   labelled "II"; ZR+X uses Item I, ZR+Y Item II. ZL's item (Item II in Normal) is the Y lane's under
   ZR. Tests: `oot3d_top_screen_hud_touch_tests` (`TestRestorationItemLanes`,
   `TestEveryItemIconHasACircle`), `oot3d_top_screen_mod_profile_tests` (labels, counters, lane presses).
-- **Not ported:** the mod's right-lane content above. The port keeps the 0x004FC648 quads where its
-  older-version transform puts them, so the right lane is empty under Restoration.
+  A follow-up moves the A button to the right lane under Restoration (`TopScreenQuestGeometryContext
+  ::HudLayout`, set by the bridge); in Normal it stays at (288,24). Until then the port left A at its
+  Normal spot, left of the diamond (the report's "A to the left").
+- **Not ported:** hiding A while ZR is held and drawing the Ocarina there (ZR+A): the port has no
+  ZR+A Ocarina input, so A stays visible and ZR+A is still A.
+- **Credit.** These Restoration rules come from the "Single Screen Experience" mod (GameBanana
+  695893), decoded from its 3.2.2 EUR `code.ips` at the addresses above. The port reimplements the
+  behaviour; no mod code or data is copied, and the source comments say so where it lands.
 
 ## How to build (Linux)
 

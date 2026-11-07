@@ -1290,7 +1290,7 @@ GUARDS = [
     # SingleScreen 3.2.2 (code.ips 0x005DFDAC, 0x005E0408, 0x005E1D6C, 0x005D21B4)
     # gives Item I/II no lane: they are hidden until ZR is held, then drawn in the
     # X/Y lanes, labelled I/II, with their counts there, while X/Y use no item of
-    # their own. Lanes 2/3 carry no circle (the A circle takes lane 3).
+    # their own. Lanes 2/3 carry no circle (B's circle takes lane 3, A the right lane).
     Guard("Restoration HUD: Item I drawn on the right with no button and no count (Item I/II show in the X/Y lanes only while ZR is held)",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
           r'const bool itemLane = region == 0U \|\| region == 3U;\s*'
@@ -1316,6 +1316,14 @@ GUARDS = [
           "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
           r'layout == TopScreenHudLayout::Restoration && index >= 2U;',
           "oot3d_top_screen_hud_touch_tests (TestHiddenControls)"),
+    Guard("Restoration HUD: A stayed left of the button diamond (3.2.2 puts it in the right lane)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
+          r'const float targetX = restoration \? 382\.0F : 288\.0F;\s*'
+          r'const float targetY = restoration \? 44\.0F : 24\.0F;',
+          "oot3d_top_screen_mod_profile_tests (A button right lane)"),
+    Guard("Restoration HUD: the bridge passes the layout to the A-button transform",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
+          r'context\.HudLayout = mTopScreenConfig\.HudLayout;'),
     Guard("Restoration HUD: a tap never presses ZR/ZL (the layout decides)",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch.cpp",
           r'itemButtonsTappable = layout != TopScreenHudLayout::Restoration;.*?'

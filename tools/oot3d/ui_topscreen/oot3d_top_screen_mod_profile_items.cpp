@@ -95,6 +95,9 @@ ResolveTopScreenSlotItemId(const TopScreenSlotItemQuery &query) noexcept {
   if (query.NativeSpecialStateActive) {
     return query.NativeItemId;
   }
+  // Restoration: X/Y have no item while ZR is held, credited to the "Single
+  // Screen Experience" mod (GameBanana 695893), 3.2.2 EUR code.ips
+  // 0x005D21B4..0x005D21D8; reimplemented, no mod code or data copied.
   if (query.RestorationZrHeld && (query.Slot == 1U || query.Slot == 2U)) {
     return 0xFFU;
   }

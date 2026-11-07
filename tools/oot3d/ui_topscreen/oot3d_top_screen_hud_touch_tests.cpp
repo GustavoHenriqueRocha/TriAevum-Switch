@@ -272,7 +272,7 @@ void TestHiddenControls() {
   const auto targets = Targets(restoration, 1.0F);
 
   // Item I/II have no lane in Restoration (they show in the X/Y lanes while
-  // ZR is held): no circle in lanes 2/3; the A circle takes lane 3.
+  // ZR is held): no circle in lanes 2/3; B's circle (quad 4) takes lane 3.
   Require(FindCircle(normalHud, 2U) != nullptr &&
               FindCircle(restorationHud, 2U) == nullptr,
           "Restoration draws no Item I circle");
@@ -281,7 +281,7 @@ void TestHiddenControls() {
   Require(FindCircle(restorationHud, 3U) == nullptr &&
               itemIICircle != nullptr && aCircle != nullptr &&
               Same(aCircle->destination, itemIICircle->destination),
-          "Restoration puts the A circle alone in the Item II lane");
+          "Restoration puts B's circle alone in the Item II lane");
 
   // The layout, not the drawing, decides: Item I/II are ZR+X/ZR+Y chords.
   Require(!targets.ButtonVisible[2] && !targets.ButtonVisible[3],

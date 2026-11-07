@@ -702,6 +702,11 @@ std::size_t AppendTopScreenExtendedItemButtonsPresentation(
   return output.size() - startSize;
 }
 
+// Restoration layout rules credited to the "Single Screen Experience" mod
+// (GameBanana 695893), as decoded from its 3.2.2 EUR code.ips: item icons
+// 0x005DFDAC/0x005E0AC0..0x005E0AF8, I/II labels 0x005E02A4/0x005E0408, ammo
+// counters 0x005E1D6C..0x005E1D9C. The behaviour is reimplemented here; no
+// mod code or data was copied.
 TopScreenItemIconPlacement
 ResolveTopScreenItemIconPlacement(TopScreenHudLayout layout, bool zrHeld,
                                   std::size_t region) noexcept {
