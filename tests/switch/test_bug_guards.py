@@ -287,6 +287,23 @@ GUARDS = [
           r'PicaSurfaceFragment pica_surface_inputs = pica_surface_fragment\(\);',
           test="test_perpixel_lighting.py (test_interpolants_read_once_at_the_top, test_branches_are_uniform)",
           forbid=r'pica_surface_unit\(pica_view\)|if \(dot\(n, n\) < 0\.5'),
+    # --- 0.1.2-test.8: per-pixel is the GPU limit in Forest Temple room 8 (busy_ms 14.0 at 2.25, 305 render-late frames) ---
+    Guard("per-pixel cost: the rim's view and Fresnel terms are computed once per pixel, not per light; the light loops are written out",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting.cpp",
+          r'if \(pica_surface\.rim\.x > 0\.0\) \{\s*fragment\.view_unit = pica_surface_unit\(fragment\.view\);\s*'
+          r'fragment\.rim_fresnel = pica_surface_rim_fresnel\(fragment\.normal, fragment\.view_unit\);',
+          test="test_perpixel_lighting.py (test_valid_inputs_match_test8_exactly)",
+          forbid=r'for \((int|uint) slot = 0u?; .*?slot\)|pica_surface_rim_fresnel\(n, v\) \* back'),
+    Guard("per-pixel cost: the draw uses its block's path variant (environment, baked) when the pack has it, the generic one otherwise",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'Deko3d::BuildPerPixelSurface\(draw, mLightingEnvironment, mLightingView,.*?'
+          r'path = Deko3d::ClassifyPerPixelSurface\(mSurfaceLighting\);.*?'
+          r'ResolveLightingFragment\(Deko3d::LightingMode::PerPixel, fragmentSource,\s*fragmentIdentity, path\)\) \{\s*'
+          r'fragment = special;\s*\} else \{\s*path = Deko3d::PerPixelPath::Generic;',
+          test="test_perpixel_lighting.py (test_path_variants_match_test8_exactly), oot3d_deko3d_lighting_tests (TestPerPixelPaths)"),
+    Guard("per-pixel cost: the pack tool writes every per-pixel path variant of every fragment text",
+          "tools/oot3d/deko3d_lighting_variants.cpp",
+          r'static_cast<size_t>\(Fast::Deko3d::PerPixelPath::Count\).*?LightingFragmentVariant\(mode, text, path\)'),
     # --- lighting3: Forest Temple room 8, 16.7 ms off / 38.4 ms per-pixel busy_ms (spilling parametric programs) ---
     Guard("lighting3: the parametric lighting copied its 256-byte program to a local; the loop's dynamic light index put it in scratch (105 GPRs, 4096 B/warp)",
           "tools/oot3d/native_pica_frontend/oot3d_native_pica_fragment_lighting_gen.cpp",
