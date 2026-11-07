@@ -140,6 +140,8 @@ size_t gGpuFrameCount = 0U;
 std::atomic<uint64_t> gPerfSubmits{0};
 std::atomic<uint64_t> gPerfCommandBytes{0};
 std::atomic<bool> gPerfSyncCheck{false};
+// NotePresentedTopScene: width << 32 | height << 2 | line samples (0: none yet).
+std::atomic<uint64_t> gPerfTopScene{0};
 
 // Report timestamps count GPU ticks (614.4 MHz on the Tegra X1).
 constexpr uint64_t GpuTicksToNs(uint64_t ticks) {
@@ -190,6 +192,12 @@ void FlushLog() {
     // Lines queued after the writer left (or with no writer at all).
     const std::lock_guard lock(gLogMutex);
     WriteLogLines(gLogQueue);
+}
+
+void NotePresentedTopScene(uint32_t width, uint32_t height, uint32_t lineSamples) {
+    gPerfTopScene.store(static_cast<uint64_t>(width) << 32U | static_cast<uint64_t>(height & 0x3FFFFFFFU) << 2U |
+                            (lineSamples & 3U),
+                        std::memory_order_relaxed);
 }
 
 Device::~Device() {
@@ -1009,6 +1017,7 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
     const uint64_t busyMaxNs = gPerfBusyMaxNs.exchange(0, std::memory_order_relaxed);
     const double count = frames != 0U ? static_cast<double>(frames) : 1.0;
     const double splitCount = split != 0U ? static_cast<double>(split) : 1.0;
+    const uint64_t topScene = gPerfTopScene.load(std::memory_order_relaxed);
     std::ostringstream out;
     out << "dkperf host_frames=" << hostFrames << " frames=" << frames
         << " gpu_ms=" << static_cast<double>(gpuNs) / count / 1.0e6
@@ -1026,6 +1035,8 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
         << " swap_acquires=" << gSwapAcquires.exchange(0, std::memory_order_relaxed)
         << " mailbox_copies=" << gMailboxCopies.exchange(0, std::memory_order_relaxed)
         << " mailbox_dropped=" << gMailboxDropped.exchange(0, std::memory_order_relaxed)
+        << " top_w=" << (topScene >> 32U) << " top_h=" << ((topScene & 0xFFFFFFFFU) >> 2U)
+        << " top_line_samples=" << (topScene & 3U)
         << " sync_check=" << (gPerfSyncCheck.load(std::memory_order_relaxed) ? 1 : 0)
         << " build=" << kDeko3dBuildTag;
     return out.str();

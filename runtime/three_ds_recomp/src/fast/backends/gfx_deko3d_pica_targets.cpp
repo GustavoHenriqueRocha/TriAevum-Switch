@@ -4,7 +4,6 @@
 #include "gfx_deko3d_pica_targets.h"
 
 #include "fast/backends/gl_pica_dynamic_scale.h"
-#include "gfx_opengl_pica_scale.h"
 
 #include <algorithm>
 #include <cmath>
@@ -76,13 +75,18 @@ bool SubmitAndWait(Device& device, std::string* error) {
 }
 } // namespace
 
-bool PicaTargets::Init(Device& device, PicaResources& resources, float scale, float widescreenFactor) {
+bool PicaTargets::Init(Device& device, PicaResources& resources, float scale, float widescreenFactor,
+                       TopScreenLineSamples lines) {
     mDevice = &device;
     mResources = &resources;
     mScale = std::max(scale, 1.0F);
     mWidescreenFactor = std::max(widescreenFactor, 1.0F);
-    Log("targets: resolution scale %.2f, widescreen factor %.3f", static_cast<double>(mScale),
-        static_cast<double>(mWidescreenFactor));
+    mLines = lines;
+    const float topSampling = PicaTargetSamplingX(kTopScreenPhysicalWidth, kTopScreenPhysicalHeight, mScale, mLines);
+    Log("targets: resolution scale %.2f, widescreen factor %.3f, top screen %s sample%s per presented line "
+        "(config/deko3d_line_samples %u)",
+        static_cast<double>(mScale), static_cast<double>(mWidescreenFactor), topSampling < 1.0F ? "one" : "two",
+        topSampling < 1.0F ? "" : "s", lines == TopScreenLineSamples::Two ? 2U : 1U);
     // Dynamic resolution lowers the configured scale, never raises it (no
     // SMAA/FXAA here, whose images would have the source's extent).
     PicaGlDynamicScale::gState.MaxScale = mScale;
@@ -152,7 +156,8 @@ PicaTarget* PicaTargets::Get(const PicaTargetKey& key, bool* created) {
     }
     PicaTarget target;
     target.Extent = PlanPicaTargetExtent(key.Width, key.Height, mScale, mWidescreenFactor, kTopScreenPhysicalWidth,
-                                         kTopScreenPhysicalHeight);
+                                         kTopScreenPhysicalHeight,
+                                         PicaTargetSamplingX(key.Width, key.Height, mScale, mLines));
     ImagePlacement color{MakeLayout(mDevice->Handle(), DkImageFormat_RGBA8_Unorm, kRenderFlags, target.Extent.Width,
                                     target.Extent.Height)};
     ImagePlacement depth{MakeLayout(mDevice->Handle(), DkImageFormat_Z24S8, kDepthFlags, target.Extent.Width,
@@ -236,17 +241,7 @@ bool PicaTargets::ApplyDynamicScale(const PicaTargetKey& key, PicaTarget& target
     if (!moved) {
         return false;
     }
-    if (desired == target.Alloc.Scale) {
-        target.Extent = target.Alloc;
-    } else {
-        const auto extent = PicaGlScale::DynamicSubRectangle(key.Width, key.Height, desired, target.Alloc.Width,
-                                                             target.Alloc.Height, target.Alloc.Wide,
-                                                             target.Alloc.WideFactor);
-        target.Extent.Width = extent.Width;
-        target.Extent.Height = extent.Height;
-        target.Extent.Scale = desired;
-        target.Extent.ScaleY = static_cast<float>(extent.Height) / static_cast<float>(key.Height);
-    }
+    target.Extent = PlanPicaDynamicExtent(key.Width, key.Height, desired, target.Alloc);
     DkCmdBuf cmd = mDevice->Cmd();
     const DkImageView* colors[] = {&target.ColorView};
     dkCmdBufBindRenderTargets(cmd, colors, 1, &target.DepthView);

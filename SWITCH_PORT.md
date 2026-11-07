@@ -2457,6 +2457,65 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   sampler and texture key as none); guards "the PICA LOD bias is applied once" (no `.lodBias =` in
   `gfx_deko3d_pica_resources.cpp`) and "the shader is where the PICA LOD bias is applied".
 
+### Top screen at one sample per presented line on deko3d: `config/deko3d_line_samples` (07/11)
+- **Waste** (GpuScout audit, Forest Temple room 8): the game renders its 240 presented lines
+  twice (the 480 columns of its 480x400 top target) and its display transfer averages each pair.
+  deko3d kept both samples at host resolution: 1440x1280 at 3x for 720 lines; at the DRS floor
+  2.25, 1080x960 averaged down to 540x960, then stretched to 720p. The PC Vulkan backend already
+  renders one sample per presented line (`render_resolution_policy.h`).
+- **Now** (default): the same policy on deko3d. `PicaTargetSamplingX` asks
+  `Oot3d::NativeTopScreenStorageSamplingX` with the extent the allocation scale presents: 0.5 for
+  the top target from scale 2 (at least the game's 480 samples), 1 below it, for the bottom screen
+  and every other target. A target's X (the presented vertical axis) scales by
+  `ScaleX = Scale * SamplingX`; Y (presented width, widescreen) is unchanged. The display
+  transfer's 2:1 filter becomes a 1:1 copy (`PlanPicaTransfer`, as Vulkan's
+  `SourceAtPresentedDensity`); the display image, its content and the scanout keep their extents.
+
+  | scale | test.7 (two samples) | now (one) | lines |
+  | --- | --- | --- | --- |
+  | 3.00 | 1440x1280, 1.84 Mpx | 720x1280, 0.92 Mpx | 720 |
+  | 2.75 | 1320x1173, 1.55 Mpx | 660x1173, 0.77 Mpx | 660 |
+  | 2.50 | 1200x1067, 1.28 Mpx | 600x1067, 0.64 Mpx | 600 |
+  | 2.25 | 1080x960, 1.04 Mpx | 540x960, 0.52 Mpx | 540 |
+
+- **What follows the target:** viewport and scissor scale X by `ScaleX` (`PlanPicaViewport`,
+  `PlanPicaScissor`, the widened path's X edges); placed UI and the widescreen canvas keep their
+  Y-axis rules (`Scale`, `ScaleY`), so proportions hold. Dynamic resolution keeps the
+  allocation's sampling at every level (`PlanPicaDynamicExtent`), the copy fills the content
+  corner and the two-texel edge bands work as before. Grass draws with the scene's viewport and
+  scissor (`RememberGrassScene`); fps60 in-between frames replay into the same target. Save states
+  resample each axis to the guest extent and back (`MakeGuestExtentSnapshot`, `PlanRestorePixels`),
+  so a state loads under either setting.
+- **Scale range, chosen on purpose:** unchanged (`config/resolution_scale` 3, DRS floor three
+  steps below: 2.25). The ceiling 3 is now a true 720p, one rendered line per panel line; the floor
+  is test.7's heavy-room sharpness (540 lines) at half its pixels, so no level is blurrier than
+  test.7. The controller's pixel model still holds (area ∝ scale², both axes linear in the scale);
+  its fixed part (`FixedFraction` 0.35) is now relatively larger, which only makes up-steps more
+  cautious. With every level about half as expensive, busy rooms climb to a sharper level while
+  60 FPS pairs fit, and spend less GPU than test.7 at the same level. Lost: the game's own vertical
+  2:1 averaging (Vulkan already drops it).
+- **Expected** (estimates, not measured; scene time taken as 60-75% pixel work): room 8,
+  lighting off, 60 FPS: `busy_ms` 14.9 → about 9-11 at 2.25; the controller should settle at 2.5
+  (600 lines) at about 11-11.5 ms, with the in-between frames fitting. At 30 FPS (scale 3) about
+  13-14 ms where test.7 would draw 1.84 Mpx. Per-pixel lighting (47 ms at 2.25) roughly halves
+  its pixel part: about 25-27 ms.
+- **Log:** `deko3d.txt` at start: `targets: resolution scale 3.00, widescreen factor 1.067, top
+  screen one sample per presented line (config/deko3d_line_samples 1)`, and the created target
+  `targets: 720x1280 (native 480x400 …, wide)`. Every `perf.txt` window's `dkperf` line ends with
+  `top_w= top_h= top_line_samples=`: the drawn extent of the last presented top scene (DRS level
+  included) and 1 or 2.
+- **Back to test.7:** `config/deko3d_line_samples` containing `2` (read at start).
+- **Console check (1 minute):** room 8, 60 FPS, lighting off, 30 s standing still: `dkperf`
+  `top_w` 540-720 with `top_line_samples=1`, `top_h` 960-1280, and `busy_ms` against test.7's 14.9
+  at the window's `drs_scale`; the picture no softer than test.7. With the `2` file: `top_w` twice as
+  large, as test.7.
+- Tests: `oot3d_deko3d_backend_tests` (`TestTopScreenLineSamples`: config parse, policy agreement
+  with Vulkan, both settings at 3 to 1.5 with and without widescreen, transfer copy against
+  average, display extents, edge bands, scanout, viewport tiling, area ∝ scale²;
+  `TestSavestateRoundTrip`: a one-sample target saved and restored), `oot3d_native_a32_input_tests`
+  (touch on the 720x1280 target); five guards "deko3d top screen at one sample per line". No shader
+  change, no `deko3d.pack` rebuild.
+
 ### fps60 cadence: regularity before average, `config/fps60_mode` (2026-10-17)
 - **Diagnosis** (`switch-logs/integ2b`, CPU 1785, 4.5 min at 60, 52 FPS average): in the
   heavy stretches (host_frames 9450–14250) the game thread spends 27–31 ms of each 33.3 ms step pair

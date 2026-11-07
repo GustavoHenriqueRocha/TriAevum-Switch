@@ -2,7 +2,8 @@
 // deko3d PICA render targets and display images (Switch), package 5
 // (docs/DEKO3D_PROGRESS.md). A target is the GL backend's PicaGlTarget: a
 // colour image (RGBA8) and a depth/stencil image (Z24S8) per PICA target key,
-// at the resolution scale (a top-screen target widened by widescreen). A
+// at the resolution scale (a top-screen target widened by widescreen and,
+// by default, at one sample per presented line: PicaTargetSamplingX). A
 // display image is PicaGlDisplay: the RGBA8 destination of a display
 // transfer, sampled by the scanout. The decisions live in the pure
 // fast/backends/gfx_deko3d_pica_pipeline.h.
@@ -83,8 +84,10 @@ struct PicaTargetStats {
 class PicaTargets {
   public:
     // scale: config/resolution_scale(_docked); widescreenFactor: > 1 widens
-    // the top-screen target (config/widescreen and the window shape).
-    bool Init(Device& device, PicaResources& resources, float scale, float widescreenFactor);
+    // the top-screen target (config/widescreen and the window shape); lines:
+    // config/deko3d_line_samples (the top target's sampling, PicaTargetSamplingX).
+    bool Init(Device& device, PicaResources& resources, float scale, float widescreenFactor,
+              TopScreenLineSamples lines);
     void Shutdown() noexcept;
     // Every target and display image (after the GPU is idle).
     void Reset() noexcept;
@@ -146,6 +149,7 @@ class PicaTargets {
     PicaResources* mResources = nullptr;
     float mScale = 1.0F;
     float mWidescreenFactor = 1.0F;
+    TopScreenLineSamples mLines = TopScreenLineSamples::One;
     uint64_t mNextId = 1;
     uint64_t mFrame = 0;
     std::unordered_map<PicaTargetKey, PicaTarget, PicaTargetKeyHash> mTargets;

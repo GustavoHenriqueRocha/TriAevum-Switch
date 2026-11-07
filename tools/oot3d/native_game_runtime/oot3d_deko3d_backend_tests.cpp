@@ -11,6 +11,7 @@
 #include "fast/renderer3ds/pica_framebuffer_encode.h"
 
 #include <array>
+#include <cmath>
 #include <limits>
 #include <span>
 #include <string>
@@ -363,11 +364,15 @@ void TestTargetsAndRects() {
   Require(!PlanPicaTargetExtent(480, 400, 3.0F, 1.0F, 480, 400).Wide, "widescreen off");
   Require(ScaledEdge(7, 1.5F) == 11 && ScaledExtent(0, 2.0F) == 0 && ScaledExtent(1, 0.1F) == 1,
           "edges same as PicaGlScale's");
-  const PicaRect viewport = PlanPicaViewport(10.7F, 0.0F, 240.9F, 400.0F, 2.0F);
+  const PicaRect viewport = PlanPicaViewport(10.7F, 0.0F, 240.9F, 400.0F, 2.0F, 2.0F);
   Require(viewport == PicaRect{20, 0, 480, 800}, "viewport truncates and scales both edges");
-  Require(PlanPicaScissor(3, 5, 6, 14, 6, 2.0F, 960, 800) == PicaRect{10, 12, 20, 2}, "inclusive scissor");
-  Require(PlanPicaScissor(0, 5, 6, 14, 6, 2.0F, 960, 800) == PicaRect{0, 0, 960, 800}, "no scissor = target");
-  Require(PlanPicaScissor(3, 9, 0, 3, 0, 1.0F, 64, 64).Width == 0, "inverted scissor empty");
+  Require(PlanPicaScissor(3, 5, 6, 14, 6, 2.0F, 2.0F, 960, 800) == PicaRect{10, 12, 20, 2}, "inclusive scissor");
+  Require(PlanPicaScissor(0, 5, 6, 14, 6, 2.0F, 2.0F, 960, 800) == PicaRect{0, 0, 960, 800}, "no scissor = target");
+  Require(PlanPicaScissor(3, 9, 0, 3, 0, 1.0F, 1.0F, 64, 64).Width == 0, "inverted scissor empty");
+  Require(PlanPicaViewport(10.7F, 0.0F, 240.9F, 400.0F, 1.5F, 3.0F) == PicaRect{15, 0, 360, 1200},
+          "viewport: X and Y scaled apart");
+  Require(PlanPicaScissor(3, 5, 6, 14, 6, 1.5F, 3.0F, 720, 1200) == PicaRect{8, 18, 14, 3},
+          "scissor: X and Y scaled apart, edges rounded");
   Require(ClipPicaRect({-4, 10, 20, 100}, 64, 64) == PicaRect{0, 10, 16, 54}, "clip to the target");
   Require(ClipPicaRect({70, 0, 5, 5}, 64, 64) == PicaRect{}, "outside the target = empty");
   PicaTargetKey a{1, 0x18000000, 0x18100000, 240, 400, 0, 3};
@@ -410,32 +415,39 @@ void TestTransferAndScanout() {
   transfer.OutputWidth = 240;
   transfer.OutputHeight = 400;
   transfer.Flags = 0;
-  auto plan = PlanPicaTransfer(transfer, 240, 400, 2.0F, 2.0F, 480, 800);
+  const auto at1 = PlanPicaTargetExtent(240, 400, 1.0F, 1.0F, 480, 400);
+  const auto at2 = PlanPicaTargetExtent(240, 400, 2.0F, 1.0F, 480, 400);
+  const auto at3 = PlanPicaTargetExtent(240, 400, 3.0F, 1.0F, 480, 400);
+  auto plan = PlanPicaTransfer(transfer, 240, 400, at2, at2);
   Require(plan.Valid && !plan.Linear && plan.SourceWidth == 480 && plan.ContentHeight == 800, "1:1 copy");
   transfer.Flags = 1U << 24U; // 2:1 horizontal
   transfer.OutputWidth = 120;
-  plan = PlanPicaTransfer(transfer, 240, 400, 2.0F, 2.0F, 480, 800);
+  plan = PlanPicaTransfer(transfer, 240, 400, at2, at2);
   Require(plan.Valid && plan.Linear && plan.OutputWidth == 120 && plan.SourceWidth == 480 && plan.AllocWidth == 240,
           "2:1 linear reads double");
   transfer.Flags = 8U;
-  Require(!PlanPicaTransfer(transfer, 240, 400, 2.0F, 2.0F, 480, 800).Valid, "unsupported mode rejects");
+  Require(!PlanPicaTransfer(transfer, 240, 400, at2, at2).Valid, "unsupported mode rejects");
   transfer.Flags = 0;
   transfer.InputWidth = 300;
-  Require(!PlanPicaTransfer(transfer, 240, 400, 2.0F, 2.0F, 480, 800).Valid, "larger than the source rejects");
+  Require(!PlanPicaTransfer(transfer, 240, 400, at2, at2).Valid, "larger than the source rejects");
   // Flip: non-linear input without dont-swizzle and without bit 0 = flipped (GL).
   transfer.InputWidth = 240;
   transfer.OutputWidth = 240;
-  Require(PlanPicaTransfer(transfer, 240, 400, 1.0F, 1.0F, 240, 400).Flip, "default flip as in GL");
+  Require(PlanPicaTransfer(transfer, 240, 400, at1, at1).Flip, "default flip as in GL");
   transfer.Flags = 1U;
-  Require(!PlanPicaTransfer(transfer, 240, 400, 1.0F, 1.0F, 240, 400).Flip, "bit 0 undoes the flip");
+  Require(!PlanPicaTransfer(transfer, 240, 400, at1, at1).Flip, "bit 0 undoes the flip");
   // Dynamic resolution (p6m): target allocated at 3x drawn at 2x — the display
   // image stays at the allocation size and the content is the 2x corner.
   transfer.Flags = 0;
-  plan = PlanPicaTransfer(transfer, 240, 400, 2.0F, 2.0F, 480, 800, 3.0F, 3.0F);
+  const auto at3drawn2 = PlanPicaDynamicExtent(240, 400, 2.0F, at3);
+  Require(at3drawn2.Width == 480 && at3drawn2.Height == 800 && at3drawn2.Scale == 2.0F &&
+              PlanPicaDynamicExtent(240, 400, 3.0F, at3).Width == 720,
+          "DRS: the drawn corner at 2x, the allocation at its own scale");
+  plan = PlanPicaTransfer(transfer, 240, 400, at3drawn2, at3);
   Require(plan.Valid && plan.AllocWidth == 720 && plan.AllocHeight == 1200 && plan.ContentWidth == 480 &&
               plan.ContentHeight == 800 && plan.SourceWidth == 480 && plan.SourceHeight == 800,
           "DRS: content smaller than the allocation");
-  plan = PlanPicaTransfer(transfer, 240, 400, 3.0F, 3.0F, 720, 1200);
+  plan = PlanPicaTransfer(transfer, 240, 400, at3, at3);
   Require(plan.AllocWidth == plan.ContentWidth && plan.AllocHeight == plan.ContentHeight, "no DRS: content = allocation");
   // 400x240 top screen presented at 1280x720: 5:3 with bars.
   const auto placement = PlanPicaScanout(240, 400, 800, 2.0F, 1280, 720);
@@ -443,6 +455,111 @@ void TestTransferAndScanout() {
   // Widened (16:9): covers the window without a 1-pixel bar.
   const auto wide = PlanPicaScanout(240, 400, 853, 2.0F, 1280, 720);
   Require(wide.CoversWindow && wide.Viewport.Width == 1280, "16:9 covers the window");
+}
+
+// config/deko3d_line_samples: the top screen at one sample per presented
+// line (default) or the game's two (test.7), at every dynamic-resolution
+// level of the Switch (3 down to the 2.25 floor and below), widened or not.
+void TestTopScreenLineSamples() {
+  using namespace Fast::Deko3d;
+  using Lines = TopScreenLineSamples;
+  Require(ParseTopScreenLineSamples("2") == Lines::Two && ParseTopScreenLineSamples(" 2\r\n") == Lines::Two,
+          "\"2\" keeps the game's two samples");
+  Require(ParseTopScreenLineSamples("") == Lines::One && ParseTopScreenLineSamples("1") == Lines::One &&
+              ParseTopScreenLineSamples("x2") == Lines::One,
+          "absent, 1 or anything else: one sample");
+  const auto presented = PresentedTopScreenExtent(3.0F);
+  Require(presented.Width == 1200 && presented.Height == 720, "3x presents 1200x720 before widescreen");
+  // The Vulkan policy (render_resolution_policy.h) decides: one sample once
+  // the allocation presents the game's 480 samples (scale >= 2).
+  Require(PicaTargetSamplingX(480, 400, 3.0F, Lines::One) == 0.5F &&
+              PicaTargetSamplingX(480, 400, 2.0F, Lines::One) == 0.5F &&
+              PicaTargetSamplingX(480, 400, 3.0F, Lines::One) ==
+                  Fast::Oot3d::NativeTopScreenStorageSamplingX({480, 400}, {1280, 720}),
+          "top screen from 2x: one sample per line, as Vulkan in handheld");
+  Require(PicaTargetSamplingX(480, 400, 1.75F, Lines::One) == 1.0F, "below 480 presented lines: the game's sampling");
+  Require(PicaTargetSamplingX(480, 400, 3.0F, Lines::Two) == 1.0F, "config 2 keeps the game's sampling");
+  Require(PicaTargetSamplingX(320, 240, 3.0F, Lines::One) == 1.0F && PicaTargetSamplingX(240, 400, 3.0F, Lines::One) == 1.0F,
+          "the bottom screen and other targets keep their sampling");
+
+  // The game's top-screen transfer: 480x400 -> 240x400, 2:1 along X.
+  Fast::Renderer3ds::PicaDisplayTransferView transfer;
+  transfer.InputPhysicalAddress = 0x1000;
+  transfer.OutputPhysicalAddress = 0x2000;
+  transfer.InputWidth = 480;
+  transfer.InputHeight = 400;
+  transfer.OutputWidth = 240;
+  transfer.OutputHeight = 400;
+  transfer.Flags = 0x01001000U;
+  for (const float factor : {1.0F, 1280.0F / 1200.0F}) {
+    const auto alloc = [&](Lines lines) {
+      return PlanPicaTargetExtent(480, 400, 3.0F, factor, 480, 400, PicaTargetSamplingX(480, 400, 3.0F, lines));
+    };
+    const auto oneAlloc = alloc(Lines::One);
+    const auto twoAlloc = alloc(Lines::Two);
+    Require(twoAlloc.Width == 1440 && oneAlloc.Width == 720 && oneAlloc.Height == twoAlloc.Height &&
+                oneAlloc.Height == (factor > 1.0F ? 1280U : 1200U),
+            "3x: 720 lines, not 1440 samples; the presented width unchanged");
+    const auto onePlan = PlanPicaTransfer(transfer, 480, 400, oneAlloc, oneAlloc);
+    Require(onePlan.Valid && !onePlan.Linear && onePlan.SourceWidth == 720 && onePlan.ContentWidth == 720 &&
+                onePlan.AllocWidth == 720 && onePlan.SourceHeight == onePlan.ContentHeight,
+            "one sample: the 2:1 filter becomes a 1:1 copy of the whole target");
+    const uint64_t onePixelsAt3 = uint64_t{oneAlloc.Width} * oneAlloc.Height;
+    for (const float scale : {3.0F, 2.75F, 2.5F, 2.25F, 2.0F, 1.5F}) {
+      const auto one = PlanPicaDynamicExtent(480, 400, scale, oneAlloc);
+      const auto two = PlanPicaDynamicExtent(480, 400, scale, twoAlloc);
+      Require(one.Width * 2U == two.Width && one.Height == two.Height && one.SamplingX == 0.5F &&
+                  one.ScaleX == scale * 0.5F && one.Scale == scale,
+              "every DRS level: the same presented lines from half the samples");
+      Require(one.Width == ScaledExtent(240, scale) && one.Height <= oneAlloc.Height && one.Width <= oneAlloc.Width,
+              "one sample per presented line, inside the allocation");
+      // The controller's pixel model: the area follows (s / max)^2.
+      const double area = static_cast<double>(uint64_t{one.Width} * one.Height) / static_cast<double>(onePixelsAt3);
+      Require(std::abs(area - (scale / 3.0) * (scale / 3.0)) < 0.005, "DRS pixel area ~ scale squared");
+      const auto onePlanAt = PlanPicaTransfer(transfer, 480, 400, one, oneAlloc);
+      const auto twoPlanAt = PlanPicaTransfer(transfer, 480, 400, two, twoAlloc);
+      Require(onePlanAt.Valid && twoPlanAt.Valid && !onePlanAt.Linear && twoPlanAt.Linear,
+              "copy (one) against the averaging blit (two)");
+      Require(onePlanAt.ContentWidth == twoPlanAt.ContentWidth && onePlanAt.ContentHeight == twoPlanAt.ContentHeight &&
+                  onePlanAt.AllocWidth == twoPlanAt.AllocWidth && onePlanAt.AllocHeight == twoPlanAt.AllocHeight,
+              "the display image and its content are the same with both policies");
+      Require(onePlanAt.SourceWidth == onePlanAt.ContentWidth && onePlanAt.SourceHeight == onePlanAt.ContentHeight &&
+                  onePlanAt.SourceWidth == one.Width && onePlanAt.SourceHeight <= one.Height &&
+                  twoPlanAt.SourceWidth == two.Width,
+              "1:1 copy of the drawn corner, never past it");
+      Require((onePlanAt.ContentWidth < onePlanAt.AllocWidth) == (scale < 3.0F),
+              "below the top scale the edge bands still apply");
+      const auto scanout = PlanPicaScanout(onePlanAt.OutputWidth, onePlanAt.OutputHeight, onePlanAt.AllocHeight,
+                                           oneAlloc.Scale, 1280, 720);
+      Require(scanout.CoversWindow == (factor > 1.0F), "the scanout is unchanged (16:9 covers the window)");
+      // A full-target draw lands on the drawn corner (non-widened path; the
+      // widened one shares its X edges).
+      if (factor == 1.0F) {
+        Require(PlanPicaViewport(0.0F, 0.0F, 480.0F, 400.0F, one.ScaleX, one.Scale) ==
+                    PicaRect{0, 0, static_cast<int32_t>(one.Width), static_cast<int32_t>(one.Height)},
+                "a full-screen viewport covers the drawn extent");
+        const PicaRect left = PlanPicaViewport(0.0F, 0.0F, 241.0F, 400.0F, one.ScaleX, one.Scale);
+        const PicaRect right = PlanPicaViewport(241.0F, 0.0F, 239.0F, 400.0F, one.ScaleX, one.Scale);
+        Require(left.X + left.Width == right.X && right.X + right.Width == static_cast<int32_t>(one.Width),
+                "neighbouring viewports tile at half the scale");
+      }
+    }
+  }
+  // A top-screen transfer without the filter (a 1:1 crop) keeps the source's
+  // density; both axes filtered still averages Y.
+  const auto oneAlloc = PlanPicaTargetExtent(480, 400, 3.0F, 1.0F, 480, 400, 0.5F);
+  transfer.OutputWidth = 480;
+  transfer.Flags = 0x00001000U;
+  auto plan = PlanPicaTransfer(transfer, 480, 400, oneAlloc, oneAlloc);
+  Require(plan.Valid && !plan.Linear && plan.SourceWidth == 720 && plan.ContentWidth == 720 && plan.AllocWidth == 720,
+          "unfiltered transfer: content at the source's density");
+  transfer.OutputWidth = 240;
+  transfer.OutputHeight = 200;
+  transfer.Flags = 0x02001000U;
+  plan = PlanPicaTransfer(transfer, 480, 400, oneAlloc, oneAlloc);
+  Require(plan.Valid && plan.Linear && plan.SourceWidth == 720 && plan.ContentWidth == 720 &&
+              plan.SourceHeight == 1200 && plan.ContentHeight == 600,
+          "2:1 on both axes: X copied, Y still averaged");
 }
 
 // ---- savestates: CapturePicaColorTargets / RestorePicaColorTargets ----
@@ -569,6 +686,16 @@ void TestSavestateRoundTrip() {
   Require(wide.ImageWidth == 16 && wide.ImageHeight == 8 && wide.ColorRgba8.size() == 16U * 8U * 4U &&
               wide.DepthValues.size() == 128U,
           "widened target resampled to the guest extent");
+  // A top target at one sample per presented line (config/deko3d_line_samples)
+  // under a low dynamic-resolution level: fewer columns than the guest's
+  // (enlarged on capture), more rows; saved and restored per axis.
+  const std::vector<uint8_t> lineColor(12U * 24U * 4U, 9);
+  const std::vector<uint32_t> lineWords(12U * 24U, 0x12345678U);
+  const auto lines = MakeGuestExtentSnapshot(top, 12, 24, lineColor, lineWords, DepthStencilWordLayout::DepthLow);
+  Require(lines.ImageWidth == 16 && lines.ImageHeight == 8 && lines.ColorRgba8 == std::vector<uint8_t>(16U * 8U * 4U, 9),
+          "one-sample target saved at the guest extent");
+  const auto linePixels = PlanRestorePixels(lines, 12, 24, DepthStencilWordLayout::DepthLow);
+  Require(linePixels.Rgba8 == lineColor && linePixels.DepthStencil == lineWords, "and restored at its own extent");
 }
 
 void TestSavestateRestoreValidation() {
@@ -715,6 +842,7 @@ int main() {
   TestTargetsAndRects();
   TestFills();
   TestTransferAndScanout();
+  TestTopScreenLineSamples();
   TestLogSchedule();
   TestUiPlan();
   TestSavestateDepthWords();

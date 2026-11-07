@@ -169,7 +169,11 @@ void GfxRenderingAPIDeko3d::InitPica() {
     if (Oot3d::GlWidescreenEnabled()) {
         widescreen = Oot3d::GlWidescreenFactor(mDevice.Width(), mDevice.Height());
     }
-    mTargets.Init(mDevice, mResources, ReadResolutionScale(), widescreen);
+    TopScreenLineSamples lines = TopScreenLineSamples::One;
+    if (const auto text = ReadFirstLine("sdmc:/switch/oot3dre/config/deko3d_line_samples")) {
+        lines = ParseTopScreenLineSamples(*text);
+    }
+    mTargets.Init(mDevice, mResources, ReadResolutionScale(), widescreen, lines);
     if (const auto lean = ReadFirstLine("sdmc:/switch/oot3dre/config/gl_lean")) {
         mPicaLean = PicaGlScale::ParseLeanSetting(*lean, true);
     }
@@ -595,14 +599,17 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
     dkCmdBufBindRasterizerState(cmd, &rasterizer);
     mDevice.Checkpoint("draw.raster");
 
-    // Viewport and scissor in host pixels of the target.
+    // Viewport and scissor in host pixels of the target: X (the presented
+    // vertical axis) by ScaleX, Y by the resolution scale or the widening.
     const float scale = target.Extent.Scale;
+    const float scaleX = target.Extent.ScaleX;
     PicaRect viewport;
     PicaRect scissor;
     if (!target.Extent.Wide) {
-        viewport = PlanPicaViewport(draw.ViewportX, draw.ViewportY, draw.ViewportWidth, draw.ViewportHeight, scale);
+        viewport = PlanPicaViewport(draw.ViewportX, draw.ViewportY, draw.ViewportWidth, draw.ViewportHeight, scaleX,
+                                    scale);
         scissor = PlanPicaScissor(draw.ScissorMode, draw.ScissorX1, draw.ScissorY1, draw.ScissorX2, draw.ScissorY2,
-                                  scale, target.Extent.Width, target.Extent.Height);
+                                  scaleX, scale, target.Extent.Width, target.Extent.Height);
     } else {
         // Widescreen top target (GL: PicaGlTarget::Wide): the scene stretches
         // over the widened axis, placed UI keeps a centred native canvas.
@@ -618,7 +625,7 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         axisInput.ResolutionScale = scale;
         axisInput.TargetScaleY = target.Extent.ScaleY;
         const auto axis = Oot3d::ResolveGlWidescreenPresentedAxis(placement, axisInput);
-        const auto edgeX = [&](float native) { return static_cast<int32_t>(std::lround(native * scale)); };
+        const auto edgeX = [&](float native) { return static_cast<int32_t>(std::lround(native * scaleX)); };
         const int32_t viewportX0 = edgeX(draw.ViewportX);
         viewport = {viewportX0, axis.ViewportBegin,
                     std::max<int32_t>(0, edgeX(draw.ViewportX + draw.ViewportWidth) - viewportX0),
@@ -715,10 +722,7 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
         }
         return reject("PICA display transfer source is missing");
     }
-    const PicaTransferPlan plan = PlanPicaTransfer(transfer, key->Width, key->Height, source->Extent.Scale,
-                                                   source->Extent.ScaleY, source->Extent.Width,
-                                                   source->Extent.Height, source->Alloc.Scale,
-                                                   source->Alloc.ScaleY);
+    const PicaTransferPlan plan = PlanPicaTransfer(transfer, key->Width, key->Height, source->Extent, source->Alloc);
     if (!plan.Valid) {
         if (transfer.Present) {
             BindWindowTarget();
@@ -747,7 +751,8 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
     } else {
         // The source's fragments must be in memory before the 2D engine
         // reads them; the copy must land before the scanout samples it and
-        // before later draws write the source again.
+        // before later draws write the source again. A top screen at one
+        // sample per presented line copies 1:1 (Linear false, equal rects).
         dkCmdBufBarrier(cmd, DkBarrier_Full, 0);
         const DkImageRect sourceRect = {0, 0, 0, plan.SourceWidth, plan.SourceHeight, 1};
         const DkImageRect destRect = {0, 0, 0, plan.ContentWidth, plan.ContentHeight, 1};
@@ -787,6 +792,8 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
         dynamic.PresentedFrames.fetch_add(1U, std::memory_order_relaxed);
         dynamic.PresentedScaleMilli.fetch_add(static_cast<uint64_t>(std::lround(source->Extent.Scale * 1000.0F)),
                                               std::memory_order_relaxed);
+        Deko3d::NotePresentedTopScene(source->Extent.Width, source->Extent.Height,
+                                      source->Extent.SamplingX < 1.0F ? 1U : 2U);
     }
     if (transfer.Present) {
         DrawPicaScanout(transfer, *display, plan, source->Alloc.Scale);

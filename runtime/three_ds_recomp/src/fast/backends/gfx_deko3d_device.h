@@ -70,6 +70,10 @@ constexpr uint32_t AlignUp(uint32_t value, uint32_t alignment) {
 void Log(const char* format, ...) __attribute__((format(printf, 1, 2)));
 // Writes the queued log lines and stops the writer thread (Device::Destroy).
 void FlushLog();
+// dkperf top_w/top_h/top_line_samples (logs/perf.txt): the drawn extent of
+// the last presented top-screen scene target and its samples per presented
+// line (1 or 2, config/deko3d_line_samples). Render thread.
+void NotePresentedTopScene(uint32_t width, uint32_t height, uint32_t lineSamples);
 
 struct StreamSpan {
     void* Cpu = nullptr;

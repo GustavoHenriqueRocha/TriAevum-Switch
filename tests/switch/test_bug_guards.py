@@ -476,6 +476,37 @@ GUARDS = [
           r'DkInvalidateFlags_Image \| DkInvalidateFlags_Zcull\);.*?'
           r'const auto layout = IdentifyDepthStencilWordLayout\(clearedWords\.front\(\)\);',
           "oot3d_deko3d_backend_tests (TestSavestateDepthWords)"),
+    # --- 07/11: deko3d top screen at one sample per presented line (config/deko3d_line_samples) ---
+    # GpuScout: at 3x the top target was 1440x1280 for 720 lines; the game's second sample per line
+    # was rendered at host resolution and averaged away by the display transfer.
+    Guard("[decision] deko3d top screen: one sample per presented line unless config/deko3d_line_samples is 2",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_pica_pipeline.h",
+          r'return c == \'2\' \? TopScreenLineSamples::Two : TopScreenLineSamples::One;\s+\}\s+'
+          r'return TopScreenLineSamples::One;',
+          test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)"),
+    Guard("deko3d top screen at one sample per line: the Vulkan policy decides the sampling, X scales by it",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_pica_pipeline.h",
+          r'return Oot3d::NativeTopScreenStorageSamplingX\(\{width, height\}, PresentedTopScreenExtent\(allocScale\)\);.*?'
+          r'extent\.ScaleX = scale \* samplingX;\s+extent\.Width = ScaledExtent\(width, extent\.ScaleX\);.*?'
+          r'extent\.ScaleX = scale \* alloc\.SamplingX;',
+          test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)"),
+    Guard("deko3d top screen at one sample per line: the game's 2:1 transfer filter becomes a 1:1 copy",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_pica_pipeline.h",
+          r'const uint32_t collapsedH = drawn\.SamplingX < 1\.0F \? horizontalSamples : 1U;\s+'
+          r'plan\.Linear = horizontalSamples / collapsedH == 2U \|\| verticalSamples == 2U;',
+          test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)"),
+    Guard("deko3d top screen at one sample per line: targets and dynamic resolution keep the allocation's sampling",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_targets.cpp",
+          r'PicaTargetSamplingX\(key\.Width, key\.Height, mScale, mLines\)\);.*?'
+          r'target\.Extent = PlanPicaDynamicExtent\(key\.Width, key\.Height, desired, target\.Alloc\);',
+          test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)"),
+    Guard("deko3d top screen at one sample per line: viewport, scissor and widened X edges use ScaleX",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'PlanPicaViewport\(draw\.ViewportX, draw\.ViewportY, draw\.ViewportWidth, draw\.ViewportHeight, scaleX,\s+scale\);.*?'
+          r'scaleX, scale, target\.Extent\.Width, target\.Extent\.Height\);.*?'
+          r'const auto edgeX = \[&\]\(float native\) \{ return static_cast<int32_t>\(std::lround\(native \* scaleX\)\); \};',
+          test="oot3d_deko3d_backend_tests (TestTopScreenLineSamples)",
+          forbid=r'native \* scale\)\)'),
     # --- 05/11: grass on deko3d (config/grass, SWITCH_PORT.md "Grass on deko3d") ---
     Guard("[decision] grass off without config/grass: nothing is configured, every hook returns at once",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
@@ -722,7 +753,7 @@ GUARDS = [
           r'Fast::Deko3dTagFrame\(kind, costCpuMs\);.*?timer\.Poll\(onGpuResult\);.*?Fast::Deko3dTakeGpuFrame\(frame\)'),
     Guard("deko3d p6m: DRS — display image at the allocation scale, content at the drawn scale (no reallocation)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
-          r'source->Extent\.Height, source->Alloc\.Scale,\s+source->Alloc\.ScaleY\);',
+          r'PlanPicaTransfer\(transfer, key->Width, key->Height, source->Extent, source->Alloc\);',
           "oot3d_deko3d_backend_tests (DRS: content smaller than the allocation)"),
     Guard("deko3d p6p: present on its own thread without waiting for the previous one → nwindow loses the current slot (dequeue before queue)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",

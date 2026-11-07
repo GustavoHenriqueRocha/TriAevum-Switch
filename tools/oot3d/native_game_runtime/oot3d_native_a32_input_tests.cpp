@@ -117,7 +117,8 @@ void EmitMouseAimTimeline(const std::filesystem::path& path, std::string_view ax
 }
 
 // Where the Switch shows native page X, Y: the deko3d top target (scale 3,
-// widened by GlWidescreenFactor), the widescreen placement of a pause-page
+// one sample per presented line, widened by GlWidescreenFactor), the
+// widescreen placement of a pause-page
 // draw on it, the page's projection row inside that viewport, and the
 // scanout of the 720x1280 display image on the 1280x720 screen.
 struct ScreenPoint {
@@ -140,9 +141,12 @@ ScreenPoint SwitchScreenPoint(const PageDraw& page, float pageX, float pageY) {
     Require(std::abs(factor - 1280.0F / 1200.0F) < 1.0e-4F, "Switch widescreen factor is not 1.0667");
     const auto extent = Fast::Deko3d::PlanPicaTargetExtent(
         Fast::Deko3d::kTopScreenPhysicalWidth, Fast::Deko3d::kTopScreenPhysicalHeight, kScale, factor,
-        Fast::Deko3d::kTopScreenPhysicalWidth, Fast::Deko3d::kTopScreenPhysicalHeight);
-    Require(extent.Wide && extent.Width == 1440U && extent.Height == 1280U,
-            "Switch top target is not 1440x1280 wide");
+        Fast::Deko3d::kTopScreenPhysicalWidth, Fast::Deko3d::kTopScreenPhysicalHeight,
+        Fast::Deko3d::PicaTargetSamplingX(Fast::Deko3d::kTopScreenPhysicalWidth,
+                                          Fast::Deko3d::kTopScreenPhysicalHeight, kScale,
+                                          Fast::Deko3d::TopScreenLineSamples::One));
+    Require(extent.Wide && extent.Width == 720U && extent.Height == 1280U,
+            "Switch top target is not 720x1280 wide");
     // A pause-page element: Ui domain, a quad that does not cover the
     // viewport (gfx_deko3d_pica_draw.cpp ResolveWidescreenPlacement).
     Fast::Oot3d::GlWidescreenDrawEvidence evidence;
