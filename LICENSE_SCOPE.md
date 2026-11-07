@@ -17,6 +17,14 @@ code's "or later" option permits the combined product to be conveyed under
 GPL-3.0-or-later. Permissively licensed components retain their MIT or BSD
 notices and permissions.
 
+Two files of the Nintendo Switch port,
+`tools/oot3d/native_game_runtime/oot3d_whole_aot_pgo.cpp` and
+`tools/oot3d/native_a32_runtime/whole_aot_pgo_merge.py`, adapt sa2-nx code
+published under GPL-3.0 without an "or later" option. They are GPL-3.0 only,
+and a build that compiles their adapted code (the instrumented PGO build) is
+conveyed under GPL-3.0. `oot3d_switch_code_pages.cpp` keeps the BSD-3-Clause
+notice of the sa2-nx SDK code it adapts (`THIRD_PARTY_NOTICES.md`).
+
 Attribution is preserved through copyright headers, `THIRD_PARTY_NOTICES.md`
 and the component license texts. These notices must remain with source and
 binary distributions as required by their applicable licenses. This is not a

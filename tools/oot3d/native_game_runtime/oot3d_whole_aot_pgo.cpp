@@ -1,6 +1,13 @@
 // Profile collection of the instrumented whole-AOT build (see
 // oot3d_whole_aot_gcov.h). Only does something with
 // OOT3D_WHOLE_AOT_GCOV_GENERATE (OOT3D_WHOLE_AOT_PROFILE_MODE=generate, GCC).
+//
+// Adapted from sa2-nx's app/src/sa2_pgo.cpp at commit adf3a4ee
+// (https://github.com/ChanseyIsTheBest/sa2-nx, ChanseyIsTheBest, GPL-3.0):
+// the gcov_info section walk, the Stream/Write/Filename/Allocate callbacks
+// and the .tmp-then-rename dump. This port's own: the applet hook that asks
+// for the focus-loss dump, the dump log, the session numbering and the stdio
+// file handling.
 #include "oot3d_whole_aot_gcov.h"
 
 #if defined(OOT3D_WHOLE_AOT_GCOV_GENERATE) && defined(__SWITCH__)

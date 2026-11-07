@@ -6,6 +6,9 @@
 // the decomp's overlay name X_Y with each word capitalized (ACTOR_EN_WF ->
 // "En_Wf", ACTOR_PLAYER -> "Player"); ACTOR_UNSET_n are nullptr.
 // oot3d_native_perf_diagnostics_tests checks every entry against that header.
+// The names are the overlay names of the zeldaret/oot decompilation's actor
+// table (https://github.com/zeldaret/oot, include/tables/actor_table.h; no
+// license), used as identifiers only.
 
 #include <array>
 #include <cstddef>

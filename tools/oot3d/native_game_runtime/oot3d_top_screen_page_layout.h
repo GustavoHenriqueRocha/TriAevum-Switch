@@ -9,6 +9,11 @@
 // Top-screen X is the presented column in native pixels (0..400). The
 // renderer places the whole 400x240 screen on the output (centred fit,
 // FitUiPresentation); this header only covers the page inside it.
+//
+// The placements reimplement what the TopScreen mod ("Single Screen
+// Experience" by M-1, GameBanana 695893, CC BY-NC-ND 4.0) does, decoded from
+// its 2.1.1 payload: no code is copied, only the addresses and the constants
+// a matching layout needs are noted.
 
 #include <cstdint>
 

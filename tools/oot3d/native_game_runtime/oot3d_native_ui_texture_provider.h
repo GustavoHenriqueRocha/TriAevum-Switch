@@ -68,6 +68,9 @@ struct Oot3dNativeUiTextureProviderStats {
 // this port's TopScreen CTXB override, since TopScreen 3.x leaves those
 // CTXBs as the game has them (texture packs and the mod's own HD images are
 // named after them). `rgba8` is that texture decoded.
+// The custom texture source, its provisional pixels and revision are ported
+// from upstream TriAevum (https://github.com/coccofresco/TriAevum, commit
+// 68d527c6, GPL-3.0-or-later).
 struct Oot3dNativeUiCustomTextureRequest {
     std::uint16_t width = 0;
     std::uint16_t height = 0;

@@ -375,6 +375,12 @@ void NativeA32Memory::CheckPageFlags() const {
     GuestWindow::CountShadowCheck(mismatches);
 }
 
+// Store cards (oot3d_native_a32_memory.h). Reference, no code copied: the
+// idea of marking each written 4 KiB page with a byte store instead of a
+// global write counter, and its aliasing pitfall, come from sa2-nx's
+// tools/store_cards.py and docs (https://github.com/ChanseyIsTheBest/sa2-nx,
+// GPL-3.0); the two-bit cards, their union type and the generations are
+// this port's.
 void NativeA32Memory::EnsureCards() {
     if (!mCards) mCards.reset(new GuestCard[PageCount]());
 }

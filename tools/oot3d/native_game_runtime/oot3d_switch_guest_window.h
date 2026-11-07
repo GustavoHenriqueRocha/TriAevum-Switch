@@ -21,6 +21,15 @@
 // (oot3d_switch_guest_window_host_alloc.cpp), off when unset. Off: no
 // reservation, no hook fires, every region is allocated as before, and
 // every guest access takes the slow path (page table).
+//
+// Reference, no code copied: the Horizon recipe (virtmemFindAslr +
+// virtmemAddReservation for the window; per slab memalign ->
+// svcMapProcessCodeMemory -> svcSetProcessMemoryPermission, or a code-memory
+// shadow -> svcMapProcessMemory; heap refused as a direct source) follows
+// the findings in usf4-nx's sdk/src/core/guest_memory_switch.{h,cpp}
+// (https://github.com/Thorhax/usf4-nx, from StevensND's nfsmw-nx Horizon
+// layer, BSD-3-Clause as part of that SDK), and the 2 MiB of slack rounded
+// up for 2 MB blocks follows sa2-nx's docs/cpu-rounds.md (GPL-3.0).
 
 #include <cstddef>
 #include <cstdint>

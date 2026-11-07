@@ -2,8 +2,10 @@
 
 // GCC profile collection for the whole-AOT shards
 // (OOT3D_WHOLE_AOT_PROFILE_MODE=generate with GCC, see native_runtime.cmake;
-// implementation in oot3d_whole_aot_pgo.cpp, following sa2-nx's
-// app/src/sa2_pgo.cpp and nfsmw-nx's app/src/nfsmw_pgo.cpp).
+// implementation in oot3d_whole_aot_pgo.cpp, adapted from sa2-nx's
+// app/src/sa2_pgo.cpp at commit adf3a4ee (ChanseyIsTheBest, GPL-3.0,
+// https://github.com/ChanseyIsTheBest/sa2-nx), whose method comes from
+// nfsmw-nx's app/src/nfsmw_pgo.cpp (StevensND, GPL-3.0)).
 //
 // libgcov's own exit-time .gcda writes do not fit the Switch: a game closed
 // from the HOME menu never exits, and a dump cut short by that leaves a

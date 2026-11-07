@@ -1,11 +1,17 @@
 // The NRO's code and read-only data on 2 MB blocks (Switch).
 //
-// Ported from sa2-nx (sdk/src/ui/switch_code_blocks.cpp, GPL-3.0, from
-// kameo-nx v1.0.1; the idea and the measurements come from the Torchlight
-// port): an instruction fetch that misses the TLB costs +115 ns on 4 KB pages
-// and +7 ns on 2 MB blocks, a data read +81 ns and +5 ns; combat ran 2-4 %
-// faster there. Our .text is 133.8 MB of whole-AOT code (3.4x sa2's), so the
-// game thread misses the instruction TLB all the time.
+// Adapted from sa2-nx (https://github.com/ChanseyIsTheBest/sa2-nx,
+// sdk/src/ui/switch_code_blocks.cpp at commit baf523b8, by ChanseyIsTheBest,
+// from kameo-nx v1.0.1). As part of sa2-nx's SDK that file is under the
+// BSD-3-Clause license; its copyright notice, conditions and disclaimer are
+// in LICENSES/sa2-nx-SDK-BSD-3-Clause.txt. The swap stub (kStub) is its bytes
+// unchanged; the rest is restructured (status struct, kill-switch file,
+// separate text and read-only swaps, heap check). The idea and the
+// measurements come from the Torchlight port: an instruction fetch that misses
+// the TLB costs +115 ns on 4 KB pages and +7 ns on 2 MB blocks, a data read
+// +81 ns and +5 ns; combat ran 2-4 % faster there. Our .text is 133.8 MB of
+// whole-AOT code (3.4x sa2's), so the game thread misses the instruction TLB
+// all the time.
 //
 // hbloader reads the NRO to the start of its heap and maps it with
 // svcMapProcessCodeMemory at a random address, so virtual and physical

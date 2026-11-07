@@ -127,6 +127,8 @@ class N64UiFast3dRenderer {
     // resolved again on later calls, and a new provider Revision resolves
     // every texture again. A first sight with only the game's own pixels
     // while its replacement decodes is held (PreparedUiTexture::held).
+    // Provisional/revision handling ported from upstream TriAevum
+    // (coccofresco/TriAevum commit 68d527c6, GPL-3.0-or-later).
     [[nodiscard]] PreparedUiTextures
     PrepareTextures(std::span<const UiPrimitive> primitives);
     // Hands prepared payloads to the renderer without drawing (a frame that
