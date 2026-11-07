@@ -344,7 +344,12 @@ The instrumented game runs slower (every branch counts): play it for coverage, n
    -DOOT3D_WHOLE_AOT_PROFILE_FILE=<profile> -DOOT3D_WHOLE_AOT_HOT_FUNCTIONS=<list>`: the shards get
    `-fprofile-use -fprofile-partial-training -fprofile-correction -fno-profile-values`
    (`-fprofile-correction`: counters updated without atomics by several threads, and read while
-   running, are not flow-consistent). With plain CMake and an empty `OOT3D_WHOLE_AOT_HOT_FUNCTIONS`,
+   running, are not flow-consistent) and, since test.8, `--param=max-inline-insns-auto=64
+   --param=inline-unit-growth=12`: recompiled code marks no function inline, so GCC's default limit
+   of 30 decided every call; sa2-nx measured 41 % fewer executed calls at +2 % size with these
+   values. Every Switch build also compiles the shards with `-fomit-frame-pointer` (devkitA64's GCC
+   sets up x29 in every non-leaf function by default). Neither changes a profile checksum: inlining
+   and the frame layout come after the profile is read. With plain CMake and an empty `OOT3D_WHOLE_AOT_HOT_FUNCTIONS`,
    the configure derives the list itself (`<build>/whole_aot_hot_from_gcda.txt`) and warns when
    pre-generated C++ was not generated with it. All 256 shards rebuild (new generated path). A plain
    `scripts/build-fork.sh` afterwards goes back to `PROFILE_MODE=none` and the normal C++.

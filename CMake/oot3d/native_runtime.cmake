@@ -454,8 +454,13 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
             # The Switch release flags carry -ffast-math, which breaks the
             # exact VFP emulation of the generated code (cumulative IXC flags
             # diverge from the reference tests). Gameplay code stays exact.
+            # devkitA64's GCC keeps a frame pointer by default (mov x29, sp in
+            # every non-leaf function); the shards need none (guest faults
+            # report guest state; the guard allocator's frame walk is bounded
+            # and stops at a shard frame), and x29 becomes a free register.
+            # sa2-nx: frame setups 24,659 -> 24; changes no profile checksum.
             target_compile_options(oot3d_native_whole_aot PRIVATE
-                -fno-fast-math -ffp-contract=off)
+                -fno-fast-math -ffp-contract=off -fomit-frame-pointer)
         endif()
         set(_oot3d_whole_aot_gcc_profile OFF)
         if (OOT3D_WHOLE_AOT_THINLTO OR
@@ -549,7 +554,15 @@ if (EXISTS "${_oot3d_whole_aot_generated_header}" AND
                     -Wno-missing-profile
                     # A function whose CFG changed since the collection run
                     # (edited runtime header) just loses its profile.
-                    -Wno-error=coverage-mismatch)
+                    -Wno-error=coverage-mismatch
+                    # Recompiled code marks no function inline, so GCC's
+                    # default limit (30) decides every call; with a profile
+                    # the inliner grows hot call sites first. sa2-nx's
+                    # measured choice: 64, with unit growth capped at 12 %
+                    # (executed calls -41 %, NRO +2 %). Inlining runs after
+                    # the profile is read: no new collection needed.
+                    --param=max-inline-insns-auto=64
+                    --param=inline-unit-growth=12)
                 # The functions the collection ran keep sched1 and
                 # gcse-after-reload even when giant
                 # (OOT3D_WHOLE_AOT_GIANT_FUNCTION_INSTRUCTIONS): without an
