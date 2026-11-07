@@ -1,14 +1,16 @@
 #version 460
 // deko3d grass (Switch, SWITCH_PORT.md "Grass on deko3d"): one instance per
 // tuft, 3 vertices per blade (a triangle list, BladesPerTuft blades).
-// - Tufts (grass_distance.w = 0): the blades stand side by side in one plane
-//   facing the camera, each narrowing to its tip. They used to be a 4-vertex
-//   card the fragment program cut into blades with discard: ~2/3 of its
-//   pixels were shaded then thrown away, and the discard with depth writes
-//   turned early depth testing off, so tufts hidden behind tufts were shaded
-//   too. Triangles draw only blade pixels, with early depth testing.
-// - Blades (within grass_distance.z, near the camera): each blade with its
-//   own facing and lean, one segment.
+// - Tufts: the blades stand side by side in one plane facing the camera,
+//   each narrowing to its tip. They used to be a 4-vertex card the fragment
+//   program cut into blades with discard: ~2/3 of its pixels were shaded then
+//   thrown away, and the discard with depth writes turned early depth testing
+//   off, so tufts hidden behind tufts were shaded too. Triangles draw only
+//   blade pixels, with early depth testing.
+// - Blades (within grass_distance.z of the camera): each blade with its own
+//   facing and lean, one segment. From grass_distance.z to grass_distance.w
+//   every vertex moves from its blade to its tuft place (no tuft changes at
+//   once as the camera moves); the stream's two kinds only split the draws.
 // Light (the source draw's PICA vertex lights) and fog (its PICA fog LUT)
 // are evaluated here, per vertex; the fragment program only writes the colour.
 //
@@ -36,7 +38,7 @@ layout(std140, binding = 1) uniform GrassFrame {
     vec4 grass_wind;              // direction x, direction z, strength, seconds
     vec4 grass_wind_detail;       // speed, spatial scale, gust strength, gust frequency
     vec4 grass_shape;             // blades per tuft, card width scale, maximum bend, lighting
-    vec4 grass_distance;          // draw distance, fade start, single-blade distance, blades (0/1)
+    vec4 grass_distance;          // draw distance, fade start, single blades to, tufts from
     vec4 grass_root_color;        // rgb, ground colour influence
     vec4 grass_tip_color;         // rgb, unused
     vec4 grass_brightness;        // root, tip, unused, collider count
@@ -99,7 +101,9 @@ void main() {
     float phase = float((grass_width_phase_fade >> 16u) & 0xffu) / 255.0 * 6.2831853;
     float bladeCount = max(grass_shape.x, 1.0);
     float cardHalf = halfWidth * bladeCount * grass_shape.y;
-    bool blades = grass_distance.w > 0.5;
+    float distanceToEye = length(grass_eye.xyz - base);
+    // 0: single blades, 1: tuft (smoothstep over grass_distance.z..w).
+    float tuftShare = smoothstep(grass_distance.z, grass_distance.w, distanceToEye);
 
     // Wind: a travelling wave plus a slow gust, as a fraction of the height.
     float along = dot(base.xz, grass_wind.xy) * grass_wind_detail.y * 0.01;
@@ -126,9 +130,9 @@ void main() {
 
     vec3 toEye = grass_eye.xyz - base;
     vec2 flatToEye = length(toEye.xz) > 1.0e-3 ? normalize(toEye.xz) : vec2(0.0, 1.0);
-    vec3 position;
-    vec3 normal;
-    float y; // 0 at the root, up to 1 at the tallest tip (the colour ramp)
+    vec3 position = base;
+    vec3 normal = vec3(0.0, 1.0, 0.0);
+    float y = 0.0; // 0 at the root, up to 1 at the tallest tip (the colour ramp)
     float seed = fract(phase * 0.1591549 + base.x * 0.0137 + base.z * 0.0071);
     // Base left, base right, tip of blade `blade`.
     uint blade = uint(gl_VertexID) / 3u;
@@ -137,7 +141,7 @@ void main() {
     float r0 = grass_hash(seed * 17.0 + b);
     float r1 = grass_hash(seed * 31.0 + b * 1.7);
     float r2 = grass_hash(seed * 53.0 + b * 2.3);
-    if (!blades) {
+    if (tuftShare > 0.0) {
         // The tuft's plane faces the camera (cylindrical billboard), the
         // blades side by side across it: x 0-1 across, y 0-1 up. Blade b
         // stands near the middle of its slot, its base 0.84 slot wide, its
@@ -153,8 +157,11 @@ void main() {
         position.xz += bend * (height * y * y);
         position.y -= dot(bend, bend) * height * 0.3 * y * y;
         normal = normalize(vec3(flatToEye.x, 0.0, flatToEye.y) * 0.5 + vec3(0.0, 1.0, 0.0));
-    } else {
-        // One segment per blade, each with its own facing and lean.
+    }
+    if (tuftShare < 1.0) {
+        // One segment per blade, each with its own facing and lean. A blade
+        // facing anywhere shows 2/pi of its width on average: 1.32 x the half
+        // width (0.84 x pi / 2) keeps a tuft's average screen width.
         vec2 axis = unpackSnorm2x16(grass_axis);
         if (dot(axis, axis) < 1.0e-6) axis = vec2(1.0, 0.0);
         axis = normalize(axis);
@@ -166,13 +173,17 @@ void main() {
         float bladeHeight = height * (0.7 + 0.3 * r2);
         vec2 lean = (vec2(r1, r2) - 0.5) * 0.35 + bend;
         vec3 root = base + vec3(offset.x, 0.0, offset.y);
+        vec3 bladePosition;
         if (corner == 2u) {
-            position = root + vec3(lean.x * bladeHeight, bladeHeight * (1.0 - 0.3 * dot(lean, lean)), lean.y * bladeHeight);
+            bladePosition = root + vec3(lean.x * bladeHeight, bladeHeight * (1.0 - 0.3 * dot(lean, lean)), lean.y * bladeHeight);
         } else {
-            position = root + vec3(facing.x, 0.0, facing.y) * (corner == 0u ? -halfWidth : halfWidth);
+            bladePosition = root + vec3(facing.x, 0.0, facing.y) * (corner == 0u ? -1.32 * halfWidth : 1.32 * halfWidth);
         }
-        normal = normalize(vec3(-facing.y, 0.6, facing.x));
-        y = corner == 2u ? 1.0 : 0.0;
+        vec3 bladeNormal = normalize(vec3(-facing.y, 0.6, facing.x));
+        float bladeY = corner == 2u ? 1.0 : 0.0;
+        position = mix(bladePosition, position, tuftShare);
+        normal = normalize(mix(bladeNormal, normal, tuftShare));
+        y = mix(bladeY, y, tuftShare);
     }
 
     vec4 ground = unpackUnorm4x8(grass_color);

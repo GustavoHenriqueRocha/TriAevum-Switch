@@ -80,8 +80,15 @@ struct GrassSwitchProfile {
     float FullDensityDistance = 1000.0F;
     float DrawDistance = 4000.0F;
     float FadeStart = 3300.0F;
-    // Tufts closer than this are drawn as their blades, one segment each.
+    // Tufts closer than this are drawn as their blades, one segment each;
+    // they turn into tufts over the next half of it (grass_vsh.glsl).
     float SingleBladeDistance = 400.0F;
+    // Fill near the camera (GrassStreamFillMultiplier): FillDistance /
+    // distance tufts per placement tuft, within FillRadius of it, so the grass
+    // around Link covers the screen as the full-density band does. Near and
+    // Far: FullDensityDistance; Whole area: Near's.
+    float FillDistance = 1000.0F;
+    float FillRadius = 18.0F;
     uint32_t MaxVisibleInstances = 8000U;
 };
 

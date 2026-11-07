@@ -115,6 +115,7 @@ GrassSwitchProfile SelectGrassSwitchProfile(bool fps60, GrassSwitchDistance dist
             profile.FullDensityDistance = 1600.0F;
             profile.DrawDistance = 5000.0F;
             profile.FadeStart = 4200.0F;
+            profile.FillDistance = 1600.0F;
             profile.MaxVisibleInstances = 22000U;
         }
         break;
@@ -122,12 +123,15 @@ GrassSwitchProfile SelectGrassSwitchProfile(bool fps60, GrassSwitchDistance dist
         profile.FullDensityDistance = fps60 ? 2000.0F : 3200.0F;
         profile.DrawDistance = fps60 ? 6000.0F : 8000.0F;
         profile.FadeStart = fps60 ? 5000.0F : 6800.0F;
+        profile.FillDistance = profile.FullDensityDistance;
         profile.MaxVisibleInstances = fps60 ? 16000U : 40000U;
         break;
     case GrassSwitchDistance::Area:
         profile.FullDensityDistance = kGrassWholeAreaDistance;
         profile.DrawDistance = kGrassWholeAreaDistance;
         profile.FadeStart = kGrassWholeAreaDistance;
+        // No full-density band to match: the fill of Near around Link.
+        profile.FillDistance = fps60 ? 1000.0F : 1600.0F;
         profile.MaxVisibleInstances = kGrassWholeAreaInstances;
         break;
     }
