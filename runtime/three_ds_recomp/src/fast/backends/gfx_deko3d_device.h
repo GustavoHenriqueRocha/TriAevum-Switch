@@ -123,6 +123,9 @@ class Device {
     [[nodiscard]] bool Mailbox() const noexcept { return mMailbox; }
     // config/deko3d_zcull: the queue was created with ZCULL on.
     [[nodiscard]] bool Zcull() const noexcept { return mZcull; }
+    // config/deko3d_compression ("0" turns it off): render-target colour,
+    // display and mailbox images get DkImageFlags_HwCompression.
+    [[nodiscard]] bool ColorCompression() const noexcept { return mColorCompression; }
     // FinishRender acquired it (no draw reached the window before the pacer).
     void CountSwapAcquire();
     // A barrier that waits for earlier work (texture uploads, descriptor
@@ -233,6 +236,7 @@ class Device {
     // config/deko3d_zcull (off by default): ZCULL on the queue, its
     // counters reset at frame top and reported at frame end.
     bool mZcull = false;
+    bool mColorCompression = true;
     std::thread mPresentThread;
     std::mutex mPresentMutex;
     std::condition_variable mPresentReady;

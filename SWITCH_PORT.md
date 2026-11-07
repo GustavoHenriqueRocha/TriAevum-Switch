@@ -1928,6 +1928,26 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   garbage contents. If anything looks wrong, `config/deko3d_barrier` with `full image descriptors shader
   frame` restores the old barriers for comparison.
 
+### Colour compression on deko3d (`config/deko3d_compression`, 07/11, on by default)
+- The scene's colour target, the display images and the mailbox images now get `DkImageFlags_HwCompression`
+  (deko3d then maps them with a compressible memory kind); depth already had it. `config/deko3d_compression`
+  whose first character is `0` turns it off (A/B). Log at start: `deko3d: colour compression on|off`.
+- Every reader is a GPU engine, which reads through the compression-aware L2:
+  - the display copy (2D engine `dkCmdBufBlitImage`) and the edge bands; the scanout samples the display image;
+  - save-state capture/restore and DRS resizes: copy engine (`dkCmdBufCopyImageToBuffer`/`BufferToImage`/
+    `CopyImage`), the same calls that already read and write the compressed depth; the CPU only touches the
+    linear staging buffers;
+  - the mailbox: the present queue's `dkCmdBufCopyImage` into the window image.
+  - Screenshots capture the window images, which stay as before: compressed only without the present
+    thread, where `dkQueuePresentImage` decompresses them (`SurfaceDecompress`); with it they go to nwindow
+    uncompressed (the display controller cannot read compressed memory).
+- Saving: −0.1 to −0.4 ms per frame [estimate]: less memory traffic for blending (most scene draws blend),
+  the 2D copy and the scanout.
+- Guards: window images keep the `!mPresentThreaded` rule; targets and displays follow the setting.
+- Console check (1 minute): `deko3d: colour compression on` in deko3d.txt; the picture looks as before
+  (no blocks, no garbage after a room change or a DRS step); save a state and load it: the restored frame is
+  right; take an album screenshot. `dkperf busy_ms`/`scene_ms` against a run with `deko3d_compression` = `0`.
+
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
   field; default `0.1.0-dev`) and `OOT3D_RELEASE_BUILD` (monotonic integer; default 0). Both go

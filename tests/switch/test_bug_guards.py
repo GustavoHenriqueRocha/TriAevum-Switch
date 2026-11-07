@@ -200,6 +200,16 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
           r'Evict\(\);\s+UploadReadyReplacements\(\);\s+\}',
           forbid=r'PollOrQueue\(\s*native\.PackHash, static_cast<uint16_t>\(view\.Width\)'),
+    # --- 07/11: colour compression (config/deko3d_compression "0" = off). The display controller can't
+    # read compressed images: window images handed to nwindow without dkQueuePresentImage stay uncompressed.
+    Guard("deko3d compression: window images compressed only when dkQueuePresentImage decompresses them",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'layoutMaker\.flags = DkImageFlags_UsageRender \| DkImageFlags_UsagePresent;\s+'
+          r'if \(!mPresentThreaded\) \{\s+layoutMaker\.flags \|= DkImageFlags_HwCompression;'),
+    Guard("deko3d compression: scene colour and display images follow config/deko3d_compression",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_targets.cpp",
+          r'DkImageFormat_RGBA8_Unorm, ColorFlags\(\*mDevice\), target\.Extent\.Width.*?'
+          r'DkImageFormat_RGBA8_Unorm, ColorFlags\(\*mDevice\), allocWidth'),
     # --- 06/11: L3+R3 > Video > FPS (30 <-> 60 interpolated) applied only after a restart ---
     # Both choices simulate at 30 Hz; the launch fixed the pacing mode and the 30 FPS launch's
     # native30_no_interpolation contract forbade interpolation, so the menu only wrote config/fps60.

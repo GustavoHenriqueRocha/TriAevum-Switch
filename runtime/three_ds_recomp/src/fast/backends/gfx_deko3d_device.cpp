@@ -316,6 +316,17 @@ bool Device::Create(uint32_t width, uint32_t height, std::string* error) {
     }
     Log("deko3d: zcull %s", mZcull ? "on (config/deko3d_zcull)" : "off");
     gPerfZcull.store(mZcull, std::memory_order_relaxed);
+    // Colour compression of the images only the GPU reads (render-target
+    // colour, display images, mailbox images): their readers are the 3D,
+    // 2D and copy engines, which go through the compression-aware L2 like
+    // the depth images (compressed since the start, read back by the same
+    // copies for save states). Window images keep their own rule above: the
+    // display controller reads them. config/deko3d_compression "0": off.
+    if (std::FILE* file = std::fopen("sdmc:/switch/oot3dre/config/deko3d_compression", "rb")) {
+        mColorCompression = std::fgetc(file) != '0';
+        std::fclose(file);
+    }
+    Log("deko3d: colour compression %s", mColorCompression ? "on" : "off (config/deko3d_compression)");
 
     mCommandMemory = MakeBlock(kCommandSliceBytes * kFramesInFlight,
                                DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "command memory");
@@ -698,6 +709,11 @@ void Device::QueuePresent(int windowSlot) {
 bool Device::CreateMailbox(const DkImageLayoutMaker& windowLayout) {
     DkImageLayoutMaker maker = windowLayout;
     maker.flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
+    if (mColorCompression) {
+        // Only the scanout/UI draws write it and the present queue's copy
+        // into the (uncompressed) window image reads it: never the display.
+        maker.flags |= DkImageFlags_HwCompression;
+    }
     DkImageLayout layout;
     dkImageLayoutInitialize(&layout, &maker);
     const uint32_t alignment = dkImageLayoutGetAlignment(&layout);

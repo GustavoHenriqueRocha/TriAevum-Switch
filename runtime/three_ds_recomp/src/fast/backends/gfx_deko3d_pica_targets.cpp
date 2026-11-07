@@ -52,6 +52,14 @@ bool Place(std::initializer_list<ImagePlacement*> images, uint64_t& total) {
 constexpr uint32_t kRenderFlags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
 constexpr uint32_t kDepthFlags = DkImageFlags_UsageRender | DkImageFlags_HwCompression;
 
+// Scene colour and display images: compressed unless config/deko3d_compression
+// says "0" (Device::ColorCompression). Their readers are GPU engines only:
+// the 2D blit into the display image, the scanout's sampling, the copy
+// engine of save states and DRS resizes (as for the compressed depth).
+uint32_t ColorFlags(const Device& device) {
+    return kRenderFlags | (device.ColorCompression() ? static_cast<uint32_t>(DkImageFlags_HwCompression) : 0U);
+}
+
 // Savestate staging: written or read by the CPU once, between two waits for
 // the GPU (every queue flush also flushes and invalidates the GPU's L2).
 constexpr uint32_t kStagingFlags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
@@ -153,7 +161,7 @@ PicaTarget* PicaTargets::Get(const PicaTargetKey& key, bool* created) {
     PicaTarget target;
     target.Extent = PlanPicaTargetExtent(key.Width, key.Height, mScale, mWidescreenFactor, kTopScreenPhysicalWidth,
                                          kTopScreenPhysicalHeight);
-    ImagePlacement color{MakeLayout(mDevice->Handle(), DkImageFormat_RGBA8_Unorm, kRenderFlags, target.Extent.Width,
+    ImagePlacement color{MakeLayout(mDevice->Handle(), DkImageFormat_RGBA8_Unorm, ColorFlags(*mDevice), target.Extent.Width,
                                     target.Extent.Height)};
     ImagePlacement depth{MakeLayout(mDevice->Handle(), DkImageFormat_Z24S8, kDepthFlags, target.Extent.Width,
                                     target.Extent.Height)};
@@ -271,7 +279,7 @@ PicaDisplay* PicaTargets::GetDisplay(uint64_t targetNamespace, uint32_t outputAd
         mRetired.push_back({display.Memory, display.ImageSlot, mFrame});
         display = PicaDisplay{};
     }
-    ImagePlacement image{MakeLayout(mDevice->Handle(), DkImageFormat_RGBA8_Unorm, kRenderFlags, allocWidth,
+    ImagePlacement image{MakeLayout(mDevice->Handle(), DkImageFormat_RGBA8_Unorm, ColorFlags(*mDevice), allocWidth,
                                     allocHeight)};
     uint64_t bytes = 0U;
     const uint32_t slot = mResources->AllocateImageSlot();
