@@ -18,9 +18,27 @@ their imported source.
 | Godot Engine contact shadows port | MIT | `LICENSES/Godot-MIT.txt` and the ported file headers |
 | SDL2 2.32.10 (statically linked) | zlib | `LICENSES/SDL2-zlib.txt` |
 | SDL_GameControllerDB mappings | zlib | `LICENSES/SDL-GameControllerDB-zlib.txt` |
-| Zstandard 1.5.6 (statically linked) | BSD-3-Clause (upstream is dual BSD/GPL-2.0; used under BSD) | `LICENSES/zstd-BSD-3-Clause.txt` |
+| Zstandard 1.5.6 (statically linked, also into the Switch NRO) | BSD-3-Clause (upstream is dual BSD/GPL-2.0; used under BSD) | `LICENSES/zstd-BSD-3-Clause.txt` |
 | libcurl 7.69.1 (devkitPro switch-curl, statically linked into the Switch NRO for the updater) | curl license (MIT/X style) | `LICENSES/curl.txt` |
-| Mbed TLS 2.28 mbedcrypto (devkitPro switch-mbedtls, statically linked into the Switch NRO for SHA-256) | Apache-2.0 OR GPL-2.0-or-later | `LICENSES/mbedtls.txt` |
+| Mbed TLS 2.28.10 mbedcrypto (devkitPro switch-mbedtls, statically linked into the Switch NRO for SHA-256) | Apache-2.0 OR GPL-2.0-or-later | `LICENSES/mbedtls.txt` |
+| Switch NRO: libnx 4.12.0 (with its crt0) | ISC | `LICENSES/libnx-4.12.0-ISC.txt` |
+| Switch NRO: deko3d 0.5.0 | zlib | `LICENSES/deko3d-0.5.0-zlib.txt` |
+| Switch NRO: SDL2 2.28.5 (devkitPro switch-sdl2) | zlib | `LICENSES/SDL2-2.28.5-Switch-zlib.txt` |
+| Switch NRO: Mesa 20.1.0 libEGL/libglapi (devkitPro switch-mesa) | MIT and per-file notices (BSD-2-Clause xxHash) | `LICENSES/Mesa-20.1.0-Switch.txt` |
+| Switch NRO: libdrm_nouveau 1.0.1 (devkitPro) | MIT | `LICENSES/libdrm_nouveau-MIT.txt` |
+| Switch NRO: glad 0.1.27 GL loader (devkitPro switch-glad) and Khronos `khrplatform.h` | MIT (generator); generated code public domain; Khronos MIT-style | `LICENSES/glad-0.1.27-MIT.txt` |
+| Switch NRO: TinyXML-2 6.0.0 (devkitPro switch-tinyxml2) | zlib | `LICENSES/tinyxml2-6.0.0-zlib.txt` |
+| Switch NRO: zlib 1.3.1 (devkitPro switch-zlib) | zlib | `LICENSES/zlib-1.3.1.txt` |
+| Switch NRO: libzip 1.11.4 | BSD-3-Clause | `LICENSES/libzip-1.11.4-BSD-3-Clause.txt` |
+| Switch NRO: spdlog 1.14.1 with bundled {fmt} | MIT | `LICENSES/spdlog-1.14.1-MIT.txt` |
+| Switch NRO: nlohmann/json 3.11.3 | MIT | `LICENSES/nlohmann-json-3.11.3-MIT.txt` |
+| Switch NRO: Dear ImGui 1.91.9b-docking | MIT | `LICENSES/Dear-ImGui-1.91.9b-MIT.txt` |
+| Switch NRO: stb_image.h (stb `0bc88af4`) | MIT (or Unlicense) | `LICENSES/stb_image-MIT-or-Unlicense.txt` |
+| Switch NRO: prism (prism-processor `1de05445`) | MIT | `LICENSES/prism-MIT.txt` |
+| Switch NRO: Monocypher 4.0.2 | BSD-2-Clause (or CC0-1.0) | `LICENSES/Monocypher-4.0.2-BSD-2-Clause-or-CC0.txt` |
+| Switch NRO: BS::thread_pool 4.1.0 | MIT | `LICENSES/thread-pool-4.1.0-MIT.txt` |
+| Switch NRO: newlib 4.6.0 (devkitA64 C library) | per-part notices (BSD-style and others) | `LICENSES/newlib-devkitA64-COPYING.txt` |
+| Switch NRO: libstdc++/libgcc of devkitA64 GCC 16.1.0 | GPL-3.0 with GCC Runtime Library Exception 3.1 | `LICENSES/GCC-Runtime-Library-Exception-3.1.txt` and root `LICENSE` |
 | sa2-nx SDK code adapted in `oot3d_switch_code_pages.cpp` (Switch NRO) | BSD-3-Clause | `LICENSES/sa2-nx-SDK-BSD-3-Clause.txt` |
 | sa2-nx app/tools code adapted in `oot3d_whole_aot_pgo.cpp` and `whole_aot_pgo_merge.py` | GPL-3.0 | Root `LICENSE` (GPL-3.0 text) |
 | Microsoft Visual C++ runtime for shaderc | Microsoft runtime redistribution terms | `LICENSES/Microsoft-Visual-Cpp-Runtime.md` |

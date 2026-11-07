@@ -397,10 +397,39 @@ targets.
 ## Nintendo Switch homebrew toolchain and services
 
 The Switch build links [switchbrew/libnx](https://github.com/switchbrew/libnx)
-(ISC License, copyright the libnx Authors) and, for the `config/renderer`
-deko3d backend, [devkitPro/deko3d](https://github.com/devkitPro/deko3d) (zlib
-License), both obtained through devkitPro (devkitA64). Their notices must
-accompany binary distributions of the Switch build.
+4.12.0 (ISC License, copyright the libnx Authors) and, for the `config/renderer`
+deko3d backend, [devkitPro/deko3d](https://github.com/devkitPro/deko3d) 0.5.0
+(zlib License), both obtained through devkitPro (devkitA64). Their notices are
+in `LICENSES/libnx-4.12.0-ISC.txt` and `LICENSES/deko3d-0.5.0-zlib.txt` and
+must accompany binary distributions of the Switch build.
+
+The Switch NRO also links these libraries statically (the link line of
+`oot3d_native_game.elf`); each license text is in `LICENSES/`, which the Switch
+release zip carries whole under `licenses/LICENSES/`:
+
+| Library and version | Source | License | Text |
+| --- | --- | --- | --- |
+| SDL2 2.28.5 | devkitPro switch-sdl2 2.28.5-4 | zlib | `SDL2-2.28.5-Switch-zlib.txt` |
+| Mesa 20.1.0 libEGL and libglapi (nouveau gallium driver, GLSL compiler) | devkitPro switch-mesa 20.1.0-5 | MIT, with per-file notices (BSD-2-Clause xxHash) | `Mesa-20.1.0-Switch.txt` |
+| libdrm_nouveau 1.0.1 | devkitPro switch-libdrm_nouveau 1.0.1-2 | MIT | `libdrm_nouveau-MIT.txt` |
+| glad 0.1.27 GL loader and Khronos `khrplatform.h` | devkitPro switch-glad 0.1.27-1 | MIT generator, public-domain output; Khronos MIT-style | `glad-0.1.27-MIT.txt` |
+| TinyXML-2 6.0.0 | devkitPro switch-tinyxml2 6.0.0-2 | zlib | `tinyxml2-6.0.0-zlib.txt` |
+| zlib 1.3.1 | devkitPro switch-zlib 1.3.1-1 | zlib | `zlib-1.3.1.txt` |
+| libzip 1.11.4 | fetched by `switch.cmake` | BSD-3-Clause | `libzip-1.11.4-BSD-3-Clause.txt` |
+| spdlog 1.14.1 with bundled {fmt} | fetched by `switch.cmake` | MIT | `spdlog-1.14.1-MIT.txt` |
+| nlohmann/json 3.11.3 | fetched by `switch.cmake` | MIT | `nlohmann-json-3.11.3-MIT.txt` |
+| Dear ImGui 1.91.9b-docking | fetched by `common.cmake` | MIT | `Dear-ImGui-1.91.9b-MIT.txt` |
+| stb_image.h (`0bc88af4`) | fetched by `common.cmake` | MIT (or Unlicense) | `stb_image-MIT-or-Unlicense.txt` |
+| prism (prism-processor `1de05445`) | fetched by `common.cmake` | MIT | `prism-MIT.txt` |
+| Monocypher 4.0.2 | fetched by `common.cmake` | BSD-2-Clause (or CC0-1.0) | `Monocypher-4.0.2-BSD-2-Clause-or-CC0.txt` |
+| BS::thread_pool 4.1.0 | fetched by `common.cmake` | MIT | `thread-pool-4.1.0-MIT.txt` |
+| Zstandard 1.5.6 | fetched by the runtime | BSD-3-Clause | `zstd-BSD-3-Clause.txt` |
+| libcurl 7.69.1, Mbed TLS 2.28.10 | devkitPro switch-curl, switch-mbedtls | see below | `curl.txt`, `mbedtls.txt` |
+| newlib 4.6.0 | devkitPro devkita64-newlib | per-part notices | `newlib-devkitA64-COPYING.txt` |
+| libstdc++, libgcc (GCC 16.1.0) | devkitPro devkita64-gcc | GPL-3.0 with GCC Runtime Library Exception 3.1 | `GCC-Runtime-Library-Exception-3.1.txt` |
+
+The deko3d shaders are compiled offline with devkitPro's uam; no uam code is
+linked into the NRO.
 
 `tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp` reads clocks through
 the IPC interface of [retronx-team/sys-clk](https://github.com/retronx-team/sys-clk)
@@ -488,7 +517,7 @@ pack source).
 ## Switch updater: libcurl and Mbed TLS
 
 The Switch NRO links devkitPro's switch-curl (libcurl 7.69.1, on libnx's TLS
-backend) for the OTA updater's HTTPS requests and switch-mbedtls 2.28
+backend) for the OTA updater's HTTPS requests and switch-mbedtls 2.28.10
 (`mbedcrypto`) for its SHA-256 checks. Their notices are in `LICENSES/curl.txt`
 and `LICENSES/mbedtls.txt`; the Switch release zip carries both.
 
