@@ -5,7 +5,9 @@
 // GetCurrentContext command; reading from there opens no clkrst/pcv session in the app (the
 // 2026-10-17 research says not to use clkrst in the app) and doesn't compete with
 // sys-clk. Without sys-clk the MHz are the stock clocks of the performance
-// configuration AM reports (read-only, no apm session either).
+// configuration AM reports. The only write is the opt-in "GPU clock: High"
+// (oot3d_switch_gpu_performance.h): an official configuration through the
+// application's own apm session, as games do.
 #if defined(__SWITCH__)
 #include <switch.h>
 
@@ -18,6 +20,7 @@
 #include <thread>
 
 #include "oot3d_switch_clocks.h"
+#include "oot3d_switch_gpu_performance.h"
 #include "oot3d_hang_watchdog.h"
 
 namespace Oot3dNativeGame {
@@ -280,6 +283,71 @@ std::string SwitchClockPerfSummary() {
     reader.Wake.notify_one();
     // clk_busy=1: the previous read hasn't returned yet (sys-clk is slow).
     return text + (busy ? " clk_busy=1" : " clk_busy=0");
+}
+
+// L3+R3 > Video > GPU clock. apm (not clkrst/pcv): the configuration HOS
+// applies to this application. The session stays open for the run, so the
+// request lasts as long as the game whether or not HOS keeps it after a
+// session closes.
+GpuPerformanceStatus ApplyGpuPerformance(bool high) {
+    static std::mutex mutex;
+    static bool sessionOpen = false;
+    static uint32_t standard = 0U;
+    const std::lock_guard<std::mutex> lock(mutex);
+    GpuPerformanceStatus status;
+    if (!high && !sessionOpen) {
+        return status;  // Standard and never changed: nothing to put back.
+    }
+    status.Attempted = true;
+    if (!sessionOpen) {
+        Result result;
+        {
+            HangWatch::ServiceCallScope call("apm:Initialize");
+            result = apmInitialize();
+        }
+        if (R_FAILED(result)) {
+            status.Result = result;
+            status.FailedStep = "apmInitialize";
+        } else {
+            sessionOpen = true;
+            u32 before = 0U;
+            {
+                HangWatch::ServiceCallScope call("apm:GetPerformanceConfiguration");
+                if (R_FAILED(apmGetPerformanceConfiguration(ApmPerformanceMode_Normal, &before))) {
+                    before = 0U;
+                }
+            }
+            standard = GpuStandardConfiguration(before);
+        }
+    }
+    if (sessionOpen) {
+        status.Requested = high ? kGpuHighHandheldConfiguration : standard;
+        Result result;
+        {
+            HangWatch::ServiceCallScope call("apm:SetPerformanceConfiguration");
+            result = apmSetPerformanceConfiguration(ApmPerformanceMode_Normal, status.Requested);
+        }
+        if (R_FAILED(result)) {
+            status.Result = result;
+            status.FailedStep = "apmSetPerformanceConfiguration";
+        } else {
+            status.Available = true;
+        }
+        u32 effective = 0U;
+        HangWatch::ServiceCallScope call("am:GetCurrentPerformanceConfiguration");
+        if (R_SUCCEEDED(appletGetCurrentPerformanceConfiguration(&effective))) {
+            status.Effective = effective;
+        }
+    }
+    const SwitchClockReading clocks = StockClockReading(status.Effective);
+    std::fprintf(stderr,
+                 "TRIAEVUM_GPU_PERF high=%d available=%d rc=0x%X failed=%s requested=0x%08X "
+                 "standard=0x%08X effective=0x%08X gpu_mhz=%d mem_mhz=%d op_mode=%s\n",
+                 high ? 1 : 0, status.Available ? 1 : 0, status.Result,
+                 status.FailedStep[0] != '\0' ? status.FailedStep : "-", status.Requested, standard,
+                 status.Effective, clocks.GpuMhz, clocks.MemMhz,
+                 appletGetOperationMode() == AppletOperationMode_Console ? "docked" : "handheld");
+    return status;
 }
 
 } // namespace Oot3dNativeGame

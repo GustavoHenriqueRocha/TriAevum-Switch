@@ -125,6 +125,9 @@ void GfxRenderingAPIDeko3d::EnsureFrame() {
         // Right after the slot's fence wait: evictions are safe here.
         mResourcesFrame = mDevice.Frame();
         mResources.BeginFrame(mResourcesFrame);
+        if (mFrameBarrier) {
+            mResources.RequestInvalidate(); // config/deko3d_barrier "frame" (A/B)
+        }
         mTargets.BeginFrame(mResourcesFrame);
         CollectUiRetired();
         ApplyLightingSettings();
@@ -634,12 +637,18 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(shaders.CodeBytes >> 10),
                 Deko3d::FormatPicaClassDraws(frames.Last, 1U).c_str(), static_cast<unsigned long long>(frames.Frames),
                 Deko3d::FormatPicaClassDraws(frames.Sum, frames.Frames).c_str());
+    // How the game resets depth (it never clears it) and the draws ZCULL
+    // could mis-test (gl_FragDepth): the ZCULL study, SWITCH_PORT.md.
+    Deko3d::Log("depth (%s): zcull=%d per frame %s | avg of %llu %s", when, mDevice.Zcull() ? 1 : 0,
+                Deko3d::FormatPicaDepthDraws(frames.Last, 1U).c_str(), static_cast<unsigned long long>(frames.Frames),
+                Deko3d::FormatPicaDepthDraws(frames.Sum, frames.Frames).c_str());
     LogLightingCounters(when);
     mFrameDraws.StartWindow();
     const auto& resources = mResources.Stats();
     Deko3d::Log("resources (%s): draws prepared=%llu rejected=%llu; textures created=%llu evicted=%llu "
                 "(budget %llu) live=%llu MiB predecoded=%llu failures=%llu shadow_fallbacks=%llu "
-                "unsupported_wraps=%llu luts=%llu samplers=%llu; pack images=%llu (again %llu) uploaded=%llu MiB "
+                "unsupported_wraps=%llu luts=%llu samplers=%llu; pack images=%llu (again %llu, at frame top %llu) "
+                "uploaded=%llu MiB "
                 "live=%llu MiB; "
                 "streamed vertex=%llu index=%llu uniform=%llu KiB, uniform reuses=%llu, "
                 "stream failures=%llu",
@@ -657,6 +666,7 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(resources.Samplers),
                 static_cast<unsigned long long>(resources.TextureReplacements),
                 static_cast<unsigned long long>(resources.TextureReplacementReuploads),
+                static_cast<unsigned long long>(resources.TextureReplacementsBatched),
                 static_cast<unsigned long long>(resources.TextureReplacementBytes >> 20),
                 static_cast<unsigned long long>(resources.TextureReplacementLiveBytes >> 20),
                 static_cast<unsigned long long>(resources.VertexBytes >> 10),

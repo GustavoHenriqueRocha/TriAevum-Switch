@@ -49,6 +49,7 @@ struct PicaResourceStats {
     uint64_t TextureReplacementBytes = 0;
     uint64_t TextureReplacementLiveBytes = 0; // pack images resident now (part of TextureBytes)
     uint64_t TextureReplacementReuploads = 0; // pack images uploaded again (evicted since), same pack settings
+    uint64_t TextureReplacementsBatched = 0;  // of TextureReplacements: uploaded at frame top (UploadReadyReplacements)
 };
 
 // What one draw binds: texture handles for bindings 1..3 and 13, the vertex
@@ -96,12 +97,17 @@ class PicaResources {
 
     // True once after new descriptors or images were written: the caller
     // issues dkCmdBufBarrier(..., DkInvalidateFlags_Descriptors |
-    // DkInvalidateFlags_Image) before the next draw.
+    // DkInvalidateFlags_Image) before the next draw. Not set by BeginFrame:
+    // every dkQueueFlush already invalidates the image, shader, descriptor
+    // and L2 caches before the next commands (deko3d postSubmitFlush).
     bool TakeInvalidate() noexcept {
         const bool pending = mInvalidate;
         mInvalidate = false;
         return pending;
     }
+    // config/deko3d_barrier "frame": the barrier at every frame's first draw
+    // as before 07/11 (A/B).
+    void RequestInvalidate() noexcept { mInvalidate = true; }
 
     [[nodiscard]] const PicaResourceStats& Stats() const noexcept { return mStats; }
     [[nodiscard]] DkGpuAddr ConstantAttribute() const noexcept { return mConstantGpu; }
@@ -131,6 +137,9 @@ class PicaResources {
         bool PackPending = false;
         bool Replacement = false;       // a texture pack image (under the replacement key)
         uint32_t PackEpoch = 0;         // mPackEpoch when made
+        // While PackPending: the view it was made from (spans empty), so
+        // BeginFrame can upload the finished pack image for it.
+        Renderer3ds::PicaTextureView PackView{};
     };
 
     struct LastUniforms {
@@ -159,6 +168,10 @@ class PicaResources {
     // Destroys an entry already out of mTextures and takes it off the totals.
     void Forget(Texture& texture) noexcept;
     void Evict();
+    // Pack images the worker finished for natives drawn last frame, all
+    // uploaded at frame top (one barrier at the first draw for all).
+    void UploadReadyReplacements();
+    std::vector<PicaTextureKey> mReadyReplacements;
 
     Device* mDevice = nullptr;
     DkMemBlock mDescriptors = nullptr; // image descriptors, then sampler descriptors

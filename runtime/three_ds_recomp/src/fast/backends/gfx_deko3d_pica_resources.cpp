@@ -327,9 +327,52 @@ void PicaResources::BeginFrame(uint64_t frame) {
     DkCmdBuf cmd = mDevice->Cmd();
     dkCmdBufBindImageDescriptorSet(cmd, mImageDescriptorsGpu, kMaxImages);
     dkCmdBufBindSamplerDescriptorSet(cmd, mSamplerDescriptorsGpu, kMaxSamplers);
-    mInvalidate = true;
+    // No barrier forced here: the frame's commands follow a dkQueueFlush,
+    // whose postSubmitFlush (deko3d maxwell/gpu_base.cpp) already invalidates
+    // the image, shader (code, global data, uniforms), descriptor and L2
+    // caches; GPU-written images (display copy, target copies) have their
+    // own Full barriers. config/deko3d_barrier "frame" brings it back.
     ApplyTexturePackSettings();
     Evict();
+    UploadReadyReplacements();
+}
+
+void PicaResources::UploadReadyReplacements() {
+    if (!mTexturePack) {
+        return;
+    }
+    // Keys first: UploadReplacement inserts into mTextures (rehash).
+    mReadyReplacements.clear();
+    for (const auto& [key, texture] : mTextures) {
+        // A native of another pack epoch is rebuilt at its next draw instead.
+        if (texture.PackPending && !texture.Replacement && texture.PackEpoch == mPackEpoch &&
+            texture.LastUsedFrame + 1U >= mFrame) {
+            mReadyReplacements.push_back(key);
+        }
+    }
+    auto& pack = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance();
+    for (const PicaTextureKey& key : mReadyReplacements) {
+        const auto found = mTextures.find(key);
+        if (found == mTextures.end()) {
+            continue;
+        }
+        Texture& native = found->second;
+        const auto polled = pack.PollOrQueue(native.PackHash, native.PackView.Width, native.PackView.Height);
+        if (polled.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready && polled.Replacement != nullptr) {
+            PicaTextureKey replacementKey = key;
+            replacementKey.ContentHash ^= kReplacementKeySalt;
+            const Renderer3ds::PicaTextureView view = native.PackView; // `native` may move on insert
+            if (UploadReplacement(view, replacementKey, *polled.Replacement) != 0U) {
+                // The native texture is never drawn again.
+                Retire(mTextures.find(key)->second);
+                mTextures.erase(key);
+                ++mStats.TextureReplacementsBatched;
+            }
+            // 0: over this frame's upload cap (or no memory): stays pending.
+        } else if (polled.State != ::Oot3d::Renderer::AzaharTextureResolveState::Pending) {
+            native.PackPending = false;
+        }
+    }
 }
 
 void PicaResources::Evict() {
@@ -414,25 +457,12 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
             Retire(native);
             mTextures.erase(found);
         } else {
-            if (native.PackPending && mTexturePack) {
-                // The pack worker was still decoding the image when the native texture was made.
-                const auto polled = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().PollOrQueue(
-                    native.PackHash, static_cast<uint16_t>(view.Width), static_cast<uint16_t>(view.Height));
-                if (polled.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready &&
-                    polled.Replacement != nullptr) {
-                    if (const DkResHandle handle = UploadReplacement(view, replacementKey, *polled.Replacement)) {
-                        // emplace may rehash: the reference stays valid, `found` not. The native
-                        // texture is never drawn again.
-                        Retire(native);
-                        mTextures.erase(key);
-                        return handle;
-                    }
-                } else if (polled.State != ::Oot3d::Renderer::AzaharTextureResolveState::Pending) {
-                    native.PackPending = false;
-                }
-            } else {
+            if (!mTexturePack) {
                 native.PackPending = false;
             }
+            // Still decoding when it was made: UploadReadyReplacements polls
+            // it at the next frame top, with the other finished pack images,
+            // so a stream of them shares one barrier instead of one per draw.
             return dkMakeTextureHandle(native.ImageSlot, native.SamplerSlot);
         }
     }
@@ -496,6 +526,11 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
     texture.PackHash = pack.NativeHash;
     texture.PackPending = pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Pending ||
                           pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready;
+    if (texture.PackPending) {
+        texture.PackView = view;
+        texture.PackView.NativeBytes = {};
+        texture.PackView.CopyReferences = {};
+    }
     texture.PackEpoch = mPackEpoch;
     if (!CreateImage(texture, DkImageFormat_RGBA8_Unorm, view.Width, view.Height, levels)) {
         if (mStats.TextureFailures++ < 10U) {

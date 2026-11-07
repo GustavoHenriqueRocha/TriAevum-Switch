@@ -1541,6 +1541,33 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   window closes (`oot3d_fps_counter.h`, tests in `oot3d_fps_counter_tests.cpp`).
 - Needs ImGui on the window: with deko3d and `config/serial_presentation` nothing ImGui draws shows.
 
+### GPU clock: L3+R3 > Video (`config/gpu_performance`, 07/11, off by default)
+- "GPU clock" combo in the Video tab: **Standard (307 MHz)** (default, file absent) or **High (460.8 MHz,
+  more battery)** (file present). Applied at once and at start (the Video panel is created at window setup
+  and applies the file then); `oot3d_switch_gpu_performance.h`, implementation in `oot3d_switch_clocks.cpp`.
+- How: the application's own apm session (`apmInitialize`, kept open for the run) and
+  `apmSetPerformanceConfiguration(ApmPerformanceMode_Normal, 0x92220008)`, the official handheld
+  configuration CPU 1020 / GPU 460.8 / memory 1331.2 MHz (switchbrew PTM services). Only the handheld
+  (Normal) configuration is touched: docked already runs the GPU at 768 MHz. Standard puts back what
+  `apmGetPerformanceConfiguration(Normal)` reported before the first change (0x00020003 if that read
+  nothing or High). Standard with no prior High opens no apm session: the default build behaves as before.
+  No clkrst/pcv (the wake-from-sleep hang stays avoided); a running sys-clk overrides whatever HOS applies.
+  libnx in `retuned-switch-prep:local` has `apmSetPerformanceConfiguration`/`apmGetPerformanceConfiguration`
+  and the weak `__nx_applet_PerformanceConfiguration` (not used: it only applies at start and only for
+  applications).
+- Log: one game-log line per change, `TRIAEVUM_GPU_PERF high=1 available=1 rc=0x0 failed=- requested=0x92220008
+  standard=0x00020003 effective=0x92220008 gpu_mhz=461 mem_mhz=1331 op_mode=handheld` (`effective` is
+  `appletGetCurrentPerformanceConfiguration` right after). If apm refuses (`failed=apmInitialize` or
+  `failed=apmSetPerformanceConfiguration` with its result code), the menu shows "Unavailable: ... refused
+  (0x...)" and the clock is unchanged.
+- Effect: up to −33% on GPU-clock-bound work [estimate]: Forest Temple room 8 step frames 14.9 ms →
+  about 10-11.5 ms [estimate]. No CPU change; battery and heat as Nintendo's own titles that use it.
+- Tests: `oot3d_fps_counter_tests` (`GpuPerformance`: the configurations' MHz, the configuration to
+  restore, the file round trip, no apm off the Switch) and three guards.
+- Console check (1 minute, without sys-clk): overlay on, choose High: the overlay's `GPU` reads 461 (was
+  307); `perf.txt` windows show `gpu_mhz=461 perf_cfg=0x92220008`; the game log has the `TRIAEVUM_GPU_PERF`
+  line. Back to Standard: `GPU 307`. Restart with High saved: the line appears at start.
+
 ### FPS: L3+R3 > Video, applied at once (`config/fps60`, 06/11)
 - **Was a bug, not a limit.** "30 FPS" and "60 FPS (interpolated)" both run the game at 30 steps a
   second (60 guest refreshes, the A32 update rate 2, the same gameplay clock); only the presentation
@@ -1830,6 +1857,96 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   `tools/oot3d/deko3d_lighting_variants.cpp`. Host tests `oot3d_deko3d_lighting_tests` (config, both
   mutations stable/idempotent/only the intended lines, off = native, lookup and fallback, block layout
   against upstream's and binding); guards in `tests/switch/test_bug_guards.py`.
+
+### ZCULL on deko3d (`config/deko3d_zcull`, 07/11, off by default)
+- **Default unchanged:** the queue keeps `DkQueueFlags_DisableZcull` ("lost tiles of decals in Aurora's
+  renderer"). With `sdmc:/switch/oot3dre/config/deko3d_zcull` present (content ignored) it is created without
+  it; deko3d then allocates the channel's ZCULL context and configures the region per depth target
+  (`gfx_deko3d_device.cpp`). Log at start: `deko3d: zcull on (config/deko3d_zcull)` / `deko3d: zcull off`.
+- **How the game resets depth:** it never clears or fills it (`fills=0 clears=0` in every logs15 line), so the
+  reset is a draw. Which draw cannot be read from the code; a new `logs/deko3d.txt` line, written with the
+  `programs` line in both modes, measures it:
+  `depth (frame): zcull=0 per frame always=N full=N fragdepth=N first none/full/partial/tested=... | avg of N ...`
+  - `always`: depth-writing draws that pass every fragment (compare ALWAYS or test off); `full`: those
+    covering the whole target.
+  - `first`: frames by the kind of their first depth-writing draw. `first ... full` near 1.00 means the reset
+    is a full-target ALWAYS draw; then turning it into a real `dkCmdBufClearDepthStencil` (what ZCULL needs to
+    start from a known state: deko3d updates ZCULL on `ZcullClearDepth` in its clear) is the next step. It is
+    not done yet: a clear is only identical if that draw writes one constant depth everywhere, which the
+    counters cannot show.
+  - `fragdepth`: depth-tested draws whose program writes `gl_FragDepth`
+    (`PicaDrawWritesFragDepth`, the generator's rule: anything but z-buffering with scale -1 and offset 0;
+    decals with a depth offset). **Likely cause of the lost decal tiles** [inference]: deko3d 0.5 writes
+    `ZcullTestMask = 0` once and never changes it, while Mesa's nvc0 sets `ZCULL_TEST_MASK = 0x11` for
+    programs that write depth; ZCULL then tests such a decal at its raster depth, not the depth it writes.
+- **Stats:** with ZCULL on, `dkperf` gains `zcull_stats=a/b/c/d`: deko3d's `DkCounter_ZcullStats` (the four
+  raw hardware counters ZcullStats0-3), reset at each frame top and reported at frame end, averaged per
+  frame. deko3d does not document their meaning: compare runs; all zero means ZCULL rejected nothing.
+  Every `dkperf` line also has `zcull=0|1`.
+- Saving: 0 to −1 ms per frame [estimate; nfsmw-nx measured about 2 ms]. Without a clear, ZCULL may start
+  each frame unknown and cull little.
+- Tests: `oot3d_deko3d_backend_tests` (`TestDepthBreakdown`; `TestFrameBreakdown` was never called and now
+  is); guard "ZCULL: off unless config/deko3d_zcull exists".
+- Console check (1 minute each): (a) without the file, Forest Temple room 8: `logs/deko3d.txt` `depth` line
+  says how depth is reset. (b) Create the file, restart, same room: `deko3d: zcull on` in deko3d.txt, `dkperf
+  zcull=1 zcull_stats=...` and `scene_ms` against (a); look at decals (floor markings, shadows' blobs,
+  Deku Tree spider webs) for missing square tiles. Delete the file if any tile is missing.
+
+### Fewer deko3d barriers (07/11)
+Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.cpp`, `gpu_transfer.cpp`):
+- `dkCmdBufBarrier(Full)` = semaphore WFI + a gpfifo entry with NoPrefetch: everything before finishes and
+  command prefetch stops. `DkInvalidateFlags_Shader` invalidates the shader *instruction, global-data and
+  constant (uniform)* caches. Every `dkQueueFlush` (the backend flushes at each `Device::Submit`, twice a
+  frame) appends `postSubmitFlush`: a barrier with no wait that invalidates image, shader, descriptor and
+  L2 caches ahead of the next submitted commands.
+1. **No barrier at every frame's first draw.** `PicaResources::BeginFrame` set the upload flag every frame,
+   so the first draw paid a Full barrier with Image|Descriptors|Shader. The cache part is what
+   `postSubmitFlush` already does (CPU writes of the new frame, uniforms in recycled stream memory included:
+   the slot's fence was waited and an invalidation follows that frame's work). The wait part guards
+   nothing: the GPU-written images read later (the display copy, save-state/target copies) have their own
+   Full barriers before and after, uploads set the flag themselves. `config/deko3d_barrier` gains the word
+   `frame` to bring it back (A/B; e.g. `full image descriptors shader frame` = the old behaviour).
+2. **Uploads no longer invalidate shader caches.** Default flags are Image|Descriptors (was |Shader): texture
+   uploads and descriptor writes touch no code, global memory or uniform (those are fresh stream memory per
+   draw and in steady state never had a per-draw invalidation anyway); new shader code still adds Shader
+   through `ShaderStore::TakeCodeWritten`. The barrier stays Full: the texture copy runs on the copy engine
+   (`BlitCopyEngine`, `LaunchDma` non-pipelined) and must land before the 3D engine samples it.
+3. **Pack images batched at frame top.** The flag is consumed lazily at the next draw, so all uploads
+   recorded before one draw already shared one barrier; the per-texture drains came from pack images
+   finishing while a frame draws (each polled and uploaded at the draw that used it). Now a native texture
+   whose pack image is still decoding is not polled mid-frame: `UploadReadyReplacements` (end of
+   `BeginFrame`) polls every such texture drawn last frame and uploads all finished ones together, under the
+   16 MiB per-frame cap (the rest stays pending). The HD image appears one frame later at most. Natives seen
+   for the first time (and pack images already decoded then) still upload at their draw.
+- Logs: `dkperf image_barriers_per_frame=` (Full barriers issued for uploads/descriptors, per frame),
+  deko3d.txt `resources` line `pack images=N (again N, at frame top N)`.
+- Saving: −0.05 to −0.2 ms per frame steady (one Full barrier and the Shader invalidation per frame),
+  more while pack images stream [estimate].
+- Guards: the Full + Image|Descriptors default, every submit flushed, pack images only at frame top.
+- Console check (1 minute): HD textures on, walk into a new area: `image_barriers_per_frame` well under 1 in
+  steady windows (was at least 1), `at frame top` grows while loading; no texture briefly showing stale or
+  garbage contents. If anything looks wrong, `config/deko3d_barrier` with `full image descriptors shader
+  frame` restores the old barriers for comparison.
+
+### Colour compression on deko3d (`config/deko3d_compression`, 07/11, on by default)
+- The scene's colour target, the display images and the mailbox images now get `DkImageFlags_HwCompression`
+  (deko3d then maps them with a compressible memory kind); depth already had it. `config/deko3d_compression`
+  whose first character is `0` turns it off (A/B). Log at start: `deko3d: colour compression on|off`.
+- Every reader is a GPU engine, which reads through the compression-aware L2:
+  - the display copy (2D engine `dkCmdBufBlitImage`) and the edge bands; the scanout samples the display image;
+  - save-state capture/restore: copy engine (`dkCmdBufCopyImageToBuffer`/`dkCmdBufCopyBufferToImage`), the
+    same calls that already read and write the compressed depth; the CPU only touches the linear staging
+    buffers (dynamic resolution copies nothing: it clears and redraws);
+  - the mailbox: the present queue's `dkCmdBufCopyImage` into the window image.
+  - Screenshots capture the window images, which stay as before: compressed only without the present
+    thread, where `dkQueuePresentImage` decompresses them (`SurfaceDecompress`); with it they go to nwindow
+    uncompressed (the display controller cannot read compressed memory).
+- Saving: −0.1 to −0.4 ms per frame [estimate]: less memory traffic for blending (most scene draws blend),
+  the 2D copy and the scanout.
+- Guards: window images keep the `!mPresentThreaded` rule; targets and displays follow the setting.
+- Console check (1 minute): `deko3d: colour compression on` in deko3d.txt; the picture looks as before
+  (no blocks, no garbage after a room change or a DRS step); save a state and load it: the restored frame is
+  right; take an album screenshot. `dkperf busy_ms`/`scene_ms` against a run with `deko3d_compression` = `0`.
 
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP

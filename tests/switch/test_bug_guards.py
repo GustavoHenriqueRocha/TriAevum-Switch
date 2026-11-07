@@ -168,6 +168,48 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
           r'case NativeA32HostAction::Wait:\s+state\.r\[15\] = resumePc;\s+status = NativeA32ThreadStatus::Waiting;\s+'
           r'NoteCore0ThreadParked\(\);'),
+    # --- 07/11: L3+R3 > Video > GPU clock (config/gpu_performance, off by default) ---
+    # Only the handheld (Normal) configuration, only the official 0x92220008, only when asked.
+    Guard("GPU clock High: only the handheld apm configuration, the official 0x92220008",
+          "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
+          r'apmSetPerformanceConfiguration\(ApmPerformanceMode_Normal, status\.Requested\)',
+          test="oot3d_fps_counter_tests (GpuPerformance)",
+          forbid=r'apmSetPerformanceConfiguration\(ApmPerformanceMode_Boost|clkrstInitialize|pcvInitialize'),
+    Guard("GPU clock: Standard without a prior High opens no apm session (default unchanged)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
+          r'if \(!high && !sessionOpen\) \{\s+return status;'),
+    Guard("GPU clock: config/gpu_performance applied at start and from the menu",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'mGpuHigh = ReadGpuPerformanceHigh\(mConfig\);\s+if \(mGpuHigh\) mGpuStatus = ApplyGpuPerformance\(true\);.*?'
+          r'mGpuStatus = ApplyGpuPerformance\(mGpuHigh\);'),
+    # --- 07/11: ZCULL on deko3d only with config/deko3d_zcull (decal tiles lost in Aurora's renderer) ---
+    Guard("ZCULL: off unless config/deko3d_zcull exists (decal tiles lost with it on)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'"sdmc:/switch/oot3dre/config/deko3d_zcull", "rb"\)\) \{\s+std::fclose\(file\);\s+mZcull = true;\s+\}.*?'
+          r'if \(!mZcull\) \{\s+queueMaker\.flags \|= DkQueueFlags_DisableZcull;',
+          test="oot3d_deko3d_backend_tests (TestDepthBreakdown: the depth line that measures it)"),
+    # --- 07/11: deko3d barriers. Uploads still need the Full barrier (copy engine before 3D sampling). ---
+    Guard("deko3d uploads: a Full barrier with Image|Descriptors invalidation before the next draw",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_api.h",
+          r'DkBarrier mImageBarrierMode = DkBarrier_Full;\s+'
+          r'uint32_t mImageBarrierFlags = DkInvalidateFlags_Image \| DkInvalidateFlags_Descriptors;'),
+    Guard("deko3d: every queue submit is flushed (postSubmitFlush is what replaces the frame-top barrier)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'dkQueueSubmitCommands\(mQueue, list\);\s+dkQueueFlush\(mQueue\);'),
+    Guard("deko3d pack images: finished ones upload at frame top, never one barrier per draw mid-frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'Evict\(\);\s+UploadReadyReplacements\(\);\s+\}',
+          forbid=r'PollOrQueue\(\s*native\.PackHash, static_cast<uint16_t>\(view\.Width\)'),
+    # --- 07/11: colour compression (config/deko3d_compression "0" = off). The display controller can't
+    # read compressed images: window images handed to nwindow without dkQueuePresentImage stay uncompressed.
+    Guard("deko3d compression: window images compressed only when dkQueuePresentImage decompresses them",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
+          r'layoutMaker\.flags = DkImageFlags_UsageRender \| DkImageFlags_UsagePresent;\s+'
+          r'if \(!mPresentThreaded\) \{\s+layoutMaker\.flags \|= DkImageFlags_HwCompression;'),
+    Guard("deko3d compression: scene colour and display images follow config/deko3d_compression",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_targets.cpp",
+          r'DkImageFormat_RGBA8_Unorm, ColorFlags\(\*mDevice\), target\.Extent\.Width.*?'
+          r'DkImageFormat_RGBA8_Unorm, ColorFlags\(\*mDevice\), allocWidth'),
     # --- 06/11: L3+R3 > Video > FPS (30 <-> 60 interpolated) applied only after a restart ---
     # Both choices simulate at 30 Hz; the launch fixed the pacing mode and the 30 FPS launch's
     # native30_no_interpolation contract forbade interpolation, so the menu only wrote config/fps60.

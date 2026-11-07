@@ -176,6 +176,40 @@ void TestFrameBreakdown() {
           "a log line starts a new window");
 }
 
+// ZCULL study: the depth line of logs/deko3d.txt (how the game resets depth,
+// draws whose program writes gl_FragDepth).
+void TestDepthBreakdown() {
+  using namespace Fast::Deko3d;
+  // The generator's raster-depth case: z-buffering, scale -1, offset 0.
+  Require(!PicaDrawWritesFragDepth(false, false, -1.0F, 0.0F), "raster depth: fixed-function depth");
+  Require(PicaDrawWritesFragDepth(false, false, -1.0F, 0.001F) && PicaDrawWritesFragDepth(false, false, -0.5F, 0.0F) &&
+              PicaDrawWritesFragDepth(false, true, -1.0F, 0.0F),
+          "depth offset, scale or w-buffering: gl_FragDepth");
+  Require(PicaDrawWritesFragDepth(true, false, -1.0F, 0.0F), "parametric programs always write it");
+  PicaFrameDrawWindow window;
+  // Frame 1: a full-target ALWAYS write first, then a partial one, a tested
+  // gl_FragDepth draw and a tested ALWAYS draw that writes nothing.
+  window.Current.CountDepth(true, true, true, true, false);
+  window.Current.CountDepth(true, true, true, false, false);
+  window.Current.CountDepth(true, true, false, false, true);
+  window.Current.CountDepth(true, false, true, true, true);
+  window.EndFrame();
+  Require(window.Last.DepthAlwaysWrites == 2U && window.Last.DepthAlwaysFull == 1U && window.Last.FragDepthTested == 1U,
+          "always writes, full ones, tested gl_FragDepth draws");
+  Require(window.Last.FirstDepthWrite[static_cast<size_t>(PicaFirstDepthWrite::AlwaysFull)] == 1U,
+          "first depth write: ALWAYS over the whole target");
+  // Frame 2: nothing writes depth. Frame 3: a tested draw writes first.
+  window.Current.CountDepth(true, false, false, true, false);
+  window.EndFrame();
+  window.Current.CountDepth(true, true, false, true, false);
+  window.Current.CountDepth(true, true, true, true, false);
+  window.EndFrame();
+  Require(FormatPicaDepthDraws(window.Sum, 1U) == "always=3 full=2 fragdepth=1 first none/full/partial/tested=1.00/1.00/0.00/1.00",
+          FormatPicaDepthDraws(window.Sum, 1U).c_str());
+  Require(FormatPicaDepthDraws(window.Last, 1U) == "always=1 full=1 fragdepth=0 first none/full/partial/tested=0.00/0.00/0.00/1.00",
+          FormatPicaDepthDraws(window.Last, 1U).c_str());
+}
+
 // Drawing regression: each text is translated/looked up in the pack only once
 // per identity, including when missing (otherwise each draw without DKSH would redo the
 // ~31 KB translation on the render thread).
@@ -848,6 +882,8 @@ int main() {
   TestSavestateDepthWords();
   TestSavestateRoundTrip();
   TestSavestateRestoreValidation();
+  TestFrameBreakdown();
+  TestDepthBreakdown();
   std::puts("oot3d_deko3d_backend_tests: ok");
   return 0;
 }
