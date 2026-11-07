@@ -571,6 +571,17 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
           r'texture->Height >= 16 && !sources\.Contains\(\*textureHash\)\) \{.*?'
           r'sources\.ObserveDecoded\(\*textureHash, texture->Width, texture->Height, rgba\);\s+\}\s+\}'),
+    # --- 07/11: still no grass at the Forest Temple entrance on a first load-in (test.7): the kept
+    # signature needs one visit to Sacred Forest Meadow. The preset's twins are built in. ---
+    Guard("grass: a twin ground takes its rule from the built-in twins while the rule texture's signature is missing",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_texture_twins.cpp",
+          r'const auto known = std::equal_range\(\s+GrassKnownTwins\(\)\.begin\(\), GrassKnownTwins\(\)\.end\(\).*?'
+          r'if \(original != nullptr\) \{.*?\} else if \(offline != known\.second\) \{\s+score = offline->Score;',
+          test="oot3d_grass_switch_tests (Oot3dGrassTwinsAtLoad)"),
+    Guard("grass: the built-in twins hold the Forest Temple entrance's ground (rule 10, Sacred Forest Meadow)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_texture_twin_table.cpp",
+          r'\{0xd885db352c997c7bULL, 256, 256, 0x7a41e65008d2ea50ULL, 256, 256, GrassSampleChannel::Luminance,',
+          test="oot3d_grass_switch_tests (TheFirstFrameOfAFreshSessionGivesTheForestTempleEntranceItsRule)"),
     # --- 06/11: floors shimmered in "square pixels" on deko3d (Forest Temple, since test.3; logs15) ---
     # The shaders add the PICA LOD bias to their explicit LOD; a sampler bias adds to it again
     # (-1.7 became -3.4: level 0 far away). SWITCH_PORT.md "Floor shimmer on deko3d".

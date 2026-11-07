@@ -63,6 +63,26 @@ inline constexpr uint32_t kGrassInheritedRuleIdBit = 0x80000000U;
 [[nodiscard]] GrassPlacementRule OwnGrassRuleFromInherited(
     const GrassPlacementRule& inherited, uint32_t ruleId);
 
+// The twins of the preset's rule textures among every texture of the game,
+// found offline with this code (tools/oot3d/deko3d_grass/make_twin_table.py;
+// generated grass_texture_twin_table.cpp). A rule texture's signature exists
+// only once it has been drawn: without these a ground whose rule texture is
+// drawn in another area had no grass in a session that starts there. Sorted.
+struct GrassKnownTwin {
+    uint64_t TwinHash = 0U;
+    uint16_t TwinWidth = 0U;
+    uint16_t TwinHeight = 0U;
+    uint64_t RuleHash = 0U;
+    uint16_t RuleWidth = 0U;
+    uint16_t RuleHeight = 0U;
+    // The rule's channel the sample mapping was made for.
+    GrassSampleChannel Channel = GrassSampleChannel::Luminance;
+    float Score = 0.0F;
+    float SampleScale = 1.0F;
+    float SampleOffset = 0.0F;
+};
+[[nodiscard]] std::span<const GrassKnownTwin> GrassKnownTwins() noexcept;
+
 // Signatures persist (a local cache) so a rule's texture is known in scenes
 // where it is not drawn. Records: hash, size, detail, ranges.
 void WriteGrassTextureSignature(

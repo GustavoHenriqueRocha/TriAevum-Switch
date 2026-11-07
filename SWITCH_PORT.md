@@ -2182,6 +2182,31 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   sessions`. The first session after an update still needs one visit to the area that draws the
   rule's texture. deko3d decodes a grass texture once per session even when its signature is kept
   (`Contains`, not `Find`): the placement samples its pixels and deko3d decodes them nowhere else.
+- **After test.7 (a first load-in, nothing kept yet):** the user still had no grass at the Forest
+  Temple entrance on loading a save there: the kept signature needs the rule texture drawn once,
+  in that session or an earlier one. The twins of the preset's 25 rule textures are now built in
+  (`GrassKnownTwins`, generated `grass_texture_twin_table.cpp`): 11 rows for 5 grounds, among them the
+  Forest Temple entrance's (`d885db352c997c7b`, bmori1 room 0) taking rule 10 (Sacred Forest
+  Meadow's ground, score 0.97); the others are grottos (kakusiana), Zora's River (spot03), a Lost
+  Woods room (spot10_1) and Ganon's Castle room 16. `GrassTwinRules::Resolve` uses a row when
+  either signature is missing, and the signatures when both exist (the same result: the rows are
+  made with the same code). A row counts only for a configured rule with that texture and channel.
+  - *Made offline:* `tools/oot3d/deko3d_grass/make_twin_table.py <romfs.bin> <work dir>` (in the host-tests
+    container) hashes every CMB texture of the RomFS as the runtime does (FNV-1a of the encoded base
+    level; all 25 rule hashes are found), then `twin_table_tool.cpp` decodes them with
+    `DecodePicaTextureRgba8` and scores them with `ComputeGrassTextureSignature`/`GrassTextureTwinScore`
+    against the preset's rules (`triaevum_product_graphics.inc`). Only hashes, the channel, the score
+    and the sample mapping are written: no pixels, no signatures. The EUR and USA (rev 1) RomFS have
+    the same 4009 textures. Rerun it when the preset's rules or the signature/score code change.
+  - *Memo:* the sources' memo keeps negatives (`cacheable` at `Resolve`'s early returns in
+    `pica_grass_source.cpp`) only under a key that holds the source cache's `Generation()` (bumped
+    by every new texture and by the store) and the rules' version; the other early returns depend
+    only on keyed draw state. A rule found later re-resolves the draw; nothing else to fix there.
+  - *Log:* `grass: N rule texture signatures kept from earlier sessions (...), 11 built-in twins of the
+    rule textures`.
+  - Tests: `oot3d_grass_switch_tests` (`Oot3dGrassTwinsAtLoad`: a fresh process, no store, no area
+    before, with the preset's rules: the entrance's ground has rule 10 at the first ask; every row is
+    of a preset rule with its channel and the best row wins) and two guards.
 - **Shaders:** `tools/oot3d/deko3d_grass/gen.py` compiles `grass_vsh.glsl` and the two fragment
   variants with uam into `gfx_deko3d_grass_dksh.h` (not in `deko3d.pack`). Rerun it after editing a
   shader.

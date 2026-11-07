@@ -7,11 +7,15 @@
 #include "fast/oot3d/grass_surface_extractor.h"
 #include "fast/oot3d/grass_switch_profile.h"
 #include "fast/oot3d/grass_texture_source_cache.h"
+#include "fast/oot3d/grass_texture_twins.h"
 #include "fast/oot3d/grass_visibility.h"
+
+#include <nlohmann/json.hpp>
 
 #include "oot3d_grass_switch_check.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -19,6 +23,9 @@
 #include <memory>
 #include <numeric>
 #include <set>
+#include <string>
+#include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -975,6 +982,117 @@ TEST(Oot3dGrassInterpolatedFrames, AnInBetweenFrameDrawsTheRealFramesPlacementsW
             EXPECT_EQ(drawn, 599U);
         }
     }
+}
+
+// The preset's rules as Deko3dConfigureGrass reads them (target, channel,
+// slots: what decides which texture has grass).
+std::vector<GrassPlacementRule> PresetGrassRules() {
+    static constexpr std::string_view kPreset =
+#include "triaevum_product_graphics.inc"
+        ;
+    std::vector<GrassPlacementRule> rules;
+    const auto document = nlohmann::json::parse(kPreset);
+    for (const auto& source : document.at("Grass").at("Sources")) {
+        GrassPlacementRule rule;
+        rule.RuleId = source.at("RuleId").get<uint32_t>();
+        const auto& target = source.at("Target");
+        rule.Target.Rgba8Hash = std::stoull(target.at("Rgba8Hash").get<std::string>(), nullptr, 16);
+        rule.Target.Width = target.at("Width").get<uint16_t>();
+        rule.Target.Height = target.at("Height").get<uint16_t>();
+        rule.Target.MapperSlotMask = target.at("MapperSlotMask").get<uint8_t>();
+        const std::array<std::string, 5> channels{"Red", "Green", "Blue", "Alpha", "Luminance"};
+        rule.Channel = static_cast<GrassSampleChannel>(
+            std::find(channels.begin(), channels.end(), source.at("Channel").get<std::string>()) - channels.begin());
+        rules.push_back(rule);
+    }
+    return rules;
+}
+
+// A fresh process: no signature store, nothing drawn before.
+void FreshGrassSession() {
+    auto& cache = GrassTextureSourceCache::Instance();
+    (void)cache.SetSignatureStore({});
+    cache.Clear();
+    GrassTwinRules::Instance().SetSource(nullptr);
+}
+
+// The Forest Temple entrance's ground (bmori1 room 0): its rule texture is
+// drawn only in Sacred Forest Meadow (rule 10, spot05).
+constexpr uint64_t kForestTempleGround = 0xd885db352c997c7bULL;
+
+// test.7: a save that starts in the Forest Temple drew no grass at its
+// entrance until Sacred Forest Meadow had been visited (in that session, or
+// in an earlier one that kept the rule texture's signature).
+TEST(Oot3dGrassTwinsAtLoad, TheFirstFrameOfAFreshSessionGivesTheForestTempleEntranceItsRule) {
+    const auto rules = PresetGrassRules();
+    ASSERT_EQ(rules.size(), 25U);
+    for (const bool groundDecoded : {true, false}) {
+        FreshGrassSession();
+        auto& twins = GrassTwinRules::Instance();
+        // deko3d decodes the drawn ground before asking (pica_grass_source.cpp);
+        // its pixels do not matter while the rule texture's are unknown.
+        if (groundDecoded) {
+            std::vector<uint8_t> pixels(256U * 256U * 4U);
+            for (size_t i = 0; i < pixels.size(); ++i) pixels[i] = static_cast<uint8_t>((i * 2654435761U) >> 24U);
+            GrassTextureSourceCache::Instance().ObserveDecoded(kForestTempleGround, 256U, 256U, pixels);
+        }
+        EXPECT_TRUE(twins.Configured(rules, kForestTempleGround, 256U, 256U, 0U)) << groundDecoded;
+        const auto inherited = twins.Inherited(rules, kForestTempleGround, 256U, 256U);
+        ASSERT_TRUE(inherited.has_value());
+        EXPECT_EQ(inherited->InheritedFrom, 10U) << "Sacred Forest Meadow's ground, the best twin";
+        EXPECT_EQ(inherited->Target.Rgba8Hash, kForestTempleGround);
+        EXPECT_EQ(inherited->Channel, GrassSampleChannel::Luminance);
+        // The twin's range mapped onto the rule texture's (its own pixels are sampled).
+        EXPECT_NEAR(inherited->SampleScale, 1.25F, 1.0e-4F);
+        EXPECT_NEAR(inherited->SampleOffset, -0.0402F, 1.0e-3F);
+        // The placements build it (PicaGrassPlacements::Update).
+        const auto all = twins.AllInherited(rules);
+        EXPECT_TRUE(std::any_of(all.begin(), all.end(), [](const GrassPlacementRule& rule) {
+            return rule.Target.Rgba8Hash == kForestTempleGround && rule.InheritedFrom == 10U;
+        }));
+        // A ground that is no twin stays bare.
+        EXPECT_FALSE(twins.Configured(rules, 0x0123456789abcdefULL, 256U, 256U, 0U));
+    }
+    FreshGrassSession();
+}
+
+// Every built-in twin is of a rule the preset has, with the channel its
+// sample mapping was made for (a preset change without rerunning
+// make_twin_table.py leaves twins bare), and grows grass on the first frame.
+TEST(Oot3dGrassTwinsAtLoad, EveryBuiltInTwinBelongsToAPresetRule) {
+    const auto rules = PresetGrassRules();
+    FreshGrassSession();
+    auto& twins = GrassTwinRules::Instance();
+    const auto known = GrassKnownTwins();
+    ASSERT_GT(known.size(), 0U);
+    EXPECT_TRUE(std::is_sorted(known.begin(), known.end(), [](const GrassKnownTwin& a, const GrassKnownTwin& b) {
+        return std::tie(a.TwinHash, a.TwinWidth, a.TwinHeight) < std::tie(b.TwinHash, b.TwinWidth, b.TwinHeight);
+    }));
+    for (const auto& twin : known) {
+        const auto rule = std::find_if(rules.begin(), rules.end(), [&](const GrassPlacementRule& r) {
+            return r.Target.Rgba8Hash == twin.RuleHash && r.Target.Width == twin.RuleWidth &&
+                   r.Target.Height == twin.RuleHeight;
+        });
+        ASSERT_TRUE(rule != rules.end());
+        EXPECT_EQ(rule->Channel, twin.Channel) << std::hex << twin.TwinHash;
+        EXPECT_GE(twin.Score, kGrassTextureTwinThreshold);
+        // The best scoring row is the rule it inherits.
+        float best = 0.0F;
+        uint64_t bestRule = 0U;
+        for (const auto& row : known)
+            if (row.TwinHash == twin.TwinHash && row.Score > best) {
+                best = row.Score;
+                bestRule = row.RuleHash;
+            }
+        const auto inherited = twins.Inherited(rules, twin.TwinHash, twin.TwinWidth, twin.TwinHeight);
+        ASSERT_TRUE(inherited.has_value());
+        const auto source = std::find_if(rules.begin(), rules.end(), [&](const GrassPlacementRule& r) {
+            return r.RuleId == inherited->InheritedFrom;
+        });
+        ASSERT_TRUE(source != rules.end());
+        EXPECT_EQ(source->Target.Rgba8Hash, bestRule) << std::hex << twin.TwinHash;
+    }
+    FreshGrassSession();
 }
 
 } // namespace
