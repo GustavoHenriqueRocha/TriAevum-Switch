@@ -27,12 +27,15 @@ class Oot3dPicaDeferredPlanBuilder;
 // Ownership: until Publish, only the guest thread touches the batch. After
 // Publish, Submissions, Plans and Status belong to the builder and are only
 // touched under its mutex; Slots are immutable and may be read by anyone.
+// With parallel builds (config/plan_one_lock absent) a slot is claimed
+// (Building) under the mutex and built outside it: its submission, plan and
+// error then belong to the claiming thread until it publishes the result.
 //
 // Batches are recycled (Oot3dPicaDeferredPlanBuilder's pool): every vector
 // keeps its capacity, so a steady game allocates no batch storage per drain
 // pass. Plans and Errors may hold more elements than the current Status.
 struct Oot3dPicaDeferredPlanBatch {
-    enum class SlotStatus : uint8_t { Unused, Pending, Built, Failed, Taken };
+    enum class SlotStatus : uint8_t { Unused, Pending, Building, Built, Failed, Taken };
 
     Oot3dPicaDeferredPlanBuilder* Builder = nullptr;
     std::vector<Oot3dPicaDrawSubmission> Submissions;
@@ -70,14 +73,19 @@ struct Oot3dPicaDeferredPlanStats {
     uint64_t ConsumerLocks = 0;
     // Worker without a batch to build.
     uint64_t WorkerIdleNanoseconds = 0;
+    // Parallel builds: a resolve found a slot another thread was building
+    // and waited for it (after building every other pending slot itself).
+    uint64_t ConsumerSlotWaits = 0;
+    uint64_t ConsumerSlotWaitNanoseconds = 0;
 };
 
 // Builds PICA draw plans for the guest thread. Serial builds (Build) run on
 // the caller; deferred batches are built by an optional background worker and
 // finished on demand by whoever resolves a plan (the render worker, or the
 // guest thread inside a synchronous render command). All builds share one
-// shader-source cache and are serialized by one mutex, so the cache never sees
-// two threads at once.
+// shader-source cache. By default a build holds one mutex from start to end;
+// with parallel builds only the cache accesses are serialized (a second
+// mutex) and the worker and a resolve build different slots at once.
 class Oot3dPicaDeferredPlanBuilder final {
   public:
     explicit Oot3dPicaDeferredPlanBuilder(
@@ -102,6 +110,14 @@ class Oot3dPicaDeferredPlanBuilder final {
     // Joins the worker (it finishes at most the plan it is building). Plans
     // still pending are built when resolved.
     void StopWorker();
+    // How plans are built (config/plan_full_identity, config/plan_copy_build,
+    // config/plan_one_lock). Before Configure; the defaults are the builder
+    // as it always was.
+    void SetBuildOptions(bool canonicalIdentity, bool inPlace, bool parallel);
+    [[nodiscard]] bool Parallel() const noexcept { return mParallel; }
+    [[nodiscard]] const Oot3dPicaPlanBuildOptions& Options() const noexcept {
+        return mBuildOptions;
+    }
 
     // Builds immediately on the calling thread (the serial path).
     bool Build(Oot3dPicaDrawSubmission& submission,
@@ -152,6 +168,19 @@ class Oot3dPicaDeferredPlanBuilder final {
     // Builds a pending slot; returns the nanoseconds spent (0: nothing to
     // build). Callers accumulate and publish their counters in bulk.
     uint64_t BuildSlotLocked(Oot3dPicaDeferredPlanBatch& batch, size_t index);
+    // Parallel builds. Claim (under the mutex): a pending slot becomes
+    // Building, false otherwise. Build (without the mutex): the claimed
+    // slot's plan; returns the nanoseconds spent and whether it was built.
+    // Finish (under the mutex): Built or Failed, waking resolves that wait.
+    bool ClaimSlotLocked(Oot3dPicaDeferredPlanBatch& batch, size_t index);
+    uint64_t BuildClaimedSlot(Oot3dPicaDeferredPlanBatch& batch, size_t index,
+                              bool& built);
+    void FinishSlotLocked(Oot3dPicaDeferredPlanBatch& batch, size_t index,
+                          bool built);
+    // Grows Plans/Errors to the batch's slot count (under the mutex).
+    static void SizeSlotStorageLocked(Oot3dPicaDeferredPlanBatch& batch);
+    // mBuildOptions plus the cache mutex when builds run in parallel.
+    Oot3dPicaPlanBuildOptions BuildOptions() noexcept;
     // Takes the build mutex, timing it only when it is contended.
     void LockBuild(std::unique_lock<std::mutex>& lock,
                    std::atomic<uint64_t>& waits,
@@ -164,6 +193,14 @@ class Oot3dPicaDeferredPlanBuilder final {
     bool mWorker = false;
     std::atomic<bool> mPredecodeTextures{false};
     std::mutex mBuildMutex;
+    // Parallel builds: the shader cache's own mutex, and the wake-up of a
+    // resolve waiting for a slot another thread is building (signalled only
+    // when someone waits: each signal is a kernel call on the console).
+    std::mutex mCacheMutex;
+    std::condition_variable mSlotBuilt;
+    uint32_t mSlotWaiters = 0U;  // under mBuildMutex
+    Oot3dPicaPlanBuildOptions mBuildOptions;
+    bool mParallel = false;
     mutable std::mutex mQueueMutex;
     std::condition_variable mQueueReady;
     std::deque<std::shared_ptr<Oot3dPicaDeferredPlanBatch>> mQueue;
@@ -184,6 +221,8 @@ class Oot3dPicaDeferredPlanBuilder final {
     std::atomic<uint64_t> mWorkerLockWaitNanoseconds{0};
     std::atomic<uint64_t> mConsumerLocks{0};
     std::atomic<uint64_t> mWorkerIdleNanoseconds{0};
+    std::atomic<uint64_t> mConsumerSlotWaits{0};
+    std::atomic<uint64_t> mConsumerSlotWaitNanoseconds{0};
 };
 
 // Replaces a deferred placeholder with its built plan (no-op for a built

@@ -1199,6 +1199,12 @@ uint64_t ComputeOot3dPicaVertexShaderStateKey(
 Oot3dPicaVertexUniformState BuildOot3dPicaVertexUniformState(
     const Oot3dPicaDrawPacket& packet) {
     Oot3dPicaVertexUniformState uniforms;
+    BuildOot3dPicaVertexUniformStateInto(packet, uniforms);
+    return uniforms;
+}
+
+void BuildOot3dPicaVertexUniformStateInto(const Oot3dPicaDrawPacket& packet,
+                                          Oot3dPicaVertexUniformState& uniforms) {
     for (size_t index = 0;
          index < packet.VertexShader.BooleanUniforms.size(); ++index) {
         if (packet.VertexShader.BooleanUniforms[index]) {
@@ -1213,7 +1219,6 @@ Oot3dPicaVertexUniformState BuildOot3dPicaVertexUniformState(
         }
     }
     uniforms.Floats = packet.VertexShader.FloatUniforms;
-    return uniforms;
 }
 
 bool GenerateOot3dPicaVertexShader(

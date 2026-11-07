@@ -422,6 +422,13 @@ uint64_t ComputeOot3dPicaFragmentShaderStateKey(
 Oot3dPicaFragmentUniformState BuildOot3dPicaFragmentUniformState(
     const Oot3dPicaDrawPacket& packet) {
     Oot3dPicaFragmentUniformState uniforms;
+    BuildOot3dPicaFragmentUniformStateInto(packet, uniforms, false);
+    return uniforms;
+}
+
+void BuildOot3dPicaFragmentUniformStateInto(
+    const Oot3dPicaDrawPacket& packet, Oot3dPicaFragmentUniformState& uniforms,
+    bool reuseFogTable) {
     for (size_t stage = 0; stage < kTevStageRegisters.size(); ++stage) {
         uniforms.TevConstants[stage] = DecodeColor(
             packet.Registers[kTevStageRegisters[stage] + 3U]);
@@ -450,17 +457,37 @@ Oot3dPicaFragmentUniformState BuildOot3dPicaFragmentUniformState(
         uniforms.TextureLodBias[texture] =
             static_cast<float>(signedRaw) / 256.0F;
     }
-    for (size_t index = 0; index < packet.FogLut.size(); ++index) {
-        const uint32_t raw = packet.FogLut[index];
-        const uint32_t value = (raw >> 13U) & 0x7FFU;
-        const uint32_t differenceBits = raw & 0x1FFFU;
-        const int32_t difference =
-            (differenceBits & 0x1000U) != 0U
-                ? static_cast<int32_t>(differenceBits | 0xFFFFE000U)
-                : static_cast<int32_t>(differenceBits);
-        uniforms.FogLut[index] = {
-            static_cast<float>(value) / 2047.0F,
-            static_cast<float>(difference) / 2047.0F};
+    // The fog table is 256 float divisions per draw and changes only with
+    // the scene's fog (config/plan_in_place): the previous draw's converted
+    // table on this thread is reused when its raw words are the same, which
+    // is exactly what converting them again gives.
+    struct FogTableCache {
+        bool Valid = false;
+        std::array<uint32_t, 128> Raw{};
+        std::array<std::array<float, 2>, 128> Converted{};
+    };
+    thread_local FogTableCache fogCache;
+    if (reuseFogTable && fogCache.Valid &&
+        fogCache.Raw == packet.FogLut.Values()) {
+        uniforms.FogLut = fogCache.Converted;
+    } else {
+        for (size_t index = 0; index < packet.FogLut.size(); ++index) {
+            const uint32_t raw = packet.FogLut[index];
+            const uint32_t value = (raw >> 13U) & 0x7FFU;
+            const uint32_t differenceBits = raw & 0x1FFFU;
+            const int32_t difference =
+                (differenceBits & 0x1000U) != 0U
+                    ? static_cast<int32_t>(differenceBits | 0xFFFFE000U)
+                    : static_cast<int32_t>(differenceBits);
+            uniforms.FogLut[index] = {
+                static_cast<float>(value) / 2047.0F,
+                static_cast<float>(difference) / 2047.0F};
+        }
+        if (reuseFogTable) {
+            fogCache.Raw = packet.FogLut.Values();
+            fogCache.Converted = uniforms.FogLut;
+            fogCache.Valid = true;
+        }
     }
     uniforms.Lighting = BuildOot3dPicaFragmentLightingUniformState(packet);
     uniforms.LightingProgram = Fast::Oot3d::BuildPicaLightingProgram(
@@ -469,7 +496,6 @@ Oot3dPicaFragmentUniformState BuildOot3dPicaFragmentUniformState(
                                packet.Registers[0x080U], packet.Registers[0x083U]};
     uniforms.ProcTexProgram = BuildOot3dPicaProcTexProgram(packet);
     Fast::Renderer3ds::DecodePicaTevProgram(packet.Registers, uniforms.TevProgram);
-    return uniforms;
 }
 
 bool GenerateOot3dPicaFragmentShader(

@@ -1890,6 +1890,42 @@ void NativeA32WindowSession::Setup() {
             "sdmc:/switch/oot3dre/config/no_texture_predecode", picaPlanError);
 #endif
     picaPlanBuilder.SetPredecodeTextures(predecodeTextures);
+    // Plan build cost per draw (SWITCH_PORT.md): the canonical identity is
+    // left out where nothing reads it (deko3d without the semantic trace or
+    // extended diagnostics, whose serial builds share these options), plans
+    // are built in place, and the worker and the render thread build
+    // different slots at once. Kill switches: config/plan_full_identity,
+    // config/plan_copy_build, config/plan_one_lock. Desktop:
+    // TRIAEVUM_PLAN_BUILD=legacy turns all three off.
+    {
+      bool fullIdentity = false;
+      bool copyBuild = false;
+      bool oneLock = false;
+#if defined(__SWITCH__)
+      fullIdentity = std::filesystem::exists(
+          "sdmc:/switch/oot3dre/config/plan_full_identity", picaPlanError);
+      copyBuild = std::filesystem::exists(
+          "sdmc:/switch/oot3dre/config/plan_copy_build", picaPlanError);
+      oneLock = std::filesystem::exists(
+          "sdmc:/switch/oot3dre/config/plan_one_lock", picaPlanError);
+#else
+      const char* planBuildEnvironment = std::getenv("TRIAEVUM_PLAN_BUILD");
+      if (planBuildEnvironment != nullptr &&
+          std::string_view(planBuildEnvironment) == "legacy") {
+        fullIdentity = copyBuild = oneLock = true;
+      }
+#endif
+      const bool identityUnread =
+          std::string_view(apiPointer->GetName()) == "deko3d" &&
+          !picaSemanticTrace.Enabled() && !launch.ExtendedDiagnostics;
+      picaPlanBuilder.SetBuildOptions(!identityUnread || fullIdentity,
+                                      !copyBuild, !oneLock);
+      std::fprintf(stderr,
+                   "TRIAEVUM_PLAN_BUILD canonical_identity=%d in_place=%d "
+                   "parallel=%d\n",
+                   (!identityUnread || fullIdentity) ? 1 : 0, copyBuild ? 0 : 1,
+                   oneLock ? 0 : 1);
+    }
     picaPlanBuilder.Configure(deferredPicaPlans && parallelPresentation,
                               picaPlanWorker);
   }

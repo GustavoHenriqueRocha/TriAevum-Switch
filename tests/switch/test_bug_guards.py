@@ -1614,6 +1614,40 @@ GUARDS = [
     Guard("hudscale75: the staged Switch config ships HUD scale 0.75",
           "config/topscreen_ui.switch.json",
           r'"hud_scale": 0\.75,'),
+    Guard("renderdraw: plans built unlocked take the shader-cache mutex around every cache access "
+          "(structural, vertex, fragment + uber, fixed binding)",
+          "tools/oot3d/native_game_runtime/oot3d_native_pica_vulkan_plan.cpp",
+          r'CacheAccess access\(options\.CacheMutex\);\s*const auto cached =\s*'
+          r'shaderCache->VertexStructuralStates\.find.*?'
+          r'CacheAccess access\(options\.CacheMutex\);\s*const auto cachedVertex =.*?'
+          r'CacheAccess access\(options\.CacheMutex\);\s*const auto cachedFragment =.*?'
+          r'UberFragmentsBySpecializedKey\.emplace.*?'
+          r'CacheAccess access\(options\.CacheMutex\);\s*auto& shared = shaderCache->FixedBindingBytes;',
+          test="oot3d_native_pica_plan_build_tests"),
+    Guard("renderdraw: every deferred build passes the builder's options (the cache mutex with parallel builds)",
+          "tools/oot3d/native_game_runtime/oot3d_native_pica_deferred_plan.cpp",
+          r'options\.CacheMutex = mParallel \? &mCacheMutex : nullptr;',
+          forbid=r'BuildOot3dPicaVulkanDrawPlanAndConsumeResources\([^;]*&mShaderCache\);',
+          test="oot3d_native_pica_plan_build_tests"),
+    Guard("renderdraw: a parallel resolve builds the pending slots and only then waits for the worker's",
+          "tools/oot3d/native_game_runtime/oot3d_native_pica_deferred_plan.cpp",
+          r'parallel\.Resolve\(\*slot, draw, error, true, deferred\).*?'
+          r'run\.Close\(\);\s*for \(auto& \[drawIndex, slot\] : building\)',
+          test="oot3d_native_pica_plan_build_tests"),
+    Guard("renderdraw: the deko3d draw path never reads the canonical identity (left empty there, "
+          "config/plan_full_identity)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'SubmitPicaDraw',
+          forbid=r'Canonical(VertexProgram|FragmentProgram|RasterState|Pipeline|DynamicState|FullRegisterState)Id'),
+    Guard("renderdraw: the identity is left out only on deko3d without the semantic trace or extended diagnostics",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'"sdmc:/switch/oot3dre/config/plan_one_lock".*?'
+          r'const bool identityUnread =\s*std::string_view\(apiPointer->GetName\(\)\) == "deko3d" &&\s*'
+          r'!picaSemanticTrace\.Enabled\(\) && !launch\.ExtendedDiagnostics;'),
+    Guard("renderdraw: perf.txt reports the plan build options, worker draws, cost per draw and slot waits",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'" plan_identity=".*?" plan_in_place=".*?" plan_parallel=".*?" plan_worker_draws=".*?'
+          r'" plan_us_draw=".*?" plan_slot_waits=".*?" plan_slot_wait_ms="'),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay
