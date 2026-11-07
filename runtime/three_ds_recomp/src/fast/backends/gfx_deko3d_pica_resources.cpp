@@ -123,7 +123,7 @@ bool PicaResources::Init(Device& device) {
     mTexturePack = mTexturePackSettings.Enabled;
     if (mTexturePack) {
         ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Configure(
-            ::Oot3d::Renderer::MakeTexturePackConfiguration(mTexturePackSettings));
+            ::Oot3d::Renderer::MakeTexturePackConfiguration(mTexturePackSettings, kConfigDirectory));
         mPackConfigured = true;
     }
     Log("resources: texture pack %s (%s, cap %ux)", mTexturePack ? "on" : "off", mTexturePackSettings.Folder.c_str(),
@@ -298,7 +298,7 @@ void PicaResources::ApplyTexturePackSettings() {
     if (settings.Enabled || mPackConfigured) {
         // Off: the runtime drops its decoded images and pending decodes.
         ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Configure(
-            ::Oot3d::Renderer::MakeTexturePackConfiguration(settings));
+            ::Oot3d::Renderer::MakeTexturePackConfiguration(settings, kConfigDirectory));
         mPackConfigured = true;
     }
     Log("resources: texture pack %s (cap %ux)", mTexturePack ? "on" : "off", settings.MaxScale);

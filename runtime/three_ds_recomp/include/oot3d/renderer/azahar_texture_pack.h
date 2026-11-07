@@ -28,6 +28,9 @@ struct AzaharTexturePackConfiguration {
     uint32_t MaxReplacementScale = 0;
     // The pack worker also makes the image's mip chain (Mips below).
     bool GenerateMipmaps = false;
+    // HUD images to decode as soon as the index is ready, and where HUD images
+    // decoded on first sight are added (azahar_hud_image_list.h). Empty = none.
+    std::filesystem::path HudImageList;
 
     bool operator==(const AzaharTexturePackConfiguration&) const = default;
 };
@@ -141,6 +144,21 @@ struct AzaharTexturePackStatus {
     std::string LastError;
 };
 
+// HUD images (AzaharTextureRequest::UserInterface) since the index was last
+// built: those decoded ahead from the configuration's HudImageList (the
+// start-up cost: worker time from the index to the last of them, and their
+// RGBA8 size) and those decoded on first sight (each one drew without its pack
+// art until ready: the longest wait from its request to its image).
+struct AzaharHudPackStatus {
+    size_t Listed = 0;
+    size_t PreloadQueued = 0;
+    size_t PreloadDecoded = 0;
+    uint64_t PreloadMicros = 0;
+    uint64_t PreloadBytes = 0;
+    size_t OnSightDecodes = 0;
+    uint64_t OnSightWaitMaxMicros = 0;
+};
+
 // Azahar's modern custom-texture identity is CityHash64 over the untouched
 // native PICA upload bytes.
 [[nodiscard]] uint64_t AzaharCityHash64(std::span<const uint8_t> bytes) noexcept;
@@ -190,6 +208,7 @@ class AzaharTexturePackRuntime final {
     ResolveMaterialOrQueue(uint64_t nativeHash, uint64_t expectedGeneration);
     void ReportMaterialUploadFailure(uint64_t nativeHash, uint64_t generation, std::string error);
     [[nodiscard]] AzaharTexturePackStatus Snapshot() const;
+    [[nodiscard]] AzaharHudPackStatus HudStatus() const;
     [[nodiscard]] uint64_t Generation() const;
     [[nodiscard]] std::vector<AzaharMaterialCatalogEntry> MaterialCatalog() const;
     // Image imports share the existing pack worker; no file decoding in UI/frame code.

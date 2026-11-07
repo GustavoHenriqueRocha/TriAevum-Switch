@@ -1,4 +1,5 @@
 #include "oot3d/renderer/azahar_texture_pack.h"
+#include "oot3d/renderer/azahar_hud_image_list.h"
 #include "oot3d/renderer/azahar_texture_scale.h"
 #include "fast/renderer/content_hash.h"
 #include "azahar_pbr_materials.h"
@@ -11,6 +12,7 @@
 #include <array>
 #include <bit>
 #include <cctype>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -505,6 +507,9 @@ struct LoadJob {
     IndexedTexture Texture;
     DecodeOptions Options;
     bool UserInterface = false;
+    // A HUD image decoded ahead from the HUD list (not seen yet this session).
+    bool Preload = false;
+    std::chrono::steady_clock::time_point Queued;
     std::optional<IndexedAzaharPbrMaterial> Material;
     AzaharMaterialIdentity Identity;
     std::shared_ptr<std::promise<AzaharImageLoadResult>> EditorImage;
@@ -545,14 +550,23 @@ std::string MakeAzaharTextureFilename(uint16_t width, uint16_t height, uint64_t 
 
 class AzaharTexturePackRuntime::Impl {
   public:
-    Impl() { mWorker = std::thread([this] { WorkerMain(); }); }
+    // HUD images have their own worker: a HUD texture seen for the first time
+    // never waits behind the world images of a scene being loaded (1080p
+    // packs: tens of PNGs, some of them 4096 wide), only behind other HUD
+    // images, which are small.
+    Impl() {
+        mWorker = std::thread([this] { WorkerMain(); });
+        mUiWorker = std::thread([this] { UiWorkerMain(); });
+    }
     ~Impl() {
         {
             std::scoped_lock lock(mMutex);
             mStopping = true;
         }
         mWorkAvailable.notify_all();
+        mUiWorkAvailable.notify_all();
         mWorker.join();
+        mUiWorker.join();
     }
 
     void Configure(AzaharTexturePackConfiguration configuration) {
@@ -724,6 +738,10 @@ class AzaharTexturePackRuntime::Impl {
         std::scoped_lock lock(mMutex);
         return mGeneration;
     }
+    AzaharHudPackStatus HudStatus() const {
+        std::scoped_lock lock(mMutex);
+        return mHud;
+    }
     std::vector<AzaharMaterialCatalogEntry> MaterialCatalog() const {
         std::scoped_lock lock(mMutex);
         std::vector<AzaharMaterialCatalogEntry> result;
@@ -778,8 +796,10 @@ class AzaharTexturePackRuntime::Impl {
   private:
     // Queues the decode of an indexed image that is neither cached, failed
     // nor already queued, then reports its state. HUD images have their own
-    // cache (another size cap and no mips than a world texture of the hash).
-    AzaharTextureResolveResult QueueOrPollLocked(uint64_t hash, TextureSize native, bool userInterface = false) {
+    // cache (another size cap and no mips than a world texture of the hash)
+    // and their own queue and worker.
+    AzaharTextureResolveResult QueueOrPollLocked(uint64_t hash, TextureSize native, bool userInterface = false,
+                                                 bool preload = false) {
         const auto indexed = mIndex.find(hash);
         if (indexed == mIndex.end()) return {AzaharTextureResolveState::Missing, hash, nullptr, true, mPack.UseNewHash};
         auto& cache = userInterface ? mUiReplacementCache : mReplacementCache;
@@ -797,9 +817,11 @@ class AzaharTexturePackRuntime::Impl {
                               ? DecodeOptions{native, kUiTextureMaxScale, false}
                               : DecodeOptions{native, mConfiguration.MaxReplacementScale, mConfiguration.GenerateMipmaps};
             job.UserInterface = userInterface;
-            mLoadJobs.push_back(std::move(job));
+            job.Preload = preload;
+            job.Queued = std::chrono::steady_clock::now();
+            (userInterface ? mUiLoadJobs : mLoadJobs).push_back(std::move(job));
             ++mPendingLoads;
-            mWorkAvailable.notify_one();
+            (userInterface ? mUiWorkAvailable : mWorkAvailable).notify_one();
         }
         return PollLocked(hash, userInterface);
     }
@@ -839,6 +861,15 @@ class AzaharTexturePackRuntime::Impl {
                 EnsureDumpPack(dumpDirectory, dumpModern);
             }
         } catch (const std::exception& exception) { error = exception.what(); }
+        // The HUD list is read with the index, off the lock.
+        std::vector<HudImageEntry> hudList;
+        if (error.empty() && configuration.LoadCustomTextures && !configuration.HudImageList.empty()) {
+            if (std::ifstream file(configuration.HudImageList, std::ios::binary); file) {
+                const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+                hudList = ParseHudImageList(text);
+            }
+        }
+        std::optional<std::vector<HudImageEntry>> hudListRewrite;
         std::scoped_lock lock(mMutex);
         mBuilding = false;
         if (serial == mRebuildSerial) {
@@ -877,9 +908,38 @@ class AzaharTexturePackRuntime::Impl {
                         mLastError = "PBR material " + Hex16(hash) + ": " + material.Error;
                     }
                 }
+                if (error.empty()) hudListRewrite = PreloadHudImagesLocked(configuration, hudList);
             }
         }
+        // Lines of a pack no longer installed are dropped from the list, under
+        // the lock so that no HUD worker append lands in between (rare: once
+        // after the pack changed).
+        if (hudListRewrite) {
+            std::string text;
+            for (const auto& entry : *hudListRewrite) text += FormatHudImageEntry(entry);
+            std::ofstream(configuration.HudImageList, std::ios::binary | std::ios::trunc) << text;
+        }
         mIdle.notify_all();
+    }
+
+    // Queues the listed HUD images the new index has on the HUD worker
+    // (state under mMutex) and starts the HUD statistics of this index.
+    // Returns the list to write back when some lines were dropped.
+    std::optional<std::vector<HudImageEntry>> PreloadHudImagesLocked(const AzaharTexturePackConfiguration& configuration,
+                                                                    const std::vector<HudImageEntry>& listed) {
+        mHud = {};
+        mHudListed.clear();
+        mHudPreloadStart = std::chrono::steady_clock::now();
+        if (configuration.HudImageList.empty()) return std::nullopt;
+        auto kept = PruneHudImageList(listed, [&](uint64_t hash) { return mIndex.contains(hash); });
+        for (const auto& entry : kept) {
+            mHudListed.insert(entry.Hash);
+            (void)QueueOrPollLocked(entry.Hash, {entry.Width, entry.Height}, true, true);
+            if (mPendingUiLoadGenerations.contains(entry.Hash)) ++mHud.PreloadQueued;
+        }
+        mHud.Listed = kept.size();
+        if (kept.size() == listed.size()) return std::nullopt;
+        return kept;
     }
 
     void QueueDump(const AzaharTextureRequest& request, uint64_t hash, uint64_t generation,
@@ -946,29 +1006,87 @@ class AzaharTexturePackRuntime::Impl {
                 replacement = DecodeReplacement(job.Texture, job.Hash, job.Generation, job.Options);
             }
         } catch (const std::exception& exception) { failure = exception.what(); }
-        std::scoped_lock lock(mMutex);
-        auto& pending = job.Material ? mPendingMaterialGenerations
-                                     : (job.UserInterface ? mPendingUiLoadGenerations : mPendingLoadGenerations);
-        auto& failed = job.Material ? mFailedMaterialHashes
-                                    : (job.UserInterface ? mFailedUiLoadHashes : mFailedLoadHashes);
-        const auto found = pending.find(job.Hash);
-        if (found != pending.end() && found->second == job.Generation) {
-            if (job.Generation == mGeneration && mConfiguration.LoadCustomTextures) {
-                if (material && material->ColorReplacement && job.Material->BaseColorTexture.empty())
-                    mReplacementCache.insert_or_assign(job.Hash, material->ColorReplacement);
-                if (material) mMaterialCache.insert_or_assign(job.Hash, std::move(material));
-                if (replacement)
-                    (job.UserInterface ? mUiReplacementCache : mReplacementCache)
-                        .insert_or_assign(job.Hash, std::move(replacement));
-                if (!failure.empty()) {
-                    failed.insert(job.Hash);
-                    mLastError = std::move(failure);
+        std::filesystem::path hudList;
+        HudImageEntry hudEntry;
+        {
+            std::scoped_lock lock(mMutex);
+            auto& pending = job.Material ? mPendingMaterialGenerations
+                                         : (job.UserInterface ? mPendingUiLoadGenerations : mPendingLoadGenerations);
+            auto& failed = job.Material ? mFailedMaterialHashes
+                                        : (job.UserInterface ? mFailedUiLoadHashes : mFailedLoadHashes);
+            const auto found = pending.find(job.Hash);
+            if (found != pending.end() && found->second == job.Generation) {
+                if (job.Generation == mGeneration && mConfiguration.LoadCustomTextures) {
+                    if (material && material->ColorReplacement && job.Material->BaseColorTexture.empty())
+                        mReplacementCache.insert_or_assign(job.Hash, material->ColorReplacement);
+                    if (material) mMaterialCache.insert_or_assign(job.Hash, std::move(material));
+                    if (replacement && job.UserInterface &&
+                        RecordHudImageLocked(job, *replacement, hudEntry))
+                        hudList = mConfiguration.HudImageList;
+                    if (replacement)
+                        (job.UserInterface ? mUiReplacementCache : mReplacementCache)
+                            .insert_or_assign(job.Hash, std::move(replacement));
+                    if (!failure.empty()) {
+                        failed.insert(job.Hash);
+                        mLastError = std::move(failure);
+                    }
                 }
+                pending.erase(found);
             }
-            pending.erase(found);
+            if (hudList.empty()) {
+                --mPendingLoads;
+                mIdle.notify_all();
+                return;
+            }
         }
+        // A HUD image seen for the first time: the next start decodes it ahead.
+        // Off the lock (an SD write), before the load counts as done.
+        std::ofstream(hudList, std::ios::binary | std::ios::app) << FormatHudImageEntry(hudEntry);
+        std::scoped_lock lock(mMutex);
         --mPendingLoads;
         mIdle.notify_all();
+    }
+    // HUD statistics of a decoded HUD image; true (with its list line in
+    // `entry`) when the HUD list does not have it yet.
+    bool RecordHudImageLocked(const LoadJob& job, const AzaharTextureReplacement& replacement, HudImageEntry& entry) {
+        const auto now = std::chrono::steady_clock::now();
+        const auto micros = [](auto duration) {
+            return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(duration).count());
+        };
+        if (job.Preload) {
+            ++mHud.PreloadDecoded;
+            mHud.PreloadBytes += replacement.Rgba8 ? replacement.Rgba8->size() : 0U;
+            mHud.PreloadMicros = micros(now - mHudPreloadStart);
+        } else {
+            ++mHud.OnSightDecodes;
+            mHud.OnSightWaitMaxMicros = std::max(mHud.OnSightWaitMaxMicros, micros(now - job.Queued));
+        }
+        const auto width = job.Options.Native.Width, height = job.Options.Native.Height;
+        if (mConfiguration.HudImageList.empty() || mHudListed.size() >= kHudImageListLimit || width == 0U ||
+            height == 0U || width > 1024U || height > 1024U || !mHudListed.insert(job.Hash).second)
+            return false;
+        entry = {job.Hash, static_cast<uint16_t>(width), static_cast<uint16_t>(height)};
+        ++mHud.Listed;
+        return true;
+    }
+    // HUD images only: a HUD texture never waits for a world image.
+    void UiWorkerMain() {
+        for (;;) {
+            LoadJob load;
+            {
+                std::unique_lock lock(mMutex);
+                mUiWorkAvailable.wait(lock, [&] { return mStopping || !mUiLoadJobs.empty(); });
+                if (mUiLoadJobs.empty()) return; // stopping
+                load = std::move(mUiLoadJobs.front());
+                mUiLoadJobs.pop_front();
+                if (load.Generation != mGeneration) {
+                    --mPendingLoads;
+                    mIdle.notify_all();
+                    continue;
+                }
+            }
+            Load(load);
+        }
     }
     void WorkerMain() {
         for (;;) {
@@ -1026,8 +1144,8 @@ class AzaharTexturePackRuntime::Impl {
     }
 
     mutable std::mutex mMutex;
-    std::condition_variable mWorkAvailable, mIdle;
-    std::thread mWorker;
+    std::condition_variable mWorkAvailable, mUiWorkAvailable, mIdle;
+    std::thread mWorker, mUiWorker;
     bool mStopping = false, mConfigured = false, mIndexReady = false;
     bool mRebuildRequested = false, mBuilding = false;
     uint64_t mGeneration = 1U, mRebuildSerial = 0U;
@@ -1047,7 +1165,12 @@ class AzaharTexturePackRuntime::Impl {
     std::unordered_map<uint64_t, uint64_t> mPendingLoadGenerations, mPendingUiLoadGenerations,
         mPendingMaterialGenerations;
     std::unordered_set<uint64_t> mFailedLoadHashes, mFailedUiLoadHashes, mFailedMaterialHashes, mDumpedHashes;
-    std::deque<LoadJob> mLoadJobs;
+    std::deque<LoadJob> mLoadJobs, mUiLoadJobs;
+    // HUD statistics since the index was built, the HUD list's hashes and
+    // when its images were queued.
+    AzaharHudPackStatus mHud;
+    std::unordered_set<uint64_t> mHudListed;
+    std::chrono::steady_clock::time_point mHudPreloadStart;
     std::deque<DumpJob> mDumpJobs;
     size_t mPendingLoads = 0U, mPendingDumps = 0U, mDumpedCount = 0U, mUnsupportedFiles = 0U;
     std::string mLastError;
@@ -1113,6 +1236,10 @@ AzaharTexturePackStatus AzaharTexturePackRuntime::Snapshot() const {
 
 uint64_t AzaharTexturePackRuntime::Generation() const {
     return mImpl->Generation();
+}
+
+AzaharHudPackStatus AzaharTexturePackRuntime::HudStatus() const {
+    return mImpl->HudStatus();
 }
 
 void AzaharTexturePackRuntime::WaitForPendingDumps() {

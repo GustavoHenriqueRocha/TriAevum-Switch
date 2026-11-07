@@ -11,6 +11,7 @@
 #include "fast/oot3d/pica_uniform_layout.h"
 #include "fast/renderer3ds/pica_gl_shader_dialect.h"
 #include "fast/renderer3ds/pica_surface_appearance.h"
+#include "oot3d/renderer/azahar_texture_pack.h"
 
 #include <switch.h>
 
@@ -663,6 +664,19 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(resources.UniformBytes >> 10),
                 static_cast<unsigned long long>(resources.UniformReuses),
                 static_cast<unsigned long long>(resources.StreamFailures));
+    // The HUD's pack images (TopScreen HUD, drawn by the UI renderer): those
+    // decoded at start-up from config/texture_pack_hud and the worker time
+    // they took, and those decoded on first sight (drawn late: the longest
+    // wait). Only with a texture pack whose HUD images were seen.
+    if (const auto hud = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().HudStatus();
+        hud.Listed != 0U || hud.OnSightDecodes != 0U) {
+        Deko3d::Log("hud pack (%s): listed=%zu preloaded=%zu/%zu in %llu ms (%llu KiB); first sight=%zu "
+                    "(wait max %llu ms)",
+                    when, hud.Listed, hud.PreloadDecoded, hud.PreloadQueued,
+                    static_cast<unsigned long long>(hud.PreloadMicros / 1000U),
+                    static_cast<unsigned long long>(hud.PreloadBytes >> 10), hud.OnSightDecodes,
+                    static_cast<unsigned long long>(hud.OnSightWaitMaxMicros / 1000U));
+    }
     const auto& targets = mTargets.Stats();
     Deko3d::Log("pica calls (%s): draws=%llu transfers=%llu presents=%llu fills=%llu clears=%llu resets=%llu "
                 "completions queued=%llu taken=%llu",
