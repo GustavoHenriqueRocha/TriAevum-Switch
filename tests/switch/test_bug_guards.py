@@ -261,6 +261,15 @@ GUARDS = [
           r'if \(!PerPixelCostAdmits\(draw\.DepthWriteEnabled\)\) return PerPixelRefusal::NoDepthWrite;',
           test="oot3d_deko3d_lighting_tests (TestPerPixel)",
           forbid=r'PerPixelCostAdmits\(draw\.Blend\.Enabled'),
+    Guard("lighting by frame kind: the fps60 in-between frames' per-pixel draws are counted apart from the real ones, through the host-tested decision (0.1.2-test.7 blink)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'auto& kind = mInBetweenSample \? mInBetweenLighting : mRealLighting;.*?'
+          r'Deko3d::AdmitPerPixelDraw\(draw\).*?Deko3d::BuildPerPixelSurface\(draw, mLightingEnvironment, mLightingView,.*?'
+          r'kind\.Light\(mSurfaceLighting\);.*?"lighting in-between \(%s\): %s"',
+          test="oot3d_deko3d_inbetween_lighting_tests"),
+    Guard("lighting by frame kind: deko3d learns the frame kind from the published temporal sample",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'mInBetweenSample = sample\.Synthetic;'),
     Guard("lighting3: logs/deko3d.txt counts each issued draw by base program class (per-frame breakdown)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'mFrameDraws\.Current\.Count\(program\.Base, program\.Lit, draw\.Blend\.Enabled, pixels\);',

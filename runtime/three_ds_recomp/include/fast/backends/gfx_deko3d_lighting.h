@@ -236,16 +236,23 @@ struct FrameKindLighting {
         ++Refusals[static_cast<size_t>(refusal)];
         if (FirstRefusal == PerPixelRefusal::None) FirstRefusal = refusal;
     }
+    // Lit draws whose block has the scene environment off (w = 0) or no rim:
+    // a frame lit like native shading counts here whatever its kind.
+    uint64_t LitWithoutEnvironment = 0;
+    uint64_t LitWithoutRim = 0;
     void Light(const Renderer3ds::PicaSurfaceLightingUniforms& block) noexcept {
         ++Lit;
+        if (block.EnvironmentParameters[3] == 0.0F) ++LitWithoutEnvironment;
+        if (block.Rim[0] <= 0.0F) ++LitWithoutRim;
         if (!FirstLit)
             FirstLit = BlockSummary{block.Control, block.EnvironmentParameters[3], block.Rim[0],
                                     block.BakedReferenceUp[3]};
     }
 };
 
-// "frames=F lit=L native=N ineligible=I first=<reason> (reason=count ...)
-// block control=a/b/c/d env=E rim=R baked=B" (the first lit draw's block).
+// "frames=F lit=L (no env E, no rim R) native=N ineligible=I first=<reason>
+// (reason=count ...) block control=a/b/c/d env=E rim=R baked=B" (the first
+// lit draw's block).
 [[nodiscard]] std::string FormatFrameKindLighting(const FrameKindLighting& kind);
 
 // The per-pixel admission of a draw before its variants are resolved

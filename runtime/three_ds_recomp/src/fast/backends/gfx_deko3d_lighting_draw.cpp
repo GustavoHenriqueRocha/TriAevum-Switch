@@ -36,7 +36,9 @@ const char* PerPixelRefusalName(PerPixelRefusal refusal) noexcept {
 
 std::string FormatFrameKindLighting(const FrameKindLighting& kind) {
     std::string text = "frames=" + std::to_string(kind.Samples) + " lit=" + std::to_string(kind.Lit) +
-                       " native=" + std::to_string(kind.Native) + " ineligible=" + std::to_string(kind.Ineligible) +
+                       " (no env " + std::to_string(kind.LitWithoutEnvironment) + ", no rim " +
+                       std::to_string(kind.LitWithoutRim) + ") native=" + std::to_string(kind.Native) +
+                       " ineligible=" + std::to_string(kind.Ineligible) +
                        " first=" + PerPixelRefusalName(kind.FirstRefusal);
     bool open = false;
     for (size_t index = 1; index < kind.Refusals.size(); ++index) {

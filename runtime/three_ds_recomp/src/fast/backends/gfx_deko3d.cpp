@@ -433,6 +433,20 @@ void GfxRenderingAPIDeko3d::ApplyLightingSettings() {
     mLightingRevision = rendering.Revision;
     mLightingMode = mode;
     if (mode == Deko3d::LightingMode::PerPixel) {
+        // The environment the frame's blocks are built with: a change of
+        // "Use scene environment" or of the scene's profile shows in the log
+        // with its device frame (a one-frame change would light that frame
+        // like native shading: no rim, native ambient).
+        const auto& next = rendering.Environment;
+        if ((next.Enabled != mLightingEnvironment.Enabled || next.ScopeIdentity != mLightingEnvironment.ScopeIdentity ||
+             next.Rim.Enabled != mLightingEnvironment.Rim.Enabled) &&
+            mEnvironmentChangesLogged < 64U) {
+            ++mEnvironmentChangesLogged;
+            Deko3d::Log("lighting: scene environment %s, scope %016llx, rim %s (frame %llu, %s)",
+                        next.Enabled ? "on" : "off", static_cast<unsigned long long>(next.ScopeIdentity),
+                        next.Rim.Enabled ? "on" : "off", static_cast<unsigned long long>(mDevice.Frame()),
+                        mInBetweenSample ? "after an in-between sample" : "after a real sample");
+        }
         mLightingEnvironment = std::move(rendering.Environment);
     }
 }
@@ -570,12 +584,13 @@ void GfxRenderingAPIDeko3d::LogLightingCounters(const char* when) {
                 static_cast<unsigned long long>(c.DrawsSpillingBase), static_cast<unsigned long long>(c.DrawsNoDepthWrite),
                 Deko3d::FormatPicaLitDraws(frames.Last, 1U).c_str(), static_cast<unsigned long long>(frames.Frames),
                 Deko3d::FormatPicaLitDraws(frames.Sum, frames.Frames).c_str());
-    // Per-pixel draws by frame kind since the previous line (its own line:
-    // Log cuts at 511 characters): real frames and fps60 in-between frames,
-    // each with its first refusal and the refusals by reason.
+    // Per-pixel draws by frame kind since the previous line, one line each
+    // (Log cuts at 511 characters): real frames and fps60 in-between frames,
+    // with their first refusal, the refusals by reason and the first lit
+    // draw's block.
     if (mLightingMode == Deko3d::LightingMode::PerPixel) {
-        Deko3d::Log("lighting by frame (%s): real %s | in-between %s", when,
-                    Deko3d::FormatFrameKindLighting(mRealLighting).c_str(),
+        Deko3d::Log("lighting real (%s): %s", when, Deko3d::FormatFrameKindLighting(mRealLighting).c_str());
+        Deko3d::Log("lighting in-between (%s): %s", when,
                     Deko3d::FormatFrameKindLighting(mInBetweenLighting).c_str());
     }
     mRealLighting = {};

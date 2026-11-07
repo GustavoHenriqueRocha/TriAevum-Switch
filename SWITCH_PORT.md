@@ -1831,6 +1831,48 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   mutations stable/idempotent/only the intended lines, off = native, lookup and fallback, block layout
   against upstream's and binding); guards in `tests/switch/test_bug_guards.py`.
 
+### Per-pixel blink on fps60 in-between frames (0.1.2-test.7 videos, `logs15`, 07/11)
+- **Seen:** Temple of Time, Per-pixel, HD pack, scale 3.00, `exact_step=1 carry_unmatched=1`: every 2-3 s
+  one frame shades differently. Geometry is right (leg silhouettes lie between the neighbours'); Link's
+  trousers go from cool grey with rim and the per-pixel dots (RGB 69,73,70) to warm beige without rim or
+  dots (99,90,74); windows ~1.4x and far surfaces brighter. Crops: `~/oot3d-work/blink/evidence/`.
+- **Which frames:** the scene costs ~20.5 ms of GPU per step, so the pacing governor sits at
+  `level=dropped` and draws one probe in-between frame every couple of seconds (`probes=1-2` per 150
+  frames); the transients match that rate. In a scene that holds 60 FPS every other frame is an
+  in-between frame [INFERENCE: a 30 Hz shading flicker].
+- **What is ruled out (host test `oot3d_deko3d_inbetween_lighting_tests`):** the backend's per-pixel
+  decision now lives in `Deko3d::BuildPerPixelSurface` / `AdmitPerPixelDraw`
+  (`gfx_deko3d_lighting_draw.cpp`, the same code `ApplyPicaLighting` runs). Two real frames of a lit CMB
+  draw (camera turning, Navi moving: the light binding is interpolated) go through the prepared
+  transition, its samples at 0, 1/2 (and 1/4) and the next real frame, the bridge's draw view and that
+  decision: every frame kind is admitted, keeps the rim, the environment and the branches (`control`),
+  and the in-between block lies between the two real blocks. The same test built with `-ffast-math` on
+  the visual-frame, bridge, surface-lighting and decision sources (as the Switch builds them,
+  `~/oot3d-work/blink/fastmath/run.sh`) passes too. And `logs15` measures the probe in-between frames at the
+  step's GPU cost (`gpu_ms_full` ~20.5 = `gpu_ms_step`) while per-pixel covers ~49 of 64 Mpx per step: the
+  in-between frames do bind the per-pixel variant. So it is not the draw selection falling back to native
+  (H1). Open: what the in-between frame's variant receives (a block with the environment or rim off, or
+  the variant's own inputs) [not proved on the host].
+- **Counters (next console run decides it):** after each `lighting (frame)` line, `logs/deko3d.txt` has
+  `lighting real (frame): ...` and `lighting in-between (frame): ...` since the previous line: `frames`
+  (temporal samples of that kind; deko3d learns the kind from `PublishPicaFrameTemporalSample`'s
+  `Synthetic`), `lit=L (no env E, no rim R)` (lit draws whose block has the scene environment off or no
+  rim), `native`, `ineligible`, `first=<reason>` and the refusals by reason (`not_scene_world`,
+  `no_surface_program`, `no_depth_write`, `fragment_operation`, `no_uniforms`, `not_perspective`,
+  `not_relightable`, `native_lights`, `no_camera`, `block`), then `block control=a/b/c/d env=E rim=R baked=B`
+  of the first lit draw. Any change of the scene environment the blocks are built with (on/off, scope,
+  rim) is logged as `lighting: scene environment on|off, scope S, rim on|off (frame N, after an
+  in-between|real sample)` (at most 64 lines).
+- **Reading them:** in-between `ineligible` with a `first` reason = H1 (that rule); in-between `no env`/`no
+  rim` close to its `lit` while real ones are 0, or a `scene environment off` line at the blink = the block
+  (environment) side; both like the real line = the GPU side (what the variant reads at run time).
+- **Check (one minute):** Per-pixel, 60 FPS, Temple of Time, Link close up for ~30 s, then
+  `logs/deko3d.txt`: compare the `lighting real` and `lighting in-between` lines (and any `scene
+  environment` line). No `deko3d.pack` rebuild needed for this change.
+- Code: `gfx_deko3d_lighting_draw.cpp`, `gfx_deko3d_lighting.h` (`PerPixelRefusal`, `FrameKindLighting`),
+  `gfx_deko3d.cpp` (`ApplyPicaLighting`, `ApplyLightingSettings`, `LogLightingCounters`),
+  `gfx_deko3d_grass.cpp` (`PublishPicaFrameTemporalSample`). Guard "lighting by frame kind".
+
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
   field; default `0.1.0-dev`) and `OOT3D_RELEASE_BUILD` (monotonic integer; default 0). Both go

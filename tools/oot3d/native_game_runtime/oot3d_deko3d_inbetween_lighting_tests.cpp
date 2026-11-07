@@ -301,7 +301,7 @@ void TestInBetweenLightsLikeRealFrames(float alpha, const char* what) {
     RequireLitLikeRealFrames(step[0], inBetween[0], next[0], what);
 }
 
-// logs/deko3d.txt "lighting by frame": counts, first refusal, refusals by
+// logs/deko3d.txt "lighting real/in-between": counts, first refusal, refusals by
 // reason and the first lit draw's block, per frame kind.
 void TestFrameKindLog() {
     using namespace Fast::Deko3d;
@@ -319,10 +319,11 @@ void TestFrameKindLog() {
     kind.Refuse(PerPixelRefusal::NoCamera);
     ++kind.Native;
     const std::string text = FormatFrameKindLighting(kind);
-    Require(text == "frames=2 lit=2 native=1 ineligible=3 first=no_camera (no_depth_write=1 no_camera=2) "
+    Require(text == "frames=2 lit=2 (no env 0, no rim 1) native=1 ineligible=3 first=no_camera "
+                    "(no_depth_write=1 no_camera=2) "
                     "block control=1/0/1/0 env=1 rim=0.5 baked=0",
             "frame kind log: " + text);
-    Require(FormatFrameKindLighting({}) == "frames=0 lit=0 native=0 ineligible=0 first=none",
+    Require(FormatFrameKindLighting({}) == "frames=0 lit=0 (no env 0, no rim 0) native=0 ineligible=0 first=none",
             "empty frame kind log");
 }
 
