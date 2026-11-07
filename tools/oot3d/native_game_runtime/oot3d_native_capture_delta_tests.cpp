@@ -40,6 +40,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -544,6 +545,25 @@ void RequireSameDraws(const std::vector<Oot3dPicaDrawSubmission>& reference,
     }
 }
 
+
+// config/plan_full_identity, plan_copy_build, plan_one_lock (as the builder's
+// SetBuildOptions takes them): set per replay by main.
+struct BuildMode {
+    bool CanonicalIdentity = true;
+    bool InPlace = false;
+    bool Parallel = false;
+};
+BuildMode gBuild;
+
+// One batch built through a deferred builder (kept alive for comparison).
+struct DeferredResult {
+    Oot3dPicaVulkanShaderSourceCache Cache;
+    std::shared_ptr<Oot3dPicaDeferredPlanBatch> Batch;
+    std::vector<Oot3dPicaVulkanDrawPlan> Plans;
+    std::vector<char> Built;
+    std::vector<std::string> Errors;
+};
+
 // How the delta run's draws of one drain pass reach their consumer.
 enum class Consumer { Take, Prefixes, Builder, BuilderWorker };
 
@@ -591,54 +611,81 @@ void Drain(Run& reference, Run& delta, Run& packets, Consumer consumer, std::mt1
         RequireSameDraws(expected, draws, "capture delta, log replayed in prefixes");
         return;
     }
-    // The runtime's path: placeholders, publish, plans resolved in any order
-    // (the render thread) while the worker may be building in order.
-    Oot3dPicaVulkanShaderSourceCache cache;
-    Oot3dPicaDeferredPlanBuilder builder(cache);
-    builder.Configure(true, consumer == Consumer::BuilderWorker);
-    auto batch = builder.BeginBatch(draws, std::move(log));
-    auto* const submissions = &batch->Submissions;
-    std::vector<Oot3dPicaVulkanDrawPlan> plans(submissions->size());
-    for (size_t index = 0; index < plans.size(); ++index) builder.FillDeferredPlan(batch, index, plans[index]);
-    builder.Publish(batch);
-    std::vector<size_t> order(plans.size());
-    std::iota(order.begin(), order.end(), 0U);
-    std::shuffle(order.begin(), order.end(), random);
-    std::vector<bool> built(plans.size());
-    std::vector<std::string> errors(plans.size());
-    for (const size_t index : order) built[index] = ResolveOot3dPicaDeferredDrawPlan(plans[index], &errors[index]);
-    builder.StopWorker();
-    // Built plans consumed the snapshots; everything else must match.
-    for (size_t index = 0; index < plans.size(); ++index) {
-        Require((*submissions)[index].DeltaEntry == kOot3dPicaNoDeltaEntry,
-                "the plan builder left a draw unmaterialized");
-        RequireSameSubmission(expected[index], (*submissions)[index], true, false,
-                              "capture delta through the plan builder");
-    }
+    // The runtime's path: placeholders, publish, then plans resolved by
+    // several threads at once, each on its own slots in random order (render
+    // thread and dependency flushes) while the worker builds in order. With
+    // parallel builds (gBuild.Parallel) two threads build slots N and N+1 at
+    // the same time, each replaying the log up to its slot first. The delta
+    // draws (with their log) and a copy of the reference draws (complete)
+    // both go this way.
+    const auto deferred = [&](std::vector<Oot3dPicaDrawSubmission>& submissions,
+                              std::shared_ptr<Oot3dPicaCaptureDeltaLog> deltaLog,
+                              std::string_view what) {
+        auto owned = std::make_unique<DeferredResult>();
+        auto& result = *owned;
+        Oot3dPicaDeferredPlanBuilder builder(result.Cache);
+        builder.SetBuildOptions(gBuild.CanonicalIdentity, gBuild.InPlace, gBuild.Parallel);
+        builder.Configure(true, consumer == Consumer::BuilderWorker);
+        result.Batch = builder.BeginBatch(submissions, std::move(deltaLog));
+        result.Plans.resize(result.Batch->Submissions.size());
+        for (size_t index = 0; index < result.Plans.size(); ++index)
+            builder.FillDeferredPlan(result.Batch, index, result.Plans[index]);
+        builder.Publish(result.Batch);
+        std::vector<size_t> order(result.Plans.size());
+        std::iota(order.begin(), order.end(), 0U);
+        std::shuffle(order.begin(), order.end(), random);
+        result.Built.assign(result.Plans.size(), 0);
+        result.Errors.assign(result.Plans.size(), {});
+        const size_t threads = 1U + random() % 3U;
+        std::vector<std::thread> resolvers;
+        for (size_t thread = 0; thread < threads; ++thread) {
+            resolvers.emplace_back([&, thread] {
+                for (size_t position = thread; position < order.size(); position += threads) {
+                    const size_t index = order[position];
+                    result.Built[index] = ResolveOot3dPicaDeferredDrawPlan(result.Plans[index],
+                                                                           &result.Errors[index]) ? 1 : 0;
+                }
+            });
+        }
+        for (auto& resolver : resolvers) resolver.join();
+        builder.StopWorker();
+        // Built plans consumed the snapshots; everything else must match.
+        for (size_t index = 0; index < result.Plans.size(); ++index) {
+            Require(result.Batch->Submissions[index].DeltaEntry == kOot3dPicaNoDeltaEntry,
+                    std::string(what) + ": the plan builder left a draw unmaterialized");
+            RequireSameSubmission(expected[index], result.Batch->Submissions[index], true, false, what);
+        }
+        return owned;
+    };
+    std::vector<Oot3dPicaDrawSubmission> referenceCopy = expected;
+    const auto fromDelta = deferred(draws, std::move(log), "capture delta through the plan builder");
+    const auto fromReference = deferred(referenceCopy, nullptr, "full capture through the plan builder");
     Oot3dPicaVulkanShaderSourceCache serialCache;
     Oot3dPicaDeferredPlanBuilder serial(serialCache);
-    for (size_t index = 0; index < plans.size(); ++index) {
+    serial.SetBuildOptions(gBuild.CanonicalIdentity, gBuild.InPlace, gBuild.Parallel);
+    for (size_t index = 0; index < expected.size(); ++index) {
         Oot3dPicaVulkanDrawPlan plan;
         std::string error;
         const bool ok = serial.Build(expected[index], plan, &error);
-        // The deferred path prefixes the builder's message.
-        Require(ok == built[index] && std::string_view(errors[index]).ends_with(error),
-                "a deferred plan built from delta draws succeeded or failed differently: serial " +
-                    std::to_string(ok) + " '" + error + "', deferred " + std::to_string(built[index]) + " '" +
-                    errors[index] + "'");
+        for (const DeferredResult* result : {fromDelta.get(), fromReference.get()}) {
+            const auto& other = result->Plans[index];
+            // The deferred path prefixes the builder's message.
+            Require(ok == (result->Built[index] != 0) &&
+                        std::string_view(result->Errors[index]).ends_with(error),
+                    "a deferred plan succeeded or failed differently: serial " + std::to_string(ok) + " '" +
+                        error + "', deferred '" + result->Errors[index] + "'");
+            if (!ok) continue;
+            Require(ComputeOot3dPicaVisualDrawIdentity(plan) == ComputeOot3dPicaVisualDrawIdentity(other),
+                    "a deferred plan differs from the serial plan");
+            Require(std::memcmp(plan.VertexShader.Uniforms.Floats.data(), other.VertexShader.Uniforms.Floats.data(),
+                                sizeof(plan.VertexShader.Uniforms.Floats)) == 0 &&
+                        plan.ResolvedVertexShaderSource() == other.ResolvedVertexShaderSource() &&
+                        plan.ResolvedFragmentShaderSource() == other.ResolvedFragmentShaderSource(),
+                    "a deferred plan has other uniforms or shaders");
+        }
         ++stats.Plans;
         stats.PlanErrors += ok ? 0U : 1U;
         if (!ok && stats.FirstPlanError.empty()) stats.FirstPlanError = error;
-        if (ok) {
-            Require(ComputeOot3dPicaVisualDrawIdentity(plan) == ComputeOot3dPicaVisualDrawIdentity(plans[index]),
-                    "a plan built from delta draws differs from the serial plan");
-            Require(std::memcmp(plan.VertexShader.Uniforms.Floats.data(),
-                                plans[index].VertexShader.Uniforms.Floats.data(),
-                                sizeof(plan.VertexShader.Uniforms.Floats)) == 0 &&
-                        plan.ResolvedVertexShaderSource() == plans[index].ResolvedVertexShaderSource() &&
-                        plan.ResolvedFragmentShaderSource() == plans[index].ResolvedFragmentShaderSource(),
-                    "a plan built from delta draws has other uniforms or shaders");
-        }
     }
 }
 
@@ -719,7 +766,8 @@ void TestReplay(uint64_t seed, size_t lists) {
                 counters.Keyframes + counters.DeltaDraws + stats.Failures == counters.Draws,
             "capture delta did not record its draws as keyframes and deltas");
     Require(counters.StateBytes < referenceCounters.StateBytes, "capture delta did not copy less state");
-    Require(frontend.SameValueWrites != 0U && frontend.LutReuses != 0U &&
+    // A restored LUT content needs a long enough stream (short TSan runs).
+    Require(frontend.SameValueWrites != 0U && (frontend.LutReuses != 0U || lists < 200U) &&
                 frontend.LutHashes < referenceFrontend.LutHashes &&
                 frontend.TableCopies <= referenceFrontend.TableCopies,
             "capture delta did not skip same-value writes or reuse LUT hashes");
@@ -810,8 +858,16 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
-    const size_t lists = argc > 1 ? static_cast<size_t>(std::strtoul(argv[1], nullptr, 10)) : 400U;
-    for (uint64_t seed = 1U; seed <= 4U; ++seed) TestReplay(seed, lists);
+    const size_t lists = argc > 1 ? static_cast<size_t>(std::strtoul(argv[1], nullptr, 10)) : 200U;
+    // Every build-option combination (8), delta on and off in each replay.
+    for (uint64_t combination = 0U; combination < 8U; ++combination) {
+        gBuild.CanonicalIdentity = (combination & 1U) == 0U;
+        gBuild.InPlace = (combination & 2U) != 0U;
+        gBuild.Parallel = (combination & 4U) != 0U;
+        std::printf("build options: canonical_identity=%d in_place=%d parallel=%d\n",
+                    gBuild.CanonicalIdentity ? 1 : 0, gBuild.InPlace ? 1 : 0, gBuild.Parallel ? 1 : 0);
+        TestReplay(combination + 1U, lists);
+    }
     std::cout << "oot3d_native_capture_delta_tests: ok\n";
     return 0;
 }
