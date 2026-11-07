@@ -429,6 +429,12 @@ bool AppendTopScreenNativeCounters(
     std::string *error = nullptr, const TopScreenUiConfig *config = nullptr,
     const TopScreenExtendedInputFrame *input = nullptr);
 
+// The button labels (ZR/ZL here, X/Y/B in the auxiliary group) draw over the
+// item icons (layer 13), as on the mod's screenshots (GameBanana 695893:
+// "ZR" over the slingshot and the bow, "Y" and "X" over their items); a pack's
+// larger icons (HenrikoMagnifico's) covered them at the icons' layer.
+inline constexpr std::uint32_t kTopScreenButtonLabelLayer = 14U;
+
 struct TopScreenTouchLabelsGeometry {
   std::array<TopScreenTexturedQuad, 2> Quads{};
 };

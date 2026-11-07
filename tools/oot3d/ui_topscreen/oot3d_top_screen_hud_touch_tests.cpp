@@ -7,6 +7,7 @@
 #include "oot3d_top_screen_mod_profile.h"
 #include "three_ds_input.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -374,6 +375,57 @@ void TestEveryItemIconHasACircle() {
       Require(circles == 1, "an item icon sits in exactly one circle");
     }
     Require(drawn == test.Sources, "the layout draws the expected items");
+  }
+}
+
+// The button labels draw over the item icons, as on the mod's screenshots
+// (ZR over the slingshot/bow, X and Y over their items): the bridge appends
+// the labels before the icons and the renderer stable-sorts by layer, so the
+// labels need a higher layer. Before, both were layer 13 and a texture pack's
+// larger icon (Henriko's bomb) covered the R of ZR.
+void TestLabelsOverItemIcons() {
+  for (const bool restoration : {false, true}) {
+    const auto layout = restoration ? TopScreenHudLayout::Restoration
+                                    : TopScreenHudLayout::Normal;
+    const bool zrHeld = restoration;
+    oot3d::ui::UiTextureIdentity atlas;
+    atlas.semantic_name = "custom-ui01";
+    std::vector<oot3d::ui::UiPrimitive> hud;
+    AppendTopScreenAuxiliaryTouchPresentation(
+        BuildTopScreenAuxiliaryTouchGeometry({}, {0, 0, 0, 0}, 1.0F, layout,
+                                             zrHeld),
+        atlas, hud);
+    AppendTopScreenTouchLabelsPresentation(
+        BuildTopScreenTouchLabelsGeometry({0, 0, 0, 0}, 1.0F, layout), atlas,
+        hud);
+    const std::size_t labels = hud.size();
+    Require(labels >= 2U, "the HUD has button labels");
+    const auto icons = NativeItemIcons(1.0F, 1.0F, nullptr, layout, zrHeld);
+    hud.insert(hud.end(), icons.begin(), icons.end());
+    for (std::size_t index = 0; index < hud.size(); ++index)
+      hud[index].source_quad += index < labels ? 0x1000U : 0x2000U; // tag
+    std::stable_sort(hud.begin(), hud.end(), [](const auto &a, const auto &b) {
+      return a.layer < b.layer;
+    });
+    std::size_t overlaps = 0;
+    for (std::size_t l = 0; l < hud.size(); ++l) {
+      if ((hud[l].source_quad & 0x1000U) == 0U || !hud[l].visible)
+        continue;
+      for (std::size_t i = 0; i < hud.size(); ++i) {
+        const auto &icon = hud[i];
+        if ((icon.source_quad & 0x2000U) == 0U || !icon.visible ||
+            icon.role != oot3d::ui::UiPrimitiveRole::ActionButton)
+          continue;
+        const auto &a = hud[l].destination;
+        const auto &b = icon.destination;
+        if (a.x >= b.x + b.width || b.x >= a.x + a.width ||
+            a.y >= b.y + b.height || b.y >= a.y + a.height)
+          continue;
+        ++overlaps;
+        Require(l > i, "a button label is drawn over the item icon it touches");
+      }
+    }
+    Require(overlaps != 0U, "the labels overlap their item icons (layout)");
   }
 }
 
@@ -862,6 +914,7 @@ int main() {
   TestDpadIcons();
   TestHiddenControls();
   TestEveryItemIconHasACircle();
+  TestLabelsOverItemIcons();
   TestRestorationItemLanes();
   TestTracker();
   TestAimOwnership();

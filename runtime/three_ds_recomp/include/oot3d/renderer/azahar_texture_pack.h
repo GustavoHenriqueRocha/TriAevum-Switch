@@ -52,6 +52,12 @@ struct AzaharTextureRequest {
     // worker, whose image is then queued as one decoded ahead (not a first
     // sight). Answers Pending without a hash. Only with UserInterface.
     bool Ahead = false;
+    // With UserInterface: a texture of the game's own menus that the PICA
+    // renderer draws (pause pages, text boxes; deko3d's `Ui` composition
+    // domain, config/texture_pack_menu). Cached, queued and listed as a HUD
+    // image (kept for the session, decoded ahead at the next start); its first
+    // sights are counted apart (AzaharHudPackStatus::MenuOnSight*).
+    bool Menu = false;
 };
 
 struct AzaharTextureReplacement {
@@ -163,6 +169,9 @@ struct AzaharHudPackStatus {
     uint64_t PreloadBytes = 0;
     size_t OnSightDecodes = 0;
     uint64_t OnSightWaitMaxMicros = 0;
+    // The same for the PICA menu textures (AzaharTextureRequest::Menu).
+    size_t MenuOnSightDecodes = 0;
+    uint64_t MenuOnSightWaitMaxMicros = 0;
 };
 
 // Azahar's modern custom-texture identity is CityHash64 over the untouched
@@ -206,7 +215,8 @@ class AzaharTexturePackRuntime final {
     // PollQueued that queues the decode again when the image was released
     // (ReleaseDecoded) or never queued; native size as in the request.
     [[nodiscard]] AzaharTextureResolveResult
-    PollOrQueue(uint64_t nativeHash, uint16_t nativeWidth, uint16_t nativeHeight);
+    PollOrQueue(uint64_t nativeHash, uint16_t nativeWidth, uint16_t nativeHeight, bool userInterface = false,
+                bool menu = false);
     // Drops the decoded image of `nativeHash` from the cache once a renderer
     // holds it on the GPU; a later request decodes it again.
     void ReleaseDecoded(uint64_t nativeHash, uint64_t generation);

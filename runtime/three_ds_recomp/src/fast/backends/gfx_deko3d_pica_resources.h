@@ -50,6 +50,10 @@ struct PicaResourceStats {
     uint64_t TextureReplacementLiveBytes = 0; // pack images resident now (part of TextureBytes)
     uint64_t TextureReplacementReuploads = 0; // pack images uploaded again (evicted since), same pack settings
     uint64_t TextureReplacementsBatched = 0;  // of TextureReplacements: uploaded at frame top (UploadReadyReplacements)
+    // Menu textures (PicaTextureIsMenuArt, config/texture_pack_menu) made with a pack image: its image was
+    // ready at the texture's first draw, or the native texture was drawn first (the swap in view).
+    uint64_t MenuTexturesReady = 0;
+    uint64_t MenuTexturesNativeFirst = 0;
 };
 
 // What one draw binds: texture handles for bindings 1..3 and 13, the vertex
@@ -135,6 +139,7 @@ class PicaResources {
         uint64_t LastUsedFrame = 0;
         uint64_t PackHash = 0;          // texture pack identity while its image is still being decoded
         bool PackPending = false;
+        bool PackMenu = false;          // resolved as a HUD image (PicaTextureIsMenuArt)
         bool Replacement = false;       // a texture pack image (under the replacement key)
         uint32_t PackEpoch = 0;         // mPackEpoch when made
         // While PackPending: the view it was made from (spans empty), so
@@ -151,15 +156,16 @@ class PicaResources {
     // A uniform block in this frame's stream; one equal to `last` (this
     // frame) is bound again instead of copied.
     bool StreamUniforms(std::span<const uint8_t> bytes, LastUniforms& last, DkGpuAddr& address, uint32_t& size);
-    DkResHandle TextureHandle(const Renderer3ds::PicaTextureView& texture);
+    DkResHandle TextureHandle(const Renderer3ds::PicaTextureView& texture, bool uiDraw);
     DkResHandle LightingLutHandle(const Renderer3ds::PicaLightingLutView& lut);
     // A sampled 2D image with its own memory block, its descriptor in `slot`.
     bool CreateImage(Texture& texture, DkImageFormat format, uint32_t width, uint32_t height, uint32_t levels);
     void UploadLevel(const Texture& texture, uint32_t level, uint32_t width, uint32_t height, DkGpuAddr source);
     void Destroy(Texture& texture) noexcept;
     // The texture pack image (larger than the native one) under the replacement key; 0 when not now.
+    // `menu`: a HUD image (kept by the pack runtime), not released after the upload.
     DkResHandle UploadReplacement(const Renderer3ds::PicaTextureView& view, const PicaTextureKey& key,
-                                  const ::Oot3d::Renderer::AzaharTextureReplacement& replacement);
+                                  const ::Oot3d::Renderer::AzaharTextureReplacement& replacement, bool menu);
     // Applies a texture pack change published by the Video tab (BeginFrame).
     void ApplyTexturePackSettings();
     // Takes an entry out of the cache; its memory goes in Evict once no
@@ -192,6 +198,7 @@ class PicaResources {
     uint32_t mPackEpoch = 1;                   // grows on every pack change (TexturePackEntryActionFor)
     bool mReleaseStalePack = false;            // pack images of earlier settings may still be cached
     bool mPackConfigured = false;              // the pack runtime was configured (the pack was on once)
+    bool mMenuImages = true;                   // config/texture_pack_menu (ParseTexturePackMenuSetting)
     std::vector<Texture> mRetired;
     // Replacement keys uploaded under the current pack settings (TextureReplacementReuploads).
     std::unordered_set<PicaTextureKey, PicaTextureKeyHash> mReplacementKeysUploaded;

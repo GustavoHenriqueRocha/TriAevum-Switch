@@ -1374,6 +1374,25 @@ GUARDS = [
           r'\.UserInterface = true,\s+\.Ahead = request\.ahead,',
           "oot3d_azahar_texture_pack_tests (HudImagesAskedAheadAreReadyAtFirstSight), "
           "oot3d_native_ui_texture_provider_tests"),
+    # --- 07/11 (test.9): pause pages showed the game's tab bar, then the pack's, on every page ---
+    Guard("pause pages (PICA, Ui draws) resolve their pack images as HUD images, shared with the HUD's ahead requests",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'menu = PicaTextureIsMenuArt\(view, uiDraw, mMenuImages\);.*?\.UserInterface = menu,\s+\.Menu = menu,',
+          "oot3d_azahar_texture_pack_tests (MenuTexturesShareTheHudImagesAndStayDecoded), "
+          "oot3d_deko3d_backend_tests (TestMenuArt)"),
+    Guard("a menu texture's pack image is not released after its upload (another guest address re-decoded it)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'if \(!menu\) \{\s+::Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.ReleaseDecoded\(',
+          "oot3d_azahar_texture_pack_tests (MenuTexturesShareTheHudImagesAndStayDecoded)"),
+    Guard("a HUD/menu texture asked for at its draw goes before the images decoded ahead",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'if \(onSight\) \{\s+mUiLoadJobs\.push_front\(std::move\(job\)\);',
+          "oot3d_azahar_texture_pack_tests (TexturesOnScreenGoBeforeHudImagesAskedAhead)"),
+    Guard("HUD button labels draw over the item icons (a pack's bigger bomb hid the R of ZR)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'primitive\.layer = kTopScreenButtonLabelLayer;.*?'
+          r'primitive\.layer = index < 4U \? kTopScreenButtonLabelLayer : 13U;',
+          "oot3d_top_screen_hud_touch_tests (TestLabelsOverItemIcons)"),
     # --- 05/11: inventory taps one slot off (pause Items/Gear/Map, TopScreen) ---
     # The touch scaled the 400-wide top screen down to the 320-wide touch
     # screen, but TopScreen draws the page one pixel per pixel at X + 40 (the

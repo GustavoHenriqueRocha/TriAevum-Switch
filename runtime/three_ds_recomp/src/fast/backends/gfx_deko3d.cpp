@@ -696,14 +696,25 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
     // the HUD textures the UI asks for ahead from the title screen on), the
     // time from the index to the last of them and their size, and those the
     // HUD asked for before they were ready (held: the longest wait).
-    if (const auto hud = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().HudStatus();
-        hud.Listed != 0U || hud.PreloadQueued != 0U || hud.OnSightDecodes != 0U) {
+    const auto hud = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().HudStatus();
+    if (hud.Listed != 0U || hud.PreloadQueued != 0U || hud.OnSightDecodes != 0U) {
         Deko3d::Log("hud pack (%s): listed=%zu ahead=%zu/%zu in %llu ms (%llu KiB); first sight=%zu "
                     "(wait max %llu ms)",
                     when, hud.Listed, hud.PreloadDecoded, hud.PreloadQueued,
                     static_cast<unsigned long long>(hud.PreloadMicros / 1000U),
                     static_cast<unsigned long long>(hud.PreloadBytes >> 10), hud.OnSightDecodes,
                     static_cast<unsigned long long>(hud.OnSightWaitMaxMicros / 1000U));
+    }
+    // The game's menus drawn through PICA (pause pages, text boxes) whose pack
+    // images resolve as HUD images (config/texture_pack_menu): textures whose
+    // image was ready at their first draw, those drawn native first (the swap
+    // in view), and how long the slowest of those waited for its decode.
+    if (resources.MenuTexturesReady != 0U || resources.MenuTexturesNativeFirst != 0U) {
+        Deko3d::Log("menu pack (%s): textures ready at first draw=%llu, native first=%llu; decoded on sight=%zu "
+                    "(wait max %llu ms)",
+                    when, static_cast<unsigned long long>(resources.MenuTexturesReady),
+                    static_cast<unsigned long long>(resources.MenuTexturesNativeFirst), hud.MenuOnSightDecodes,
+                    static_cast<unsigned long long>(hud.MenuOnSightWaitMaxMicros / 1000U));
     }
     const auto& targets = mTargets.Stats();
     Deko3d::Log("pica calls (%s): draws=%llu transfers=%llu presents=%llu fills=%llu clears=%llu resets=%llu "
