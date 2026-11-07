@@ -280,6 +280,13 @@ GUARDS = [
     Guard("deko3d per-pixel lighting: the draw binds the surface block at kSurfaceLightingBinding (5)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'dkCmdBufBindUniformBuffer\(cmd, DkStage_Fragment, Deko3d::kSurfaceLightingBinding, res\.SurfaceLighting,'),
+    # --- 0.1.2-test.7: per-pixel dots, 8x4-pixel (one warp) tiles of wrong lighting on Link and floors ---
+    Guard("per-pixel dots: the interpolants are read once at the top of the per-pixel body, never per use inside the light loops or lane-dependent branches",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting.cpp",
+          r'PicaSurfaceFragment pica_surface_fragment\(\) \{.*?fragment\.view = clamp\(pica_view, -finite, finite\);.*?'
+          r'PicaSurfaceFragment pica_surface_inputs = pica_surface_fragment\(\);',
+          test="test_perpixel_lighting.py (test_interpolants_read_once_at_the_top, test_branches_are_uniform)",
+          forbid=r'pica_surface_unit\(pica_view\)|if \(dot\(n, n\) < 0\.5'),
     # --- lighting3: Forest Temple room 8, 16.7 ms off / 38.4 ms per-pixel busy_ms (spilling parametric programs) ---
     Guard("lighting3: the parametric lighting copied its 256-byte program to a local; the loop's dynamic light index put it in scratch (105 GPRs, 4096 B/warp)",
           "tools/oot3d/native_pica_frontend/oot3d_native_pica_fragment_lighting_gen.cpp",

@@ -1948,6 +1948,39 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   (no blocks, no garbage after a room change or a DRS step); save a state and load it: the restored frame is
   right; take an album screenshot. `dkperf busy_ms`/`scene_ms` against a run with `deko3d_compression` = `0`.
 
+### Per-pixel dots: 8x4-pixel tiles of wrong lighting (0.1.2-test.7, Per-pixel only)
+- **Seen:** dark, white or coloured (cyan, blue, magenta) dashes on Link's trousers and face, the Temple
+  of Time platform, the Forest Temple and Hyrule Field's ground; gone on Native; flickering.
+- **They are warps, not pixels:** the dashes sit on a screen grid of 8 render pixels horizontally
+  (10.67 display pixels at the 2.25x scale of the Temple of Time, Hyrule Field and face shots, 8.0 at the
+  3.0x scale of the Forest Temple shot; phase-locked fit over ~700 detected dashes) and 4 render rows
+  (2.67 display rows in the Hyrule Field shot): 32 pixels, one Maxwell fragment warp. A numeric fault
+  (NaN, Inf, `pow`, a division) is per pixel. CPU evaluation of the test.7 text (`tests/switch/glsl_eval.py`,
+  binary32, Maxwell min/max) over zero/opposite/infinite/NaN normals, the eye at the fragment, a light at
+  the surface, a zero radius and grazing angles: every output finite and in [0, 1]. The math is upstream's
+  (no `saturate`, `max` or epsilon lost in the trim).
+- **What the compiled variants do that native shaders do not** (uam `-r` + envytools `envydis -m gm107`
+  over the 271 p7b texts, the console-missing texts and the six parametric bases): scoreboard RAW/WAR,
+  predicate latency (13 cycles) and register counts are all correct; no local memory; sync-stack depth 5-7
+  (16 on chip). But the per-pixel code interpolated its inputs at every use: 184 `IPA` per variant against
+  20-25 in the base (`pica_view` 52 times, inside the light loops; the tint ~3000 instructions in), and it
+  had 8 lane-dependent branches (the rim's `dot(n, n) < 0.5`/`dot(l, l) < 0.5` early returns, the rim
+  side ternary); specialized native texts have none. [INFERENCE] the warp-level fault comes from those
+  late/lane-dependent interpolations or branches (nothing else in the variant differs from native code;
+  uniform-buffer streaming is fenced and identical in reuse rules to the PICA uniforms).
+- **Fix (shader text, `deko3d.pack` must be rebuilt):** `pica_surface_fragment()` reads the normal, view
+  and tint once at the top of the body, before any branch (a clamp to the finite range keeps them computed
+  values: a plain copy is propagated back to every use) and passes them down; the per-fragment early
+  returns and the rim side ternary are selects. Same bytes as test.7 on valid inputs and on finite degenerate
+  inputs. A variant now has 22 `IPA`, none after a branch, no lane-dependent control flow, ~15% fewer
+  instructions (3469 -> 2975 on `frag_3555e8fa561f9ca5`), 43 GPRs instead of 37.
+- **Tests:** `tests/switch/test_perpixel_lighting.py` (run.sh): the current text against
+  `tests/switch/data/perpixel_lighting_test7.glsl` on 300 random blocks over every path, degenerate inputs,
+  interpolants read only in `pica_surface_fragment()`, every branch condition uniform. Guard "per-pixel dots".
+- **Check (one minute):** after the pack rebuild, Per-pixel, stand on the Temple of Time platform (or look
+  at Link's legs up close): no dashes. If they remain, the cause is outside the shader structure (next
+  suspects: the per-draw surface block's memory, texture uploads racing slow draws).
+
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
   field; default `0.1.0-dev`) and `OOT3D_RELEASE_BUILD` (monotonic integer; default 0). Both go
