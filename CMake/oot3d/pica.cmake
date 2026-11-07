@@ -218,6 +218,7 @@ oot3d_target_defaults(oot3d_native_pica_transfer_tests FOLDER Tests)
 add_library(oot3d_native_pica_submission STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_submission.cpp
     tools/oot3d/native_game_runtime/oot3d_native_pica_a32_memory_view.cpp
+    tools/oot3d/native_game_runtime/oot3d_native_pica_capture_delta.cpp
 )
 target_include_directories(oot3d_native_pica_submission PUBLIC
     tools/oot3d/native_game_runtime
@@ -353,6 +354,18 @@ add_executable(oot3d_native_offload_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_native_offload_tests PRIVATE
     oot3d_native_pica_vulkan_plan)
 oot3d_target_defaults(oot3d_native_offload_tests FOLDER Tests)
+
+# config/capture_delta: command streams replayed through the frontend and the
+# queue with and without capture delta (taken, deferred to the plan builder,
+# savestates), every submission compared byte for byte; --bench for the
+# capture sub-stages on the real guest memory.
+add_executable(oot3d_native_capture_delta_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_capture_delta_tests.cpp
+)
+target_link_libraries(oot3d_native_capture_delta_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_capture_delta_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_capture_delta_tests)
 
 add_executable(oot3d_native_pica_visual_frame_soak_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_pica_visual_frame_soak_tests.cpp

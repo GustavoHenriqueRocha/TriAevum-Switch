@@ -87,6 +87,24 @@ inline NativeOffloadOptions ReadNativeOffloadOptions() {
     return options;
 }
 
+// config/capture_delta (SWITCH_PORT.md "Capture delta"): the per-draw state
+// capture records only what changed since the previous draw and the plan
+// builder fills the rest off the game thread. Switch: the file absent = on,
+// "0" = the full copy per draw. Desktop: TRIAEVUM_CAPTURE_DELTA=1 (off
+// otherwise).
+inline bool ReadNativeCaptureDelta() {
+#if defined(__SWITCH__)
+    std::ifstream input("sdmc:/switch/oot3dre/config/capture_delta");
+    if (!input) return true;
+    std::string text;
+    std::getline(input, text);
+    return ParseOffloadSwitch(text);
+#else
+    const char* value = std::getenv("TRIAEVUM_CAPTURE_DELTA");
+    return value != nullptr && std::string_view(value) != "" && ParseOffloadSwitch(value);
+#endif
+}
+
 // Appends lines to one file from a service thread, in submission order.
 // Push never waits for the file: it takes a mutex the writer holds only to
 // pop (never during the write) and drops the line when the queue is full.

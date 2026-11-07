@@ -74,6 +74,11 @@ class Oot3dPicaSharedArray final {
         return mStorage->MutationIdentity;
     }
 
+    // A write would copy the storage first (another snapshot shares it).
+    [[nodiscard]] bool Shared() const noexcept {
+        return mStorage.use_count() != 1;
+    }
+
   private:
     struct Storage final {
         Array Values{};
@@ -308,18 +313,84 @@ struct Oot3dPicaRegisterWrite {
     uint32_t FinalValue = 0;
 };
 
+// Construction tag: the packet's register file, float uniforms and default
+// attributes stay unset (not zeroed) because the sink fills them right after
+// (a full copy) or later, off the game thread (config/capture_delta: the
+// capture-delta log of oot3d_native_pica_capture_delta.h).
+struct Oot3dPicaStateArraysDeferred {};
+
 struct Oot3dPicaShaderState {
     static constexpr size_t MaximumProgramWords = 4096;
     static constexpr size_t MaximumSwizzleWords = 4096;
     static constexpr size_t FloatUniformCount = 96;
 
+    Oot3dPicaShaderState() : FloatUniforms{} {}
+    // Everything but FloatUniforms (left unset).
+    Oot3dPicaShaderState(const Oot3dPicaShaderState& other,
+                         Oot3dPicaStateArraysDeferred) noexcept
+        : Program(other.Program), Swizzles(other.Swizzles),
+          IntegerUniforms(other.IntegerUniforms),
+          BooleanUniforms(other.BooleanUniforms),
+          ProgramWordCount(other.ProgramWordCount),
+          SwizzleWordCount(other.SwizzleWordCount) {}
+
     Oot3dPicaSharedArray<uint32_t, MaximumProgramWords> Program;
     Oot3dPicaSharedArray<uint32_t, MaximumSwizzleWords> Swizzles;
-    std::array<std::array<float, 4>, FloatUniformCount> FloatUniforms{};
+    std::array<std::array<float, 4>, FloatUniformCount> FloatUniforms;
     std::array<std::array<uint8_t, 4>, 4> IntegerUniforms{};
     std::array<bool, 16> BooleanUniforms{};
     size_t ProgramWordCount = 0;
     size_t SwizzleWordCount = 0;
+};
+
+// The 64-byte lines of the frontend state written since the capture that
+// last consumed them (config/capture_delta): register file (48 lines of 16
+// registers), vertex and geometry float uniforms (24 lines of 4 vectors
+// each), default attributes (4 lines of 4 vectors). Every line starts dirty;
+// a line rewritten with its own value is still dirty (the capture copies
+// content, the mark only says where to look).
+struct Oot3dPicaStateDirtyLines {
+    static constexpr size_t RegisterLines = 48U;
+    static constexpr size_t UniformLines = 24U;
+    static constexpr size_t AttributeLines = 4U;
+    static constexpr uint64_t AllRegisters = (uint64_t{1} << RegisterLines) - 1U;
+    static constexpr uint32_t AllUniforms = (uint32_t{1} << UniformLines) - 1U;
+    static constexpr uint32_t AllAttributes = (uint32_t{1} << AttributeLines) - 1U;
+
+    uint64_t Registers = AllRegisters;
+    uint32_t VertexUniforms = AllUniforms;
+    uint32_t GeometryUniforms = AllUniforms;
+    uint32_t DefaultAttributes = AllAttributes;
+
+    void MarkRegister(size_t id) noexcept { Registers |= uint64_t{1} << (id >> 4U); }
+    void MarkAll() noexcept { *this = Oot3dPicaStateDirtyLines{}; }
+    void Clear() noexcept {
+        Registers = 0U;
+        VertexUniforms = GeometryUniforms = DefaultAttributes = 0U;
+    }
+};
+
+// Game-thread cost of the frontend's part of the capture (logs/perf.txt
+// "capture:" group), cumulative. Ticks: CaptureTicks().
+struct Oot3dPicaFrontendCaptureStats {
+    uint64_t Lists = 0;
+    uint64_t ListWords = 0;
+    // Whole command lists, the sink's draw captures included.
+    uint64_t ListTicks = 0;
+    // Lighting LUT tables: the 24 KiB content hash at a draw after an
+    // upload, and the 24 KiB copy-on-write at the first upload after a draw.
+    uint64_t LutTicks = 0;
+    uint64_t LutHashes = 0;
+    uint64_t LutCopies = 0;
+    // Capture delta: hashes avoided because the uploads restored the content
+    // of a table seen before (the same bytes, so the same hash).
+    uint64_t LutReuses = 0;
+    // Copy-on-write copies of the shared tables (shader programs, swizzles,
+    // fog and procedural texture tables) made by a write after a draw.
+    uint64_t TableCopies = 0;
+    // Capture delta: table writes of the value already there, skipped (no
+    // copy-on-write and the content hash stays valid).
+    uint64_t SameValueWrites = 0;
 };
 
 // Procedural texture and fog tables: uploaded rarely and referenced by every
@@ -374,10 +445,13 @@ struct Oot3dPicaDrawPacketSource {
     const Oot3dPicaProcTexLutState* ProcTexLuts = nullptr;
     std::shared_ptr<const Oot3dPicaLightingLutState> LightingLuts;
     const std::array<std::array<float, 4>, 16>* DefaultAttributes = nullptr;
+    // The frontend's dirty lines (config/capture_delta); a sink that
+    // captures only what changed clears the lines it consumed.
+    Oot3dPicaStateDirtyLines* DirtyLines = nullptr;
 };
 
 struct Oot3dPicaDrawPacket {
-    Oot3dPicaDrawPacket() = default;
+    Oot3dPicaDrawPacket() : Registers{}, DefaultAttributes{} {}
 
     explicit Oot3dPicaDrawPacket(const Oot3dPicaDrawPacketSource& source)
         : Oot3dPicaDrawPacket(source.CommandListAddress,
@@ -387,6 +461,21 @@ struct Oot3dPicaDrawPacket {
                               *source.VertexShader, *source.GeometryShader,
                               *source.FogLut, *source.ProcTexLuts,
                               source.LightingLuts, *source.DefaultAttributes) {
+        if (source.LightBinding != nullptr) LightBinding = *source.LightBinding;
+    }
+
+    // Everything but the register file, float uniforms and default
+    // attributes, which stay unset (Oot3dPicaStateArraysDeferred).
+    Oot3dPicaDrawPacket(const Oot3dPicaDrawPacketSource& source,
+                        Oot3dPicaStateArraysDeferred deferred)
+        : CommandListAddress(source.CommandListAddress),
+          CommandListOffsetWords(source.CommandListOffsetWords),
+          CompositionDomain(source.CompositionDomain),
+          Composition(source.Composition), Indexed(source.Indexed),
+          VertexShader(*source.VertexShader, deferred),
+          GeometryShader(*source.GeometryShader, deferred),
+          FogLut(*source.FogLut), ProcTexLuts(*source.ProcTexLuts),
+          LightingLuts(source.LightingLuts) {
         if (source.LightBinding != nullptr) LightBinding = *source.LightBinding;
     }
 
@@ -416,13 +505,13 @@ struct Oot3dPicaDrawPacket {
     Oot3dPicaCompositionAttribution Composition;
     Fast::Renderer3ds::PicaNativeLightBinding LightBinding;
     bool Indexed = false;
-    std::array<uint32_t, 0x300> Registers{};
+    std::array<uint32_t, 0x300> Registers;
     Oot3dPicaShaderState VertexShader;
     Oot3dPicaShaderState GeometryShader;
     Oot3dPicaFogLut FogLut;
     Oot3dPicaProcTexLutState ProcTexLuts;
     std::shared_ptr<const Oot3dPicaLightingLutState> LightingLuts;
-    std::array<std::array<float, 4>, 16> DefaultAttributes{};
+    std::array<std::array<float, 4>, 16> DefaultAttributes;
 };
 
 class Oot3dPicaPacketSink {
@@ -480,6 +569,18 @@ class Oot3dNativePicaFrontend {
     // sink as SubmitDrawPacketSource (built in place by the queue).
     void SetInPlaceDrawPackets(bool enabled) noexcept {
         mInPlaceDrawPackets = enabled;
+    }
+    // config/capture_delta: the source handed to the sink carries the dirty
+    // lines of the register file, uniforms and default attributes (the sink
+    // captures only those); table writes of the value already present are
+    // skipped (no copy-on-write; the lighting LUT hash stays valid) and a
+    // lighting LUT whose uploads restored an earlier table's content takes
+    // that table and its hash instead of hashing 24 KiB again. Every packet
+    // keeps the same content and hashes as with it off.
+    void SetCaptureDelta(bool enabled);
+    [[nodiscard]] bool CaptureDelta() const noexcept { return mCaptureDelta; }
+    [[nodiscard]] const Oot3dPicaFrontendCaptureStats& CaptureStats() const noexcept {
+        return mCaptureStats;
     }
     void SetCommandListCompositionDomain(
         Oot3dPicaCompositionDomain domain) noexcept;
@@ -553,6 +654,26 @@ class Oot3dNativePicaFrontend {
         uint16_t registerId, uint32_t writeValue, uint16_t stageBase,
         Oot3dPicaShaderState& shader, PackedAttributeQueue& uniformQueue,
         bool mirrorToGeometryShader);
+    // Stores into a shared table (copy-on-write); with capture delta a write
+    // of the value already there is skipped.
+    template <typename Table, typename Value>
+    void WriteTable(Table& table, size_t index, Value value);
+    void MarkUniform(const Oot3dPicaShaderState& shader, size_t index) noexcept {
+        if (&shader == &mVertexShader) {
+            mDirtyLines.VertexUniforms |= uint32_t{1} << (index >> 2U);
+        } else {
+            mDirtyLines.GeometryUniforms |= uint32_t{1} << (index >> 2U);
+        }
+    }
+    void WriteLightingLut(size_t table, size_t index, uint32_t value);
+    // Before a draw: the LUT's content hash, computed or (capture delta)
+    // taken over from an earlier table with the same content.
+    void SettleLightingLutHash();
+    // XOR of one mixed word per LUT entry (position and value), kept up to
+    // date by every LUT write while capture delta is on: equal contents have
+    // equal fingerprints, so only those are compared byte for byte.
+    static uint64_t LutEntryFingerprint(size_t position, uint32_t value) noexcept;
+    void RecomputeLutFingerprint() noexcept;
 
     Oot3dPicaPacketSink* mPacketSink = nullptr;
     std::unordered_map<uint32_t, uint32_t> mHardwareRegisters;
@@ -575,6 +696,19 @@ class Oot3dNativePicaFrontend {
     size_t mHardwareWriteCount = 0;
     bool mDiagnosticHistoryEnabled = true;
     bool mInPlaceDrawPackets = false;
+    bool mCaptureDelta = false;
+    Oot3dPicaStateDirtyLines mDirtyLines;
+    Oot3dPicaFrontendCaptureStats mCaptureStats;
+    uint64_t mLutFingerprint = 0;
+    // Recently hashed LUT contents (capture delta), round robin.
+    struct LutCacheEntry {
+        uint64_t Fingerprint = 0;
+        std::shared_ptr<Oot3dPicaLightingLutState> State;
+    };
+    // At most 8 x 24 KiB pinned.
+    static constexpr size_t kLutCacheEntries = 8U;
+    std::array<LutCacheEntry, kLutCacheEntries> mLutCache{};
+    size_t mLutCacheNext = 0;
     Oot3dPicaCompositionDomain mCommandListCompositionDomain =
         Oot3dPicaCompositionDomain::Unknown;
     uint32_t mCompositionSpanCommandListAddress = 0;

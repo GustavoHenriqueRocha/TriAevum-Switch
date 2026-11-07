@@ -39,6 +39,10 @@ struct Oot3dPicaDeferredPlanBatch {
 
     Oot3dPicaDeferredPlanBuilder* Builder = nullptr;
     std::vector<Oot3dPicaDrawSubmission> Submissions;
+    // config/capture_delta: the log that fills the submissions' register
+    // files, uniforms and default attributes; replayed under the build lock
+    // up to the slot being built (nullptr: every submission is complete).
+    std::shared_ptr<Oot3dPicaCaptureDeltaLog> Delta;
     std::vector<Oot3dPicaDeferredPlanSlot> Slots;
     std::vector<Oot3dPicaVulkanDrawPlan> Plans;
     std::vector<SlotStatus> Status;
@@ -125,9 +129,11 @@ class Oot3dPicaDeferredPlanBuilder final {
 
     // Takes the drained submissions by swapping vectors: `drained` comes back
     // empty with the capacity of a recycled batch, ready for the submission
-    // queue to fill again. No submission is copied.
+    // queue to fill again. No submission is copied. `delta` is the capture
+    // delta log the queue handed over with them (materialized lazily).
     std::shared_ptr<Oot3dPicaDeferredPlanBatch> BeginBatch(
-        std::vector<Oot3dPicaDrawSubmission>& drained);
+        std::vector<Oot3dPicaDrawSubmission>& drained,
+        std::shared_ptr<Oot3dPicaCaptureDeltaLog> delta = nullptr);
     // The placeholder plan of one submission, before Publish: identity, the
     // decoded state (framebuffer, viewport) the guest-side frame accounting
     // reads, and the copy producers its textures reference. Everything else

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "oot3d_native_pica_capture_delta.h"
 #include "oot3d_native_pica_draw_state.h"
 
 #include "fast/renderer3ds/pica_native_state.h"
@@ -134,12 +135,25 @@ struct Oot3dPicaDrawSubmission {
         : Id(id), Packet(source) {
     }
 
+    // Register file, float uniforms and default attributes left unset: the
+    // queue copies them next, or a capture-delta log fills them later.
+    Oot3dPicaDrawSubmission(uint64_t id,
+                            const Oot3dPicaDrawPacketSource& source,
+                            Oot3dPicaStateArraysDeferred deferred)
+        : Id(id), Packet(source, deferred) {
+    }
+
     uint64_t Id = 0;
     Oot3dPicaDrawPacket Packet;
     Oot3dPicaDecodedDrawState State;
     uint32_t MinimumVertexIndex = 0;
     uint32_t MaximumVertexIndex = 0;
     std::vector<Oot3dPicaResourceSnapshot> Resources;
+    // config/capture_delta: the entry of the queue's capture-delta log that
+    // still has to be materialized into Packet's register file, float
+    // uniforms and default attributes (kOot3dPicaNoDeltaEntry: they hold the
+    // draw's state).
+    uint32_t DeltaEntry = kOot3dPicaNoDeltaEntry;
 };
 
 struct Oot3dPicaCompletionSubmission {
@@ -227,6 +241,15 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     // hashes; false keeps the previous passes.
     void SetLeanCapture(bool enabled) noexcept { mLeanCapture = enabled; }
     [[nodiscard]] bool LeanCapture() const noexcept { return mLeanCapture; }
+    // config/capture_delta: a draw from a source with dirty lines records
+    // only those lines (Oot3dPicaCaptureDeltaLog) instead of copying the
+    // 6.4 KiB register file, float uniforms and default attributes into its
+    // packet; the draw state is decoded from the frontend's registers. The
+    // arrays are materialized by the consumer: every take below does it
+    // before returning, except TakePendingDraws(destination, log), which
+    // hands the log over (the plan builder replays it off this thread).
+    void SetCaptureDelta(bool enabled);
+    [[nodiscard]] bool CaptureDelta() const noexcept { return mCaptureDelta; }
     // Always counted, cumulative (logs/perf.txt): time inside the draw
     // submissions (the guest's GX command, on the guest thread) and the bytes
     // copied into snapshots and hashed there.
@@ -240,6 +263,26 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
         // to make room for them (the cache is full: kGeometrySnapshotCacheLimit).
         uint64_t GeometryMisses = 0;
         uint64_t GeometryEvictions = 0;
+        // Sub-stages of Nanoseconds, in CaptureTicks() (perf.txt "capture:"):
+        // the register file into the packet (or the log), the float uniforms
+        // and default attributes, the rest of the packet (shared tables,
+        // composition), the state decode, index/vertex and texture
+        // snapshots, and the enqueue bookkeeping. HashTicks is the part of
+        // the snapshots spent hashing content.
+        uint64_t RegisterTicks = 0;
+        uint64_t UniformTicks = 0;
+        uint64_t PacketTicks = 0;
+        uint64_t DecodeTicks = 0;
+        uint64_t VertexTicks = 0;
+        uint64_t TextureTicks = 0;
+        uint64_t HashTicks = 0;
+        uint64_t EnqueueTicks = 0;
+        // Register file, uniforms and attributes written on this thread
+        // (6.4 KiB per draw without capture delta), and the draws recorded
+        // as a delta / as a keyframe.
+        uint64_t StateBytes = 0;
+        uint64_t DeltaDraws = 0;
+        uint64_t Keyframes = 0;
     };
     [[nodiscard]] CaptureCounters Counters() const noexcept {
         std::lock_guard guard(mQueueMutex);
@@ -290,10 +333,20 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
         const Oot3dPicaMemoryFillCommand& command, bool* deferredToGpu,
         std::string* error = nullptr) override;
 
+    // Identities, decoded state and resources. With capture delta the
+    // register file, uniforms and default attributes of these draws may not
+    // be filled yet (DeltaEntry); the takes below fill them.
     std::span<const Oot3dPicaDrawSubmission> PendingDraws() const;
     std::vector<Oot3dPicaDrawSubmission> TakePendingDraws();
     void TakePendingDraws(
         std::vector<Oot3dPicaDrawSubmission>& destination);
+    // The same, but the draws' capture-delta log (if any draw has an entry)
+    // comes along unreplayed in `deltaLog`: the caller materializes the draws
+    // (Oot3dPicaCaptureDeltaLog::MaterializeThrough) before reading those
+    // arrays, or hands both to Oot3dPicaDeferredPlanBuilder::BeginBatch.
+    void TakePendingDraws(
+        std::vector<Oot3dPicaDrawSubmission>& destination,
+        std::shared_ptr<Oot3dPicaCaptureDeltaLog>& deltaLog);
     std::span<const Oot3dPicaCompletionSubmission> PendingCompletions() const;
     std::vector<Oot3dPicaCompletionSubmission> TakePendingCompletions();
     std::span<const Oot3dPicaDisplayTransferSubmission>
@@ -430,7 +483,13 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     // Links every entry by ascending LastUsedSequence (after a restore).
     void RebuildGeometryLru();
     bool SubmitDrawLocked(Oot3dPicaDrawSubmission& submission,
+                          const Oot3dPicaDrawPacketSource& source,
                           std::string* error);
+    // Fills the arrays of every pending draw and empties the log.
+    void MaterializePendingLocked();
+    // Snapshot content hashes, timed into mCounters.HashTicks.
+    uint64_t HashTimed(std::span<const uint8_t> bytes);
+    uint64_t ContinueHashTimed(uint64_t hash, std::span<const uint8_t> bytes);
     bool CaptureTextureResources(Oot3dPicaDrawSubmission &submission,
                                  std::string *error);
 
@@ -450,6 +509,11 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     bool mDeferGpuBackedDisplayTransfers = false;
     bool mRuntimeProfilingEnabled = false;
     bool mLeanCapture = false;
+    bool mCaptureDelta = false;
+    std::shared_ptr<Oot3dPicaCaptureDeltaLogPool> mDeltaPool =
+        std::make_shared<Oot3dPicaCaptureDeltaLogPool>();
+    // The log of mPendingDraws' entries (acquired at the first delta draw).
+    std::shared_ptr<Oot3dPicaCaptureDeltaLog> mDeltaLog;
     CaptureCounters mCounters;
     TexturePayloadTransform mTexturePayloadTransform;
     TextureSnapshotTransform mTextureSnapshotTransform;

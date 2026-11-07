@@ -1,6 +1,8 @@
 #include "oot3d_native_pica_frontend.h"
+#include "oot3d_native_capture_clock.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 #include <bit>
 #include <cmath>
@@ -150,6 +152,99 @@ Oot3dNativePicaFrontend::Oot3dNativePicaFrontend(
 void Oot3dNativePicaFrontend::SetPacketSink(
     Oot3dPicaPacketSink* packetSink) {
     mPacketSink = packetSink;
+}
+
+void Oot3dNativePicaFrontend::SetCaptureDelta(bool enabled) {
+    mCaptureDelta = enabled;
+    mDirtyLines.MarkAll();
+    mLutCache = {};
+    mLutCacheNext = 0U;
+    if (enabled) RecomputeLutFingerprint();
+}
+
+uint64_t Oot3dNativePicaFrontend::LutEntryFingerprint(size_t position,
+                                                      uint32_t value) noexcept {
+    // splitmix64 step of (position, value): constants from Sebastiano
+    // Vigna's public-domain splitmix64.c (https://prng.di.unimi.it/).
+    uint64_t x = (static_cast<uint64_t>(position) << 32U) | value;
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27U)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31U);
+}
+
+void Oot3dNativePicaFrontend::RecomputeLutFingerprint() noexcept {
+    uint64_t fingerprint = 0U;
+    for (size_t position = 0; position < mLightingLuts->PackedEntries.size();
+         ++position) {
+        fingerprint ^= LutEntryFingerprint(position,
+                                           mLightingLuts->PackedEntries[position]);
+    }
+    mLutFingerprint = fingerprint;
+}
+
+template <typename Table, typename Value>
+void Oot3dNativePicaFrontend::WriteTable(Table& table, size_t index,
+                                         Value value) {
+    const Table& current = table;
+    if (mCaptureDelta && current[index] == value) {
+        ++mCaptureStats.SameValueWrites;
+        return;
+    }
+    mCaptureStats.TableCopies += current.Shared() ? 1U : 0U;
+    table[index] = value;
+}
+
+void Oot3dNativePicaFrontend::WriteLightingLut(size_t table, size_t index,
+                                               uint32_t value) {
+    const uint32_t previous = std::as_const(*mLightingLuts).Entry(table, index);
+    if (mCaptureDelta && previous == value) {
+        // The content (and so its hash) does not change.
+        ++mCaptureStats.SameValueWrites;
+        return;
+    }
+    if (mLightingLuts.use_count() != 1) {
+        const uint64_t started = CaptureTicks();
+        mLightingLuts = std::make_shared<Oot3dPicaLightingLutState>(*mLightingLuts);
+        ++mCaptureStats.LutCopies;
+        mCaptureStats.LutTicks += CaptureTicks() - started;
+    }
+    mLightingLuts->Entry(table, index) = value;
+    mLightingLuts->ContentHash = 0U;
+    mLightingLuts->ContentHashAvailable = false;
+    if (mCaptureDelta) {
+        const size_t position = table * Oot3dPicaLightingLutState::EntryCount + index;
+        mLutFingerprint ^= LutEntryFingerprint(position, previous) ^
+                           LutEntryFingerprint(position, value);
+    }
+}
+
+void Oot3dNativePicaFrontend::SettleLightingLutHash() {
+    if (mLightingLuts->ContentHashAvailable) return;
+    const uint64_t started = CaptureTicks();
+    if (mCaptureDelta) {
+        for (const auto& entry : mLutCache) {
+            if (entry.State != nullptr && entry.Fingerprint == mLutFingerprint &&
+                std::memcmp(entry.State->PackedEntries.data(),
+                            mLightingLuts->PackedEntries.data(),
+                            sizeof(mLightingLuts->PackedEntries)) == 0) {
+                // Same bytes as a table hashed before: its object and hash
+                // (the next upload copies it, as it copies any shared table).
+                mLightingLuts = entry.State;
+                ++mCaptureStats.LutReuses;
+                mCaptureStats.LutTicks += CaptureTicks() - started;
+                return;
+            }
+        }
+    }
+    mLightingLuts->ContentHash = ComputeOot3dPicaLightingLutContentHash(*mLightingLuts);
+    mLightingLuts->ContentHashAvailable = true;
+    ++mCaptureStats.LutHashes;
+    if (mCaptureDelta) {
+        mLutCache[mLutCacheNext] = {mLutFingerprint, mLightingLuts};
+        mLutCacheNext = (mLutCacheNext + 1U) % mLutCache.size();
+    }
+    mCaptureStats.LutTicks += CaptureTicks() - started;
 }
 
 void Oot3dNativePicaFrontend::SetDiagnosticHistoryEnabled(bool enabled) {
@@ -360,14 +455,17 @@ void Oot3dNativePicaFrontend::ApplyShaderStageRegisterSideEffects(
                 shader.FloatUniforms[index] =
                     float32 ? DecodePackedFloat32(uniformQueue.Words)
                             : DecodePackedFloat24(uniformQueue.Words);
+                MarkUniform(shader, index);
                 mirror([&](Oot3dPicaShaderState& target) {
                     target.FloatUniforms[index] = shader.FloatUniforms[index];
+                    MarkUniform(target, index);
                 });
             }
             uniformQueue.Count = 0;
             mPicaRegisters[stageBase + kFloatUniformSetupOffset] =
                 (setup & 0x80000000U) |
                 static_cast<uint32_t>((index + 1U) & 0x7FU);
+            mDirtyLines.MarkRegister(stageBase + kFloatUniformSetupOffset);
         }
         return;
     }
@@ -375,15 +473,16 @@ void Oot3dNativePicaFrontend::ApplyShaderStageRegisterSideEffects(
         offset <= kProgramDataEndOffset) {
         const size_t index = mPicaRegisters[stageBase + kProgramOffsetOffset];
         if (index < shader.Program.size()) {
-            shader.Program[index] = writeValue;
+            WriteTable(shader.Program, index, writeValue);
             shader.ProgramWordCount = std::max(shader.ProgramWordCount, index + 1U);
             mirror([&](Oot3dPicaShaderState& target) {
-                target.Program[index] = writeValue;
+                WriteTable(target.Program, index, writeValue);
                 target.ProgramWordCount =
                     std::max(target.ProgramWordCount, index + 1U);
             });
             mPicaRegisters[stageBase + kProgramOffsetOffset] =
                 static_cast<uint32_t>(index + 1U);
+            mDirtyLines.MarkRegister(stageBase + kProgramOffsetOffset);
         }
         return;
     }
@@ -391,16 +490,17 @@ void Oot3dNativePicaFrontend::ApplyShaderStageRegisterSideEffects(
         offset <= kSwizzleDataEndOffset) {
         const size_t index = mPicaRegisters[stageBase + kSwizzleOffsetOffset];
         if (index < shader.Swizzles.size()) {
-            shader.Swizzles[index] = writeValue;
+            WriteTable(shader.Swizzles, index, writeValue);
             shader.SwizzleWordCount =
                 std::max(shader.SwizzleWordCount, index + 1U);
             mirror([&](Oot3dPicaShaderState& target) {
-                target.Swizzles[index] = writeValue;
+                WriteTable(target.Swizzles, index, writeValue);
                 target.SwizzleWordCount =
                     std::max(target.SwizzleWordCount, index + 1U);
             });
             mPicaRegisters[stageBase + kSwizzleOffsetOffset] =
                 static_cast<uint32_t>(index + 1U);
+            mDirtyLines.MarkRegister(stageBase + kSwizzleOffsetOffset);
         }
     }
 }
@@ -413,18 +513,12 @@ void Oot3dNativePicaFrontend::ApplyShaderRegisterSideEffects(
         const size_t index = config & 0xFFU;
         const size_t table = (config >> 8U) & 0x1FU;
         if (table < Oot3dPicaLightingLutState::TableCount) {
-            if (mLightingLuts.use_count() != 1) {
-                mLightingLuts =
-                    std::make_shared<Oot3dPicaLightingLutState>(
-                        *mLightingLuts);
-            }
-            mLightingLuts->Entry(table, index) = writeValue;
-            mLightingLuts->ContentHash = 0U;
-            mLightingLuts->ContentHashAvailable = false;
+            WriteLightingLut(table, index, writeValue);
         }
         mPicaRegisters[kPicaLightingLutConfig] =
             (config & 0xFFFFFF00U) |
             static_cast<uint32_t>((index + 1U) & 0xFFU);
+        mDirtyLines.MarkRegister(kPicaLightingLutConfig);
         return;
     }
     if (registerId >= kPicaProcTexLutDataBegin &&
@@ -432,8 +526,8 @@ void Oot3dNativePicaFrontend::ApplyShaderRegisterSideEffects(
         const uint32_t config = mPicaRegisters[kPicaProcTexLutConfig];
         const uint32_t index = config & 0xFFU;
         const uint32_t table = (config >> 8U) & 0xFU;
-        const auto writeLut = [index, writeValue](auto& lut) {
-            lut[index % lut.size()] = writeValue;
+        const auto writeLut = [this, index, writeValue](auto& lut) {
+            WriteTable(lut, index % lut.size(), writeValue);
         };
         switch (table) {
         case 0U:
@@ -456,16 +550,18 @@ void Oot3dNativePicaFrontend::ApplyShaderRegisterSideEffects(
         }
         mPicaRegisters[kPicaProcTexLutConfig] =
             (config & 0xFFFFFF00U) | ((index + 1U) & 0xFFU);
+        mDirtyLines.MarkRegister(kPicaProcTexLutConfig);
         return;
     }
     if (registerId >= kPicaFogLutDataBegin &&
         registerId <= kPicaFogLutDataEnd) {
         const uint32_t offset =
             mPicaRegisters[kPicaFogLutOffset] & 0xFFFFU;
-        mFogLut[offset % mFogLut.size()] = writeValue;
+        WriteTable(mFogLut, offset % mFogLut.size(), writeValue);
         mPicaRegisters[kPicaFogLutOffset] =
             (mPicaRegisters[kPicaFogLutOffset] & 0xFFFF0000U) |
             ((offset + 1U) & 0xFFFFU);
+        mDirtyLines.MarkRegister(kPicaFogLutOffset);
         return;
     }
     if (registerId == kPicaDefaultAttributeIndex) {
@@ -481,8 +577,10 @@ void Oot3dNativePicaFrontend::ApplyShaderRegisterSideEffects(
             if (index < 15U) {
                 mDefaultAttributes[index] =
                     DecodePackedFloat24(mDefaultAttributeQueue.Words);
+                mDirtyLines.DefaultAttributes |= uint32_t{1} << (index >> 2U);
                 mPicaRegisters[kPicaDefaultAttributeIndex] =
                     static_cast<uint32_t>(index + 1U);
+                mDirtyLines.MarkRegister(kPicaDefaultAttributeIndex);
             }
             mDefaultAttributeQueue.Count = 0;
         }
@@ -644,6 +742,14 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
         SetError(error, "GSP submit command-list size is invalid");
         return false;
     }
+    // The whole list on the game thread, the sink's captures included.
+    struct ListTimer {
+        Oot3dPicaFrontendCaptureStats& Stats;
+        uint64_t Started = CaptureTicks();
+        ~ListTimer() { Stats.ListTicks += CaptureTicks() - Started; }
+    } listTimer{mCaptureStats};
+    ++mCaptureStats.Lists;
+    mCaptureStats.ListWords += commandListWords.size();
 
     std::vector<Oot3dPicaCommandListCompositionSpan> compositionSpans;
     if (mCompositionSpanCommandListAddress == commandListAddress &&
@@ -787,6 +893,7 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
                 finalValue = (mPicaRegisters[id] & ~mask) |
                              (writeValue & mask);
                 mPicaRegisters[id] = finalValue;
+                mDirtyLines.MarkRegister(id);
                 ApplyShaderRegisterSideEffects(id, finalValue);
             }
             if (mDiagnosticHistoryEnabled) {
@@ -796,11 +903,7 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
             }
             if (id == kPicaTriggerDraw ||
                 id == kPicaTriggerDrawIndexed) {
-                if (!mLightingLuts->ContentHashAvailable) {
-                    mLightingLuts->ContentHash =
-                        ComputeOot3dPicaLightingLutContentHash(*mLightingLuts);
-                    mLightingLuts->ContentHashAvailable = true;
-                }
+                SettleLightingLutHash();
                 const auto* metadata = resolveComposition(offsetWords);
                 auto composition = metadata != nullptr
                     ? metadata->Attribution
@@ -849,6 +952,7 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
                     source.ProcTexLuts = &mProcTexLuts;
                     source.LightingLuts = mLightingLuts;
                     source.DefaultAttributes = &mDefaultAttributes;
+                    source.DirtyLines = mCaptureDelta ? &mDirtyLines : nullptr;
                     if (!mPacketSink->SubmitDrawPacketSource(source, error)) {
                         return false;
                     }
@@ -1106,6 +1210,8 @@ bool Oot3dNativePicaFrontend::RestoreState(const nlohmann::json& state,
             interrupts.push_back(static_cast<Oot3dPicaInterruptId>(raw));
         }
 
+        // Everything may differ from what a sink captured last.
+        mDirtyLines.MarkAll();
         mHardwareRegisters = std::move(hardwareRegisters);
         mPicaRegisters = picaRegisters;
         mVertexShader = std::move(vertexShader);
@@ -1124,6 +1230,7 @@ bool Oot3dNativePicaFrontend::RestoreState(const nlohmann::json& state,
             table("color_difference", mProcTexLuts.ColorDifference);
         }
         mLightingLuts = std::move(lightingLuts);
+        if (mCaptureDelta) RecomputeLutFingerprint();
         mDefaultAttributes = state.at("default_attributes")
                                  .get<decltype(mDefaultAttributes)>();
         mVertexUniformQueue = vertexQueue;

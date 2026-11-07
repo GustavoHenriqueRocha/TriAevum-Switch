@@ -2,6 +2,7 @@
 // First: on the Switch it brings in glad, which must precede any GL header.
 #include "oot3d_native_gpu_frame_timer.h"
 #include "oot3d_native_a32_window_session.h"
+#include "oot3d_native_capture_clock.h"
 #include <fstream>
 #include <sstream>
 #include "fast/renderer3ds/pica_surface_debug.h"
@@ -2080,6 +2081,75 @@ bool NativeA32WindowSession::RunFrame() {
                << " perf_dropped=" << perfWriter->Dropped();
           previousWriterNanoseconds = writer;
         }
+        // Capture sub-stages (SWITCH_PORT.md "Capture delta"): µs per draw
+        // of the queue's part of pica_capture_ms (register file, uniforms and
+        // default attributes, the rest of the packet, decode, index/vertex
+        // and texture snapshots, hashing inside them, enqueue), the bytes of
+        // state written on this thread, the frontend's list walk and lighting
+        // LUT work (ms per host frame), the replay of capture-delta logs off
+        // this thread and the placeholder plan per draw (pica_plan).
+        {
+          static Oot3dNativeGame::Oot3dPicaFrontendCaptureStats previousFrontend{};
+          static Oot3dNativeGame::Oot3dPicaCaptureDeltaLog::Totals previousMaterialize{};
+          static double previousPlanSeconds = 0.0;
+          const auto& frontend = picaFrontend.CaptureStats();
+          const auto materialize =
+              Oot3dNativeGame::Oot3dPicaCaptureDeltaLog::MaterializeTotals();
+          const uint64_t draws = capture.Draws - previousCapture.Draws;
+          const auto usPerDraw = [draws](uint64_t now, uint64_t before) {
+            return draws != 0U
+                       ? Oot3dNativeGame::CaptureTicksToNanoseconds(now - before) /
+                             1.0e3 / static_cast<double>(draws)
+                       : 0.0;
+          };
+          const auto msPerFrame = [hostFrames](uint64_t now, uint64_t before) {
+            return Oot3dNativeGame::CaptureTicksToNanoseconds(now - before) / 1.0e6 /
+                   hostFrames;
+          };
+          const auto perFrame = [hostFrames](uint64_t now, uint64_t before) {
+            return static_cast<double>(now - before) / hostFrames;
+          };
+          const uint64_t materialized = materialize.Draws - previousMaterialize.Draws;
+          perf << " capture: capture_delta=" << (submissionQueueStorage->CaptureDelta() ? 1 : 0)
+               << " cap_regs_us=" << usPerDraw(capture.RegisterTicks, previousCapture.RegisterTicks)
+               << " cap_uniforms_us=" << usPerDraw(capture.UniformTicks, previousCapture.UniformTicks)
+               << " cap_packet_us=" << usPerDraw(capture.PacketTicks, previousCapture.PacketTicks)
+               << " cap_decode_us=" << usPerDraw(capture.DecodeTicks, previousCapture.DecodeTicks)
+               << " cap_vertex_us=" << usPerDraw(capture.VertexTicks, previousCapture.VertexTicks)
+               << " cap_texture_us=" << usPerDraw(capture.TextureTicks, previousCapture.TextureTicks)
+               << " cap_hash_us=" << usPerDraw(capture.HashTicks, previousCapture.HashTicks)
+               << " cap_enqueue_us=" << usPerDraw(capture.EnqueueTicks, previousCapture.EnqueueTicks)
+               << " cap_state_kb="
+               << static_cast<double>(capture.StateBytes - previousCapture.StateBytes) / 1024.0 /
+                      hostFrames
+               << " cap_delta_draws=" << perFrame(capture.DeltaDraws, previousCapture.DeltaDraws)
+               << " cap_keyframes=" << perFrame(capture.Keyframes, previousCapture.Keyframes)
+               << " cap_materialize_us="
+               << (materialized != 0U
+                       ? Oot3dNativeGame::CaptureTicksToNanoseconds(materialize.Ticks -
+                                                                    previousMaterialize.Ticks) /
+                             1.0e3 / static_cast<double>(materialized)
+                       : 0.0)
+               << " cap_materialized=" << perFrame(materialize.Draws, previousMaterialize.Draws)
+               << " cap_plan_us="
+               << (draws != 0U ? (phaseTiming.PicaPlanSeconds - previousPlanSeconds) * 1.0e6 /
+                                     static_cast<double>(draws)
+                               : 0.0)
+               << " list_ms=" << msPerFrame(frontend.ListTicks, previousFrontend.ListTicks)
+               << " lists=" << perFrame(frontend.Lists, previousFrontend.Lists)
+               << " list_kwords="
+               << perFrame(frontend.ListWords, previousFrontend.ListWords) / 1024.0
+               << " lut_ms=" << msPerFrame(frontend.LutTicks, previousFrontend.LutTicks)
+               << " lut_hashes=" << perFrame(frontend.LutHashes, previousFrontend.LutHashes)
+               << " lut_reuses=" << perFrame(frontend.LutReuses, previousFrontend.LutReuses)
+               << " lut_copies=" << perFrame(frontend.LutCopies, previousFrontend.LutCopies)
+               << " table_copies=" << perFrame(frontend.TableCopies, previousFrontend.TableCopies)
+               << " same_value_writes="
+               << perFrame(frontend.SameValueWrites, previousFrontend.SameValueWrites);
+          previousFrontend = frontend;
+          previousMaterialize = materialize;
+          previousPlanSeconds = phaseTiming.PicaPlanSeconds;
+        }
         previousCapture = capture;
         previousGuestInPica = phaseTiming.GuestInsidePicaSubmitSeconds;
         previousPicaSubmit = picaSubmitSeconds;
@@ -2972,7 +3042,11 @@ void NativeA32WindowSession::RunGuestRefresh() {
   bool refreshHadNativeDraws = false;
   while (drainPassesThisRefresh < kMaximumPicaDrainPassesPerRefresh) {
     PublishNativeSceneView();
-    submissionQueue.TakePendingDraws(drainedDraws);
+    // config/capture_delta: the log of the draws' register files, uniforms
+    // and default attributes comes along unreplayed (below: to the plan
+    // builder, or replayed here for the serial build).
+    std::shared_ptr<Oot3dNativeGame::Oot3dPicaCaptureDeltaLog> drainedDelta;
+    submissionQueue.TakePendingDraws(drainedDraws, drainedDelta);
     auto &draws = drainedDraws;
     auto completions = submissionQueue.TakePendingCompletions();
     auto displayTransfers = submissionQueue.TakePendingDisplayTransfers();
@@ -3178,7 +3252,9 @@ void NativeA32WindowSession::RunGuestRefresh() {
       // Swaps vectors with a recycled batch: `draws` comes back empty with
       // capacity for the submission queue to fill next; nothing is copied
       // or allocated per pass.
-      deferredPlans = picaPlanBuilder.BeginBatch(draws);
+      deferredPlans = picaPlanBuilder.BeginBatch(draws, std::move(drainedDelta));
+    } else if (drainedDelta != nullptr) {
+      drainedDelta->MaterializeAll(draws);
     }
     auto &drawList =
         deferredPlans != nullptr ? deferredPlans->Submissions : draws;
