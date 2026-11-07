@@ -1292,12 +1292,14 @@ GUARDS = [
           r'homebrewArgv\.erase\(homebrewArgv\.begin\(\) \+ 13, homebrewArgv\.begin\(\) \+ 15\);\s+'
           r'\} else \{\s+if \(std::filesystem::is_regular_file\(\s+"sdmc:/switch/oot3dre/config/topscreen_ui_atlas_hd\.png"\)\)'
           r'.*?"--topscreen-hd-textures".*?\}\s+\}'),
-    Guard("HUD custom textures (packs, the mod's HD images) are named after the game's own texture, not this "
-          "port's TopScreen CTXB override (the hearts and B label kept the old art)",
+    Guard("HUD custom textures (packs, the mod's HD images), asked for ahead or resolved, are named after the "
+          "game's own texture, not this port's TopScreen CTXB override (the hearts and B label kept the old art)",
           "tools/oot3d/native_game_runtime/oot3d_native_ui_texture_provider.cpp",
           r'original = encoded;\s+switch \(mTextureOverrides->Apply\(encoded\)\).*?'
-          r'ApplyCustomTexture\(encoding->native_pica_format, original, pixels, true\);',
-          "oot3d_native_ui_texture_provider_tests (identified by the game's own bytes)"),
+          r'ApplyCustomTexture\(encoding->native_pica_format, original\.empty\(\) \? encoded : original,\s+'
+          r'pixels, true, false\);.*?'
+          r'ApplyCustomTexture\(encoding->native_pica_format, original, pixels, false, true\);',
+          "oot3d_native_ui_texture_provider_tests (identified by the game's own bytes, ahead too)"),
     Guard("HUD pack images: UI requests keep the 3x cap and their own cache (ReleaseDecoded of a world upload must not drop them)",
           "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
           r'DecodeOptions\{native, kUiTextureMaxScale, false\}',
