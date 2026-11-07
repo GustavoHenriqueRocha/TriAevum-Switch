@@ -7,8 +7,12 @@
 // (FSR EASU + RCAS 0.2 without them) and anisotropy (4x without it,
 // gfx_opengl_pica_post.h). The debug menu's video
 // tab (oot3d_video_settings_panel.cpp) writes the same files; the frame rate
-// applies at once (LiveFrameRate, oot3d_native_launch_frame_rate.h), the
+// applies at once (LiveFrameRate, oot3d_native_launch_frame_rate.h), and so
+// does drs_60 ("full": Resolution at 60 FPS = Full,
+// LiveDynamicResolutionSixty, oot3d_native_dynamic_resolution.h); the
 // rest, like any edit of the files, on the next start of the game.
+
+#include "oot3d_native_dynamic_resolution.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,6 +34,8 @@ struct VideoSettings {
   float DockedScale = kDefaultScale;
   float HandheldScale = kDefaultScale;
   bool Fps60 = false;
+  // config/drs_60: hold the full scale at 60 FPS.
+  bool FullResolution60 = false;
   Upscale Upscaler = Upscale::FsrSharpen;
   bool Anisotropy = true;
 
@@ -59,6 +65,10 @@ struct VideoSettings {
                              : result.HandheldScale;
     std::error_code error;
     result.Fps60 = std::filesystem::exists(config / "fps60", error);
+    std::string drs60;
+    result.FullResolution60 = firstLine("drs_60", drs60) &&
+                              ParseDynamicResolutionSixtyMode(drs60) ==
+                                  DynamicResolutionSixtyMode::Full;
     std::string upscaler, sharpen, anisotropy;
     if (firstLine("upscaler", upscaler) && upscaler.rfind("fsr", 0) != 0 &&
         upscaler.rfind("FSR", 0) != 0) {
@@ -99,6 +109,7 @@ struct VideoSettings {
       return !error;
     };
     if (!present("fps60", Fps60, "")) return "fps60";
+    if (!present("drs_60", FullResolution60, "full\n")) return "drs_60";
     if (!present("upscaler", Upscaler == Upscale::Linear, "linear\n")) return "upscaler";
     if (!present("sharpen", Upscaler != Upscale::FsrSharpen, "0\n")) return "sharpen";
     if (!present("anisotropy", !Anisotropy, "1\n")) return "anisotropy";

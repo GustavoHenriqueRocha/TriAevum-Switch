@@ -188,7 +188,18 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
   const uint32_t rateHz = realtimePacer.TargetRateHz() != 0U
                               ? realtimePacer.TargetRateHz()
                               : 60U;
-  if (interpolationPacingConfigured && rateHz == interpolationPacingRateHz) {
+  // L3+R3 > Video > Resolution at 60 FPS, published by the menu: a new
+  // choice reconfigures the pacing as a rate change does.
+  {
+    const auto &liveSixty = Oot3dNativeGame::LiveDynamicResolutionSixty();
+    const uint64_t revision = liveSixty.Revision.load(std::memory_order_acquire);
+    if (revision != liveDynamicResolutionSixtyRevision) {
+      liveDynamicResolutionSixtyRevision = revision;
+      interpolationPacingOptions.DynamicResolutionSixty = liveSixty.Load();
+    }
+  }
+  if (interpolationPacingConfigured && rateHz == interpolationPacingRateHz &&
+      interpolationPacingOptions.DynamicResolutionSixty == dynamicResolutionSixtyMode) {
     // A backend reset (InitNativePica) forgets the namespace scale.
     if (interpolationPacing.ReducedAvailable() &&
         api.PicaNamespaceResolutionScale(kReducedVisualRenderTargetNamespace) !=
@@ -246,6 +257,8 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
 #endif
   if (drsDeko3dTiming)
     Oot3dNativeGame::UseDeko3dDynamicResolutionTiming(pacing.Resolution);
+  pacing.ResolutionSixty = options.DynamicResolutionSixty;
+  dynamicResolutionSixtyMode = options.DynamicResolutionSixty;
   pacing.ResolutionStartScale = dynamicResolutionMemory.StartScale(
       rateHz, !firstConfiguration, pacing.Resolution);
   backendScale.Requested = 0.0F;
@@ -260,7 +273,7 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
     std::fprintf(stderr,
                  "TRIAEVUM_DYNAMIC_RESOLUTION active=%d supported=%d "
                  "max=%.2f min=%.2f budget_ms=%.1f timing=%s down=%.2f "
-                 "up=%.2f hidden_ms=%.1f\n",
+                 "up=%.2f hidden_ms=%.1f drs_60=%s held_full=%d\n",
                  dynamicResolutionActive ? 1 : 0,
                  backendScale.Supported ? 1 : 0, pacing.Resolution.MaxScale,
                  dynamicResolution.Config().MinScale,
@@ -268,23 +281,30 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
                  drsDeko3dTiming ? "deko3d" : "gl",
                  dynamicResolution.Config().DownFraction,
                  dynamicResolution.Config().UpFraction,
-                 dynamicResolution.Config().HiddenGpuMs);
+                 dynamicResolution.Config().HiddenGpuMs,
+                 Oot3dNativeGame::DynamicResolutionSixtyModeName(
+                     dynamicResolutionSixtyMode).data(),
+                 dynamicResolution.LowestLevel() == 0U ? 1 : 0);
   {
     std::lock_guard lock(interpolationPerfMutex);
     interpolationPerf.DrsActive = dynamicResolutionActive;
     interpolationPerf.DrsMinScale = dynamicResolution.Config().MinScale;
+    interpolationPerf.DrsMode = dynamicResolutionSixtyMode;
     interpolationPerf.RateHz = rateHz;
     interpolationPerf.CadenceMode = cadenceGovernor.Config().Mode;
   }
   if (!firstConfiguration)
     std::fprintf(stderr,
                  "TRIAEVUM_FRAME_RATE rate_hz=%u pair_budget_ms=%.1f "
-                 "decision_budget_ms=%.1f fps60_mode=%s interpolation=%d\n",
+                 "decision_budget_ms=%.1f fps60_mode=%s interpolation=%d "
+                 "drs_60=%s\n",
                  rateHz, interpolationPacing.PairBudgetMs(),
                  interpolationPacing.DecisionBudgetMs(),
                  Oot3dNativeGame::Fps60ModeName(cadenceGovernor.Config().Mode)
                      .data(),
-                 visualInterpolationEnabled ? 1 : 0);
+                 visualInterpolationEnabled ? 1 : 0,
+                 Oot3dNativeGame::DynamicResolutionSixtyModeName(
+                     dynamicResolutionSixtyMode).data());
   if (firstConfiguration) {
 #if defined(__SWITCH__)
     // The window acquire's idle gap is not GPU work (gpu_frame_timer.h);
@@ -1675,7 +1695,9 @@ bool NativeA32WindowSession::RunFrame() {
           const uint64_t presentedWindow = presented - previousPresented;
           perf << " drs=" << (current.DrsActive ? 1 : 0)
                << " drs_scale=" << current.DrsScale
-               << " drs_min=" << current.DrsMinScale << " drs_scale_avg="
+               << " drs_min=" << current.DrsMinScale << " drs_mode="
+               << Oot3dNativeGame::DynamicResolutionSixtyModeName(current.DrsMode)
+               << " drs_scale_avg="
                << (presentedWindow != 0U
                        ? static_cast<double>(milli - previousMilli) /
                              1000.0 / static_cast<double>(presentedWindow)

@@ -1946,6 +1946,14 @@ void NativeA32WindowSession::Setup() {
       options.DynamicResolution = true;
       options.DynamicResolutionText = trimmed(*text);
     }
+    // config/drs_60 (TRIAEVUM_DRS_60): "full" holds the full scale at 60
+    // FPS (L3+R3 > Video > Resolution at 60 FPS; the menu changes it live).
+    if (const auto text = readText("drs_60", "TRIAEVUM_DRS_60"))
+      options.DynamicResolutionSixty =
+          Oot3dNativeGame::ParseDynamicResolutionSixtyMode(trimmed(*text));
+    std::fprintf(stderr, "TRIAEVUM_DRS_60 mode=%s\n",
+                 Oot3dNativeGame::DynamicResolutionSixtyModeName(
+                     options.DynamicResolutionSixty).data());
     // config/fps60_mode: legacy (default), adaptive, strict60 (A/B of the
     // presentation cadence, oot3d_native_cadence_governor.h). Without it,
     // config/interp_pacing=0 keeps its meaning (every in-between frame

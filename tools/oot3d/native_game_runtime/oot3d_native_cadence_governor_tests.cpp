@@ -1058,6 +1058,69 @@ void TestLiveRateSwitchKeepsSixtyScale() {
   CHECK(std::abs(c.Scale() - 2.75F) < 1.0e-4F);
 }
 
+// Resolution at 60 FPS = Full (config/drs_60): 60 holds 3.00 in a heavy room
+// (room 8 standing, 15 ms a step frame at 2.25: ~26 at 3.00), the cadence
+// governor sheds the in-between frames that do not fit, and a 30 -> 60
+// switch begins at 3.00 (not the remembered scale or the floor). Back to
+// Dynamic, the same switch resumes where Dynamic last ran.
+void TestLiveRateSwitchFullStartsAtFull() {
+  auto base = LiveRateConfig();
+  UseDeko3dDynamicResolutionTiming(base.Resolution);
+  auto full = base;
+  full.ResolutionSixty = DynamicResolutionSixtyMode::Full;
+  const double heavyStepAt3 = 26.0;
+  // Session start at 60 under Full.
+  RateRig rig;
+  RatePacingResolutionMemory memory;
+  ConfigureRatePacing(60U, full, rig.Pacing, rig.Drs, rig.Cadence);
+  CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  CHECK(rig.Drs.LowestLevel() == 0U);
+  (void)DriveRate(rig, 60U, heavyStepAt3, 42.0, 600);
+  CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  CHECK(rig.Drs.Stats().Downs == 0U);
+  // The cadence governor still sheds what does not fit.
+  CHECK(rig.Cadence.DropsInBetween());
+  // 60 -> 30 -> 60 under Full: a held full scale is not remembered.
+  memory.Leave(60U, rig.Drs);
+  CHECK(memory.LastScaleAtSixty == 0.0F);
+  ConfigureRatePacing(30U, full, rig.Pacing, rig.Drs, rig.Cadence);
+  CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  (void)DriveRate(rig, 30U, heavyStepAt3, 42.0, 300);
+  memory.Leave(30U, rig.Drs);
+  auto config = full;
+  config.ResolutionStartScale = memory.StartScale(60U, true, config.Resolution);
+  ConfigureRatePacing(60U, config, rig.Pacing, rig.Drs, rig.Cadence);
+  CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  (void)DriveRate(rig, 60U, heavyStepAt3, 42.0, 300);
+  CHECK(std::abs(rig.Drs.Scale() - 3.0F) < 1.0e-4F);
+  CHECK(rig.Drs.Stats().Downs == 0U);
+  // A remembered Dynamic scale does not apply under Full either.
+  {
+    RateRig dyn;
+    RatePacingResolutionMemory remembered;
+    ConfigureRatePacing(60U, base, dyn.Pacing, dyn.Drs, dyn.Cadence);
+    (void)DriveRate(dyn, 60U, heavyStepAt3, 42.0, 600);
+    CHECK(dyn.Drs.Scale() < 3.0F);
+    remembered.Leave(60U, dyn.Drs);
+    CHECK(remembered.LastScaleAtSixty > 0.0F && remembered.LastScaleAtSixty < 3.0F);
+    ConfigureRatePacing(30U, base, dyn.Pacing, dyn.Drs, dyn.Cadence);
+    auto toFull = full;
+    toFull.ResolutionStartScale = remembered.StartScale(60U, true, toFull.Resolution);
+    ConfigureRatePacing(60U, toFull, dyn.Pacing, dyn.Drs, dyn.Cadence);
+    CHECK(std::abs(dyn.Drs.Scale() - 3.0F) < 1.0e-4F);
+    // Dynamic again: resumes at the remembered scale.
+    auto toDynamic = base;
+    toDynamic.ResolutionStartScale =
+        remembered.StartScale(60U, true, toDynamic.Resolution);
+    ConfigureRatePacing(60U, toDynamic, dyn.Pacing, dyn.Drs, dyn.Cadence);
+    CHECK(std::abs(dyn.Drs.Scale() - remembered.LastScaleAtSixty) < 1.0e-4F);
+  }
+  // Full changes nothing at 30.
+  RateRig thirty;
+  ConfigureRatePacing(30U, full, thirty.Pacing, thirty.Drs, thirty.Cadence);
+  CHECK(thirty.Drs.LowestLevel() == 3U);
+}
+
 // The first presents after a switch are measured against the new period
 // only: no late step, hold change or lock from an interval of the old rate.
 void TestLiveRateSwitchFirstPresents() {
@@ -1135,6 +1198,7 @@ int main(int argc, char **argv) {
   TestLiveRateSwitchMatchesFreshStart();
   TestLiveRateSwitchFirstPresents();
   TestLiveRateSwitchKeepsSixtyScale();
+  TestLiveRateSwitchFullStartsAtFull();
   if (argc > 1 && std::strcmp(argv[1], "--report") == 0)
     Report();
   if (gFailures != 0) {

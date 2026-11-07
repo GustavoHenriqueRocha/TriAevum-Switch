@@ -73,10 +73,17 @@
 // at 60 FPS the light areas settle at 2.5 (2.75 from ~10.4 ms at 2.25, 3.00
 // from ~8.5).
 //
+// Resolution at 60 FPS (L3+R3 > Video, config/drs_60): Dynamic (default)
+// is all of the above; Full holds MaxScale at 60 FPS (the controller is
+// configured with MinScale == MaxScale: no level to step to) so the GPU
+// clock options can be compared at full resolution. The cadence governor
+// still drops in-between frames that do not fit. 30 FPS is unaffected.
+//
 // Pure logic (no GL, no clock): oot3d_native_dynamic_resolution_tests.cpp
-// (TestLog16Deko3dReplay replays log16's windows).
+// (TestLog16Deko3dReplay replays log16's windows, TestFullAtSixty).
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -154,6 +161,59 @@ inline constexpr float kDynamicResolutionDefaultSteps = 3.0F;
   if (scale < 1.0F)
     return fallback;
   return std::min(scale, maxScale);
+}
+
+enum class DynamicResolutionSixtyMode : uint8_t { Dynamic, Full };
+
+// config/drs_60: "full" (any case of the first word) holds the full scale
+// at 60 FPS; absent or anything else: Dynamic.
+[[nodiscard]] inline DynamicResolutionSixtyMode ParseDynamicResolutionSixtyMode(
+    std::string_view text) noexcept {
+  while (!text.empty() && (text.front() == ' ' || text.front() == '\t'))
+    text.remove_prefix(1U);
+  if (text.size() < 4U)
+    return DynamicResolutionSixtyMode::Dynamic;
+  for (size_t i = 0; i < 4U; ++i)
+    if ((text[i] | 0x20) != "full"[i])
+      return DynamicResolutionSixtyMode::Dynamic;
+  if (text.size() > 4U && text[4] != '\r' && text[4] != '\n' &&
+      text[4] != ' ' && text[4] != '\t')
+    return DynamicResolutionSixtyMode::Dynamic;
+  return DynamicResolutionSixtyMode::Full;
+}
+
+[[nodiscard]] constexpr std::string_view DynamicResolutionSixtyModeName(
+    DynamicResolutionSixtyMode mode) noexcept {
+  return mode == DynamicResolutionSixtyMode::Full ? "full" : "dynamic";
+}
+
+// Under Full at 60 FPS: nothing to vary (MinScale == MaxScale).
+inline void ApplyDynamicResolutionSixtyMode(uint32_t rateHz,
+                                            DynamicResolutionSixtyMode mode,
+                                            DynamicResolutionConfig &config) noexcept {
+  if (rateHz == 60U && mode == DynamicResolutionSixtyMode::Full)
+    config.MinScale = config.MaxScale;
+}
+
+// L3+R3 > Video > Resolution at 60 FPS while the game runs: published by
+// the menu, read by the render thread at its next pacing check.
+struct LiveDynamicResolutionSixtyChoice {
+  std::atomic<uint8_t> Mode{0U};
+  std::atomic<uint64_t> Revision{0U};
+
+  void Publish(DynamicResolutionSixtyMode mode) noexcept {
+    Mode.store(static_cast<uint8_t>(mode), std::memory_order_relaxed);
+    Revision.fetch_add(1U, std::memory_order_release);
+  }
+  [[nodiscard]] DynamicResolutionSixtyMode Load() const noexcept {
+    return static_cast<DynamicResolutionSixtyMode>(
+        Mode.load(std::memory_order_relaxed));
+  }
+};
+
+inline LiveDynamicResolutionSixtyChoice &LiveDynamicResolutionSixty() noexcept {
+  static LiveDynamicResolutionSixtyChoice choice;
+  return choice;
 }
 
 struct DynamicResolutionStats {

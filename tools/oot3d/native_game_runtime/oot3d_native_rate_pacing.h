@@ -21,10 +21,14 @@
 // descent cost 16 and 23 dropped in-between frames (windows 32250, 34800).
 // A switch to 60 now begins at the scale 60 FPS last ran at in this session
 // (RatePacingResolutionMemory), or at the floor if it never ran at 60. The
-// first configuration of a session still starts at MaxScale.
+// first configuration of a session still starts at MaxScale. Under
+// Resolution at 60 FPS = Full (config/drs_60) 60 always runs at MaxScale,
+// a switch to 60 included, and a held full scale is not remembered as the
+// scale Dynamic resumes at.
 //
 // Pure logic: oot3d_native_cadence_governor_tests.cpp
-// (TestLiveRateSwitchMatchesFreshStart, TestLiveRateSwitchKeepsSixtyScale).
+// (TestLiveRateSwitchMatchesFreshStart, TestLiveRateSwitchKeepsSixtyScale,
+// TestLiveRateSwitchFullStartsAtFull).
 
 #include "oot3d_native_cadence_governor.h"
 #include "oot3d_native_dynamic_resolution.h"
@@ -42,6 +46,8 @@ struct RatePacingConfig {
   // The scale dynamic resolution begins at (0: MaxScale);
   // RatePacingResolutionMemory::StartScale.
   float ResolutionStartScale = 0.0F;
+  // config/drs_60 (L3+R3 > Video > Resolution at 60 FPS).
+  DynamicResolutionSixtyMode ResolutionSixty = DynamicResolutionSixtyMode::Dynamic;
   // config/fps60_mode; only means something at 60 (at 30 every picture
   // holds two refreshes by design): legacy at any other rate.
   Fps60ModeConfig Cadence{};
@@ -58,7 +64,7 @@ struct RatePacingResolutionMemory {
 
   // Before reconfiguring: the rate being left and its controller.
   void Leave(uint32_t rateHz, const DynamicResolutionController &resolution) noexcept {
-    if (rateHz == 60U)
+    if (rateHz == 60U && resolution.LowestLevel() > 0U)
       LastScaleAtSixty = resolution.Scale();
   }
 
@@ -89,7 +95,9 @@ inline void ConfigureRatePacing(uint32_t rateHz, const RatePacingConfig &config,
   const double pairMs = RatePacingPairBudgetMs(rateHz);
   interpolation.Configure(config.Interpolation, pairMs, config.BaseScale,
                           config.ReducedAvailable);
-  resolution.Configure(config.Resolution, pairMs, config.ResolutionStartScale);
+  DynamicResolutionConfig resolutionConfig = config.Resolution;
+  ApplyDynamicResolutionSixtyMode(rateHz, config.ResolutionSixty, resolutionConfig);
+  resolution.Configure(resolutionConfig, pairMs, config.ResolutionStartScale);
   cadence.Configure(RatePacingCadence(rateHz, config.Cadence),
                     1000.0 / static_cast<double>(rateHz));
   // Single in-between frames are dropped only in legacy; adaptive drops

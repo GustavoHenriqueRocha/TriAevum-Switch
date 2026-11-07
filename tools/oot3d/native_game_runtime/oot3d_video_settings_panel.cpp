@@ -92,6 +92,13 @@ public:
       mSettings.Fps60 = rate == 1;
       changed = rateChanged = true;
     }
+    const char *const drsModes[] = {"Dynamic (default)", "Full"};
+    int drsMode = mSettings.FullResolution60 ? 1 : 0;
+    bool drsChanged = false;
+    if (ImGui::Combo("Resolution at 60 FPS", &drsMode, drsModes, 2)) {
+      mSettings.FullResolution60 = drsMode == 1;
+      changed = drsChanged = true;
+    }
     const char *const upscalers[] = {"FSR + sharpening (default)", "FSR without sharpening",
                                      "Linear (lightest)"};
     int upscaler = static_cast<int>(mSettings.Upscaler);
@@ -109,9 +116,16 @@ public:
     // Both rates simulate at 30 Hz: the game applies the new one at its next
     // frame (oot3d_native_launch_frame_rate.h); config/fps60 keeps it.
     if (rateChanged) LiveFrameRate().Publish(mSettings.Fps60);
+    // config/drs_60 likewise: the render thread reconfigures its pacing at
+    // its next frame (oot3d_native_dynamic_resolution.h).
+    if (drsChanged)
+      LiveDynamicResolutionSixty().Publish(mSettings.FullResolution60
+                                               ? DynamicResolutionSixtyMode::Full
+                                               : DynamicResolutionSixtyMode::Dynamic);
     // The rest (resolution, upscaling, filter) is read at start.
     VideoSettings atStart = mSettings;
     atStart.Fps60 = mBoot.Fps60;
+    atStart.FullResolution60 = mBoot.FullResolution60;
     if (!mError.empty())
       ImGui::TextWrapped("Could not write config/%s.", mError.c_str());
     else if (atStart != mBoot)
@@ -120,6 +134,10 @@ public:
     else
       ImGui::TextDisabled("Values in use.");
     ImGui::TextDisabled("FPS applies at once; the game keeps 30 steps a second either way.");
+    ImGui::TextDisabled("Resolution at 60 FPS applies at once. Dynamic lowers the resolution in busy "
+                        "rooms to keep 60 FPS. Full keeps the full resolution (handheld 3x, docked "
+                        "the docked setting) and can drop the real frame rate in busy rooms at the "
+                        "Standard GPU clock; GPU clock High helps.");
     // Applies at once (RunFrame reads the flag every frame); the file keeps
     // it for the next start.
     ImGui::Separator();

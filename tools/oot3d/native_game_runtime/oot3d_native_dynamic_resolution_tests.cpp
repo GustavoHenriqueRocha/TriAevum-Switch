@@ -56,6 +56,47 @@ void Run(DynamicResolutionController &c, double pairAt3, int steps) {
     (void)c.ObservePair(PairAt(c, pairAt3));
 }
 
+// Resolution at 60 FPS (config/drs_60): Full holds 3.00 at 60 in a heavy
+// scene (no down, shedding or not), a docked 4.5 likewise; Dynamic and 30
+// FPS keep their levels.
+void TestFullAtSixty() {
+  using Oot3dNativeGame::ApplyDynamicResolutionSixtyMode;
+  using Oot3dNativeGame::DynamicResolutionSixtyMode;
+  using Oot3dNativeGame::ParseDynamicResolutionSixtyMode;
+  CHECK(ParseDynamicResolutionSixtyMode("full") == DynamicResolutionSixtyMode::Full);
+  CHECK(ParseDynamicResolutionSixtyMode(" Full\r\n") == DynamicResolutionSixtyMode::Full);
+  CHECK(ParseDynamicResolutionSixtyMode("") == DynamicResolutionSixtyMode::Dynamic);
+  CHECK(ParseDynamicResolutionSixtyMode("dynamic") == DynamicResolutionSixtyMode::Dynamic);
+  CHECK(ParseDynamicResolutionSixtyMode("fullx") == DynamicResolutionSixtyMode::Dynamic);
+  for (const float maxScale : {3.0F, 4.5F}) {
+    DynamicResolutionConfig config;
+    config.MaxScale = maxScale;
+    config.MinScale = maxScale - 0.75F;
+    UseDeko3dDynamicResolutionTiming(config);
+    auto full = config;
+    ApplyDynamicResolutionSixtyMode(60U, DynamicResolutionSixtyMode::Full, full);
+    DynamicResolutionController c;
+    c.Configure(full, kPair, config.MinScale);
+    CHECK(Near(c.Scale(), maxScale));
+    for (int i = 0; i < 2000; ++i)
+      (void)c.ObservePair(1.5 * kPair, i % 2 == 0);
+    CHECK(Near(c.Scale(), maxScale));
+    CHECK(c.Stats().Downs == 0U && c.Stats().Changes == 0U);
+    // Dynamic: the same scene goes down.
+    auto dynamic = config;
+    ApplyDynamicResolutionSixtyMode(60U, DynamicResolutionSixtyMode::Dynamic, dynamic);
+    DynamicResolutionController d;
+    d.Configure(dynamic, kPair);
+    for (int i = 0; i < 2000; ++i)
+      (void)d.ObservePair(1.5 * kPair);
+    CHECK(d.Stats().Downs > 0U && Near(d.Scale(), config.MinScale));
+    // 30 FPS: Full changes nothing.
+    auto thirty = config;
+    ApplyDynamicResolutionSixtyMode(30U, DynamicResolutionSixtyMode::Full, thirty);
+    CHECK(Near(thirty.MinScale, config.MinScale));
+  }
+}
+
 void TestParser() {
   CHECK(Near(ParseDynamicResolutionMinScale("", 3.0F), 2.25));
   CHECK(Near(ParseDynamicResolutionMinScale("\n", 3.0F), 2.25));
@@ -575,6 +616,7 @@ void TestDeko3dSteadyAreasHoldOneLevel() {
 } // namespace
 
 int main() {
+  TestFullAtSixty();
   TestLog16GlCalibrationStaysAtFloor();
   TestLog16Deko3dReplay();
   TestDeko3dSteadyAreasHoldOneLevel();

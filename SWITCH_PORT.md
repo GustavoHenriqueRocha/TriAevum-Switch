@@ -3244,6 +3244,34 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   Then, still in room 8, switch to 30, wait 10 s and switch back to 60: the window with the switch
   back shows `drs_downs=0` (log16: 3), `drs_scale=2.25`, and few `interp_dropped` (log16: 16 and 23).
 
+### Resolution at 60 FPS: Dynamic or Full, `config/drs_60` (11/07)
+- **Why:** to compare the GPU clock options (Standard 307 MHz, High 460.8 MHz) at the full
+  resolution at 60 FPS, where dynamic resolution would otherwise hide the difference by stepping down.
+- **Option:** L3+R3 > Video > "Resolution at 60 FPS", next to FPS. Dynamic (default) is the
+  controller above. Full: at 60 FPS the controller is configured with `MinScale == MaxScale`
+  (`ApplyDynamicResolutionSixtyMode`, `oot3d_native_dynamic_resolution.h`, called by
+  `ConfigureRatePacing`), so it holds the boot's full scale (handheld 3.0, docked the docked setting)
+  and never steps down. 30 FPS is unchanged. The cadence governor still drops in-between frames
+  whose pair does not fit; `new_fps` in `perf.txt` (and the overlay) then shows the real rate.
+- **Persistence and live switch:** `config/drs_60` = `full` (absent = Dynamic), written by the panel
+  through `VideoSettings` like `fps60`; read at start (`TRIAEVUM_DRS_60` on the PC). The panel
+  publishes `LiveDynamicResolutionSixty()`; `EnsureInterpolationPacing` sees the new revision at the
+  next frame and reconfigures the pacing as a rate change does. A 30 → 60 switch under Full starts
+  at the full scale (the remembered 60 FPS scale only applies under Dynamic), and a held full scale
+  is not remembered (`RatePacingResolutionMemory::Leave` skips a controller with no levels).
+- **Logs:** start-up `TRIAEVUM_DRS_60 mode=`, and `drs_60=`/`held_full=` on the
+  `TRIAEVUM_DYNAMIC_RESOLUTION` line, `drs_60=` on `TRIAEVUM_FRAME_RATE`; every `perf.txt` window
+  has `drs_mode=full|dynamic` after `drs_min` (under Full at 60, `drs_min` equals `drs_scale`).
+- Tests: `oot3d_native_dynamic_resolution_tests` `TestFullAtSixty` (3.0 and 4.5 held under a pair
+  1.5x the budget, shedding or not, no change; Dynamic goes to its floor; 30 untouched; the parser);
+  `oot3d_native_cadence_governor_tests` `TestLiveRateSwitchFullStartsAtFull` (heavy room 8 at 60:
+  3.0, no downs, the cadence governor sheds; 60 → 30 → 60 and Dynamic → Full switches start at 3.0;
+  back to Dynamic resumes at the remembered scale); `oot3d_video_settings_tests` (`drs_60` round trip).
+- **Console check (1 minute):** 60 FPS, Resolution at 60 FPS = Full, GPU clock Standard: stand in
+  the Temple of Time 20 s; switch GPU clock to High, 20 s more. `perf.txt`: `drs_scale=3`
+  `drs_min=3` `drs_mode=full` in every window at 60; compare `new_fps` between the Standard and High
+  windows. Switch FPS to 30 and back to 60: the window after shows `drs_scale=3`.
+
 ### fps60 cadence: regularity before average, `config/fps60_mode` (2026-10-17)
 - **Diagnosis** (`switch-logs/integ2b`, CPU 1785, 4.5 min at 60, 52 FPS average): in the
   heavy stretches (host_frames 9450–14250) the game thread spends 27–31 ms of each 33.3 ms step pair

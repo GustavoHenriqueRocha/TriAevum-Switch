@@ -56,6 +56,17 @@ int main() {
     Require(!std::filesystem::exists(dir / "fps60"), "fps60 removed");
     Require(VideoSettings::Load(dir) == saved, "round trip without fps60");
 
+    // drs_60: "full" only when Full (Resolution at 60 FPS).
+    saved.FullResolution60 = true;
+    Require(saved.Save(dir).empty(), "save drs_60");
+    Require(VideoSettings::Load(dir) == saved, "round trip with drs_60");
+    saved.FullResolution60 = false;
+    Require(saved.Save(dir).empty(), "save without drs_60");
+    Require(!std::filesystem::exists(dir / "drs_60"), "drs_60 removed");
+    WriteText(dir / "drs_60", "dynamic\n");
+    Require(!VideoSettings::Load(dir).FullResolution60, "drs_60 dynamic");
+    std::filesystem::remove(dir / "drs_60");
+
     // Upscaler, sharpen and anisotropy: files only away from the default.
     saved.Upscaler = VideoSettings::Upscale::Linear;
     saved.Anisotropy = false;

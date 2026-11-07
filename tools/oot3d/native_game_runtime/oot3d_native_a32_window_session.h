@@ -656,11 +656,20 @@ private:
     // scale ("2.25").
     bool DynamicResolution = false;
     std::string DynamicResolutionText;
+    // config/drs_60 (L3+R3 > Video > Resolution at 60 FPS): Full holds the
+    // full scale at 60 FPS. Changed live through LiveDynamicResolutionSixty.
+    Oot3dNativeGame::DynamicResolutionSixtyMode DynamicResolutionSixty =
+        Oot3dNativeGame::DynamicResolutionSixtyMode::Dynamic;
   } interpolationPacingOptions;
   Oot3dNativeGame::InterpolationPacingGovernor interpolationPacing;
   // Dynamic resolution of the top-screen scene (render thread).
   Oot3dNativeGame::DynamicResolutionController dynamicResolution;
   bool dynamicResolutionActive = false;
+  // The Resolution at 60 FPS mode the pacing was configured with, and the
+  // last LiveDynamicResolutionSixty revision applied.
+  Oot3dNativeGame::DynamicResolutionSixtyMode dynamicResolutionSixtyMode =
+      Oot3dNativeGame::DynamicResolutionSixtyMode::Dynamic;
+  uint64_t liveDynamicResolutionSixtyRevision = 0U;
   // The scale 60 FPS last ran at: a switch back to 60 begins there
   // (oot3d_native_rate_pacing.h; log16).
   Oot3dNativeGame::RatePacingResolutionMemory dynamicResolutionMemory;
@@ -851,6 +860,8 @@ private:
     bool DrsActive = false;
     float DrsScale = 0.0F;
     float DrsMinScale = 0.0F;
+    Oot3dNativeGame::DynamicResolutionSixtyMode DrsMode =
+        Oot3dNativeGame::DynamicResolutionSixtyMode::Dynamic;
     double DrsPairMs = 0.0;
     Oot3dNativeGame::DynamicResolutionStats Drs{};
   };
