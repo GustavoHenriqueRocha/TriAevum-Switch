@@ -596,6 +596,7 @@ class AzaharTexturePackRuntime::Impl {
         mFailedLoadHashes.clear();
         mFailedUiLoadHashes.clear();
         mHudWaiting.clear();
+        mMenuWaiting.clear();
         mFailedMaterialHashes.clear();
         mDumpedHashes.clear();
         const auto title = Hex16(mConfiguration.TitleId);
@@ -657,7 +658,8 @@ class AzaharTexturePackRuntime::Impl {
         if (!loadEnabled) return {AzaharTextureResolveState::Disabled, hash, nullptr, true, loadUsesNewHash};
         std::scoped_lock lock(mMutex);
         if (generation != mGeneration || !mConfiguration.LoadCustomTextures) return {};
-        return QueueOrPollLocked(hash, {request.Width, request.Height}, request.UserInterface);
+        return QueueOrPollLocked(hash, {request.Width, request.Height}, request.UserInterface, false,
+                                 request.UserInterface && request.Menu);
     }
 
     AzaharTextureResolveResult PollQueued(uint64_t hash) const {
@@ -665,11 +667,11 @@ class AzaharTexturePackRuntime::Impl {
         return PollLocked(hash);
     }
 
-    AzaharTextureResolveResult PollOrQueue(uint64_t hash, TextureSize native) {
+    AzaharTextureResolveResult PollOrQueue(uint64_t hash, TextureSize native, bool userInterface, bool menu) {
         std::scoped_lock lock(mMutex);
         if (!mConfigured || !mConfiguration.LoadCustomTextures) return {};
         if (!mIndexReady) return {AzaharTextureResolveState::Pending, hash, nullptr, false, mPack.UseNewHash};
-        return QueueOrPollLocked(hash, native);
+        return QueueOrPollLocked(hash, native, userInterface, false, userInterface && menu);
     }
 
     void ReleaseDecoded(uint64_t hash, uint64_t generation) {
@@ -851,15 +853,19 @@ class AzaharTexturePackRuntime::Impl {
     // nor already queued, then reports its state. HUD images have their own
     // cache (another size cap and no mips than a world texture of the hash)
     // and their own queue and worker; a HUD request (not ahead) that finds
-    // its image still decoding is remembered as a first sight drawn late.
+    // its image still decoding is remembered as a first sight drawn late
+    // (`menu`: a PICA menu texture, counted apart). A texture on screen goes
+    // before the HUD images asked for ahead: queued at the front, or moved
+    // there when it was queued ahead and has not started.
     AzaharTextureResolveResult QueueOrPollLocked(uint64_t hash, TextureSize native, bool userInterface = false,
-                                                 bool preload = false) {
+                                                 bool preload = false, bool menu = false) {
         const auto indexed = mIndex.find(hash);
         if (indexed == mIndex.end()) return {AzaharTextureResolveState::Missing, hash, nullptr, true, mPack.UseNewHash};
         auto& cache = userInterface ? mUiReplacementCache : mReplacementCache;
         auto& pending = userInterface ? mPendingUiLoadGenerations : mPendingLoadGenerations;
         const auto& failed = userInterface ? mFailedUiLoadHashes : mFailedLoadHashes;
         const auto cached = cache.find(hash);
+        const bool onSight = userInterface && !preload;
         if ((cached == cache.end() || cached->second->Generation != mGeneration) && !failed.contains(hash) &&
             !pending.contains(hash)) {
             pending.emplace(hash, mGeneration);
@@ -873,13 +879,26 @@ class AzaharTexturePackRuntime::Impl {
             job.UserInterface = userInterface;
             job.Preload = preload;
             if (preload) ++mHud.PreloadQueued;
-            (userInterface ? mUiLoadJobs : mLoadJobs).push_back(std::move(job));
+            if (onSight) {
+                mUiLoadJobs.push_front(std::move(job));
+            } else {
+                (userInterface ? mUiLoadJobs : mLoadJobs).push_back(std::move(job));
+            }
             ++mPendingLoads;
             (userInterface ? mUiWorkAvailable : mWorkAvailable).notify_one();
+        } else if (onSight && pending.contains(hash)) {
+            const auto queued = std::find_if(mUiLoadJobs.begin(), mUiLoadJobs.end(), [&](const LoadJob& job) {
+                return job.Hash == hash && job.AheadNative.empty();
+            });
+            if (queued != mUiLoadJobs.end() && queued != mUiLoadJobs.begin()) {
+                LoadJob job = std::move(*queued);
+                mUiLoadJobs.erase(queued);
+                mUiLoadJobs.push_front(std::move(job));
+            }
         }
         auto result = PollLocked(hash, userInterface);
-        if (userInterface && !preload && result.State == AzaharTextureResolveState::Pending)
-            mHudWaiting.try_emplace(hash, std::chrono::steady_clock::now());
+        if (onSight && result.State == AzaharTextureResolveState::Pending)
+            (menu ? mMenuWaiting : mHudWaiting).try_emplace(hash, std::chrono::steady_clock::now());
         return result;
     }
     AzaharTextureResolveResult PollLocked(uint64_t hash, bool userInterface = false) const {
@@ -987,6 +1006,7 @@ class AzaharTexturePackRuntime::Impl {
         mHud = {};
         mHudListed.clear();
         mHudWaiting.clear();
+        mMenuWaiting.clear();
         mHudPreloadStart = std::chrono::steady_clock::now();
         if (configuration.HudImageList.empty()) return std::nullopt;
         auto kept = PruneHudImageList(listed, [&](uint64_t hash) { return mIndex.contains(hash); });
@@ -1086,7 +1106,10 @@ class AzaharTexturePackRuntime::Impl {
                     if (!failure.empty()) {
                         failed.insert(job.Hash);
                         mLastError = std::move(failure);
-                        if (job.UserInterface) mHudWaiting.erase(job.Hash);
+                        if (job.UserInterface) {
+                            mHudWaiting.erase(job.Hash);
+                            mMenuWaiting.erase(job.Hash);
+                        }
                     }
                 }
                 pending.erase(found);
@@ -1122,6 +1145,11 @@ class AzaharTexturePackRuntime::Impl {
             ++mHud.OnSightDecodes;
             mHud.OnSightWaitMaxMicros = std::max(mHud.OnSightWaitMaxMicros, micros(now - waiting->second));
             mHudWaiting.erase(waiting);
+        }
+        if (const auto waiting = mMenuWaiting.find(job.Hash); waiting != mMenuWaiting.end()) {
+            ++mHud.MenuOnSightDecodes;
+            mHud.MenuOnSightWaitMaxMicros = std::max(mHud.MenuOnSightWaitMaxMicros, micros(now - waiting->second));
+            mMenuWaiting.erase(waiting);
         }
         const auto width = job.Options.Native.Width, height = job.Options.Native.Height;
         if (mConfiguration.HudImageList.empty() || mHudListed.size() >= kHudImageListLimit || width == 0U ||
@@ -1238,7 +1266,7 @@ class AzaharTexturePackRuntime::Impl {
     AzaharHudPackStatus mHud;
     std::unordered_set<uint64_t> mHudListed;
     std::chrono::steady_clock::time_point mHudPreloadStart;
-    std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> mHudWaiting;
+    std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> mHudWaiting, mMenuWaiting;
     std::deque<DumpJob> mDumpJobs;
     size_t mPendingLoads = 0U, mPendingDumps = 0U, mDumpedCount = 0U, mUnsupportedFiles = 0U;
     std::string mLastError;
@@ -1280,8 +1308,9 @@ AzaharTexturePackRuntime::PollQueued(
 }
 
 AzaharTextureResolveResult AzaharTexturePackRuntime::PollOrQueue(uint64_t nativeHash, uint16_t nativeWidth,
-                                                                  uint16_t nativeHeight) {
-    return mImpl->PollOrQueue(nativeHash, {nativeWidth, nativeHeight});
+                                                                  uint16_t nativeHeight, bool userInterface,
+                                                                  bool menu) {
+    return mImpl->PollOrQueue(nativeHash, {nativeWidth, nativeHeight}, userInterface, menu);
 }
 
 void AzaharTexturePackRuntime::ReleaseDecoded(uint64_t nativeHash, uint64_t generation) {

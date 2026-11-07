@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 namespace Fast::Deko3d {
 
@@ -153,6 +154,26 @@ enum class PicaTextureUse : uint8_t {
         return texture.NativeType == 2U ? PicaTextureUse::Shadow2D : PicaTextureUse::Color;
     }
     return PicaTextureUse::Unsupported;
+}
+
+// A texture of the game's own 2D menus (pause pages, text boxes): a colour
+// texture without mip levels of a draw in the `Ui` composition domain or
+// layer. With config/texture_pack_menu on (`menuImages`, the default) its
+// texture pack image is resolved as a HUD image
+// (AzaharTextureRequest::UserInterface + Menu): the cache the HUD's own pack
+// images live in, so the pause pages share the images the HUD asked for
+// ahead (menu_item_parts00's tabs, the item icons, the digits), kept for the
+// session instead of decoded again for every new guest address, and listed
+// for the next start (config/texture_pack_hud). Mipmapped textures (3D models
+// in a menu) stay on the world path: HUD images have no mip chain.
+[[nodiscard]] constexpr bool PicaTextureIsMenuArt(const Renderer3ds::PicaTextureView& texture, bool uiDraw,
+                                                  bool menuImages) noexcept {
+    return menuImages && uiDraw && texture.NativeType == 0U && texture.MaxMipLevel == 0U;
+}
+
+// config/texture_pack_menu: absent, empty or anything but a leading `0` = on.
+[[nodiscard]] constexpr bool ParseTexturePackMenuSetting(std::string_view firstLine, bool exists) noexcept {
+    return !exists || firstLine.empty() || firstLine.front() != '0';
 }
 
 constexpr uint32_t kMaxPicaMipLevels = 16U;

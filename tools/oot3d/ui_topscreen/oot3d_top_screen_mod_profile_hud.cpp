@@ -1092,7 +1092,7 @@ std::size_t AppendTopScreenTouchLabelsPresentation(
     primitive.uv = {quad.AtlasOrigin.X / 512.0F, quad.AtlasOrigin.Y / 256.0F,
                     quad.AtlasSize.X / 512.0F, quad.AtlasSize.Y / 256.0F};
     primitive.color = quad.Color;
-    primitive.layer = 13U;
+    primitive.layer = kTopScreenButtonLabelLayer;
     output.push_back(std::move(primitive));
   }
   return output.size() - startSize;
@@ -1304,7 +1304,8 @@ std::size_t AppendTopScreenAuxiliaryTouchPresentation(
     primitive.uv = {quad.AtlasOrigin.X / 512.0F, quad.AtlasOrigin.Y / 256.0F,
                     quad.AtlasSize.X / 512.0F, quad.AtlasSize.Y / 256.0F};
     primitive.color = quad.Color;
-    primitive.layer = 13U;
+    // The X/Y/B labels over the item icons (layer 13); the view icon (quad 4) stays with the icons.
+    primitive.layer = index < 4U ? kTopScreenButtonLabelLayer : 13U;
     output.push_back(std::move(primitive));
   }
   return output.size() - startSize;

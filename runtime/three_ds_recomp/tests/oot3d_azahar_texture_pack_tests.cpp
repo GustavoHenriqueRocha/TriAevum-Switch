@@ -767,4 +767,139 @@ TEST_F(Oot3dAzaharTexturePackTest, HudImagesAskedAheadMatchALegacyHashPack) {
     EXPECT_EQ(status.OnSightDecodes, 0U);
 }
 
+// The pause pages drawn through PICA (deko3d, config/texture_pack_menu) ask
+// for their pack images as HUD images (UserInterface + Menu): a texture the
+// HUD already asked for ahead (menu_item_parts00, whose tabs swapped from
+// "GEAR MAP ITEMS" to the pack's art on every page in logs17's video) is
+// ready at the page's first draw; the image stays decoded after the
+// renderer's upload (a page at another guest address finds it at once); a
+// menu texture seen first is decoded on the HUD worker, counted apart from the
+// HUD's own first sights and listed for the next start.
+TEST_F(Oot3dAzaharTexturePackTest, MenuTexturesShareTheHudImagesAndStayDecoded) {
+    using namespace Oot3d::Renderer;
+    const auto pack = Root / "menu";
+    std::filesystem::create_directories(pack);
+    {
+        std::ofstream output(pack / "pack.json");
+        output << nlohmann::json{{"options", {{"skip_mipmap", true}, {"flip_png_files", true}, {"use_new_hash", false}}}};
+    }
+    // Two 8x8 ETC1A4 textures (format 13, menu_item_parts00's), legacy hash as Henriko's pack.
+    const auto texture = [](uint8_t seed) {
+        std::array<uint8_t, 64> native{};
+        for (size_t index = 0; index < native.size(); ++index) native[index] = static_cast<uint8_t>(index * 29U + seed);
+        return native;
+    };
+    const auto tabs = texture(7U), page = texture(91U);
+    std::vector<uint8_t> tabsRgba, pageRgba;
+    ASSERT_TRUE(DecodePicaTextureRgba8(13U, 8U, 8U, tabs, tabsRgba));
+    ASSERT_TRUE(DecodePicaTextureRgba8(13U, 8U, 8U, page, pageRgba));
+    const uint64_t tabsHash = ComputeAzaharTextureHash({8U, 8U, 13U, 0U, tabs, tabsRgba}, false);
+    const uint64_t pageHash = ComputeAzaharTextureHash({8U, 8U, 13U, 0U, page, pageRgba}, false);
+    ASSERT_NE(tabsHash, pageHash);
+    WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, tabsHash, 13U, 0U), 32U, 32U,
+                          std::vector<uint8_t>(32U * 32U * 4U, 120U));
+    WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, pageHash, 13U, 0U), 32U, 32U,
+                          std::vector<uint8_t>(32U * 32U * 4U, 60U));
+    const auto list = Root / "texture_pack_hud";
+    AzaharTexturePackRuntime runtime;
+    runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack,
+                       .MaxReplacementScale = 2U, .GenerateMipmaps = true, .HudImageList = list});
+    runtime.WaitForPendingLoads();
+    // The HUD asks for the tabs' texture ahead (title screen).
+    AzaharTextureRequest ahead{8U, 8U, 13U, 0U, tabs, {}};
+    ahead.UserInterface = true;
+    ahead.Ahead = true;
+    (void)runtime.ResolveOrQueue(ahead);
+    runtime.WaitForPendingLoads();
+
+    // The Items page's first draw (PICA, decoded texels as deko3d passes them).
+    AzaharTextureRequest tabsMenu{8U, 8U, 13U, 0U, tabs, tabsRgba};
+    tabsMenu.UserInterface = true;
+    tabsMenu.Menu = true;
+    const auto first = runtime.ResolveOrQueue(tabsMenu);
+    ASSERT_EQ(first.State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(first.Replacement->Width, 24U); // the HUD's 3x cap, not the world's 2x
+    EXPECT_TRUE(first.Replacement->Mips.empty());
+    // Uploaded by the renderer; a world release does not drop it. The Map page
+    // (same texture at another guest address) finds it again at once.
+    runtime.ReleaseDecoded(tabsHash, first.Replacement->Generation);
+    EXPECT_EQ(runtime.PollOrQueue(tabsHash, 8U, 8U, true, true).State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(runtime.ResolveOrQueue(tabsMenu).State, AzaharTextureResolveState::Ready);
+    // The world path still has its own cache (another cap, mips).
+    EXPECT_EQ(runtime.PollQueued(tabsHash).State, AzaharTextureResolveState::Missing);
+
+    // A page texture the HUD never asked for: drawn native first, decoded on
+    // the HUD worker, counted as a menu first sight, listed.
+    AzaharTextureRequest pageMenu{8U, 8U, 13U, 0U, page, pageRgba};
+    pageMenu.UserInterface = true;
+    pageMenu.Menu = true;
+    EXPECT_EQ(runtime.ResolveOrQueue(pageMenu).State, AzaharTextureResolveState::Pending);
+    runtime.WaitForPendingLoads();
+    EXPECT_EQ(runtime.PollOrQueue(pageHash, 8U, 8U, true, true).State, AzaharTextureResolveState::Ready);
+    const auto status = runtime.HudStatus();
+    EXPECT_EQ(status.OnSightDecodes, 0U);
+    EXPECT_EQ(status.MenuOnSightDecodes, 1U);
+    EXPECT_EQ(status.Listed, 2U);
+    std::ifstream file(list, std::ios::binary);
+    EXPECT_EQ(std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>()),
+              FormatHudImageEntry({tabsHash, 8U, 8U}) + FormatHudImageEntry({pageHash, 8U, 8U}));
+}
+
+// A texture on screen (HUD or menu) does not wait behind the HUD images
+// decoded ahead: with a long HUD list (the menu textures of earlier sessions),
+// a texture asked for at its draw goes to the front of the HUD worker's queue,
+// also when it was itself queued ahead further back.
+TEST_F(Oot3dAzaharTexturePackTest, TexturesOnScreenGoBeforeHudImagesAskedAhead) {
+    using namespace Oot3d::Renderer;
+    const auto pack = Root / "front";
+    std::filesystem::create_directories(pack);
+    {
+        std::ofstream output(pack / "pack.json");
+        output << nlohmann::json{{"options", {{"skip_mipmap", true}, {"flip_png_files", true}, {"use_new_hash", true}}}};
+    }
+    constexpr size_t kSlowImages = 8U;
+    std::vector<uint8_t> noise(2048U * 1024U * 4U);
+    uint32_t state = 4242U;
+    for (auto& value : noise) value = static_cast<uint8_t>((state = state * 1664525U + 1013904223U) >> 24U);
+    std::string listText;
+    for (size_t image = 0; image < kSlowImages; ++image) {
+        std::array<uint8_t, 512> native{};
+        for (size_t index = 0; index < native.size(); ++index)
+            native[index] = static_cast<uint8_t>(index * 3U + image * 17U + 1U);
+        const uint64_t hash = AzaharCityHash64(native);
+        WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(16U, 8U, hash, 0U, 0U), 2048U, 1024U, noise);
+        listText += FormatHudImageEntry({hash, 16U, 8U});
+    }
+    std::array<uint8_t, 512> onScreen{};
+    for (size_t index = 0; index < onScreen.size(); ++index) onScreen[index] = static_cast<uint8_t>(index * 9U + 4U);
+    const uint64_t onScreenHash = AzaharCityHash64(onScreen);
+    WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(16U, 8U, onScreenHash, 0U, 0U), 48U, 24U,
+                          std::vector<uint8_t>(48U * 24U * 4U, 33U));
+    listText += FormatHudImageEntry({onScreenHash, 16U, 8U}); // last in the list
+    const auto list = Root / "texture_pack_hud";
+    std::ofstream(list, std::ios::binary) << listText;
+
+    AzaharTexturePackRuntime runtime;
+    runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack,
+                       .MaxReplacementScale = 2U, .GenerateMipmaps = true, .HudImageList = list});
+    AzaharTextureRequest menu{16U, 8U, 0U, 0U, onScreen, {}};
+    menu.UserInterface = true;
+    menu.Menu = true;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    // Until the index is ready the request has no hash.
+    while (!runtime.ResolveOrQueue(menu).NativeHashAvailable && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    while (runtime.ResolveOrQueue(menu).State == AzaharTextureResolveState::Pending &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_EQ(runtime.ResolveOrQueue(menu).State, AzaharTextureResolveState::Ready);
+    // Most of the slow images ahead of it in the list are still decoding.
+    EXPECT_LE(runtime.HudStatus().PreloadDecoded, kSlowImages / 2U + 1U);
+    runtime.WaitForPendingLoads();
+    const auto status = runtime.HudStatus();
+    EXPECT_EQ(status.PreloadQueued, kSlowImages + 1U);
+    EXPECT_EQ(status.PreloadDecoded, kSlowImages + 1U);
+    EXPECT_EQ(status.OnSightDecodes, 0U);
+}
+
 } // namespace

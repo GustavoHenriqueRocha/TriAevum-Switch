@@ -2000,6 +2000,70 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   list, its order and completeness), `oot3d_top_screen_ocarina_text_runtime_tests` (pass-through);
   three guards.
 
+### Pause pages without the old art first (`config/texture_pack_menu`, 07/11, test.10)
+- **Symptom (test.9):** "the menu textures still swap". `logs17/deko3d.txt`: `hud pack (frame):
+  listed=5 ahead=5/5 in 1289 ms (21888 KiB); first sight=0 (wait max 0 ms)` all session: the HUD (UI
+  renderer) was right. Video `2026110713005300-…`: every pause page opens with the game's tab bar
+  ("GEAR MAP ITEMS", capitals) and changes to the pack's ("Gear Map Items") in view: Items frames
+  711-719 (0.3 s), Map 752-759, Gear 780-784 (frames of the 29.76 fps capture; the item icons and page
+  art were already the pack's).
+- **Cause:** the pause pages are not the UI renderer's: TopScreen moves the game's lower screen onto
+  the top one and deko3d draws it from the PICA stream (`Ui` composition domain). Its textures took
+  the world path: decoded on first sight on the world worker (the native texture drawn meanwhile),
+  released from RAM after the upload (`ReleaseDecoded`), keyed by guest address. The tab bar is
+  `menu_item_parts00` (Henriko 5.0a `18DDBB03B81C1D60`): the very image the HUD decodes ahead at the
+  title screen (item_page), but into the HUD's own cache, which the PICA path never asked. Each page
+  draws it at another address, a new texture, and its image had been released: decoded again, the old
+  art shown meanwhile. `again 75` re-uploads in the session.
+- **Fix:** a colour texture without mip levels of a `Ui` draw (`PicaTextureIsMenuArt`,
+  `gfx_deko3d_pica_plan.h`) asks for its pack image as a HUD image (`AzaharTextureRequest::UserInterface`
+  + `Menu`): the HUD cache, so the images the HUD asked for ahead (`menu_item_parts00`, the item icons
+  `icon_item_menu00`, the digits `num_all00`, `menu_okarina_parts00`) are ready at a page's first draw
+  from the first start on; kept for the session (not released after the upload: another address finds
+  it at once); decoded on the HUD worker, never behind world PNGs; listed in `config/texture_pack_hud`,
+  so the other page textures (map, gear and option parts, item names) are decoded at the title screen
+  of the next start. A texture asked for at its draw (HUD or menu) now goes to the front of the HUD
+  worker's queue, also when it was queued ahead further back (a long list does not delay it). 3x cap and
+  no mip chain, as HUD images; mipmapped textures (3D models in menus) and the world keep the world path.
+- **A/B:** `config/texture_pack_menu` = `0` (read at start) gives the world path back.
+- **Cost:** RAM for the menu images seen, kept for the session and decoded at each start once listed
+  (list limit 256): 256x32 item names 0.3 MiB each, a 256x256 page 2.25 MiB, a 512x256 one 4.5 MiB at
+  the 3x cap (Henriko 5.0a: all of `UI` and `MAPS` at 3x would be 216 MiB; a playthrough sees a part of
+  it). Start-up: the HUD worker decodes them during the title screen (logs17: the HUD's 5 in 1.3 s).
+- **Log:** `menu pack (…): textures ready at first draw=R, native first=N; decoded on sight=S (wait max W
+  ms)`: `N` is the swaps in view (expected: 0 for the tab bar from the first start, 0 for every page from
+  the second); `hud pack` `listed=` counts the menu lines too, `first sight=` stays the HUD's.
+  `resources: texture pack on (…), menu textures as HUD images on` at start.
+- Tests: `oot3d_azahar_texture_pack_tests` (`MenuTexturesShareTheHudImagesAndStayDecoded`,
+  `TexturesOnScreenGoBeforeHudImagesAskedAhead`; standalone build as above), `oot3d_deko3d_backend_tests`
+  (`TestMenuArt`). `deko3d.pack` unchanged (no shader change).
+
+### HUD against the mod's screenshots (07/11, test.9 report)
+- **Report:** two images (`2026110713043700-…` and `2026110713045100-…`), "the normal looks better but
+  they still don't look quite like the images from the mod website" (GameBanana 695893, Kokiri Forest
+  `ss05`, Epona `ss06`). `…043700` is the Normal layout (B and A in a row, X/Y/ZR/ZL cluster, bomb on ZR),
+  `…045100` Restoration (X/Y/A/B diamond, no ZR/ZL lanes). `logs17/topscreen_import.txt`: 3.2.2
+  downloaded (status 200, SHA-256 `d07f5ae7…`), HD UI atlas and both HD images installed.
+- **What differs, and why:**
+  - *Scale:* the mod's screenshots are at HUD scale ~0.70 (1.85 px per HUD unit on a 640-pixel-high
+    image: X-to-ZL 91 px for 48 units, heart pitch 21 px); the Switch default is 0.90
+    (`config/topscreen_ui.switch.json`, the mod's own default), 2.71 px per unit on 720p (Y-to-ZR
+    130 px). Setting: L3+R3 > HUD > HUD scale (0.70 or 0.75 for the screenshots' look).
+  - *Labels under icons:* the X/Y/B/ZR/ZL labels and the item icons were both layer 13 and the icons
+    came after, so a larger icon covered its label (the bomb over the R of ZR, the bow over Y); on the
+    mod's screenshots the labels are on top. Now `kTopScreenButtonLabelLayer` (14) puts them over the
+    icons (`oot3d_top_screen_hud_touch_tests` `TestLabelsOverItemIcons`).
+  - *Item icons and counts:* the player's texture pack (Henriko's `icon_item_menu00`, `num_all00`); the
+    mod has no images for them and its screenshots show the game's own. Larger, rounder art.
+  - *Hearts, magic meter, B and View/Back:* the pack's `menu_top_parts00` (`BB00B25B…`) wins over the
+    mod's image of the same name; both are the same art (the mod's is Henriko's with the View/Back
+    captions kept), so hearts look the same either way.
+  - *Circles, D-pad cross, labels:* the mod's HD UI atlas, as on `ss05` (translucent disc, 20% black:
+    hard to see on a dark scene). D-pad left/right items: the Switch D-pad maps boots (adult) and
+    boomerang/slingshot (child), shown only when owned; `ss05` shows sticks and nuts.
+  - *Perf overlay:* the FPS lines are drawn over the hearts in both images.
+  - Upscaling and OC do not touch the HUD (the UI renderer draws at the output resolution).
+
 ### Toon and per-pixel lighting (deko3d): L3+R3 > Video > Lighting (`config/lighting`, off by default)
 - **Switch:** `sdmc:/switch/oot3dre/config/lighting`, first word `toon` or `perpixel`; absent, empty or
   anything else = off (native PICA lighting, as before). **The model lives in the graphics settings**

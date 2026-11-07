@@ -126,8 +126,16 @@ bool PicaResources::Init(Device& device) {
             ::Oot3d::Renderer::MakeTexturePackConfiguration(mTexturePackSettings, kConfigDirectory));
         mPackConfigured = true;
     }
-    Log("resources: texture pack %s (%s, cap %ux)", mTexturePack ? "on" : "off", mTexturePackSettings.Folder.c_str(),
-        mTexturePackSettings.MaxScale);
+    std::ifstream menuSetting(std::string(kConfigDirectory) + "/texture_pack_menu");
+    std::string menuLine;
+    const bool menuSettingExists = static_cast<bool>(menuSetting);
+    if (menuSettingExists) {
+        std::getline(menuSetting, menuLine);
+    }
+    mMenuImages = ParseTexturePackMenuSetting(menuLine, menuSettingExists);
+    Log("resources: texture pack %s (%s, cap %ux), menu textures as HUD images %s (config/texture_pack_menu)",
+        mTexturePack ? "on" : "off", mTexturePackSettings.Folder.c_str(), mTexturePackSettings.MaxScale,
+        mMenuImages ? "on" : "off");
     Log("resources: %u image / %u sampler descriptors, texture budget %llu MiB", kMaxImages, kMaxSamplers,
         static_cast<unsigned long long>(mBudgetBytes >> 20));
     return true;
@@ -357,12 +365,13 @@ void PicaResources::UploadReadyReplacements() {
             continue;
         }
         Texture& native = found->second;
-        const auto polled = pack.PollOrQueue(native.PackHash, native.PackView.Width, native.PackView.Height);
+        const auto polled = pack.PollOrQueue(native.PackHash, native.PackView.Width, native.PackView.Height,
+                                             native.PackMenu, native.PackMenu);
         if (polled.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready && polled.Replacement != nullptr) {
             PicaTextureKey replacementKey = key;
             replacementKey.ContentHash ^= kReplacementKeySalt;
             const Renderer3ds::PicaTextureView view = native.PackView; // `native` may move on insert
-            if (UploadReplacement(view, replacementKey, *polled.Replacement) != 0U) {
+            if (UploadReplacement(view, replacementKey, *polled.Replacement, native.PackMenu) != 0U) {
                 // The native texture is never drawn again.
                 Retire(mTextures.find(key)->second);
                 mTextures.erase(key);
@@ -432,7 +441,7 @@ void PicaResources::Evict() {
     mStats.TextureBytes = mTextureBytes;
 }
 
-DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& view) {
+DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& view, bool uiDraw) {
     const DkResHandle fallback = dkMakeTextureHandle(kFallbackColorImage, kNearestSampler);
     const uint64_t contentHash = view.NativeContentHashAvailable ? view.NativeContentHash : HashBytes(view.NativeBytes);
     const PicaTextureKey key = MakePicaTextureKey(view, contentHash);
@@ -499,9 +508,11 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
         return rememberFallback();
     }
     ::Oot3d::Renderer::AzaharTextureResolveResult pack;
+    bool menu = false;
     if (mTexturePack && ClassifyPicaTexture(view) == PicaTextureUse::Color) {
         const size_t baseBytes = PicaBaseLevelBytes(view.NativeFormat, view.Width, view.Height);
         if (baseBytes != 0U && baseBytes <= view.NativeBytes.size()) {
+            menu = PicaTextureIsMenuArt(view, uiDraw, mMenuImages);
             pack = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ResolveOrQueue({
                 .Width = static_cast<uint16_t>(view.Width),
                 .Height = static_cast<uint16_t>(view.Height),
@@ -509,9 +520,12 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
                 .MipLevel = 0U,
                 .NativeBytes = view.NativeBytes.first(baseBytes),
                 .NativeRgba8 = std::span<const uint8_t>(decoded->Mips[0]),
+                .UserInterface = menu,
+                .Menu = menu,
             });
             if (pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready && pack.Replacement != nullptr) {
-                if (const DkResHandle handle = UploadReplacement(view, replacementKey, *pack.Replacement)) {
+                if (const DkResHandle handle = UploadReplacement(view, replacementKey, *pack.Replacement, menu)) {
+                    mStats.MenuTexturesReady += menu ? 1U : 0U;
                     return handle;
                 }
             }
@@ -526,6 +540,8 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
     texture.PackHash = pack.NativeHash;
     texture.PackPending = pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Pending ||
                           pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready;
+    texture.PackMenu = menu && texture.PackPending;
+    mStats.MenuTexturesNativeFirst += texture.PackMenu ? 1U : 0U;
     if (texture.PackPending) {
         texture.PackView = view;
         texture.PackView.NativeBytes = {};
@@ -570,7 +586,8 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
 }
 
 DkResHandle PicaResources::UploadReplacement(const Renderer3ds::PicaTextureView& view, const PicaTextureKey& key,
-                                             const ::Oot3d::Renderer::AzaharTextureReplacement& replacement) {
+                                             const ::Oot3d::Renderer::AzaharTextureReplacement& replacement,
+                                             bool menu) {
     const auto& rgba = replacement.Rgba8;
     const uint64_t baseBytes = static_cast<uint64_t>(replacement.Width) * replacement.Height * 4U;
     if (rgba == nullptr || rgba->size() < baseBytes || baseBytes > UINT32_MAX) {
@@ -651,9 +668,12 @@ DkResHandle PicaResources::UploadReplacement(const Renderer3ds::PicaTextureView&
         ++mStats.TextureReplacementReuploads;
     }
     const auto inserted = mTextures.emplace(key, texture).first;
-    // The GPU copy is the one drawn now; the worker decodes the file again if it is ever evicted.
-    ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ReleaseDecoded(replacement.NativeHash,
-                                                                          replacement.Generation);
+    // The GPU copy is the one drawn now; the worker decodes the file again if it is ever evicted. A menu
+    // texture's image is a HUD image: the pack runtime keeps it (another guest address finds it at once).
+    if (!menu) {
+        ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ReleaseDecoded(replacement.NativeHash,
+                                                                              replacement.Generation);
+    }
     return dkMakeTextureHandle(inserted->second.ImageSlot, inserted->second.SamplerSlot);
 }
 
@@ -700,6 +720,9 @@ bool PicaResources::Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources
     }
     // Textures first: an unsupported one rejects the draw before any upload.
     out.Textures.fill(dkMakeTextureHandle(kFallbackColorImage, kNearestSampler));
+    // A draw of the game's 2D menus (`Ui` domain or layer): PicaTextureIsMenuArt.
+    const bool uiDraw = draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Ui ||
+                        draw.Composition.Layer == Renderer3ds::PicaCompositionLayer::Ui;
     for (const auto& texture : draw.Textures) {
         if (texture.Slot >= out.Textures.size()) {
             return fail("PICA texture slot is invalid");
@@ -710,7 +733,7 @@ bool PicaResources::Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources
                 ++mStats.ShadowFallbacks;
                 out.Textures[texture.Slot] = dkMakeTextureHandle(kFallbackIntegerImage, kNearestSampler);
                 break;
-            case PicaTextureUse::Color: out.Textures[texture.Slot] = TextureHandle(texture); break;
+            case PicaTextureUse::Color: out.Textures[texture.Slot] = TextureHandle(texture, uiDraw); break;
         }
     }
     out.LightingLut = draw.LightingLut.PackedEntries.empty()

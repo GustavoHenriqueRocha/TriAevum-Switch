@@ -319,6 +319,31 @@ void TestSamplerAndTextureKeys() {
   Require(ClassifyPicaTexture(view) == PicaTextureUse::Color, "type 3 in slot 0 = color");
 }
 
+// Menu textures (pause pages, text boxes) resolve their pack image as a HUD
+// image (config/texture_pack_menu): single-level colour textures of `Ui`
+// draws only; 3D models in menus (mipmapped) and the world stay as they were.
+void TestMenuArt() {
+  using namespace Fast::Deko3d;
+  Fast::Renderer3ds::PicaTextureView view;
+  view.Width = 256;
+  view.Height = 256;
+  view.NativeFormat = 13;
+  Require(PicaTextureIsMenuArt(view, true, true), "a single-level texture of a Ui draw is menu art");
+  Require(!PicaTextureIsMenuArt(view, false, true), "the same texture in a scene draw is not");
+  Require(!PicaTextureIsMenuArt(view, true, false), "config/texture_pack_menu 0 turns it off");
+  auto mipmapped = view;
+  mipmapped.MaxMipLevel = 3;
+  Require(!PicaTextureIsMenuArt(mipmapped, true, true), "a mipmapped texture keeps the world path (mip chain)");
+  auto shadow = view;
+  shadow.NativeType = 2;
+  Require(!PicaTextureIsMenuArt(shadow, true, true), "only colour textures");
+  Require(ParseTexturePackMenuSetting("", false), "absent = on");
+  Require(ParseTexturePackMenuSetting("", true), "empty = on");
+  Require(ParseTexturePackMenuSetting("1", true), "1 = on");
+  Require(!ParseTexturePackMenuSetting("0", true), "0 = off");
+  Require(!ParseTexturePackMenuSetting("0 off", true), "a leading 0 = off");
+}
+
 void TestMipPlanAndSlots() {
   using namespace Fast::Deko3d;
   std::array<PicaMipPlan, kMaxPicaMipLevels> mips{};
@@ -899,6 +924,7 @@ int main() {
   TestProgramPick();
   TestStageCacheResolvesOnce();
   TestSamplerAndTextureKeys();
+  TestMenuArt();
   TestMipPlanAndSlots();
   TestVertexPlan();
   TestPipelineEnums();
