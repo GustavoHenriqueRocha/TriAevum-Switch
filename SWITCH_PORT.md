@@ -2166,6 +2166,16 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
     tuft drawn, so the visible cap bounds it: Near ≤4 ms (60 fps) / ≤11 ms (30 fps), Far ≤8 / ≤20 ms,
     Whole area ≤33 ms `[INF]`. Whole area in Hyrule Field exceeds a 60 fps frame: the menu says so
     and recommends 30 FPS.
+- **After test.6 (a save that starts in an area):** a ground without a rule of its own takes the rule of
+  its twin texture (`GrassTwinRules`), which needs the rule texture's signature. deko3d kept none, so
+  a save that starts in the Forest Temple drew no grass at its entrance until Sacred Forest Meadow
+  had been visited in that session (logs15/15sc: `rules_seen` 4, 0 sources published, then 6 after
+  the meadow). Rule textures' signatures are now kept in
+  `shadercache/grass_texture_signatures.bin` (`SetSignatureStore`, as on PC; one ~4 KiB record per
+  rule texture, written once) and the log says `grass: N rule texture signatures kept from earlier
+  sessions`. The first session after an update still needs one visit to the area that draws the
+  rule's texture. deko3d decodes a grass texture once per session even when its signature is kept
+  (`Contains`, not `Find`): the placement samples its pixels and deko3d decodes them nowhere else.
 - **Shaders:** `tools/oot3d/deko3d_grass/gen.py` compiles `grass_vsh.glsl` and the two fragment
   variants with uam into `gfx_deko3d_grass_dksh.h` (not in `deko3d.pack`). Rerun it after editing a
   shader.

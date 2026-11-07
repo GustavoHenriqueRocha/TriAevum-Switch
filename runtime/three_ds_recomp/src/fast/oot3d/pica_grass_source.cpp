@@ -154,15 +154,18 @@ bool Resolve(const Renderer3ds::PicaDrawView& draw, uint64_t frameId, const Inte
         return false;
     }
     auto& sources = GrassTextureSourceCache::Instance();
+    // Decoded once per session, even when an earlier session kept its
+    // signature: the placement samples these pixels (AcquireMaskShared), and
+    // deko3d decodes textures nowhere else. Only rule textures' signatures
+    // are kept (GrassTwinRules).
     if (texture->NativeType == 0 && texture->CopyReferences.empty() && texture->Width >= 16 &&
-        texture->Height >= 16 && !sources.Find(*textureHash, false)) {
+        texture->Height >= 16 && !sources.Contains(*textureHash)) {
         const auto size = EncodedMipSize(texture->NativeFormat, texture->Width, texture->Height);
         std::vector<uint8_t> rgba;
         if (size && *size <= texture->NativeBytes.size() &&
             ::Oot3d::Renderer::DecodePicaTextureRgba8(texture->NativeFormat, texture->Width, texture->Height,
                                                       texture->NativeBytes.first(*size), rgba, nullptr)) {
             sources.ObserveDecoded(*textureHash, texture->Width, texture->Height, rgba);
-            (void)sources.Find(*textureHash, true);
         }
     }
     const uint64_t observedHash = sources.ResolveObservedHash(*textureHash, texture->Width, texture->Height);

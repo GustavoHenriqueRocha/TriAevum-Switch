@@ -117,6 +117,7 @@
 #include <random>
 #include <numbers>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <map>
@@ -1537,6 +1538,46 @@ TEST(Oot3dGrassTextureTwins, TexturesWithoutTheirOwnRuleInheritTheirTwinsRule) {
     EXPECT_TRUE(twins.Configured(rules, 0xB0U, 128U, 128U, 0U));
     EXPECT_TRUE(twins.AllInherited(rules).empty());
     twins.SetSource(nullptr);
+}
+
+// Switch (deko3d) kept no signatures: a save that starts in the Forest Temple
+// drew no grass at its entrance until Sacred Forest Meadow, which draws the
+// rule's own texture, had been visited in the same session.
+TEST(Oot3dGrassTextureTwins, RuleSignatureKeptByAnEarlierSessionServesItsTwin) {
+    using namespace Fast::Oot3d;
+    auto& cache = GrassTextureSourceCache::Instance();
+    auto& twins = GrassTwinRules::Instance();
+    twins.SetSource(nullptr);  // the renderer's cache
+    const auto store = std::filesystem::temp_directory_path() / "oot3d_grass_signature_store_test.bin";
+    std::filesystem::remove(store);
+    std::vector<GrassPlacementRule> rules(1);
+    rules[0].RuleId = 1U;
+    rules[0].Target.Rgba8Hash = 0xA1U;
+    rules[0].Target.Width = rules[0].Target.Height = 128U;
+    rules[0].Target.MapperSlotMask = 0x01U;
+    const auto ground = GrassTwinPattern(31U, 128U);
+    const auto twin = GrassTwinPattern(31U, 128U, 0.6F);
+    const auto session = [&](const std::filesystem::path& kept, bool drawsRuleTexture) {
+        cache.Clear();
+        twins.Clear();
+        const size_t loaded = cache.SetSignatureStore(kept);
+        if (drawsRuleTexture) cache.ObserveDecoded(0xA1U, 128U, 128U, ground);
+        cache.ObserveDecoded(0xB1U, 128U, 128U, twin);
+        return std::pair{loaded, twins.Configured(rules, 0xB1U, 128U, 128U, 0U)};
+    };
+    // Nothing kept: the twin has a rule only while the rule's texture is drawn.
+    EXPECT_EQ(session({}, false), std::pair(size_t{0}, false));
+    // A session that draws both keeps the rule texture's signature...
+    EXPECT_EQ(session(store, true), std::pair(size_t{0}, true));
+    // ...and the next one starts where only the twin is drawn.
+    EXPECT_EQ(session(store, false), std::pair(size_t{1}, true));
+    // Kept once: drawing the rule's texture again appends nothing.
+    EXPECT_EQ(session(store, true), std::pair(size_t{1}, true));
+    EXPECT_EQ(session(store, false).first, 1U);
+    (void)cache.SetSignatureStore({});
+    cache.Clear();
+    twins.Clear();
+    std::filesystem::remove(store);
 }
 
 TEST(Oot3dGrassTextureCoordinates,

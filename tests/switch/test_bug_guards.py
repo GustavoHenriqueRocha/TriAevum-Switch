@@ -562,6 +562,15 @@ GUARDS = [
           r'case GrassSwitchDistance::Area:\s+profile\.FullDensityDistance = kGrassWholeAreaDistance;.*?'
           r'profile\.MaxVisibleInstances = kGrassWholeAreaInstances;',
           test="oot3d_grass_switch_tests (WholeAreaDrawsEveryTuftAndTheCapKeepsTheNearest)"),
+    # --- 06/11: a save that starts in the Forest Temple drew no grass at its entrance (logs15) ---
+    Guard("grass (deko3d): rule textures' signatures are kept across sessions, so a twin in an area entered first finds its rule",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'SetSignatureStore\(\s+"sdmc:/switch/oot3dre/shadercache/grass_texture_signatures\.bin"\);',
+          test="oot3d_graphics_foundation_tests (Oot3dGrassTextureTwins.RuleSignatureKeptByAnEarlierSessionServesItsTwin)"),
+    Guard("grass (deko3d): a kept signature never skips the session's decode (the placement samples its pixels)",
+          "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
+          r'texture->Height >= 16 && !sources\.Contains\(\*textureHash\)\) \{.*?'
+          r'sources\.ObserveDecoded\(\*textureHash, texture->Width, texture->Height, rgba\);\s+\}\s+\}'),
     # --- 26/10: dev menu without buttons on deko3d ---
     Guard("dev menu (L3+R3) opened on deko3d but didn't receive controller input (no ImGui SDL backend)",
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",

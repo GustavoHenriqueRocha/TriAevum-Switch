@@ -90,8 +90,9 @@ class GrassTextureSourceCache final : public GrassTextureSignatureSource {
     [[nodiscard]] std::shared_ptr<const GrassTextureSignature> Find(
         uint64_t rgba8Hash, bool persist) override;
     [[nodiscard]] uint64_t Generation() const override;
-    // Loads the kept signatures; new kept ones are appended to this file.
-    void SetSignatureStore(std::filesystem::path path);
+    // Loads the kept signatures (returns how many); new kept ones are
+    // appended to this file.
+    size_t SetSignatureStore(std::filesystem::path path);
     void Clear();
 
   private:

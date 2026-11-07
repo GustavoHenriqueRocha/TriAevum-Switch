@@ -32,6 +32,7 @@
 #include "fast/oot3d/grass_scene_bridge.h"
 #include "fast/oot3d/grass_stream_handoff.h"
 #include "fast/oot3d/grass_switch_profile.h"
+#include "fast/oot3d/grass_texture_source_cache.h"
 #include "fast/oot3d/grass_visibility.h"
 #include "fast/oot3d/graphics_settings.h"
 #include "fast/oot3d/graphics_settings_persistence.h"
@@ -449,6 +450,15 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
         Deko3d::Log("grass: the preset has no source rules; off");
         return;
     }
+    // Rule textures' signatures are kept across sessions (as on PC, beside the
+    // shader pack): a ground that takes its rule from a twin drawn in another
+    // area then grows grass in a session that starts there (a save in the
+    // Forest Temple had none until Sacred Forest Meadow was visited).
+    const size_t kept = Oot3d::GrassTextureSourceCache::Instance().SetSignatureStore(
+        "sdmc:/switch/oot3dre/shadercache/grass_texture_signatures.bin");
+    Deko3d::Log("grass: %zu rule texture signatures kept from earlier sessions "
+                "(shadercache/grass_texture_signatures.bin)",
+                kept);
     ApplyProfile(*state, fps60, Oot3d::ReadGrassSwitchDistance(config));
     state->Placements = std::make_unique<Oot3d::PicaGrassPlacements>(state->Profile.RetainedBytes);
     Deko3d::Log("grass: on (config/grass = %s), %zu rules, %.0f tufts/m2 of %u blades, at most %u per placement, "
