@@ -246,6 +246,7 @@ class Program:
         self.functions = {}
         self.globals = {}
         self.global_types = {}
+        self.fused_fma = True  # fma(): one rounding (False: product rounded first)
         self._parse(_Stream(tokenize(text)))
 
     # -- declarations --
@@ -905,6 +906,14 @@ class _Interpreter:
         if isinstance(a, bool) or (isinstance(a, Vec) and a.kind == "b"):
             return self._map(lambda p, q, t: q if t else p, x, y, a)
         return self.binary("+", x, self.binary("*", self.binary("-", y, x), a))
+
+    def _b_fma(self, a, b, c):
+        # One rounding of the exact a * b + c (binary32 products are exact in
+        # a double; the sum is rounded once there, then to binary32). Set
+        # Program.fused_fma = False to round the product first (unfused).
+        if not self.program.fused_fma:
+            return self.binary("+", self.binary("*", a, b), c)
+        return self._map(lambda p, q, r: f32(p * q + r), a, b, c)
 
     def _b_any(self, x):
         return any(x.c)

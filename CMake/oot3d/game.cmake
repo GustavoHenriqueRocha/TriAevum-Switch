@@ -78,6 +78,17 @@ target_include_directories(oot3d_deko3d_backend_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime/three_ds_recomp/include)
 oot3d_target_defaults(oot3d_deko3d_backend_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# config/deko3d_clear_draw: the depth reset's proofs (header-only;
+# tests/switch/test_clear_draw_tev.py runs its --emit output through glsl_eval).
+add_executable(oot3d_deko3d_clear_draw_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_deko3d_clear_draw_tests.cpp
+)
+target_compile_features(oot3d_deko3d_clear_draw_tests PRIVATE cxx_std_20)
+target_include_directories(oot3d_deko3d_clear_draw_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/runtime/three_ds_recomp/include
+    ${CMAKE_SOURCE_DIR}/tools/oot3d/native_pica_frontend)
+oot3d_target_defaults(oot3d_deko3d_clear_draw_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # deko3d toon / per-pixel lighting variants (config/lighting; pure parts).
 add_executable(oot3d_deko3d_lighting_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_deko3d_lighting_tests.cpp
