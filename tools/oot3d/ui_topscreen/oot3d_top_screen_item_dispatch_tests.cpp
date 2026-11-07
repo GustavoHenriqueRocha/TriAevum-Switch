@@ -196,6 +196,38 @@ void RunTopScreenItemDispatchTests() {
     Check(!ShouldObserveTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, input, runtime) &&
           !ExecuteTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, input, runtime) &&
           state.r[0] == global, "special state did not stay native");
+    // 3.2.2 0x005D21B4: under Restoration, ZR held takes X/Y's own items
+    // (slots 1, 2) away, so ZR+X/ZR+Y use Item I/II alone.
+    {
+        TopScreenExtendedInputFrame chord{.ZrHeld = true, .RestorationLayout = true};
+        Check(memory.Write8(global + 0x5C75U, 0), "clear special state");
+        for (const uint32_t slot : {1U, 2U}) {
+            state.r[0] = global;
+            state.r[1] = slot;
+            state.r[14] = 0x123400U;
+            Check(ShouldObserveTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
+                  ExecuteTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
+                  state.r[0] == 0xFFU && state.r[15] == 0x123400U,
+                  "Restoration ZR held left X/Y their items");
+        }
+        for (const uint32_t slot : {0U, 3U, 4U}) {
+            state.r[0] = global;
+            state.r[1] = slot;
+            Check(!ExecuteTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
+                  state.r[0] == global, "Restoration ZR held changed B or Item I/II slots");
+        }
+        chord.ZrHeld = false;
+        state.r[0] = global;
+        state.r[1] = 1;
+        Check(!ShouldObserveTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
+              !ExecuteTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
+              state.r[0] == global, "Restoration without ZR changed X");
+        chord.ZrHeld = true;
+        Check(memory.Write8(global + 0x5C75U, 1), "set special state");
+        Check(!ExecuteTopScreenItemDispatch(kTopScreenSlotItemEntry, memory, state, chord, runtime) &&
+              state.r[0] == global, "Restoration special state did not stay native");
+        state.r[1] = 3;
+    }
 
     for (const bool secondSlot : {false, true}) {
         input = {.ZrPressed = !secondSlot, .ZlPressed = secondSlot,

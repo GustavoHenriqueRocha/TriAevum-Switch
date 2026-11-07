@@ -45,18 +45,15 @@ TopScreenUiConfig SwitchConfig() {
   return config;
 }
 
-// itemIIconDrawn: whether the bridge copied a visible Item I icon.
 std::vector<oot3d::ui::UiPrimitive> BuildHud(const TopScreenUiConfig &config,
-                                             float alpha,
-                                             bool itemIIconDrawn = true) {
+                                             float alpha) {
   oot3d::ui::UiTextureIdentity items;
   oot3d::ui::UiTextureIdentity page;
   items.semantic_name = "native-items";
   page.semantic_name = "native-pause";
   std::vector<oot3d::ui::UiPrimitive> hud;
   AppendTopScreenTouchClusterPresentation(
-      BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, alpha, config.HudLayout,
-                                         itemIIconDrawn),
+      BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, alpha, config.HudLayout),
       page, hud);
   TopScreenDpadPresentationState dpad;
   dpad.OwnedEquipment = 0x7777;
@@ -108,7 +105,9 @@ template <typename T> std::span<const std::uint8_t> Bytes(const T &values) {
 // itemIAlpha is the native alpha of source 0 (0: the game draws no Item I).
 std::vector<oot3d::ui::UiPrimitive>
 NativeItemIcons(float alpha, float itemIAlpha = 1.0F,
-                TopScreenNativeItemOpacity *opacity = nullptr) {
+                TopScreenNativeItemOpacity *opacity = nullptr,
+                TopScreenHudLayout layout = TopScreenHudLayout::Normal,
+                bool zrHeld = false) {
   NativeA32Memory memory;
   std::string error;
   Require(memory.MapRegion({"hud-item-icons", 0x00500000U, 0x00040000U, true,
@@ -151,7 +150,7 @@ NativeItemIcons(float alpha, float itemIAlpha = 1.0F,
   std::vector<oot3d::ui::UiPrimitive> icons;
   Require(AppendTopScreenNativeItemIconCopies(memory, {0, 0, 0, 0}, alpha,
                                               items, icons, &error, false,
-                                              opacity),
+                                              opacity, layout, zrHeld),
           "the item icons were not copied");
   return icons;
 }
@@ -272,33 +271,27 @@ void TestHiddenControls() {
   const auto normalTargets = Targets(SwitchConfig(), 1.0F);
   const auto targets = Targets(restoration, 1.0F);
 
-  // The Item I icon keeps its circle, drawn as in Normal; Item II sits on
-  // the A circle, which moves into its lane, so it gets no second one.
-  const auto *normalItemI = FindCircle(normalHud, 2U);
-  const auto *itemICircle = FindCircle(restorationHud, 2U);
-  Require(normalItemI != nullptr && itemICircle != nullptr,
-          "Restoration draws the Item I circle");
-  Require(Same(itemICircle->destination, normalItemI->destination) &&
-              Same(itemICircle->uv, normalItemI->uv) &&
-              itemICircle->color.alpha == normalItemI->color.alpha &&
-              itemICircle->texture.semantic_name ==
-                  normalItemI->texture.semantic_name,
-          "Restoration draws the Item I circle with the Normal art and alpha");
+  // Item I/II have no lane in Restoration (they show in the X/Y lanes while
+  // ZR is held): no circle in lanes 2/3; the A circle takes lane 3.
+  Require(FindCircle(normalHud, 2U) != nullptr &&
+              FindCircle(restorationHud, 2U) == nullptr,
+          "Restoration draws no Item I circle");
   const auto *itemIICircle = FindCircle(normalHud, 3U);
   const auto *aCircle = FindCircle(restorationHud, 4U);
   Require(FindCircle(restorationHud, 3U) == nullptr &&
               itemIICircle != nullptr && aCircle != nullptr &&
               Same(aCircle->destination, itemIICircle->destination),
-          "Restoration frames Item II with the A circle alone");
+          "Restoration puts the A circle alone in the Item II lane");
 
   // The layout, not the drawing, decides: Item I/II are ZR+X/ZR+Y chords.
   Require(!targets.ButtonVisible[2] && !targets.ButtonVisible[3],
-          "Restoration Item I/II circles take no taps");
-  Require(ResolveTopScreenHudTouchTargets(restorationHud,
-                                          TopScreenHudLayout::Normal, kWidth,
-                                          kHeight)
-              .ButtonVisible[2],
-          "the same circle is a target in the Normal layout");
+          "Restoration Item I/II lanes take no taps");
+  const auto normalUnderRestoration = ResolveTopScreenHudTouchTargets(
+      normalHud, TopScreenHudLayout::Restoration, kWidth, kHeight);
+  Require(!normalUnderRestoration.ButtonVisible[2] &&
+              !normalUnderRestoration.ButtonVisible[3] &&
+              normalTargets.ButtonVisible[2],
+          "the layout decides: a drawn Item I circle takes no tap under Restoration");
   for (const auto &primitive : restorationHud) {
     if (!IsClusterCircle(primitive))
       continue;
@@ -330,96 +323,142 @@ void TestHiddenControls() {
           "no HUD, no controls");
 }
 
-// Every lane that shows an item icon shows exactly one circle around it, in
-// both layouts (Restoration once left the Item I icon bare).
+// Every item icon drawn sits in exactly one circle, in both layouts and with
+// ZR up or held: Restoration draws Item I/II only while ZR is held, in the X/Y
+// circles, and the X/Y icons step aside then.
 void TestEveryItemIconHasACircle() {
-  for (const auto layout :
-       {TopScreenHudLayout::Normal, TopScreenHudLayout::Restoration}) {
+  struct Case {
+    TopScreenHudLayout Layout;
+    bool ZrHeld;
+    std::array<bool, 4> Sources; // Item I, X, Y, Item II drawn
+  };
+  constexpr std::array<Case, 4> kCases{
+      {{TopScreenHudLayout::Normal, false, {true, true, true, true}},
+       {TopScreenHudLayout::Normal, true, {true, true, true, true}},
+       {TopScreenHudLayout::Restoration, false, {false, true, true, false}},
+       {TopScreenHudLayout::Restoration, true, {true, false, false, true}}}};
+  for (const auto &test : kCases) {
     auto config = SwitchConfig();
-    config.HudLayout = layout;
+    config.HudLayout = test.Layout;
     oot3d::ui::UiTextureIdentity page;
     page.semantic_name = "native-pause";
     std::vector<oot3d::ui::UiPrimitive> hud;
-    TopScreenNativeItemOpacity opacity;
-    const auto icons = NativeItemIcons(1.0F, 1.0F, &opacity);
-    Require(opacity.ItemIDrawn, "the copies report the drawn Item I icon");
+    const auto icons =
+        NativeItemIcons(1.0F, 1.0F, nullptr, test.Layout, test.ZrHeld);
     AppendTopScreenTouchClusterPresentation(
-        BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, 1.0F, layout,
-                                           opacity.ItemIDrawn),
+        BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, 1.0F, test.Layout),
         page, hud);
     hud.insert(hud.end(), icons.begin(), icons.end());
     ApplyTopScreenHudScale(hud, config);
     ApplyTopScreenGameplayCanvas(hud);
-    std::size_t framed = 0;
+    std::array<bool, 4> drawn{};
     for (const auto &icon : hud) {
       if (icon.role != oot3d::ui::UiPrimitiveRole::ActionButton ||
           icon.layer != 13U || !icon.visible)
         continue;
+      Require(icon.source_quad < 4U, "only the four face-button items");
+      drawn[icon.source_quad] = true;
       const float x = CenterX(icon.destination);
       const float y = CenterY(icon.destination);
       std::size_t circles = 0;
       for (const auto &circle : hud) {
         const auto &rect = circle.destination;
-        circles += IsClusterCircle(circle) && x >= rect.x && y >= rect.y &&
-                   x < rect.x + rect.width && y < rect.y + rect.height;
+        if (!IsClusterCircle(circle) || x < rect.x || y < rect.y ||
+            x >= rect.x + rect.width || y >= rect.y + rect.height)
+          continue;
+        ++circles;
+        // The renderer stable-sorts by layer: circle first, icon over it.
+        Require(circle.layer < icon.layer && &circle < &icon,
+                "the item icon is drawn above its circle");
       }
       Require(circles == 1, "an item icon sits in exactly one circle");
-      // The renderer stable-sorts by layer: the circle is drawn first and
-      // the icon over it, in both layouts.
-      for (const auto &circle : hud) {
-        const auto &rect = circle.destination;
-        if (IsClusterCircle(circle) && x >= rect.x && y >= rect.y &&
-            x < rect.x + rect.width && y < rect.y + rect.height)
-          Require(circle.layer < icon.layer && &circle < &icon,
-                  "the item icon is drawn above its circle");
-      }
-      ++framed;
     }
-    Require(framed == 4, "Item I, X, Y and Item II icons are all drawn");
+    Require(drawn == test.Sources, "the layout draws the expected items");
   }
 }
 
-// Restoration draws the Item I circle exactly while the game draws the Item I
-// icon (once an empty circle stood there). Normal does not depend on it.
-void TestItemICircleFollowsItsIcon() {
-  oot3d::ui::UiTextureIdentity page;
-  page.semantic_name = "native-pause";
-  for (const float itemIAlpha : {1.0F, 0.0F}) {
-    TopScreenNativeItemOpacity opacity;
-    const auto icons = NativeItemIcons(1.0F, itemIAlpha, &opacity);
-    Require(opacity.ItemIDrawn == (itemIAlpha != 0.0F),
-            "the copies report whether Item I is drawn");
-    std::size_t itemIIcons = 0;
+// The Restoration slot-to-button mapping (SingleScreen 3.2.2): with ZR held
+// Item I is drawn where X is and Item II where Y is, the buttons that chord
+// them (ZR+X, ZR+Y), labelled I/II; without ZR they are not drawn at all.
+void TestRestorationItemLanes() {
+  const auto center = [](const std::vector<oot3d::ui::UiPrimitive> &icons,
+                         std::uint32_t source) {
     for (const auto &icon : icons)
-      itemIIcons += icon.source_quad == 0U && icon.visible;
-    Require(itemIIcons == (opacity.ItemIDrawn ? 1U : 0U),
-            "ItemIDrawn is the visible Item I copy");
-    std::vector<oot3d::ui::UiPrimitive> hud;
-    AppendTopScreenTouchClusterPresentation(
-        BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, 1.0F,
-                                           TopScreenHudLayout::Restoration,
-                                           opacity.ItemIDrawn),
-        page, hud);
-    Require((FindCircle(hud, 2U) != nullptr) == opacity.ItemIDrawn,
-            "Restoration: an Item I circle only around a drawn Item I icon");
+      if (icon.source_quad == source && icon.visible)
+        return std::array<float, 2>{CenterX(icon.destination),
+                                    CenterY(icon.destination)};
+    return std::array<float, 2>{-1.0F, -1.0F};
+  };
+  const auto normal = NativeItemIcons(1.0F);
+  const auto held = NativeItemIcons(1.0F, 1.0F, nullptr,
+                                    TopScreenHudLayout::Restoration, true);
+  const auto released = NativeItemIcons(1.0F, 1.0F, nullptr,
+                                        TopScreenHudLayout::Restoration, false);
+  const auto same = [](std::array<float, 2> a, std::array<float, 2> b) {
+    return Near(a[0], b[0]) && Near(a[1], b[1]);
+  };
+  // The move is exactly one lane: right (Item I) to top (X), bottom (Item
+  // II) to left (Y), as the circles are spaced.
+  const auto lanes = BuildTopScreenTouchClusterGeometry({0, 0, 0, 0}, 1.0F);
+  const auto moved = [](std::array<float, 2> point, TopScreenVec2 from,
+                        TopScreenVec2 to) {
+    return std::array<float, 2>{point[0] + to.X - from.X,
+                                point[1] + to.Y - from.Y};
+  };
+  Require(same(center(held, 0U), moved(center(normal, 0U), lanes.Positions[2],
+                                       lanes.Positions[0])),
+          "ZR held: Item I is drawn in the X lane");
+  Require(same(center(held, 3U), moved(center(normal, 3U), lanes.Positions[3],
+                                       lanes.Positions[1])),
+          "ZR held: Item II is drawn in the Y lane");
+  Require(center(held, 1U)[0] < 0 && center(held, 2U)[0] < 0,
+          "ZR held: the X/Y items step aside");
+  Require(center(released, 0U)[0] < 0 && center(released, 3U)[0] < 0 &&
+              same(center(released, 1U), center(normal, 1U)) &&
+              same(center(released, 2U), center(normal, 2U)),
+          "ZR up: X/Y in their lanes, no Item I/II");
+  for (std::size_t region = 0; region < 6U; ++region) {
+    const auto placement = ResolveTopScreenItemIconPlacement(
+        TopScreenHudLayout::Normal, true, region);
+    Require(placement.Visible && placement.Offset.X == 0.0F &&
+                placement.Offset.Y == 0.0F,
+            "Normal places every region natively");
   }
-  const auto normal = BuildTopScreenTouchClusterGeometry(
-      {0, 2, 0, 2}, 0.75F, TopScreenHudLayout::Normal, true);
-  const auto normalNoItem = BuildTopScreenTouchClusterGeometry(
-      {0, 2, 0, 2}, 0.75F, TopScreenHudLayout::Normal, false);
-  Require(std::memcmp(&normal, &normalNoItem, sizeof(normal)) == 0,
-          "Normal ignores the Item I icon");
-  const auto restorationNoItem = BuildHud(
-      [] {
-        auto config = SwitchConfig();
-        config.HudLayout = TopScreenHudLayout::Restoration;
-        return config;
-      }(),
-      1.0F, false);
-  Require(FindCircle(restorationNoItem, 2U) == nullptr &&
-              FindCircle(restorationNoItem, 3U) == nullptr &&
-              FindCircle(restorationNoItem, 4U) != nullptr,
-          "Restoration without Item I: no Item I circle, the A circle stays");
+  Require(ResolveTopScreenItemIconPlacement(TopScreenHudLayout::Restoration,
+                                            true, 4U)
+                  .Visible &&
+              ResolveTopScreenItemIconPlacement(
+                  TopScreenHudLayout::Restoration, false, 5U)
+                  .Visible,
+          "Restoration leaves the D-pad and action regions alone");
+
+  // The chord uses Item I/II and X/Y give up their own items meanwhile.
+  TopScreenItemQueryState state;
+  state.Input.RestorationLayout = true;
+  state.Input.ZrHeld = true;
+  state.Input.XPressed = true;
+  state.Input.XHeld = true;
+  Require(ResolveTopScreenItemQuery(TopScreenItemQuery::ItemIPressed, state) &&
+              !ResolveTopScreenItemQuery(TopScreenItemQuery::ItemIIPressed,
+                                         state),
+          "ZR+X uses Item I");
+  Require(HasTopScreenSlotItemOverrideInput(state.Input),
+          "ZR held routes the X/Y slot queries");
+  for (const std::uint8_t slot : {1, 2})
+    Require(ResolveTopScreenSlotItemId({slot, 0x0AU, false, false, false,
+                                        true}) == 0xFFU,
+            "ZR held: X/Y use no item of their own");
+  Require(ResolveTopScreenSlotItemId({1U, 0x0AU, false, false, true, true}) ==
+              0x0AU,
+          "the game's special states keep the native item");
+  Require(ResolveTopScreenSlotItemId({0U, 0x3BU, false, false, false, true}) ==
+              0x3BU,
+          "B keeps its item");
+  state.Input.ZrHeld = false;
+  Require(!HasTopScreenSlotItemOverrideInput(state.Input) &&
+              !ResolveTopScreenItemQuery(TopScreenItemQuery::ItemIPressed,
+                                         state),
+          "X alone is X");
 }
 
 TopScreenTouchContact At(std::uint32_t id, float windowX, float windowY,
@@ -823,7 +862,7 @@ int main() {
   TestDpadIcons();
   TestHiddenControls();
   TestEveryItemIconHasACircle();
-  TestItemICircleFollowsItsIcon();
+  TestRestorationItemLanes();
   TestTracker();
   TestAimOwnership();
   TestAimRates();

@@ -1315,6 +1315,26 @@ int main() {
                   std::array<float, 4>{2.0F, 0.0F, 2.0F, 0.0F} &&
               std::abs(dynamicTouch.Alpha - 0.6F) < 0.001F,
           "TopScreen touch dynamic state is not sourced from native gameplay");
+  {
+    // Restoration: lanes 2/3 press with the ZR+X/ZR+Y chords, not ZR alone.
+    TopScreenExtendedInputFrame chord;
+    chord.RestorationLayout = true;
+    chord.ZrHeld = true;
+    chord.ZlHeld = true;
+    TopScreenTouchDynamicState pressed;
+    Require(ReadTopScreenTouchDynamicState(touchStateMemory, chord, &pressed,
+                                           &error) &&
+                pressed.VerticalOffsets ==
+                    std::array<float, 4>{2.0F, 0.0F, 0.0F, 0.0F},
+            "Restoration pressed Item I/II lanes without the chord");
+    chord.XHeld = true;
+    chord.YHeld = true;
+    Require(ReadTopScreenTouchDynamicState(touchStateMemory, chord, &pressed,
+                                           &error) &&
+                pressed.VerticalOffsets ==
+                    std::array<float, 4>{2.0F, 0.0F, 2.0F, 2.0F},
+            "Restoration did not press Item I/II lanes with ZR+X/ZR+Y");
+  }
 
   TopScreenAuxiliaryTouchInputs auxiliaryInputs;
   auxiliaryInputs.HasPlayState = true;
@@ -1349,26 +1369,53 @@ int main() {
               std::abs(auxiliaryPrimitives[0].color.alpha - 0.54F) < 0.001F,
           "TopScreen group-39 auxiliary presenter is incomplete");
   const auto restorationTouchCluster = BuildTopScreenTouchClusterGeometry(
-      {0.0F, 1.0F, 2.0F, 3.0F}, 0.5F,
-      TopScreenHudLayout::Restoration, true);
+      {0.0F, 1.0F, 2.0F, 3.0F}, 0.5F, TopScreenHudLayout::Restoration);
   Require(restorationTouchCluster.Alpha[0] == 0.5F &&
               restorationTouchCluster.Alpha[1] == 0.5F &&
-              restorationTouchCluster.Alpha[2] == 0.5F &&
+              restorationTouchCluster.Alpha[2] == 0.0F &&
               restorationTouchCluster.Alpha[3] == 0.0F &&
               restorationTouchCluster.Positions[4].X == 342.0F &&
               restorationTouchCluster.Positions[4].Y == 52.0F,
           "Restoration touch-cluster geometry is incorrect");
-  Require(BuildTopScreenTouchClusterGeometry({0.0F, 1.0F, 2.0F, 3.0F}, 0.5F,
-                                             TopScreenHudLayout::Restoration,
-                                             false)
-                  .Alpha[2] == 0.0F,
-          "Restoration drew the Item I circle without its icon");
   const auto restorationAuxiliary = BuildTopScreenAuxiliaryTouchGeometry(
       auxiliaryInputs, dynamicTouch.VerticalOffsets, dynamicTouch.Alpha,
       TopScreenHudLayout::Restoration);
   Require(restorationAuxiliary.Quads[2].Position.X == 337.0F &&
               restorationAuxiliary.Quads[2].Position.Y == 54.0F,
           "Restoration auxiliary control geometry is incorrect");
+  Require(restorationAuxiliary.Quads[0].AtlasOrigin.X == 207.0F &&
+              restorationAuxiliary.Quads[1].AtlasOrigin.X == 226.0F,
+          "Restoration without ZR keeps the X/Y labels");
+  {
+    // 3.2.2 0x005E0408..0x005E0470: ZR held relabels the X/Y lanes I/II
+    // (custom_ui01 rects 22/23), one unit up; Normal ignores ZR.
+    const auto held = BuildTopScreenAuxiliaryTouchGeometry(
+        auxiliaryInputs, dynamicTouch.VerticalOffsets, dynamicTouch.Alpha,
+        TopScreenHudLayout::Restoration, true);
+    Require(held.Quads[0].Visible && held.Quads[1].Visible &&
+                held.Quads[0].AtlasOrigin.X == 131.0F &&
+                held.Quads[0].AtlasOrigin.Y == 231.0F &&
+                held.Quads[1].AtlasOrigin.X == 150.0F &&
+                held.Quads[1].AtlasOrigin.Y == 231.0F &&
+                held.Quads[0].Position.X ==
+                    restorationAuxiliary.Quads[0].Position.X &&
+                held.Quads[0].Position.Y ==
+                    restorationAuxiliary.Quads[0].Position.Y - 1.0F &&
+                held.Quads[1].Position.Y ==
+                    restorationAuxiliary.Quads[1].Position.Y - 1.0F,
+            "Restoration with ZR held labels the X/Y lanes I/II");
+    const auto normal = BuildTopScreenAuxiliaryTouchGeometry(
+        auxiliaryInputs, dynamicTouch.VerticalOffsets, dynamicTouch.Alpha);
+    const auto normalHeld = BuildTopScreenAuxiliaryTouchGeometry(
+        auxiliaryInputs, dynamicTouch.VerticalOffsets, dynamicTouch.Alpha,
+        TopScreenHudLayout::Normal, true);
+    for (std::size_t index = 0; index < 4U; ++index)
+      Require(normalHeld.Quads[index].AtlasOrigin.X ==
+                      normal.Quads[index].AtlasOrigin.X &&
+                  normalHeld.Quads[index].Position.Y ==
+                      normal.Quads[index].Position.Y,
+              "Normal labels do not depend on ZR");
+  }
   const auto restorationLabels = BuildTopScreenTouchLabelsGeometry(
       dynamicTouch.VerticalOffsets, dynamicTouch.Alpha,
       TopScreenHudLayout::Restoration);
@@ -1597,6 +1644,55 @@ int main() {
               nativeCounters[4].role ==
                   oot3d::ui::UiPrimitiveRole::CounterDigit,
           "TopScreen native counter reconstruction is incomplete");
+  {
+    // 3.2.2 Restoration counters (0x005E1D6C..0x005E1D9C): Item I's count
+    // (42, counter 0) and X's (7, counter 2). Without ZR only X's count is
+    // drawn, in the X lane; with ZR held only Item I's, in the X lane
+    // (358,20), keeping Item I's lane-2 press offset.
+    Require(touchStateMemory.Write8(kPlayState + 0x435U + 2U, 1U) &&
+                touchStateMemory.Write32(kPlayState + 0x32CU + 8U, 7U),
+            "could not seed the X ammo counter");
+    TopScreenUiConfig restorationConfig;
+    restorationConfig.HudLayout = TopScreenHudLayout::Restoration;
+    TopScreenExtendedInputFrame counterInput;
+    const auto ammoDigits = [&](const TopScreenUiConfig *config) {
+      std::vector<oot3d::ui::UiPrimitive> counters;
+      Require(AppendTopScreenNativeCounters(
+                  touchStateMemory, dynamicTouch.VerticalOffsets,
+                  numberGlyphTexture, counters, &error, config, &counterInput),
+              "cannot build the Restoration ammo counters");
+      // Rupees (3 digits) and keys (1) come first.
+      return std::vector<oot3d::ui::UiPrimitive>(counters.begin() + 4,
+                                                 counters.end());
+    };
+    const auto normal = ammoDigits(nullptr);
+    // Ones digit first: 42 is '2' then '4'.
+    Require(normal.size() == 3U && normal[0].destination.x == 389.0F &&
+                normal[1].destination.x == 382.0F &&
+                normal[0].destination.y == 49.0F &&
+                normal[2].destination.x == 365.0F &&
+                normal[2].destination.y == 25.0F,
+            "Normal draws Item I's count in its lane and X's in the X lane");
+    const auto released = ammoDigits(&restorationConfig);
+    Require(released.size() == 1U && released[0].destination.x == 365.0F &&
+                released[0].destination.y == 25.0F,
+            "Restoration without ZR draws X's count only");
+    counterInput.ZrHeld = true;
+    const auto held = ammoDigits(&restorationConfig);
+    Require(held.size() == 2U && held[0].destination.x == 365.0F &&
+                held[1].destination.x == 358.0F &&
+                held[0].destination.y == 25.0F &&
+                held[1].destination.y == 25.0F,
+            "Restoration with ZR held draws Item I's count in the X lane");
+    TopScreenUiConfig normalConfig;
+    const auto normalHeld = ammoDigits(&normalConfig);
+    Require(normalHeld.size() == normal.size() &&
+                normalHeld[0].destination.x == normal[0].destination.x,
+            "Normal counters do not depend on ZR");
+    Require(touchStateMemory.Write8(kPlayState + 0x435U + 2U, 0U) &&
+                touchStateMemory.Write32(kPlayState + 0x32CU + 8U, 0xFFFFFFFFU),
+            "could not clear the X ammo counter");
+  }
 
   constexpr std::uint32_t sourceAmmo = kPlayState + 0x800U;
   Require(touchStateMemory.Write32(kPlayState + 0x10U, sourceAmmo) &&

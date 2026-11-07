@@ -32,19 +32,23 @@ std::array<bool, 4> BuildTopScreenItemCompatibilityOverrides(
 
 bool HasTopScreenSlotItemOverrideInput(
     const TopScreenExtendedInputFrame &input) noexcept {
-  return !input.RestorationLayout && !input.GameplayDpadActionsOwned &&
+  // Restoration: X/Y give up their items while ZR is held (the chords).
+  if (input.RestorationLayout) {
+    return input.ZrHeld;
+  }
+  return !input.GameplayDpadActionsOwned &&
          (input.DpadLeftHeld || input.DpadRightHeld);
 }
 
 bool HasTopScreenItemQueryOverrideInput(
     const TopScreenExtendedInputFrame &input) noexcept {
-  if (HasTopScreenSlotItemOverrideInput(input)) {
-    return true;
-  }
   if (input.RestorationLayout) {
     return (input.ZrHeld &&
             (input.XPressed || input.YPressed || input.XHeld || input.YHeld)) ||
            (input.ZrPressed && (input.XHeld || input.YHeld));
+  }
+  if (HasTopScreenSlotItemOverrideInput(input)) {
+    return true;
   }
   return input.ZrPressed || input.ZlPressed || input.ZrHeld || input.ZlHeld;
 }
@@ -90,6 +94,9 @@ std::uint8_t
 ResolveTopScreenSlotItemId(const TopScreenSlotItemQuery &query) noexcept {
   if (query.NativeSpecialStateActive) {
     return query.NativeItemId;
+  }
+  if (query.RestorationZrHeld && (query.Slot == 1U || query.Slot == 2U)) {
+    return 0xFFU;
   }
   if (query.Slot == 3U && query.ItemICompatibilityOverride) {
     return 0x45U;

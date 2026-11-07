@@ -1282,31 +1282,41 @@ GUARDS = [
           r'removed = std::filesystem::remove\(target, error\);',
           "oot3d_native_a32_ctr_fs_tests (TestSlotEraseWithRelativeSaveRoot)",
           forbid=r'std::filesystem::(weakly_canonical|canonical|absolute)\('),
-    # --- 05/11: Restoration HUD left the item on the right of the button cluster without its circle ---
-    # The Item I/II circles were hidden under Restoration so that taps could not
-    # press ZR/ZL, but the native item icons are still drawn in those lanes.
-    # The circles are drawn (Item II's lane already has the moved A circle) and
-    # the layout, not the drawing, keeps Item I/II untappable.
-    Guard("Restoration HUD: the item on the right of the button cluster had no circle around it",
+    # --- 05/11 and 06/11: Restoration HUD drew the Item I icon on the right of
+    # the button cluster, first without a circle, then with an empty circle when
+    # no Item I was drawn. ---
+    # --- 07/11: then the right item had no button letter, no count and no
+    # button: Item I/II are the ZR+X/ZR+Y chords under Restoration. ---
+    # SingleScreen 3.2.2 (code.ips 0x005DFDAC, 0x005E0408, 0x005E1D6C, 0x005D21B4)
+    # gives Item I/II no lane: they are hidden until ZR is held, then drawn in the
+    # X/Y lanes, labelled I/II, with their counts there, while X/Y use no item of
+    # their own. Lanes 2/3 carry no circle (the A circle takes lane 3).
+    Guard("Restoration HUD: Item I drawn on the right with no button and no count (Item I/II show in the X/Y lanes only while ZR is held)",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
-          r'layout == TopScreenHudLayout::Restoration &&\s*'
-          r'\(index == 3U \|\| \(index == 2U && !itemIIconDrawn\)\)',
-          "oot3d_top_screen_hud_touch_tests (TestEveryItemIconHasACircle)",
-          forbid=r'index >= 2U \? 0\.0F'),
-    # --- 06/11: then Restoration HUD showed an empty circle on the right ---
-    # The lane-2 circle was drawn whether or not the game drew an Item I icon.
-    # The bridge copies the item icons first and passes ItemIDrawn (a visible
-    # region-0 copy) to the circle geometry; the icons still draw above it.
-    Guard("Restoration HUD: an empty circle on the right (no Item I icon drawn)",
+          r'const bool itemLane = region == 0U \|\| region == 3U;\s*'
+          r'placement\.Visible = itemLane == zrHeld;\s*'
+          r'if \(itemLane && zrHeld\) \{\s*placement\.Offset = \{-24\.0F, -24\.0F\};',
+          "oot3d_top_screen_hud_touch_tests (TestRestorationItemLanes)"),
+    Guard("Restoration HUD: the item copies, X/Y labels and counters follow the layout and ZR",
           "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
-          r'BuildTopScreenTouchClusterGeometry\(\s*touchState\.VerticalOffsets, touchState\.Alpha,\s*'
-          r'mTopScreenConfig\.HudLayout, itemOpacity\.ItemIDrawn\)',
-          "oot3d_top_screen_hud_touch_tests (TestItemICircleFollowsItsIcon)"),
-    Guard("Restoration HUD: ItemIDrawn is the visible Item I (region 0) icon copy",
+          r'itemIconCopies, &itemCopyError, false, &itemOpacity,\s*'
+          r'mTopScreenConfig\.HudLayout, mTopScreenInput\.ZrHeld\);.*?'
+          r'BuildTopScreenAuxiliaryTouchGeometry\(\s*auxiliaryInputs, touchState\.VerticalOffsets, touchState\.Alpha,\s*'
+          r'mTopScreenConfig\.HudLayout, mTopScreenInput\.ZrHeld\);',
+          "oot3d_top_screen_hud_touch_tests (TestEveryItemIconHasACircle)"),
+    Guard("Restoration HUD: Item I/II counts drawn on the right/bottom instead of the X/Y lanes",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
-          r'if \(regionIndex == 0U && primitive\.visible\)\s*observedOpacity\.ItemIDrawn = true;',
-          "oot3d_top_screen_hud_touch_tests (TestItemICircleFollowsItsIcon)"),
-    Guard("Restoration HUD: Item I/II circles are drawn but a tap never presses ZR/ZL (the layout decides)",
+          r'if \(zrHeld\) \{\s*return counter < 2U \? std::optional<std::size_t>\(counter \+ 2U\)',
+          "oot3d_top_screen_mod_profile_tests (Restoration counters)"),
+    Guard("Restoration HUD: ZR+X also used the X item (X/Y give up their items while ZR is held)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_items.cpp",
+          r'if \(query\.RestorationZrHeld && \(query\.Slot == 1U \|\| query\.Slot == 2U\)\) \{\s*return 0xFFU;',
+          "oot3d_top_screen_hud_touch_tests (TestRestorationItemLanes)"),
+    Guard("Restoration HUD: no circle in the Item I/II lanes (Item I/II have no lane there)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'layout == TopScreenHudLayout::Restoration && index >= 2U;',
+          "oot3d_top_screen_hud_touch_tests (TestHiddenControls)"),
+    Guard("Restoration HUD: a tap never presses ZR/ZL (the layout decides)",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch.cpp",
           r'itemButtonsTappable = layout != TopScreenHudLayout::Restoration;.*?'
           r'if \(!itemButtonsTappable && \(primitive\.source_quad == kItemIQuad \|\|',
