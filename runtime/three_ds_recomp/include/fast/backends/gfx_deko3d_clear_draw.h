@@ -942,6 +942,14 @@ struct PicaClearDrawPlan {
         plan.ColorWhy = why;
         return plan;
     };
+    if (context.StencilWrites) {
+        return colorKeep("stencil writes");
+    }
+    if (plan.ColorMask == 0U) {
+        // Writes depth only: the depth clear is all of it.
+        plan.Action = PicaClearDrawAction::FullClear;
+        return plan;
+    }
     if (!tevKnown) {
         return colorKeep("no uniforms");
     }
@@ -956,9 +964,6 @@ struct PicaClearDrawPlan {
     }
     if (!draw.Blend.Enabled && draw.LogicOperation != Renderer3ds::PicaLogicOperation::Copy) {
         return colorKeep("logic op");
-    }
-    if (context.StencilWrites) {
-        return colorKeep("stencil writes");
     }
     plan.Action = PicaClearDrawAction::FullClear;
     for (size_t c = 0; c < 4U; ++c) {

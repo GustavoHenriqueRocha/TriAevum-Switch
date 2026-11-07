@@ -2127,6 +2127,73 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   says how depth is reset. (b) Create the file, restart, same room: `deko3d: zcull on` in deko3d.txt, `dkperf
   zcull=1 zcull_stats=...` and `scene_ms` against (a); look at decals (floor markings, shadows' blobs,
   Deku Tree spider webs) for missing square tiles. Delete the file if any tile is missing.
+- **Decals with ZCULL on (07/11, depthclear):** since deko3d cannot set `ZcullTestMask`, every draw whose
+  program writes `gl_FragDepth` and tests or writes depth is wrapped in two ZCULL invalidations
+  (`dkCmdBufBarrier(None, DkInvalidateFlags_Zcull)` = `InvalidateZcullNoWfi`, in order, no wait): ZCULL
+  cannot reject the decal by its raster depth, nor keep a view of the tiles that the decal's written depth
+  made wrong. The cost [inference]: ZCULL culls little or nothing after the frame's first such draw until the
+  next depth clear (`config/deko3d_clear_draw`). `dkperf zcull_invalidates=` counts them per frame. Restored save states
+  already invalidated ZCULL (`WriteTarget`); a change of depth target invalidates it in deko3d itself.
+  Grass drawn with `gl_FragDepth` (w-buffered meshes; `grass: ... depth-writing 0` in every log so far) is
+  not wrapped. **Stays opt-in:** ZCULL needs a depth clear to start from a known state, and the clear only
+  exists where `reset draw:` says `plan depth_clear`/`full_clear`; the decal guard is correct by
+  construction [inference from deko3d 0.5's source] but untested on the console.
+
+### Depth reset as fast clears, overdraw counters (`config/deko3d_clear_draw`, 07/11, off by default)
+The game never clears depth; every frame starts with a full-target draw with depth test ALWAYS (`depth (frame):
+... first ... full=1.00`). `gfx_deko3d_clear_draw.h` decides, per such draw, whether it provably writes one
+depth and one colour; `config/deko3d_clear_draw` (present, content not `0`) applies the decision. Absent, the
+draw is only described. Log at start: `pica: clear draw on (config/deko3d_clear_draw)` / `pica: clear draw off`.
+- **Plans:** `depth_clear`: the draw provably writes depth 0 or 1 at every pixel of the target, so the depth
+  is cleared to it (`dkCmdBufClearDepthStencil`, deko3d's fast ZCULL clear) and the draw runs with depth
+  writes off. `full_clear`: its colour is provably one constant too (or it writes no colour), so the colour
+  is cleared to it under the draw's colour mask and the draw is skipped. The target's version moves once,
+  as for the draw. Anything not provable keeps the draw unchanged.
+- **What "provable" means** (all host-tested on synthetic draw states, `oot3d_deko3d_clear_draw_tests`):
+  - Depth: only the explicit form of the specialized program (`gl_FragDepth = -z * depth_scale +
+    depth_offset`) with scale 0 is constant (w-buffered: only offset 0). The raster form (scale -1, offset 0)
+    writes the rasterized depth, which the CPU cannot reproduce bit for bit: never converted. Only 0 and 1
+    are cleared to (exact in any depth conversion).
+  - Colour: every TEV input the program reads is a constant (TEV constants, buffer colour; disabled
+    textures, lighting and procedural texture read 0). The six stages run in double precision and every
+    8-bit rounding must be at least 0.01 (in 1/255 steps) from a boundary, else "rounding boundary". Checked
+    against 200,000 random constant programs in eight float32 models (division or reciprocal, fused or
+    separate fma, two mix forms) and, in `tests/switch/test_clear_draw_tev.py`, by running the generator's own
+    TEV expressions through `glsl_eval.py` in binary32: every proven program stores the predicted bytes.
+  - Coverage: the frontend's typed model-view-projection transform projects the vertices (with a float32
+    error bound); one triangle or two forming a convex quad must contain every pixel centre of the viewport
+    (a quarter pixel inside its edges); no vertex within rounding of a clip plane (the vertex wrapper's
+    near/far snapping included: a quad exactly on the far plane is **not** provable, float32 may clip it);
+    with culling, the covering triangles front-facing by the GL rule `PlanPicaCull` reproduces.
+  - No discard (alpha test off, ALWAYS, or provably passing on the constant alpha, with `int(a * 255)`
+    truncation), no fog, no fragment lighting, no Toon/Per-pixel variant, the specialized program; for the
+    colour clear also no blending (or ONE/ZERO add), logic op COPY, no stencil writes.
+- **`reset draw:` line** (`logs/deko3d.txt`, at each change of plan, at most 64, and once per periodic log):
+  vertices, topology, triangles, culling, `coverage proven|...`; `depth raster|frag <constant>|frag scale ..
+  offset ..`, `test always|off`, the vertices' raster depth range `z a..b` and NDC `x`/`y` ranges; `colour
+  constant rrggbbaa|vertex_colour|texture|lighting|proctex at stage N`, mask, blend, logic op, fog, lighting,
+  `alpha_test enabled/function passes|discards|unknown`, stencil; `plan draw (reason)|depth_clear[, colour
+  kept (reason)]|full_clear`. The plan is computed (and logged) with the file absent too.
+- **dkperf (perf.txt):** `fs_px=` fragment shader runs and `passed_px=` samples passing depth/stencil, frame top
+  to scene end, per pixel of the presented top scene (`top_w x top_h`; every target of the scene counts);
+  `opaque_ms=` frame top to the first translucent world draw (before grass); `clear_draw=0|1 resets= depth_clears=
+  full_clears=` per frame (`resets` counts the depth resets whether converted or not).
+- **Saving** [estimate]: the reset covers 921,600 pixels at 3.0. Skipped (`full_clear`): its constant-TEV
+  shader (six byte-rounded stages) and the colour/depth writes, about 0.5–1.2 ms at 307 MHz (less once
+  pass-through stages are skipped in the pack), and a known ZCULL state each frame. `depth_clear` alone: the
+  depth writes, about 0.1 ms, and the ZCULL state. Nothing if the console's `reset draw:` says `plan draw`.
+- **Risks:** the coverage proof trusts the frontend's typed transform (as the widescreen coverage does) and
+  the GL culling model of `PlanPicaCull`; the clears trust deko3d's clear to respect the scissor (the extent)
+  as `ApplyPicaFill` does. Nothing changes the generated game code; `deko3d.pack` is unchanged.
+- Guards: "clear draw: the depth reset becomes clears only with config/deko3d_clear_draw", "clear draw: a
+  constant colour only away from 8-bit rounding boundaries", "ZCULL: draws whose program writes
+  gl_FragDepth invalidate ZCULL around them".
+- Console check (one minute each, full resolution, 60 FPS: the Temple of Time, Forest Temple room 8, Sacred
+  Forest Meadow): (a) without the file, read `reset draw:` (its `plan` and reason) and `dkperf fs_px passed_px
+  opaque_ms busy_ms`; (b) with `config/deko3d_clear_draw`, restart, same places: `pica: clear draw on`,
+  `dkperf clear_draw=1 depth_clears full_clears`, `busy_ms`/`scene_ms`/`fs_px` against (a), and the picture
+  unchanged (sky, background colour, far geometry); (c) only if (b) shows `full_clears` or `depth_clears`
+  near 1: add `config/deko3d_zcull`, compare `zcull_stats`, `zcull_invalidates`, `scene_ms`, and look at decals.
 
 ### Fewer deko3d barriers (07/11)
 Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.cpp`, `gpu_transfer.cpp`):

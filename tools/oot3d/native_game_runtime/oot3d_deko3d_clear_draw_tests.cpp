@@ -645,6 +645,14 @@ void TestPlan() {
                 "vertex colour keeps the colour draw");
         const std::string line = FormatPicaResetDraw(draw.View, plan);
         Require(line.find("plan depth_clear, colour kept (vertex_colour)") != std::string::npos, "depth-only line");
+        draw.View.ColorWriteMask = 0U;
+        plan = PlanPicaClearDraw(draw.View, ResetContext());
+        Require(plan.Action == PicaClearDrawAction::FullClear && plan.ColorMask == 0U,
+                "a depth-only reset needs no colour: cleared, the draw skipped");
+        auto stencil = ResetContext();
+        stencil.StencilWrites = true;
+        Require(PlanPicaClearDraw(draw.View, stencil).Action == PicaClearDrawAction::DepthClear,
+                "a depth-only reset writing stencil keeps its draw");
     }
     {
         SyntheticDraw draw(Quad(-0.5F));
