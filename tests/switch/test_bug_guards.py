@@ -635,6 +635,20 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
           r'RefreshGrassMemoDraw\(mesh, draw, state\.Memo\.CameraInverse\(draw\)\) \|\| RefreshMemoClip\(mesh, draw\)',
           test="oot3d_grass_switch_tests (Oot3dGrassInterpolatedFrames)"),
+    # --- 07/11: less grass around Link than further out in Hyrule Field (test.8 videos) ---
+    Guard("grass thinner around Link: tufts near the camera bring fill tufts (FillDistance / distance in all)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_instance_stream.cpp",
+          r'const float fillReach = std::min\(settings\.FillDistance, fullDistance\);.*?'
+          r'fillReach / \(static_cast<float>\(child\) \+ GrassFillStableValue\(tuft\.StableId, child\)\);',
+          test="oot3d_grass_switch_tests (AroundLinkTheGrassCoversAsMuchAsFurtherOut)"),
+    Guard("grass changed as Link walked: a thinned tuft grows in, never appears at full height",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_instance_stream.cpp",
+          r'const float grown = std::min\(fade, GrassGrowth\(kept, distance, kGrassThinGrowth\)\);',
+          test="oot3d_grass_switch_tests (WalkingChangesNoTuftAtOnce)"),
+    Guard("grass changed as Link walked: single blades turn into tufts over a distance, not at once",
+          "tools/oot3d/deko3d_grass/grass_vsh.glsl",
+          r'float tuftShare = smoothstep\(grass_distance\.z, grass_distance\.w, distanceToEye\);',
+          forbid=r'bool blades = grass_distance\.w > 0\.5;'),
     # --- grass round 4 (SWITCH_PORT.md "Grass on deko3d", Round 4) ---
     Guard("grass at 60 fps: an in-between frame publishes no sources; it draws the last real frame's placements with its own camera",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",

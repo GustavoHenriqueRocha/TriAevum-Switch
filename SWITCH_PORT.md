@@ -2481,6 +2481,45 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
     -> 1 -> 0 -> 1 with a late worker at each change. test.8's rules give frames without a cull after
     the grass appeared, the new ones none, with every frame from each scene's first cull drawn and no
     cull of another scene drawn) and guards.
+- **After test.8 (07/11, less grass around Link in Hyrule Field):** at Near the grass reached the
+  whole field, but the user saw less of it near Link than a few metres further out, changing as he
+  walked (videos `2026110709434700`/`09402400`, frames 150-750: sparse tufts around Link, a dense carpet
+  from a few hundred units past him).
+  - *Cause:* the placements keep one density in the world: Hyrule Field's ground placement is capped
+    and thinned evenly (`logs10a/deko3d.txt:32`: 3 placements of 34886 tufts, then 130886 with the 4th,
+    which is the cap of 96000). Past `FullDensityDistance` the thinning keeps the screen coverage
+    (fewer, wider tufts), but nearer than that the same tufts per m2 cover less of the screen the
+    nearer they are (coverage ~ density x distance): around Link, ~250 units from the camera, about a
+    quarter of the band at 1000. Host reproduction (`AroundLinkTheGrassCoversAsMuchAsFurtherOut`, a
+    field of the profile's tufts at ~11 per m2, the field camera): coverage 0.87 at 180-320 units
+    against 2.60 at 600-1000 and 3.21 at 1000-1600. Two changes as Link walks: tufts crossing 400
+    units switched at once from camera-facing tufts to single blades of random facing (~3/4 of the
+    screen width), and a tuft the distance thinning keeps appeared at full height (696 tufts changed
+    by more than a quarter of their size in one 4-unit step over 400 units of walking, host test).
+  - *Fix* (`grass_instance_stream.cpp`): nearer than `FillDistance` (Near and Far: their
+    `FullDensityDistance`; Whole area: Near's) each kept tuft on screen brings up to 8 fill tufts on
+    its ground plane within `FillRadius` (18 units), FillDistance / distance tufts in all
+    (`GrassStreamFillMultiplier`, at most 9x). A fill tuft has a stable spot, height, facing and phase
+    of its own (`PackGrassFillInstance`), the tuft's ground colour, and grows out of the ground over
+    25% of its distance; a tuft the thinning keeps grows over the last 10% of its distance
+    (`kGrassThinGrowth`). Single blades turn into tufts between 400 and 600 units in the vertex shader
+    (every vertex moves from its blade place to its tuft place; a single blade is 1.32x wider, the
+    average screen width of a tuft's blade). The stream's kinds only split the draws (GPU split).
+    Per tuft, the cluster's frustum test leaves out the tufts of a visible cluster that are off the
+    screen (about a quarter of the instances in the host field), which pays for most of the fill.
+  - *After:* coverage 3.10 around Link, 3.04 at 600-1000, 2.95 at 1000-1600 (30 fps: 4.89, 4.78,
+    4.99); walking 400 units, no tuft changes by more than 12% of its size in a step. Host field at
+    60 fps: 5020 instances before, 5250 after (1547 fill, 1317 off-screen tufts left out).
+  - *Cost* `[INF]`: the log16 Hyrule windows spend ~0.16 us of GPU per tuft (far tufts, a few pixels)
+    and ~0.23 us per near blade, so the cost is per instance; with about as many instances and twice
+    the grass screen area near the camera, Near's 0.55-0.63 ms should become ~0.6-0.75 ms. Worker: one
+    frustum test per kept tuft. Whole area draws fewer instances (off-screen tufts left out).
+  - *Log:* the profile line adds `(tufts from 600), fill to F`; the third `grass:` line adds
+    `fill F off screen O` after `thinned` and `fill F` after `max`. `visible` counts the fill tufts:
+    `visible - fill + off screen` compares with earlier logs.
+  - Tests: `oot3d_grass_switch_tests` (`Oot3dGrassNearDensity`: coverage around Link against the
+    full-density and thinned bands, walking without pops, the multiplier, a fill tuft's place, fill
+    only near and on screen).
 - **Shaders:** `tools/oot3d/deko3d_grass/gen.py` compiles `grass_vsh.glsl` and the two fragment
   variants with uam into `gfx_deko3d_grass_dksh.h` (not in `deko3d.pack`). Rerun it after editing a
   shader.
@@ -2490,10 +2529,12 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   - `grass: frame N drawn D/600 frames | visible V (max, budget) tufts blades draws clusters
     visible/tested over_budget | worker W ms/cull | render draw R ms/frame | gpu G ms/frame (max)`.
     `gpu` is the time between GPU timestamps around the grass draws, approximate; `blades` and
-    `tufts` split it (near single blades first, then the cards).
+    `tufts` split it (the instances nearer than the single-blade distance first, then the rest).
   - `grass: frame N fragment raster R draws, depth-writing D | culls fresh F stale S (frames that
-    redrew an older cull), no result X, nothing drawn E | cull instances I (max) thinned T | distance
-    full A max B | area ... gaps G`. `depth-writing` should be 0 unless the scene uses w-buffering;
+    redrew an older cull), no result X, nothing drawn E | cull instances I (max) thinned T fill L off
+    screen O | distance full A max B fill C | area ... gaps G`. `fill` counts the fill tufts among the
+    instances, `off screen` the kept tufts of visible clusters left out by the per-tuft frustum test.
+    `depth-writing` should be 0 unless the scene uses w-buffering;
     `nothing drawn` counts draw points that had a cull result but drew none of it (should be 0);
     `no result` counts draw points before a scene's first cull and `gaps` draw points without a cull
     right after grass (should be 0).

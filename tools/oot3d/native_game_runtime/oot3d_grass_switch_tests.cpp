@@ -20,9 +20,11 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -428,6 +430,7 @@ TEST(Oot3dGrassInstanceStream, CullsByFrustumAndDistanceAndSplitsNearBlades) {
     GrassStreamPlacement placement{GridPlacement(3000.0F, 100.0F, 9U), LookAlongZ(eye), eye};
     GrassStreamSettings settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(true, GrassSwitchDistance::Near));
     settings.MaxInstances = 1000000U;
+    settings.FillDistance = 0.0F; // the placement's own tufts (fill: Oot3dGrassNearDensity)
     std::vector<GrassStreamInstance> output(settings.MaxInstances);
     std::vector<GrassStreamRange> ranges;
     GrassInstanceStreamBuilder builder;
@@ -448,12 +451,15 @@ TEST(Oot3dGrassInstanceStream, CullsByFrustumAndDistanceAndSplitsNearBlades) {
             // Nothing well behind the camera (the margin keeps a little).
             EXPECT_GT(output[index].PositionHeight[2], -settings.CullMargin - 200.0F);
             const uint32_t fade = output[index].WidthPhaseFade >> 24U;
-            if (distance <= settings.FadeStart) EXPECT_EQ(fade, 255U);
-            else EXPECT_LT(fade, 255U);
+            // Full height until the thinning starts (a kept tuft grows over
+            // the last kGrassThinGrowth of its distance), shrinking past FadeStart.
+            if (distance <= settings.FullDensityDistance / (1.0F + kGrassThinGrowth)) EXPECT_EQ(fade, 255U);
+            if (distance > settings.FadeStart) EXPECT_LT(fade, 255U);
         }
         next += range.Count;
     }
     EXPECT_EQ(next, stats.Tufts + stats.Blades);
+    EXPECT_EQ(stats.Fill, 0U);
     EXPECT_EQ(stats.ClustersOverBudget, 0U);
 }
 
@@ -545,6 +551,373 @@ TEST(Oot3dGrassInstanceStream, NothingWithoutBudgetOrPlacements) {
     GrassStreamPlacement placement{GridPlacement(500.0F, 100.0F, 1U), LookAlongZ(eye), eye};
     settings.MaxInstances = 0U;
     EXPECT_EQ(builder.Build({&placement, 1}, settings, output, ranges).Tufts, 0U);
+}
+
+// ---- Hyrule Field at Near: the grass around Link (07/11 videos, log16) -----
+
+// A camera like the field camera behind Link: `height` above the ground at
+// eye.z, pitched down by `pitchDegrees`, 16:9. Clip w is the view depth.
+std::array<float, 16> FieldCamera(const std::array<float, 3>& eye, float pitchDegrees) {
+    const float pitch = pitchDegrees * 3.14159265F / 180.0F;
+    const float sy = 1.0F / std::tan(22.5F * 3.14159265F / 180.0F); // 45 degrees vertical
+    const float sx = sy / (16.0F / 9.0F);
+    const std::array<float, 3> right{1.0F, 0.0F, 0.0F}, up{0.0F, std::cos(pitch), std::sin(pitch)},
+        forward{0.0F, -std::sin(pitch), std::cos(pitch)};
+    const auto dot = [&](const std::array<float, 3>& a) { return a[0] * eye[0] + a[1] * eye[1] + a[2] * eye[2]; };
+    std::array<float, 16> m{};
+    for (int axis = 0; axis < 3; ++axis) {
+        m[axis * 4 + 0] = sx * right[axis];
+        m[axis * 4 + 1] = sy * up[axis];
+        m[axis * 4 + 2] = forward[axis];
+        m[axis * 4 + 3] = forward[axis];
+    }
+    m[12] = -sx * dot(right);
+    m[13] = -sy * dot(up);
+    m[14] = -dot(forward);
+    m[15] = -dot(forward);
+    return m;
+}
+
+std::array<float, 4> Clip(const std::array<float, 16>& m, const std::array<float, 3>& p) {
+    std::array<float, 4> clip{};
+    for (int row = 0; row < 4; ++row)
+        clip[row] = m[row] * p[0] + m[4 + row] * p[1] + m[8 + row] * p[2] + m[12 + row];
+    return clip;
+}
+
+bool OnScreen(const std::array<float, 16>& m, const std::array<float, 3>& p, float edge = 1.0F) {
+    const auto clip = Clip(m, p);
+    return clip[3] > 1.0F && std::abs(clip[0]) < edge * clip[3] && std::abs(clip[1]) < edge * clip[3];
+}
+
+uint32_t Mix(uint32_t value) {
+    value ^= value >> 16U;
+    value *= 0x7feb352dU;
+    value ^= value >> 15U;
+    value *= 0x846ca68bU;
+    value ^= value >> 16U;
+    return value;
+}
+
+float Unit(uint32_t value) { return static_cast<float>(Mix(value) >> 8U) / static_cast<float>(1U << 24U); }
+
+// A flat field like Hyrule Field's ground placement after its cap: one tuft
+// per `spacing` x `spacing` (jittered), the profile's tuft sizes, clusters of
+// ClusterSize cells sorted by stable visibility as BuildGrassPlacementSet does.
+std::shared_ptr<GrassWorldPlacement> FieldPlacement(float spacing) {
+    const auto profile = SelectGrassSwitchProfile(true, GrassSwitchDistance::Near);
+    struct Cell {
+        std::vector<GrassWorldAnchor> Anchors;
+    };
+    const float minX = -3000.0F, maxX = 3000.0F, minZ = -1000.0F, maxZ = 6000.0F;
+    const auto columns = static_cast<uint32_t>((maxX - minX) / profile.ClusterSize);
+    const auto rows = static_cast<uint32_t>((maxZ - minZ) / profile.ClusterSize);
+    std::vector<Cell> cells(size_t{columns} * rows);
+    uint32_t id = 1U;
+    for (float z = minZ + spacing * 0.5F; z < maxZ; z += spacing)
+        for (float x = minX + spacing * 0.5F; x < maxX; x += spacing) {
+            GrassWorldAnchor anchor;
+            const float px = x + (Unit(id * 3U) - 0.5F) * spacing, pz = z + (Unit(id * 3U + 1U) - 0.5F) * spacing;
+            const float height = profile.TuftHeightMin + (profile.TuftHeightMax - profile.TuftHeightMin) * Unit(id * 5U);
+            const float width = profile.BladeWidthMin + (profile.BladeWidthMax - profile.BladeWidthMin) * Unit(id * 7U);
+            const float angle = Unit(id * 11U) * 6.2831853F;
+            anchor.BaseHeight = {px, 0.0F, pz, height};
+            anchor.HalfWidthPhase = {width * 0.5F, Unit(id * 13U) * 6.2831853F};
+            anchor.PackedWidthAxis = PackGrassDirection({std::cos(angle), std::sin(angle)});
+            anchor.PackedWorldNormal = PackGrassNormal({0.0F, 1.0F, 0.0F});
+            anchor.StableId = Mix(id++) | 1U;
+            anchor.SurfaceColor = 0xff20a040U;
+            const auto column = std::min(columns - 1U, static_cast<uint32_t>((px - minX) / profile.ClusterSize));
+            const auto row = std::min(rows - 1U, static_cast<uint32_t>((pz - minZ) / profile.ClusterSize));
+            cells[size_t{row} * columns + column].Anchors.push_back(anchor);
+        }
+    auto placement = std::make_shared<GrassWorldPlacement>();
+    placement->Identity = 77U;
+    for (auto& cell : cells) {
+        if (cell.Anchors.empty()) continue;
+        std::sort(cell.Anchors.begin(), cell.Anchors.end(), [](const auto& a, const auto& b) {
+            return GrassStableVisibilityValue(a.StableId) < GrassStableVisibilityValue(b.StableId);
+        });
+        GrassWorldCluster cluster;
+        cluster.FirstAnchor = static_cast<uint32_t>(placement->Anchors.size());
+        cluster.AnchorCount = static_cast<uint32_t>(cell.Anchors.size());
+        std::array<float, 3> low{1.0e9F, 1.0e9F, 1.0e9F}, high{-1.0e9F, -1.0e9F, -1.0e9F};
+        for (const auto& anchor : cell.Anchors)
+            for (int axis = 0; axis < 3; ++axis) {
+                low[axis] = std::min(low[axis], anchor.BaseHeight[axis]);
+                high[axis] = std::max(high[axis], anchor.BaseHeight[axis]);
+            }
+        for (int axis = 0; axis < 3; ++axis) cluster.Center[axis] = (low[axis] + high[axis]) * 0.5F;
+        for (const auto& anchor : cell.Anchors) {
+            const float dx = anchor.BaseHeight[0] - cluster.Center[0], dz = anchor.BaseHeight[2] - cluster.Center[2];
+            cluster.Radius = std::max(cluster.Radius, std::sqrt(dx * dx + dz * dz));
+            cluster.MaximumBladeHeight = std::max(cluster.MaximumBladeHeight, anchor.BaseHeight[3]);
+        }
+        cluster.Radius += cluster.MaximumBladeHeight;
+        cluster.MinimumStableVisibility = GrassStableVisibilityValue(cell.Anchors.front().StableId);
+        placement->Clusters.push_back(cluster);
+        for (const auto& anchor : cell.Anchors) {
+            placement->Anchors.push_back(anchor);
+            placement->CullingAnchors.push_back({{anchor.BaseHeight[0], anchor.BaseHeight[1], anchor.BaseHeight[2]},
+                                                 GrassStableVisibilityValue(anchor.StableId)});
+        }
+    }
+    return placement;
+}
+
+float Smooth01(float x) {
+    x = std::clamp(x, 0.0F, 1.0F);
+    return x * x * (3.0F - 2.0F * x);
+}
+
+// What a drawn instance covers on screen, per steradian: its card (the
+// shader's BladesPerTuft blades of the packed half width side by side) times
+// its drawn height (grass_vsh.glsl: height * smoothstep(fade)) over the
+// squared distance.
+float DrawnSize(const GrassStreamInstance& instance) {
+    const float halfWidth = UnpackGrassHalf(static_cast<uint16_t>(instance.WidthPhaseFade & 0xffffU));
+    const float fade = static_cast<float>(instance.WidthPhaseFade >> 24U) / 255.0F;
+    return 2.0F * halfWidth * 5.0F * instance.PositionHeight[3] * Smooth01(fade);
+}
+
+// How much of the ground's screen area the grass covers between `near` and
+// `far` units from the eye: the drawn sizes over the ground's solid angle
+// (a horizontal patch dA at distance d covers dA * height / d^3).
+float ScreenCoverage(std::span<const GrassStreamInstance> drawn, const std::array<float, 16>& camera,
+                     const std::array<float, 3>& eye, float near, float far) {
+    double grass = 0.0;
+    for (const auto& instance : drawn) {
+        const std::array<float, 3> base{instance.PositionHeight[0], instance.PositionHeight[1],
+                                        instance.PositionHeight[2]};
+        const float d = Distance(instance, eye);
+        if (d < near || d >= far || !OnScreen(camera, base)) continue;
+        grass += DrawnSize(instance) / (static_cast<double>(d) * d);
+    }
+    double ground = 0.0;
+    const float step = 5.0F;
+    for (float z = eye[2]; z < eye[2] + far; z += step)
+        for (float x = -far; x < far; x += step) {
+            const std::array<float, 3> point{x + step * 0.5F, 0.0F, z + step * 0.5F};
+            const float dx = point[0] - eye[0], dy = point[1] - eye[1], dz = point[2] - eye[2];
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (d < near || d >= far || !OnScreen(camera, point)) continue;
+            ground += step * step * eye[1] / (static_cast<double>(d) * d * d);
+        }
+    return ground > 0.0 ? static_cast<float>(grass / ground) : 0.0F;
+}
+
+// The user (07/11, Hyrule Field at Near): "the amount of grass reduces near
+// the character". The placement keeps one density everywhere (its cap thins
+// it evenly); past FullDensityDistance the thinning keeps the coverage per
+// screen area (fewer, wider tufts), but nearer than that the same tufts per m2
+// cover less of the screen the nearer they are (coverage ~ density x
+// distance): around Link, ~250 units from the camera, a quarter of the band
+// further out. Near the camera the stream adds fill tufts so the coverage
+// stays at least that of the full-density band.
+TEST(Oot3dGrassNearDensity, AroundLinkTheGrassCoversAsMuchAsFurtherOut) {
+    const auto placementWorld = FieldPlacement(30.0F); // ~11 tufts per m2
+    const std::array<float, 3> eye{0.0F, 100.0F, 0.0F};
+    const auto camera = FieldCamera(eye, 12.0F);
+    GrassStreamPlacement placement{placementWorld, camera, eye};
+    for (const bool fps60 : {true, false}) {
+        auto settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(fps60, GrassSwitchDistance::Near));
+        std::vector<GrassStreamInstance> output(GrassSwitchStreamCapacity());
+        std::vector<GrassStreamRange> ranges;
+        GrassInstanceStreamBuilder builder;
+        const auto stats = builder.Build({&placement, 1}, settings, output, ranges);
+        EXPECT_EQ(stats.ClustersOverBudget, 0U);
+        const std::span<const GrassStreamInstance> drawn(output.data(), stats.Tufts + stats.Blades);
+        const float full = settings.FullDensityDistance;
+        const float link = ScreenCoverage(drawn, camera, eye, 180.0F, 320.0F);
+        const float fewMetres = ScreenCoverage(drawn, camera, eye, 0.6F * full, full);
+        const float thinned = ScreenCoverage(drawn, camera, eye, full, 1.6F * full);
+        // Cost proxies: instances (vertex work) and drawn screen area (pixel
+        // work, ScreenCoverage's units over the whole reach) with and without fill.
+        const float area = ScreenCoverage(drawn, camera, eye, 0.0F, settings.DrawDistance);
+        auto unfilled = settings;
+        unfilled.FillDistance = 0.0F;
+        std::vector<GrassStreamInstance> plain(GrassSwitchStreamCapacity());
+        const auto plainStats = builder.Build({&placement, 1}, unfilled, plain, ranges);
+        const float plainArea = ScreenCoverage(std::span<const GrassStreamInstance>(plain.data(), plainStats.Tufts + plainStats.Blades),
+                                               camera, eye, 0.0F, settings.DrawDistance);
+        std::cout << "  coverage fps60=" << fps60 << ": around Link " << link << ", " << 0.6F * full << "-" << full
+                  << " " << fewMetres << ", " << full << "-" << 1.6F * full << " " << thinned << "; instances "
+                  << drawn.size() << " (fill " << stats.Fill << ", left out off screen " << stats.OffScreen
+                  << "), screen area " << area << " (without fill " << plainArea << ")\n";
+        EXPECT_GT(fewMetres, 0.0F);
+        EXPECT_GE(link, 0.9F * fewMetres);
+        EXPECT_GE(link, 0.9F * thinned);
+    }
+}
+
+// Walking through the field: no tuft may appear, vanish or change its drawn
+// size at once (popping) as the camera moves, inside the screen.
+TEST(Oot3dGrassNearDensity, WalkingChangesNoTuftAtOnce) {
+    const auto placementWorld = FieldPlacement(30.0F);
+    auto settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(true, GrassSwitchDistance::Near));
+    settings.MaxInstances = GrassSwitchStreamCapacity(); // the visible cap is another matter
+    struct Seen {
+        float Size = 0.0F;
+        float Full = 0.0F;
+    };
+    using Key = std::pair<int64_t, int64_t>;
+    const auto key = [](const GrassStreamInstance& instance) {
+        return Key{std::llround(instance.PositionHeight[0] * 64.0), std::llround(instance.PositionHeight[2] * 64.0)};
+    };
+    std::vector<GrassStreamInstance> output(GrassSwitchStreamCapacity());
+    std::vector<GrassStreamRange> ranges;
+    GrassInstanceStreamBuilder builder;
+    std::map<Key, Seen> before;
+    std::array<float, 16> previousCamera{};
+    float worst = 0.0F;
+    uint32_t pops = 0U;
+    for (int step = 0; step <= 100; ++step) {
+        const std::array<float, 3> eye{0.0F, 100.0F, 4.0F * static_cast<float>(step)};
+        const auto camera = FieldCamera(eye, 12.0F);
+        GrassStreamPlacement placement{placementWorld, camera, eye};
+        const auto stats = builder.Build({&placement, 1}, settings, output, ranges);
+        ASSERT_EQ(stats.ClustersOverBudget, 0U);
+        std::map<Key, Seen> now;
+        for (uint32_t index = 0; index < stats.Tufts + stats.Blades; ++index) {
+            const auto& instance = output[index];
+            const float height = instance.PositionHeight[3];
+            const float halfWidth = UnpackGrassHalf(static_cast<uint16_t>(instance.WidthPhaseFade & 0xffffU));
+            now[key(instance)] = {DrawnSize(instance), 2.0F * halfWidth * 5.0F * height};
+        }
+        if (step != 0) {
+            // Inside both screens, away from the edges: no frustum change.
+            const auto inside = [&](const Key& k) {
+                const std::array<float, 3> p{static_cast<float>(k.first) / 64.0F, 0.0F,
+                                             static_cast<float>(k.second) / 64.0F};
+                return OnScreen(camera, p, 0.8F) && OnScreen(previousCamera, p, 0.8F);
+            };
+            const auto compare = [&](const Key& k, const Seen* a, const Seen* b) {
+                if (!inside(k)) return;
+                const float full = std::max(a ? a->Full : 0.0F, b ? b->Full : 0.0F);
+                const float change = std::abs((a ? a->Size : 0.0F) - (b ? b->Size : 0.0F)) / full;
+                worst = std::max(worst, change);
+                if (change > 0.25F) {
+                    ++pops;
+                    std::cout << "  POP x=" << k.first / 64.0 << " z=" << k.second / 64.0 << " eyez=" << eye[2]
+                              << " a=" << (a ? a->Size / a->Full : -1.0F) << " b=" << (b ? b->Size / b->Full : -1.0F)
+                              << "\n";
+                }
+            };
+            for (const auto& [k, seen] : now) {
+                const auto found = before.find(k);
+                compare(k, found == before.end() ? nullptr : &found->second, &seen);
+            }
+            for (const auto& [k, seen] : before)
+                if (!now.contains(k)) compare(k, &seen, nullptr);
+        }
+        before = std::move(now);
+        previousCamera = camera;
+    }
+    std::cout << "  walking 400 units in steps of 4: " << pops << " tufts changed by more than a quarter at once, "
+              << "largest change " << worst << " of a tuft\n";
+    EXPECT_EQ(pops, 0U);
+    EXPECT_LE(worst, 0.25F);
+}
+
+TEST(Oot3dGrassNearDensity, FillMultiplierFollowsTheDistanceToItsCap) {
+    const auto settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(true, GrassSwitchDistance::Near));
+    EXPECT_EQ(settings.FillDistance, settings.FullDensityDistance);
+    EXPECT_EQ(GrassStreamFillMultiplier(settings, settings.FillDistance), 1.0F);
+    EXPECT_EQ(GrassStreamFillMultiplier(settings, 2.0F * settings.FillDistance), 1.0F);
+    EXPECT_NEAR(GrassStreamFillMultiplier(settings, 250.0F), 1000.0F / (1.125F * 250.0F), 1.0e-4F);
+    EXPECT_EQ(GrassStreamFillMultiplier(settings, 10.0F), 1.0F + static_cast<float>(kGrassMaxFillPerTuft));
+    for (float d = 50.0F; d < 1000.0F; d += 50.0F)
+        EXPECT_GE(GrassStreamFillMultiplier(settings, d), GrassStreamFillMultiplier(settings, d + 50.0F));
+    GrassStreamSettings none = settings;
+    none.FillDistance = 0.0F;
+    EXPECT_EQ(GrassStreamFillMultiplier(none, 100.0F), 1.0F);
+    // Fill never reaches past full density, where the thinning could drop
+    // the tuft and its fill tufts with it.
+    GrassStreamSettings beyond = settings;
+    beyond.FillDistance = 4.0F * settings.FullDensityDistance;
+    EXPECT_EQ(GrassStreamFillMultiplier(beyond, settings.FullDensityDistance), 1.0F);
+    // Every mode fills to its full-density band; Whole area as Near does.
+    for (const bool fps60 : {true, false}) {
+        const auto near = SelectGrassSwitchProfile(fps60, GrassSwitchDistance::Near);
+        const auto far = SelectGrassSwitchProfile(fps60, GrassSwitchDistance::Far);
+        const auto area = SelectGrassSwitchProfile(fps60, GrassSwitchDistance::Area);
+        EXPECT_EQ(near.FillDistance, near.FullDensityDistance);
+        EXPECT_EQ(far.FillDistance, far.FullDensityDistance);
+        EXPECT_EQ(area.FillDistance, near.FillDistance);
+    }
+}
+
+TEST(Oot3dGrassNearDensity, AFillTuftStaysOnItsTuftsGroundAndNeverMoves) {
+    GrassWorldAnchor tuft;
+    tuft.BaseHeight = {100.0F, 50.0F, -40.0F, 20.0F};
+    tuft.HalfWidthPhase = {1.25F, 2.0F};
+    tuft.PackedWidthAxis = PackGrassDirection({1.0F, 0.0F});
+    const std::array<float, 3> slope{0.3F, 0.9F, -0.2F};
+    tuft.PackedWorldNormal = PackGrassNormal(slope);
+    tuft.StableId = 0x1234567U;
+    tuft.SurfaceColor = 0xff336699U;
+    const auto normal = UnpackGrassNormal(tuft.PackedWorldNormal);
+    std::set<std::pair<float, float>> spots;
+    for (uint32_t child = 1U; child <= kGrassMaxFillPerTuft; ++child) {
+        const auto fill = PackGrassFillInstance(tuft, child, 1.0F, 18.0F);
+        const auto again = PackGrassFillInstance(tuft, child, 1.0F, 18.0F);
+        EXPECT_EQ(std::memcmp(&fill, &again, sizeof(fill)), 0);
+        const float dx = fill.PositionHeight[0] - tuft.BaseHeight[0], dy = fill.PositionHeight[1] - tuft.BaseHeight[1],
+                    dz = fill.PositionHeight[2] - tuft.BaseHeight[2];
+        EXPECT_LE(std::sqrt(dx * dx + dz * dz), 18.0F + 1.0e-3F);
+        EXPECT_NEAR(normal[0] * dx + normal[1] * dy + normal[2] * dz, 0.0F, 1.0e-3F); // on the ground plane
+        EXPECT_EQ(fill.SurfaceColor, tuft.SurfaceColor);
+        EXPECT_EQ(fill.PackedNormal, tuft.PackedWorldNormal);
+        EXPECT_GE(fill.PositionHeight[3], 0.75F * tuft.BaseHeight[3] - 1.0e-3F);
+        EXPECT_LE(fill.PositionHeight[3], 1.25F * tuft.BaseHeight[3] + 1.0e-3F);
+        EXPECT_EQ(fill.WidthPhaseFade >> 24U, 255U);
+        spots.insert({fill.PositionHeight[0], fill.PositionHeight[2]});
+        EXPECT_GE(GrassFillStableValue(tuft.StableId, child), 0.0F);
+        EXPECT_LT(GrassFillStableValue(tuft.StableId, child), 1.0F);
+    }
+    EXPECT_EQ(spots.size(), size_t{kGrassMaxFillPerTuft}); // each its own spot
+}
+
+TEST(Oot3dGrassNearDensity, FillComesOnlyNearTheCameraAndOnScreen) {
+    const auto placementWorld = FieldPlacement(30.0F);
+    const std::array<float, 3> eye{0.0F, 100.0F, 0.0F};
+    const auto camera = FieldCamera(eye, 12.0F);
+    GrassStreamPlacement placement{placementWorld, camera, eye};
+    const auto nearSettings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(true, GrassSwitchDistance::Near));
+    auto settings = nearSettings;
+    std::vector<GrassStreamInstance> output(GrassSwitchStreamCapacity());
+    std::vector<GrassStreamRange> ranges;
+    GrassInstanceStreamBuilder builder;
+    const auto with = builder.Build({&placement, 1}, settings, output, ranges);
+    const std::vector<GrassStreamInstance> filled(output.begin(), output.begin() + with.Tufts + with.Blades);
+    settings.FillDistance = 0.0F;
+    const auto without = builder.Build({&placement, 1}, settings, output, ranges);
+    EXPECT_EQ(without.Fill, 0U);
+    EXPECT_GT(with.Fill, 0U);
+    EXPECT_EQ(with.Tufts + with.Blades, without.Tufts + without.Blades + with.Fill);
+    EXPECT_EQ(with.OffScreen, without.OffScreen);
+    EXPECT_GT(with.OffScreen, 0U); // a visible cluster's tufts off the screen are left out
+    // Per band, the tufts drawn per placement tuft follow the multiplier.
+    for (const auto& [near, far] : {std::pair{180.0F, 320.0F}, std::pair{400.0F, 600.0F}, std::pair{1100.0F, 2000.0F}}) {
+        uint32_t count = 0U, own = 0U;
+        for (const auto& instance : filled) {
+            const float d = Distance(instance, eye);
+            if (d >= near && d < far &&
+                OnScreen(camera, {instance.PositionHeight[0], 0.0F, instance.PositionHeight[2]}, 0.9F))
+                ++count;
+        }
+        for (uint32_t index = 0; index < without.Tufts + without.Blades; ++index) {
+            const float d = Distance(output[index], eye);
+            if (d >= near && d < far &&
+                OnScreen(camera, {output[index].PositionHeight[0], 0.0F, output[index].PositionHeight[2]}, 0.9F))
+                ++own;
+        }
+        ASSERT_GT(own, 0U);
+        const float expected = GrassStreamFillMultiplier(nearSettings, 0.5F * (near + far));
+        std::cout << "  band " << near << "-" << far << ": " << count << " tufts for " << own
+                  << " of the placement, multiplier at its middle " << expected << "\n";
+        EXPECT_NEAR(static_cast<float>(count) / static_cast<float>(own), expected, 0.25F * expected);
+    }
 }
 
 } // namespace

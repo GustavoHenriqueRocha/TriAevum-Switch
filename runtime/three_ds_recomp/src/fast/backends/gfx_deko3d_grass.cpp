@@ -14,9 +14,10 @@
 //   lights), records the instanced draws and hands the next cull to the
 //   worker. An fps60 in-between frame publishes no sources: it draws the last
 //   real frame's placements with its own camera (GrassInBetweenCameras);
-// - grass cull worker (service thread, cores 1|2): culls per cluster and
-//   writes the 32-byte instances straight into GPU-visible memory
-//   (grass_instance_stream.h); its result is drawn from the next frame on;
+// - grass cull worker (service thread, cores 1|2): culls per cluster and per
+//   tuft, adds the fill tufts near the camera and writes the 32-byte
+//   instances straight into GPU-visible memory (grass_instance_stream.h);
+//   its result is drawn from the next frame on;
 // - placement builder worker (service thread): builds placements, thinned
 //   evenly to the profile's cap (ThinGrassAnchorsToLimit).
 // The game thread only reads Link's and Epona's colliders when drawing is on
@@ -259,7 +260,7 @@ struct GrassState {
     // The target grass was last drawn into (its camera feeds the cull).
     uint64_t DrawnNamespace = 0;
     uint32_t DrawnColorAddress = 0;
-    std::array<DkGpuAddr, 2> FrameUniforms{DK_GPU_ADDR_INVALID, DK_GPU_ADDR_INVALID}; // tufts, blades
+    DkGpuAddr FrameUniforms = DK_GPU_ADDR_INVALID; // both kinds (grass_vsh.glsl blends them by distance)
     bool Posted = false;
 
     // Accumulated between logs.
@@ -277,7 +278,7 @@ struct GrassState {
     uint64_t GpuSamples = 0;
     double GpuMs = 0.0, GpuMaxMs = 0.0, GpuBladesMs = 0.0, GpuTuftsMs = 0.0;
     uint64_t RasterDraws = 0, DepthDraws = 0;
-    uint64_t CullInstances = 0, CullInstancesMax = 0, CullThinned = 0;
+    uint64_t CullInstances = 0, CullInstancesMax = 0, CullThinned = 0, CullFill = 0, CullOffScreen = 0;
     uint64_t EmptyFrames = 0;   // a draw point with a cull result but nothing of it drawn
     uint64_t NoResultFrames = 0; // a draw point before the scene's first cull finished
     uint64_t FreshBase = 0, StaleBase = 0;
@@ -305,7 +306,7 @@ std::atomic<uint32_t> gGrassArea{0xffffffffU};
 // Read by the game thread once per step: true only with config/grass = draw.
 bool gGrassWantsColliders = false;
 
-GrassFrameUniforms BuildFrameUniforms(const GrassState& state, bool blades) {
+GrassFrameUniforms BuildFrameUniforms(const GrassState& state) {
     const auto& settings = state.Settings;
     GrassFrameUniforms frame;
     const float direction = settings.WindDirectionDegrees * 3.14159265F / 180.0F;
@@ -316,8 +317,9 @@ GrassFrameUniforms BuildFrameUniforms(const GrassState& state, bool blades) {
                         settings.WindGustFrequency};
     frame.Shape = {static_cast<float>(state.Profile.BladesPerTuft), 1.0F, settings.MaximumBend,
                    settings.Appearance.ReceiveLighting ? 1.0F : 0.0F};
+    // Single blades to SingleBladeDistance, turning into tufts over the next half of it.
     frame.Distance = {state.Stream.DrawDistance, state.Stream.FadeStart, state.Stream.SingleBladeDistance,
-                      blades ? 1.0F : 0.0F};
+                      1.5F * state.Stream.SingleBladeDistance};
     const auto& look = settings.Appearance;
     frame.RootColor = {look.RootColor[0], look.RootColor[1], look.RootColor[2], look.TextureColorInfluence};
     frame.TipColor = {look.TipColor[0], look.TipColor[1], look.TipColor[2], 0.0F};
@@ -417,16 +419,19 @@ void ApplyProfile(GrassState& state, bool fps60, Oot3d::GrassSwitchDistance dist
 void LogProfile(const GrassState& state) {
     const auto distance = Oot3d::GrassSwitchDistanceWord(state.Distance);
     if (state.Distance == Oot3d::GrassSwitchDistance::Area) {
-        Deko3d::Log("grass: %s distance=area: every tuft of the area, at most %u visible (nearest clusters first)",
-                    state.Fps60 ? "60 fps" : "30 fps", state.Stream.MaxInstances);
+        Deko3d::Log("grass: %s distance=area: every tuft of the area, at most %u visible (nearest clusters first), "
+                    "fill to %.0f",
+                    state.Fps60 ? "60 fps" : "30 fps", state.Stream.MaxInstances,
+                    static_cast<double>(state.Stream.FillDistance));
         return;
     }
     Deko3d::Log("grass: %s distance=%.*s: full density to %.0f, thinning to %.0f (shrinking from %.0f), single "
-                "blades within %.0f, at most %u visible",
+                "blades within %.0f (tufts from %.0f), fill to %.0f, at most %u visible",
                 state.Fps60 ? "60 fps" : "30 fps", static_cast<int>(distance.size()), distance.data(),
                 static_cast<double>(state.Stream.FullDensityDistance), static_cast<double>(state.Stream.DrawDistance),
                 static_cast<double>(state.Stream.FadeStart), static_cast<double>(state.Stream.SingleBladeDistance),
-                state.Stream.MaxInstances);
+                static_cast<double>(1.5F * state.Stream.SingleBladeDistance),
+                static_cast<double>(state.Stream.FillDistance), state.Stream.MaxInstances);
 }
 
 } // namespace
@@ -594,7 +599,7 @@ void UpdatePlacements(GrassState& state, uint64_t frame) {
     if (state.PreparedFrame == frame) return;
     state.PreparedFrame = frame;
     state.Frame.Clear();
-    state.FrameUniforms = {DK_GPU_ADDR_INVALID, DK_GPU_ADDR_INVALID};
+    state.FrameUniforms = DK_GPU_ADDR_INVALID;
     state.Posted = false;
     const auto begin = std::chrono::steady_clock::now();
     try {
@@ -660,6 +665,8 @@ void TakeCull(GrassState& state) {
     state.CullInstances += instances;
     state.CullInstancesMax = std::max(state.CullInstancesMax, instances);
     state.CullThinned += result.Stats.AnchorsThinned;
+    state.CullFill += result.Stats.Fill;
+    state.CullOffScreen += result.Stats.OffScreen;
     state.Slots.FinishWrite(result.Slot, result.Frame);
     state.Current = std::move(result);
 }
@@ -767,7 +774,8 @@ void GrassEndFrame(uint64_t frame) {
         // the culls selected.
         Log("grass: frame %llu fragment raster %llu draws, depth-writing %llu | culls fresh %llu stale %llu "
             "(frames that redrew an older cull), no result %llu, nothing drawn %llu | cull instances %.0f "
-            "(max %llu) thinned %.0f | distance=%s full %.0f max %.0f | area %s scene %d room %d, changes %llu "
+            "(max %llu) thinned %.0f fill %.0f off screen %.0f | distance=%s full %.0f max %.0f fill %.0f | "
+            "area %s scene %d room %d, changes %llu "
             "(scene %llu), foreign culls dropped %llu (other scene), without a shared placement %llu, gaps %llu, "
             "ranges drawn with another target's placement %llu | empty placements %u | in-between frames %llu "
             "(without a camera %llu)",
@@ -777,10 +785,12 @@ void GrassEndFrame(uint64_t frame) {
             static_cast<unsigned long long>(state->Slots.StaleFrames - state->StaleBase),
             static_cast<unsigned long long>(state->NoResultFrames), static_cast<unsigned long long>(state->EmptyFrames),
             static_cast<double>(state->CullInstances) / jobs, static_cast<unsigned long long>(state->CullInstancesMax),
-            static_cast<double>(state->CullThinned) / jobs,
+            static_cast<double>(state->CullThinned) / jobs, static_cast<double>(state->CullFill) / jobs,
+            static_cast<double>(state->CullOffScreen) / jobs,
             Oot3d::GrassSwitchDistanceWord(state->Distance).data(),
             static_cast<double>(state->Stream.FullDensityDistance),
-            static_cast<double>(state->Stream.DrawDistance), state->DrawnArea == 0xffffffffU ? "none" : "drawn",
+            static_cast<double>(state->Stream.DrawDistance), static_cast<double>(state->Stream.FillDistance),
+            state->DrawnArea == 0xffffffffU ? "none" : "drawn",
             state->DrawnArea == 0xffffffffU ? -1 : static_cast<int>(state->DrawnArea >> 8U),
             state->DrawnArea == 0xffffffffU ? -1 : static_cast<int>(static_cast<int8_t>(state->DrawnArea & 0xffU)),
             static_cast<unsigned long long>(state->AreaChanges), static_cast<unsigned long long>(state->SceneChanges),
@@ -803,7 +813,7 @@ void GrassEndFrame(uint64_t frame) {
     state->GpuSamples = 0;
     state->GpuMs = state->GpuMaxMs = state->GpuBladesMs = state->GpuTuftsMs = 0.0;
     state->RasterDraws = state->DepthDraws = 0;
-    state->CullInstances = state->CullInstancesMax = state->CullThinned = 0;
+    state->CullInstances = state->CullInstancesMax = state->CullThinned = state->CullFill = state->CullOffScreen = 0;
     state->EmptyFrames = state->NoResultFrames = 0;
     state->FreshBase = state->Slots.FreshFrames;
     state->AreaChanges = state->SceneChanges = state->ForeignOtherScene = state->NoPlacementFrames = 0;
@@ -976,13 +986,11 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
                 dkCmdBufBindVtxAttribState(cmd, attributes.data(), static_cast<uint32_t>(attributes.size()));
                 const DkVtxBufferState buffer = {static_cast<uint32_t>(sizeof(Oot3d::GrassStreamInstance)), 1U};
                 dkCmdBufBindVtxBufferState(cmd, &buffer, 1);
-                for (uint32_t kind = 0; kind < 2U; ++kind) {
-                    const auto frameUniforms = BuildFrameUniforms(*state, kind == 1U);
-                    const StreamSpan span = mDevice.Stream(sizeof(frameUniforms), DK_UNIFORM_BUF_ALIGNMENT);
-                    if (span.Cpu != nullptr) {
-                        std::memcpy(span.Cpu, &frameUniforms, sizeof(frameUniforms));
-                        state->FrameUniforms[kind] = span.Gpu;
-                    }
+                const auto frameUniforms = BuildFrameUniforms(*state);
+                const StreamSpan span = mDevice.Stream(sizeof(frameUniforms), DK_UNIFORM_BUF_ALIGNMENT);
+                if (span.Cpu != nullptr) {
+                    std::memcpy(span.Cpu, &frameUniforms, sizeof(frameUniforms));
+                    state->FrameUniforms = span.Gpu;
                 }
             }
             if (placement.UniformsGpu == DK_GPU_ADDR_INVALID) {
@@ -992,7 +1000,7 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
                 placement.UniformsGpu = span.Gpu;
             }
             const bool blades = range.Kind == Oot3d::GrassStreamKind::Blades;
-            const DkGpuAddr frameUniforms = state->FrameUniforms[blades ? 1U : 0U];
+            const DkGpuAddr frameUniforms = state->FrameUniforms;
             if (frameUniforms == DK_GPU_ADDR_INVALID) continue;
             const DkShader* shaders[] = {state->Vertex,
                                          placement.ExplicitDepth ? state->FragmentDepth : state->Fragment};
