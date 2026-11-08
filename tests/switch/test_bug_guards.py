@@ -1713,11 +1713,25 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'" plan_identity=".*?" plan_in_place=".*?" plan_parallel=".*?" plan_worker_draws=".*?'
           r'" plan_us_draw=".*?" plan_slot_waits=".*?" plan_slot_wait_ms="'),
+    # --- 11/07: Profile18 mirror natives (render loops, allocator walk, divide) ---
+    Guard("cpunatives: the mirror replacements use single-line prologues (the PGO profile of every other function in their shards stays valid)",
+          "tools/oot3d/native_a32_runtime/guest_overrides.json",
+          r'"0x00452DA4"[^\n]*"inline": true.*"0x0046E140"[^\n]*"inline": true.*"0x0046E048"[^\n]*"inline": true'
+          r'.*"0x0046D734"[^\n]*"inline": true.*"0x0046DA6C"[^\n]*"inline": true.*"0x00477D60"[^\n]*"inline": true'
+          r'.*"0x003FCA08"[^\n]*"inline": true.*"0x00466F78"[^\n]*"inline": true.*"0x00368D94"[^\n]*"inline": true'),
+    Guard("cpunatives: each mirror replacement has its own kill switch (config/guest_overrides_disable)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'config/guest_overrides_disable.*DisableOot3dGuestOverridesFromList'),
+    Guard("cpunatives: perf.txt shows the mirror replacements' executions and declines per window",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'perf << Oot3dNativeGame::FormatOot3dGuestOverridesPerfLine\(\);'),
 ]
 
 # Native VFP overrides that cost more than the translation: they must stay
 # disabled until someone measures again (guest FPSCR, 2026-10-18).
-DISABLED_OVERRIDES = {"0x003727F0", "0x003325F0", "0x0036E168", "0x00372070", "0x002CDE90"}
+DISABLED_OVERRIDES = {"0x003727F0", "0x003325F0", "0x0036E168", "0x00372070", "0x002CDE90",
+                      # Profile18 mirror round: no gain in the loop-only bench (2026-11-07).
+                      "0x00477D60", "0x003FCA08", "0x00368D94", "0x00466F78"}
 
 
 def check_guard(guard: Guard) -> str | None:
@@ -1740,7 +1754,7 @@ def check_overrides() -> str | None:
     disabled = {entry["entry"] for entry in entries if entry.get("disabled")}
     missing = sorted(DISABLED_OVERRIDES - disabled)
     if missing:
-        return "VFP overrides re-enabled without measurement: " + ", ".join(missing)
+        return "overrides re-enabled without measurement: " + ", ".join(missing)
     return None
 
 
@@ -1755,7 +1769,7 @@ def main() -> int:
         print(("FAIL " if error else "ok   ") + guard.bug + (f"\n     {error}" if error else ""))
         failures += error is not None
     error = check_overrides()
-    print(("FAIL " if error else "ok   ") + "5 VFP overrides remain disabled"
+    print(("FAIL " if error else "ok   ") + "overrides measured slower than the translation remain disabled"
           + (f"\n     {error}" if error else ""))
     failures += error is not None
     print(f"{len(GUARDS) + 1 - failures}/{len(GUARDS) + 1} guards ok")

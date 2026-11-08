@@ -1102,6 +1102,51 @@ std::string DescribeOot3dGuestOverrides() {
 #endif
 }
 
+size_t DisableOot3dGuestOverridesFromList(std::string_view list) {
+#if defined(OOT3D_GUEST_OVERRIDES)
+    return DisableOot3dGuestOverrides(list);
+#else
+    static_cast<void>(list);
+    return 0U;
+#endif
+}
+
+std::string FormatOot3dGuestOverridesPerfLine() {
+#if defined(OOT3D_GUEST_OVERRIDES)
+    // Counters at the previous line (game thread only, like the perf line).
+    static std::vector<std::pair<uint64_t, uint64_t>> previous;
+    const auto* table = Oot3dGuestOverrideTable();
+    const size_t count = Oot3dGuestOverrideCount();
+    previous.resize(count);
+    uint64_t calls = 0U, declined = 0U;
+    size_t disabled = 0U;
+    std::string entries;
+    for (size_t i = 0; i < count; ++i) {
+        const auto& info = table[i];
+        if (!info.Mirror) continue;
+        const uint64_t c = info.Calls - previous[i].first;
+        const uint64_t d = info.Declined - previous[i].second;
+        previous[i] = {info.Calls, info.Declined};
+        calls += c;
+        declined += d;
+        disabled += info.Disabled ? 1U : 0U;
+        // Replacements not wired into this build's generated code (disabled
+        // in guest_overrides.json) never run: listed only when they did.
+        if (c == 0U && d == 0U) continue;
+        char text[48];
+        std::snprintf(text, sizeof(text), " %X=%" PRIu64 "/%" PRIu64, info.Entry, c, d);
+        entries += text;
+    }
+    char head[128];
+    std::snprintf(head, sizeof(head), "natives: overrides=%s calls=%" PRIu64 " declined=%" PRIu64
+                  " disabled=%zu", Oot3dGuestOverridesEnabled() ? "on" : "off", calls, declined,
+                  disabled);
+    return head + entries + "\n";
+#else
+    return {};
+#endif
+}
+
 bool Oot3dWholeAotAvailable() noexcept {
 #if defined(OOT3D_NATIVE_GENERATED_WHOLE_AOT)
     return !Oot3dWholeAotEntryPoints().empty();

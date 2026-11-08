@@ -36,6 +36,13 @@
 
 namespace Oot3dNativeGame::GeneratedWholeAot {
 namespace a32 = oot3d::recomp::a32;
+// Indirect calls (in the call closure of the larger render functions): the
+// test has no dispatch table, so both sides take the same exit there.
+Oot3dWholeAotFlow ExecuteOot3dWholeAotIndirect(uint32_t pc, Oot3dWholeAotFrame&,
+                                               Oot3dWholeAotContext&,
+                                               Oot3dAotArchitecturalState&) {
+    return {Oot3dWholeAotFlowKind::Unsupported, pc, 0U};
+}
 #include "guest_override_fixture.inc"
 } // namespace Oot3dNativeGame::GeneratedWholeAot
 
@@ -1061,6 +1068,225 @@ void Prepare(uint32_t entry, Rng& rng, Scenario& s,
         if (rng.Chance(20)) s.Budget = rng.Below(4U);
         break;
     }
+    case 0x00452DA4U: { // UpdateTextureTransforms: material bytes, coordinator list
+        if (!rng.Chance(92)) break;
+        const uint32_t object = alloc(0x20U), material = alloc(0x10U), bytes = alloc(0x200U);
+        const uint32_t index = rng.Below(16U);
+        poke(object + 0xCU, material);
+        poke(material + 4U, bytes);
+        // Mostly zero bytes (the call-free path), sometimes set ones (exits to the calls).
+        const uint32_t density = rng.Chance(50) ? 0U : rng.Below(200U);
+        for (uint32_t w = 0; w < 0x60U; ++w) {
+            uint32_t word = 0U;
+            for (uint32_t b = 0; b < 4U; ++b) {
+                if (rng.Below(1000U) < density) word |= (rng.U32() & 0xFFU) << (8U * b);
+            }
+            poke(bytes + 4U * index + 4U * w, word);
+        }
+        const uint32_t count = rng.Below(rng.Chance(80) ? 12U : 40U);
+        const uint32_t list = alloc(16U + 24U * 41U);
+        const uint32_t holder = alloc(4U);
+        poke(holder, list);
+        poke(list + 8U, rng.Chance(4) ? rng.U32() : count);
+        for (uint32_t i = 0; i <= count; ++i) poke(list + 16U + 24U * i, rng.U32());
+        const uint32_t other = alloc(0x1C0U);
+        poke(object + 0x10U, other);
+        poke(other + 0x1B4U, rng.Chance(50) ? 0U : rng.U32());
+        g.r[4] = rng.Chance(97) ? object : rng.Pointer();
+        g.r[7] = rng.Chance(97) ? holder : rng.Pointer();
+        g.r[8] = index;
+        g.r[5] = rng.Chance(80) ? 0U : rng.Below(count + 2U);
+        g.r[6] = rng.Below(100U);
+        if (rng.Chance(30)) s.Budget = rng.Below(12U * count + 12U);
+        break;
+    }
+    case 0x0046E140U:   // nngx validation: emit dirty registers (list r8, scratch r9)
+    case 0x0046E048U:   // (list r9, scratch r8)
+    case 0x0046D734U: { // mark registers dirty (list r3)
+        if (!rng.Chance(92)) break;
+        g.r[13] = (kRamBase + 0x4000U + rng.Below(0x3000U)) & ~7U;
+        const uint32_t object = alloc(0x800U);         // values +0x4B4, enables +0x3F6, bitmap +0x7A8
+        const uint32_t shadow = alloc(0x1200U) - 0x1000U; // shadow + 0x100C + 4 * reg
+        const uint32_t headers = alloc(0x180U);
+        const uint32_t count = rng.Below(rng.Chance(80) ? 24U : 90U);
+        const uint32_t list = alloc(4U * (count + 1U));
+        for (uint32_t i = 0; i < count; ++i) poke(list + 4U * i, rng.Below(0x60U));
+        poke(list + 4U * count, rng.Chance(97) ? 0xBDU : rng.Below(0x60U));
+        const uint32_t dirty = rng.Below(101U), enabled = rng.Below(101U), same = rng.Below(60U);
+        for (uint32_t w = 0; w < 3U; ++w) {
+            uint32_t bits = 0U;
+            for (uint32_t b = 0; b < 32U; ++b) bits |= (rng.Below(100U) < dirty ? 1U : 0U) << b;
+            poke(object + 0x7A8U + 4U * w, bits);
+        }
+        for (uint32_t r = 0; r < 0x60U; r += 4U) {
+            uint32_t bytes = 0U;
+            for (uint32_t b = 0; b < 4U; ++b) bytes |= (rng.Below(100U) < enabled ? 1U + rng.Below(255U) : 0U) << (8U * b);
+            poke(object + 0x3F6U + r - 2U, bytes); // (+0x3F6 is 2 bytes off a word)
+        }
+        for (uint32_t r = 0; r < 0x60U; ++r) {
+            const uint32_t value = rng.U32();
+            poke(object + 0x4B4U + 4U * r, value);
+            poke(shadow + 0x100CU + 4U * r, rng.Below(100U) < same ? value : rng.U32());
+            poke(headers + 4U * r, rng.U32() & 0xFFFFU);
+        }
+        const uint32_t cursorVar = alloc(8U), commands = alloc(8U * 100U);
+        const uint32_t room = rng.Chance(80) ? 8U * count : 8U * rng.Below(count + 1U);
+        poke(cursorVar, commands);
+        poke(cursorVar + 4U, commands + room);
+        g.r[0] = rng.Chance(85) ? 0U : rng.Below(count + 1U);
+        g.r[4] = object;
+        if (entry == 0x0046D734U) {
+            g.r[3] = list;
+            g.r[12] = object + 0x3F6U;
+            g.r[6] = shadow;
+            g.r[7] = rng.Chance(95) ? 1U : rng.U32();
+        } else {
+            g.r[entry == 0x0046E140U ? 8 : 9] = list;
+            g.r[10] = rng.Chance(95) ? 1U : rng.U32();
+            g.r[11] = cursorVar;
+            g.r[7] = cursorVar + 4U;
+            g.r[14] = headers;
+            poke(g.r[13] + 0x810U, shadow);
+            poke(g.r[13] + (entry == 0x0046E140U ? 0x814U : 0x818U), object + 0x3F6U);
+        }
+        if (rng.Chance(30)) s.Budget = rng.Below(6U * count + 8U);
+        break;
+    }
+    case 0x0046DA6CU: { // nngx validation: runs of consecutive uniform words
+        if (!rng.Chance(92)) break;
+        const uint32_t object = alloc(0x1C0U);
+        const uint32_t limit = rng.Chance(90) ? 1U + rng.Below(96U) : rng.U32();
+        poke(object + 0x1B0U, limit);
+        const uint32_t density = rng.Below(101U);
+        for (uint32_t w = 0; w < 3U; ++w) {
+            uint32_t bits = 0U;
+            for (uint32_t b = 0; b < 32U; ++b) bits |= (rng.Below(100U) < density ? 1U : 0U) << b;
+            poke(object + 0x1B4U + 4U * w, bits);
+        }
+        uint32_t value = rng.U32();
+        const uint32_t breaks = rng.Below(30U);
+        for (uint32_t i = 0; i < 96U; ++i) {
+            value = rng.Below(100U) < breaks ? rng.U32() : value + 1U;
+            poke(object + 0x30U + 4U * i, value);
+        }
+        g.r[4] = object;
+        g.r[6] = rng.Below(rng.Chance(80) ? 8U : 96U);
+        g.r[2] = rng.Chance(50) ? 0U : rng.U32();
+        g.r[11] = rng.Chance(50) ? value : rng.U32();
+        g.r[12] = rng.Below(8U);
+        g.r[10] = rng.Chance(95) ? 1U : rng.U32();
+        if (rng.Chance(30)) s.Budget = rng.Below(400U);
+        break;
+    }
+    case 0x00477D60U: { // arena free list: tagged 16-byte headers chained by +8
+        if (!rng.Chance(92)) break;
+        const uint32_t length = 1U + rng.Below(rng.Chance(70) ? 16U : 200U);
+        const uint32_t free = rng.Below(30U);
+        const uint32_t request = 16U * rng.Below(64U);
+        uint32_t node = alloc(16U), first = node;
+        for (uint32_t i = 0; i < length; ++i) {
+            const uint32_t next = i + 1U < length ? alloc(16U) : (rng.Chance(90) ? 0U : rng.Pointer());
+            const uint32_t tag = rng.Chance(97) ? 0x7373U : rng.U32() & 0xFFFFU;
+            poke(node, tag | (rng.Below(100U) < free ? 1U + rng.Below(0xFFFFU) : 0U) << 16U);
+            poke(node + 4U, rng.Chance(70) ? 16U * rng.Below(80U) : rng.U32());
+            poke(node + 8U, next);
+            node = next;
+        }
+        g.r[1] = first;
+        g.r[2] = request;
+        g.r[3] = rng.Chance(97) ? 0x7373U : rng.U32();
+        g.r[12] = request + 16U;
+        if (rng.Chance(30)) s.Budget = rng.Below(6U * length + 8U);
+        break;
+    }
+    case 0x003FCA08U: { // quad corners into the vertex streams
+        if (!rng.Chance(92)) break;
+        g.r[13] = (kRamBase + 0x4000U + rng.Below(0x3000U)) & ~7U;
+        const uint32_t object = alloc(0x280U);
+        const uint32_t quad = rng.Below(4U);
+        const uint32_t positions = alloc(48U), normals = alloc(48U), colors = alloc(16U * 16U),
+                       texcoords = alloc(8U * 4U);
+        for (uint32_t i = 0; i < 12U; ++i) poke(positions + 4U * i, rng.Float());
+        for (uint32_t i = 0; i < 12U; ++i) poke(normals + 4U * i, rng.Float());
+        for (uint32_t i = 0; i < 64U; ++i) poke(colors + 4U * i, rng.U32());
+        const bool edges = rng.Chance(25);
+        for (uint32_t i = 0; i < 8U; ++i) {
+            poke(texcoords + 4U * i, edges && rng.Chance(50) ? EdgeFloat(rng) : rng.Float());
+            poke(object + 0x260U + 4U * i, edges && rng.Chance(50) ? EdgeFloat(rng) : rng.Float());
+        }
+        if (edges && rng.Chance(70)) g.fpscr = EdgeFpscr(rng);
+        poke(object + 0x1F0U, colors - 64U * quad);
+        poke(object + 0x1F4U, texcoords - 8U * quad);
+        poke(g.r[13], quad);
+        for (uint32_t offset : {0x94U, 0x98U, 0x9CU}) poke(g.r[13] + offset, rng.Chance(40) ? 0U : rng.U32());
+        g.r[0] = rng.Chance(85) ? 0U : rng.Below(5U);
+        g.r[4] = object;
+        g.r[5] = positions;
+        g.r[10] = normals;
+        g.r[9] = alloc(48U);
+        g.r[6] = alloc(48U);
+        g.r[7] = alloc(64U);
+        g.r[8] = rng.Chance(95) ? alloc(32U) : rng.Pointer();
+        if (rng.Chance(30)) s.Budget = rng.Below(30U);
+        break;
+    }
+    case 0x00466F78U: { // PatchBoneUniforms: packet stream of 0x2C0/0x2C1 commands
+        if (!rng.Chance(92)) break;
+        const uint32_t packet = alloc(0x20U), holder = alloc(4U);
+        const uint32_t stream = alloc(0x400U), bones = alloc(0x200U);
+        const uint32_t index = rng.Below(3U), skip = 4U * rng.Below(8U);
+        poke(holder, packet);
+        poke(packet + 0x14U, index);
+        poke(packet + 8U + 4U * index, stream - skip - 8U);
+        for (uint32_t i = 0; i < 0x80U; ++i) poke(bones + 4U * i, rng.Float());
+        const uint32_t boneCount = rng.Chance(90) ? rng.Below(6U) : rng.U32();
+        int32_t words = static_cast<int32_t>(4U * boneCount);
+        uint32_t at = stream;
+        for (uint32_t step = 0; step < 24U && words > 0 && at + 0x80U < stream + 0x400U; ++step) {
+            const uint32_t kind = rng.Below(100U);
+            if (kind < 25U) { // 0x2C0: skipped
+                poke(at + 4U, 0x2C0U | (rng.U32() & 0xFFFF0000U));
+                at += 8U;
+                continue;
+            }
+            if (kind < 30U) { // anything else: the loop spins until the budget runs out
+                poke(at + 4U, rng.U32());
+                break;
+            }
+            static constexpr uint32_t kCounts[] = {1U, 3U, 4U, 5U, 8U, 9U, 12U, 13U, 16U};
+            const uint32_t c = kCounts[rng.Below(std::size(kCounts))];
+            poke(at + 4U, 0x2C1U | (rng.U32() & 0xF00F0000U) | ((c - 1U) << 20U));
+            const uint32_t entry0 = at;
+            at += 20U;
+            const int32_t groups = (static_cast<int32_t>(c) - 1) / 4;
+            if (c - 1U > 3U) at += 16U * static_cast<uint32_t>(groups);
+            if (((at - (entry0 + 8U)) & 7U) != 0U) at += 4U;
+            words -= static_cast<int32_t>(c);
+        }
+        g.r[0] = rng.Chance(97) ? holder : rng.Pointer();
+        g.r[1] = bones;
+        g.r[2] = boneCount;
+        g.r[3] = skip;
+        if (rng.Chance(30)) s.Budget = rng.Below(60U);
+        break;
+    }
+    case 0x00368D94U: { // unsigned divide: quotients 0/1, long chains, zero, signed
+        const auto value = [&]() {
+            switch (rng.Below(6U)) {
+            case 0: return rng.Below(16U);
+            case 1: return rng.Below(1000U);
+            case 2: return rng.U32() >> rng.Below(32U);
+            case 3: return rng.U32() & 0x7FFFFFFFU;
+            default: return rng.U32();
+            }
+        };
+        g.r[0] = value();
+        g.r[1] = value();
+        if (rng.Chance(30)) g.r[1] = (g.r[0] >> 1) + rng.Below(4U) - 1U; // quotient 0/1/2 edges
+        if (rng.Chance(5)) g.r[1] = 0U;
+        if (rng.Chance(10)) s.Budget = rng.Below(10U);
+        break;
+    }
     default:
         break;
     }
@@ -1184,7 +1410,7 @@ int main() {
     }
     const uint64_t trials = OOT3D_QEMU_TRIALS;
     const uint64_t seed = OOT3D_QEMU_SEED;
-    const uint32_t only = OOT3D_QEMU_ONLY;
+    const std::vector<uint32_t> only{OOT3D_QEMU_ONLY};
 #else
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -1205,7 +1431,18 @@ int main(int argc, char** argv) {
     }
     const uint64_t trials = argc > 2 ? std::strtoull(argv[2], nullptr, 0) : 1000000ULL;
     const uint64_t seed = argc > 3 ? std::strtoull(argv[3], nullptr, 0) : 0x5EEDULL;
-    const uint32_t only = argc > 4 ? static_cast<uint32_t>(std::strtoul(argv[4], nullptr, 16)) : 0U;
+    // Entries to test: one, or several separated by commas (none or 0: all).
+    std::vector<uint32_t> only;
+    {
+        const std::string list = argc > 4 ? argv[4] : "0";
+        size_t at = 0U;
+        while (at <= list.size()) {
+            const size_t comma = std::min(list.find(',', at), list.size());
+            only.push_back(static_cast<uint32_t>(
+                std::strtoul(list.substr(at, comma - at).c_str(), nullptr, 16)));
+            at = comma + 1U;
+        }
+    }
 #endif
 
     gOot3dGuestOverrideProfileHook = {FakeProfileEntry, FakeProfileForwards, FakeProfileMark};
@@ -1216,7 +1453,10 @@ int main(int argc, char** argv) {
     }
     int failures = 0;
     for (const auto& testCase : GeneratedWholeAot::kOverrideCases) {
-        if (only != 0U && testCase.Entry != only) continue;
+        if (only.front() != 0U &&
+            std::find(only.begin(), only.end(), testCase.Entry) == only.end()) {
+            continue;
+        }
         Rng rng(seed ^ (uint64_t{testCase.Entry} << 20U));
         const auto* table = Oot3dGuestOverrideTable();
         const Oot3dGuestOverrideInfo* info = nullptr;
@@ -1371,8 +1611,85 @@ int main(int argc, char** argv) {
             // Each call starts from the same RAM (restored outside the measurement), and
             // time is measured call by call with the cycle counter.
             std::vector<uint8_t> ram(kRamSize);
+            // GUEST_OVERRIDE_BENCH=same: both sides on memory A, which with
+            // TRIAEVUM_FASTMEM_WINDOW=1 is the window (the console's path; B is
+            // a heap image on the slow path). The memories then no longer match
+            // afterwards, so the check below is skipped.
+            const char* benchMode = std::getenv("GUEST_OVERRIDE_BENCH");
+            const bool sameMemory = benchMode != nullptr && (std::strcmp(benchMode, "same") == 0 ||
+                                                             std::strcmp(benchMode, "loop") == 0);
+            if (std::strcmp(benchMode, "loop") == 0) {
+                // GUEST_OVERRIDE_BENCH=loop: only the replaced range, both on
+                // memory A (the window with TRIAEVUM_FASTMEM_WINDOW=1). The
+                // replacement runs alone (block replacements: called directly,
+                // must leave through a resume PC); the translation runs from the
+                // same block with a budget of exactly the blocks the replacement
+                // consumed, so it stops (block limit) at that resume block: the
+                // same guest work on both sides, without the translated tail.
+                // Function replacements (and block replacements that return
+                // from the function): the whole call on both sides.
+                std::vector<std::pair<const std::pair<Scenario, std::vector<uint8_t>>*, uint32_t>> runs;
+                uint64_t totalBlocks = 0U;
+                for (const auto& item : accepted) {
+                    memoryA.WriteBytes(kRamBase, item.second);
+                    a32::GuestState guest = item.first.Guest;
+                    Oot3dWholeAotStats stats{};
+                    Oot3dWholeAotContext context{memoryA, memoryA, stats};
+                    context.ResetBlockBudget(1U << 20U);
+                    Oot3dWholeAotFrame frame(guest);
+                    Oot3dAotArchitecturalState state(guest);
+                    Oot3dWholeAotFlow flow{};
+                    uint32_t resumePc = 0U;
+                    const bool ran = testCase.NativeBlock != nullptr
+                        ? testCase.NativeBlock(frame, context, state, flow, resumePc) &&
+                              (resumePc != 0U || flow.Kind == Oot3dWholeAotFlowKind::Returned)
+                        : testCase.Native(frame, context, state, flow) &&
+                              flow.Kind == Oot3dWholeAotFlowKind::Returned;
+                    const uint32_t blocks = context.BlocksConsumed();
+                    if (ran && blocks >= 2U && blocks <= 20000U) {
+                        runs.emplace_back(&item, blocks);
+                        totalBlocks += blocks;
+                    }
+                }
+                const auto time = [&](bool native) {
+                    uint64_t cycles = 0U;
+                    for (int round = 0; round < 20; ++round) {
+                        for (const auto& [item, blocks] : runs) {
+                            memoryA.WriteBytes(kRamBase, item->second);
+                            a32::GuestState guest = item->first.Guest;
+                            Oot3dWholeAotStats stats{};
+                            Oot3dWholeAotContext context{memoryA, memoryA, stats};
+                            context.ResetBlockBudget(native ? 1U << 20U : blocks);
+                            Oot3dWholeAotFrame frame(guest);
+                            Oot3dAotArchitecturalState state(guest);
+                            Oot3dWholeAotFlow flow{};
+                            uint32_t resumePc = 0U;
+                            const uint64_t start = CycleCounter();
+                            if (!native) {
+                                flow = testCase.Translated(frame, context, state, testCase.Entry);
+                            } else if (testCase.NativeBlock != nullptr) {
+                                testCase.NativeBlock(frame, context, state, flow, resumePc);
+                            } else {
+                                testCase.Native(frame, context, state, flow);
+                            }
+                            asm volatile("" : : "r"(&flow), "r"(&guest) : "memory");
+                            cycles += CycleCounter() - start;
+                        }
+                    }
+                    return static_cast<double>(cycles) / 20.0;
+                };
+                if (!runs.empty()) {
+                    const double translated = time(false), native = time(true);
+                    std::printf("  loop %08X: %zu inputs, %.1f blocks each; translated %.1f, native %.1f "
+                                "TSC cycles/block (%.2fx)\n",
+                                testCase.Entry, runs.size(),
+                                static_cast<double>(totalBlocks) / runs.size(),
+                                translated / totalBlocks, native / totalBlocks, translated / native);
+                }
+                continue;
+            }
             const auto bench = [&](bool native) {
-                NativeA32Memory& memory = native ? memoryB : memoryA;
+                NativeA32Memory& memory = native && !sameMemory ? memoryB : memoryA;
                 memory.ReadBytes(kRamBase, ram);
                 uint64_t cycles = 0U, calls = 0U;
                 for (int round = 0; round < 20; ++round) {
@@ -1405,8 +1722,8 @@ int main(int argc, char** argv) {
             std::printf("  bench %08X: translated %.0f TSC cycles/call, native %.0f (%.2fx)\n",
                         testCase.Entry, translated, native, translated / native);
             std::string where;
-            if (!SameMemory(memoryA, memoryB, true, &where) ||
-                memoryA.WriteGeneration() != memoryB.WriteGeneration()) {
+            if (!sameMemory && (!SameMemory(memoryA, memoryB, true, &where) ||
+                                memoryA.WriteGeneration() != memoryB.WriteGeneration())) {
                 std::printf("FAIL %08X memory diverges after bench (%s)\n",
                             testCase.Entry, where.c_str());
                 ++failures;

@@ -2261,6 +2261,8 @@ bool NativeA32WindowSession::RunFrame() {
              << '\n';
         previousThreads = process.GuestThreadProfile();
       }
+      // Mirror guest replacements: executions/declines per window (its own line).
+      perf << Oot3dNativeGame::FormatOot3dGuestOverridesPerfLine();
       // config/second_core: how the DSP frames went out, the second core's
       // lock waits and preemption, and how long the game thread waited for
       // it, per host frame (its own line).

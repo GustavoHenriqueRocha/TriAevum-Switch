@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Oot3dNativeGame {
@@ -57,6 +58,13 @@ void RegisterOot3dGuestOverrideProfileHook(
     void (*mark)(void* user, uint32_t pc) noexcept) noexcept;
 // One line per override: entry, name, native executions and refusals.
 std::string DescribeOot3dGuestOverrides();
+// config/guest_overrides_disable: per-replacement kill switches (hex entries
+// and/or "mirror"; see DisableOot3dGuestOverrides). Returns how many it
+// disabled (0 when the overrides are not compiled in).
+size_t DisableOot3dGuestOverridesFromList(std::string_view list);
+// logs/perf.txt "natives:" line: per window, executions and declines of
+// the mirror replacements (Profile18 round), each and in total.
+std::string FormatOot3dGuestOverridesPerfLine();
 std::span<const uint32_t> Oot3dCompiledFunctionEntryPoints(
     bool includeWholeAot = true,
     bool includeManualCompiledFunctions = true) noexcept;

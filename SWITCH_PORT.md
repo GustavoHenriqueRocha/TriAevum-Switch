@@ -3564,6 +3564,79 @@ temple entry had `no shared placement 2` too.
   the entrance's grass stays through the Wolfos fight; the third `grass:` line of the entry window
   should read `without a shared placement 0, gaps 0`.
 
+### Mirror natives for the render loops (Profile18 items 2 and 5, 11/07)
+Guest replacements for the hottest loops of the game's CPU renderer, in the existing mechanism
+(`guest_overrides.json`, `apply_guest_overrides.py`, `oot3d_native_guest_overrides.cpp`), all with
+`"inline": true` single-line prologues, so only the functions that receive one lose their PGO profile.
+- **Kind: "mirror".** Each one is the translated blocks of its range transcribed one for one: the same
+  `ReadFast`/`WriteFast`/`ReadWordsFast`/`WriteWordsFast` calls in the same order, the same lazy-flag
+  updates with the same liveness masks, one budget unit per block. The guest registers, flags and
+  budget live in locals for the whole loop (the translation writes them back and reloads them around
+  every guest store through the window's byte pointer and every budget decrement, which may alias
+  them), and the per-block hook gate is a single `Hooked()` test. The exits are the translation's own,
+  at the same point and with the same state: budget exhausted at block X → block limit at X; a failing
+  access at instruction P → memory fault at P with the registers the earlier instructions left; leaving
+  the range → resume at the translated block. Nothing is validated ahead and, after the hook test,
+  nothing declines. Blocks that call translated functions stay translated (the replacement resumes
+  there). The body lambdas are `always_inline`: out of line, the registers went back to the stack and
+  the gain disappeared.
+- **Enabled** (logs18b block entries; real time per 30 Hz step with the profile's ~200 ns per entry
+  removed, over the profiled session):
+
+  | Block | Function | Entries | Translated ms/step | Loop bench |
+  |---|---|---:|---:|---:|
+  | 0x00452DA4 | `CmbRenderer_UpdateTextureTransforms`, coordinator loop (call-free path) | 3.11 M | 0.43 | 1.44–1.67x |
+  | 0x0046E140 | 0x0046C204 nngx state validation: emit dirty registers | 2.04 M | 0.24 | 1.33–1.53x |
+  | 0x0046E048 | same loop, second register list | 0.13 M | 0.02 | 1.35x |
+  | 0x0046D734 | same function: mark registers dirty | 0.68 M | 0.08 | 1.26x |
+  | 0x0046DA6C | same function: runs of uniform words | 0.48 M | 0.06 | 1.28x |
+
+- **Written, proven and disabled** (no gain in the bench; they stay in the differential test and a
+  guard keeps them off): 0x00477D60 arena free-list walk (0.98x), 0x003FCA08 quad corner copy
+  (0.74x), 0x00466F78 `MeshCommandPacket_PatchBoneUniforms` whole (0.83x: 17.7 blocks per call, the
+  state copy in and out costs more than the block entries it saves) and 0x00368D94 unsigned divide
+  (1.03x, 4 blocks per typical call). Like the five math natives of 2026-10-18: short bodies lose.
+- **Left translated:** 0x003F96BC (straight line; its cost is three external `Mtx3x4_Multiply` calls
+  per call, 1.4–2.0 µs each in the profile, which a replacement would still make the same way),
+  0x003F9D9C (a translated call in each of its 6 iterations), 0x0047FE44 (one block and a tail call),
+  0x00452934 (calls in every mesh iteration; the skip path is 2 blocks), 0x00350820 `Array_Construct`
+  (an indirect constructor call per element), 0x002DC370 (double-precision `pow`, 1,921 calls in the
+  whole session from `AudioPitchTable_Generate`, software binary64 in the translation).
+- **Exactness:** `run_guest_override_equivalence.py`, 200 thousand trials per replacement, zero
+  differences: host with the fastmem window on (all 33 entries) and off (the nine new ones), and
+  qemu-aarch64 (devkitA64, Switch flags, native VFP) for the five enabled ones (`--only` now takes a
+  comma-separated list). The five do no floating point: in the Switch build (`-ffp-contract=off`, as
+  the shards) four use no FP/SIMD register at all and 0x0046DA6C only moves integer state through
+  SIMD registers (no arithmetic, no FPCR). Under qemu, the older 0x0046700C case takes hours at 200
+  thousand trials (1,106 s on the host: two thirds of its trials run to the 1 M-block budget), so a
+  full 33-entry qemu run needs a lower trial count for that case. The harness gained scenarios for the nine new entries, a stub for indirect
+  calls in the call closure (both sides take the same exit), the renamed translation in patched copies
+  that call a function with its own override, and a loop-only benchmark.
+- **Benchmark:** `GUEST_OVERRIDE_BENCH=loop TRIAEVUM_FASTMEM_WINDOW=1`: both sides on the window
+  (the console's memory path); the replacement runs alone and the translation runs from the same block
+  with a budget of exactly the blocks the replacement consumed, so it stops at the same resume block;
+  TSC cycles per guest block on the Ryzen. (`GUEST_OVERRIDE_BENCH=1`, the old mode, measures the
+  replacement on a heap image, the slow path, against the translation on the window: with the window
+  on it is not a fair comparison. In the loop bench the older 0x0046700C copy measures 0.82x and
+  0x003563E0 1.03x.)
+- **Expected effect** [INFERENCE: x86 ratios applied to the console profile]: −0.2 to −0.3 ms per 30 Hz
+  step on the profiled mix, more where draws rise (room 8 attacks, bush cutting), since both functions
+  run per draw.
+- **A/B on the console:** `config/guest_overrides_disable` (text: hex entries and/or `mirror` for this
+  round's replacements); `config/no_guest_overrides` still turns every replacement off.
+  `logs/perf.txt` gets a `natives:` line per window: `overrides=on|off calls= declined= disabled=` and
+  `entry=calls/declines` for each mirror replacement that ran.
+- **Build:** `build-fork.sh` with `PGO=use` regenerates the `-pgo` C++ in place with the checkout's
+  `generate_whole_aot_cpp.py --guest-overrides` and `apply_guest_overrides.py`, both reading the
+  checkout's `guest_overrides.json`; with `AOT_GENERATOR=7baf1fde8b` the path (and so the `.gcda`
+  names) is unchanged. Checked on a copy of `fork-gen-7baf1fde8b-pgo/cpp`: only shards 091 and 180
+  change, both keep their line count (only the five block-label lines change; both already had the
+  include), and both compile for the Switch. The functions that receive a prologue lose their
+  profile: 0x0046C204 (3,528 instructions, still in the hot list) and 0x00452B40. Note for later
+  rounds: a function prologue and a block prologue cannot share a function (`find_definition` needs
+  the unmodified signature line), so a whole-function replacement of a function that already has a
+  block replacement goes on its entry block (as the disabled 0x00466F78 does).
+
 ## Next steps
 
 - Future ideas (user request, 2026-10-17):

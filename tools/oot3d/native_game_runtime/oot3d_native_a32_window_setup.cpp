@@ -985,6 +985,14 @@ void NativeA32WindowSession::Setup() {
     if (std::filesystem::exists("sdmc:/switch/oot3dre/config/no_guest_overrides", overridesError)) {
       Oot3dNativeGame::SetOot3dGuestOverridesEnabled(false);
     }
+    // Per-replacement A/B: hex entries and/or "mirror" (the Profile18
+    // round's replacements); logs/perf.txt "natives:" shows the effect.
+    std::ifstream disableList("sdmc:/switch/oot3dre/config/guest_overrides_disable");
+    if (disableList) {
+      const std::string list((std::istreambuf_iterator<char>(disableList)),
+                             std::istreambuf_iterator<char>());
+      Oot3dNativeGame::DisableOot3dGuestOverridesFromList(list);
+    }
   }
 #endif
   // The user's profiles beside the configuration; the release's defaults in
