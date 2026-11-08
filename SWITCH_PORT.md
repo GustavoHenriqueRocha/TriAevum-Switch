@@ -957,8 +957,12 @@ byte-identical when off), `test_apply_guest_overrides.py`, `oot3d_native_block_e
 (the 64 option combinations against the previous inline list), the census `--check`,
 `oot3d_native_perf_diagnostics_tests` (concurrent recording, also under TSan),
 `test_whole_aot_indirect_census.py`, and the A/B of `run_register_promotion_equivalence.py
---n4` (base vs sparse on the real functions: guest state, memory, writes and hook sequence equal,
-budget counters free, short budgets resumed to completion).
+--n4` (`OOT3D_N4_EQUIVALENCE`: base vs sparse on 60 real functions with their 1,706-function call
+closure, run to completion through every `BlockLimit` resume, half the trials with 1-48-block
+slices, hooks only at gates incl. hooks that change state and skip-first; guest state, memory,
+write generations, write trace and the hook sequence must be equal, the budget counters are
+free): 60/60 cases, 11,845 trials, 1.86 M hooks, zero differences (host g++ -O2; first run only,
+200 trials per case; random inputs fault early in several hot functions).
 
 ### Audio off the game thread (2026-10-17)
 - The DSP HLE (mixing) stays on the game thread: each audio frame reads the DSP shared regions,
