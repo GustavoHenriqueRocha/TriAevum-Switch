@@ -30,7 +30,9 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <memory>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -1399,6 +1401,410 @@ uint32_t Regression(uint32_t entry, uint64_t trial, Scenario& s,
     }
 }
 
+#if defined(OOT3D_N4_EQUIVALENCE)
+// N4 mode (run_register_promotion_equivalence.py --n4): side A is the default
+// lowering (namespace Base: every block charges the budget and tests the hook
+// gate), side B the generator's --sparse-block-entries (namespace Sparse:
+// budget only at function entries, loop headers, gated blocks and uncharged
+// dispatches; the hook gate only at the PCs of its hook-gate list). Guest
+// state must be identical; only the budget accounting may differ, so the
+// points where a run stops with BlockLimit (a cooperative thread switch)
+// move. Each side therefore runs every trial to completion the way the
+// runtime does (ExecuteOot3dWholeAotFunction): the registry loop re-dispatches
+// Returned/Branch flows while budget remains, and every BlockLimit exit (or
+// budget exhaustion between dispatches) is resumed at its PC with a fresh
+// slice and skipFirstBlockEntry = false. The final state, memory, write
+// trace, statistics (except BlockLimitExits) and the full hook sequence (PC
+// plus the guest state the callback saw, in order) must match. Hooks are only
+// requested at gated PCs: an every-block request is what the runtime refuses
+// under N4 (checked once at startup).
+
+constexpr uint32_t kN4LargeBudget = 1U << 16U;
+constexpr uint64_t kN4LargeCap = 1U << 20U;
+constexpr uint64_t kN4SmallCap = 1U << 17U;
+
+const GeneratedWholeAot::N4DispatchEntry* FindN4Dispatch(uint32_t pc) noexcept {
+    const auto* begin = std::begin(GeneratedWholeAot::kN4Dispatch);
+    const auto* end = std::end(GeneratedWholeAot::kN4Dispatch);
+    const auto* found = std::lower_bound(
+        begin, end, pc, [](const auto& entry, uint32_t value) { return entry.Pc < value; });
+    return found != end && found->Pc == pc ? found : nullptr;
+}
+
+uint64_t HashGuest(const a32::GuestState& g) noexcept {
+    uint64_t hash = 0xCBF29CE484222325ULL;
+    const auto mix = [&](uint32_t word) {
+        hash = (hash ^ word) * 0x100000001B3ULL;
+    };
+    for (int i = 0; i < 15; ++i) mix(g.r[i]);
+    mix(g.cpsr);
+    mix(g.fpscr);
+    for (const uint32_t v : g.vfp) mix(v);
+    return hash;
+}
+
+struct N4HookLog {
+    std::vector<uint32_t> Pcs;
+    std::vector<uint64_t> States;
+    bool Mutate = false;
+};
+
+// Records the PC and the state the callback sees; the mutating variant also
+// changes guest state (r12, one VFP register, sometimes C), as real hooks do,
+// which exercises the commit/reload around the gated block entry.
+void N4Hook(uint32_t pc, a32::GuestState& g, a32::MemoryBus&, void* user) {
+    auto& log = *static_cast<N4HookLog*>(user);
+    log.Pcs.push_back(pc);
+    log.States.push_back(HashGuest(g));
+    if (log.Mutate) {
+        const uint32_t n = static_cast<uint32_t>(log.Pcs.size());
+        g.r[12] ^= pc * 0x9E3779B1U + n;
+        g.vfp[n & 31U] ^= 1U;
+        if ((n & 3U) == 0U) g.cpsr ^= 0x20000000U;
+    }
+}
+
+struct N4Setup {
+    const uint32_t* Hooks = nullptr;
+    size_t HookCount = 0;
+    bool Mutate = false;
+    uint32_t StopPc = 0;
+    uint64_t Cap = 0;
+    uint64_t SegmentSeed = 0;
+};
+
+struct N4Outcome {
+    a32::GuestState Guest{};
+    Oot3dWholeAotFlow Flow{};
+    Oot3dWholeAotStats Stats{};
+    N4HookLog Hooks;
+    uint64_t Consumed = 0;   // budget units over all slices
+    uint64_t Slices = 0;     // resumes
+    uint64_t Generation = 0;
+    uint64_t Trace = 0;
+    bool Finished = false;
+    bool Unresumable = false; // a BlockLimit exit PC without a dispatch entry
+};
+
+N4Outcome RunN4(const GeneratedWholeAot::OverrideCase& testCase, bool sparse,
+                const Scenario& s, const N4Setup& setup, NativeA32Memory& memory) {
+    N4Outcome out;
+    out.Guest = s.Guest;
+    out.Hooks.Mutate = setup.Mutate;
+    memory.EnableWriteTraceFingerprint(s.Trace);
+    Rng slices(setup.SegmentSeed); // the same slice budgets on both sides
+    uint32_t pc = testCase.Entry;
+    for (bool first = true;; first = false) {
+        // The runtime refuses a zero budget; resumed slices get a fresh one.
+        const uint32_t budget = first ? std::max(1U, s.Budget)
+                              : s.Budget >= kN4LargeBudget ? s.Budget
+                              : slices.Chance(25) ? 1U : 1U + slices.Below(48U);
+        Oot3dWholeAotContext context{memory, memory, out.Stats};
+        if (setup.HookCount != 0U) {
+            context.BlockEntry = N4Hook;
+            context.BlockEntryUser = &out.Hooks;
+            context.BlockEntryPcs = setup.Hooks;
+            context.BlockEntryPcCount = setup.HookCount;
+            context.RefreshBlockEntryGate();
+        }
+        context.SkipFirstBlockEntry = first && s.SkipFirst;
+        context.ResetBlockBudget(budget);
+        Oot3dWholeAotFrame frame(out.Guest);
+        Oot3dAotArchitecturalState state(out.Guest);
+        Oot3dWholeAotFlow flow{};
+        {
+#if OOT3D_GUEST_FP_AARCH64
+            Oot3dGuestFpScope fpScope(out.Guest.fpscr);
+#endif
+            if (first) {
+                flow = (sparse ? testCase.Patched : testCase.Translated)(frame, context, state, pc);
+            } else {
+                const auto* entry = FindN4Dispatch(pc);
+                flow = (sparse ? entry->Sparse : entry->Base)(frame, context, state, pc);
+            }
+            // The registry loop of ExecuteOot3dWholeAotFunction.
+            while ((flow.Kind == Oot3dWholeAotFlowKind::Returned ||
+                    flow.Kind == Oot3dWholeAotFlowKind::Branch) &&
+                   flow.Pc != setup.StopPc && context.BlocksRemaining != 0U) {
+                const auto* entry = FindN4Dispatch(flow.Pc);
+                if (entry == nullptr) break;
+                flow = (sparse ? entry->Sparse : entry->Base)(frame, context, state, flow.Pc);
+            }
+            state.Flush(0x7FFFU, true);
+#if OOT3D_GUEST_FP_AARCH64
+            Oot3dGuestFpFoldFlags(out.Guest.fpscr);
+#endif
+        }
+        out.Consumed += context.BlocksConsumed();
+        out.Flow = flow;
+        const bool resumable = FindN4Dispatch(flow.Pc) != nullptr;
+        if (flow.Kind == Oot3dWholeAotFlowKind::BlockLimit) {
+            if (!resumable) {
+                out.Unresumable = true;
+                break;
+            }
+        } else if (!((flow.Kind == Oot3dWholeAotFlowKind::Returned ||
+                      flow.Kind == Oot3dWholeAotFlowKind::Branch) &&
+                     flow.Pc != setup.StopPc && resumable && context.BlocksRemaining == 0U)) {
+            out.Finished = true;
+            break;
+        }
+        if (out.Consumed >= setup.Cap) break;
+        pc = flow.Pc;
+        ++out.Slices;
+    }
+    out.Generation = memory.WriteGeneration();
+    out.Trace = s.Trace ? memory.WriteTraceFingerprint() : 0U;
+    memory.EnableWriteTraceFingerprint(false);
+    return out;
+}
+
+std::string N4Mismatch(const N4Outcome& a, const N4Outcome& b) {
+    if (a.Guest.r != b.Guest.r) return "registers";
+    if (a.Guest.cpsr != b.Guest.cpsr) return "cpsr";
+    if (a.Guest.fpscr != b.Guest.fpscr) return "fpscr";
+    if (a.Guest.vfp != b.Guest.vfp) return "vfp";
+    if (a.Flow.Kind != b.Flow.Kind || a.Flow.Pc != b.Flow.Pc ||
+        a.Flow.Detail != b.Flow.Detail) return "flow";
+    Oot3dWholeAotStats sa = a.Stats, sb = b.Stats;
+    sa.BlockLimitExits = sb.BlockLimitExits = 0U; // thread-switch points may move
+    if (!SameStats(sa, sb) || a.Stats.Calls != b.Stats.Calls) return "stats";
+    if (a.Hooks.Pcs != b.Hooks.Pcs) return "hook pcs";
+    if (a.Hooks.States != b.Hooks.States) return "hook states";
+    if (a.Generation != b.Generation) return "generation";
+    if (a.Trace != b.Trace) return "trace";
+    return {};
+}
+
+std::string DescribeN4(const N4Outcome& o) {
+    Outcome view;
+    view.Guest = o.Guest;
+    view.Flow = o.Flow;
+    view.Consumed = static_cast<uint32_t>(o.Consumed);
+    view.Stats = o.Stats;
+    view.Hooks = o.Hooks.Pcs;
+    view.Generation = o.Generation;
+    view.Trace = o.Trace;
+    char extra[96];
+    std::snprintf(extra, sizeof(extra), "\n  slices=%" PRIu64 " finished=%d unresumable=%d",
+                  o.Slices, o.Finished, o.Unresumable);
+    return Describe(view) + extra;
+}
+
+// Fresh, identical memories (also equal write generations) after a trial
+// whose base side never finished: its two sides would stop at different guest
+// points, so their memories could not be compared or kept in step.
+bool ResetMemories(NativeA32Memory& a, NativeA32Memory& b) {
+    for (auto* memory : {&a, &b}) {
+        std::destroy_at(memory);
+        std::construct_at(memory);
+        if (!BuildMemory(*memory)) return false;
+    }
+    return true;
+}
+
+// The hooks the runtime would accept under N4 must be covered by the gate
+// list, and an every-block request must be refused.
+int CheckN4Gates() {
+    using namespace GeneratedWholeAot;
+    const Oot3dWholeAotHookGateSet sparse{false, kN4HookGates};
+    int failures = 0;
+    uint32_t missing = 1U;
+    if (Oot3dWholeAotHookGatesCover(sparse, {}, &missing) || missing != 0U) {
+        std::printf("FAIL N4 gates: an every-block hook request is not refused\n");
+        ++failures;
+    }
+    if (!Oot3dWholeAotHookGatesCover(Oot3dWholeAotHookGateSet{}, {})) {
+        std::printf("FAIL default gates: an every-block hook request is refused\n");
+        ++failures;
+    }
+    if (!Oot3dWholeAotHookGatesCover(sparse, kN4OutsideHooks, &missing)) {
+        std::printf("FAIL N4 gates: outside hook %08X has no gate\n", missing);
+        ++failures;
+    }
+    for (const auto& item : kN4CaseHooks) {
+        const std::span<const uint32_t> hooks(kN4InsideHooks + item.First, item.Count);
+        if (!std::is_sorted(hooks.begin(), hooks.end()) ||
+            !Oot3dWholeAotHookGatesCover(sparse, hooks, &missing)) {
+            std::printf("FAIL N4 gates: hook %08X of case %08X has no gate\n", missing, item.Entry);
+            ++failures;
+        }
+    }
+    std::printf("N4: %zu dispatch entries, %zu gates, %zu outside hooks, %zu inside hooks\n",
+                std::size(kN4Dispatch), std::size(kN4HookGates), std::size(kN4OutsideHooks),
+                std::size(kN4InsideHooks));
+    return failures;
+}
+
+struct N4CaseStats {
+    uint64_t Compared = 0, Unfinished = 0;
+    uint64_t BaseConsumed = 0, SparseConsumed = 0;             // all compared trials
+    uint64_t LargeBaseConsumed = 0, LargeSparseConsumed = 0;   // single-slice trials
+    uint64_t BaseLimits = 0, SparseLimits = 0, Hooks = 0, MutatingTrials = 0;
+    uint64_t SkipHooked = 0, Flows[6] = {};
+    std::vector<std::pair<Scenario, std::vector<uint8_t>>> Bench;
+};
+
+// One trial in N4 mode; false (after printing the case) on a difference.
+bool N4Trial(const GeneratedWholeAot::OverrideCase& testCase, Scenario& s, uint64_t trial,
+             uint64_t seed, NativeA32Memory& memoryA, NativeA32Memory& memoryB,
+             N4CaseStats& stats, bool bench) {
+    using namespace GeneratedWholeAot;
+    Rng rng(seed ^ (uint64_t{testCase.Entry} << 20U) ^ (trial * 0x9E3779B97F4A7C15ULL) ^ 0x4E34U);
+    // Half the trials run in short slices (many thread switches).
+    if (rng.Chance(50)) s.Budget = 1U + rng.Below(48U);
+    N4Setup setup;
+    std::span<const uint32_t> inside;
+    for (const auto& item : kN4CaseHooks) {
+        if (item.Entry == testCase.Entry) inside = {kN4InsideHooks + item.First, item.Count};
+    }
+    // 25% no hooks, 20% gated hooks outside the call closure, 35% gated
+    // hooks inside it (the case entry and interior blocks), 20% the same
+    // with a hook that changes guest state.
+    const uint32_t kind = rng.Below(100U);
+    if ((kind >= 25U && kind < 45U) || (kind >= 45U && inside.empty())) {
+        setup.Hooks = std::data(kN4OutsideHooks);
+        setup.HookCount = std::size(kN4OutsideHooks);
+    } else if (kind >= 45U) {
+        setup.Hooks = inside.data();
+        setup.HookCount = inside.size();
+        setup.Mutate = kind >= 80U;
+    }
+    // The return address ends the run (stopPc, as for a host call into the
+    // guest): it must not be a dispatch entry, or a resumed callee returning
+    // there would end one side early.
+    while (FindN4Dispatch(s.Guest.r[14]) != nullptr) s.Guest.r[14] += 4U;
+    setup.StopPc = s.Guest.r[14];
+    setup.Cap = s.Budget >= kN4LargeBudget ? kN4LargeCap : kN4SmallCap;
+    setup.SegmentSeed = rng.U32() | (uint64_t{rng.U32()} << 32U);
+
+    std::vector<uint8_t> snapshot;
+    if (bench && stats.Bench.size() < 256U && setup.HookCount == 0U && !s.Trace &&
+        s.Budget >= kN4LargeBudget) {
+        snapshot.resize(kRamSize);
+        memoryA.ReadBytes(kRamBase, snapshot);
+    }
+    const N4Outcome a = RunN4(testCase, false, s, setup, memoryA);
+    if (!a.Unresumable && !a.Finished) {
+        // Base never finished (an endless guest loop): nothing to compare.
+        ++stats.Unfinished;
+        if (!ResetMemories(memoryA, memoryB)) {
+            std::printf("failed to map memory\n");
+            return false;
+        }
+        return true;
+    }
+    N4Setup sparseSetup = setup;
+    sparseSetup.Cap = a.Consumed; // N4 never charges more than the default lowering
+    const N4Outcome b = RunN4(testCase, true, s, sparseSetup, memoryB);
+    std::string why;
+    if (a.Unresumable) why = "base BlockLimit exit without a dispatch entry";
+    else if (b.Unresumable) why = "N4 BlockLimit exit without a dispatch entry";
+    else if (!b.Finished) why = "N4 did not finish within the base block count";
+    else if (b.Consumed > a.Consumed) why = "N4 charged more blocks than the base";
+    else why = N4Mismatch(a, b);
+    std::string where;
+    if (why.empty() && !SameMemory(memoryA, memoryB, (trial & 255U) == 0U, &where)) {
+        why = "memory (" + where + ")";
+    }
+    if (!why.empty()) {
+        std::printf("FAIL %08X %s trial %" PRIu64 ": %s\n", testCase.Entry, testCase.Name,
+                    trial, why.c_str());
+        std::printf(" input budget=%u hooks=%zu mutate=%d skip=%d trace=%d stop=%08X\n",
+                    s.Budget, setup.HookCount, setup.Mutate, s.SkipFirst, s.Trace,
+                    setup.StopPc);
+        Outcome input;
+        input.Guest = s.Guest;
+        std::printf(" initial state:\n  %s\n", Describe(input).c_str());
+        std::printf(" base:\n  %s\n", DescribeN4(a).c_str());
+        std::printf(" n4:\n  %s\n", DescribeN4(b).c_str());
+        for (size_t i = 0; i < std::max(a.Hooks.Pcs.size(), b.Hooks.Pcs.size()); ++i) {
+            const bool same = i < a.Hooks.Pcs.size() && i < b.Hooks.Pcs.size() &&
+                              a.Hooks.Pcs[i] == b.Hooks.Pcs[i] &&
+                              a.Hooks.States[i] == b.Hooks.States[i];
+            if (!same) {
+                std::printf(" first hook difference at #%zu: base %08X n4 %08X\n", i,
+                            i < a.Hooks.Pcs.size() ? a.Hooks.Pcs[i] : 0U,
+                            i < b.Hooks.Pcs.size() ? b.Hooks.Pcs[i] : 0U);
+                break;
+            }
+        }
+        return false;
+    }
+    ++stats.Compared;
+    ++stats.Flows[std::min<size_t>(static_cast<size_t>(a.Flow.Kind), 5U)];
+    stats.BaseConsumed += a.Consumed;
+    stats.SparseConsumed += b.Consumed;
+    if (a.Slices == 0U && b.Slices == 0U) {
+        stats.LargeBaseConsumed += a.Consumed;
+        stats.LargeSparseConsumed += b.Consumed;
+    }
+    stats.BaseLimits += a.Stats.BlockLimitExits;
+    stats.SparseLimits += b.Stats.BlockLimitExits;
+    stats.Hooks += a.Hooks.Pcs.size();
+    stats.MutatingTrials += setup.Mutate;
+    stats.SkipHooked += s.SkipFirst && setup.HookCount != 0U &&
+                        std::binary_search(setup.Hooks, setup.Hooks + setup.HookCount,
+                                           testCase.Entry);
+    if (!snapshot.empty() && a.Slices == 0U && a.Consumed > 3U) {
+        stats.Bench.emplace_back(s, std::move(snapshot));
+    }
+    return true;
+}
+
+void PrintN4Case(const GeneratedWholeAot::OverrideCase& testCase, const N4CaseStats& n4,
+                 uint64_t trials, bool failed) {
+    const auto ratio = [](uint64_t sparse, uint64_t base) {
+        return base == 0U ? 0.0 : static_cast<double>(sparse) / static_cast<double>(base);
+    };
+    std::printf("%s %08X %-36s trials=%" PRIu64 " compared=%" PRIu64 " unfinished=%" PRIu64
+                " flows[ret=%" PRIu64 " br=%" PRIu64 " svc=%" PRIu64 " fault=%" PRIu64
+                " nsup=%" PRIu64 "] consumed base=%" PRIu64 " n4=%" PRIu64 " (%.3f)"
+                " single-slice %.3f limits base=%" PRIu64 " n4=%" PRIu64 " hooks=%" PRIu64
+                " mutating=%" PRIu64 " skip-gated=%" PRIu64 "\n",
+                failed ? "FAILED" : "OK    ", testCase.Entry, testCase.Name, trials,
+                n4.Compared, n4.Unfinished, n4.Flows[0], n4.Flows[1], n4.Flows[2], n4.Flows[4],
+                n4.Flows[5], n4.BaseConsumed, n4.SparseConsumed,
+                ratio(n4.SparseConsumed, n4.BaseConsumed),
+                ratio(n4.LargeSparseConsumed, n4.LargeBaseConsumed), n4.BaseLimits,
+                n4.SparseLimits, n4.Hooks, n4.MutatingTrials, n4.SkipHooked);
+}
+
+#if defined(__x86_64__) && !defined(OOT3D_GUEST_OVERRIDE_QEMU)
+// x86 microbenchmark of the two lowerings on the same accepted inputs (no
+// hooks, one slice), both on memory A with RAM restored before every call;
+// only indicative of the relative difference.
+void BenchN4(const GeneratedWholeAot::OverrideCase& testCase, const N4CaseStats& n4,
+             NativeA32Memory& memory) {
+    if (n4.Bench.empty()) return;
+    const auto time = [&](bool sparse) {
+        uint64_t cycles = 0U, calls = 0U;
+        for (int round = 0; round < 20; ++round) {
+            for (const auto& [scenario, image] : n4.Bench) {
+                memory.WriteBytes(kRamBase, image);
+                a32::GuestState guest = scenario.Guest;
+                Oot3dWholeAotStats stats{};
+                Oot3dWholeAotContext context{memory, memory, stats};
+                context.ResetBlockBudget(1U << 20U);
+                Oot3dWholeAotFrame frame(guest);
+                Oot3dAotArchitecturalState state(guest);
+                const uint64_t start = CycleCounter();
+                Oot3dWholeAotFlow flow = (sparse ? testCase.Patched : testCase.Translated)(
+                    frame, context, state, testCase.Entry);
+                asm volatile("" : : "r"(&flow), "r"(&guest) : "memory");
+                cycles += CycleCounter() - start;
+                ++calls;
+            }
+        }
+        return static_cast<double>(cycles) / static_cast<double>(calls);
+    };
+    const double base = time(false), sparse = time(true);
+    std::printf("  bench %08X: %zu inputs, base %.0f TSC cycles/call, n4 %.0f (%.3fx)\n",
+                testCase.Entry, n4.Bench.size(), base, sparse, base / sparse);
+}
+#endif
+#endif // OOT3D_N4_EQUIVALENCE
+
 } // namespace
 
 #if defined(OOT3D_GUEST_OVERRIDE_QEMU)
@@ -1452,6 +1858,9 @@ int main(int argc, char** argv) {
         return 2;
     }
     int failures = 0;
+#if defined(OOT3D_N4_EQUIVALENCE)
+    failures += CheckN4Gates();
+#endif
     for (const auto& testCase : GeneratedWholeAot::kOverrideCases) {
         if (only.front() != 0U &&
             std::find(only.begin(), only.end(), testCase.Entry) == only.end()) {
@@ -1477,6 +1886,9 @@ int main(int argc, char** argv) {
         constexpr bool benchEnabled = false; // the microbenchmark uses the x86 counter
 #endif
         bool failed = false;
+#if defined(OOT3D_N4_EQUIVALENCE)
+        N4CaseStats n4;
+#endif
         for (uint64_t trial = 0; trial < trials && !failed; ++trial) {
             Scenario s;
             auto& g = s.Guest;
@@ -1542,6 +1954,13 @@ int main(int argc, char** argv) {
                     if (memory->IsWritable(address, 4U)) memory->WriteHost<uint32_t>(address, value);
                 }
             }
+#if defined(OOT3D_N4_EQUIVALENCE)
+            if (!N4Trial(testCase, s, trial, seed, memoryA, memoryB, n4, benchEnabled)) {
+                failed = true;
+                ++failures;
+            }
+            continue;
+#endif
             std::vector<uint8_t> snapshot;
             if (benchEnabled && accepted.size() < 256U && !s.Trace && s.HookMode == 0U &&
                 s.Budget == (1U << 20U) && (s.Guest.fpscr & 0x00C00000U) == 0U) {
@@ -1594,6 +2013,17 @@ int main(int argc, char** argv) {
                 failed = true;
             }
         }
+#if defined(OOT3D_N4_EQUIVALENCE)
+        PrintN4Case(testCase, n4, trials, failed);
+#if defined(__x86_64__) && !defined(OOT3D_GUEST_OVERRIDE_QEMU)
+        if (benchEnabled && !failed) {
+            BenchN4(testCase, n4, memoryA);
+            // The bench wrote memory A only: start the next case from equal memories.
+            if (!ResetMemories(memoryA, memoryB)) return 2;
+        }
+#endif
+        continue;
+#endif
         const uint64_t calls = info ? info->Calls - callsBefore : 0U;
         const uint64_t declined = info ? info->Declined - declinedBefore : 0U;
         std::printf("%s %08X %-36s trials=%" PRIu64 " native=%" PRIu64 " declined=%" PRIu64
