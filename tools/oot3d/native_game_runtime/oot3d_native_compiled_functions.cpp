@@ -1130,6 +1130,9 @@ std::string FormatOot3dGuestOverridesPerfLine() {
         calls += c;
         declined += d;
         disabled += info.Disabled ? 1U : 0U;
+        // Replacements not wired into this build's generated code (disabled
+        // in guest_overrides.json) never run: listed only when they did.
+        if (c == 0U && d == 0U) continue;
         char text[48];
         std::snprintf(text, sizeof(text), " %X=%" PRIu64 "/%" PRIu64, info.Entry, c, d);
         entries += text;

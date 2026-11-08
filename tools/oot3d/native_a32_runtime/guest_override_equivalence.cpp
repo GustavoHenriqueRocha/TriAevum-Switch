@@ -1597,8 +1597,85 @@ int main(int argc, char** argv) {
             // Each call starts from the same RAM (restored outside the measurement), and
             // time is measured call by call with the cycle counter.
             std::vector<uint8_t> ram(kRamSize);
+            // GUEST_OVERRIDE_BENCH=same: both sides on memory A, which with
+            // TRIAEVUM_FASTMEM_WINDOW=1 is the window (the console's path; B is
+            // a heap image on the slow path). The memories then no longer match
+            // afterwards, so the check below is skipped.
+            const char* benchMode = std::getenv("GUEST_OVERRIDE_BENCH");
+            const bool sameMemory = benchMode != nullptr && (std::strcmp(benchMode, "same") == 0 ||
+                                                             std::strcmp(benchMode, "loop") == 0);
+            if (std::strcmp(benchMode, "loop") == 0) {
+                // GUEST_OVERRIDE_BENCH=loop: only the replaced range, both on
+                // memory A (the window with TRIAEVUM_FASTMEM_WINDOW=1). The
+                // replacement runs alone (block replacements: called directly,
+                // must leave through a resume PC); the translation runs from the
+                // same block with a budget of exactly the blocks the replacement
+                // consumed, so it stops (block limit) at that resume block: the
+                // same guest work on both sides, without the translated tail.
+                // Function replacements (and block replacements that return
+                // from the function): the whole call on both sides.
+                std::vector<std::pair<const std::pair<Scenario, std::vector<uint8_t>>*, uint32_t>> runs;
+                uint64_t totalBlocks = 0U;
+                for (const auto& item : accepted) {
+                    memoryA.WriteBytes(kRamBase, item.second);
+                    a32::GuestState guest = item.first.Guest;
+                    Oot3dWholeAotStats stats{};
+                    Oot3dWholeAotContext context{memoryA, memoryA, stats};
+                    context.ResetBlockBudget(1U << 20U);
+                    Oot3dWholeAotFrame frame(guest);
+                    Oot3dAotArchitecturalState state(guest);
+                    Oot3dWholeAotFlow flow{};
+                    uint32_t resumePc = 0U;
+                    const bool ran = testCase.NativeBlock != nullptr
+                        ? testCase.NativeBlock(frame, context, state, flow, resumePc) &&
+                              (resumePc != 0U || flow.Kind == Oot3dWholeAotFlowKind::Returned)
+                        : testCase.Native(frame, context, state, flow) &&
+                              flow.Kind == Oot3dWholeAotFlowKind::Returned;
+                    const uint32_t blocks = context.BlocksConsumed();
+                    if (ran && blocks >= 2U && blocks <= 20000U) {
+                        runs.emplace_back(&item, blocks);
+                        totalBlocks += blocks;
+                    }
+                }
+                const auto time = [&](bool native) {
+                    uint64_t cycles = 0U;
+                    for (int round = 0; round < 20; ++round) {
+                        for (const auto& [item, blocks] : runs) {
+                            memoryA.WriteBytes(kRamBase, item->second);
+                            a32::GuestState guest = item->first.Guest;
+                            Oot3dWholeAotStats stats{};
+                            Oot3dWholeAotContext context{memoryA, memoryA, stats};
+                            context.ResetBlockBudget(native ? 1U << 20U : blocks);
+                            Oot3dWholeAotFrame frame(guest);
+                            Oot3dAotArchitecturalState state(guest);
+                            Oot3dWholeAotFlow flow{};
+                            uint32_t resumePc = 0U;
+                            const uint64_t start = CycleCounter();
+                            if (!native) {
+                                flow = testCase.Translated(frame, context, state, testCase.Entry);
+                            } else if (testCase.NativeBlock != nullptr) {
+                                testCase.NativeBlock(frame, context, state, flow, resumePc);
+                            } else {
+                                testCase.Native(frame, context, state, flow);
+                            }
+                            asm volatile("" : : "r"(&flow), "r"(&guest) : "memory");
+                            cycles += CycleCounter() - start;
+                        }
+                    }
+                    return static_cast<double>(cycles) / 20.0;
+                };
+                if (!runs.empty()) {
+                    const double translated = time(false), native = time(true);
+                    std::printf("  loop %08X: %zu inputs, %.1f blocks each; translated %.1f, native %.1f "
+                                "TSC cycles/block (%.2fx)\n",
+                                testCase.Entry, runs.size(),
+                                static_cast<double>(totalBlocks) / runs.size(),
+                                translated / totalBlocks, native / totalBlocks, translated / native);
+                }
+                continue;
+            }
             const auto bench = [&](bool native) {
-                NativeA32Memory& memory = native ? memoryB : memoryA;
+                NativeA32Memory& memory = native && !sameMemory ? memoryB : memoryA;
                 memory.ReadBytes(kRamBase, ram);
                 uint64_t cycles = 0U, calls = 0U;
                 for (int round = 0; round < 20; ++round) {
@@ -1631,8 +1708,8 @@ int main(int argc, char** argv) {
             std::printf("  bench %08X: translated %.0f TSC cycles/call, native %.0f (%.2fx)\n",
                         testCase.Entry, translated, native, translated / native);
             std::string where;
-            if (!SameMemory(memoryA, memoryB, true, &where) ||
-                memoryA.WriteGeneration() != memoryB.WriteGeneration()) {
+            if (!sameMemory && (!SameMemory(memoryA, memoryB, true, &where) ||
+                                memoryA.WriteGeneration() != memoryB.WriteGeneration())) {
                 std::printf("FAIL %08X memory diverges after bench (%s)\n",
                             testCase.Entry, where.c_str());
                 ++failures;

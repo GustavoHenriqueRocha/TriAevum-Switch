@@ -1630,7 +1630,9 @@ GUARDS = [
 
 # Native VFP overrides that cost more than the translation: they must stay
 # disabled until someone measures again (guest FPSCR, 2026-10-18).
-DISABLED_OVERRIDES = {"0x003727F0", "0x003325F0", "0x0036E168", "0x00372070", "0x002CDE90"}
+DISABLED_OVERRIDES = {"0x003727F0", "0x003325F0", "0x0036E168", "0x00372070", "0x002CDE90",
+                      # Profile18 mirror round: no gain in the loop-only bench (2026-11-07).
+                      "0x00477D60", "0x003FCA08", "0x00368D94", "0x00466F78"}
 
 
 def check_guard(guard: Guard) -> str | None:
@@ -1653,7 +1655,7 @@ def check_overrides() -> str | None:
     disabled = {entry["entry"] for entry in entries if entry.get("disabled")}
     missing = sorted(DISABLED_OVERRIDES - disabled)
     if missing:
-        return "VFP overrides re-enabled without measurement: " + ", ".join(missing)
+        return "overrides re-enabled without measurement: " + ", ".join(missing)
     return None
 
 
@@ -1668,7 +1670,7 @@ def main() -> int:
         print(("FAIL " if error else "ok   ") + guard.bug + (f"\n     {error}" if error else ""))
         failures += error is not None
     error = check_overrides()
-    print(("FAIL " if error else "ok   ") + "5 VFP overrides remain disabled"
+    print(("FAIL " if error else "ok   ") + "overrides measured slower than the translation remain disabled"
           + (f"\n     {error}" if error else ""))
     failures += error is not None
     print(f"{len(GUARDS) + 1 - failures}/{len(GUARDS) + 1} guards ok")

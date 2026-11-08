@@ -3003,6 +3003,12 @@ bool Override_003563E0(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
 
 constexpr uint32_t kMirrorDecline = 1U; // not a block PC (exits return a PC or 0)
 
+// The body lambdas must be inlined: an out-of-line body receives the guest
+// registers by reference, they live on the stack again and every guest
+// store through the window's byte pointer reloads them (the translation's
+// problem, which these replacements exist to avoid).
+#define OOT3D_MIRROR_INLINE __attribute__((always_inline))
+
 // LDM/STM/PUSH/POP like the translation: the one-page path, otherwise word
 // by word with the fault on the first failing word.
 inline bool MirrorLoadWords(NativeA32Memory& memory, uint32_t first, uint32_t* words,
@@ -3145,7 +3151,7 @@ bool Override_00452DA4(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     constexpr size_t kIdx = kIdx00452DA4;
     static_cast<void>(frame);
     OOT3D_MIRROR_BEGIN(0x00452DA4U, 0x00452EB4U);
-    const uint32_t exit = [&]() -> uint32_t {
+    const uint32_t exit = [&]() OOT3D_MIRROR_INLINE -> uint32_t {
         while (true) {
             // 0x00452DA4
             OOT3D_MIRROR_ENTER(0x00452DA4U);
@@ -3246,7 +3252,7 @@ bool Override_00452DA4(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
 // register (r8 / r9), `X` the scratch for the end pointer (r9 / r8) and
 // `enableOffset` the stack slot holding r4 + 0x3F6 (0x814 / 0x818).
 template <uint32_t Base, size_t T, size_t X, uint32_t EnableOffset>
-inline bool EmitDirtyRegisters(size_t kIdx, Oot3dWholeAotFrame& frame,
+OOT3D_MIRROR_INLINE inline bool EmitDirtyRegisters(size_t kIdx, Oot3dWholeAotFrame& frame,
                                Oot3dWholeAotContext& context,
                                Oot3dAotArchitecturalState& state,
                                Oot3dWholeAotFlow& flow, uint32_t& resumePc) noexcept {
@@ -3254,7 +3260,7 @@ inline bool EmitDirtyRegisters(size_t kIdx, Oot3dWholeAotFrame& frame,
     OOT3D_MIRROR_BEGIN(Base, Base + 0xA4U);
     uint32_t& list = R[T];
     uint32_t& end = R[X];
-    const uint32_t exit = [&]() -> uint32_t {
+    const uint32_t exit = [&]() OOT3D_MIRROR_INLINE -> uint32_t {
         while (true) {
             // base + 0x00
             OOT3D_MIRROR_ENTER(Base);
@@ -3351,7 +3357,7 @@ bool Override_0046D734(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     constexpr size_t kIdx = kIdx0046D734;
     static_cast<void>(frame);
     OOT3D_MIRROR_BEGIN(0x0046D734U, 0x0046D778U);
-    const uint32_t exit = [&]() -> uint32_t {
+    const uint32_t exit = [&]() OOT3D_MIRROR_INLINE -> uint32_t {
         while (true) {
             // 0x0046D734
             OOT3D_MIRROR_ENTER(0x0046D734U);
@@ -3397,7 +3403,7 @@ bool Override_0046DA6C(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     constexpr size_t kIdx = kIdx0046DA6C;
     static_cast<void>(frame);
     OOT3D_MIRROR_BEGIN(0x0046DA6CU, 0x0046DB1CU);
-    const uint32_t exit = [&]() -> uint32_t {
+    const uint32_t exit = [&]() OOT3D_MIRROR_INLINE -> uint32_t {
         uint32_t pc = 0x0046DA6CU;
         while (true) {
             switch (pc) {
@@ -3484,7 +3490,7 @@ bool Override_00477D60(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     constexpr size_t kIdx = kIdx00477D60;
     static_cast<void>(frame);
     OOT3D_MIRROR_BEGIN(0x00477D60U, 0x00477E1CU);
-    const uint32_t exit = [&]() -> uint32_t {
+    const uint32_t exit = [&]() OOT3D_MIRROR_INLINE -> uint32_t {
         while (true) {
             // 0x00477D60
             OOT3D_MIRROR_ENTER(0x00477D60U);
@@ -3536,7 +3542,7 @@ bool Override_003FCA08(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     constexpr size_t kIdx = kIdx003FCA08;
     OOT3D_MIRROR_BEGIN(0x003FCA08U, 0x003FCAB0U);
     auto& guest = frame.Guest;
-    const uint32_t exit = [&]() -> uint32_t {
+    const uint32_t exit = [&]() OOT3D_MIRROR_INLINE -> uint32_t {
         while (true) {
             // 0x003FCA08
             OOT3D_MIRROR_ENTER(0x003FCA08U);
@@ -3667,7 +3673,7 @@ bool Override_00466F78(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     if (Hooked(context, 0x002DBC48U, 0x002DBC48U)) return Decline(kIdx);
     OOT3D_MIRROR_BEGIN(0x00466F78U, 0x00467080U);
     auto& v = frame.Guest.vfp;
-    const uint32_t exit = [&]() -> uint32_t {
+    const uint32_t exit = [&]() OOT3D_MIRROR_INLINE -> uint32_t {
         // 0x00466F78
         OOT3D_MIRROR_ENTER(0x00466F78U);
         {
@@ -3812,20 +3818,20 @@ bool Override_00368D94(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
     // One step "rsbs r3, r1, r0, lsr #n; subcs r0, r0, r1, lsl #n; adcs r2, r2, r2"
     // (the flags of the ADCS are not live except where noted).
     OOT3D_MIRROR_BEGIN(0x00368D94U, 0x00368EC8U);
-    const auto step = [&](uint32_t shift, uint8_t adcMask) {
+    const auto step = [&](uint32_t shift, uint8_t adcMask) OOT3D_MIRROR_INLINE {
         const uint32_t operand = Oot3dAotLsr(r0, shift);
         Oot3dAotSetSubtractFlags(flags, operand, r1, Mask(0x2U));
         r3 = operand - r1;
         if (flags.C()) r0 = r0 - Oot3dAotLsl(r1, shift);
         r2 = Oot3dAotAddWithCarry(flags, r2, r2, flags.C(), true, Mask(adcMask));
     };
-    const auto test = [&](uint32_t shift) {
+    const auto test = [&](uint32_t shift) OOT3D_MIRROR_INLINE {
         const uint32_t operand = Oot3dAotLsr(r0, shift);
         Oot3dAotSetSubtractFlags(flags, operand, r1, Mask(0x2U));
         r3 = operand - r1;
         return flags.C();
     };
-    const uint32_t exit = [&]() -> uint32_t {
+    const uint32_t exit = [&]() OOT3D_MIRROR_INLINE -> uint32_t {
         // 0x00368D94
         OOT3D_MIRROR_ENTER(0x00368D94U);
         {
@@ -3948,6 +3954,7 @@ bool Override_00368D94(Oot3dWholeAotFrame& frame, Oot3dWholeAotContext& context,
 }
 
 #undef OOT3D_MIRROR_END_FUNCTION
+#undef OOT3D_MIRROR_INLINE
 #undef OOT3D_MIRROR_END_BLOCK
 #undef OOT3D_MIRROR_COMMIT
 #undef OOT3D_MIRROR_STORE_WORDS

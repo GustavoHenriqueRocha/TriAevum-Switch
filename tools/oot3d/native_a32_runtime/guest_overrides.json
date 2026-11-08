@@ -31,9 +31,9 @@
     {"entry": "0x0046E048", "function": "0x0046C204", "resume": ["0x0046E0FC"], "name": "NngxValidateState:emit_dirty2", "inline": true, "logs18b_block_entries": "0.13M+"},
     {"entry": "0x0046D734", "function": "0x0046C204", "resume": ["0x0046D788"], "name": "NngxValidateState:mark_dirty", "inline": true, "logs18b_block_entries": "0.68M"},
     {"entry": "0x0046DA6C", "function": "0x0046C204", "resume": ["0x0046DA84", "0x0046DB24"], "name": "NngxValidateState:uniform_runs", "inline": true, "logs18b_block_entries": "0.48M"},
-    {"entry": "0x00477D60", "function": "0x00477D30", "resume": ["0x00477D78", "0x00477E24"], "name": "MemoryArena_AllocateAlignedBlock:walk", "inline": true, "logs18b_block_entries": "0.77M"},
-    {"entry": "0x003FCA08", "function": "0x003FC2F8", "resume": ["0x003FCABC"], "name": "QuadBatch:corners", "inline": true, "logs18b_block_entries": "0.92M"},
-    {"entry": "0x00466F78", "function": "0x00466F78", "resume": ["0x00467080"], "name": "MeshCommandPacket_PatchBoneUniforms", "inline": true, "logs18b_block_entries": "0.98M"},
-    {"entry": "0x00368D94", "name": "Runtime_UnsignedDivMod", "inline": true, "logs18b_block_entries": "0.81M"}
+    {"entry": "0x00477D60", "disabled": "disabled on 2026-11-07: loop-only bench (x86, fastmem window, same memory) 17.8 TSC cycles per block translated vs 18.1 native: no gain; stays in the differential test", "function": "0x00477D30", "resume": ["0x00477D78", "0x00477E24"], "name": "MemoryArena_AllocateAlignedBlock:walk", "inline": true, "logs18b_block_entries": "0.77M"},
+    {"entry": "0x003FCA08", "disabled": "disabled on 2026-11-07: loop-only bench (x86, fastmem window, same memory) 106.8 TSC cycles per block translated vs 145.1 native; stays in the differential test", "function": "0x003FC2F8", "resume": ["0x003FCABC"], "name": "QuadBatch:corners", "inline": true, "logs18b_block_entries": "0.92M"},
+    {"entry": "0x00466F78", "disabled": "disabled on 2026-11-07: loop-only bench (x86, fastmem window, same memory, whole call) 34.8 TSC cycles per block translated vs 41.7 native (17.7 blocks per call: copying the guest state in and out costs more than the block entries saved); stays in the differential test", "function": "0x00466F78", "resume": ["0x00467080"], "name": "MeshCommandPacket_PatchBoneUniforms", "inline": true, "logs18b_block_entries": "0.98M"},
+    {"entry": "0x00368D94", "disabled": "disabled on 2026-11-07: loop-only bench (x86, fastmem window) 50.9 TSC cycles per block translated vs 49.2 native: within noise, 4 blocks per typical call; stays in the differential test", "name": "Runtime_UnsignedDivMod", "inline": true, "logs18b_block_entries": "0.81M"}
   ]
 }
