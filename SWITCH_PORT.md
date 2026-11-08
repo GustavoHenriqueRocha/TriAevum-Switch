@@ -957,12 +957,19 @@ byte-identical when off), `test_apply_guest_overrides.py`, `oot3d_native_block_e
 (the 64 option combinations against the previous inline list), the census `--check`,
 `oot3d_native_perf_diagnostics_tests` (concurrent recording, also under TSan),
 `test_whole_aot_indirect_census.py`, and the A/B of `run_register_promotion_equivalence.py
---n4` (`OOT3D_N4_EQUIVALENCE`: base vs sparse on 60 real functions with their 1,706-function call
-closure, run to completion through every `BlockLimit` resume, half the trials with 1-48-block
-slices, hooks only at gates incl. hooks that change state and skip-first; guest state, memory,
-write generations, write trace and the hook sequence must be equal, the budget counters are
-free): 60/60 cases, 11,845 trials, 1.86 M hooks, zero differences (host g++ -O2; first run only,
-200 trials per case; random inputs fault early in several hot functions).
+--n4` (`OOT3D_N4_EQUIVALENCE`: base vs sparse on 259 real functions (the 34 override cases, the
+top 60 of the guest profile and the 175 other functions owning a real gate), 2,648 functions per
+side with the call closure and the registry owner of every dispatch entry; each side runs to
+completion through every `BlockLimit` resume, half the trials with 1-48-block slices; hooks at
+the 330 real gates plus test hooks, incl. hooks that change state and skip-first; half the inputs
+shaped (registers and stack in a fake heap with plausible words, plausible `.data`/`.bss`);
+guest state, memory, write generations, write trace and the hook sequence must be equal, the
+budget counters are free). Host g++ -O2, 20k trials per case for N4 and for N4 + VFP literals:
+259/259 each, 5.15 M trials compared, 523.5 M hooks, zero differences (30.5 % of shaped trials
+return, 25.4 % unshaped; `0046C204`, `003F96BC`, `003FC2F8`, `00300328`, `0041E968` were
+only covered up to their early exits on the host). qemu-aarch64 (devkitA64 -O3), 16 hot cases ×
+2k: 16/16, zero differences. Budget used, N4 / base: 0.92 overall, 0.17-0.75 in the branchy hot
+functions, ~1.0 where every block is a loop header.
 
 ### Audio off the game thread (2026-10-17)
 - The DSP HLE (mixing) stays on the game thread: each audio frame reads the DSP shared regions,
