@@ -8,7 +8,9 @@
 //    failing draws) and guest memory writes between lists (store cards),
 //    replayed through the real frontend and submission queue over the real
 //    guest memory: once with capture delta off (the reference), once on with
-//    the frontend's source, once on with copied packets.
+//    the frontend's source, once on with copied packets (the two capture
+//    delta runs also walk the lists with config/list_walk_fast, the
+//    reference without).
 //  - Every draw compared byte for byte: register file, both float-uniform
 //    files, default attributes, shader words, every table, the lighting LUT
 //    content and hash, decoded state, vertex/index/texture snapshots and
@@ -429,7 +431,8 @@ struct Run {
     std::unique_ptr<Oot3dNativePicaSubmissionQueue> Queue;
     Oot3dNativePicaFrontend Frontend;
 
-    Run(bool delta, bool inPlace) {
+    // fastWalk: config/list_walk_fast (the reference keeps the per-word walk).
+    Run(bool delta, bool inPlace, bool fastWalk = false) {
         std::string error;
         Require(Memory.MapRegion({"linear", kGuestBase, kMemoryBytes, true, false, {}}, &error), error);
         Queue = std::make_unique<Oot3dNativePicaSubmissionQueue>(
@@ -440,6 +443,7 @@ struct Run {
         Frontend.SetDiagnosticHistoryEnabled(false);
         Frontend.SetInPlaceDrawPackets(inPlace);
         Frontend.SetCaptureDelta(delta);
+        Frontend.SetListWalkFast(fastWalk);
     }
     Run(const Run&) = delete;
     Run& operator=(const Run&) = delete;
@@ -693,8 +697,8 @@ void TestReplay(uint64_t seed, size_t lists) {
     Stream stream(seed);
     auto& random = stream.Random();
     Run reference(false, true);
-    Run delta(true, true);
-    Run packets(true, false);
+    Run delta(true, true, true);
+    Run packets(true, false, true);
     const auto write = [&](const MemoryWrite& memoryWrite) {
         reference.Write(memoryWrite);
         delta.Write(memoryWrite);

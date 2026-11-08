@@ -105,6 +105,23 @@ inline bool ReadNativeCaptureDelta() {
 #endif
 }
 
+// config/list_walk_fast (SWITCH_PORT.md "Command-list walk"): the GSP
+// command-list walk dispatches per register from a table and batches
+// consecutive-mode commands. Switch: the file absent = on, "0" = the
+// per-word walk. Desktop: TRIAEVUM_LIST_WALK_FAST=1 (off otherwise).
+inline bool ReadNativeListWalkFast() {
+#if defined(__SWITCH__)
+    std::ifstream input("sdmc:/switch/oot3dre/config/list_walk_fast");
+    if (!input) return true;
+    std::string text;
+    std::getline(input, text);
+    return ParseOffloadSwitch(text);
+#else
+    const char* value = std::getenv("TRIAEVUM_LIST_WALK_FAST");
+    return value != nullptr && std::string_view(value) != "" && ParseOffloadSwitch(value);
+#endif
+}
+
 // Appends lines to one file from a service thread, in submission order.
 // Push never waits for the file: it takes a mutex the writer holds only to
 // pop (never during the write) and drops the line when the queue is full.
