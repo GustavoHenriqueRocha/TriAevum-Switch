@@ -291,6 +291,63 @@ private:
   uint64_t mGraceUntilMs = 0U;
 };
 
+// The apm request read back. HOS applies a configuration some time after
+// apmSetPerformanceConfiguration returns (test.15 logs23: read at once, the
+// configuration in effect was always the previous request's), so the
+// follow-up thread reads it (AM GetCurrentPerformanceConfiguration) every
+// kPollMs until it equals the request or kSettleMs passed, and logs it once
+// it settles. Docked, HOS runs the docked configuration: no match there.
+class ApmReadback {
+public:
+  static constexpr uint64_t kPollMs = 100U;
+  static constexpr uint64_t kSettleMs = 1000U;
+
+  enum class Outcome : uint8_t {
+    Pending,   // not settled yet (or nothing to read back)
+    Matched,   // HOS reports the request
+    TimedOut,  // kSettleMs and HOS still reports something else (LastEffective)
+  };
+
+  // A new request (replaces one still pending: the caller logs that one).
+  void Start(uint32_t requested, uint64_t nowMs) {
+    mActive = true;
+    mRequested = requested;
+    mStartMs = nowMs;
+    mNextPollMs = nowMs;
+    mLastEffective = 0U;
+  }
+
+  bool Active() const { return mActive; }
+  uint64_t NextPollMs() const { return mNextPollMs; }
+  uint32_t Requested() const { return mRequested; }
+  uint32_t LastEffective() const { return mLastEffective; }
+  uint64_t ElapsedMs(uint64_t nowMs) const { return nowMs - mStartMs; }
+
+  // effective: what HOS reports now (0 = the read failed). Matched or
+  // TimedOut is returned once; the readback is then inactive.
+  Outcome Poll(uint32_t effective, uint64_t nowMs) {
+    if (!mActive) return Outcome::Pending;
+    if (effective != 0U) mLastEffective = effective;
+    if (effective == mRequested) {
+      mActive = false;
+      return Outcome::Matched;
+    }
+    if (nowMs - mStartMs >= kSettleMs) {
+      mActive = false;
+      return Outcome::TimedOut;
+    }
+    mNextPollMs = nowMs + kPollMs;
+    return Outcome::Pending;
+  }
+
+private:
+  bool mActive = false;
+  uint32_t mRequested = 0U;
+  uint32_t mLastEffective = 0U;
+  uint64_t mStartMs = 0U;
+  uint64_t mNextPollMs = 0U;
+};
+
 // What the last ApplyPerformance did (the menu's error text) and where the
 // CPU request stands now.
 struct PerformanceStatus {
@@ -301,7 +358,7 @@ struct PerformanceStatus {
   uint32_t ApmResult = 0;     // libnx Result of the failing step (0 = success)
   const char *ApmFailedStep = "";  // "apmInitialize" / "apmSetPerformanceConfiguration"
   uint32_t ApmRequested = 0;  // handheld configuration asked for
-  uint32_t ApmEffective = 0;  // appletGetCurrentPerformanceConfiguration afterwards (0 = unread)
+  uint32_t ApmEffective = 0;  // the configuration HOS reported once settled (ApmReadback; 0 = not yet)
   // CPU (clkrst / pcv)
   bool CpuUnavailable = false;  // clkrst/pcv refused: CPU High does nothing this run
   bool CpuOverridden = false;   // another tool keeps changing the CPU clock
@@ -339,7 +396,9 @@ struct PerformanceClockSample {
 // Applies the choice at once (oot3d_switch_performance.cpp): the handheld
 // configuration through apm when GPU or memory changed (the apm session is
 // opened on the first High and kept), then CPU High or the earlier rate.
-// Logs TRIAEVUM_PERF_APM / TRIAEVUM_PERF_CPU lines. All Standard before any
+// Logs TRIAEVUM_PERF_APM / TRIAEVUM_PERF_CPU lines, and once HOS applied an
+// apm request (or 1 s passed) TRIAEVUM_PERF_APM_EFFECTIVE from the follow-up
+// thread (ApmReadback). All Standard before any
 // High is a no-op: no apm session, no clkrst, the default focus handling.
 PerformanceStatus ApplyPerformance(PerformanceChoice choice);
 // The same status with the CPU fields as they are now (the keeper may have

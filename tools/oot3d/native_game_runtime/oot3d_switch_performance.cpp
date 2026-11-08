@@ -172,7 +172,9 @@ struct ApmState {
 // True when an apm request was made (HOS then applies that configuration's
 // clocks, CPU 1020 MHz included). The session stays open for the run, so the
 // request lasts as long as the game whether or not HOS keeps it after a
-// session closes.
+// session closes. What HOS applies is read back later on the follow-up thread
+// (ApmReadback, TRIAEVUM_PERF_APM_EFFECTIVE): read here at once it was still
+// the previous request's (test.15 logs23).
 bool ApplyApm(ApmState& apm, bool gpu, bool memory, PerformanceStatus& status) {
     const bool unchanged = gpu == apm.Gpu && memory == apm.Memory;
     if (unchanged || (!gpu && !memory && !apm.SessionOpen)) {
@@ -222,18 +224,12 @@ bool ApplyApm(ApmState& apm, bool gpu, bool memory, PerformanceStatus& status) {
         } else {
             status.ApmAvailable = true;
         }
-        u32 effective = 0U;
-        HangWatch::ServiceCallScope call("am:GetCurrentPerformanceConfiguration");
-        if (R_SUCCEEDED(appletGetCurrentPerformanceConfiguration(&effective))) {
-            status.ApmEffective = effective;
-        }
     }
-    const SwitchClockReading clocks = StockClockReading(status.ApmEffective);
     Log("TRIAEVUM_PERF_APM gpu_high=%d mem_high=%d available=%d rc=0x%X failed=%s requested=0x%08X "
-        "standard=0x%08X effective=0x%08X gpu_mhz=%d mem_mhz=%d op_mode=%s",
+        "standard=0x%08X op_mode=%s",
         gpu ? 1 : 0, memory ? 1 : 0, status.ApmAvailable ? 1 : 0, status.ApmResult,
         status.ApmFailedStep[0] != '\0' ? status.ApmFailedStep : "-", status.ApmRequested,
-        apm.Standard, status.ApmEffective, clocks.GpuMhz, clocks.MemMhz, OperationModeName());
+        apm.Standard, OperationModeName());
     apm.Last = status;
     return true;
 }
@@ -253,7 +249,9 @@ struct CpuState {
     Keeper Cpu;
     PerformanceChoice Requested;
     ApmState Apm;
-    std::atomic<bool> Started{false};  // hook, thread and atexit installed
+    std::atomic<bool> Started{false};  // hook, thread and atexit installed (CPU High)
+    bool ThreadStarted = false;        // the follow-up thread (CPU High or an apm readback)
+    ApmReadback Readback;              // the last apm request, until HOS reports it
     AppletHookCookie Hook{};
     bool NoSuspend = false;  // focus handling switched to NoSuspend
     bool FocusModeRefused = false;
@@ -265,7 +263,7 @@ struct CpuState {
     const char* HosEventPending = nullptr;
     Result LastResult = 0;
     const char* LastFailedStep = "";
-    std::thread Thread;
+    std::thread Thread;  // FollowUpLoop
     // A copy for the menu and perf.txt, which never wait for Mutex (held
     // during clock IPC): PublishedMutex is only held to copy it.
     std::mutex PublishedMutex;
@@ -390,6 +388,32 @@ void FocusIn(CpuState& state, const char* why) {
     StartFollowUps(state, now, why);
 }
 
+// Mutex held: one read of the configuration in effect for the pending apm
+// request; logs once it equals the request or kSettleMs passed.
+void PollApmReadback(CpuState& state, uint64_t now) {
+    u32 effective = 0U;
+    {
+        HangWatch::ServiceCallScope call("am:GetCurrentPerformanceConfiguration");
+        if (R_FAILED(appletGetCurrentPerformanceConfiguration(&effective))) effective = 0U;
+    }
+    const ApmReadback::Outcome outcome = state.Readback.Poll(effective, now);
+    if (outcome == ApmReadback::Outcome::Pending) return;
+    const bool matched = outcome == ApmReadback::Outcome::Matched;
+    const uint32_t reported = state.Readback.LastEffective();
+    const SwitchClockReading clocks = StockClockReading(reported);
+    const bool docked = appletGetOperationMode() == AppletOperationMode_Console;
+    Log("TRIAEVUM_PERF_APM_EFFECTIVE requested=0x%08X effective=0x%08X match=%d after_ms=%llu gpu_mhz=%d "
+        "mem_mhz=%d op_mode=%s%s",
+        state.Readback.Requested(), reported, matched ? 1 : 0,
+        static_cast<unsigned long long>(state.Readback.ElapsedMs(now)), clocks.GpuMhz, clocks.MemMhz,
+        docked ? "docked" : "handheld",
+        matched ? ""
+        : docked ? " (docked: HOS runs the docked configuration; the request applies in handheld)"
+                 : " (HOS still reports another configuration after 1 s)");
+    if (state.Apm.Last.ApmRequested == state.Readback.Requested()) state.Apm.Last.ApmEffective = reported;
+    Publish(state);
+}
+
 void FollowUpLoop(CpuState& state) {
     std::unique_lock<std::mutex> lock(state.Mutex);
     for (;;) {
@@ -397,6 +421,7 @@ void FollowUpLoop(CpuState& state) {
         if (state.FollowUpNext < kFollowUps)
             due = state.FollowUpStartMs + Keeper::kFollowUpMs[state.FollowUpNext];
         if (state.RearmAtMs != 0U && state.RearmAtMs < due) due = state.RearmAtMs;
+        if (state.Readback.Active() && state.Readback.NextPollMs() < due) due = state.Readback.NextPollMs();
         if (!state.FocusInPending && state.HosEventPending == nullptr) {
             const uint64_t now = NowMs();
             if (due == UINT64_MAX) {
@@ -429,6 +454,7 @@ void FollowUpLoop(CpuState& state) {
                 Carry(state, state.Cpu.Check(hz, NowMs()), state.FollowUpWhy, hz);
             }
         }
+        if (state.Readback.Active() && now >= state.Readback.NextPollMs()) PollApmReadback(state, now);
     }
 }
 
@@ -505,13 +531,21 @@ void OnAppletHook(AppletHookType hook, void* param) {
     state.Wake.notify_one();
 }
 
+// Game thread (the Video panel), apply mutex held: the follow-up thread, for
+// CPU High or an apm readback. A pthread: oot3d_switch_threads.cpp makes it a
+// service thread (0x3B, cores 1-2). Never joined (no detach(): it throws on
+// Switch, p6x).
+void EnsureFollowUpThread(CpuState& state) {
+    if (state.ThreadStarted) return;
+    state.ThreadStarted = true;
+    state.Thread = std::thread([&state] { FollowUpLoop(state); });
+}
+
 // Game thread (the Video panel), apply mutex held.
 void StartCpuKeeper(CpuState& state) {
     if (state.Started.load(std::memory_order_relaxed)) return;
     appletHook(&state.Hook, OnAppletHook, &state);
-    // A pthread: oot3d_switch_threads.cpp makes it a service thread (0x3B,
-    // cores 1-2). Never joined (no detach(): it throws on Switch, p6x).
-    state.Thread = std::thread([&state] { FollowUpLoop(state); });
+    EnsureFollowUpThread(state);
     std::atexit(RestoreAtExit);
     state.Started.store(true, std::memory_order_release);
 }
@@ -528,6 +562,16 @@ PerformanceStatus ApplyPerformance(PerformanceChoice choice) {
     status.Requested = choice;
     state.Requested = choice;
     const bool apmChanged = ApplyApm(state.Apm, choice.Gpu, choice.Memory, status);
+    if (apmChanged && status.ApmAvailable) {
+        // Read back on the follow-up thread what HOS applies (never here). A
+        // request still unsettled is logged as superseded with HOS's last report.
+        if (state.Readback.Active())
+            Log("TRIAEVUM_PERF_APM_EFFECTIVE requested=0x%08X effective=0x%08X match=0 superseded=1",
+                state.Readback.Requested(), state.Readback.LastEffective());
+        state.Readback.Start(status.ApmRequested, NowMs());
+        EnsureFollowUpThread(state);
+        state.Wake.notify_one();
+    }
     if (state.Started.load(std::memory_order_relaxed)) {
         const uint64_t now = NowMs();
         if (choice.Cpu != state.Cpu.Wanted()) {

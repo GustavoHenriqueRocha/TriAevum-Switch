@@ -349,6 +349,15 @@ GUARDS = [
     Guard("p6w: the menu and perf.txt read the performance status without waiting on clock IPC",
           "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
           r'PerformanceStatus CurrentPerformanceStatus\(\) \{(?:(?!state\.Mutex|AccessClock).)*?return state\.Published;'),
+    # --- test.15 logs23: TRIAEVUM_PERF_APM effective= was one request behind (read at once) ---
+    Guard("test.15: the apm configuration in effect is read back on the follow-up thread, not at once on the game thread",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'bool ApplyApm\((?:(?!appletGetCurrentPerformanceConfiguration).)*?apm\.Last = status;\s+return true;\s+\}.*?'
+          r'void PollApmReadback\(CpuState& state, uint64_t now\) \{.*?appletGetCurrentPerformanceConfiguration\(&effective\).*?'
+          r'state\.Readback\.Poll\(effective, now\).*?TRIAEVUM_PERF_APM_EFFECTIVE.*?'
+          r'void FollowUpLoop\(CpuState& state\) \{.*?PollApmReadback\(state, now\);.*?'
+          r'state\.Readback\.Start\(status\.ApmRequested, NowMs\(\)\);\s+EnsureFollowUpThread\(state\);',
+          test="oot3d_switch_performance_tests (ApmReadbackSettles)"),
     # --- 08/11 (test.14 logs22): kernel_fast: and TRIAEVUM_GPU_PERF never reached oot3d_native_game.log ---
     # stderr is libnx's null device and kernel_fast: was logged before InitContextForDemo made the logger.
     Guard("test.14: Performance mode lines went to stderr (lost) — they go to the game log",

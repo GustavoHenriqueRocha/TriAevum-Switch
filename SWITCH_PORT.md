@@ -2005,8 +2005,14 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   "CPU High unavailable: … refused (0x…)").
 - **Logs.** Game log (`logs/oot3d_native_game.log`, through `oot3d_game_log.h`; see "Start-up lines in
   the game log" below): `TRIAEVUM_PERF_APM gpu_high=1 mem_high=1 available=1 rc=0x0 failed=-
-  requested=0x92220007 standard=0x00020003 effective=0x92220007 gpu_mhz=461 mem_mhz=1600 op_mode=handheld`
-  per apm change; `TRIAEVUM_PERF_CPU event=<choose_high|choose_standard|focus|resume|wake|dock_change|
+  requested=0x92220007 standard=0x00020003 op_mode=handheld` per apm change, then, from the follow-up
+  thread once HOS applied it, `TRIAEVUM_PERF_APM_EFFECTIVE requested=0x92220007 effective=0x92220007
+  match=1 after_ms=100 gpu_mhz=461 mem_mhz=1600 op_mode=handheld` (`ApmReadback`: AM
+  `GetCurrentPerformanceConfiguration` every 100 ms until it equals the request, at most 1 s; test.15
+  logs23 read it at once and all 7 lines showed the previous request's). If it never matches: `match=0
+  after_ms=1000` with what HOS reported and why (`docked: HOS runs the docked configuration` or `HOS still
+  reports another configuration after 1 s`); a new request before that logs the old one `superseded=1`.
+  `TRIAEVUM_PERF_CPU event=<choose_high|choose_standard|focus|resume|wake|dock_change|
   perf_mode_change|apm_change|perf_window|background|exit_request|exit|atexit> action=<set_high|restore|override>
   mhz_before= requested_mhz= mhz_after= rc= failed= reapply= focus_mode= op_mode=` per request (read-backs
   that find 1224 log nothing), plus `event=focus_mode` and `event=background ... waited_ms=` lines.
@@ -2022,7 +2028,8 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   measured]; memory High [not measured].
 - Tests: `oot3d_switch_performance_tests` (the files, the mode, GPU × memory → configuration, the restore
   rules, the keeper against a fake clock: HOS resets, sys-clk fight, HOME, exit, failures; the `perf.txt`
-  fields), `oot3d_fps_counter_tests` (the `clkrst` overlay line) and the guards under "08/11: L3+R3 >
+  fields; `ApmReadbackSettles`: the apm readback matching late, timing out at 1 s, restarting),
+  `oot3d_fps_counter_tests` (the `clkrst` overlay line) and the guards under "08/11: L3+R3 >
   Video > Performance mode".
 - Risks: the self-suspend through `SetFocusHandlingMode` follows emulator reimplementations of AM, not a
   console trace [INFERENCE]; if AM suspended later, the game would run up to 1 s in the background

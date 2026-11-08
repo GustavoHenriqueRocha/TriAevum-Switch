@@ -295,6 +295,46 @@ void KeeperChosenOutOfFocus() {
   Require(keeper.Focus(true, kCpuStandardHz, 2U).Do == Action::SetHigh, "in focus: 1224");
 }
 
+// The apm request read back until HOS applies it (test.15 logs23: read at
+// once it was still the previous request's).
+void ApmReadbackSettles() {
+  using Outcome = ApmReadback::Outcome;
+  ApmReadback readback;
+  Require(!readback.Active() && readback.Poll(0x92220007U, 0U) == Outcome::Pending,
+          "nothing to read back before a request");
+
+  readback.Start(0x92220007U, 1000U);
+  Require(readback.Active() && readback.NextPollMs() == 1000U, "first read at once");
+  Require(readback.Poll(0x92220008U, 1000U) == Outcome::Pending, "at once: still the previous request's");
+  Require(readback.NextPollMs() == 1000U + ApmReadback::kPollMs, "next read kPollMs later");
+  Require(readback.Poll(0U, 1100U) == Outcome::Pending && readback.LastEffective() == 0x92220008U,
+          "a failed read keeps the last report");
+  Require(readback.Poll(0x92220007U, 1200U) == Outcome::Matched && !readback.Active() &&
+              readback.LastEffective() == 0x92220007U && readback.ElapsedMs(1200U) == 200U,
+          "matched once HOS reports the request, after 200 ms");
+  Require(readback.Poll(0x92220007U, 1300U) == Outcome::Pending, "settled: reported once");
+
+  // Docked (or anything else that keeps another configuration): 1 s, then the mismatch.
+  readback.Start(0x00020001U, 5000U);
+  for (uint64_t t = 5000U; t < 5000U + ApmReadback::kSettleMs; t += ApmReadback::kPollMs)
+    Require(readback.Poll(0x00010001U, t) == Outcome::Pending, "not yet 1 s");
+  Require(readback.Poll(0x00010001U, 5000U + ApmReadback::kSettleMs) == Outcome::TimedOut && !readback.Active() &&
+              readback.LastEffective() == 0x00010001U,
+          "after 1 s: timed out with what HOS reported");
+
+  // A read after a long pause (the game was suspended) still matches first.
+  readback.Start(0x00020003U, 0U);
+  Require(readback.Poll(0x00020003U, 60000U) == Outcome::Matched, "a late read that matches is a match");
+
+  // A new request restarts the readback.
+  readback.Start(0x92220008U, 0U);
+  readback.Poll(0x00020003U, 0U);
+  readback.Start(0x92220007U, 50U);
+  Require(readback.Active() && readback.Requested() == 0x92220007U && readback.LastEffective() == 0U &&
+              readback.ElapsedMs(50U) == 0U,
+          "a new request starts over");
+}
+
 void PerfFields() {
   PerformanceStatus status;
   Require(Same(FormatPerformancePerfFields(status),
@@ -328,6 +368,7 @@ int main() {
   KeeperFailures();
   KeeperChosenOutOfFocus();
   PerfFields();
+  ApmReadbackSettles();
   std::puts("switch performance: PASS");
   return 0;
 }
