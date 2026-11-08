@@ -311,6 +311,10 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     size_t PendingSleepCount() const;
     uint32_t TakePendingDspAudioFrames();
     bool SignalDspAudioFrame();
+    // The audio pipe's interrupt event is signaled: no waiter took the last
+    // SignalDspAudioFrame (or the event resets manually), so a thread could
+    // still take it (config/kernel_retake keeps the kernel lock for the mix).
+    bool DspAudioInterruptPending() const;
     NativeA32CtrHidUpdateResult
     AdvanceHidToCurrentTick(NativeA32Memory& memory,
                             const NativeA32HidState& state);

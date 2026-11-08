@@ -30,6 +30,16 @@
 //        core's whole SVC or DSP frame. The second core waits at most the
 //        submission instead. perf.txt untimed: ui_lock_takes /
 //        ui_lock_waits / ui_lock_wait (0 takes with it on).
+//  retake: config/second_core with the host audio stream only. The second
+//        core's DSP frame (idle work) holds the kernel lock only to claim the
+//        frame, resolve the shared regions and signal the interrupt, and to
+//        account the regions and statistics afterwards; the mix and the host
+//        audio submit run with it released (the game thread used to wait at
+//        its next guest exit for the rest of the frame: guest_kernel: lock=
+//        of thread 0, ~72 % of dsp_core1_ms in test.11). Only when the
+//        interrupt woke no game-thread thread and left nothing for one to
+//        take (otherwise the frame keeps the lock). perf.txt second_core:
+//        dsp_released / dsp_held_ms / core0_gated / core0_lock_wait_ms.
 
 #include "oot3d_native_offload.h"
 
@@ -44,6 +54,7 @@ struct NativeKernelOptions {
     bool Wake = false;
     bool Svc = false;
     bool UiLock = false;
+    bool Retake = false;
 };
 
 inline NativeKernelOptions ReadNativeKernelOptions() {
@@ -70,6 +81,7 @@ inline NativeKernelOptions ReadNativeKernelOptions() {
     options.Wake = part("wake");
     options.Svc = part("svc");
     options.UiLock = part("ui_lock");
+    options.Retake = part("retake");
     return options;
 }
 

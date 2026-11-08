@@ -1611,8 +1611,15 @@ void RunAllTests() {
     Require(host.TakePendingDspAudioFrames() == 0U,
             "DSP audio tick fired before one native frame elapsed");
     host.AdvanceSystemTicks(1U);
+    // config/kernel_retake reads whether the audio interrupt stayed signaled
+    // (this event resets manually: a wait leaves it signaled).
+    state.r[0] = dspPipeEvent;
+    Require(host.HandleSvc(0x19, state, memory, context).Action ==
+                    NativeA32HostAction::Resume &&
+                !host.DspAudioInterruptPending(),
+            "a cleared DSP audio interrupt reads as pending");
     Require(host.TakePendingDspAudioFrames() == 1U &&
-                host.SignalDspAudioFrame(),
+                host.SignalDspAudioFrame() && host.DspAudioInterruptPending(),
             "DSP audio tick did not follow the native frame cadence");
     Require(memory.Write32(0x1FF82100, dspPipeEvent),
             "cannot rewrite periodic DSP event wait array");
@@ -1621,7 +1628,7 @@ void RunAllTests() {
     state.r[3] = 0;
     Require(host.HandleSvc(0x25, state, memory, context).Action ==
                     NativeA32HostAction::Resume &&
-                state.r[0] == 0 && state.r[1] == 0,
+                state.r[0] == 0 && state.r[1] == 0 && host.DspAudioInterruptPending(),
             "periodic DSP audio frame did not signal its pipe event");
     host.AdvanceSystemTicks(
         NativeA32CtrHostServices::DspAudioFrameTicks * 2U);

@@ -304,7 +304,8 @@ private:
   // without the host audio stream).
   void PumpDspAudioFrame();
   // The second core's idle work (dspOnSecondCore): one deferred DSP frame on
-  // its host thread, kernel lock held.
+  // its host thread, kernel lock held on entry and return (config/kernel_retake:
+  // released around the mix and the host audio submit).
   void DeliverDspAudioFrameOnSecondCore();
   // Statistics, PCM dump and host output of mixed DSP samples.
   void AccountDspSamples(const std::vector<int16_t> &samples);
@@ -798,6 +799,9 @@ private:
   // keeps the kernel lock (one acquisition) instead of releasing it and
   // taking it again at every guest memory read.
   bool uiSubmitHoldsKernel = false;
+  // config/kernel_retake (oot3d_native_kernel_options.h): the second core's
+  // DSP frame mixes with the kernel lock released.
+  bool dspMixReleasesKernel = false;
   // DSP HLE frames of one refresh: storage reused across refreshes.
   std::vector<int16_t> refreshAudioSamples;
   // config/audio_deferred (Switch, absent = on, "0" = off): DSP frames of

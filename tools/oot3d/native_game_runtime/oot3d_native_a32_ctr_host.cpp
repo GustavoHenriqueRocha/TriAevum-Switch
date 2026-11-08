@@ -1417,6 +1417,11 @@ bool NativeA32CtrHostServices::SignalDspAudioFrame() {
     return mDspAudioRunning && SignalDspInterrupt(2U, kDspAudioPipe);
 }
 
+bool NativeA32CtrHostServices::DspAudioInterruptPending() const {
+    const auto& event = mDspInterruptEvents[2U][kDspAudioPipe];
+    return event != nullptr && event->AvailableCount != 0;
+}
+
 NativeA32CtrHidRuntimeProfile
 NativeA32CtrHostServices::HidRuntimeProfile() const noexcept {
     return mHidRuntimeProfile;
