@@ -787,6 +787,7 @@ NativeA32ProcessRunResult NativeA32Process::Run(
         }
 
         if (exit.kind == oot3d::recomp::a32::ExitKind::Svc) {
+            if (concurrent) WaitOutReleasedIdleWorkForSvc(exit.detail, state);
             NativeA32HostContext context{*this, mCurrentThreadId};
             const auto svcStart = timed ? TimingClock::now()
                                         : TimingClock::time_point{};
@@ -964,6 +965,7 @@ bool NativeA32Process::InvokeFunctionWithState(
         }
 #endif
         if (exit.kind == oot3d::recomp::a32::ExitKind::Svc) {
+            if (SecondCore::Active()) WaitOutReleasedIdleWorkForSvc(exit.detail, state);
             NativeA32HostContext context{*this, mCurrentThreadId};
             CpuPhaseProbe::Scope cpuSvc(CpuPhaseProbe::Phase::Svc);
             auto hostResult =
@@ -1148,6 +1150,10 @@ NativeA32GuestThreadProfile NativeA32Process::GuestThreadProfile() const noexcep
     profile.SecondCoreIdleReleasedUnits =
         mSecondCoreIdleReleasedUnits.load(std::memory_order_relaxed);
     profile.Core0IdleGateWaits = mCore0IdleGateWaits.load(std::memory_order_relaxed);
+    profile.SecondCoreIdleHeldWoken = mSecondCoreIdleHeldWoken.load(std::memory_order_relaxed);
+    profile.SecondCoreIdleHeldWaiting =
+        mSecondCoreIdleHeldWaiting.load(std::memory_order_relaxed);
+    profile.Core0IdleSvcGateWaits = mCore0IdleSvcGateWaits.load(std::memory_order_relaxed);
     const SecondCore::Core0LockSample core0Lock = SecondCore::SampleCore0Lock();
     profile.Core0LockWaits = core0Lock.Waits;
     profile.Core0LockWaitNanoseconds = core0Lock.WaitNanoseconds;
@@ -1262,24 +1268,34 @@ void NativeA32Process::NoteCore0ThreadParked() noexcept {
 }
 
 bool NativeA32Process::RunSecondCoreIdleWorkAfterEffect(uint64_t core0WakesBefore,
-                                                        bool effectPending,
+                                                        bool core0Waits,
+                                                        const NativeA32SvcFilter& observesEffect,
                                                         const std::function<void()>& work) {
+    const bool woken = mCore0ThreadWakes != core0WakesBefore;
     if (!SecondCore::Active() || SecondCore::Processor() != 1U || !SecondCore::KernelHeld() ||
-        mCore0ThreadWakes != core0WakesBefore || effectPending) {
+        woken || core0Waits) {
+        if (woken) {
+            mSecondCoreIdleHeldWoken.fetch_add(1U, std::memory_order_relaxed);
+        } else if (core0Waits) {
+            mSecondCoreIdleHeldWaiting.fetch_add(1U, std::memory_order_relaxed);
+        }
         work();
         return false;
     }
     // Opened and closed under the kernel lock (closed also when `work`
     // throws): while open the second core is inside a kernel section, and
-    // whoever waits for it to close (a world stop, a gated dispatch) re-tests.
+    // whoever waits for it to close (a world stop, a gated dispatch or SVC)
+    // re-tests.
     struct Section {
-        explicit Section(NativeA32Process& process)
+        Section(NativeA32Process& process, const NativeA32SvcFilter& filter)
             : Process(process), Start(ReadThreadProfileCounter()) {
             ++SecondCore::gInKernel[1];
             Process.mSecondCoreIdleReleased = true;
+            Process.mReleasedSvcFilter = &filter;
         }
         ~Section() {
             Process.mSecondCoreIdleReleased = false;
+            Process.mReleasedSvcFilter = nullptr;
             --SecondCore::gInKernel[1];
             SecondCore::NotifyKernel();
             Process.mSecondCoreIdleReleasedTicks.fetch_add(ReadThreadProfileCounter() - Start,
@@ -1290,10 +1306,23 @@ bool NativeA32Process::RunSecondCoreIdleWorkAfterEffect(uint64_t core0WakesBefor
         Section& operator=(const Section&) = delete;
         NativeA32Process& Process;
         uint64_t Start;
-    } section{*this};
+    } section{*this, observesEffect};
     const SecondCore::KernelRelease release;
     work();
     return true;
+}
+
+void NativeA32Process::WaitOutReleasedIdleWorkForSvc(
+    uint32_t immediate, const oot3d::recomp::a32::GuestState& state) {
+    // The effect (the DSP interrupt) is already applied while the work (the
+    // mix it announces) runs: a wait that lists its object would find it
+    // signaled early. It starts once the work is over, as when the effect came
+    // after it.
+    while (mSecondCoreIdleReleased && mReleasedSvcFilter != nullptr && *mReleasedSvcFilter &&
+           (*mReleasedSvcFilter)(immediate, state)) {
+        mCore0IdleSvcGateWaits.fetch_add(1U, std::memory_order_relaxed);
+        SecondCore::WaitKernel([this] { return !mSecondCoreIdleReleased; });
+    }
 }
 
 void NativeA32Process::WaitOutReleasedIdleWork() {
@@ -1644,13 +1673,14 @@ std::string FormatNativeA32SecondCoreLine(const NativeA32GuestThreadProfile& now
     }
     const uint64_t released =
         ns(now.SecondCoreIdleReleasedTicks - windowStart.SecondCoreIdleReleasedTicks);
-    char line[640];
+    char line[768];
     std::snprintf(
         line, sizeof(line),
         "second_core: dsp_pumped=%.2f dsp_flushed=%.2f dsp_late=%llu dsp_wait_ms=%.3f "
         "dsp_core1=%.2f dsp_core1_ms=%.3f core1_lock_wait_ms=%.3f core1_preempted_ms=%s "
         "core0_saved_ms=%.3f core1_wakes=%.1f core1_empty_wakes=%.1f dsp_released=%.2f "
-        "dsp_held_ms=%.3f core0_gated=%.2f core0_lock_waits=%.1f core0_lock_wait_ms=%.3f",
+        "dsp_held_ms=%.3f core0_gated=%.2f core0_lock_waits=%.1f core0_lock_wait_ms=%.3f "
+        "dsp_held_woken=%.2f dsp_held_waiter=%.2f core0_svc_gated=%.2f",
         static_cast<double>(dsp.Pumped) / frames, static_cast<double>(dsp.Flushed) / frames,
         static_cast<unsigned long long>(dsp.Late), waitMs,
         static_cast<double>(now.SecondCoreIdleWorkUnits - windowStart.SecondCoreIdleWorkUnits) /
@@ -1666,7 +1696,14 @@ std::string FormatNativeA32SecondCoreLine(const NativeA32GuestThreadProfile& now
         nsToMs(idleWork > released ? idleWork - released : 0U),
         static_cast<double>(now.Core0IdleGateWaits - windowStart.Core0IdleGateWaits) / frames,
         static_cast<double>(now.Core0LockWaits - windowStart.Core0LockWaits) / frames,
-        nsToMs(now.Core0LockWaitNanoseconds - windowStart.Core0LockWaitNanoseconds));
+        nsToMs(now.Core0LockWaitNanoseconds - windowStart.Core0LockWaitNanoseconds),
+        static_cast<double>(now.SecondCoreIdleHeldWoken - windowStart.SecondCoreIdleHeldWoken) /
+            frames,
+        static_cast<double>(now.SecondCoreIdleHeldWaiting -
+                            windowStart.SecondCoreIdleHeldWaiting) /
+            frames,
+        static_cast<double>(now.Core0IdleSvcGateWaits - windowStart.Core0IdleSvcGateWaits) /
+            frames);
     return line;
 }
 
