@@ -18,6 +18,7 @@
 #include "oot3d/renderer/azahar_texture_pack.h"
 #endif
 #include "fast/oot3d/pica_texture_predecode.h"
+#include "oot3d/renderer/azahar_texture_pack_settings.h"
 #include <imgui.h>
 #include "fast/backends/gl_frame_profiler.h"
 #include "fast/backends/gl_pica_dynamic_scale.h"
@@ -1318,6 +1319,7 @@ bool NativeA32WindowSession::RunFrame() {
   // a waiting second core (oot3d_native_kernel_options.h).
   if (!uiSubmitHoldsKernel) hostWorkRelease.emplace();
   const auto uiSubmitStart = std::chrono::steady_clock::now();
+  const double uiPrepareBefore = untimed.UiPrepare;
   const auto uiLockBefore = Oot3dNativeGame::SecondCore::SampleCore0Lock();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::UiSubmit);
   // The HUD's texture pack images decode before its first frame: its
@@ -1412,6 +1414,23 @@ bool NativeA32WindowSession::RunFrame() {
         static_cast<double>(uiLockAfter.WaitNanoseconds - uiLockBefore.WaitNanoseconds) / 1.0e9;
   }
   untimed.UiSubmit += SecondsSince(uiSubmitStart);
+  {
+    // A texture pack change in progress (deko3d.txt `texture pack change ...
+    // game thread: longest frame, longest HUD texture preparation`): this
+    // frame from the last one's UI submission (waits for the render thread
+    // included) and its HUD texture preparation. Game thread only.
+    static std::chrono::steady_clock::time_point previousUiSubmit;
+    const auto micros = [](double seconds) { return static_cast<uint64_t>(seconds * 1.0e6); };
+    const uint64_t frameMicros =
+        previousUiSubmit.time_since_epoch().count() == 0
+            ? 0U
+            : static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                        uiSubmitStart - previousUiSubmit)
+                                        .count());
+    previousUiSubmit = uiSubmitStart;
+    Oot3d::Renderer::LiveTexturePackChangeGameWatch().Observe(frameMicros,
+                                                             micros(untimed.UiPrepare - uiPrepareBefore));
+  }
   if (uiSubmitHoldsKernel) hostWorkRelease.emplace();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PresentSubmit);
   phaseStart = std::chrono::steady_clock::now();

@@ -1,5 +1,6 @@
 #include "oot3d_n64_ui_renderer.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -229,16 +230,22 @@ void TestHeldFirstDraws() {
         Require(provider.calls == 4, "a final texture was resolved again");
 
         // Turned off and on again (a new revision): the resident texture
-        // keeps drawing while the replacement decodes again.
+        // keeps drawing while the replacement decodes again, polled every
+        // few calls (test.13: polled at every call, the game thread lost
+        // 25-50 ms per frame).
         provider.ready = false;
         provider.revision = 2U;
         frame();
-        Require(backend.widths.size() == 1U && backend.deleted.empty() && backend.drawn.back() == 1U,
+        Require(provider.calls == 5 && backend.widths.size() == 1U && backend.deleted.empty() &&
+                    backend.drawn.back() == 1U,
                 "a held revision dropped the texture that was drawing");
+        for (std::uint32_t call = 1U; call < kUiProvisionalPollInterval; ++call) frame();
+        Require(provider.calls == 5 && backend.drawn.back() == 1U && renderer.Stats().held_draws == 6U,
+                "a texture that draws was polled at every call while its replacement decoded");
         provider.ready = true;
         frame();
-        Require(backend.widths == std::vector<uint16_t>({6U, 6U}) && backend.deleted == std::vector<uint32_t>{1U} &&
-                    backend.drawn.back() == 2U,
+        Require(provider.calls == 6 && backend.widths == std::vector<uint16_t>({6U, 6U}) &&
+                    backend.deleted == std::vector<uint32_t>{1U} && backend.drawn.back() == 2U,
                 "the replacement of a new revision did not replace the resident texture");
     }
     {
@@ -260,6 +267,64 @@ void TestHeldFirstDraws() {
         for (int index = 0; index < 8; ++index) (void)renderer.PrepareTextures(primitives);
         Require(provider.calls == int(kUiHoldPolls) + 1, "an expired hold was still polled at every call");
     }
+}
+
+// test.13: each HD texture change (on, off, another size, the index ready)
+// resolved every HUD texture again in one call and polled those still
+// decoding at every call: 25-50 ms more game thread per frame for ~10 frames
+// (hitches.txt:1629-1680). A new revision resolves the textures that draw at
+// most kUiResolvesPerPrepare per call, each drawing its earlier texture until
+// then.
+void TestRevisionResolvesAreSpread() {
+    using namespace oot3d::ui;
+    std::vector<UiPrimitive> primitives;
+    for (int index = 0; index < 20; ++index) {
+        primitives.push_back(TexturedPrimitive("oot3d/native/t" + std::to_string(index)));
+    }
+    PackProvider provider;
+    provider.nativeStandIn = true;
+    provider.ready = true;
+    SizingBackend backend;
+    N64UiFast3dRenderer renderer(backend, &provider);
+    int mostResolves = 0;
+    const auto frame = [&] {
+        const int calls = provider.calls;
+        const size_t drawn = backend.drawn.size();
+        std::string error;
+        Require(renderer.Render(primitives, 400, 240, N64UiCanvasMode::NativeTopScreen400x240,
+                                renderer.PrepareTextures(primitives), &error),
+                "spread UI rendering failed: " + error);
+        Require(backend.drawn.size() - drawn == primitives.size(), "a texture that draws was not drawn");
+        mostResolves = std::max(mostResolves, provider.calls - calls);
+    };
+    frame();
+    Require(provider.calls == 20 && backend.widths.size() == 20U, "first sights were not resolved at once");
+    mostResolves = 0;
+
+    // HD textures on (a new revision, the replacements decoding): the
+    // textures keep drawing, resolved six per call, then polled.
+    provider.revision = 2U;
+    provider.ready = false;
+    for (int call = 0; call < 4; ++call) frame();
+    Require(provider.calls == 40 && renderer.Stats().deferred_resolves == 14U + 8U + 2U,
+            "a new revision was not resolved six per call");
+    for (int call = 0; call < 24; ++call) frame();
+    Require(backend.widths.size() == 20U && backend.deleted.empty() && renderer.Stats().held_draws == 0U,
+            "a texture that draws was held or replaced by the game's pixels");
+    provider.ready = true;
+    for (int call = 0; call < 16; ++call) frame();
+    Require(backend.widths.size() == 40U && backend.deleted.size() == 20U,
+            "the replacements did not all come");
+    Require(mostResolves <= int(kUiResolvesPerPrepare), "a call resolved more than its budget");
+
+    // HD textures off (another revision, final pixels at once): replaced six
+    // per call, each drawing its pack image until then.
+    provider.revision = 3U;
+    mostResolves = 0;
+    const int before = provider.calls;
+    for (int call = 0; call < 4; ++call) frame();
+    Require(provider.calls - before == 20 && backend.widths.size() == 60U && mostResolves == 6,
+            "turning the pack off did not resolve every texture within four calls");
 }
 
 // A texture pack as the HUD sees it: an image is queued when asked for
@@ -373,6 +438,7 @@ int main() {
     using namespace oot3d::ui;
     TestProvisionalTextures();
     TestHeldFirstDraws();
+    TestRevisionResolvesAreSpread();
     TestRequestAhead();
     Require(N64UiSolidShaderId0() != 0U &&
                 N64UiTexturedShaderId0() != 0U &&

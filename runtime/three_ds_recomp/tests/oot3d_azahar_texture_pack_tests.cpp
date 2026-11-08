@@ -1166,6 +1166,21 @@ TEST_F(Oot3dAzaharTexturePackTest, TexturesDrawnWhileThePackIndexesResolveOnceIt
     const auto full = runtime.PollOrQueue(hash, 8U, 8U);
     ASSERT_EQ(full.State, AzaharTextureResolveState::Ready);
     EXPECT_EQ(full.Replacement->Width, 32U); // the file's own size, never enlarged
+
+    // HD textures off, the index waiting in pack.json again: a HUD texture
+    // gets its own pixels at once (test.13: Pending until the index, and the
+    // UI polled it meanwhile), the hash for authoring once indexed.
+    runtime.Configure({.LoadCustomTextures = false, .UserDirectory = Root, .LoadDirectory = pack});
+    EXPECT_FALSE(runtime.IndexReady());
+    const AzaharTextureRequest hud{8U, 8U, 0U, 0U, native, {}, true};
+    EXPECT_EQ(runtime.ResolveOrQueue(hud).State, AzaharTextureResolveState::Disabled);
+    EXPECT_EQ(runtime.ResolveOrQueue(request).State, AzaharTextureResolveState::Disabled);
+    ASSERT_TRUE(feedPackJson());
+    runtime.WaitForPendingLoads();
+    const auto indexed = runtime.ResolveOrQueue(request);
+    EXPECT_EQ(indexed.State, AzaharTextureResolveState::Disabled);
+    EXPECT_TRUE(indexed.NativeHashAvailable);
+    EXPECT_EQ(indexed.NativeHash, hash);
 }
 #endif
 

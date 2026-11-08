@@ -704,7 +704,13 @@ class AzaharTexturePackRuntime::Impl {
         {
             std::scoped_lock lock(mMutex);
             if (!mConfigured) return {};
-            if (!mIndexReady) return {AzaharTextureResolveState::Pending, 0U, nullptr};
+            if (!mIndexReady) {
+                // HD textures off (and no dump): nothing to wait for, the
+                // caller draws its own pixels at once; the hash (for
+                // authoring) is there once the index is.
+                if (!mConfiguration.LoadCustomTextures && !mConfiguration.DumpTextures) return {};
+                return {AzaharTextureResolveState::Pending, 0U, nullptr};
+            }
             if (request.UserInterface && request.Ahead) return QueueAheadLocked(request);
             dumpEnabled = mConfiguration.DumpTextures;
             loadEnabled = mConfiguration.LoadCustomTextures;

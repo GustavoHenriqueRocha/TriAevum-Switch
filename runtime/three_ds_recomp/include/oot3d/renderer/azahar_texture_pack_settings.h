@@ -208,6 +208,82 @@ enum class TexturePackEntryAction : uint8_t { Keep, Rebuild, Release };
                                                              : TexturePackEntryAction::Keep;
 }
 
+// Textures one frame resolves again after a pack change (a Rebuild above, or
+// a pack image of another size cap still drawn): each decodes the game's
+// texture, identifies it in the pack and uploads it on the render thread.
+// test.13 did all of a view's at once, at the change and again when the
+// index was ready. The others keep drawing what they drew (the native
+// texture, or the earlier cap's image) until a later frame has budget; pack
+// images still upload within kReplacementBytesPerFrame. Turning the pack off
+// is not spread: no pack image is drawn from that frame on.
+inline constexpr uint32_t kTexturePackRebuildsPerFrame = 6U;
+
+struct TexturePackRebuildBudget {
+    uint32_t Left = kTexturePackRebuildsPerFrame;
+    uint64_t Deferred = 0; // asked for with nothing left, all frames
+
+    constexpr void NewFrame() noexcept { Left = kTexturePackRebuildsPerFrame; }
+    [[nodiscard]] constexpr bool Take() noexcept {
+        if (Left == 0U) {
+            ++Deferred;
+            return false;
+        }
+        --Left;
+        return true;
+    }
+};
+
+// The hold a scene's first frames get (config/texture_pack_hold): only when
+// the game entered it with the pack on. A settings change never holds, also
+// when the scene changed while the pack was off (test.13: HD textures turned
+// on in the meadow held the frame 558 ms, perf.txt:2289, hitches.txt:1735).
+[[nodiscard]] constexpr uint64_t TexturePackSceneHoldMicros(bool sceneEntered, uint32_t holdMs) noexcept {
+    return sceneEntered ? static_cast<uint64_t>(holdMs) * 1000U : 0U;
+}
+
+// The game thread during a pack change, from the change to its `took
+// effect` line: its longest frame (one UI submission to the next, waits for
+// the render thread included) and its longest UI texture preparation (the HUD
+// textures resolved again, N64UiFast3dRenderer::PrepareTextures). The
+// renderer begins and ends it; the game thread observes each frame.
+class TexturePackChangeGameWatch {
+  public:
+    struct Result {
+        uint64_t LongestFrameMicros = 0;
+        uint64_t LongestPrepareMicros = 0;
+    };
+
+    void Begin() noexcept {
+        mLongestFrame.store(0U, std::memory_order_relaxed);
+        mLongestPrepare.store(0U, std::memory_order_relaxed);
+        mActive.store(true, std::memory_order_release);
+    }
+    void Observe(uint64_t frameMicros, uint64_t prepareMicros) noexcept {
+        if (!mActive.load(std::memory_order_acquire)) return;
+        Raise(mLongestFrame, frameMicros);
+        Raise(mLongestPrepare, prepareMicros);
+    }
+    Result End() noexcept {
+        mActive.store(false, std::memory_order_release);
+        return {mLongestFrame.load(std::memory_order_relaxed), mLongestPrepare.load(std::memory_order_relaxed)};
+    }
+
+  private:
+    static void Raise(std::atomic<uint64_t>& longest, uint64_t value) noexcept {
+        uint64_t current = longest.load(std::memory_order_relaxed);
+        while (value > current && !longest.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+        }
+    }
+    std::atomic<bool> mActive{false};
+    std::atomic<uint64_t> mLongestFrame{0U};
+    std::atomic<uint64_t> mLongestPrepare{0U};
+};
+
+inline TexturePackChangeGameWatch& LiveTexturePackChangeGameWatch() noexcept {
+    static TexturePackChangeGameWatch watch;
+    return watch;
+}
+
 // A pack change (or the configuration at start) has taken effect on screen
 // once no pack image of earlier settings is left and, with the pack on, its
 // index is ready and none of the textures drawn last frame still waits for its

@@ -327,7 +327,7 @@ GUARDS = [
     Guard("deko3d pack images: finished ones upload at frame top, never one barrier per draw mid-frame",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
           r'Evict\(\);\s+BeginScene\(\);\s+UploadReadyReplacements\(\);\s+TrackPackChange\(\);\s+'
-          r'(?:LogPackSizes\(\);\s+)?\}',
+          r'(?:LogPackSizes\(\);\s+)?(?:if \(mPackChange\.Active\) \{.*?\}\s+)?\}',
           forbid=r'PollOrQueue\(\s*native\.PackHash, static_cast<uint16_t>\(view\.Width\)'),
     # --- 07/11: colour compression (config/deko3d_compression "0" = off). The display controller can't
     # read compressed images: window images handed to nwindow without dkQueuePresentImage stay uncompressed.
@@ -1638,15 +1638,16 @@ GUARDS = [
     # answered Missing and they stayed native until evicted (SWITCH_PORT.md "HD textures applied at once").
     Guard("textures drawn while the pack indexes (no hash) are made again once its index is ready",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
-          r'TexturePackEntryActionFor\(false, native\.PackEpoch, mPackEpoch, mTexturePack,\s+'
-          r'native\.PackUnindexed, mPackIndexReady\) ==\s+::Oot3d::Renderer::TexturePackEntryAction::Rebuild\).*?'
+          r'TexturePackEntryActionFor\(false, native\.PackEpoch, mPackEpoch,\s+'
+          r'mTexturePack, native\.PackUnindexed,\s+mPackIndexReady\) ==\s+'
+          r'::Oot3d::Renderer::TexturePackEntryAction::Rebuild;.*?'
           r'texture\.PackUnindexed = mTexturePackSettings\.Reresolve &&\s+'
           r'pack\.State == ::Oot3d::Renderer::AzaharTextureResolveState::Pending &&\s+!pack\.NativeHashAvailable;',
           "oot3d_texture_pack_scale_tests (ToggleCache), "
           "oot3d_azahar_texture_pack_tests (TexturesDrawnWhileThePackIndexesResolveOnceItIsReady)"),
     Guard("the renderer learns when the pack's index is ready after a change, and never polls an empty hash",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
-          r'mPackIndexReady = false;\s+Log\("resources: texture pack %s \(cap %ux\)".*?'
+          r'mPackIndexReady = false;.*?mHoldLeftMicros = 0U;\s+Log\("resources: texture pack %s \(cap %ux\)".*?'
           r'if \(mTexturePack && !mPackIndexReady\) \{.*?'
           r'mPackIndexReady = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.IndexReady\(\);.*?'
           r'if \(texture\.PackPending && !texture\.PackUnindexed && !texture\.Replacement && '
@@ -1656,6 +1657,36 @@ GUARDS = [
           "runtime/three_ds_recomp/include/oot3d/renderer/azahar_texture_pack_settings.h",
           r'return !replacement && packOn && unindexed && indexReady \? TexturePackEntryAction::Rebuild',
           "oot3d_texture_pack_scale_tests (ToggleCache)"),
+    # --- 08/11 (ToggleFreeze, test.13 logs21): each HD-texture change froze the game: every HUD texture
+    # resolved again at once and those still decoding polled at every call (game thread +25-50 ms per frame
+    # for ~10 frames, hitches.txt:1629-1680), the render thread resolved a whole view again at the change and
+    # at the index, and turning the pack on in a scene entered while it was off armed the scene hold (613 ms,
+    # hitches.txt:1735) (SWITCH_PORT.md "HD texture changes without a freeze").
+    Guard("a pack settings change never arms the scene hold, also for a scene entered while the pack was off",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'serial != mSceneSerial\) \{\s+FollowScene\(serial, false\);\s+\}\s+mHoldLeftMicros = 0U;.*?'
+          r'mHoldLeftMicros = ::Oot3d::Renderer::TexturePackSceneHoldMicros\(entered, mTexturePackSettings\.HoldMs\);',
+          "oot3d_texture_pack_scale_tests (PackChangeSpread)"),
+    Guard("after a pack change the render thread resolves a view again a few textures per frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'mPackRebuilds\.NewFrame\(\);.*?'
+          r'if \(!mPackRebuilds\.Take\(\)\) \{\s+mPackChange\.Deferred.*?'
+          r'const bool deferred = rebuild && !mPackRebuilds\.Take\(\);',
+          "oot3d_texture_pack_scale_tests (PackChangeSpread)"),
+    Guard("a new UI provider revision resolves the HUD textures that draw a few per call, never holding them",
+          "tools/oot3d/ui_n64/oot3d_n64_ui_renderer.cpp",
+          r'if \(first && drawable\) \{.*?if \(!take\(\)\) \{.*?'
+          r'if \(pixels\.native_stand_in && drawable\) \{.*?continue;',
+          "oot3d_n64_ui_renderer_tests (TestRevisionResolvesAreSpread, TestHeldFirstDraws)",
+          forbid=r'\+\+provisional_poll_ %'),
+    Guard("HD textures off: the pack answers Disabled at once, also while it indexes",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'if \(!mIndexReady\) \{.*?if \(!mConfiguration\.LoadCustomTextures && !mConfiguration\.DumpTextures\) return \{\};',
+          "oot3d_azahar_texture_pack_tests (TexturesDrawnWhileThePackIndexesResolveOnceItIsReady)"),
+    Guard("the game thread's longest frame and HUD preparation during a pack change are logged",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'Oot3d::Renderer::LiveTexturePackChangeGameWatch\(\)\.Observe\(frameMicros,',
+          "oot3d_texture_pack_scale_tests (PackChangeSpread)"),
     # --- 08/11 (TexSizes, test.13 report): "if we have 3x textures max, the setting shouldn't show 4." The
     # Video tab offers only the sizes the pack has, measured by the pack worker when it has nothing else to
     # do (SWITCH_PORT.md "HD texture size: only the sizes the pack has").

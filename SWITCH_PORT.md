@@ -2375,7 +2375,8 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
     scene's first 60 frames the renderer waits at frame start for the pack images of the world textures
     drawn native the frame before (`WaitForImages`, which moves them to the front), within the budget;
     the game follows once the frame queue is full, so the fade-in starts that much later. Covers first
-    visits (no list yet).
+    visits (no list yet). Only a scene the game entered with HD textures on: a change in the Video tab never
+    holds (see "HD texture changes without a freeze").
   - *RAM:* images decoded ahead stay until their first draw uploads them (then released as every world
     image), those never drawn go at the next scene change, and no more are decoded while the unused ones
     hold 128 MiB (`kScenePreloadBudgetBytes`; a dungeon's whole list at 3x with mips is ~65 MiB).
@@ -2524,6 +2525,68 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - **Console check:** L3+R3 > Video with HD textures on: "HD texture size" offers 1x, 2x, 3x on the SD
   above (3x labelled the largest), and `deko3d.txt` has `texture pack sizes: … up to 3x` once; the next
   start says `remembered`.
+
+### HD texture changes without a freeze (08/11, test.13 logs21)
+- **Report (Perf21 §3):** each change of HD textures in L3+R3 > Video (on, off, another size; off at another
+  size too) gave a burst of 5–15 game-thread frames 23–87 ms above guest time: the Forest Temple at
+  39768–44676 (11 bursts for 12 changes, `hitches.txt:1528-1687`; changes `deko3d.txt:641-716`), the
+  meadow at 46854–48685 (8 bursts for 8 changes, `hitches.txt:1729-1869`; changes `deko3d.txt:758-793`).
+  Each burst opens with one 128–171 ms frame whose game time is its guest time (the render thread's change
+  frame). One frame took 613 ms (`hitches.txt:1735`).
+- **Causes, from the logs:**
+  - *HUD textures resolved again on the game thread.* `ui_prepare` (game thread,
+    `N64UiFast3dRenderer::PrepareTextures`) is 0.002–0.5 ms per frame without a change and 2.6–8.3 ms per frame
+    averaged over the 150-frame windows holding the changes (`perf.txt:2121,2128,2142,2149,2163,2289-2338`):
+    [INFERENCE: that is the 25–50 ms extra of the burst frames]. Every change bumps the pack's generation twice (at the change and when
+    the index is ready); each bump made the UI renderer resolve every HUD texture again in one call: read
+    it from guest memory, decode it, identify it in the pack (Azahar's legacy hash for Henriko's pack:
+    flip and hash the decoded pixels). Those whose image was still decoding (the HUD worker decodes the 27
+    HUD images again: `hud pack … 27/27 in 2462 ms`, `deko3d.txt:788`) came back with only the game's
+    pixels, were held, and held textures were polled at every call for up to 30 calls, although they
+    still had an earlier texture drawing. With the pack off the runtime answered Pending until the index
+    (the pack is indexed when off too [INFERENCE: as long as an index on, 322–436 ms]), so off did the same.
+  - *The scene hold re-armed by the change.* The hold follows the runtime's scene serial only while the
+    pack is on; the meadow was entered with it off, so turning it on looked like a scene start
+    (`deko3d.txt:758-759`: `texture pack on`, then the scene before logged as left) and held 558 ms in one
+    frame (`deko3d.txt:790` `hold 558 ms over 1 frames`; `perf.txt:2289`): the 613 ms frame.
+  - *The render thread resolved the whole view at once,* at the change and again at the index (62–86
+    textures: `resolved again at their draw 62`, `deko3d.txt:695-712,760`): decode, identify, upload each.
+    That is the first frame of each burst [INFERENCE: the change frame's 128–171 ms has game time ≈
+    guest time, i.e. the game thread waited for the render thread].
+  - Not the cause: the index runs on the pack worker with the lock taken only to publish; the image
+    scale measure (`texture_pack_sizes`) runs only when every pack worker is idle and is not in test.13.
+- **Change:**
+  - *HUD (`oot3d_n64_ui_renderer.cpp`):* after a new revision a texture that draws already keeps drawing
+    and is resolved again at most `kUiResolvesPerPrepare` (6) per call together with the provisional
+    polls; while only the game's pixels stand in for its replacement it keeps its earlier texture and is
+    polled every `kUiProvisionalPollInterval` (8) calls, round robin, instead of being held and polled at
+    every call. First sights (nothing drawn yet) behave as before (held up to `kUiHoldPolls`). Off: ~30
+    HUD textures are back to the game's art in ~5 calls (one each frame).
+  - *Runtime:* with HD textures off (and no dump) `ResolveOrQueue` answers Disabled at once, also while
+    the index is built; the hash for authoring comes once it is.
+  - *Render thread (`gfx_deko3d_pica_resources.cpp`):* at most `kTexturePackRebuildsPerFrame` (6) textures
+    a frame are resolved again after a change (`TexturePackRebuildBudget`); the others keep drawing their
+    native texture or the earlier cap's pack image until a later frame (they count as waiting, so `took
+    effect` comes after them). Pack images still upload within 16 MiB a frame. Turning the pack off is not
+    spread: from that frame on no pack image is drawn and natives are made from the draw's bytes, as before.
+  - *Hold:* a settings change sets the hold budget to 0 and follows a scene entered while the pack was
+    off without one (`TexturePackSceneHoldMicros`); only a scene the game entered with the pack on holds.
+- **Counters:** the change's line gains `draws kept on their earlier texture for a later frame D (F
+  frames at the budget of 6), longest render frame start S ms; game thread: longest frame G ms, longest HUD
+  texture preparation P ms`. G is from one UI submission to the next on the game thread (waits for the
+  render thread included), P its `PrepareTextures` time (`TexturePackChangeGameWatch`, from the change to
+  its line). The UI renderer's `deferred_resolves` counts what calls left for later.
+- **Expected on the console** [INFERENCE]: P ≤ ~6 ms (six resolves of ~1 ms), G ≤ ~50 ms, no frame held
+  by the change; the swap takes a few frames more (62 textures at 6 a frame: 11 frames).
+- Tests: `oot3d_n64_ui_renderer_tests` (`TestRevisionResolvesAreSpread`: 20 HUD textures, on: six per call,
+  never held, never more than six; off: all within four calls; `TestHeldFirstDraws`: a drawing texture is
+  polled every 8 calls), `oot3d_texture_pack_scale_tests` (`PackChangeSpread`: 62 resolves in 11 frames,
+  the hold rule, the game-thread watch), `oot3d_azahar_texture_pack_tests`
+  (`TexturesDrawnWhileThePackIndexesResolveOnceItIsReady`: off while indexing answers Disabled at once).
+  Five guards; three existing guards' patterns follow the new code.
+- **Console check:** in a field, L3+R3 > Video: HD textures off, on, then 2x and 3x. No stall; `deko3d.txt`
+  `texture pack change took effect` lines show `game thread: longest frame` under ~50 ms and `longest HUD
+  texture preparation` a few ms, and no `hold` in the next `world pack` line.
 
 ### HUD against the mod's screenshots (07/11, test.9 report)
 - **Report:** two images (`2026110713043700-…` and `2026110713045100-…`), "the normal looks better but

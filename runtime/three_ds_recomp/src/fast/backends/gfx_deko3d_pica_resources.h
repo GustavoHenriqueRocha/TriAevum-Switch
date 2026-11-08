@@ -95,6 +95,9 @@ struct PicaPackChangeStats {
     uint64_t Uploaded = 0;           // pack images uploaded since
     uint64_t UploadedBytes = 0;
     uint64_t Released = 0;           // pack images of earlier settings dropped
+    uint64_t Deferred = 0;           // draws kept on their earlier texture: over kTexturePackRebuildsPerFrame
+    uint64_t RebuildFrames = 0;      // frames that used the whole rebuild budget
+    uint64_t LongestFrameStartMicros = 0; // the render thread's longest frame start (BeginFrame) since
 };
 // About 30 s at 60 FPS: a change still waiting then is logged as incomplete.
 inline constexpr uint64_t kPackChangeReportFrames = 1800U;
@@ -235,6 +238,10 @@ class PicaResources {
     // ended. In the scene's first frames (config/texture_pack_hold), waits
     // for the pack images of the world textures drawn native last frame.
     void BeginScene();
+    // Follows the runtime's scene `serial`: the visit before is logged and a
+    // new one starts, with the hold budget only when the game entered it with
+    // the pack on (`entered`; TexturePackSceneHoldMicros).
+    void FollowScene(uint64_t serial, bool entered);
     // The change in mPackChange: counted, and logged once it took effect
     // (TrackPackChange, at each frame's start), was superseded or ran out.
     // Its log names the textures drawn last frame (PackOnScreen).
@@ -256,6 +263,8 @@ class PicaResources {
     uint64_t mSceneSerial = 0;
     uint64_t mHoldLeftMicros = 0;
     PicaSceneTextureStats mScene{};
+    // Resolves left this frame after a pack change (TextureHandle).
+    ::Oot3d::Renderer::TexturePackRebuildBudget mPackRebuilds{};
 
     Device* mDevice = nullptr;
     DkMemBlock mDescriptors = nullptr; // image descriptors, then sampler descriptors

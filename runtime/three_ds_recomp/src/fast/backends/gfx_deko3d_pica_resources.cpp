@@ -351,13 +351,26 @@ void PicaResources::ApplyTexturePackSettings() {
         mPackConfigured = true;
     }
     mPackIndexReady = false;
+    // A settings change never holds the frame (TexturePackSceneHoldMicros): a
+    // scene the game entered while the pack was off is followed without a
+    // hold, and one still in its first frames loses what was left of it.
+    if (const uint64_t serial = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().SceneSerial();
+        serial != mSceneSerial) {
+        FollowScene(serial, false);
+    }
+    mHoldLeftMicros = 0U;
     Log("resources: texture pack %s (cap %ux)", mTexturePack ? "on" : "off", settings.MaxScale);
     StartPackChange(false);
 }
 
 void PicaResources::BeginFrame(uint64_t frame) {
+    const auto frameStart = std::chrono::steady_clock::now();
     mFrame = frame;
     mReplacementBytesThisFrame = 0U;
+    if (mPackChange.Active && mPackRebuilds.Left == 0U) {
+        ++mPackChange.RebuildFrames;
+    }
+    mPackRebuilds.NewFrame();
     if (!mFallbacksUploaded) {
         // Fallback contents: white, and an empty Shadow2D texel.
         const StreamSpan staging = mDevice->Stream(2U * kStagingAlignment, kStagingAlignment);
@@ -393,6 +406,13 @@ void PicaResources::BeginFrame(uint64_t frame) {
     UploadReadyReplacements();
     TrackPackChange();
     LogPackSizes();
+    if (mPackChange.Active) {
+        mPackChange.LongestFrameStartMicros = std::max<uint64_t>(
+            mPackChange.LongestFrameStartMicros,
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - frameStart)
+                                      .count()));
+    }
 }
 
 void PicaResources::UploadReadyReplacements() {
@@ -439,18 +459,22 @@ void PicaResources::UploadReadyReplacements() {
     }
 }
 
+void PicaResources::FollowScene(uint64_t serial, bool entered) {
+    if (mSceneSerial != 0U || mScene.Frames != 0U) {
+        LogScene(mScene, "left");
+    }
+    mSceneSerial = serial;
+    mScene = {};
+    mHoldLeftMicros = ::Oot3d::Renderer::TexturePackSceneHoldMicros(entered, mTexturePackSettings.HoldMs);
+}
+
 void PicaResources::BeginScene() {
     if (!mTexturePack) {
         return;
     }
     auto& pack = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance();
     if (const uint64_t serial = pack.SceneSerial(); serial != mSceneSerial) {
-        if (mSceneSerial != 0U || mScene.Frames != 0U) {
-            LogScene(mScene, "left");
-        }
-        mSceneSerial = serial;
-        mScene = {};
-        mHoldLeftMicros = static_cast<uint64_t>(mTexturePackSettings.HoldMs) * 1000U;
+        FollowScene(serial, true);
     }
     ++mScene.Frames;
     // The hold: in the scene's first frames, the pack images of the world
@@ -492,6 +516,7 @@ void PicaResources::StartPackChange(bool atStart) {
     mPackChange.MaxScale = mTexturePackSettings.MaxScale;
     mPackChange.Frame = mFrame;
     mPackChange.Start = std::chrono::steady_clock::now();
+    ::Oot3d::Renderer::LiveTexturePackChangeGameWatch().Begin();
 }
 
 PicaResources::PackOnScreen PicaResources::CountPackOnScreen() const {
@@ -505,8 +530,10 @@ PicaResources::PackOnScreen PicaResources::CountPackOnScreen() const {
             continue;
         }
         ++onScreen.Natives;
-        onScreen.Waiting += mTexturePack && texture.PackEpoch == mPackEpoch &&
-                                    (texture.PackPending || texture.PackUnindexed)
+        // With the pack on, a native of earlier settings drawn last frame
+        // waits too: its resolve was left for a later frame (mPackRebuilds).
+        onScreen.Waiting += mTexturePack && (texture.PackEpoch != mPackEpoch ||
+                                             texture.PackPending || texture.PackUnindexed)
                                 ? 1U
                                 : 0U;
     }
@@ -547,17 +574,23 @@ void PicaResources::LogPackChange(const char* outcome, const PackOnScreen& onScr
     } else if (change.PackOn) {
         std::snprintf(index, sizeof(index), "%llu ms", static_cast<unsigned long long>(change.IndexMicros / 1000U));
     }
+    const auto game = ::Oot3d::Renderer::LiveTexturePackChangeGameWatch().End();
     Log("resources: texture pack change %s (%s%s, cap %ux) after %llu ms, %llu frames: index ready after %s; "
         "resolved again at their draw %llu (made while the index was being built %llu, again once it was ready "
         "%llu); pack images uploaded %llu (%llu MiB), earlier ones released %llu; drawn last frame: %llu pack "
-        "images, %llu native (%llu waiting for their pack image)",
+        "images, %llu native (%llu waiting for their pack image); draws kept on their earlier texture for a later "
+        "frame %llu (%llu frames at the budget of %u), longest render frame start %.1f ms; game thread: longest frame %.1f ms, "
+        "longest HUD texture preparation %.1f ms",
         outcome, change.AtStart ? "start, " : "", change.PackOn ? "on" : "off", change.MaxScale, millis,
         static_cast<unsigned long long>(mFrame - change.Frame), index,
         static_cast<unsigned long long>(change.ResolvedAgain), static_cast<unsigned long long>(change.MadeWhileIndexing),
         static_cast<unsigned long long>(change.ResolvedAfterIndex), static_cast<unsigned long long>(change.Uploaded),
         static_cast<unsigned long long>(change.UploadedBytes >> 20), static_cast<unsigned long long>(change.Released),
         static_cast<unsigned long long>(onScreen.PackImages), static_cast<unsigned long long>(onScreen.Natives),
-        static_cast<unsigned long long>(onScreen.Waiting));
+        static_cast<unsigned long long>(onScreen.Waiting), static_cast<unsigned long long>(change.Deferred),
+        static_cast<unsigned long long>(change.RebuildFrames), ::Oot3d::Renderer::kTexturePackRebuildsPerFrame,
+        static_cast<double>(change.LongestFrameStartMicros) / 1000.0,
+        static_cast<double>(game.LongestFrameMicros) / 1000.0, static_cast<double>(game.LongestPrepareMicros) / 1000.0);
     mPackChange.Active = false;
 }
 
@@ -680,7 +713,13 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
                 }
                 return dkMakeTextureHandle(replacement.ImageSlot, replacement.SamplerSlot);
             }
-            // Made at an earlier size cap: resolved again below.
+            // Made at an earlier size cap: resolved again below, or drawn
+            // until a later frame has budget for it.
+            if (!mPackRebuilds.Take()) {
+                mPackChange.Deferred += mPackChange.Active ? 1U : 0U;
+                found->second.LastUsedFrame = mFrame;
+                return dkMakeTextureHandle(found->second.ImageSlot, found->second.SamplerSlot);
+            }
             if (mPackChange.Active) {
                 ++mPackChange.Released;
                 ++mPackChange.ResolvedAgain;
@@ -692,9 +731,14 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
     if (const auto found = mTextures.find(key); found != mTextures.end()) {
         Texture& native = found->second;
         native.LastUsedFrame = mFrame;
-        if (::Oot3d::Renderer::TexturePackEntryActionFor(false, native.PackEpoch, mPackEpoch, mTexturePack,
-                                                         native.PackUnindexed, mPackIndexReady) ==
-            ::Oot3d::Renderer::TexturePackEntryAction::Rebuild) {
+        const bool rebuild = ::Oot3d::Renderer::TexturePackEntryActionFor(false, native.PackEpoch, mPackEpoch,
+                                                                          mTexturePack, native.PackUnindexed,
+                                                                          mPackIndexReady) ==
+                             ::Oot3d::Renderer::TexturePackEntryAction::Rebuild;
+        // Over this frame's budget: drawn as it is until a later frame.
+        const bool deferred = rebuild && !mPackRebuilds.Take();
+        mPackChange.Deferred += deferred && mPackChange.Active ? 1U : 0U;
+        if (rebuild && !deferred) {
             // Made while the pack was off or at another cap, or while its index
             // was being built (no hash then): resolve it again below.
             if (mPackChange.Active) {

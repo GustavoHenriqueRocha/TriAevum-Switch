@@ -486,6 +486,47 @@ void ScaleMenu() {
   Require(selected(MakeTexturePackScaleMenu(6U, 5U)) == 0U, "cap 6 above a 5x pack: No limit");
 }
 
+// A live pack change never freezes the game (test.13, logs21): the render
+// thread resolves a view again a few textures per frame, a settings change
+// never arms the scene hold, and the game thread's longest frame and HUD
+// preparation during the change are kept for its log line.
+void PackChangeSpread() {
+  // 62 textures resolved again (logs21/deko3d.txt:695: 31 at the change, 31
+  // once the index was ready) at six per frame: 11 frames, never more.
+  TexturePackRebuildBudget budget;
+  uint32_t left = 62U, frames = 0U;
+  while (left != 0U) {
+    budget.NewFrame();
+    ++frames;
+    uint32_t done = 0U;
+    for (uint32_t texture = 0U; texture < left; ++texture) done += budget.Take() ? 1U : 0U;
+    Require(done <= kTexturePackRebuildsPerFrame, "a frame resolved more than its budget");
+    left -= done;
+  }
+  Require(frames == 11U, "62 resolves did not take 11 frames");
+  Require(budget.Deferred == 56U + 50U + 44U + 38U + 32U + 26U + 20U + 14U + 8U + 2U,
+          "draws kept on their texture were not counted");
+
+  // The hold: a scene the game entered with the pack on, never a settings change.
+  Require(TexturePackSceneHoldMicros(true, 1000U) == 1000000U, "a scene entry holds up to its budget");
+  Require(TexturePackSceneHoldMicros(false, 1000U) == 0U, "a settings change held the frame");
+  Require(TexturePackSceneHoldMicros(true, 0U) == 0U, "config/texture_pack_hold 0 held");
+
+  // The game thread's longest frame and preparation, only while a change runs.
+  TexturePackChangeGameWatch watch;
+  watch.Observe(900000U, 50000U);
+  watch.Begin();
+  watch.Observe(33000U, 1000U);
+  watch.Observe(613000U, 200U);
+  watch.Observe(40000U, 45000U);
+  const auto result = watch.End();
+  Require(result.LongestFrameMicros == 613000U && result.LongestPrepareMicros == 45000U,
+          "the longest game-thread frame or preparation of the change");
+  watch.Observe(2000000U, 2000000U);
+  watch.Begin();
+  Require(watch.End().LongestFrameMicros == 0U, "a frame outside the change was counted");
+}
+
 } // namespace
 
 int main() {
@@ -500,6 +541,7 @@ int main() {
   PreloadAndHoldSettings();
   PackImageScales();
   ScaleMenu();
+  PackChangeSpread();
   std::puts("oot3d_texture_pack_scale_tests: ok");
   return 0;
 }

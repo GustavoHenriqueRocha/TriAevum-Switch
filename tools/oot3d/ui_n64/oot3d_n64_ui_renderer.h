@@ -40,6 +40,9 @@ struct N64UiRendererStats {
     std::uint64_t holds_expired = 0;
     // Textures asked for ahead of their first draw (RequestAhead).
     std::uint64_t ahead_requests = 0;
+    // Resolves of textures that draw already (a new provider revision) left
+    // for a later call: over kUiResolvesPerPrepare.
+    std::uint64_t deferred_resolves = 0;
 };
 
 struct UiTexturePixels {
@@ -97,6 +100,16 @@ using PreparedUiTextures = std::vector<PreparedUiTexture>;
 // its own worker in a few frames; past this the game's own pixels are drawn
 // until the replacement comes, as before.
 inline constexpr std::uint32_t kUiHoldPolls = 30U;
+// A provisional texture (its replacement decoding) is polled again after
+// this many calls of PrepareTextures.
+inline constexpr std::uint32_t kUiProvisionalPollInterval = 8U;
+// Resolves one PrepareTextures call makes at most beyond first sights and
+// held ones: a new provider revision (a texture pack turned on or off, its
+// index ready, another size) resolves the textures that draw a few per call,
+// each drawing its earlier texture until then, and provisional polls share
+// it. A resolve reads, decodes and identifies the game's texture (about 1 ms
+// on the Switch for a HUD atlas [INFERENCE]).
+inline constexpr std::uint32_t kUiResolvesPerPrepare = 6U;
 
 std::uint64_t N64UiSolidShaderId0() noexcept;
 std::uint64_t N64UiTexturedShaderId0() noexcept;
@@ -124,9 +137,12 @@ class N64UiFast3dRenderer {
     // Resolves every texture a Render of these primitives would resolve for
     // the first time. Prepared keys are remembered (until Release), so each
     // payload is read once, as Render alone would; a provisional payload is
-    // resolved again on later calls, and a new provider Revision resolves
-    // every texture again. A first sight with only the game's own pixels
-    // while its replacement decodes is held (PreparedUiTexture::held).
+    // resolved again every kUiProvisionalPollInterval calls, and a new
+    // provider Revision resolves every texture again, at most
+    // kUiResolvesPerPrepare per call for those that draw already (they keep
+    // drawing until then, and while only the game's own pixels stand in for
+    // the replacement). A first sight with only the game's own pixels while
+    // its replacement decodes is held (PreparedUiTexture::held).
     // Provisional/revision handling ported from upstream TriAevum
     // (coccofresco/TriAevum commit 68d527c6, GPL-3.0-or-later).
     [[nodiscard]] PreparedUiTextures
@@ -165,12 +181,15 @@ class N64UiFast3dRenderer {
     const UiTextureProvider* texture_provider_ = nullptr;
     std::unordered_map<std::string, ResidentTexture> textures_;
     std::unordered_set<std::string> failed_textures_;
-    // Preparing side: keys already handed to the renderer, those handed with
-    // provisional pixels, and the provider revision they were resolved at.
+    // Preparing side: keys already handed to the renderer at this revision,
+    // those handed with provisional pixels (with the call they were polled
+    // at), keys handed drawable pixels at any revision (resident on the
+    // rendering side), and the provider revision keys were resolved at.
     std::unordered_set<std::string> prepared_keys_;
-    std::unordered_set<std::string> provisional_keys_;
+    std::unordered_map<std::string, std::uint64_t> provisional_polled_;
+    std::unordered_set<std::string> drawable_keys_;
     std::uint64_t prepared_revision_ = 0;
-    std::uint32_t provisional_poll_ = 0;
+    std::uint64_t prepare_calls_ = 0;
     // Keys whose first draws are held, and the calls they were polled at.
     std::unordered_map<std::string, std::uint32_t> hold_polls_;
     // Keys asked for ahead and the provider revision they were asked at.
