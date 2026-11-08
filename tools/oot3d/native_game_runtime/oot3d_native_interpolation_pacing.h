@@ -34,6 +34,23 @@
 // ms (31.9 of 33.3, it fits) never came back under 90%: stuck at dropped,
 // 30 real frames a second presented irregularly.
 //
+// Entry recovery (config/pacer_entry_recover, logs20a-e, 2026-11-08): the
+// first 1-3 s in a new area carry one-off work (HD texture decode and
+// upload, grass placements, slow fences). The pair goes over, the in-between
+// frames drop, and the ratio of the in-between frame learnt in those frames
+// stays high while nothing is drawn, so only a probe brings 60 back: every
+// 60 decisions, 2 s, mostly after the work had ended (20a Kokiri: work to
+// frame 12065, dropped from ~12040 to ~12160 at the first probe). Now, in
+// the EntryDecisions after a scene entry (NoteEntry), once the known entry
+// work is done (SetEntryWork: the HD pack's scene preload, grass placements),
+// a pair estimate within EntryProbeFraction of the budget is probed every
+// EntryProbeInterval decisions. A probe whose measured pair does not fit is
+// a failed probe and doubles the interval: up to ProbeInterval in an entry
+// window, up to MaxProbeInterval outside, so a view that really is too
+// heavy sees fewer probes after the first seconds, not more. A return to
+// the preferred level or a probe that fits resets it. Render-thread holds
+// at a scene's start are not frame work (the window code leaves them out).
+//
 // Pure logic (no GL, no clock): tested by
 // oot3d_native_interpolation_pacing_tests.cpp.
 
@@ -108,6 +125,20 @@ struct InterpolationPacingConfig {
   // After this many consecutive in-between frames below the full level, one
   // is drawn a level higher to refresh its estimate (if not hopeless).
   uint32_t ProbeInterval = 60U;
+  // config/pacer_entry_recover (on; "0": the schedule above alone, no
+  // back-off, render-thread holds counted as work). For EntryDecisions
+  // in-between decisions after a scene entry (300: 10 s at 60 FPS), once
+  // its known work is done (SetEntryWork), a probe whose pair estimate is
+  // within EntryProbeFraction of the budget comes every EntryProbeInterval
+  // decisions (1/3 s; logs20a-e: Kokiri's estimate at the drop was
+  // 1.05-1.07 of the budget, the Hyrule Field entrance with its grass at the
+  // cap 1.14-1.25). Each failed probe in a row doubles the interval, up to
+  // ProbeInterval in an entry window and MaxProbeInterval (8 s) outside.
+  bool EntryRecover = true;
+  uint32_t EntryDecisions = 300U;
+  uint32_t EntryProbeInterval = 10U;
+  double EntryProbeFraction = 1.10;
+  uint32_t MaxProbeInterval = 240U;
   // config/interp_margin_ms: the pair must fit the budget minus this much
   // (ms). tour15 (2026-10-23, pgo5j, costs without the render thread's
   // acquire wait): areas whose measured GPU pair was 29-33 ms "fit" 33.3
@@ -197,7 +228,16 @@ struct InterpolationPacingStats {
   uint64_t ReducedFrames = 0;
   uint64_t DroppedFrames = 0;
   uint64_t Probes = 0;
+  // Probes whose measured pair did not fit (the level stayed below), and
+  // the probes of an entry's shorter interval (config/pacer_entry_recover).
+  uint64_t FailedProbes = 0;
+  uint64_t EntryProbes = 0;
   uint64_t LevelChanges = 0;
+  // Scene entries (NoteEntry) and the in-between decisions of their entry
+  // windows that stayed below the preferred level: the time at 30 after an
+  // entry (both counted with config/pacer_entry_recover off too, for A/B).
+  uint64_t Entries = 0;
+  uint64_t EntryBelowDecisions = 0;
 };
 
 class InterpolationPacingGovernor {
@@ -232,6 +272,9 @@ public:
     mProbeAge = 0U;
     mBelowPreferred = 0U;
     mOverBudget = 0U;
+    mFailedProbes = 0U;
+    mEntryLeft = 0U;
+    mEntryWork = false;
     mLevel = PreferredLevel();
   }
 
@@ -245,8 +288,17 @@ public:
   // The level of the next in-between frame.
   [[nodiscard]] InterpolatedSampleLevel Decide() noexcept {
     const auto preferred = PreferredLevel();
+    // The entry window counts in-between decisions (NoteEntry).
+    const bool entry = mEntryLeft != 0U;
+    if (entry)
+      --mEntryLeft;
+    const auto decided = [&](InterpolatedSampleLevel level, bool probe) {
+      if (entry && level != preferred)
+        ++mStats.EntryBelowDecisions;
+      return Commit(level, probe);
+    };
     if (mStepCostMs <= 0.0) {
-      return Commit(preferred, false);
+      return decided(preferred, false);
     }
     const double budget = mDecisionBudgetMs;
     const auto index = [](InterpolatedSampleLevel level) {
@@ -303,22 +355,84 @@ public:
       auto probe = static_cast<InterpolatedSampleLevel>(index(chosen) - 1U);
       if (probe == InterpolatedSampleLevel::Reduced && !mReducedAvailable)
         probe = InterpolatedSampleLevel::Full;
-      if (++mBelowPreferred >= mConfig.ProbeInterval ||
+      const double probePair = mStepCostMs + Estimate(probe);
+      // config/pacer_entry_recover: sooner after an entry once its known
+      // work is done, when the pair is close to fitting; later after each
+      // failed probe.
+      const bool entryProbe = mConfig.EntryRecover && entry && !mEntryWork &&
+                              probePair <= mConfig.EntryProbeFraction * budget;
+      if (++mBelowPreferred >= ProbeIntervalNow(entryProbe) ||
           !mMeasured[index(probe)]) {
         mBelowPreferred = 0U;
-        if (index(probe) >= index(preferred) &&
-            mStepCostMs + Estimate(probe) <= 1.25 * budget) {
+        if (index(probe) >= index(preferred) && probePair <= 1.25 * budget) {
           ++mStats.Probes;
+          if (entryProbe)
+            ++mStats.EntryProbes;
           mProbing = probe;
           mProbeAge = 0U;
-          return Commit(probe, true);
+          return decided(probe, true);
         }
       }
     } else if (chosen == preferred) {
       mBelowPreferred = 0U;
+      mFailedProbes = 0U;
     }
-    return Commit(chosen, false);
+    return decided(chosen, false);
   }
+
+  // A scene entry (render thread, before the new scene's first frame): the
+  // next EntryDecisions in-between decisions are its entry window.
+  void NoteEntry() noexcept {
+    ++mStats.Entries;
+    mEntryLeft = mConfig.EntryDecisions;
+    mEntryWork = false;
+    if (mConfig.EntryRecover)
+      mFailedProbes = 0U;
+  }
+
+  // Known entry work still running (render thread, once a frame in an
+  // entry window: the HD pack's preload of the scene, grass placements in
+  // the making). While it runs, the probes keep the normal schedule (a probe
+  // then mostly fails); when it ends, the first entry probe comes
+  // EntryWorkSettle decisions later (the decoded images still go up to the
+  // GPU in the next frames), then every EntryProbeInterval decisions,
+  // doubled per failed probe. Without the signal (never pending) the entry
+  // probes run from the entry on.
+  void SetEntryWork(bool pending) noexcept {
+    if (pending == mEntryWork)
+      return;
+    mEntryWork = pending;
+    if (!pending && mEntryLeft != 0U && mConfig.EntryRecover) {
+      mFailedProbes = 0U;
+      mBelowPreferred = mConfig.EntryProbeInterval > kEntryWorkSettle
+                            ? mConfig.EntryProbeInterval - kEntryWorkSettle
+                            : 0U;
+    }
+  }
+  static constexpr uint32_t kEntryWorkSettle = 3U;
+
+  // Decisions below the preferred level between two probes: ProbeInterval,
+  // or EntryProbeInterval for an entry probe, doubled per failed probe in a
+  // row up to MaxProbeInterval, in an entry window up to ProbeInterval
+  // (never sparser than the former schedule there). Without
+  // config/pacer_entry_recover: always ProbeInterval.
+  [[nodiscard]] uint32_t ProbeIntervalNow(bool entryProbe) const noexcept {
+    if (!mConfig.EntryRecover)
+      return mConfig.ProbeInterval;
+    const uint32_t base = std::max<uint32_t>(
+        1U, entryProbe ? mConfig.EntryProbeInterval : mConfig.ProbeInterval);
+    const uint32_t cap = std::max(
+        base, entryProbe ? mConfig.ProbeInterval : mConfig.MaxProbeInterval);
+    uint64_t interval = base;
+    for (uint32_t failed = 0U; failed < mFailedProbes && interval < cap;
+         ++failed)
+      interval *= 2U;
+    return static_cast<uint32_t>(std::min<uint64_t>(interval, cap));
+  }
+  [[nodiscard]] uint32_t FailedProbesInRow() const noexcept {
+    return mFailedProbes;
+  }
+  [[nodiscard]] bool InEntry() const noexcept { return mEntryLeft != 0U; }
 
   // config/fps60_mode (oot3d_native_cadence_governor.h): with "adaptive" the
   // cadence governor drops in-between frames as a whole (a locked 30) and
@@ -364,6 +478,15 @@ public:
       mProbing.reset();
       mRatio[index] = std::min(ratio, 2.0 * mRatio[index]);
       mMeasured[index] = true;
+      // Judged as the next decision will: a probe whose pair does not fit
+      // with the recovery margin leaves the level below (a failed probe).
+      if (mStepCostMs + Estimate(level) <=
+          mConfig.RecoverFraction * mDecisionBudgetMs) {
+        mFailedProbes = 0U;
+      } else {
+        ++mFailedProbes;
+        ++mStats.FailedProbes;
+      }
       return;
     }
     // One sample counts at most twice the average (a hitch must not keep the
@@ -427,6 +550,11 @@ private:
   uint32_t mProbeAge = 0U;
   uint32_t mBelowPreferred = 0U;
   uint32_t mOverBudget = 0U;
+  // config/pacer_entry_recover: failed probes in a row (the back-off) and
+  // the in-between decisions left in the entry window.
+  uint32_t mFailedProbes = 0U;
+  uint32_t mEntryLeft = 0U;
+  bool mEntryWork = false; // SetEntryWork
   InterpolationPacingStats mStats{};
 };
 

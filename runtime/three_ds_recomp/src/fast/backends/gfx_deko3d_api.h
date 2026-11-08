@@ -428,6 +428,9 @@ void GrassBeginFrame();
 void GrassNoteSample(bool synthetic, uint64_t frame);
 // config/grass = draw and the preset loaded (EnsureFrame reads it per frame).
 [[nodiscard]] bool GrassDrawEnabled();
+// Placements requested and not made yet (config/grass = draw; render
+// thread): entry work for the pacing governor (Deko3dEntryWorkPending).
+[[nodiscard]] bool GrassWorkPending();
 } // namespace Deko3d
 
 } // namespace Fast

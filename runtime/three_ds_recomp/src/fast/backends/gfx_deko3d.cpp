@@ -779,6 +779,11 @@ std::vector<uint64_t> GfxRenderingAPIDeko3d::TakePicaCompletions() {
     return result;
 }
 
+bool Deko3dEntryWorkPending() {
+    return ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().PendingLoads() != 0U ||
+           Deko3d::GrassWorkPending();
+}
+
 } // namespace Fast
 
 #else // !__SWITCH__
@@ -793,6 +798,14 @@ std::string Deko3dPerfReport(unsigned long long) {
     return {};
 }
 void Deko3dTagFrame(uint8_t, double) {
+}
+void Deko3dNoteRenderHold(uint64_t) {
+}
+uint64_t Deko3dTakeRenderHoldMicros() {
+    return 0U;
+}
+bool Deko3dEntryWorkPending() {
+    return false;
 }
 bool Deko3dTakeGpuFrame(Deko3dGpuFrame&) {
     return false;

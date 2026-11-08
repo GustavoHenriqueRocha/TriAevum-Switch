@@ -271,6 +271,9 @@ class AzaharTexturePackRuntime final {
     // The current visit, and the visit the last change ended.
     [[nodiscard]] AzaharScenePackStatus SceneStatus() const;
     [[nodiscard]] AzaharScenePackStatus PreviousSceneStatus() const;
+    // Decodes queued or running (Snapshot().PendingLoads without the copy):
+    // the pacing governor's entry work (config/pacer_entry_recover).
+    [[nodiscard]] size_t PendingLoads() const;
     // A world texture of the current scene drawn with its pack image still on
     // the GPU: listed for the scene, and its copy decoded ahead released.
     void NoteSceneImage(uint64_t nativeHash, uint16_t nativeWidth, uint16_t nativeHeight);

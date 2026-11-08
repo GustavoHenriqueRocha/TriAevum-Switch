@@ -4052,6 +4052,86 @@ Guest replacements for the hottest loops of the game's CPU renderer, in the exis
   GPU queue simulation: with dropping the steps stay on time, without dropping >100 late).
 - A/B on console: `native_replay` = `1`; `interp_pacing` = `0`; `interp_scale` = `1.5` (and
   `interp_scale_mode` = `always` to see the cost/quality of reduced on every intermediate).
+- Probes after an area entry, failed probes and the render-thread holds: see "60 FPS back sooner after
+  entering an area" below (`config/pacer_entry_recover`).
+
+### 60 FPS back sooner after entering an area (`config/pacer_entry_recover`, 08/11, test.13)
+- **Report (test.12):** "we still have the frame drops, but if I stay in the area it stabilizes to 60".
+- **What the logs show** (logs20a-e, `perf.txt` 150-frame windows, `hitches.txt`, `deko3d.txt`):
+  - The first 1-1.5 s in an area carry one-off work: the HD pack decodes the scene's images (69-73
+    images, 1.1-1.35 s on the workers) and the render thread uploads them (slow fences, up to 16 ms),
+    and grass placements are loaded or built (0.3-1.2 s). The pair goes over 33.3 ms, and after 3
+    decisions in a row the in-between frames drop: 30 FPS.
+  - 20a Kokiri: entered at frame 11982 and decoded until about 12055; render-bound frames
+    (`hitches.txt:80-96`) until 12065; dropped from about 12040. The window at 12150 (`perf.txt:625`)
+    shows 16 full and 55 dropped in-between frames. The window at 12300 (`:632`) shows 5 dropped, then
+    `probes=1 level_changes=1`. In total 60 dropped decisions, so the first probe brought 60 back, about
+    1.6 s after the work had ended.
+  - The same pattern at 20b 6900/7050 (74 dropped; the work had ended at about 6858, before the
+    drop) and at 20d 9300 (60 dropped, the probe recovered).
+  - Why the estimate did not bring 60 back by itself: the full in-between frame's ratio learnt while
+    the work ran stayed high (`est_full_ms` 19.3 against `est_step_ms` 16.2). Nothing is drawn while
+    dropped, so only a probe refreshes it. Settled, the Kokiri pair is 16 + 16 = 32.0 ms, under the
+    97 % recovery threshold of 32.3 ms; the stale estimate said 35.5.
+- **Changes** (`oot3d_native_interpolation_pacing.h`, on by default):
+  - **Entry window.** The game thread hands each scene change to the render thread (`NoteEntry`).
+    The next 300 in-between decisions (10 s) are the entry window.
+  - **Probing after the work.** On deko3d the render thread tells the governor whether entry work
+    is still running (`Deko3dEntryWorkPending`: HD pack decodes queued or running, or grass placements
+    requested and not yet made). Once it ends, the first probe comes 3 decisions later, then every 10
+    decisions (1/3 s). This applies only while the estimated pair is within 1.10 × the budget.
+    - Kokiri's estimate at the drop was 1.05-1.07 × the budget. The Hyrule Field entrance with its grass
+      at the cap was 1.14-1.25, so it gets no entry probes.
+    - Without the signal (another renderer), entry probes start at the entry.
+  - **Back-off.** A probe whose measured pair does not fit is a *failed probe*. Each failed probe in a
+    row doubles the interval: 10 → 20 → 40 → 60 inside an entry window, and 60 → 120 → 240 (8 s)
+    elsewhere. A return to full, or a probe that fits, resets it. A view that really is too heavy
+    therefore sees fewer probes (each one a late in-between frame), not more.
+  - **Holds are not work.** The texture pack hold (`config/texture_pack_hold`) and the grass hold
+    (`config/grass_hold`) report their wait (`Deko3dNoteRenderHold`). The frame's render-thread cost
+    leaves the wait out, so a held frame neither counts towards a drop nor inflates the ratio.
+- **`config/pacer_entry_recover`:** absent or `1` = on; `0` = the former pacer (a probe every 60
+  decisions, holds counted as work).
+  - The entry and failed-probe counters are kept either way, for A/B.
+  - Desktop: `TRIAEVUM_PACER_ENTRY_RECOVER`.
+  - Start line: `TRIAEVUM_INTERP_PACING ... entry_recover=1 entry_probe_interval=10
+    entry_decisions=300 max_probe_interval=240`.
+- **`perf.txt`, `interp:` block** (per window): `entry_recover`, `failed_probes`, `entry_probes`,
+  `entries`, `entry_30_s`, `probe_interval`, `held_frames`, `held_ms`, `entry_work_frames`.
+  - `entry_30_s` is the time below full inside entry windows: the in-between decisions × the pair.
+  - `probe_interval` is the outside-entry interval now (60, doubled per failed probe in a row).
+  - `entry_work_frames` counts the frames whose entry work was still running.
+- **Estimate on the recorded entries** (`[INFERENCE]`: the windows are 2.5 s wide). Assumptions:
+  - the work ends where the pack's preload ends;
+  - a probe before the last render-bound hitch of the entry fails.
+
+  | Entry | Before | After |
+  |---|---|---|
+  | 20a Kokiri | 2.0 s at 30 | 1.0 s (0.35 s if the first probe fits), +1 failed probe |
+  | 20b Kokiri | 2.5 s | about 0.4 s |
+  | 20d Kokiri | 2.0 s | about 0.4 s |
+  | 20e Kokiri (enemies, CPU-bound too; first probe at 2 s failed) | 3.7 s, flapping | about the same (the estimate recovers it), +1-2 failed probes |
+  | 20a/20b/20d/20e Hyrule Field entrance (estimate over 1.10 or hopeless) | — | no entry probes; same stay; back-off only (20b 4 → 2 probes) |
+  | 20c Hyrule Field entrance (461 MHz, Full, 1.01) | 2 failed probes before 60 | 4 failed probes before 60; same stay |
+  | Heavy runs without an entry, all five sessions | 38 probes | about 28 (back-off) |
+
+  - Over all runs of at least 60 dropped decisions the totals are 38 probes before and about 28 after.
+  - Not one more level change: a failed probe never changes the level.
+- **Tests:** `oot3d_native_interpolation_pacing_tests`.
+  - `TestEntrySpikeThenRecovery`: 20a's numbers. With the signal, back at full 2 pairs after the work
+    ends (formerly 19-49). Without it, within 30.
+  - `TestSustainedHeavyViewDoesNotOscillate`: 18 + 18 ms and 19.5 + 21 ms held for 20 s give 1 level
+    change. Failed probes: 5 in the entry window against 4 before, and 6 against 9 over 20 s. None in
+    the 1.22 view.
+  - `TestFailedProbeBacksOff`: gaps of 120, 240, 240; reset by a return to full or by a probe that fits.
+  - `TestProbesHappenWhileDropped` now checks both settings.
+  - Guards: `tests/switch/test_bug_guards.py` ("08/11 (test.13)").
+- **Console check:** enter Kokiri Forest from the Lost Woods, then:
+  - The window after the entry has `entries=1` and `entry_work_frames` > 0, and `entry_30_s` is
+    around 0.4-1 s (before: 2 s).
+  - `held_frames` is 1-2 with `held_ms` matching the `world pack ... hold` line in `deko3d.txt`.
+  - In the Hyrule Field grove at Full, `failed_probes` per window falls to 0-1 as `probe_interval`
+    climbs to 240.
 
 ### Texture/object flicker when turning the camera fast (fps60, 2026-10-24)
 - **Symptom** (pgo5o, `config/fps60`, `dynamic_resolution`, `fps60_mode=adaptive`): when turning the

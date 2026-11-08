@@ -137,6 +137,8 @@ constexpr size_t kGpuFrameRing = 8U;
 std::array<Fast::Deko3dGpuFrame, kGpuFrameRing> gGpuFrames{};
 size_t gGpuFrameHead = 0U;
 size_t gGpuFrameCount = 0U;
+// Deko3dNoteRenderHold / Deko3dTakeRenderHoldMicros (render thread only).
+uint64_t gRenderHoldMicros = 0U;
 std::atomic<uint64_t> gPerfSubmits{0};
 std::atomic<uint64_t> gPerfCommandBytes{0};
 std::atomic<bool> gPerfSyncCheck{false};
@@ -1239,6 +1241,13 @@ std::string Deko3dPerfReport(unsigned long long hostFrames) {
 }
 void Deko3dTagFrame(uint8_t kind, double cpuMilliseconds) {
     Deko3d::gPendingTag = {true, kind, cpuMilliseconds};
+}
+
+void Deko3dNoteRenderHold(uint64_t micros) {
+    Deko3d::gRenderHoldMicros += micros;
+}
+uint64_t Deko3dTakeRenderHoldMicros() {
+    return std::exchange(Deko3d::gRenderHoldMicros, 0U);
 }
 
 Deko3dSwapTimes Deko3dLastSwapTimes() {

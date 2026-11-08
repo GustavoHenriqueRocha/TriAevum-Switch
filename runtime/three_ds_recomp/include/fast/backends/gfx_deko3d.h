@@ -84,6 +84,19 @@ struct Deko3dGpuFrame {
 };
 void Deko3dTagFrame(uint8_t kind, double cpuMilliseconds);
 
+// Render-thread waits at a frame's start for a scene's entry work
+// (config/texture_pack_hold, config/grass_hold): the frame waited, it did no
+// work. Render thread only: the holds add their wait, the pacing governor
+// takes the frame's total before Deko3dTagFrame and leaves it out of the
+// frame's cost (config/pacer_entry_recover). Nothing elsewhere.
+void Deko3dNoteRenderHold(uint64_t micros);
+uint64_t Deko3dTakeRenderHoldMicros();
+// A scene's entry work still running (render thread): HD pack decodes queued
+// or running, grass placements requested and not made. The pacing governor
+// probes 60 again soon after it ends (config/pacer_entry_recover). False
+// elsewhere.
+bool Deko3dEntryWorkPending();
+
 // Render-thread CPU time of the last swap (FinishRender) and of its parts, for
 // logs/spikes.txt (p6o: the swap took 12.7 ms in the frames that missed a
 // refresh while fence, acquire and present were short). Zero elsewhere.

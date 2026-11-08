@@ -235,6 +235,7 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
   config.ReducedMode = options.ReducedAlways
                            ? Oot3dNativeGame::InterpolationReducedScaleMode::Always
                            : Oot3dNativeGame::InterpolationReducedScaleMode::Auto;
+  config.EntryRecover = options.PacerEntryRecover;
   pacing.ReducedAvailable =
       config.ReducedScale > 0.0F &&
       api.SetPicaNamespaceResolutionScale(kReducedVisualRenderTargetNamespace,
@@ -329,14 +330,18 @@ void NativeA32WindowSession::EnsureInterpolationPacing() {
                  "TRIAEVUM_INTERP_PACING keep_speed=%d reduced_scale=%.2f "
                  "reduced_available=%d mode=%s base_scale=%.2f "
                  "native_replay=%d fps60_mode=%s cpu_count_wait=%d "
-                 "flush_before_pacing=%d margin_ms=%.2f\n",
+                 "flush_before_pacing=%d margin_ms=%.2f entry_recover=%d "
+                 "entry_probe_interval=%u entry_decisions=%u "
+                 "max_probe_interval=%u\n",
                  config.KeepGameSpeed ? 1 : 0, config.ReducedScale,
                  reducedAvailable ? 1 : 0,
                  options.ReducedAlways ? "always" : "auto", baseScale,
                  skipNativeReplay ? 0 : 1,
                  Oot3dNativeGame::Fps60ModeName(options.Fps60Mode.Mode).data(),
                  gCountRenderWait ? 1 : 0, gFlushBeforePacing ? 1 : 0,
-                 config.MarginMs);
+                 config.MarginMs, config.EntryRecover ? 1 : 0,
+                 config.EntryProbeInterval, config.EntryDecisions,
+                 config.MaxProbeInterval);
   }
   std::lock_guard lock(interpolationPerfMutex);
   interpolationPerf.ReducedScale = reducedAvailable ? config.ReducedScale : 0.0F;
@@ -357,9 +362,30 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   (void)waitTicks;
   const double waitMs = 0.0;
 #endif
+  // config/pacer_entry_recover: the render thread's holds at a scene's start
+  // (config/texture_pack_hold, config/grass_hold) waited for the scene's
+  // entry work; the frame did no work then, and a held frame must not count
+  // towards a drop nor inflate the in-between ratio the recovery rests on.
+  double holdMs = 0.0;
+  bool entryWork = false;
+#if defined(__SWITCH__)
+  holdMs = static_cast<double>(Fast::Deko3dTakeRenderHoldMicros()) / 1000.0;
+  // And the entry work still running (HD pack decodes, grass placements):
+  // the governor probes 60 again soon after it ends. Asked only in an
+  // entry window (one pack mutex a frame there).
+  if (interpolationPacing.Config().EntryRecover && interpolationPacing.InEntry() &&
+      Fast::Deko3dRendererSelected()) {
+    entryWork = Fast::Deko3dEntryWorkPending();
+    interpolationPacing.SetEntryWork(entryWork);
+  }
+#endif
+  const double workCpuMs = interpolationPacing.Config().EntryRecover
+                               ? std::max(0.0, cpuMs - holdMs)
+                               : cpuMs;
   const double costCpuMs =
-      gCountRenderWait ? cpuMs
-                       : Oot3dNativeGame::NativeRenderThreadBusyMs(cpuMs, waitMs);
+      gCountRenderWait
+          ? workCpuMs
+          : Oot3dNativeGame::NativeRenderThreadBusyMs(workCpuMs, waitMs);
   // logs/spikes.txt: this frame's render-thread work and acquire wait.
   spikeRenderBusyMs = Oot3dNativeGame::NativeRenderThreadBusyMs(cpuMs, waitMs);
   spikeRenderWaitMs = waitMs;
@@ -474,8 +500,19 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
     perf.GpuMs[index] += gpuMs[index];
     perf.GpuFrames[index] += gpuFrames[index];
   }
+  if (holdMs > 0.0) {
+    ++perf.HoldFrames;
+    perf.HoldMs += holdMs;
+  }
+  if (entryWork)
+    ++perf.EntryWorkFrames;
   const auto &stats = interpolationPacing.Stats();
   perf.Probes = stats.Probes;
+  perf.FailedProbes = stats.FailedProbes;
+  perf.EntryProbes = stats.EntryProbes;
+  perf.Entries = stats.Entries;
+  perf.EntryBelowDecisions = stats.EntryBelowDecisions;
+  perf.ProbeInterval = interpolationPacing.ProbeIntervalNow(false);
   perf.LevelChanges = stats.LevelChanges;
   perf.Level = static_cast<uint8_t>(interpolationPacing.Level());
   perf.GpuTimer = gpuAvailable;
@@ -843,6 +880,15 @@ bool NativeA32WindowSession::RunFrame() {
     renderStream.Submit([scene = texturePackScene] {
       ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().NoteScene(scene);
     });
+  }
+  // Paced interpolation: a new scene (the load's -1 in between counts as a
+  // change, so a reload of the same scene is an entry too) opens the
+  // governor's entry window on the render thread, before the scene's first
+  // frame (config/pacer_entry_recover; entries are counted either way).
+  if (frameArea.Scene != pacerEntryScene) {
+    pacerEntryScene = frameArea.Scene;
+    if (frameArea.Scene >= 0)
+      renderStream.Submit([this] { interpolationPacing.NoteEntry(); });
   }
 #endif
   const auto headAreaEnd = std::chrono::steady_clock::now();
@@ -1698,6 +1744,24 @@ bool NativeA32WindowSession::RunFrame() {
              << " repeat_fallbacks=" << (current.RepeatFallbacks - previous.RepeatFallbacks)
              << " native_replay_skipped=" << (current.NativeReplaysSkipped - previous.NativeReplaysSkipped)
              << " probes=" << (current.Probes - previous.Probes)
+             // config/pacer_entry_recover: probes whose pair did not fit,
+             // probes of an entry's shorter interval, scene entries, the
+             // time below full in the entry windows (s: in-between
+             // decisions x the pair) and the probe interval now (60 doubled
+             // per failed probe in a row); render-thread holds left out of
+             // the frame cost (frames, ms) and the frames whose entry work
+             // (pack decodes, grass placements) was still running.
+             << " entry_recover=" << (interpolationPacingOptions.PacerEntryRecover ? 1 : 0)
+             << " failed_probes=" << (current.FailedProbes - previous.FailedProbes)
+             << " entry_probes=" << (current.EntryProbes - previous.EntryProbes)
+             << " entries=" << (current.Entries - previous.Entries)
+             << " entry_30_s="
+             << static_cast<double>(current.EntryBelowDecisions - previous.EntryBelowDecisions) *
+                    current.BudgetMs / 1000.0
+             << " probe_interval=" << current.ProbeInterval
+             << " held_frames=" << (current.HoldFrames - previous.HoldFrames)
+             << " held_ms=" << (current.HoldMs - previous.HoldMs)
+             << " entry_work_frames=" << (current.EntryWorkFrames - previous.EntryWorkFrames)
              << " level_changes=" << (current.LevelChanges - previous.LevelChanges)
              << " gpu_timer=" << (current.GpuTimer ? 1 : 0)
              << " gpu_ns_per_tick=" << current.GpuFactor;

@@ -634,6 +634,14 @@ bool GrassDrawEnabled() {
     return state != nullptr && state->Mode == Oot3d::GrassSwitchMode::Draw;
 }
 
+bool GrassWorkPending() {
+    const GrassState* state = gGrass.load(std::memory_order_acquire);
+    if (state == nullptr || state->Mode != Oot3d::GrassSwitchMode::Draw || !state->DrawReady || state->DrawFailed)
+        return false;
+    // As GrassBeginFrame's hold: requested placements still being made.
+    return state->Placements->Stats().Queued != 0U && state->Placements->BuilderStats().Pending != 0U;
+}
+
 void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
     GrassState* state = gGrass.load(std::memory_order_acquire);
     if (state == nullptr || draw.CompositionDomain != decltype(draw.CompositionDomain)::Scene ||
@@ -716,6 +724,7 @@ void GrassBeginFrame() {
     state->HoldMicros += waited;
     ++state->HoldFrames;
     state->HoldTimeouts += done ? 0U : 1U;
+    Deko3dNoteRenderHold(waited); // not the frame's work (config/pacer_entry_recover)
 }
 
 // A scene change: the drawn cull, the sources' memo (whose geometry

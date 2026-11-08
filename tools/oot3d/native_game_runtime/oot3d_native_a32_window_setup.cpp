@@ -1941,6 +1941,13 @@ void NativeA32WindowSession::Setup() {
       options.ReducedAlways = trimmed(*text) == "always";
     if (const auto text = readText("native_replay", "TRIAEVUM_NATIVE_REPLAY"))
       options.ForceNativeReplay = trimmed(*text) == "1";
+    // config/pacer_entry_recover (TRIAEVUM_PACER_ENTRY_RECOVER): on without
+    // the file; "0" keeps the former probe schedule and counts the
+    // render-thread holds as frame work (SWITCH_PORT.md "60 FPS back sooner
+    // after entering an area").
+    if (const auto text =
+            readText("pacer_entry_recover", "TRIAEVUM_PACER_ENTRY_RECOVER"))
+      options.PacerEntryRecover = trimmed(*text) != "0";
     // Draws that exist in only one of two guest frames (culling/LOD while
     // the camera turns fast; oot3d_native_pica_visual_frame.h): the step
     // frame shows the previous guest frame itself (config/interp_exact_step)

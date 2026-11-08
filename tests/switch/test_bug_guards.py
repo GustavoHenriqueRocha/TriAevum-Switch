@@ -1624,6 +1624,36 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
           r'mResources\.BeginFrame\(mResourcesFrame\);\s+Deko3d::GrassBeginFrame\(\);',
           "oot3d_grass_switch_tests (Oot3dGrassSceneHold)"),
+    # --- 08/11 (test.13): "frame drops, but if I stay in the area it stabilizes to 60" (logs20a-e) ---
+    # Entering an area, one-off work (pack decodes and uploads, grass, slow fences) dropped the
+    # in-between frames; the full frame's ratio learnt then stayed while nothing was drawn, and
+    # only the probe every 60 decisions (2 s) brought 60 back, long after the work had ended.
+    Guard("after a scene entry the pacer probes 60 again soon after the entry work ends (config/pacer_entry_recover)",
+          "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
+          r'bool EntryRecover = true;.*?const bool entryProbe = mConfig\.EntryRecover && entry && !mEntryWork &&'
+          r'.*?if \(\+\+mBelowPreferred >= ProbeIntervalNow\(entryProbe\) \|\|',
+          "oot3d_native_interpolation_pacing_tests (TestEntrySpikeThenRecovery)"),
+    Guard("a failed probe doubles the probe interval (no extra probes in a view that really is too heavy)",
+          "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
+          r'interval \*= 2U;.*?\+\+mFailedProbes;\s+\+\+mStats\.FailedProbes;',
+          "oot3d_native_interpolation_pacing_tests (TestFailedProbeBacksOff, TestSustainedHeavyViewDoesNotOscillate)"),
+    Guard("the game thread hands each scene entry to the pacer, the render thread its entry work",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'renderStream\.Submit\(\[this\] \{ interpolationPacing\.NoteEntry\(\); \}\);'),
+    Guard("render-thread holds (texture pack, grass) are not frame work for the pacer",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'Fast::Deko3dTakeRenderHoldMicros\(\).*?interpolationPacing\.SetEntryWork\(entryWork\);'
+          r'.*?std::max\(0\.0, cpuMs - holdMs\).*?NativeRenderThreadBusyMs\(workCpuMs, waitMs\)'),
+    Guard("the texture pack hold reports its wait to the pacer",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'mScene\.HoldMicros \+= waited;.*?Deko3dNoteRenderHold\(waited\);'),
+    Guard("the grass hold reports its wait to the pacer",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
+          r'state->HoldMicros \+= waited;.*?Deko3dNoteRenderHold\(waited\);'),
+    Guard("config/pacer_entry_recover: on without the file, \"0\" the former pacer",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'readText\("pacer_entry_recover", "TRIAEVUM_PACER_ENTRY_RECOVER"\)\)\s+'
+          r'options\.PacerEntryRecover = trimmed\(\*text\) != "0";'),
     Guard("HUD button labels draw over the item icons (a pack's bigger bomb hid the R of ZR)",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
           r'primitive\.layer = kTopScreenButtonLabelLayer;.*?'

@@ -651,6 +651,10 @@ private:
     // config/native_replay=1: replay the native namespace although the
     // backend never observes it (A/B).
     bool ForceNativeReplay = false;
+    // config/pacer_entry_recover ("0": off): sooner probes after a scene
+    // entry, back-off after failed probes, render-thread holds left out of
+    // the frame cost (oot3d_native_interpolation_pacing.h).
+    bool PacerEntryRecover = true;
     // config/fps60_mode (oot3d_native_cadence_governor.h): adaptive
     // (default), strict60 or legacy, then options.
     Oot3dNativeGame::Fps60ModeConfig Fps60Mode{};
@@ -724,6 +728,9 @@ private:
   Oot3dNativeGame::NativeArea frameArea{};
   // The scene last handed to the texture pack runtime (deko3d; -2 = none yet).
   int texturePackScene = -2;
+  // The scene of the last frame for the pacing governor's entries
+  // (InterpolationPacingGovernor::NoteEntry; -2 = none yet).
+  int pacerEntryScene = -2;
   Oot3dNativeGame::NativeAreaWindow perfAreaWindow;
   // Actor cost profile (config/actor_profile; oot3d_native_actor_profile.h).
   std::optional<Oot3dNativeGame::NativeActorProfile> actorProfile;
@@ -862,6 +869,19 @@ private:
     uint64_t ReducedRefused = 0;
     uint64_t RepeatFallbacks = 0;
     uint64_t Probes = 0;
+    // config/pacer_entry_recover (InterpolationPacingStats): failed and
+    // entry probes, scene entries, in-between decisions below full in their
+    // entry windows, the current probe interval (back-off), the frames
+    // whose render-thread hold (texture pack, grass) left the cost and the
+    // frames of an entry window with its work still running.
+    uint64_t FailedProbes = 0;
+    uint64_t EntryProbes = 0;
+    uint64_t Entries = 0;
+    uint64_t EntryBelowDecisions = 0;
+    uint32_t ProbeInterval = 0U;
+    uint64_t HoldFrames = 0;
+    double HoldMs = 0.0;
+    uint64_t EntryWorkFrames = 0;
     uint64_t LevelChanges = 0;
     uint8_t Level = 0;
     bool GpuTimer = false;

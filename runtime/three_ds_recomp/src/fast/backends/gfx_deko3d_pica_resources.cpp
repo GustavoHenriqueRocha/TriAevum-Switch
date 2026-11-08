@@ -2,6 +2,7 @@
 #if defined(__SWITCH__)
 #include "gfx_deko3d_pica_resources.h"
 
+#include "fast/backends/gfx_deko3d.h"
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
 #include "fast/oot3d/pica_texture_predecode.h"
 #include "fast/oot3d/pica_uniform_layout.h"
@@ -460,6 +461,7 @@ void PicaResources::BeginScene() {
     ++mScene.HoldFrames;
     mScene.HoldMicros += waited;
     mScene.HoldTimeouts += left != 0U ? 1U : 0U;
+    Deko3dNoteRenderHold(waited); // not the frame's work (config/pacer_entry_recover)
 }
 
 void PicaResources::LogScene(const PicaSceneTextureStats& stats, const char* when) {

@@ -859,6 +859,10 @@ class AzaharTexturePackRuntime::Impl {
         std::scoped_lock lock(mMutex);
         return mPreviousScene;
     }
+    size_t PendingLoads() const {
+        std::scoped_lock lock(mMutex);
+        return mPendingLoads;
+    }
     void NoteSceneImage(uint64_t hash, TextureSize native) {
         std::scoped_lock lock(mMutex);
         if (!mConfigured || !mConfiguration.LoadCustomTextures || !mIndexReady || !mIndex.contains(hash)) return;
@@ -1685,6 +1689,10 @@ AzaharScenePackStatus AzaharTexturePackRuntime::SceneStatus() const {
 
 AzaharScenePackStatus AzaharTexturePackRuntime::PreviousSceneStatus() const {
     return mImpl->PreviousSceneStatus();
+}
+
+size_t AzaharTexturePackRuntime::PendingLoads() const {
+    return mImpl->PendingLoads();
 }
 
 void AzaharTexturePackRuntime::NoteSceneImage(uint64_t nativeHash, uint16_t nativeWidth, uint16_t nativeHeight) {
