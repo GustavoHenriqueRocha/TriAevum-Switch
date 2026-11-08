@@ -370,7 +370,7 @@ int main() {
     Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels,
                                            &error) &&
                 pixels.provisional && pixels.native_stand_in && pixels.width == 8U &&
-                pixels.rgba8.front() == 0xFFU &&
+                pixels.Data().front() == 0xFFU &&
                 requested == profileTexturePayload && requestedFormat == 0U,
             "a pending custom texture did not keep provisional native pixels marked as the old art");
     // A pending pack image over the HD atlas: the atlas stands in.
@@ -378,13 +378,13 @@ int main() {
     Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels,
                                            &error) &&
                 pixels.provisional && !pixels.native_stand_in && pixels.width == 16U &&
-                pixels.height == 16U && pixels.rgba8 == *standIn,
+                pixels.height == 16U && pixels.shared_rgba8 == standIn,
             "a pending custom texture did not draw its stand-in (not held: it is HD art)");
     packState = Oot3dNativeUiCustomTexture::State::Ready;
     Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels,
                                            &error) &&
                 !pixels.provisional && !pixels.native_stand_in && pixels.width == 24U &&
-                pixels.height == 24U && pixels.rgba8 == *replacement &&
+                pixels.height == 24U && pixels.shared_rgba8 == replacement && pixels.rgba8.empty() &&
                 profileTextureProvider.Stats().custom_texture_replacements == 1U &&
                 profileTextureProvider.Stats().custom_texture_pending == 2U,
             "a ready custom texture did not replace the TopScreen profile pixels");
@@ -392,7 +392,7 @@ int main() {
     Require(profileTextureProvider.Resolve(profileTextureIdentity, pixels,
                                            &error) &&
                 !pixels.provisional && pixels.width == 8U &&
-                pixels.rgba8.front() == 0xFFU,
+                pixels.Data().front() == 0xFFU,
             "without a custom texture the native pixels did not come back");
     // Asked for ahead of its first draw: the source sees the same identity,
     // marked ahead and not decoded (the pack hashes it on its worker); no
@@ -444,6 +444,57 @@ int main() {
     Require(requestedAhead && requested == resolvedBytes && requestedRgbaBytes == 0U &&
                 overrideProvider.Stats().custom_texture_ahead == 1U,
             "a native UI texture asked for ahead was not identified by the game's own bytes");
+
+    // The identity cache (test.14: a pack change resolved each HUD texture
+    // again, decoding it on the game thread): once the source has given the
+    // legacy hash, the same bytes are read and hashed, not decoded, the
+    // source gets both hashes, and the pixels are shared, not copied.
+    {
+        Oot3dNativeA32UiTextureProvider cachedProvider(picaMemory);
+        std::optional<std::uint64_t> seenModern, seenLegacy;
+        std::size_t calls = 0U;
+        Oot3dNativeUiCustomTexture::State state = Oot3dNativeUiCustomTexture::State::Pending;
+        cachedProvider.SetCustomTextureSource({
+            [&](const Oot3dNativeUiCustomTextureRequest& request) {
+                ++calls;
+                seenModern = request.modern_hash;
+                seenLegacy = request.legacy_hash;
+                Oot3dNativeUiCustomTexture custom;
+                custom.state = state;
+                custom.legacy_hash = request.legacy_hash.value_or(0x1234U);
+                if (state == Oot3dNativeUiCustomTexture::State::Ready) {
+                    custom.width = 24U;
+                    custom.height = 24U;
+                    custom.rgba8 = replacement;
+                }
+                return custom;
+            },
+            [] { return 1U; },
+        });
+        Require(memory.WriteBytes(0x14000000U, originalPayload), "could not restore the native fixture");
+        oot3d::ui::UiTexturePixels first;
+        Require(cachedProvider.Resolve(identity, first, &error) && first.provisional && first.native_stand_in &&
+                    first.shared_rgba8 != nullptr && first.rgba8.empty() &&
+                    cachedProvider.Stats().identity_decodes == 1U && cachedProvider.Stats().identity_hits == 0U &&
+                    seenModern.has_value() && !seenLegacy.has_value(),
+                "a first resolve was not decoded, offered with its modern hash and cached");
+        const auto decodeFailures = cachedProvider.Stats().decode_failures;
+        oot3d::ui::UiTexturePixels again;
+        Require(cachedProvider.Resolve(identity, again, &error) && again.provisional && again.native_stand_in &&
+                    again.shared_rgba8 == first.shared_rgba8 && cachedProvider.Stats().identity_hits == 1U &&
+                    cachedProvider.Stats().identity_decodes == 1U && seenLegacy == std::optional<std::uint64_t>(0x1234U) &&
+                    cachedProvider.Stats().decode_failures == decodeFailures && calls == 2U,
+                "a resolve of the same bytes was decoded again, or not offered with both hashes");
+        state = Oot3dNativeUiCustomTexture::State::Ready;
+        Require(cachedProvider.Resolve(identity, again, &error) && !again.provisional && again.width == 24U &&
+                    again.shared_rgba8 == replacement && cachedProvider.Stats().identity_hits == 2U,
+                "a ready replacement from the cache was not shared");
+        // Other bytes at the same address: decoded and cached as another identity.
+        Require(memory.WriteBytes(0x14000000U, replacementPayload), "could not write the other payload");
+        Require(cachedProvider.Resolve(identity, again, &error) && cachedProvider.Stats().identity_decodes == 2U,
+                "changed bytes were taken from the cache");
+        Require(memory.WriteBytes(0x14000000U, originalPayload), "could not restore the native fixture");
+    }
 
     // The HUD's choice between the player's pack and the HD UI atlas.
     {

@@ -15,7 +15,7 @@ constexpr std::uint32_t kFree = 0x003525D4U;
 
 std::string TextureKey(const oot3d::ui::UiTexturePixels &pixels) {
   std::uint64_t hash = 0xCBF29CE484222325ULL;
-  for (auto byte : pixels.rgba8) { hash ^= byte; hash *= 0x100000001B3ULL; }
+  for (auto byte : pixels.Data()) { hash ^= byte; hash *= 0x100000001B3ULL; }
   std::ostringstream key;
   key << "oot3d/topscreen/song_text/" << pixels.width << 'x' << pixels.height << '/' << std::hex << hash;
   return key.str();

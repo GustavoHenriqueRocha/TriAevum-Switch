@@ -3,7 +3,9 @@
 #include "oot3d/renderer/ui_render_backend.h"
 #include "oot3d_ui/ui_primitives.h"
 
+#include <chrono>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -49,6 +51,15 @@ struct UiTexturePixels {
     std::uint16_t width = 0;
     std::uint16_t height = 0;
     std::vector<std::uint8_t> rgba8;
+    // Pixels shared instead of `rgba8` (a texture pack image, a cached
+    // decode): handed to the renderer without a copy on the game thread
+    // (test.14: a 3x HUD image, up to 19 MB, was copied there). Data() is
+    // whichever is set.
+    std::shared_ptr<const std::vector<std::uint8_t>> shared_rgba8;
+    [[nodiscard]] std::span<const std::uint8_t> Data() const noexcept {
+        return shared_rgba8 ? std::span<const std::uint8_t>(*shared_rgba8)
+                            : std::span<const std::uint8_t>(rgba8);
+    }
     // Valid pixels standing in for a final payload that is still being
     // prepared (a custom texture decoding); the texture is resolved again.
     bool provisional = false;
@@ -107,9 +118,13 @@ inline constexpr std::uint32_t kUiProvisionalPollInterval = 8U;
 // held ones: a new provider revision (a texture pack turned on or off, its
 // index ready, another size) resolves the textures that draw a few per call,
 // each drawing its earlier texture until then, and provisional polls share
-// it. A resolve reads, decodes and identifies the game's texture (about 1 ms
-// on the Switch for a HUD atlas [INFERENCE]).
+// it. With the provider's identity cache (oot3d_native_ui_texture_provider)
+// such a resolve reads and hashes the game's texture, no decode.
 inline constexpr std::uint32_t kUiResolvesPerPrepare = 6U;
+// And the time those resolves may take in one call (checked before each): the
+// TopScreen HUD prepares twice per frame, so a frame spends at most about
+// twice this on them (plus one resolve each).
+inline constexpr std::chrono::microseconds kUiResolveTimeBudget{1500};
 
 std::uint64_t N64UiSolidShaderId0() noexcept;
 std::uint64_t N64UiTexturedShaderId0() noexcept;

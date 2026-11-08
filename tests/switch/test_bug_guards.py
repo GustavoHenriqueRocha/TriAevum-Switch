@@ -1437,7 +1437,8 @@ GUARDS = [
     # --- 26/10: 14-18 ms spikes every 1800 frames (deko3d log on the render thread) ---
     Guard("deko3d: Log() wrote logs/deko3d.txt (fopen/fclose on the SD) on the render thread every 1800 frames",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
-          r'void Log\(const char\* format, \.\.\.\) \{.*?gLogQueue\.emplace_back\(line\);',
+          r'void Log\(const char\* format, \.\.\.\) \{.*?std::string line = FormatLogLine\(format, args\);.*?'
+          r'gLogQueue\.push_back\(std::move\(line\)\);',
           "oot3d_frame_spike_tests (TestDeko3dPresentFieldsAtTheEnd)",
           forbid=r'void Log\(const char\* format, \.\.\.\) \{\s+std::lock_guard lock\(gLogMutex\);\s+FILE\*'),
     # --- 26/10: corrupted heap (tours 16-20: chunk 0x50 with swapped bk = use after free) ---
@@ -1701,8 +1702,38 @@ GUARDS = [
           "oot3d_azahar_texture_pack_tests (TexturesDrawnWhileThePackIndexesResolveOnceItIsReady)"),
     Guard("the game thread's longest frame and HUD preparation during a pack change are logged",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
-          r'Oot3d::Renderer::LiveTexturePackChangeGameWatch\(\)\.Observe\(frameMicros,',
+          r'Oot3d::Renderer::LiveTexturePackChangeGameWatch\(\)\.Observe\(\s+frameMicros,',
           "oot3d_texture_pack_scale_tests (PackChangeSpread)"),
+    # --- 08/11 (TogglePack2, test.14 logs22a): each HD-texture change still stuttered: every 4th frame the
+    # game thread took 66-108 ms (20 ms guest; hitches.txt:805-944): the HUD's provisional polls and
+    # refreshes decoded each texture again on the game thread (a 512x256 decode: 6 ms on a desktop core).
+    # Deko3d lines were cut at 511 characters (SWITCH_PORT.md "HD texture changes: the HUD without decodes").
+    Guard("deko3d.txt lines are never cut: a longer line formats again into a string of its length",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_log_line.h",
+          r'if \(static_cast<std::size_t>\(length\) < sizeof\(line\)\) \{.*?'
+          r'std::string longer\(static_cast<std::size_t>\(length\), \'\\0\'\);',
+          "oot3d_texture_pack_scale_tests (LogLines)",
+          forbid=r'char line\[512\]'),
+    Guard("a HUD texture resolved again is taken from the identity cache: read and hashed, not decoded",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_texture_provider.cpp",
+          r'if \(!generatedText &&\s+ApplyCachedCustomTexture\(encoding->native_pica_format,.*?'
+          r'pixels\.shared_rgba8 = found->second\.native;',
+          "oot3d_native_ui_texture_provider_tests (identity cache)",
+          forbid=r'pixels\.rgba8 = \*custom\.rgba8;'),
+    Guard("the HUD source passes the cached hashes to the pack and returns the legacy one for the cache",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'\.KnownModernHash = request\.modern_hash,\s+\.KnownLegacyHash = request\.legacy_hash,.*?'
+          r'custom\.legacy_hash = identity\.KnownLegacyHash;',
+          "oot3d_azahar_texture_pack_tests (CapsHudTexturesAtThreeTimesWithoutMipmaps)"),
+    Guard("another HD texture size keeps the pack's HUD images (no first-sight wait after a cap change)",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'const bool keepHud = mConfigured && configuration\.LoadCustomTextures && otherCap == mConfiguration;.*?'
+          r'cached->second->Generation >= mUiValidFromGeneration',
+          "oot3d_azahar_texture_pack_tests (CapsHudTexturesAtThreeTimesWithoutMipmaps)"),
+    Guard("the UI renderer's deferrable resolves have a time budget per call as well as a count",
+          "tools/oot3d/ui_n64/oot3d_n64_ui_renderer.cpp",
+          r'if \(budget == 0U \|\| std::chrono::steady_clock::now\(\) - start >= kUiResolveTimeBudget\) return false;',
+          "oot3d_n64_ui_renderer_tests (TestRevisionResolvesAreSpread)"),
     # --- 08/11 (TexSizes, test.13 report): "if we have 3x textures max, the setting shouldn't show 4." The
     # Video tab offers only the sizes the pack has, measured by the pack worker when it has nothing else to
     # do (SWITCH_PORT.md "HD texture size: only the sizes the pack has").

@@ -241,6 +241,11 @@ struct TexturePackRebuildBudget {
     return sceneEntered ? static_cast<uint64_t>(holdMs) * 1000U : 0U;
 }
 
+// The HUD work one game-thread frame may do because of a change (texture
+// preparation, N64UiFast3dRenderer::PrepareTextures): above it the frame
+// counts as over budget in the change's line.
+inline constexpr uint64_t kTexturePackChangeGamePrepareBudgetMicros = 4000U;
+
 // The game thread during a pack change, from the change to its `took
 // effect` line: its longest frame (one UI submission to the next, waits for
 // the render thread included) and its longest UI texture preparation (the HUD
@@ -249,23 +254,40 @@ struct TexturePackRebuildBudget {
 class TexturePackChangeGameWatch {
   public:
     struct Result {
+        uint64_t Frames = 0;
         uint64_t LongestFrameMicros = 0;
         uint64_t LongestPrepareMicros = 0;
+        uint64_t PrepareOverBudget = 0; // frames over kTexturePackChangeGamePrepareBudgetMicros
+        uint64_t Resolves = 0;          // HUD textures resolved (the provider's resolve calls)
+        uint64_t Decodes = 0;           // of those, decoded (not in its identity cache)
     };
 
     void Begin() noexcept {
+        mFrames.store(0U, std::memory_order_relaxed);
         mLongestFrame.store(0U, std::memory_order_relaxed);
         mLongestPrepare.store(0U, std::memory_order_relaxed);
+        mOverBudget.store(0U, std::memory_order_relaxed);
+        mResolves.store(0U, std::memory_order_relaxed);
+        mDecodes.store(0U, std::memory_order_relaxed);
         mActive.store(true, std::memory_order_release);
     }
-    void Observe(uint64_t frameMicros, uint64_t prepareMicros) noexcept {
+    // One game-thread frame: from the previous one's UI submission, its HUD
+    // texture preparation, and the HUD textures it resolved and decoded.
+    void Observe(uint64_t frameMicros, uint64_t prepareMicros, uint64_t resolves = 0U,
+                 uint64_t decodes = 0U) noexcept {
         if (!mActive.load(std::memory_order_acquire)) return;
+        mFrames.fetch_add(1U, std::memory_order_relaxed);
         Raise(mLongestFrame, frameMicros);
         Raise(mLongestPrepare, prepareMicros);
+        if (prepareMicros > kTexturePackChangeGamePrepareBudgetMicros) mOverBudget.fetch_add(1U, std::memory_order_relaxed);
+        mResolves.fetch_add(resolves, std::memory_order_relaxed);
+        mDecodes.fetch_add(decodes, std::memory_order_relaxed);
     }
     Result End() noexcept {
         mActive.store(false, std::memory_order_release);
-        return {mLongestFrame.load(std::memory_order_relaxed), mLongestPrepare.load(std::memory_order_relaxed)};
+        return {mFrames.load(std::memory_order_relaxed),    mLongestFrame.load(std::memory_order_relaxed),
+                mLongestPrepare.load(std::memory_order_relaxed), mOverBudget.load(std::memory_order_relaxed),
+                mResolves.load(std::memory_order_relaxed),  mDecodes.load(std::memory_order_relaxed)};
     }
 
   private:
@@ -275,8 +297,12 @@ class TexturePackChangeGameWatch {
         }
     }
     std::atomic<bool> mActive{false};
+    std::atomic<uint64_t> mFrames{0U};
     std::atomic<uint64_t> mLongestFrame{0U};
     std::atomic<uint64_t> mLongestPrepare{0U};
+    std::atomic<uint64_t> mOverBudget{0U};
+    std::atomic<uint64_t> mResolves{0U};
+    std::atomic<uint64_t> mDecodes{0U};
 };
 
 inline TexturePackChangeGameWatch& LiveTexturePackChangeGameWatch() noexcept {

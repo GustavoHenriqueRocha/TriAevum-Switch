@@ -2588,6 +2588,68 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   `texture pack change took effect` lines show `game thread: longest frame` under ~50 ms and `longest HUD
   texture preparation` a few ms, and no `hold` in the next `world pack` line.
 
+### HD texture changes: the HUD without decodes (08/11, test.14 logs22/22a)
+- **Report (Perf22 §3, §7):** test.14 removed the hold, but each change still stuttered for about half a
+  second, with audio repeats (~35 conceal events, ~1 s over seven changes): after every change, every 4th
+  frame the game thread took 66–108 ms with ~20 ms of guest time, for 20–45 frames
+  (`logs22a/hitches.txt:805-944`, e.g. 18841, 18845, 18849, 18854, 18858, 18862: 71–77 ms game, 19–24 ms guest;
+  `logs22/hitches.txt:15-67`). The change lines give `game thread: longest frame` 59–112 ms
+  (`logs22a/deko3d.txt:350-382`, `logs22/deko3d.txt:103`); render frame starts stayed ≤ 33 ms. The line's tail
+  (`longest HUD texture preparation`) was lost: `Log()` formatted into 512 bytes (the lines are 511
+  characters).
+- **Cause [INFERENCE from the code and the cadence]:** the HUD's polls and refreshes decoded.
+  - The TopScreen HUD calls `PrepareTextures` twice per frame (GameplayHud and TouchControls,
+    `oot3d_native_a32_window_frame.cpp`), so its budget of 6 resolves per call is 12 per frame, and the
+    provisional polls (every 8 calls per texture, all polled together after a change) come every 4 frames:
+    the cadence of the spikes.
+  - Each resolve read the texture from guest memory, **decoded it** (`DecodePicaTextureRgba8`), hashed the
+    decode for Azahar's legacy identity (Henriko's pack) and, once ready, **copied** the 3x pack image into
+    the pixels handed to the renderer. Measured on the PC (Ryzen 7 3700X, `-O2`, one core): decode of a
+    256x256 ETC1A4 2.1 ms, 512x256 ETC1A4 6.3 ms, 512x512 ETC1 6.1 ms, 512x512 A8 4.5 ms; legacy hash 0.4–1.2 ms; copy of a 3x image 0.2–1.2
+    ms. The A57 at 1020 MHz is several times slower [INFERENCE]: a few such resolves make the 45–85 ms.
+  - `ui_prepare` 2.7–3.3 ms per frame in the change windows against 0.24–0.5 normally, and `ui_submit`
+    3.3–4.2: the preparation is the growth.
+  - Not the cause: render frame starts stay ≤ 33 ms (the world's re-resolves are spread); the pack lock is held
+    only briefly by the game thread's resolves.
+  - HUD first sights waited up to 702 ms (`hud pack … ahead=11/28 … first sight=3`, menu 684 ms,
+    `logs22a/deko3d.txt:373-374`): every change, even of the size only, dropped the HUD images, and the HUD
+    worker decoded them all again.
+- **Change:**
+  - *Identity cache (`oot3d_native_ui_texture_provider`):* the decode of each HUD texture and its legacy hash
+    are kept by its encoded bytes (their modern Azahar hash) and shape, at most 64 MiB, least recently used
+    first. A texture resolved again (a change, a poll, a hold) is read from guest memory and hashed (CityHash
+    of the encoded base level), not decoded; the source gets both hashes (`modern_hash`, `legacy_hash` →
+    `AzaharTextureRequest::KnownModernHash`/`KnownLegacyHash`), so the pack hashes nothing either. Only a
+    texture's first resolve decodes (as before the change).
+  - *No copies:* `UiTexturePixels::shared_rgba8` hands the pack image, the HD stand-in or the cached decode
+    to the renderer without copying (`Data()`).
+  - *Budget:* besides the 6 per call, the deferrable resolves stop once a call has spent
+    `kUiResolveTimeBudget` (1.5 ms).
+  - *HUD images kept across a size change:* they are reduced to 3x whatever the size
+    (`kUiTextureMaxScale`); `Configure` keeps them when only the cap changes (`mUiValidFromGeneration`).
+    Off clears them, as before.
+  - *`Log()`:* a 1024-byte stack buffer; a longer line formats again into a string of its length
+    (`gfx_deko3d_log_line.h`). The queue held a string per line already: no new allocation for lines that fit.
+- **Counters (the change's line, now whole):** `game thread: N frames, longest frame G ms, longest HUD texture
+  preparation P ms (K frames over 4.0 ms), HUD textures resolved R (decoded D)`. P is the HUD preparation of
+  one frame including the ahead requests; K counts frames over `kTexturePackChangeGamePrepareBudgetMicros`;
+  D > 0 means the identity cache missed (a texture first seen, or evicted). The provider's
+  `identity_hits`/`identity_decodes`/`identity_evictions` count the same.
+- **Expected on the console** [INFERENCE]: P ≤ 3–4 ms and K = 0 for changes of textures seen before, D = 0,
+  G close to a normal frame; HUD and menu textures drawn with their pack image at once after a size change.
+  Off still draws the world's natives from that frame on; the HUD's game art comes back within a few
+  frames, from the cache.
+- Tests: `oot3d_native_ui_texture_provider_tests` (identity cache: the second resolve of the same bytes is not
+  decoded, gets both hashes, shares the pixels; other bytes are decoded), `oot3d_azahar_texture_pack_tests`
+  (`CapsHudTexturesAtThreeTimesWithoutMipmaps`: a cap change keeps the HUD image, ready with no decode; known
+  hashes), `oot3d_texture_pack_scale_tests` (`PackChangeSpread`: the budget counters; `LogLines`: lines at,
+  over and far over 1024 bytes kept whole), `oot3d_n64_ui_renderer_tests`. Five guards; two existing guards
+  follow the new code.
+- **Console check:** in a field, L3+R3 > Video: HD textures 3x, 2x, 3x, off, on. No stutter; each `texture
+  pack change took effect` line in `deko3d.txt` ends with `HUD textures resolved R (decoded 0)` and `0 frames
+  over 4.0 ms`; the HUD keeps its pack art through the size changes; `hitches.txt` has no frames with game time
+  40+ ms over guest time.
+
 ### HUD against the mod's screenshots (07/11, test.9 report)
 - **Report:** two images (`2026110713043700-…` and `2026110713045100-…`), "the normal looks better but
   they still don't look quite like the images from the mod website" (GameBanana 695893, Kokiri Forest

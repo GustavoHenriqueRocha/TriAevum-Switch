@@ -14,6 +14,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace Oot3dNativeGame {
@@ -60,6 +61,11 @@ struct Oot3dNativeUiTextureProviderStats {
     std::uint64_t custom_texture_pending = 0;
     // Textures offered to the custom source ahead of their first draw.
     std::uint64_t custom_texture_ahead = 0;
+    // Native/profile textures offered to the custom source: found in the
+    // identity cache (no decode, no hash of the decoded pixels) or decoded.
+    std::uint64_t identity_hits = 0;
+    std::uint64_t identity_decodes = 0;
+    std::uint64_t identity_evictions = 0;
 };
 
 // A decoded UI texture offered to a custom texture source (a texture pack,
@@ -80,6 +86,11 @@ struct Oot3dNativeUiCustomTextureRequest {
     // Asked for before the texture's first draw (RequestAhead): the source
     // starts preparing its replacement; the result is not used.
     bool ahead = false;
+    // The texture's Azahar hashes when the provider knows them already (its
+    // identity cache): the source need not hash `encoded_base_level` (modern)
+    // nor the decoded pixels (legacy), and `rgba8` may be the cached decode.
+    std::optional<std::uint64_t> modern_hash;
+    std::optional<std::uint64_t> legacy_hash;
 };
 
 struct Oot3dNativeUiCustomTexture {
@@ -90,6 +101,9 @@ struct Oot3dNativeUiCustomTexture {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::shared_ptr<const std::vector<std::uint8_t>> rgba8;
+    // The request's legacy Azahar hash when the source computed it (the
+    // provider caches it with the decode).
+    std::optional<std::uint64_t> legacy_hash;
 };
 
 struct Oot3dNativeUiCustomTextureSource {
@@ -161,6 +175,22 @@ class Oot3dNativeA32UiTextureProvider final
     }
 
   private:
+    // A native texture's decode and legacy hash, by its encoded base level
+    // (its modern Azahar hash) and shape. A texture resolved again (a pack
+    // change, a provisional poll) is read and hashed, not decoded; its pixels
+    // are shared, not copied (test.14: each resolve decoded, 2-6 ms on a
+    // desktop core for a 256-512 texel HUD texture, up to 12 per frame every
+    // 4 frames after each pack change: 66-108 ms game-thread frames).
+    struct CachedIdentity {
+        std::shared_ptr<const std::vector<std::uint8_t>> native;
+        std::uint64_t legacy_hash = 0;
+        std::uint64_t last_use = 0;
+    };
+    // Decodes kept at most (bytes of RGBA8); the least recently used go. The
+    // TopScreen HUD and the pause pages' natives fit [INFERENCE].
+    static constexpr std::size_t kIdentityCacheBytes = 64U << 20U;
+    [[nodiscard]] static std::uint64_t IdentityKey(std::uint64_t modernHash, std::uint16_t width,
+                                                   std::uint16_t height, std::uint8_t format) noexcept;
     bool ResolvePixels(const oot3d::ui::UiTextureIdentity& identity,
                        oot3d::ui::UiTexturePixels& pixels, std::string* error,
                        bool ahead) const;
@@ -171,12 +201,23 @@ class Oot3dNativeA32UiTextureProvider final
                             std::span<const std::uint8_t> encoded,
                             oot3d::ui::UiTexturePixels& pixels, bool ahead,
                             bool overridden) const;
+    // The same from the identity cache: false when `encoded` is not there.
+    bool ApplyCachedCustomTexture(std::uint8_t nativePicaFormat,
+                                  std::span<const std::uint8_t> encoded,
+                                  oot3d::ui::UiTexturePixels& pixels) const;
+    // `custom` applied over the native pixels (`pixels.shared_rgba8`).
+    void FinishCustomTexture(const Oot3dNativeUiCustomTexture& custom,
+                             oot3d::ui::UiTexturePixels& pixels) const;
 
     const Oot3dPicaPhysicalMemoryView& mMemory;
     const TopScreenTextureOverridePack* mTextureOverrides = nullptr;
     mutable Oot3dNativeUiTextureProviderStats mStats;
     Oot3dNativePicaSubmissionQueue::TextureSnapshotTransform mGeneratedTextureTransform;
     Oot3dNativeUiCustomTextureSource mCustomTextures;
+    // Game thread only (Resolve, RequestAhead).
+    mutable std::unordered_map<std::uint64_t, CachedIdentity> mIdentities;
+    mutable std::size_t mIdentityBytes = 0;
+    mutable std::uint64_t mIdentityClock = 0;
 };
 
 } // namespace Oot3dNativeGame

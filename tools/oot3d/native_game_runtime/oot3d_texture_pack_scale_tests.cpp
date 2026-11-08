@@ -4,6 +4,7 @@
 #include "oot3d/renderer/azahar_pack_scale.h"
 #include "oot3d/renderer/azahar_texture_pack_settings.h"
 #include "oot3d/renderer/azahar_texture_scale.h"
+#include "fast/backends/gfx_deko3d_log_line.h"
 
 #include <chrono>
 #include <cstdio>
@@ -525,6 +526,38 @@ void PackChangeSpread() {
   watch.Observe(2000000U, 2000000U);
   watch.Begin();
   Require(watch.End().LongestFrameMicros == 0U, "a frame outside the change was counted");
+  // test.14 (logs22a/hitches.txt:805-944): frames over the HUD budget are
+  // counted, with the HUD textures resolved and decoded meanwhile.
+  watch.Begin();
+  watch.Observe(33000U, 1500U, 6U, 0U);
+  watch.Observe(108000U, 85000U, 12U, 12U);
+  watch.Observe(34000U, kTexturePackChangeGamePrepareBudgetMicros, 3U, 0U);
+  const auto counted = watch.End();
+  Require(counted.Frames == 3U && counted.PrepareOverBudget == 1U && counted.Resolves == 21U &&
+              counted.Decodes == 12U && counted.LongestPrepareMicros == 85000U,
+          "frames over the HUD budget, resolves or decodes of a change");
+}
+
+// logs/deko3d.txt lines are never cut (test.14: every `texture pack change`
+// line lost its tail at 511 characters).
+std::string FormatLine(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  std::string line = Fast::Deko3d::FormatLogLine(format, args);
+  va_end(args);
+  return line;
+}
+
+void LogLines() {
+  Require(FormatLine("short %d", 7) == "short 7", "a short line");
+  const std::string tail(3000U, 'x');
+  const std::string longer = FormatLine("head %s tail %u", tail.c_str(), 42U);
+  Require(longer.size() == 5U + 3000U + 8U && longer.starts_with("head xxx") && longer.ends_with(" tail 42"),
+          "a line longer than the stack buffer was cut");
+  const std::string exact(Fast::Deko3d::kLogLineStackBytes - 1U, 'y');
+  Require(FormatLine("%s", exact.c_str()) == exact, "a line of the stack buffer's size was cut");
+  const std::string over(Fast::Deko3d::kLogLineStackBytes, 'z');
+  Require(FormatLine("%s", over.c_str()) == over, "a line one longer than the stack buffer was cut");
 }
 
 } // namespace
@@ -542,6 +575,7 @@ int main() {
   PackImageScales();
   ScaleMenu();
   PackChangeSpread();
+  LogLines();
   std::puts("oot3d_texture_pack_scale_tests: ok");
   return 0;
 }

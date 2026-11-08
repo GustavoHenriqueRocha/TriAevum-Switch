@@ -579,8 +579,9 @@ void PicaResources::LogPackChange(const char* outcome, const PackOnScreen& onScr
         "resolved again at their draw %llu (made while the index was being built %llu, again once it was ready "
         "%llu); pack images uploaded %llu (%llu MiB), earlier ones released %llu; drawn last frame: %llu pack "
         "images, %llu native (%llu waiting for their pack image); draws kept on their earlier texture for a later "
-        "frame %llu (%llu frames at the budget of %u), longest render frame start %.1f ms; game thread: longest frame %.1f ms, "
-        "longest HUD texture preparation %.1f ms",
+        "frame %llu (%llu frames at the budget of %u), longest render frame start %.1f ms; game thread: %llu frames, "
+        "longest frame %.1f ms, longest HUD texture preparation %.1f ms (%llu frames over %.1f ms), HUD textures "
+        "resolved %llu (decoded %llu)",
         outcome, change.AtStart ? "start, " : "", change.PackOn ? "on" : "off", change.MaxScale, millis,
         static_cast<unsigned long long>(mFrame - change.Frame), index,
         static_cast<unsigned long long>(change.ResolvedAgain), static_cast<unsigned long long>(change.MadeWhileIndexing),
@@ -590,7 +591,10 @@ void PicaResources::LogPackChange(const char* outcome, const PackOnScreen& onScr
         static_cast<unsigned long long>(onScreen.Waiting), static_cast<unsigned long long>(change.Deferred),
         static_cast<unsigned long long>(change.RebuildFrames), ::Oot3d::Renderer::kTexturePackRebuildsPerFrame,
         static_cast<double>(change.LongestFrameStartMicros) / 1000.0,
-        static_cast<double>(game.LongestFrameMicros) / 1000.0, static_cast<double>(game.LongestPrepareMicros) / 1000.0);
+        static_cast<unsigned long long>(game.Frames), static_cast<double>(game.LongestFrameMicros) / 1000.0,
+        static_cast<double>(game.LongestPrepareMicros) / 1000.0, static_cast<unsigned long long>(game.PrepareOverBudget),
+        static_cast<double>(::Oot3d::Renderer::kTexturePackChangeGamePrepareBudgetMicros) / 1000.0,
+        static_cast<unsigned long long>(game.Resolves), static_cast<unsigned long long>(game.Decodes));
     mPackChange.Active = false;
 }
 

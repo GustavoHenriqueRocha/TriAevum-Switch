@@ -67,6 +67,11 @@ struct AzaharTextureRequest {
     // image (kept for the session, decoded ahead at the next start); its first
     // sights are counted apart (AzaharHudPackStatus::MenuOnSight*).
     bool Menu = false;
+    // The request's Azahar hashes when the caller knows them already (the
+    // HUD's identity cache, oot3d_native_ui_texture_provider): not computed
+    // again, and NativeRgba8 is not needed for the legacy one.
+    std::optional<uint64_t> KnownModernHash;
+    std::optional<uint64_t> KnownLegacyHash;
 };
 
 struct AzaharTextureReplacement {
