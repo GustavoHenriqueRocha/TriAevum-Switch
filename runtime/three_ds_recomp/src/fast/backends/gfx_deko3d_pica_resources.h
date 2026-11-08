@@ -98,7 +98,21 @@ struct PicaPackChangeStats {
     uint64_t Deferred = 0;           // draws kept on their earlier texture: over kTexturePackRebuildsPerFrame
     uint64_t RebuildFrames = 0;      // frames that used the whole rebuild budget
     uint64_t LongestFrameStartMicros = 0; // the render thread's longest frame start (BeginFrame) since
+    // Of the frame start: the longest pack settings apply (Configure), stale
+    // release (Evict) and finished pack image upload (UploadReadyReplacements).
+    uint64_t LongestApplyMicros = 0;
+    uint64_t LongestEvictMicros = 0;
+    uint64_t LongestUploadMicros = 0;
+    // A change of only the size cap: pack images and natives kept (the same
+    // size at the new cap), and the runtime's counters at the change.
+    bool CapOnly = false;
+    uint64_t KeptImages = 0;
+    uint64_t KeptNatives = 0;
+    ::Oot3d::Renderer::AzaharCapChangeStatus CapStatusBefore{};
 };
+// Retired textures and pack images of earlier settings destroyed per frame at
+// most (Evict); the rest wait for the next frames, drawn by nothing.
+inline constexpr uint32_t kTextureReleasesPerFrame = 12U;
 // About 30 s at 60 FPS: a change still waiting then is logged as incomplete.
 inline constexpr uint64_t kPackChangeReportFrames = 1800U;
 
@@ -201,6 +215,8 @@ class PicaResources {
         // While PackPending: the view it was made from (spans empty), so
         // BeginFrame can upload the finished pack image for it.
         Renderer3ds::PicaTextureView PackView{};
+        // A pack image: its PNG's size before the cap (TexturePackCapChangesImage).
+        ::Oot3d::Renderer::TextureSize PackSource{};
     };
 
     struct LastUniforms {

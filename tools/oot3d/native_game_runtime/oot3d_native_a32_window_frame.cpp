@@ -1433,10 +1433,14 @@ bool NativeA32WindowSession::RunFrame() {
                                         .count());
     previousUiSubmit = uiSubmitStart;
     const auto &uiProvider = nativeUiTextureProviderStorage->Stats();
-    Oot3d::Renderer::LiveTexturePackChangeGameWatch().Observe(
-        frameMicros, micros(untimed.UiPrepare + untimed.UiAhead - uiPrepareBefore),
-        uiProvider.resolve_calls - uiProviderBefore.resolve_calls,
-        uiProvider.identity_decodes - uiProviderBefore.identity_decodes);
+    auto &packChangeWatch = Oot3d::Renderer::LiveTexturePackChangeGameWatch();
+    // The audio stream's stats take its lock: read only while a change runs.
+    const uint64_t concealEvents = packChangeWatch.Active() && hostAudioStream != nullptr
+                                       ? hostAudioStream->GetStats().ConcealEvents
+                                       : ~0ULL;
+    packChangeWatch.Observe(frameMicros, micros(untimed.UiPrepare + untimed.UiAhead - uiPrepareBefore),
+                            uiProvider.resolve_calls - uiProviderBefore.resolve_calls,
+                            uiProvider.identity_decodes - uiProviderBefore.identity_decodes, concealEvents);
   }
   if (uiSubmitHoldsKernel) hostWorkRelease.emplace();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PresentSubmit);

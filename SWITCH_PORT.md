@@ -2741,6 +2741,70 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   over 4.0 ms`; the HUD keeps its pack art through the size changes; `hitches.txt` has no frames with game time
   40+ ms over guest time.
 
+### HD texture size changes: nothing on the game thread, the index kept (08/11, test.15 logs23)
+- **Report (Perf23 §3):** with the HUD fixed (`decoded 0` on every line), 9 of 10 size changes still made one
+  game-thread frame of 117–157 ms (`texture pack change … game thread: … longest frame 117.0–156.7 ms`,
+  `logs23/deko3d.txt:310-353`; hitches `logs23/hitches.txt:313-510`), then 0.3–0.5 s of 30–67 ms frames, and
+  1–4 audio concealments per change (`conceal_events` 45 → 67 over the ten, `min_queued` 267–396 against
+  ~3,300; `perf.txt:751-849`). Every change also queued the scene's whole list again: `decoded=825` =
+  11 × 75.
+- **Where the game thread was:**
+  - *Not in the guest:* the hitch lines show `game_ms` 21–22, but `game_ms` is the frame before:
+    `oot3d_native_a32_window_frame.cpp` computes the busy time of the previous host frame at the next frame's
+    start and hands it to the render thread, whose hitch sample prints it with the present that follows
+    (`busyMs = frameMs - waitMs` of `previous.Start`…`presentationTime`). The long frame's own time comes with
+    the next present, which was not a hitch. So the game thread may well have been busy, not blocked.
+  - *Not the HUD:* `longest HUD texture preparation` 5.6–18.6 ms on those lines, all from the identity cache.
+  - *In the Video tab* [INFERENCE from the code; no counter split it]: the tab is drawn by
+    `gui->StartDraw()` on the game thread, and a size change saved there: `create_directories`, rewriting
+    `config/texture_pack` (even when unchanged), writing or removing `config/texture_pack_scale`, and probing
+    the pack folder (`is_directory`). SD writes measured 10–60 ms each elsewhere (`perf_writer_ms`): two of
+    them and the probes make the 100–130 ms the frame had beyond its usual work; change 10 (46 ms) had quick
+    writes.
+  - *Behind the render thread:* `longest render frame start` 17.7–53.8 ms on the change frames (only 1.2 at
+    start): the change frame's apply (`Configure`), the release of ~56 pack images at once (`earlier ones
+    released 56`) and the uploads. A render frame that long makes the game thread wait at its next
+    submission [INFERENCE]. The new detail line splits it.
+  - Ruled out by the code: the index (pack worker; the lock is only taken to publish), `Publish` (three atomics),
+    the HUD's revision (lock-free), `texture_pack_sizes` (written on the pack worker).
+- **Change:**
+  - *Settings writer (`fast/oot3d/config_writer.h`):* every file of the Video tab (video settings, overlay,
+    performance clocks, draw distance, HD textures, grass ×4, lighting) is written on one service thread; the
+    tab only queues the write (a newer write of the same file replaces a queued one) and publishes the value
+    as before. The pack folder is probed there too. A failed write still shows "Could not write config/…"
+    (`ConfigWriter::Failed`). Queued writes are done before the writer ends.
+  - *Index kept on a size change (`AzaharTexturePackRuntime::Configure`):* with the pack on before and after
+    and only the cap different, the runtime keeps its index, HUD images and HUD revision (`UiRevision`, now
+    the HUD provider's revision; only HD textures on/off, another folder or a rebuilt index bump it). World
+    images of the old cap are dropped (generation).
+  - *Only the images that change:* each world image's PNG size is kept at its decode
+    (`AzaharTextureReplacement::SourceWidth/SourceHeight`). A size change queues again only the scene's listed
+    images the new cap draws at another size (`TexturePackCapChangesImage`); the others are decoded when drawn.
+    The renderer keeps every pack image the new cap draws at the same size, the HUD/menu images, and natives
+    without a pack image (their epoch is moved on), so they are neither released nor uploaded again.
+  - *Releases spread:* at most `kTextureReleasesPerFrame` (12) textures are destroyed a frame (retired ones and
+    pack images of earlier settings).
+  - *Off* is as before: the world draws its natives from that frame on.
+- **Counters** (a second line after each change, `texture pack change detail`): `size only, index kept` or
+  `HD textures on or off`; pack images and natives kept; scene images decoded again and left; render frame
+  start parts (apply, releases, uploads, longest each); settings files written off the game thread (count,
+  failures, longest); and the audio stream's concealments during the change. With the main line's `game
+  thread: … longest frame G ms`, G near a normal frame and `conceal events … 0` show that no game-thread frame
+  drained the audio queue (~3,300 frames: about 70 ms at the 48 kHz device rate, 100 ms at the DSP's 32,728 Hz).
+- **Expected on the console** [INFERENCE]: a size change has G ≈ 20–35 ms, render frame start parts of a few
+  ms, `decoded again` only for images whose size differs (for the user's pack, 2x ↔ 3x: the 3x model images),
+  0 concealments; the settings file writes show their 10–60 ms on the writer instead.
+- Tests: `oot3d_texture_pack_scale_tests` (`SettingsWriter`: Submit does not wait, a newer write of a file
+  replaces the queued one, failures per file, a queued write done before the writer ends; `CapChanges`: which
+  images a cap change changes, concealments during a change), `oot3d_azahar_texture_pack_tests`
+  (`ASizeChangeKeepsTheIndexAndDecodesOnlyTheImagesItChanges`: 3x→2x keeps the index and HUD revision and
+  queues 1 of 3 scene images, 2x→1x 2 of 3; off bumps the HUD revision; and
+  `TexturesDrawnWhileThePackIndexesResolveOnceItIsReady`, whose No limit step now keeps the index). Six new
+  guards; five existing guards follow the writer and the frame-start timing.
+- **Console check:** in Kokiri, L3+R3 > Video: HD texture size 2x, 1x, 3x, 2x. No stall or sound repeat; each
+  change gives `texture pack change took effect` with `game thread: … longest frame` near 33 ms and a `detail`
+  line `size only, index kept … audio conceal events during the change 0`.
+
 ### HUD against the mod's screenshots (07/11, test.9 report)
 - **Report:** two images (`2026110713043700-…` and `2026110713045100-…`), "the normal looks better but
   they still don't look quite like the images from the mod website" (GameBanana 695893, Kokiri Forest

@@ -1171,18 +1171,15 @@ TEST_F(Oot3dAzaharTexturePackTest, TexturesDrawnWhileThePackIndexesResolveOnceIt
     ASSERT_EQ(capped.State, AzaharTextureResolveState::Ready);
     EXPECT_EQ(capped.Replacement->Width, 16U); // the 2x cap
 
-    // "HD texture size" No limit: indexed again, the same in between, and the
-    // second resolve decodes the file at its own size.
+    // "HD texture size" No limit: the index is kept (test.16; before, the
+    // pack was indexed again), so the resolve has its hash at once and
+    // decodes the file at its own size.
     runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack,
                        .MaxReplacementScale = 0U, .GenerateMipmaps = true});
-    EXPECT_FALSE(runtime.IndexReady());
+    EXPECT_TRUE(runtime.IndexReady());
     const auto meanwhile = runtime.ResolveOrQueue(request);
     EXPECT_EQ(meanwhile.State, AzaharTextureResolveState::Pending);
-    EXPECT_FALSE(meanwhile.NativeHashAvailable);
-    ASSERT_TRUE(feedPackJson());
-    runtime.WaitForPendingLoads();
-    ASSERT_TRUE(runtime.IndexReady());
-    EXPECT_EQ(runtime.ResolveOrQueue(request).State, AzaharTextureResolveState::Pending);
+    EXPECT_TRUE(meanwhile.NativeHashAvailable);
     runtime.WaitForPendingLoads();
     const auto full = runtime.PollOrQueue(hash, 8U, 8U);
     ASSERT_EQ(full.State, AzaharTextureResolveState::Ready);
@@ -1296,6 +1293,79 @@ TEST_F(Oot3dAzaharTexturePackTest, MeasuresThePacksLargestImageScaleAndRemembers
         EXPECT_FALSE(runtime.ImageScaleStatus().Remembered);
         EXPECT_EQ(runtime.LargestImageScale(), 5U);
     }
+}
+
+// test.15: every "HD texture size" change indexed the pack again, bumped the
+// HUD's revision and decoded the scene's whole list again (825 = 11 x 75
+// decodes). A change of only the cap keeps the index and the HUD's revision,
+// and queues again only the scene images the new cap draws at another size.
+TEST_F(Oot3dAzaharTexturePackTest, ASizeChangeKeepsTheIndexAndDecodesOnlyTheImagesItChanges) {
+    using namespace Oot3d::Renderer;
+    const auto pack = Root / "sizes";
+    std::filesystem::create_directories(pack);
+    {
+        std::ofstream output(pack / "pack.json");
+        output << nlohmann::json{{"options", {{"skip_mipmap", true}, {"flip_png_files", true}, {"use_new_hash", true}}}};
+    }
+    // Three 8x8 natives: image 0 at 2x (16), image 1 at 1x (8), image 2 at 3x (24).
+    std::array<std::array<uint8_t, 256>, 3> natives{};
+    constexpr std::array<uint32_t, 3> kFile{16U, 8U, 24U};
+    for (size_t image = 0; image < natives.size(); ++image) {
+        for (size_t index = 0; index < 256U; ++index) natives[image][index] = static_cast<uint8_t>(index * 5U + image * 17U);
+        WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, AzaharCityHash64(natives[image]), 0U, 0U),
+                              kFile[image], kFile[image],
+                              std::vector<uint8_t>(size_t(kFile[image]) * kFile[image] * 4U, uint8_t(60U + image)));
+    }
+    const auto request = [&](size_t image) { return AzaharTextureRequest{8U, 8U, 0U, 0U, natives[image], {}}; };
+    auto configuration = AzaharTexturePackConfiguration{.LoadCustomTextures = true, .UserDirectory = Root,
+                                                        .LoadDirectory = pack, .MaxReplacementScale = 3U,
+                                                        .GenerateMipmaps = true,
+                                                        .SceneImageList = Root / "texture_pack_scenes"};
+    AzaharTexturePackRuntime runtime;
+    runtime.Configure(configuration);
+    runtime.WaitForPendingLoads();
+    runtime.NoteScene(0x55);
+    for (size_t image = 0; image < 3U; ++image) (void)runtime.ResolveOrQueue(request(image));
+    runtime.WaitForPendingLoads();
+    for (size_t image = 0; image < 3U; ++image)
+        EXPECT_EQ(runtime.ResolveOrQueue(request(image)).Replacement->Width, kFile[image]);
+    const uint64_t uiRevision = runtime.UiRevision();
+
+    // 3x -> 2x: only image 2 (24 -> 16) is decoded again; the index stays.
+    configuration.MaxReplacementScale = 2U;
+    runtime.Configure(configuration);
+    EXPECT_TRUE(runtime.IndexReady());
+    EXPECT_EQ(runtime.UiRevision(), uiRevision);
+    auto cap = runtime.CapChangeStatus();
+    EXPECT_EQ(cap.Changes, 1U);
+    EXPECT_EQ(cap.Requeued, 1U);
+    EXPECT_EQ(cap.Left, 2U);
+    runtime.WaitForPendingLoads();
+    const auto again = runtime.PollQueued(AzaharCityHash64(natives[2]));
+    ASSERT_EQ(again.State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(again.Replacement->Width, 16U);
+    EXPECT_EQ(again.Replacement->SourceWidth, 24U);
+    // An unchanged image is decoded when drawn (the renderer keeps its copy).
+    EXPECT_EQ(runtime.PollQueued(AzaharCityHash64(natives[0])).State, AzaharTextureResolveState::Missing);
+    EXPECT_EQ(runtime.ResolveOrQueue(request(0)).State, AzaharTextureResolveState::Pending);
+    runtime.WaitForPendingLoads();
+    EXPECT_EQ(runtime.ResolveOrQueue(request(0)).Replacement->Width, 16U);
+
+    // 2x -> 1x: images 0 (16 -> 8) and 2 (16 -> 8); image 1 stays at 8.
+    configuration.MaxReplacementScale = 1U;
+    runtime.Configure(configuration);
+    cap = runtime.CapChangeStatus();
+    EXPECT_EQ(cap.Changes, 2U);
+    EXPECT_EQ(cap.Requeued, 3U);
+    EXPECT_EQ(cap.Left, 3U);
+    EXPECT_EQ(runtime.UiRevision(), uiRevision);
+
+    // HD textures off: a full change, a new HUD revision.
+    configuration.LoadCustomTextures = false;
+    runtime.Configure(configuration);
+    EXPECT_NE(runtime.UiRevision(), uiRevision);
+    runtime.WaitForPendingLoads();
+    EXPECT_EQ(runtime.CapChangeStatus().Changes, 2U);
 }
 
 } // namespace

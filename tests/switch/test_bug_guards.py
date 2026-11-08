@@ -317,7 +317,8 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
           r'mPerf = ReadPerformanceChoice\(mConfig\);\s+'
           r'if \(DerivePerformanceMode\(mPerf\) != PerformanceMode::Off\) mPerfStatus = ApplyPerformance\(mPerf\);.*?'
-          r'mPerfSaveError = SavePerformanceChoice\(mConfig, mPerf\);\s+mPerfStatus = ApplyPerformance\(mPerf\);',
+          r'Write\("performance", \[config = mConfig, choice = mPerf\] \{ return SavePerformanceChoice\(config, choice\) == nullptr; \}\);\s+'
+          r'mPerfStatus = ApplyPerformance\(mPerf\);',
           test="oot3d_switch_performance_tests (Files, Mode)"),
     Guard("CPU High: only 1224 MHz or the earlier rate, never a GPU/memory write through clkrst",
           "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
@@ -398,8 +399,8 @@ GUARDS = [
           r'dkQueueSubmitCommands\(mQueue, list\);\s+dkQueueFlush\(mQueue\);'),
     Guard("deko3d pack images: finished ones upload at frame top, never one barrier per draw mid-frame",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
-          r'Evict\(\);\s+BeginScene\(\);\s+UploadReadyReplacements\(\);\s+TrackPackChange\(\);\s+'
-          r'(?:LogPackSizes\(\);\s+)?(?:if \(mPackChange\.Active\) \{.*?\}\s+)?\}',
+          r'Evict\(\);\s+const uint64_t evictMicros = micros\(partStart\);\s+BeginScene\(\);\s+'
+          r'partStart = std::chrono::steady_clock::now\(\);\s+UploadReadyReplacements\(\);.*?TrackPackChange\(\);',
           forbid=r'PollOrQueue\(\s*native\.PackHash, static_cast<uint16_t>\(view\.Width\)'),
     # --- 07/11: colour compression (config/deko3d_compression "0" = off). The display controller can't
     # read compressed images: window images handed to nwindow without dkQueuePresentImage stay uncompressed.
@@ -426,7 +427,7 @@ GUARDS = [
           forbid=r'"native30_no_interpolation"'),
     Guard("FPS in L3+R3 > Video: the menu publishes the choice (and still writes config/fps60)",
           "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
-          r'if \(changed\) mError = mSettings\.Save\(mConfig\);.*?'
+          r'if \(changed\) Write\("video", \[settings = mSettings, config = mConfig\] \{ return settings\.Save\(config\)\.empty\(\); \}\);.*?'
           r'if \(rateChanged\) LiveFrameRate\(\)\.Publish\(mSettings\.Fps60\);'),
     Guard("FPS switched live: every governor starts over at the new rate (no lock, estimate or interval of the old one)",
           "tools/oot3d/native_game_runtime/oot3d_native_cadence_governor.h",
@@ -938,7 +939,7 @@ GUARDS = [
           r'ApplyProfile\(\*state, state->Fps60, \*distance\);'),
     Guard("Grass distance: the menu saves and publishes the choice",
           "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
-          r'SaveGrassSwitchDistance\(mConfig, mGrassDistance\);\s+Fast::Oot3d::PublishGrassSwitchDistance\(mGrassDistance\);'),
+          r'return Fast::Oot3d::SaveGrassSwitchDistance\(config, distance\);\s+\}\);\s+Fast::Oot3d::PublishGrassSwitchDistance\(mGrassDistance\);'),
     Guard("Grass distance Whole area: every tuft, capped only by the stream memory (no distance thinning)",
           "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
           r'case GrassSwitchDistance::Area:\s+profile\.FullDensityDistance = kGrassWholeAreaDistance;.*?'
@@ -1759,7 +1760,7 @@ GUARDS = [
           "oot3d_azahar_texture_pack_tests (TexturesDrawnWhileThePackIndexesResolveOnceItIsReady)"),
     Guard("the game thread's longest frame and HUD preparation during a pack change are logged",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
-          r'Oot3d::Renderer::LiveTexturePackChangeGameWatch\(\)\.Observe\(\s+frameMicros,',
+          r'packChangeWatch\.Observe\(frameMicros,',
           "oot3d_texture_pack_scale_tests (PackChangeSpread)"),
     # --- 08/11 (TogglePack2, test.14 logs22a): each HD-texture change still stuttered: every 4th frame the
     # game thread took 66-108 ms (20 ms guest; hitches.txt:805-944): the HUD's provisional polls and
@@ -1791,6 +1792,40 @@ GUARDS = [
           "tools/oot3d/ui_n64/oot3d_n64_ui_renderer.cpp",
           r'if \(budget == 0U \|\| std::chrono::steady_clock::now\(\) - start >= kUiResolveTimeBudget\) return false;',
           "oot3d_n64_ui_renderer_tests (TestRevisionResolvesAreSpread)"),
+    # --- 08/11 (TogglePack3, test.15 logs23): 9 of 10 HD texture size changes still gave one 117-157 ms
+    # game-thread frame (hitches.txt:313-510): the Video tab wrote config/texture_pack(_scale) and probed the
+    # pack folder on the game thread; each size change also indexed the pack again and decoded the scene's
+    # whole list (SWITCH_PORT.md "HD texture size changes: nothing on the game thread, the index kept").
+    Guard("the Video tab writes its config files on the settings writer's thread, never in its draw",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'::Oot3d::Renderer::LiveTexturePackSettings\(\)\.Publish\(mPack\);\s+'
+          r'Write\(::Oot3d::Renderer::kTexturePackConfigName, \[settings = mPack, config = mConfig, found = mPackFound\] \{',
+          "oot3d_texture_pack_scale_tests (SettingsWriter)",
+          forbid=r'mPackError = mPack\.Save\(mConfig\);|mPackFound = PackFolderExists\(\);'),
+    Guard("a change of only HD texture size keeps the pack's index and the HUD's revision",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'if \(keepHud && mIndexReady && !mRebuildRequested && !mBuilding\) \{.*?'
+          r'QueueScenePreloadLocked\(previousCap\);\s+mIdle\.notify_all\(\);\s+return;',
+          "oot3d_azahar_texture_pack_tests (ASizeChangeKeepsTheIndexAndDecodesOnlyTheImagesItChanges)"),
+    Guard("a size change queues again only the scene images the new cap draws at another size",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'!TexturePackCapChangesImage\(native, source->second, \*changedFromCap,',
+          "oot3d_azahar_texture_pack_tests (ASizeChangeKeepsTheIndexAndDecodesOnlyTheImagesItChanges), "
+          "oot3d_texture_pack_scale_tests (CapChanges)"),
+    Guard("the HUD's texture revision is the pack's UI revision (not bumped by a size change)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'\[\] \{ return Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.UiRevision\(\); \},',
+          "oot3d_azahar_texture_pack_tests (ASizeChangeKeepsTheIndexAndDecodesOnlyTheImagesItChanges)"),
+    Guard("the renderer keeps the pack images a size change draws at the same size",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'const bool capOnly = mTexturePackSettings\.Enabled && settings\.Enabled;.*?'
+          r'!::Oot3d::Renderer::TexturePackCapChangesImage\(.*?texture\.PackEpoch = mPackEpoch;',
+          "oot3d_texture_pack_scale_tests (CapChanges)"),
+    Guard("textures are destroyed at most kTextureReleasesPerFrame a frame",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'if \(idle\(texture\) < policy\.MinIdleFrames \|\| releases >= kTextureReleasesPerFrame\) \{.*?'
+          r'if \(idle\(texture\) >= policy\.MinIdleFrames && releases < kTextureReleasesPerFrame\) \{',
+          "no host test (Switch-only renderer); the change's detail line shows the release time"),
     # --- 08/11 (TexSizes, test.13 report): "if we have 3x textures max, the setting shouldn't show 4." The
     # Video tab offers only the sizes the pack has, measured by the pack worker when it has nothing else to
     # do (SWITCH_PORT.md "HD texture size: only the sizes the pack has").
