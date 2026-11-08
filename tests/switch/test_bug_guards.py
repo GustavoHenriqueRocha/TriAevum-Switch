@@ -279,7 +279,7 @@ GUARDS = [
           r'dkQueueSubmitCommands\(mQueue, list\);\s+dkQueueFlush\(mQueue\);'),
     Guard("deko3d pack images: finished ones upload at frame top, never one barrier per draw mid-frame",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
-          r'Evict\(\);\s+BeginScene\(\);\s+UploadReadyReplacements\(\);\s+\}',
+          r'Evict\(\);\s+BeginScene\(\);\s+UploadReadyReplacements\(\);\s+TrackPackChange\(\);\s+\}',
           forbid=r'PollOrQueue\(\s*native\.PackHash, static_cast<uint16_t>\(view\.Width\)'),
     # --- 07/11: colour compression (config/deko3d_compression "0" = off). The display controller can't
     # read compressed images: window images handed to nwindow without dkQueuePresentImage stay uncompressed.
@@ -1553,6 +1553,29 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
           r'pack\.WaitForImages\(mHoldHashes, std::chrono::microseconds\(mHoldLeftMicros\)\);',
           "oot3d_azahar_texture_pack_tests (SceneChangesDropTheBacklogAndTheHoldWaitsForImagesOnScreen)"),
+    # --- 08/11 (TexLive): HD textures turned on, or another "HD texture size", in the Video tab did not
+    # show on the textures already in view: drawn while the pack indexed again, they had no hash, the poll
+    # answered Missing and they stayed native until evicted (SWITCH_PORT.md "HD textures applied at once").
+    Guard("textures drawn while the pack indexes (no hash) are made again once its index is ready",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'TexturePackEntryActionFor\(false, native\.PackEpoch, mPackEpoch, mTexturePack,\s+'
+          r'native\.PackUnindexed, mPackIndexReady\) ==\s+::Oot3d::Renderer::TexturePackEntryAction::Rebuild\).*?'
+          r'texture\.PackUnindexed = mTexturePackSettings\.Reresolve &&\s+'
+          r'pack\.State == ::Oot3d::Renderer::AzaharTextureResolveState::Pending &&\s+!pack\.NativeHashAvailable;',
+          "oot3d_texture_pack_scale_tests (ToggleCache), "
+          "oot3d_azahar_texture_pack_tests (TexturesDrawnWhileThePackIndexesResolveOnceItIsReady)"),
+    Guard("the renderer learns when the pack's index is ready after a change, and never polls an empty hash",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
+          r'mPackIndexReady = false;\s+Log\("resources: texture pack %s \(cap %ux\)".*?'
+          r'if \(mTexturePack && !mPackIndexReady\) \{.*?'
+          r'mPackIndexReady = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.IndexReady\(\);.*?'
+          r'if \(texture\.PackPending && !texture\.PackUnindexed && !texture\.Replacement && '
+          r'texture\.PackEpoch == mPackEpoch &&',
+          "oot3d_azahar_texture_pack_tests (TexturesDrawnWhileThePackIndexesResolveOnceItIsReady)"),
+    Guard("a native made while indexing is resolved again only once the index is ready, never a pack image",
+          "runtime/three_ds_recomp/include/oot3d/renderer/azahar_texture_pack_settings.h",
+          r'return !replacement && packOn && unindexed && indexReady \? TexturePackEntryAction::Rebuild',
+          "oot3d_texture_pack_scale_tests (ToggleCache)"),
     Guard("deko3d grass keeps placements on the SD card (config/grass_placement_cache)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
           r'if \(placementCache\) \{\s+state->Placements->SetCacheDirectory\(',

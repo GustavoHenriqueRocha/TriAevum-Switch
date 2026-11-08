@@ -16,6 +16,10 @@
 // - config/texture_pack_hold: how long, in ms, the renderer may wait in all
 //   for a scene's world images while its first frames draw (`0` or `off` =
 //   never); absent = 1000, at most 2500.
+// - config/texture_pack_reresolve: `0` turns off the second resolve of the
+//   textures drawn while the pack's index was being built (at start, or after
+//   a change in the Video tab), which then stay native until evicted (the
+//   behaviour before 08/11); absent = on.
 //
 // The Video tab writes the files and publishes the values in
 // LiveTexturePackSettings(); the renderer applies a new revision at the start
@@ -48,6 +52,7 @@ inline constexpr const char* kTexturePackHoldConfigName = "texture_pack_hold";
 inline constexpr uint32_t kTexturePackHoldDefaultMs = 1000U;
 // The hang watchdog reports a game thread stalled for 3 s.
 inline constexpr uint32_t kTexturePackHoldLimitMs = 2500U;
+inline constexpr const char* kTexturePackReresolveConfigName = "texture_pack_reresolve";
 
 // A whole number 0-8 (surrounding spaces and a line end allowed); anything
 // else is `fallback`.
@@ -82,6 +87,7 @@ struct TexturePackSettings {
     // Read at start only (the Video tab does not write them).
     bool ScenePreload = true;
     uint32_t HoldMs = kTexturePackHoldDefaultMs;
+    bool Reresolve = true;
 
     bool operator==(const TexturePackSettings&) const = default;
 
@@ -108,6 +114,11 @@ struct TexturePackSettings {
             std::string text;
             std::getline(file, text);
             settings.HoldMs = ParseTexturePackHoldMs(text);
+        }
+        if (std::ifstream file(config / kTexturePackReresolveConfigName); file) {
+            std::string text;
+            std::getline(file, text);
+            settings.Reresolve = text.empty() || text.front() != '0';
         }
         return settings;
     }
@@ -170,19 +181,36 @@ struct TexturePackSettings {
 
 // What the renderer's texture cache does with one cached entry once the pack
 // settings changed (`epoch` counts the changes; an entry remembers the epoch
-// it was made in):
+// it was made in) or the pack's index became ready:
 // - Keep: still valid.
-// - Rebuild: a native texture made without the current pack: retire it and
-//   resolve it again through the pack.
+// - Rebuild: a native texture made without the current pack, or made while the
+//   pack's index was being built (`unindexed`: the runtime had no hash for it,
+//   AzaharTextureResolveResult::NativeHashAvailable false, so it could never
+//   find its image) now that the index is ready: retire it and resolve it
+//   again through the pack.
 // - Release: a pack image of earlier settings: never drawn again; retire it
 //   (its memory goes once no frame in flight can read it).
 enum class TexturePackEntryAction : uint8_t { Keep, Rebuild, Release };
 
 [[nodiscard]] constexpr TexturePackEntryAction TexturePackEntryActionFor(bool replacement, uint32_t entryEpoch,
-                                                                         uint32_t epoch, bool packOn) noexcept {
-    if (entryEpoch == epoch) return TexturePackEntryAction::Keep;
-    if (replacement) return TexturePackEntryAction::Release;
-    return packOn ? TexturePackEntryAction::Rebuild : TexturePackEntryAction::Keep;
+                                                                         uint32_t epoch, bool packOn, bool unindexed,
+                                                                         bool indexReady) noexcept {
+    if (entryEpoch != epoch) {
+        if (replacement) return TexturePackEntryAction::Release;
+        return packOn ? TexturePackEntryAction::Rebuild : TexturePackEntryAction::Keep;
+    }
+    return !replacement && packOn && unindexed && indexReady ? TexturePackEntryAction::Rebuild
+                                                             : TexturePackEntryAction::Keep;
+}
+
+// A pack change (or the configuration at start) has taken effect on screen
+// once no pack image of earlier settings is left and, with the pack on, its
+// index is ready and none of the textures drawn last frame still waits for its
+// pack image (decoding, or made while the index was being built). The
+// renderer logs it once (`texture pack change took effect`).
+[[nodiscard]] constexpr bool TexturePackChangeTookEffect(bool packOn, bool indexReady, uint64_t waitingOnScreen,
+                                                         bool earlierPackImagesLeft) noexcept {
+    return !earlierPackImagesLeft && (!packOn || (indexReady && waitingOnScreen == 0U));
 }
 
 // Published by the Video tab; read by the renderer once per frame.

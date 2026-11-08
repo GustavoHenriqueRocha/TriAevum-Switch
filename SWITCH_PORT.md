@@ -2036,7 +2036,9 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   flight can read them (two frames, the eviction rule), and the pack worker drops its decoded
   images and queued decodes. On, or another size: each native texture is retired and made again on
   its next draw, so it resolves through the pack; the pack is scanned again and images decode
-  lazily, as at start. Only the deko3d renderer loads packs.
+  lazily, as at start. Textures drawn while that scan runs have no hash yet and are made again once
+  it is done (08/11; before, the textures in view stayed native: see "HD textures applied at once,
+  also to the textures in view" below). Only the deko3d renderer loads packs.
 - **Size cap (pack worker):** after the PNG decode, an image wider or taller than native x N is
   reduced to at most native x N on each axis (`azahar_texture_scale.cpp`): every output texel is
   the area-weighted average of the source texels it covers (any ratio, e.g. 3 → 2, not only
@@ -2273,6 +2275,71 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   (`FileSelectPiecesAreRelocatedMenuDrawsInEitherDomain`), `oot3d_grass_async_placement_builder_tests`
   (load/build split, limits), `oot3d_grass_switch_tests` (`Oot3dGrassPlacementCache`). No shader change:
   `deko3d.pack` unchanged.
+
+### HD textures applied at once, also to the textures in view (`config/texture_pack_reresolve`, 08/11)
+- **Report (test.12):** "texture settings, I don't think they apply in real time" (tried in an older run),
+  and "does 2x/3x/4x work automatically based on the files available?".
+- **Cause:** turning HD textures on, or choosing another "HD texture size", reconfigures the pack runtime,
+  and any change of its configuration (the size cap included) throws the index away and scans the pack
+  again (`AzaharTexturePackRuntime::Configure`: `mIndexReady = false`). The renderer applies the change at
+  the top of a frame and retires every texture of the earlier settings; that same frame, every texture in
+  view is made again and asks the runtime, whose index is not ready: the answer is `Pending` with no hash
+  (`ResolveOrQueue`, `{Pending, 0U, nullptr}`). The texture kept hash 0; once the index was ready, the frame
+  top's poll asked for hash 0, got `Missing`, and the texture was drawn native for good, until 30 s
+  unused or the texture budget evicted it. So after "on" or another size, everything in view at the time
+  stayed (or went back to) native; Link, the pause pages' art and anything drawn in every scene kept it
+  across scene changes; only textures first drawn after the scan got pack images. Off worked (natives are
+  made from the draw's bytes; pack images released after two frames). The HUD (UI renderer) was right: it
+  resolves again at every pack generation, and the index's completion is one. The same race exists at
+  start, for textures drawn before the first index is ready. In the code since the toggle came in
+  (`1ea23809`, build 5, `0.1.1-test.1`).
+- **Old logs:** the only live changes are `logs6/deko3d.txt:45` (`texture pack on (cap 2x)`) and
+  `logs7/deko3d.txt:41` (`off (cap 3x)`), both build 5. `pack images=0` there before and after: no pack was
+  installed yet (logs7 had the pack on from its start and also 0; from logs8 on the same title screen
+  gives `pack images=36 … uploaded=13 MiB`), so those logs cannot show the bug. No later log has a live
+  change.
+- **Fix:** a texture made while the index is being built (`Pending` without a hash,
+  `AzaharTextureResolveResult::NativeHashAvailable` false) is marked `PackUnindexed`: drawn native, never
+  polled with hash 0, left out of the hold. The renderer asks `AzaharTexturePackRuntime::IndexReady()` once
+  per frame until it is ready (after a change or at start), and from then on such a texture is made again at
+  its next draw (`TexturePackEntryActionFor`: `Rebuild`), which resolves it with its hash and queues its
+  image as a texture on screen. Cost: one more native decode per texture in view, once, when the scan ends.
+- **A/B:** `config/texture_pack_reresolve` = `0` (read at start) gives the old behaviour back.
+- **Log** (`deko3d.txt`), once per change, when it has taken effect on screen (no pack image of the earlier
+  settings left; with HD textures on, the index ready and none of the textures drawn last frame still
+  waiting for its image): `resources: texture pack change took effect (on|off, cap Nx) after T ms, F frames:
+  index ready after I ms; resolved again at their draw R (made while the index was being built U, again once
+  it was ready A); pack images uploaded P (M MiB), earlier ones released E; drawn last frame: X pack images,
+  Y native (W waiting for their pack image)`. The same line with `start, ` for the configuration at start;
+  `still incomplete` after 1800 frames, `superseded` when another change came first. Expected after "on" in
+  a scene: `A` close to `U`, `X` most of the textures in view, `Y` those the pack has no image for. With
+  `texture_pack_reresolve` = `0` the line still comes, with `A` 0 and the stuck textures in `Y`.
+- **2x/3x/4x and the files:** "HD texture size" is a cap, not a choice of files: each PNG is decoded and,
+  when wider or taller than native x N, reduced to native x N (`CappedReplacementSize`, applied after the
+  decode in `DecodeReplacement`); a smaller file is used at its own size, never enlarged; No limit keeps
+  every file's size. HUD and menu images stay at most 3x whatever the setting (`kUiTextureMaxScale`). The
+  pack has one file per texture, so a bigger setting only shows more where the files are bigger: with the
+  copy `shrink_texture_pack.py` writes by default (world and models at most 2x, HUD 3x), 3x, 4x and No
+  limit draw the same world images as 2x (each change decodes them again: native in view for the scan
+  and the decodes, then the same art). The test.12 logs point to that copy on the user's SD [INFERENCE]:
+  the HUD's five images decode on the console in 1289 ms (`logs17/deko3d.txt:39`, `hud pack … ahead=5/5 in
+  1289 ms (21888 KiB)`, the five at 3x) and 533 ms (`logs18a`), against 2.7 s for the 1080p files on the
+  PC (0.24 s shrunk); `logs20a:49` decodes 26 in 1521 ms. The title screen's 36 pack images take 13 MiB
+  (`logs20a:48`, the same since logs8) where its natives took about 3 MiB (`logs6:25` `live=3 MiB`
+  without a pack): about 4x the bytes, i.e. 2x per side (a 3x file would give 9x at the 3x cap).
+  Bigger world or model images need a copy made with
+  `--world 3`/`--models 3` (or the 1080p pack itself) and, for 4x or No limit in dungeons, a larger
+  `config/gl_texture_budget_mb`.
+- Tests: `oot3d_texture_pack_scale_tests` (`ToggleCache`: the rule for textures made while indexing, the
+  took-effect rule, the setting), `oot3d_azahar_texture_pack_tests`
+  (`TexturesDrawnWhileThePackIndexesResolveOnceItIsReady`: pack.json is a FIFO, so the scan waits for the
+  test; a resolve meanwhile has no hash, its poll after the scan answers Missing, the second resolve finds
+  the image at the 2x cap, and again after a change to No limit at the file's size; standalone build). The
+  renderer's wiring (`gfx_deko3d_pica_resources.cpp`, Switch only) is checked by compiling it; three guards.
+- **Console check:** in Kokiri Forest, L3+R3 > Video: HD textures off, then on. Within a few seconds the
+  ground, Link and the houses are the pack's again (before: native until another area), and `deko3d.txt`
+  has `texture pack change took effect (on, cap 3x)` with `again once it was ready` > 0 and `W` 0. Then
+  "HD texture size" 2x: the same line with `cap 2x`.
 
 ### HUD against the mod's screenshots (07/11, test.9 report)
 - **Report:** two images (`2026110713043700-…` and `2026110713045100-…`), "the normal looks better but

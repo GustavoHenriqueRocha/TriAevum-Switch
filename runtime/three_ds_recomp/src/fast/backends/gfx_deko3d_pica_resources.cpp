@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -165,11 +166,16 @@ bool PicaResources::Init(Device& device) {
     }
     mMenuImages = ParseTexturePackMenuSetting(menuLine, menuSettingExists);
     Log("resources: texture pack %s (%s, cap %ux), menu textures as HUD images %s (config/texture_pack_menu), "
-        "scene lists %s (config/texture_pack_preload), hold %u ms per scene (config/texture_pack_hold)",
+        "scene lists %s (config/texture_pack_preload), hold %u ms per scene (config/texture_pack_hold), "
+        "textures drawn while the pack indexes resolved again %s (config/texture_pack_reresolve)",
         mTexturePack ? "on" : "off", mTexturePackSettings.Folder.c_str(), mTexturePackSettings.MaxScale,
-        mMenuImages ? "on" : "off", mTexturePackSettings.ScenePreload ? "on" : "off", mTexturePackSettings.HoldMs);
+        mMenuImages ? "on" : "off", mTexturePackSettings.ScenePreload ? "on" : "off", mTexturePackSettings.HoldMs,
+        mTexturePackSettings.Reresolve ? "on" : "off");
     Log("resources: %u image / %u sampler descriptors, texture budget %llu MiB", kMaxImages, kMaxSamplers,
         static_cast<unsigned long long>(mBudgetBytes >> 20));
+    if (mTexturePack) {
+        StartPackChange(true);
+    }
     return true;
 }
 
@@ -336,12 +342,16 @@ void PicaResources::ApplyTexturePackSettings() {
     mReleaseStalePack = true;
     mReplacementKeysUploaded.clear(); // every pack image uploads again by design
     if (settings.Enabled || mPackConfigured) {
-        // Off: the runtime drops its decoded images and pending decodes.
+        // Off: the runtime drops its decoded images and pending decodes. On or
+        // another cap: it indexes the pack again; textures drawn meanwhile get
+        // no hash and resolve again once it is ready (PackUnindexed).
         ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Configure(
             ::Oot3d::Renderer::MakeTexturePackConfiguration(settings, kConfigDirectory));
         mPackConfigured = true;
     }
+    mPackIndexReady = false;
     Log("resources: texture pack %s (cap %ux)", mTexturePack ? "on" : "off", settings.MaxScale);
+    StartPackChange(false);
 }
 
 void PicaResources::BeginFrame(uint64_t frame) {
@@ -373,9 +383,14 @@ void PicaResources::BeginFrame(uint64_t frame) {
     // caches; GPU-written images (display copy, target copies) have their
     // own Full barriers. config/deko3d_barrier "frame" brings it back.
     ApplyTexturePackSettings();
+    if (mTexturePack && !mPackIndexReady) {
+        // Asked until it is (one lock per frame meanwhile), then known until the next change.
+        mPackIndexReady = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().IndexReady();
+    }
     Evict();
     BeginScene();
     UploadReadyReplacements();
+    TrackPackChange();
 }
 
 void PicaResources::UploadReadyReplacements() {
@@ -385,8 +400,9 @@ void PicaResources::UploadReadyReplacements() {
     // Keys first: UploadReplacement inserts into mTextures (rehash).
     mReadyReplacements.clear();
     for (const auto& [key, texture] : mTextures) {
-        // A native of another pack epoch is rebuilt at its next draw instead.
-        if (texture.PackPending && !texture.Replacement && texture.PackEpoch == mPackEpoch &&
+        // A native of another pack epoch is rebuilt at its next draw instead, as is one made while
+        // the index was being built (no hash to ask with).
+        if (texture.PackPending && !texture.PackUnindexed && !texture.Replacement && texture.PackEpoch == mPackEpoch &&
             texture.LastUsedFrame + 1U >= mFrame) {
             mReadyReplacements.push_back(key);
         }
@@ -444,8 +460,8 @@ void PicaResources::BeginScene() {
     }
     mHoldHashes.clear();
     for (const auto& [key, texture] : mTextures) {
-        if (texture.PackPending && !texture.Replacement && !texture.PackMenu && texture.PackEpoch == mPackEpoch &&
-            texture.LastUsedFrame + 1U >= mFrame) {
+        if (texture.PackPending && !texture.PackUnindexed && !texture.Replacement && !texture.PackMenu &&
+            texture.PackEpoch == mPackEpoch && texture.LastUsedFrame + 1U >= mFrame) {
             mHoldHashes.push_back(texture.PackHash);
         }
     }
@@ -460,6 +476,86 @@ void PicaResources::BeginScene() {
     ++mScene.HoldFrames;
     mScene.HoldMicros += waited;
     mScene.HoldTimeouts += left != 0U ? 1U : 0U;
+}
+
+void PicaResources::StartPackChange(bool atStart) {
+    if (mPackChange.Active) {
+        LogPackChange("superseded", CountPackOnScreen());
+    }
+    mPackChange = {};
+    mPackChange.Active = true;
+    mPackChange.AtStart = atStart;
+    mPackChange.PackOn = mTexturePack;
+    mPackChange.MaxScale = mTexturePackSettings.MaxScale;
+    mPackChange.Frame = mFrame;
+    mPackChange.Start = std::chrono::steady_clock::now();
+}
+
+PicaResources::PackOnScreen PicaResources::CountPackOnScreen() const {
+    PackOnScreen onScreen;
+    for (const auto& [key, texture] : mTextures) {
+        if (texture.LastUsedFrame + 1U < mFrame) {
+            continue;
+        }
+        if (texture.Replacement) {
+            ++onScreen.PackImages;
+            continue;
+        }
+        ++onScreen.Natives;
+        onScreen.Waiting += mTexturePack && texture.PackEpoch == mPackEpoch &&
+                                    (texture.PackPending || texture.PackUnindexed)
+                                ? 1U
+                                : 0U;
+    }
+    return onScreen;
+}
+
+void PicaResources::TrackPackChange() {
+    if (!mPackChange.Active) {
+        return;
+    }
+    if (mTexturePack && mPackIndexReady && mPackChange.IndexMicros == 0U) {
+        mPackChange.IndexMicros = std::max<uint64_t>(
+            1U, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - mPackChange.Start)
+                                          .count()));
+    }
+    // "Drawn last frame" means after the change from its second frame on.
+    if (mFrame <= mPackChange.Frame + 1U) {
+        return;
+    }
+    const PackOnScreen onScreen = CountPackOnScreen();
+    if (::Oot3d::Renderer::TexturePackChangeTookEffect(mTexturePack, mPackIndexReady, onScreen.Waiting,
+                                                       mReleaseStalePack)) {
+        LogPackChange("took effect", onScreen);
+    } else if (mFrame - mPackChange.Frame >= kPackChangeReportFrames) {
+        LogPackChange("still incomplete", onScreen);
+    }
+}
+
+void PicaResources::LogPackChange(const char* outcome, const PackOnScreen& onScreen) {
+    const auto& change = mPackChange;
+    const auto millis = static_cast<unsigned long long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - change.Start).count());
+    // Pack off: no index to wait for.
+    char index[32] = "-";
+    if (change.PackOn && change.IndexMicros == 0U) {
+        std::snprintf(index, sizeof(index), "not yet");
+    } else if (change.PackOn) {
+        std::snprintf(index, sizeof(index), "%llu ms", static_cast<unsigned long long>(change.IndexMicros / 1000U));
+    }
+    Log("resources: texture pack change %s (%s%s, cap %ux) after %llu ms, %llu frames: index ready after %s; "
+        "resolved again at their draw %llu (made while the index was being built %llu, again once it was ready "
+        "%llu); pack images uploaded %llu (%llu MiB), earlier ones released %llu; drawn last frame: %llu pack "
+        "images, %llu native (%llu waiting for their pack image)",
+        outcome, change.AtStart ? "start, " : "", change.PackOn ? "on" : "off", change.MaxScale, millis,
+        static_cast<unsigned long long>(mFrame - change.Frame), index,
+        static_cast<unsigned long long>(change.ResolvedAgain), static_cast<unsigned long long>(change.MadeWhileIndexing),
+        static_cast<unsigned long long>(change.ResolvedAfterIndex), static_cast<unsigned long long>(change.Uploaded),
+        static_cast<unsigned long long>(change.UploadedBytes >> 20), static_cast<unsigned long long>(change.Released),
+        static_cast<unsigned long long>(onScreen.PackImages), static_cast<unsigned long long>(onScreen.Natives),
+        static_cast<unsigned long long>(onScreen.Waiting));
+    mPackChange.Active = false;
 }
 
 void PicaResources::LogScene(const PicaSceneTextureStats& stats, const char* when) {
@@ -496,9 +592,10 @@ void PicaResources::Evict() {
         for (auto entry = mTextures.begin(); entry != mTextures.end();) {
             Texture& texture = entry->second;
             if (::Oot3d::Renderer::TexturePackEntryActionFor(texture.Replacement, texture.PackEpoch, mPackEpoch,
-                                                             mTexturePack) ==
+                                                             mTexturePack, texture.PackUnindexed, mPackIndexReady) ==
                 ::Oot3d::Renderer::TexturePackEntryAction::Release) {
                 if (idle(texture) >= policy.MinIdleFrames) {
+                    mPackChange.Released += mPackChange.Active ? 1U : 0U;
                     Forget(texture);
                     entry = mTextures.erase(entry);
                     continue;
@@ -556,21 +653,33 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
                 }
                 return dkMakeTextureHandle(replacement.ImageSlot, replacement.SamplerSlot);
             }
-            Retire(found->second); // made at an earlier size cap
+            // Made at an earlier size cap: resolved again below.
+            if (mPackChange.Active) {
+                ++mPackChange.Released;
+                ++mPackChange.ResolvedAgain;
+            }
+            Retire(found->second);
             mTextures.erase(found);
         }
     }
     if (const auto found = mTextures.find(key); found != mTextures.end()) {
         Texture& native = found->second;
         native.LastUsedFrame = mFrame;
-        if (::Oot3d::Renderer::TexturePackEntryActionFor(false, native.PackEpoch, mPackEpoch, mTexturePack) ==
+        if (::Oot3d::Renderer::TexturePackEntryActionFor(false, native.PackEpoch, mPackEpoch, mTexturePack,
+                                                         native.PackUnindexed, mPackIndexReady) ==
             ::Oot3d::Renderer::TexturePackEntryAction::Rebuild) {
-            // Made while the pack was off or at another cap: resolve it again below.
+            // Made while the pack was off or at another cap, or while its index
+            // was being built (no hash then): resolve it again below.
+            if (mPackChange.Active) {
+                ++mPackChange.ResolvedAgain;
+                mPackChange.ResolvedAfterIndex += native.PackUnindexed && native.PackEpoch == mPackEpoch ? 1U : 0U;
+            }
             Retire(native);
             mTextures.erase(found);
         } else {
             if (!mTexturePack) {
                 native.PackPending = false;
+                native.PackUnindexed = false;
             }
             // Still decoding when it was made: UploadReadyReplacements polls
             // it at the next frame top, with the other finished pack images,
@@ -644,9 +753,16 @@ DkResHandle PicaResources::TextureHandle(const Renderer3ds::PicaTextureView& vie
     texture.PackHash = pack.NativeHash;
     texture.PackPending = pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Pending ||
                           pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Ready;
+    // No hash: the pack's index is being built (start, or a change in the Video tab). Polling would only
+    // answer Missing once it is ready, so the texture is made again then (TexturePackEntryActionFor) and
+    // counted as drawn native first at that resolve.
+    texture.PackUnindexed = mTexturePackSettings.Reresolve &&
+                            pack.State == ::Oot3d::Renderer::AzaharTextureResolveState::Pending &&
+                            !pack.NativeHashAvailable;
+    mPackChange.MadeWhileIndexing += mPackChange.Active && texture.PackUnindexed ? 1U : 0U;
     texture.PackMenu = menu && texture.PackPending;
-    mStats.MenuTexturesNativeFirst += texture.PackMenu ? 1U : 0U;
-    mScene.NativeFirst += texture.PackPending && !menu ? 1U : 0U;
+    mStats.MenuTexturesNativeFirst += texture.PackMenu && !texture.PackUnindexed ? 1U : 0U;
+    mScene.NativeFirst += texture.PackPending && !menu && !texture.PackUnindexed ? 1U : 0U;
     if (texture.PackPending) {
         texture.PackView = view;
         texture.PackView.NativeBytes = {};
@@ -770,6 +886,10 @@ DkResHandle PicaResources::UploadReplacement(const Renderer3ds::PicaTextureView&
     mStats.TextureReplacementBytes += stagingBytes;
     mStats.TextureReplacementLiveBytes += texture.Bytes;
     ++mStats.TextureReplacements;
+    if (mPackChange.Active) {
+        ++mPackChange.Uploaded;
+        mPackChange.UploadedBytes += stagingBytes;
+    }
     if (!mReplacementKeysUploaded.insert(key).second) {
         // Uploaded before under these settings and evicted since: the surface
         // showed its native texture again for the frames until this upload.
