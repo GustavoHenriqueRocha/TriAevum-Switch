@@ -297,20 +297,58 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
           r'case NativeA32HostAction::Wait:\s+state\.r\[15\] = resumePc;\s+status = NativeA32ThreadStatus::Waiting;\s+'
           r'NoteCore0ThreadParked\(\);'),
-    # --- 07/11: L3+R3 > Video > GPU clock (config/gpu_performance, off by default) ---
-    # Only the handheld (Normal) configuration, only the official 0x92220008, only when asked.
-    Guard("GPU clock High: only the handheld apm configuration, the official 0x92220008",
-          "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
-          r'apmSetPerformanceConfiguration\(ApmPerformanceMode_Normal, status\.Requested\)',
-          test="oot3d_fps_counter_tests (GpuPerformance)",
-          forbid=r'apmSetPerformanceConfiguration\(ApmPerformanceMode_Boost|clkrstInitialize|pcvInitialize'),
-    Guard("GPU clock: Standard without a prior High opens no apm session (default unchanged)",
-          "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
-          r'if \(!high && !sessionOpen\) \{\s+return status;'),
-    Guard("GPU clock: config/gpu_performance applied at start and from the menu",
+    # --- 08/11: L3+R3 > Video > Performance mode (config/cpu_performance, gpu_performance,
+    #     memory_performance; off by default) ---
+    # GPU and memory: only the handheld (Normal) configuration, only official IDs, only when asked.
+    Guard("GPU/memory High: only the handheld apm configuration, an official ID from HandheldConfiguration",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'status\.ApmRequested = HandheldConfiguration\(gpu, memory, apm\.Standard\);.*?'
+          r'apmSetPerformanceConfiguration\(ApmPerformanceMode_Normal, status\.ApmRequested\)',
+          test="oot3d_switch_performance_tests (Configurations, RestoreRules)",
+          forbid=r'ApmPerformanceMode_Boost'),
+    Guard("Performance mode: all Standard without a prior High opens no apm session (default unchanged)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'if \(unchanged \|\| \(!gpu && !memory && !apm\.SessionOpen\)\) \{'),
+    Guard("Performance mode: CPU Standard opens no clkrst, installs no hook, keeps the default focus handling",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'if \(choice\.Cpu\) StartCpuKeeper\(state\);.*?'
+          r'if \(!state\.Started\.load\(std::memory_order_acquire\)\) return sample;'),
+    Guard("Performance mode: the three files applied at start and from the menu",
           "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
-          r'mGpuHigh = ReadGpuPerformanceHigh\(mConfig\);\s+if \(mGpuHigh\) mGpuStatus = ApplyGpuPerformance\(true\);.*?'
-          r'mGpuStatus = ApplyGpuPerformance\(mGpuHigh\);'),
+          r'mPerf = ReadPerformanceChoice\(mConfig\);\s+'
+          r'if \(DerivePerformanceMode\(mPerf\) != PerformanceMode::Off\) mPerfStatus = ApplyPerformance\(mPerf\);.*?'
+          r'mPerfSaveError = SavePerformanceChoice\(mConfig, mPerf\);\s+mPerfStatus = ApplyPerformance\(mPerf\);',
+          test="oot3d_switch_performance_tests (Files, Mode)"),
+    Guard("CPU High: only 1224 MHz or the earlier rate, never a GPU/memory write through clkrst",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'AccessClock\(ClockModule::Cpu, step\.Hz\)',
+          test="oot3d_switch_performance_tests (KeeperBasics: FakeClock only accepts 1224)",
+          forbid=r'AccessClock\(ClockModule::(?:Gpu|Memory), (?!0U\))'),
+    # SwitchWakerHD #33 (commit 8d9a643e): CPU 1224 through clkrst from the game, sessions kept open,
+    # restore from a focus hook that never ran before AM suspended the game -> Erista no wake from sleep.
+    Guard("SwitchWakerHD #33: every clkrst access opens and closes its session (none kept across a suspension)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'\A(?:(?!ClkrstSession\b).)*ClkrstSession session\{\};(?:(?!ClkrstSession\b).)*\Z'),
+    Guard("SwitchWakerHD #33: AccessClock closes the clkrst session and service after each read/write",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'clkrstOpenSession\(&session, ClkrstModule\(module\), 3\);.*?clkrstCloseSession\(&session\);\s+\}\s+'
+          r'clkrstExit\(\);\s+return access;'),
+    Guard("SwitchWakerHD #33: HOME/sleep reach the hook (NoSuspend while CPU High), which restores the CPU "
+          "rate before letting AM suspend the game",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'noSuspend \? AppletFocusHandlingMode_NoSuspend.*?'
+          r'void EnterBackground\(CpuState& state\) \{.*?'
+          r'Carry\(state, state\.Cpu\.Focus\(false, 0U, NowMs\(\)\), "background", 0U\);.*?'
+          r'appletSetFocusHandlingMode\(AppletFocusHandlingMode_SuspendHomeSleep\);.*?'
+          r'case AppletFocusState_Background:\s+EnterBackground\(state\);',
+          test="oot3d_switch_performance_tests (KeeperBasics: focus lost restores 1020)"),
+    Guard("CPU High: exit (atexit and ExitRequest) puts the earlier rate back",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'case AppletHookType_OnExitRequest:\s+RestoreForExit\("exit_request"\);.*?std::atexit\(RestoreAtExit\);',
+          test="oot3d_switch_performance_tests (KeeperBasics: exit restores once)"),
+    Guard("p6w: the menu and perf.txt read the performance status without waiting on clock IPC",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'PerformanceStatus CurrentPerformanceStatus\(\) \{(?:(?!state\.Mutex|AccessClock).)*?return state\.Published;'),
     # --- 07/11: ZCULL on deko3d only with config/deko3d_zcull (decal tiles lost in Aurora's renderer) ---
     Guard("ZCULL: off unless config/deko3d_zcull exists (decal tiles lost with it on)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",
@@ -1155,7 +1193,8 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
           r'SwitchClockReading SwitchClockLatest\(\) \{'
           r'(?:(?!serviceDispatch|ReadClocks\(\)|appletGetCurrentPerformanceConfiguration).)*?return reading;'),
-    Guard("SwitchWakerHD #33: clkrst in the app froze the console on wake from sleep — clocks are read without clkrst/pcv",
+    Guard("SwitchWakerHD #33: clkrst in the app froze the console on wake from sleep — the clock reader opens no "
+          "clkrst/pcv itself (only oot3d_switch_performance.cpp, with CPU High)",
           "tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp",
           r'appletGetCurrentPerformanceConfiguration\(',
           forbid=r'\b(?:clkrst|pcv)[A-Z]\w*\('),

@@ -106,6 +106,14 @@ add_executable(oot3d_fps_counter_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_fps_counter_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_fps_counter_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# L3+R3 > Video > Performance mode: files, apm configurations, restore rules
+# and the CPU clock keeper (oot3d_switch_performance.h; header-only).
+add_executable(oot3d_switch_performance_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_switch_performance_tests.cpp
+)
+target_compile_features(oot3d_switch_performance_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_switch_performance_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Landing roll (N64) at the fall action's landing (config/no_landing_roll; header-only).
 add_executable(oot3d_landing_roll_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_landing_roll_tests.cpp
@@ -688,6 +696,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         tools/oot3d/native_game_runtime/oot3d_switch_threads.cpp
         # Clocks for logs/perf.txt (sys-clk IPC, read only).
         tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp
+        # L3+R3 > Video > Performance mode: GPU/memory through apm, CPU High
+        # through clkrst (config/cpu_performance, gpu_performance,
+        # memory_performance).
+        tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp
         # Display vsync clock (config/pacer_vsync, config/frame_spikes).
         tools/oot3d/native_game_runtime/oot3d_switch_vsync_clock.cpp
         # The console's six-axis sensors as controller motion (gyro aiming).

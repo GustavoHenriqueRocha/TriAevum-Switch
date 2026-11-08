@@ -3,7 +3,7 @@
 #include "oot3d_fps_counter.h"
 #include "oot3d_native_launch_frame_rate.h"
 #include "oot3d_draw_distance_config.h"
-#include "oot3d_switch_gpu_performance.h"
+#include "oot3d_switch_performance.h"
 #include "fast/backends/gfx_deko3d.h"
 #include "fast/backends/gfx_deko3d_lighting.h"
 #include "fast/oot3d/graphics_settings_runtime.h"
@@ -70,10 +70,11 @@ public:
     mGrassDistance = Fast::Oot3d::ReadGrassSwitchDistance(mConfig);
     mGrassLod = Fast::Oot3d::ReadGrassSwitchLod(mConfig);
     mGrassFill = Fast::Oot3d::ReadGrassSwitchFill(mConfig);
-    // config/gpu_performance applies at start (the panel is created once, at
-    // window setup); Standard opens no apm session.
-    mGpuHigh = ReadGpuPerformanceHigh(mConfig);
-    if (mGpuHigh) mGpuStatus = ApplyGpuPerformance(true);
+    // config/cpu_performance, gpu_performance and memory_performance apply at
+    // start (the panel is created once, at window setup); all Standard opens
+    // no apm session and no clkrst.
+    mPerf = ReadPerformanceChoice(mConfig);
+    if (DerivePerformanceMode(mPerf) != PerformanceMode::Off) mPerfStatus = ApplyPerformance(mPerf);
     mDrawDistance = ReadActorDrawDistance(mConfig);
     LiveActorDrawDistance().store(mDrawDistance, std::memory_order_relaxed);
     LiveDrawDistanceNativeGroups().store(ReadDrawDistanceNativeGroups(mConfig), std::memory_order_relaxed);
@@ -149,7 +150,7 @@ public:
     }
     if (!mOverlayError.empty())
       ImGui::TextWrapped("Could not write config/%s.", mOverlayError.c_str());
-    DrawGpuClock();
+    DrawPerformance();
     DrawDrawDistance();
     DrawTexturePack();
     DrawGrass();
@@ -169,25 +170,46 @@ private:
     return static_cast<bool>(file);
   }
 
-  // config/gpu_performance (oot3d_switch_gpu_performance.h): the official
-  // handheld configuration with GPU 460.8 MHz, applied at once and at start.
-  void DrawGpuClock() {
+  // L3+R3 > Video > Performance mode (oot3d_switch_performance.h): the mode
+  // row sets all three clocks, each clock row its own file; applied at once
+  // and at start.
+  void DrawPerformance() {
     ImGui::Separator();
-    const char *const clocks[] = {"Standard (307 MHz)", "High (460.8 MHz, more battery)"};
-    int clock = mGpuHigh ? 1 : 0;
-    if (ImGui::Combo("GPU clock", &clock, clocks, 2)) {
-      mGpuHigh = clock == 1;
-      mGpuSaveError = !SaveGpuPerformanceHigh(mConfig, mGpuHigh);
-      mGpuStatus = ApplyGpuPerformance(mGpuHigh);
+    PerformanceChoice choice = mPerf;
+    const PerformanceMode mode = DerivePerformanceMode(mPerf);
+    if (ImGui::BeginCombo("Performance mode", PerformanceModeName(mode))) {
+      if (ImGui::Selectable("Off", mode == PerformanceMode::Off)) choice = {false, false, false};
+      if (ImGui::Selectable("On", mode == PerformanceMode::On)) choice = {true, true, true};
+      ImGui::EndCombo();
     }
-    if (mGpuSaveError)
-      ImGui::TextWrapped("Could not write config/%s.", kGpuPerformanceConfigName);
-    if (mGpuStatus.Attempted && !mGpuStatus.Available)
-      ImGui::TextWrapped("Unavailable: %s refused (0x%X); the clock is unchanged.",
-                         mGpuStatus.FailedStep, mGpuStatus.Result);
-    ImGui::TextDisabled("Handheld only (docked already runs the GPU at 768 MHz). High is Nintendo's "
-                        "official handheld mode with a faster GPU: more frames in busy rooms, shorter "
-                        "battery life. Applies at once; sys-clk overrides it.");
+    const char *const cpu[] = {"Standard (1020 MHz)", "High (1224 MHz)"};
+    const char *const gpu[] = {"Standard (307 MHz)", "High (460.8 MHz)"};
+    const char *const memory[] = {"Standard (1331 MHz)", "High (1600 MHz)"};
+    int value = choice.Cpu ? 1 : 0;
+    if (ImGui::Combo("CPU clock", &value, cpu, 2)) choice.Cpu = value == 1;
+    value = choice.Gpu ? 1 : 0;
+    if (ImGui::Combo("GPU clock", &value, gpu, 2)) choice.Gpu = value == 1;
+    value = choice.Memory ? 1 : 0;
+    if (ImGui::Combo("Memory clock", &value, memory, 2)) choice.Memory = value == 1;
+    if (choice != mPerf) {
+      mPerf = choice;
+      mPerfSaveError = SavePerformanceChoice(mConfig, mPerf);
+      mPerfStatus = ApplyPerformance(mPerf);
+    }
+    if (mPerfSaveError != nullptr) ImGui::TextWrapped("Could not write config/%s.", mPerfSaveError);
+    if (mPerfStatus.ApmAttempted && !mPerfStatus.ApmAvailable)
+      ImGui::TextWrapped("GPU and memory unavailable: %s refused (0x%X); those clocks are unchanged.",
+                         mPerfStatus.ApmFailedStep, mPerfStatus.ApmResult);
+    // The CPU request changes after the choice (an override found later).
+    const PerformanceStatus now = CurrentPerformanceStatus();
+    if (mPerf.Cpu && now.CpuUnavailable)
+      ImGui::TextWrapped("CPU High unavailable: %s refused (0x%X); the CPU clock is unchanged.",
+                         now.CpuFailedStep, now.CpuResult);
+    else if (mPerf.Cpu && now.CpuOverridden)
+      ImGui::TextWrapped("CPU: another tool (sys-clk?) keeps setting %u MHz; the game leaves the CPU clock to it.",
+                         static_cast<unsigned>((now.CpuForeignHz + 500000U) / 1000000U));
+    ImGui::TextDisabled("More battery use. CPU High is above the clock Nintendo gives games; GPU High and Memory "
+                        "High are official handheld settings (docked already runs them faster).");
   }
 
   // config/draw_distance (oot3d_draw_distance_config.h, SWITCH_PORT.md "Draw
@@ -386,9 +408,9 @@ private:
   bool mGrassFillError = false;
   std::string mLightingError;
   std::string mLightingIssue;
-  bool mGpuHigh = false;
-  bool mGpuSaveError = false;
-  GpuPerformanceStatus mGpuStatus;
+  PerformanceChoice mPerf;
+  const char *mPerfSaveError = nullptr;
+  PerformanceStatus mPerfStatus;
   ActorDrawDistance mDrawDistance = kDefaultActorDrawDistance;
   bool mDrawDistanceError = false;
 };

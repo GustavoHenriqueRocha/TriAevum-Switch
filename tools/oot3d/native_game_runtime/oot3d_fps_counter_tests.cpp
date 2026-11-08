@@ -1,5 +1,4 @@
 #include "oot3d_fps_counter.h"
-#include "oot3d_switch_gpu_performance.h"
 
 #include <cmath>
 #include <cstdio>
@@ -148,6 +147,7 @@ void StockTable() {
   Require(Same(SwitchClockSourceName(SwitchClockSource::SysClkReal), "sysclk_real") &&
               Same(SwitchClockSourceName(SwitchClockSource::SysClkTarget), "sysclk") &&
               Same(SwitchClockSourceName(SwitchClockSource::Stock), "stock") &&
+              Same(SwitchClockSourceName(SwitchClockSource::Clkrst), "clkrst") &&
               Same(SwitchClockSourceName(SwitchClockSource::None), "none"),
           "perf.txt clk_src names");
 }
@@ -179,6 +179,9 @@ void Lines() {
   Require(Same(text, "CPU --  GPU --  MEM --  stock 0x92220010"), "unknown configuration line");
   FormatPerfOverlayClockLine(text, sizeof(text), SwitchClockReading{});
   Require(Same(text, "CPU --  GPU --  MEM --"), "nothing read");
+  SwitchClockReading clkrst{1224, 461, 1600, SwitchClockSource::Clkrst, 0U};
+  FormatPerfOverlayClockLine(text, sizeof(text), clkrst);
+  Require(Same(text, "CPU 1224  GPU 461  MEM 1600  clkrst"), "clkrst line (CPU High on)");
 
   // The longest lines fit their buffers (no truncation).
   sysClk = SwitchClockReading{2397, 1267, 2131, SwitchClockSource::SysClkReal, 0U};
@@ -228,30 +231,6 @@ void Overlay() {
   Require(!PerfOverlayEnabled().load(), "overlay off until the Video tab loads config/fps_counter");
 }
 
-// L3+R3 > Video > GPU clock: the configurations are the table's 460.8 and
-// 307.2 MHz handheld ones, Standard restores what the session reported, and
-// the file round-trips.
-void GpuPerformance() {
-  const SwitchClockReading high = StockClockReading(kGpuHighHandheldConfiguration);
-  Require(high.GpuMhz == 461 && high.CpuMhz == 1020 && high.MemMhz == 1331, "High = 1020/460.8/1331.2");
-  const SwitchClockReading standard = StockClockReading(kGpuStandardHandheldConfiguration);
-  Require(standard.GpuMhz == 307 && standard.CpuMhz == 1020 && standard.MemMhz == 1331,
-          "Standard = 1020/307.2/1331.2");
-  static_assert(GpuStandardConfiguration(0U) == kGpuStandardHandheldConfiguration);
-  static_assert(GpuStandardConfiguration(kGpuHighHandheldConfiguration) == kGpuStandardHandheldConfiguration);
-  static_assert(GpuStandardConfiguration(0x00020005U) == 0x00020005U);
-  Require(!ApplyGpuPerformance(true).Attempted, "no apm off the Switch");
-
-  const auto dir = std::filesystem::temp_directory_path() / "oot3d_gpu_performance_test";
-  std::error_code error;
-  std::filesystem::remove_all(dir, error);
-  Require(!ReadGpuPerformanceHigh(dir), "absent = Standard");
-  Require(SaveGpuPerformanceHigh(dir, true) && ReadGpuPerformanceHigh(dir), "High saved");
-  Require(SaveGpuPerformanceHigh(dir, false) && !ReadGpuPerformanceHigh(dir), "Standard removes the file");
-  Require(SaveGpuPerformanceHigh(dir, false), "removing an absent file is fine");
-  std::filesystem::remove_all(dir, error);
-}
-
 } // namespace
 
 int main() {
@@ -260,7 +239,6 @@ int main() {
   StockTable();
   Lines();
   Overlay();
-  GpuPerformance();
   std::puts("perf overlay: PASS");
   return 0;
 }

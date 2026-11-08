@@ -76,6 +76,7 @@ inline void FormatPerfOverlayFrameLine(char *out, size_t size, double fps, doubl
 // MHz, without the unit to keep the line short:
 //   "CPU 1785  GPU 768  MEM 1600  sys-clk"
 //   "CPU 1020  GPU 307  MEM 1331  stock"
+//   "CPU 1224  GPU 461  MEM 1600  clkrst" (CPU High on: the rates clkrst reports)
 //   "CPU --  GPU --  MEM --  stock 0x92220010" (configuration not in the table)
 //   "CPU --  GPU --  MEM --" (nothing read)
 inline void FormatPerfOverlayClockLine(char *out, size_t size,
@@ -99,6 +100,9 @@ inline void FormatPerfOverlayClockLine(char *out, size_t size,
       std::snprintf(out, size, "CPU --  GPU --  MEM --  stock 0x%08X",
                     static_cast<unsigned>(reading.PerformanceConfiguration));
     }
+    return;
+  case SwitchClockSource::Clkrst:
+    std::snprintf(out, size, "CPU %s  GPU %s  MEM %s  clkrst", cpu, gpu, mem);
     return;
   case SwitchClockSource::None: break;
   }

@@ -3,16 +3,18 @@
 // The console's current clocks for logs/perf.txt and the performance overlay
 // (oot3d_switch_clocks.cpp).
 //
-// Read-only: the MHz come from sys-clk's public IPC ("sys:clk",
-// GetCurrentContext); without sys-clk they come from the performance
-// configuration HOS has applied (AM ICommonStateGetter
-// GetCurrentPerformanceConfiguration, mapped by the table below: the stock
-// clocks, not a measurement). The handheld/dock mode and the performance mode
-// come from the applet (values libnx already keeps, no IPC). The app never
-// opens clkrst nor pcv (SwitchWakerHD issue #33: clkrst in the app froze the
-// console on wake from sleep; sys-clk is what overclocks). The only change
-// it can make is the opt-in official handheld configuration through apm
-// (oot3d_switch_gpu_performance.h, config/gpu_performance).
+// The MHz come from sys-clk's public IPC ("sys:clk", GetCurrentContext);
+// without sys-clk they come from the performance configuration HOS has
+// applied (AM ICommonStateGetter GetCurrentPerformanceConfiguration, mapped
+// by the table below: the stock clocks, not a measurement). While CPU High is
+// on (oot3d_switch_performance.h, config/cpu_performance) they are the rates
+// clkrst reports, read by oot3d_switch_performance.cpp (one short session per
+// read). The handheld/dock mode and the performance mode come from the
+// applet (values libnx already keeps, no IPC). This reader never opens clkrst
+// nor pcv itself: with CPU Standard (the default) the app opens neither
+// (SwitchWakerHD issue #33: CPU 1224 MHz set through clkrst from the app
+// froze Erista consoles on wake from sleep; oot3d_switch_performance.cpp
+// says how CPU High avoids what it did).
 //
 // Off the Switch the readings are empty; the table and the reading type are
 // plain data, so host tests use them.
@@ -27,6 +29,7 @@ enum class SwitchClockSource : uint8_t {
   SysClkReal,   // sys-clk realFreqs (measured, API >= 2)
   SysClkTarget, // sys-clk freqs (the clocks it asked for)
   Stock,        // the HOS performance configuration, through the table below
+  Clkrst,       // clkrst GetClockRate (while CPU High is on)
 };
 
 // perf.txt `clk_src=` names.
@@ -35,6 +38,7 @@ constexpr const char *SwitchClockSourceName(SwitchClockSource source) {
   case SwitchClockSource::SysClkReal: return "sysclk_real";
   case SwitchClockSource::SysClkTarget: return "sysclk";
   case SwitchClockSource::Stock: return "stock";
+  case SwitchClockSource::Clkrst: return "clkrst";
   case SwitchClockSource::None: break;
   }
   return "none";
@@ -100,12 +104,16 @@ SwitchClockReading SwitchClockLatest();
 
 // " clocks: cpu_mhz=1785 gpu_mhz=768 mem_mhz=1600 clk_src=sysclk_real
 // op_mode=handheld perf_mode=normal sysclk_profile=handheld sysclk_enabled=1
-// sysclk_api=4 clk_ipc_us=40 clk_busy=0" for the window line (without sys-clk:
-// "clk_src=stock perf_cfg=0x00020003" and the configuration's MHz). Returns the
-// previous reading and requests the next one from its own thread (the IPC never runs on the
-// game thread; clk_busy=1 if the previous one hasn't returned yet); the session with
-// sys-clk is opened the first time and kept. A field that couldn't be read
-// is -1 (clk_src=none when neither source answered).
+// sysclk_api=4 clk_ipc_us=40 req_cpu=0 req_gpu=0 req_mem=0 cpu_reapply=0
+// cpu_override=0 cpu_err=- clk_busy=0" for the window line (without sys-clk:
+// "clk_src=stock perf_cfg=0x00020003" and the configuration's MHz; with CPU
+// High "clk_src=clkrst"; the req_/cpu_ fields: FormatPerformancePerfFields).
+// Returns the previous reading and requests the next one from its own thread
+// (the IPC never runs on the game thread; clk_busy=1 if the previous one
+// hasn't returned yet), which with CPU High also reads the CPU rate back
+// (SamplePerformanceClocks); the session with sys-clk is opened the first
+// time and kept. A field that couldn't be read is -1 (clk_src=none when
+// neither source answered).
 std::string SwitchClockPerfSummary();
 #else
 inline SwitchClockReading SwitchClockLatest() { return {}; }

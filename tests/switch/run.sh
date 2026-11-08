@@ -69,6 +69,7 @@ UNIT_TESTS=(
     oot3d_switch_code_pages_tests
     oot3d_switch_guest_window_tests
     oot3d_switch_motion_tests
+    oot3d_switch_performance_tests
     oot3d_switch_thread_layout_tests
     oot3d_texture_pack_scale_tests
     oot3d_top_screen_hud_touch_tests
