@@ -377,6 +377,12 @@ struct Oot3dPicaFrontendCaptureStats {
     uint64_t ListWords = 0;
     // Whole command lists, the sink's draw captures included.
     uint64_t ListTicks = 0;
+    // The part of ListTicks inside the sink's draw and interrupt submissions
+    // (its capture, lock included): ListTicks - SinkTicks is the walk itself.
+    uint64_t SinkTicks = 0;
+    // config/list_walk_fast: extra words of a command written by a batched
+    // loop (a register repeated in consecutive mode, float uniform bursts).
+    uint64_t BatchedWords = 0;
     // Lighting LUT tables: the 24 KiB content hash at a draw after an
     // upload, and the 24 KiB copy-on-write at the first upload after a draw.
     uint64_t LutTicks = 0;
@@ -570,6 +576,12 @@ class Oot3dNativePicaFrontend {
     void SetInPlaceDrawPackets(bool enabled) noexcept {
         mInPlaceDrawPackets = enabled;
     }
+    // config/list_walk_fast (SWITCH_PORT.md "Command-list walk"): without
+    // diagnostic history, lists are walked with a per-register dispatch table
+    // and batched consecutive-mode commands. The registers, shader state,
+    // tables, queues, dirty lines, packets and composition are the same.
+    void SetListWalkFast(bool enabled) noexcept { mListWalkFast = enabled; }
+    [[nodiscard]] bool ListWalkFast() const noexcept { return mListWalkFast; }
     // config/capture_delta: the source handed to the sink carries the dirty
     // lines of the register file, uniforms and default attributes (the sink
     // captures only those); table writes of the value already present are
@@ -654,6 +666,12 @@ class Oot3dNativePicaFrontend {
         uint16_t registerId, uint32_t writeValue, uint16_t stageBase,
         Oot3dPicaShaderState& shader, PackedAttributeQueue& uniformQueue,
         bool mirrorToGeometryShader);
+    // config/list_walk_fast: the extra words of a consecutive-mode command
+    // to one float uniform data register, as ApplyShaderStageRegisterSideEffects
+    // would take them one by one. False (nothing written) when the queue
+    // already holds a whole vector for the current mode (the per-word path).
+    bool WriteFloatUniformBurst(uint16_t registerId, bool vertexStage,
+                                uint32_t mask, std::span<const uint32_t> words);
     // Stores into a shared table (copy-on-write); with capture delta a write
     // of the value already there is skipped.
     template <typename Table, typename Value>
@@ -696,6 +714,7 @@ class Oot3dNativePicaFrontend {
     size_t mHardwareWriteCount = 0;
     bool mDiagnosticHistoryEnabled = true;
     bool mInPlaceDrawPackets = false;
+    bool mListWalkFast = false;
     bool mCaptureDelta = false;
     Oot3dPicaStateDirtyLines mDirtyLines;
     Oot3dPicaFrontendCaptureStats mCaptureStats;

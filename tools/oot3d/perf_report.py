@@ -391,6 +391,13 @@ def summarize_offload(windows: list[Window]) -> None:
               f" ({fmt(mean('lut_hashes'), 1)} hashes, {fmt(mean('lut_reuses'), 1)} reused,"
               f" {fmt(mean('lut_copies'), 1)} copies); table copies {fmt(mean('table_copies'), 1)},"
               f" same-value writes skipped {fmt(mean('same_value_writes'), 0)} per frame")
+        if any("list_walk_ms" in m for m in marked):
+            # config/list_walk_fast (SWITCH_PORT.md "Command-list walk"): the
+            # walk outside the sink's captures.
+            print(f"    list walk (list_walk_fast={int(num(marked[-1], 'list_walk_fast'))}):"
+                  f" {fmt(mean('list_walk_ms'), 3)} ms/frame outside the captures,"
+                  f" {fmt(mean('list_walk_ns_word'), 1)} ns/word,"
+                  f" {fmt(mean('list_batched_kwords'), 1)} K words batched")
 
 
 def summarize_cadence(windows: list[Window], seconds: float) -> None:

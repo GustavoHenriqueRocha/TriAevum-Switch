@@ -80,6 +80,16 @@ target_link_libraries(oot3d_native_pica_frontend_tests PRIVATE
     oot3d_native_pica_frontend)
 oot3d_target_defaults(oot3d_native_pica_frontend_tests FOLDER Tests)
 
+# config/list_walk_fast: the fast command-list walk against the per-word
+# walk on the same streams (packets, savestate, composition compared after
+# every list); --bench for the walk's ns per word.
+add_executable(oot3d_native_pica_list_walk_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_pica_frontend/oot3d_native_pica_list_walk_tests.cpp
+)
+target_link_libraries(oot3d_native_pica_list_walk_tests PRIVATE
+    oot3d_native_pica_frontend)
+oot3d_target_defaults(oot3d_native_pica_list_walk_tests FOLDER Tests)
+
 add_executable(oot3d_native_pica_program_descriptor_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_pica_frontend/oot3d_native_pica_program_descriptor_tests.cpp
 )

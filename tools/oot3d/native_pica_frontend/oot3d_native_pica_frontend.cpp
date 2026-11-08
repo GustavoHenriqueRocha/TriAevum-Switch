@@ -42,6 +42,58 @@ constexpr uint16_t kPicaProcTexLutDataEnd = 0x0B7U;
 constexpr uint16_t kPicaLightingLutConfig = 0x1C5U;
 constexpr uint16_t kPicaLightingLutDataBegin = 0x1C8U;
 constexpr uint16_t kPicaLightingLutDataEnd = 0x1CFU;
+// Shader stage registers, from the stage's base (0x280 geometry, 0x2B0 vertex).
+constexpr uint16_t kBooleanUniformOffset = 0x00U;
+constexpr uint16_t kIntegerUniformBeginOffset = 0x01U;
+constexpr uint16_t kIntegerUniformEndOffset = 0x04U;
+constexpr uint16_t kFloatUniformSetupOffset = 0x10U;
+constexpr uint16_t kFloatUniformDataBeginOffset = 0x11U;
+constexpr uint16_t kFloatUniformDataEndOffset = 0x18U;
+constexpr uint16_t kProgramOffsetOffset = 0x1BU;
+constexpr uint16_t kProgramDataBeginOffset = 0x1CU;
+constexpr uint16_t kProgramDataEndOffset = 0x23U;
+constexpr uint16_t kSwizzleOffsetOffset = 0x25U;
+constexpr uint16_t kSwizzleDataBeginOffset = 0x26U;
+constexpr uint16_t kSwizzleDataEndOffset = 0x2DU;
+
+// config/list_walk_fast: what a write to each register does besides its
+// store and dirty line, so the walk dispatches with one table load instead
+// of the range checks of ApplyShaderRegisterSideEffects for every word.
+enum Oot3dPicaRegisterKind : uint8_t {
+    kRegisterPlain = 0,
+    // ApplyShaderRegisterSideEffects does something (LUT and table data,
+    // default attributes, shader uniforms, program and swizzle data).
+    kRegisterSideEffect,
+    // A draw (0x22E/0x22F) or the P3D interrupt request (0x010).
+    kRegisterTrigger,
+    // Float uniform data: a side effect, and consecutive-mode bursts go
+    // through WriteFloatUniformBurst.
+    kRegisterVertexFloatData,
+    kRegisterGeometryFloatData,
+};
+
+constexpr std::array<uint8_t, kPicaRegisterCount> kRegisterKinds = [] {
+    std::array<uint8_t, kPicaRegisterCount> kinds{};
+    const auto range = [&kinds](uint32_t first, uint32_t last, uint8_t kind) {
+        for (uint32_t id = first; id <= last; ++id) kinds[id] = kind;
+    };
+    range(kPicaLightingLutDataBegin, kPicaLightingLutDataEnd, kRegisterSideEffect);
+    range(kPicaProcTexLutDataBegin, kPicaProcTexLutDataEnd, kRegisterSideEffect);
+    range(kPicaFogLutDataBegin, kPicaFogLutDataEnd, kRegisterSideEffect);
+    range(kPicaDefaultAttributeIndex, kPicaDefaultAttributeDataEnd, kRegisterSideEffect);
+    for (const uint32_t base : {kPicaGeometryShaderBase, kPicaVertexShaderBase}) {
+        range(base + kBooleanUniformOffset, base + kIntegerUniformEndOffset, kRegisterSideEffect);
+        range(base + kFloatUniformDataBeginOffset, base + kFloatUniformDataEndOffset,
+              base == kPicaVertexShaderBase ? kRegisterVertexFloatData : kRegisterGeometryFloatData);
+        range(base + kProgramDataBeginOffset, base + kProgramDataEndOffset, kRegisterSideEffect);
+        range(base + kSwizzleDataBeginOffset, base + kSwizzleDataEndOffset, kRegisterSideEffect);
+    }
+    kinds[kPicaTriggerDraw] = kRegisterTrigger;
+    kinds[kPicaTriggerDrawIndexed] = kRegisterTrigger;
+    kinds[kPicaIrqRequest] = kRegisterTrigger;
+    return kinds;
+}();
+
 constexpr std::array<uint32_t, 16> kExpandedParameterMasks{
     0x00000000U, 0x000000FFU, 0x0000FF00U, 0x0000FFFFU,
     0x00FF0000U, 0x00FF00FFU, 0x00FFFF00U, 0x00FFFFFFU,
@@ -400,19 +452,6 @@ void Oot3dNativePicaFrontend::ApplyShaderStageRegisterSideEffects(
     uint16_t registerId, uint32_t writeValue, uint16_t stageBase,
     Oot3dPicaShaderState& shader,
     PackedAttributeQueue& uniformQueue, bool mirrorToGeometryShader) {
-    constexpr uint16_t kBooleanUniformOffset = 0x00U;
-    constexpr uint16_t kIntegerUniformBeginOffset = 0x01U;
-    constexpr uint16_t kIntegerUniformEndOffset = 0x04U;
-    constexpr uint16_t kFloatUniformSetupOffset = 0x10U;
-    constexpr uint16_t kFloatUniformDataBeginOffset = 0x11U;
-    constexpr uint16_t kFloatUniformDataEndOffset = 0x18U;
-    constexpr uint16_t kProgramOffsetOffset = 0x1BU;
-    constexpr uint16_t kProgramDataBeginOffset = 0x1CU;
-    constexpr uint16_t kProgramDataEndOffset = 0x23U;
-    constexpr uint16_t kSwizzleOffsetOffset = 0x25U;
-    constexpr uint16_t kSwizzleDataBeginOffset = 0x26U;
-    constexpr uint16_t kSwizzleDataEndOffset = 0x2DU;
-
     const uint16_t offset = registerId - stageBase;
     const auto mirror = [&](const auto& apply) {
         if (mirrorToGeometryShader) {
@@ -503,6 +542,63 @@ void Oot3dNativePicaFrontend::ApplyShaderStageRegisterSideEffects(
             mDirtyLines.MarkRegister(stageBase + kSwizzleOffsetOffset);
         }
     }
+}
+
+bool Oot3dNativePicaFrontend::WriteFloatUniformBurst(
+    uint16_t registerId, bool vertexStage, uint32_t mask,
+    std::span<const uint32_t> words) {
+    const uint16_t setupId = static_cast<uint16_t>(
+        (vertexStage ? kPicaVertexShaderBase : kPicaGeometryShaderBase) +
+        kFloatUniformSetupOffset);
+    Oot3dPicaShaderState& shader = vertexStage ? mVertexShader : mGeometryShader;
+    PackedAttributeQueue& queue =
+        vertexStage ? mVertexUniformQueue : mGeometryUniformQueue;
+    // Only a completed vector rewrites the setup register, and it keeps the
+    // mode bit: the mode holds for the whole burst.
+    uint32_t setup = mPicaRegisters[setupId];
+    const bool float32 = (setup & 0x80000000U) != 0U;
+    const size_t requiredWords = float32 ? 4U : 3U;
+    size_t count = queue.Count;
+    if (count >= requiredWords) {
+        return false;
+    }
+    // ApplyShaderRegisterSideEffects' mirror condition; neither register
+    // changes during the burst.
+    const bool mirror =
+        vertexStage &&
+        (mPicaRegisters[kPicaGeometryShaderExclusiveConfiguration] & 1U) == 0U &&
+        (mPicaRegisters[kPicaPipelineUseGeometryShader] & 3U) == 0U;
+    uint32_t value = mPicaRegisters[registerId];
+    bool advanced = false;
+    for (const uint32_t word : words) {
+        value = (value & ~mask) | (word & mask);
+        queue.Words[count++] = value;
+        if (count != requiredWords) {
+            continue;
+        }
+        const size_t index = setup & 0x7FU;
+        if (index < shader.FloatUniforms.size()) {
+            shader.FloatUniforms[index] = float32
+                                              ? DecodePackedFloat32(queue.Words)
+                                              : DecodePackedFloat24(queue.Words);
+            MarkUniform(shader, index);
+            if (mirror) {
+                mGeometryShader.FloatUniforms[index] = shader.FloatUniforms[index];
+                MarkUniform(mGeometryShader, index);
+            }
+        }
+        count = 0U;
+        setup = (setup & 0x80000000U) |
+                static_cast<uint32_t>((index + 1U) & 0x7FU);
+        advanced = true;
+    }
+    queue.Count = count;
+    mPicaRegisters[registerId] = value;
+    if (advanced) {
+        mPicaRegisters[setupId] = setup;
+        mDirtyLines.MarkRegister(setupId);
+    }
+    return true;
 }
 
 void Oot3dNativePicaFrontend::ApplyShaderRegisterSideEffects(
@@ -860,7 +956,228 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
     size_t cursor = 0;
     bool stopRequested = false;
     bool drawSubmitted = false;
-    while (cursor < commandListWords.size()) {
+    // After the store of a draw trigger or the P3D interrupt request.
+    const auto trigger = [&](uint16_t id, bool supported,
+                             uint32_t offsetWords) -> bool {
+        if (id == kPicaTriggerDraw || id == kPicaTriggerDrawIndexed) {
+            SettleLightingLutHash();
+            const auto* metadata = resolveComposition(offsetWords);
+            auto composition = metadata != nullptr
+                ? metadata->Attribution
+                : listDomain == Oot3dPicaCompositionDomain::Ui
+                    ? Oot3dPicaCompositionAttribution{
+                          Oot3dPicaCompositionLayer::Ui,
+                          Oot3dPicaCompositionProvenance::NativeUiLifecycle, 0U, 0U}
+                    : Oot3dPicaCompositionAttribution{};
+            if (composition.TemporalIdentity.Available()) {
+                const uint64_t address = uint64_t{commandListAddress} + uint64_t{offsetWords} * 4U;
+                if (metadata == nullptr || composition.TemporalPacketBeginAddress == 0 ||
+                    address < composition.TemporalPacketBeginAddress || address >= metadata->EndAddress)
+                    composition.TemporalIdentity = {};
+                else
+                    composition.TemporalIdentity.Slot += address - composition.TemporalPacketBeginAddress;
+            }
+            composition.TemporalPacketBeginAddress = 0;
+            auto domain = listDomain;
+            switch (composition.Layer) {
+                case Oot3dPicaCompositionLayer::OpaqueWorld:
+                case Oot3dPicaCompositionLayer::TransparentWorld:
+                case Oot3dPicaCompositionLayer::Atmosphere:
+                    domain = Oot3dPicaCompositionDomain::Scene;
+                    break;
+                case Oot3dPicaCompositionLayer::Ui:
+                    domain = Oot3dPicaCompositionDomain::Ui;
+                    break;
+                case Oot3dPicaCompositionLayer::Unknown:
+                    break;
+            }
+            if (mInPlaceDrawPackets && !mDiagnosticHistoryEnabled &&
+                mPacketSink != nullptr) {
+                // The sink constructs the packet where it keeps it.
+                Oot3dPicaDrawPacketSource source;
+                source.CommandListAddress = commandListAddress;
+                source.CommandListOffsetWords = offsetWords;
+                source.CompositionDomain = domain;
+                source.Composition = composition;
+                if (metadata != nullptr && domain == Oot3dPicaCompositionDomain::Scene)
+                    source.LightBinding = &metadata->LightBinding;
+                source.Indexed = id == kPicaTriggerDrawIndexed;
+                source.Registers = &mPicaRegisters;
+                source.VertexShader = &mVertexShader;
+                source.GeometryShader = &mGeometryShader;
+                source.FogLut = &mFogLut;
+                source.ProcTexLuts = &mProcTexLuts;
+                source.LightingLuts = mLightingLuts;
+                source.DefaultAttributes = &mDefaultAttributes;
+                source.DirtyLines = mCaptureDelta ? &mDirtyLines : nullptr;
+                const uint64_t sinkStarted = CaptureTicks();
+                const bool submitted = mPacketSink->SubmitDrawPacketSource(source, error);
+                mCaptureStats.SinkTicks += CaptureTicks() - sinkStarted;
+                if (!submitted) {
+                    return false;
+                }
+                drawSubmitted = true;
+            } else {
+            Oot3dPicaDrawPacket draw(
+                commandListAddress, offsetWords,
+                domain, composition,
+                id == kPicaTriggerDrawIndexed, mPicaRegisters,
+                mVertexShader, mGeometryShader, mFogLut, mProcTexLuts,
+                mLightingLuts, mDefaultAttributes);
+            if (metadata != nullptr && domain == Oot3dPicaCompositionDomain::Scene)
+                draw.LightBinding = metadata->LightBinding;
+            if (mPacketSink != nullptr) {
+                const uint64_t sinkStarted = CaptureTicks();
+                const bool submitted = mPacketSink->SubmitDrawPacket(draw, error);
+                mCaptureStats.SinkTicks += CaptureTicks() - sinkStarted;
+                if (!submitted) {
+                    return false;
+                }
+            }
+            drawSubmitted = true;
+            if (mDiagnosticHistoryEnabled) {
+                mPendingDrawPackets.push_back(std::move(draw));
+            }
+            }
+        }
+        if (id == kPicaIrqRequest && supported) {
+            const uint32_t request = mPicaRegisters[kPicaIrqRequest];
+            const uint32_t compare = mPicaRegisters[kPicaIrqCompare];
+            const bool byteMatches =
+                (request & 0xFFU) == (compare & 0xFFU) ||
+                ((request >> 8U) & 0xFFU) ==
+                    ((compare >> 8U) & 0xFFU) ||
+                ((request >> 16U) & 0xFFU) ==
+                    ((compare >> 16U) & 0xFFU) ||
+                ((request >> 24U) & 0xFFU) ==
+                    ((compare >> 24U) & 0xFFU);
+            if (byteMatches) {
+                if (!drawSubmitted) {
+                    mPendingInterrupts.push_back(
+                        Oot3dPicaInterruptId::P3d);
+                } else if (mPacketSink != nullptr) {
+                    const uint64_t sinkStarted = CaptureTicks();
+                    const bool submitted = mPacketSink->SubmitInterruptAfterGpuWork(
+                        Oot3dPicaInterruptId::P3d, error);
+                    mCaptureStats.SinkTicks += CaptureTicks() - sinkStarted;
+                    if (!submitted) {
+                        return false;
+                    }
+                }
+                stopRequested =
+                    mPicaRegisters[kPicaIrqAutoStop] != 0U;
+            }
+        }
+        return true;
+    };
+
+    const bool fastWalk = mListWalkFast && !mDiagnosticHistoryEnabled;
+    if (fastWalk) {
+        // config/list_walk_fast: the same writes in the same order; plain
+        // registers are only stored (kRegisterKinds), a register repeated in
+        // consecutive mode keeps the masked bits of its last word, and float
+        // uniform bursts are queued and decoded in one loop.
+        const uint32_t* const words = commandListWords.data();
+        const size_t wordCount = commandListWords.size();
+        // The register lines this walk dirtied, kept in a register (not a
+        // store and reload per word) and handed to mDirtyLines before each
+        // draw (whose sink consumes them) and on every way out.
+        struct WalkTotals {
+            uint64_t& DirtyRegisters;
+            uint64_t& BatchedWords;
+            uint64_t Dirty = 0U;
+            uint64_t Batched = 0U;
+            ~WalkTotals() {
+                DirtyRegisters |= Dirty;
+                BatchedWords += Batched;
+            }
+        } totals{mDirtyLines.Registers, mCaptureStats.BatchedWords};
+        const auto write = [&](uint16_t id, uint32_t writeValue, uint32_t mask,
+                               uint32_t offsetWords) -> bool {
+            if (id >= kPicaRegisterCount) {
+                return true;
+            }
+            const uint32_t finalValue =
+                (mPicaRegisters[id] & ~mask) | (writeValue & mask);
+            mPicaRegisters[id] = finalValue;
+            totals.Dirty |= uint64_t{1} << (id >> 4U);
+            const uint8_t kind = kRegisterKinds[id];
+            if (kind == kRegisterPlain) [[likely]] {
+                return true;
+            }
+            if (kind == kRegisterTrigger) {
+                mDirtyLines.Registers |= totals.Dirty;
+                totals.Dirty = 0U;
+                return trigger(id, true, offsetWords);
+            }
+            ApplyShaderRegisterSideEffects(id, finalValue);
+            return true;
+        };
+        while (cursor < wordCount) {
+            if (stopRequested) {
+                break;
+            }
+            cursor += cursor & 1U;
+            if (cursor == wordCount) {
+                break;
+            }
+            if (cursor + 2U > wordCount) {
+                SetError(error, "PICA command list ends before its header");
+                return false;
+            }
+            const uint32_t valueOffset = static_cast<uint32_t>(cursor);
+            const uint32_t value = words[cursor];
+            const uint32_t header = words[cursor + 1U];
+            cursor += 2U;
+            const uint16_t registerId = static_cast<uint16_t>(header);
+            const uint32_t mask = kExpandedParameterMasks[(header >> 16U) & 0xFU];
+            const uint32_t extraDataLength = (header >> 20U) & 0xFFU;
+            const bool grouped = (header >> 31U) != 0;
+            if (!write(registerId, value, mask, valueOffset)) {
+                return false;
+            }
+            if (extraDataLength == 0U) {
+                continue;
+            }
+            if (extraDataLength > wordCount - cursor) {
+                SetError(error, "PICA command list extra data is truncated");
+                return false;
+            }
+            const uint32_t* const extra = words + cursor;
+            if (!grouped && registerId < kPicaRegisterCount) {
+                const uint8_t kind = kRegisterKinds[registerId];
+                if (kind == kRegisterPlain) {
+                    // Each word replaces the masked bits: the last one's stay
+                    // (the line is already marked by the first write).
+                    mPicaRegisters[registerId] =
+                        (mPicaRegisters[registerId] & ~mask) |
+                        (extra[extraDataLength - 1U] & mask);
+                    cursor += extraDataLength;
+                    totals.Batched += extraDataLength;
+                    continue;
+                }
+                if ((kind == kRegisterVertexFloatData ||
+                     kind == kRegisterGeometryFloatData) &&
+                    WriteFloatUniformBurst(registerId, kind == kRegisterVertexFloatData, mask,
+                                           std::span<const uint32_t>(extra, extraDataLength))) {
+                    cursor += extraDataLength;
+                    totals.Batched += extraDataLength;
+                    continue;
+                }
+            }
+            for (uint32_t index = 0; index < extraDataLength; ++index) {
+                const uint16_t extraRegister = static_cast<uint16_t>(
+                    registerId + (grouped ? index + 1U : 0U));
+                if (!write(extraRegister, extra[index], mask,
+                           static_cast<uint32_t>(cursor + index))) {
+                    return false;
+                }
+            }
+            cursor += extraDataLength;
+        }
+    }
+    // The walk without config/list_walk_fast, or with diagnostic history.
+    while (!fastWalk && cursor < commandListWords.size()) {
         if (stopRequested) {
             break;
         }
@@ -901,106 +1218,11 @@ bool Oot3dNativePicaFrontend::SubmitGspCommand(
                     {commandListAddress, offsetWords, id, parameterMask,
                      supported, writeValue, finalValue});
             }
-            if (id == kPicaTriggerDraw ||
-                id == kPicaTriggerDrawIndexed) {
-                SettleLightingLutHash();
-                const auto* metadata = resolveComposition(offsetWords);
-                auto composition = metadata != nullptr
-                    ? metadata->Attribution
-                    : listDomain == Oot3dPicaCompositionDomain::Ui
-                        ? Oot3dPicaCompositionAttribution{
-                              Oot3dPicaCompositionLayer::Ui,
-                              Oot3dPicaCompositionProvenance::NativeUiLifecycle, 0U, 0U}
-                        : Oot3dPicaCompositionAttribution{};
-                if (composition.TemporalIdentity.Available()) {
-                    const uint64_t address = uint64_t{commandListAddress} + uint64_t{offsetWords} * 4U;
-                    if (metadata == nullptr || composition.TemporalPacketBeginAddress == 0 ||
-                        address < composition.TemporalPacketBeginAddress || address >= metadata->EndAddress)
-                        composition.TemporalIdentity = {};
-                    else
-                        composition.TemporalIdentity.Slot += address - composition.TemporalPacketBeginAddress;
-                }
-                composition.TemporalPacketBeginAddress = 0;
-                auto domain = listDomain;
-                switch (composition.Layer) {
-                    case Oot3dPicaCompositionLayer::OpaqueWorld:
-                    case Oot3dPicaCompositionLayer::TransparentWorld:
-                    case Oot3dPicaCompositionLayer::Atmosphere:
-                        domain = Oot3dPicaCompositionDomain::Scene;
-                        break;
-                    case Oot3dPicaCompositionLayer::Ui:
-                        domain = Oot3dPicaCompositionDomain::Ui;
-                        break;
-                    case Oot3dPicaCompositionLayer::Unknown:
-                        break;
-                }
-                if (mInPlaceDrawPackets && !mDiagnosticHistoryEnabled &&
-                    mPacketSink != nullptr) {
-                    // The sink constructs the packet where it keeps it.
-                    Oot3dPicaDrawPacketSource source;
-                    source.CommandListAddress = commandListAddress;
-                    source.CommandListOffsetWords = offsetWords;
-                    source.CompositionDomain = domain;
-                    source.Composition = composition;
-                    if (metadata != nullptr && domain == Oot3dPicaCompositionDomain::Scene)
-                        source.LightBinding = &metadata->LightBinding;
-                    source.Indexed = id == kPicaTriggerDrawIndexed;
-                    source.Registers = &mPicaRegisters;
-                    source.VertexShader = &mVertexShader;
-                    source.GeometryShader = &mGeometryShader;
-                    source.FogLut = &mFogLut;
-                    source.ProcTexLuts = &mProcTexLuts;
-                    source.LightingLuts = mLightingLuts;
-                    source.DefaultAttributes = &mDefaultAttributes;
-                    source.DirtyLines = mCaptureDelta ? &mDirtyLines : nullptr;
-                    if (!mPacketSink->SubmitDrawPacketSource(source, error)) {
-                        return false;
-                    }
-                    drawSubmitted = true;
-                } else {
-                Oot3dPicaDrawPacket draw(
-                    commandListAddress, offsetWords,
-                    domain, composition,
-                    id == kPicaTriggerDrawIndexed, mPicaRegisters,
-                    mVertexShader, mGeometryShader, mFogLut, mProcTexLuts,
-                    mLightingLuts, mDefaultAttributes);
-                if (metadata != nullptr && domain == Oot3dPicaCompositionDomain::Scene)
-                    draw.LightBinding = metadata->LightBinding;
-                if (mPacketSink != nullptr &&
-                    !mPacketSink->SubmitDrawPacket(draw, error)) {
-                    return false;
-                }
-                drawSubmitted = true;
-                if (mDiagnosticHistoryEnabled) {
-                    mPendingDrawPackets.push_back(std::move(draw));
-                }
-                }
+            if (id != kPicaTriggerDraw && id != kPicaTriggerDrawIndexed &&
+                id != kPicaIrqRequest) {
+                return true;
             }
-            if (id == kPicaIrqRequest && supported) {
-                const uint32_t request = mPicaRegisters[kPicaIrqRequest];
-                const uint32_t compare = mPicaRegisters[kPicaIrqCompare];
-                const bool byteMatches =
-                    (request & 0xFFU) == (compare & 0xFFU) ||
-                    ((request >> 8U) & 0xFFU) ==
-                        ((compare >> 8U) & 0xFFU) ||
-                    ((request >> 16U) & 0xFFU) ==
-                        ((compare >> 16U) & 0xFFU) ||
-                    ((request >> 24U) & 0xFFU) ==
-                        ((compare >> 24U) & 0xFFU);
-                if (byteMatches) {
-                    if (!drawSubmitted) {
-                        mPendingInterrupts.push_back(
-                            Oot3dPicaInterruptId::P3d);
-                    } else if (mPacketSink != nullptr &&
-                               !mPacketSink->SubmitInterruptAfterGpuWork(
-                                   Oot3dPicaInterruptId::P3d, error)) {
-                        return false;
-                    }
-                    stopRequested =
-                        mPicaRegisters[kPicaIrqAutoStop] != 0U;
-                }
-            }
-            return true;
+            return trigger(id, supported, offsetWords);
         };
         if (!applyWrite(registerId, value, valueOffset)) {
             return false;

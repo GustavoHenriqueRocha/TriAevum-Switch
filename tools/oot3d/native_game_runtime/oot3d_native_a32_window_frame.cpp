@@ -2139,6 +2139,19 @@ bool NativeA32WindowSession::RunFrame() {
                << " lists=" << perFrame(frontend.Lists, previousFrontend.Lists)
                << " list_kwords="
                << perFrame(frontend.ListWords, previousFrontend.ListWords) / 1024.0
+               << " list_walk_fast=" << (picaFrontend.ListWalkFast() ? 1 : 0)
+               << " list_walk_ms="
+               << msPerFrame(frontend.ListTicks - frontend.SinkTicks,
+                             previousFrontend.ListTicks - previousFrontend.SinkTicks)
+               << " list_walk_ns_word="
+               << (frontend.ListWords != previousFrontend.ListWords
+                       ? Oot3dNativeGame::CaptureTicksToNanoseconds(
+                             (frontend.ListTicks - frontend.SinkTicks) -
+                             (previousFrontend.ListTicks - previousFrontend.SinkTicks)) /
+                             static_cast<double>(frontend.ListWords - previousFrontend.ListWords)
+                       : 0.0)
+               << " list_batched_kwords="
+               << perFrame(frontend.BatchedWords, previousFrontend.BatchedWords) / 1024.0
                << " lut_ms=" << msPerFrame(frontend.LutTicks, previousFrontend.LutTicks)
                << " lut_hashes=" << perFrame(frontend.LutHashes, previousFrontend.LutHashes)
                << " lut_reuses=" << perFrame(frontend.LutReuses, previousFrontend.LutReuses)

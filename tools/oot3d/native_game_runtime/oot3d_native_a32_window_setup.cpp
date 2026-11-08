@@ -953,6 +953,8 @@ void NativeA32WindowSession::Setup() {
     submissionQueue.SetCaptureDelta(captureDelta);
     picaFrontend.SetCaptureDelta(captureDelta);
   }
+  // config/list_walk_fast: the command-list walk's dispatch table and batches.
+  picaFrontend.SetListWalkFast(Oot3dNativeGame::ReadNativeListWalkFast());
   picaPresentationScheduler.SetMoveFreeFinish(offload.Plan);
 #if defined(__SWITCH__)
   if (offload.Perf) {

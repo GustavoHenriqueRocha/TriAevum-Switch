@@ -4312,6 +4312,96 @@ place and clock: Kokiri Forest, room 8 with the Deku Babas, cutting bushes. Comp
 the `cap_*` stages, `list_ms`, `lut_ms`/`lut_hashes`, `game_pair_ms` and `guest`. With it on,
 `cap_state_kb` falls about fivefold and `cap_materialize_us` appears; the image must be identical.
 
+### Command-list walk: `config/list_walk_fast` (2026-11-08)
+Perf19 (test.11, Kokiri Forest, `logs19/perf.txt:1039`): the GSP command-list walk outside the captures
+(`list_ms` − `pica_capture_ms`) costs 1.81 ms per host frame, about 2.6 ms per step: 34.7 K words per
+frame, about 450 words and 23 µs per draw, about 52 ns per word. The per-word walk ran every word
+through a lambda that stored the register, marked its dirty line, called
+`ApplyShaderRegisterSideEffects` (eight range checks and the mirror condition before it finds that
+most registers have no side effect), checked the diagnostic history, both draw triggers and the
+interrupt request. A float uniform word also went through the stage's offset checks and reloaded
+the setup register.
+
+**Fast walk** (`config/list_walk_fast`: no file = on, `0` = off; desktop `TRIAEVUM_LIST_WALK_FAST=1`).
+Used when diagnostic history is off (always on the console). The writes keep their order:
+- **Dispatch table** (`kRegisterKinds`, 0x300 bytes, built at compile time from the same constants):
+  plain, side effect (LUT/fog/procedural data, default attributes, boolean/integer uniforms, program
+  and swizzle data), trigger (0x22E/0x22F draws, 0x010 interrupt request), vertex/geometry float
+  uniform data. A plain register is a store and a dirty bit, and a trigger or side-effect register
+  goes to the same code as before.
+- **Consecutive mode:** a plain register repeated by one command keeps the masked bits of the last
+  word, (old & ~mask) | (last & mask), in one store. A float uniform burst goes through
+  `WriteFloatUniformBurst`: one loop queues the words and decodes each vector. The setup register, the
+  mode and the geometry mirror are read once, the queue count stays in a register, and the setup is
+  written back at the end with its dirty line. If the queue already holds a whole vector for the
+  current mode, the burst takes the per-word path. That only happens when the setup changes from
+  float32 to float24 with 3 words queued, where both walks overrun the 4-word queue the same way.
+- **Dirty register lines** are collected in a register and handed to `Oot3dPicaStateDirtyLines`
+  before each trigger (the sink consumes them at a draw) and on every exit.
+- The draw and interrupt code is shared by both walks (one `trigger` lambda). The per-word walk is
+  unchanged and checks the three trigger ids inline before calling it.
+
+**`perf.txt` `capture:` group:**
+- `list_walk_fast`: whether the fast walk is on.
+- `list_walk_ms`: the walk without the sink's draw and interrupt submissions, in ms per host frame.
+  The frontend times those submissions (`SinkTicks`, lock included), so this is `list_ms` minus the
+  sink. It is a little less than `list_ms` − `pica_capture_ms`, which also holds the queue lock.
+- `list_walk_ns_word`: the same, per command word.
+- `list_batched_kwords`: the K words per frame taken by a batched loop.
+
+`perf_report.py` prints them under `offload`.
+
+**Exactness proof:** `oot3d_native_pica_list_walk_tests` (in `run.sh`). Two frontends, per-word and
+fast, get the same lists. Compared after every list:
+- success and error text;
+- every sink event: each packet with its register file, both shader states (float uniforms bit for
+  bit), every table, LUT content and hash, default attributes, composition and light binding; the
+  dirty lines handed along; interrupts after GPU work;
+- the whole frontend savestate (registers, shader state, tables, the three packed queues);
+- the pending interrupts, the composition statistics and notes, and the table/LUT counters.
+
+What it runs:
+- *Every register:* 777 ids (0–0x2FF, and ids past the register file and near 0xFFFF that wrap), each
+  with all 16 byte masks, written alone, repeated in consecutive mode, and in a grouped run, each
+  followed by a probe draw: 12,432 lists.
+- *Streams:* 16 seeds × 400 lists, all 16 combinations of capture delta, in-place packets, pass-span
+  fallback and late lists on time.
+  - Game-shaped draws: material registers, TEV and light runs, texture units, float32/float24
+    uniform bursts, bone matrices, attribute loaders.
+  - Random commands over the whole register space, with masks, padding, bursts up to 256 words, draws
+    in bursts and interrupt requests that stop the list.
+  - Truncated lists, draws the sink refuses, and random composition and pass spans, domains and
+    generations.
+  - About 13 million words and 38,000 draws in all, identical.
+- *Diagnostic history* keeps the per-word walk.
+
+`oot3d_native_capture_delta_tests` now also walks its two capture-delta runs with the fast walk
+against the per-word reference, through the real queue, guest memory, delta log and plan builder.
+
+**Host bench** (`oot3d_native_pica_list_walk_tests --bench`, Release, Ryzen, shared machine, 100 draws
+per frame in 4 lists). It times the walk without the sink and interleaves runs with the english
+`af991bd7` walk (`base`). That walk measures the same as the per-word column, within ±10 % noise:
+
+| Shape | Words/draw | Per-word walk, ns/word | Fast walk, ns/word | Batched words |
+|---|---:|---:|---:|---:|
+| game (material singles, runs, uniforms, skinning) | 390 | 9.7–16.5 | 3.1–4.8 | 20 % |
+| single writes only | 402 | 7.3–11.2 | 2.6–4.2 | 0 % |
+| uniform-heavy (60-vector float24 bursts) | 242 | 15.9–24.6 | 5.8–9.4 | 79 % |
+
+Within each run the fast walk takes 2.3–3.9× less time (−56 to −79 %), and the game shape about 3×.
+
+**Estimate for the console** [INFERENCE: the game's real register mix was not recorded, and the
+A57/Ryzen ratio is assumed to be the same for both walks]:
+- Kokiri's 2.6 ms per step outside the captures falls to about 0.8–1.3 ms;
+- that is −1.2 to −1.8 ms per step at about 109 draws per step, and −0.7 to −1.2 ms in the 60 FPS
+  places (1.7–2.4 ms there).
+- `list_walk_ns_word` should fall from about 50 to about 15–25.
+
+**Console A/B (one minute):** in Kokiri Forest, at the same place and clock, create
+`config/list_walk_fast` with `0`, then remove it. Compare `list_walk_ms`, `list_walk_ns_word`,
+`list_ms`, `guest`, `game_pair_ms` (mean and p90) and the GSP IPC part of `guest_kernel:`.
+`pica_capture_ms` and the `cap_*` stages must not move, and the image must be identical.
+
 ### Status as of 2026-10-17 (best version so far)
 - PGO (2nd collection) + lean mode + PICA plans on core 1 + render thread on core 2 + audio on its own thread.
 - Measured at 30 FPS, 2× scale: 29.9 FPS average, 93% of the time at 30, logic ~11 ms per step.
