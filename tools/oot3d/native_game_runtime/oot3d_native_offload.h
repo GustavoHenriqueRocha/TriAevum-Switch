@@ -140,6 +140,24 @@ inline bool ReadNativeVertexSnapshotFast() {
 #endif
 }
 
+// config/texture_snapshot_fast (SWITCH_PORT.md "Texture snapshot and packet
+// stages"): textures viewed and certified directly, found through a front
+// table, compared page by page; the next draw's packet prefetched. Switch:
+// the file absent = on, "0" = the previous path. Desktop:
+// TRIAEVUM_TEXTURE_SNAPSHOT_FAST=1 (off otherwise).
+inline bool ReadNativeTextureSnapshotFast() {
+#if defined(__SWITCH__)
+    std::ifstream input("sdmc:/switch/oot3dre/config/texture_snapshot_fast");
+    if (!input) return true;
+    std::string text;
+    std::getline(input, text);
+    return ParseOffloadSwitch(text);
+#else
+    const char* value = std::getenv("TRIAEVUM_TEXTURE_SNAPSHOT_FAST");
+    return value != nullptr && std::string_view(value) != "" && ParseOffloadSwitch(value);
+#endif
+}
+
 // Appends lines to one file from a service thread, in submission order.
 // Push never waits for the file: it takes a mutex the writer holds only to
 // pop (never during the write) and drops the line when the queue is full.

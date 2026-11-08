@@ -4806,6 +4806,136 @@ must be identical.
 - If a range is rewritten whole every frame, the page certificates only add cost.
 - `vs_uncertified` shows ranges an escaped write pointer covers; those still compare every byte.
 
+### Texture snapshot and packet stages: `config/texture_snapshot_fast` (11/08)
+Perf19 candidate 5. On core 0, inside the GSP SVC, the texture stage (`cap_texture_us`) costs 2.6–3.7 µs
+per draw and the packet stage (`cap_packet_us`) 2.1–2.6 µs. In Kokiri Forest (109 draws per step) that is
+0.34 and 0.26 ms per step.
+
+For every enabled texture, the texture stage did the following:
+- views the memory through the callbacks and two alias walks (`View`, then `SnapshotWriteGeneration`);
+- hashes a 13-field key and walks the bucket of an `unordered_map`;
+- runs a full `memcmp` of the texture (often tens of KiB) whenever its certificate changed.
+
+The packet stage builds the draw's packet in the queue. With capture delta, the register file, the float
+uniforms and the default attributes are already left to the log. What is left still copies the eleven shared
+tables, with one atomic reference increment each per draw: two shader programs, two swizzle tables, the fog
+table, five procedural texture tables and the lighting LUTs. The slot it writes was last written frames ago,
+often on another core (the plan worker frees the drained draws).
+
+**`config/texture_snapshot_fast`** (no file = on, `0` = off). It switches the following together:
+- **Direct view and certificate.** A texture that lies in exactly one region goes through
+  `Oot3dPicaPhysicalMemoryView::ViewCertified`, the vertex path's direct calls. The memory calls and their
+  order are the same. An aliased texture keeps the previous path (`tx_fallbacks`).
+- **Front table** of the texture cache: 512 direct-mapped slots, each holding the map node where a key was
+  last found. The cache only loses nodes when the whole map is replaced (a payload transform is set, or a
+  restore), and both of those clear the table.
+- **Page certificates.** When a multi-page texture's certificate changed, the certificate of each page is
+  taken. That happens after the texture's own certificate and before any byte is compared or copied, and the
+  page certificates are kept with the cache entry. Only the pages whose certificate changed are compared with
+  the cached source bytes. This is the vertex path's proof, and the compare is now one function for both
+  (`ComparePageRuns`). Observation resets clear the page certificates.
+- **Deferred tables.** A capture-delta draw's packet leaves its shared tables empty
+  (`Oot3dPicaStateTablesDeferred`; `Oot3dPicaSharedArray` gains a storage-less constructor). The delta log
+  takes one reference to each set of tables, and only when one of them is a different storage than at the
+  previous recorded draw (`SharesStorageWith`). Its replay sets them together with the arrays.
+  - A storage the log holds is shared, so the frontend's copy-on-write never writes it in place. The
+    replayed tables are therefore the draw's.
+  - Everything that reads the tables (plan builds, shader generation, diagnostics) also needs the register
+    file, so it already runs after the replay. The placeholders read only identity, composition and decoded
+    state.
+  - The comparison and recording are counted in `cap_packet_us`. The increments move to the replay on the
+    plan worker (`cap_materialize_us`).
+- **Prefetch.** After each draw, the parts of the next packet slot that the constructor and the decoder will
+  write are prefetched for writing. The register file, the uniforms and the attributes are not.
+
+The switch gives the same snapshots, hashes, base-level hashes, misses, copied and hashed bytes, materialized
+packets and savestates. Only the bytes compared, the references taken on core 0, and the time spent differ.
+
+**`perf.txt` `tsnap:` group** (after `vsnap:`). Fields per host frame:
+- `texture_snapshot_fast`;
+- `tx_resources`: textures looked up;
+- `tx_copy_referenced`: textures with GPU copy references (their CPU gaps are read every draw; unchanged);
+- `tx_version_hits` / `tx_version_misses`;
+- `tx_uncertified`;
+- `tx_unproven_kb`, `tx_compared_kb`;
+- `tx_pages`, `tx_dirty_pages`;
+- `tx_fallbacks`;
+- `tx_misses`: new snapshots.
+
+Then µs per draw of `cap_texture_us`:
+- `tx_view_us`: copy-reference check, view, certificate, lookup;
+- `tx_compare_us`: page certificates and comparison;
+- `tx_copy_us`: new snapshot with its copy, payload transform and hashes;
+- `tx_rest_us`: snapshot list, HD-font resolve and the copy-referenced textures.
+
+`perf_report.py` prints the group under `offload`.
+
+**Exactness proof**
+- **`oot3d_native_texture_snapshot_tests`** (in `run.sh`)
+  - *Runs:* three queues over three copies of one guest-memory history: off, on, and toggled at random
+    between draws.
+  - *Textures:* every format, 8–256 texels per side, mip chains and type 2. They live in the heap, in VRAM
+    and behind a second alias (the fallback). Invalid formats and unmapped textures produce the same errors.
+  - *Memory changes:* content changes, same-value rewrites, escaped write pointers and deferred device
+    writes.
+  - *Mid-stream events:* a payload transform is set and removed, the write observation is rebound, and
+    savestates are compared and restored.
+  - *Checks on every draw:*
+    - the same success or error, packet and snapshots in all three runs;
+    - the bytes and both hashes equal guest memory at the draw, through the transform when one is set.
+  - *Result:* 4 seeds × 400 frames, about 133,000 draws and 267,000 textures. The fast run compares
+    28–57 % of the bytes the reference compares.
+- **`oot3d_native_capture_delta_tests`.** The two capture-delta runs now start with the switch on and toggle
+  it between lists, so the logs mix deferred and copied tables.
+  - Before the replay, a deferred draw must have all eleven tables empty.
+  - After every consumer path (queue takes, prefix replays, the plan builder with its worker and concurrent
+    resolvers), every table must equal the reference's.
+  - About 960 deferred draws are checked per seed.
+- **Mutation checks:** treating a texture's last page as clean fails the texture test at the first affected
+  draw. Not recording a lighting-LUT change fails the delta test with "lighting LUT".
+
+**Host bench** (`oot3d_native_texture_snapshot_tests --bench`, Release, Ryzen, shared machine).
+- *Scene:* 110 draws per frame from the frontend state with capture delta, 1–2 of 120 textures of 4–64 KiB
+  each, a 390-word walk between draws, and a consumer thread that replays and frees the drained draws through
+  4 recycled vectors.
+- *Texture stage, µs per draw, off → on:*
+
+| Write pattern between frames | Texture stage | of which view + lookup | KiB compared per frame |
+|---|---|---|---|
+| none (steady) | 0.64–0.89 → 0.51–0.61 | 0.43–0.63 → 0.29–0.36 | 0 |
+| one same-value byte in every texture | 1.11–1.38 → 0.90–1.11 | 0.49–0.59 → 0.32–0.40 | 799 → 308 |
+| every byte of every texture rewritten | 1.05–1.33 → 0.94–1.24 | 0.47–0.61 → 0.30–0.38 | 799 → 799 |
+
+- *Packet constructor alone* (hot, single thread), ns per draw: 158–161 → 86–89. Destruction: 78 → 23.
+- *Full packet stage:* 0.30–0.53 → 0.31–0.45 µs. That is within the noise: on the Ryzen the slot's cache
+  lines come from the 32 MiB L3 and a `lock xadd` costs about 6 ns.
+
+**Estimate for the console** [INFERENCE, not measured]
+- *Texture stage:* if Kokiri is in the steady regime, −25 to −30 %, so −0.8 to −0.95 µs per draw, or
+  about −0.1 ms per step.
+- *Packet stage:*
+  - Each of the eleven increments is an exclusive load/store pair with acquire/release ordering on the A57
+    (no LSE). That is 25–40 cycles in L1 and more when the plan worker on core 1 last wrote the line:
+    −0.3 to −1.1 µs per draw, or −0.03 to −0.12 ms per step.
+  - The prefetch is worth something only if the slot misses the 2 MiB L2. The drained-draw ring is about
+    3 MiB, so it probably does.
+- *Total:* about −0.1 to −0.25 ms per step on core 0, all inside the GSP SVC, so the kernel lock is held
+  that much less.
+- *Cost on core 1:* `cap_materialize_us` rises by the moved increments, about 0.1–0.5 µs per draw.
+
+**Console A/B (one minute):** in Kokiri Forest, at the same place and clock, create
+`config/texture_snapshot_fast` with `0`, then remove it. Compare:
+- `cap_texture_us`, `cap_packet_us`, `pica_capture_ms`, `list_ms`, `guest`, `game_pair_ms` (mean and p90),
+  `core1_lock_ms` and `cap_materialize_us`;
+- the `tsnap:` fields. With the switch off, `tx_compared_kb` equals `tx_unproven_kb`.
+
+The image must be identical.
+
+**Risks:**
+- A texture rewritten whole every frame only pays for its page certificates.
+- A table read from an unreplayed capture-delta packet would dereference an empty storage. Every reader
+  found also reads the register file, which is already under the replay rule.
+
 ### Status as of 2026-10-17 (best version so far)
 - PGO (2nd collection) + lean mode + PICA plans on core 1 + render thread on core 2 + audio on its own thread.
 - Measured at 30 FPS, 2× scale: 29.9 FPS average, 93% of the time at 30, logic ~11 ms per step.

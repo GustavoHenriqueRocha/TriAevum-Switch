@@ -377,6 +377,19 @@ target_link_libraries(oot3d_native_capture_delta_tests PRIVATE
 oot3d_target_defaults(oot3d_native_capture_delta_tests FOLDER Tests)
 oot3d_guest_window_host_alloc(oot3d_native_capture_delta_tests)
 
+# config/texture_snapshot_fast: texture snapshots captured with the direct,
+# page-certified path, the previous path and the switch toggled, over the
+# same guest memory history (store cards, escaped pointers, deferred writes,
+# aliases, payload transforms); every snapshot compared with the others and
+# with guest memory; --bench for the texture and packet stages per draw.
+add_executable(oot3d_native_texture_snapshot_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_texture_snapshot_tests.cpp
+)
+target_link_libraries(oot3d_native_texture_snapshot_tests PRIVATE
+    oot3d_native_pica_vulkan_plan)
+oot3d_target_defaults(oot3d_native_texture_snapshot_tests FOLDER Tests)
+oot3d_guest_window_host_alloc(oot3d_native_texture_snapshot_tests)
+
 # config/vertex_snapshot_fast: index buffers and vertex loaders captured with
 # the page-certified path, the previous path and the switch toggled, over the
 # same guest memory history (store cards, escaped pointers, deferred writes,

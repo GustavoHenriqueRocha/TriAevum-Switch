@@ -420,6 +420,18 @@ def summarize_offload(windows: list[Window]) -> None:
               f" {fmt(mean('vs_dirty_pages'), 1)}, fallbacks {fmt(mean('vs_fallbacks'), 1)}")
         print("    vertex stage per draw: " + ", ".join(
             f"{key} {fmt(mean('vs_' + key + '_us'), 2)}" for key in ("view", "compare", "copy", "rest")) + " us")
+    if any("tx_resources" in m for m in marked):
+        # "tsnap:" block: the texture snapshot steps inside cap_texture_us
+        # (config/texture_snapshot_fast; SWITCH_PORT.md "Texture snapshot and packet stages").
+        print(f"    texture snapshots (texture_snapshot_fast={int(num(marked[-1], 'texture_snapshot_fast'))}):"
+              f" {fmt(mean('tx_resources'), 0)} textures/frame (+{fmt(mean('tx_copy_referenced'), 1)} with GPU"
+              f" copies), {fmt(mean('tx_version_hits'), 0)} proven unchanged,"
+              f" {fmt(mean('tx_version_misses'), 0)} not ({fmt(mean('tx_uncertified'), 0)} without certificate,"
+              f" {fmt(mean('tx_misses'), 1)} new); unproven {fmt(mean('tx_unproven_kb'), 0)} KiB, compared"
+              f" {fmt(mean('tx_compared_kb'), 0)} KiB/frame; pages {fmt(mean('tx_pages'), 0)}, changed"
+              f" {fmt(mean('tx_dirty_pages'), 1)}, fallbacks {fmt(mean('tx_fallbacks'), 1)}")
+        print("    texture stage per draw: " + ", ".join(
+            f"{key} {fmt(mean('tx_' + key + '_us'), 2)}" for key in ("view", "compare", "copy", "rest")) + " us")
 
 
 def summarize_cadence(windows: list[Window], seconds: float) -> None:

@@ -19,6 +19,13 @@
 
 namespace Oot3dNativeGame {
 
+// Construction tag: a packet's shared tables (shader programs and swizzles,
+// fog and procedural texture tables, lighting LUTs) stay empty because the
+// capture-delta log that recorded them sets them when it is replayed
+// (config/capture_delta with config/texture_snapshot_fast, SWITCH_PORT.md
+// "Texture snapshot and packet stages").
+struct Oot3dPicaStateTablesDeferred {};
+
 // Shader programs are uploaded rarely and then referenced by every draw.
 // Copy-on-write storage keeps each submitted packet as an immutable snapshot
 // without copying the complete 16 KiB backing array on the hot draw path.
@@ -31,6 +38,16 @@ class Oot3dPicaSharedArray final {
 
     explicit Oot3dPicaSharedArray(Array values)
         : mStorage(std::make_shared<Storage>(std::move(values))) {}
+
+    // No storage until assigned (Oot3dPicaStateTablesDeferred): nothing may
+    // read it before.
+    explicit Oot3dPicaSharedArray(Oot3dPicaStateTablesDeferred) noexcept {}
+
+    // The same storage (so the same values: a shared storage is never
+    // written in place).
+    [[nodiscard]] bool SharesStorageWith(const Oot3dPicaSharedArray& other) const noexcept {
+        return mStorage == other.mStorage;
+    }
 
     Oot3dPicaSharedArray& operator=(Array values) {
         mStorage = std::make_shared<Storage>(std::move(values));
@@ -333,6 +350,15 @@ struct Oot3dPicaShaderState {
           BooleanUniforms(other.BooleanUniforms),
           ProgramWordCount(other.ProgramWordCount),
           SwizzleWordCount(other.SwizzleWordCount) {}
+    // Nor Program and Swizzles (left empty).
+    Oot3dPicaShaderState(const Oot3dPicaShaderState& other,
+                         Oot3dPicaStateArraysDeferred,
+                         Oot3dPicaStateTablesDeferred tables) noexcept
+        : Program(tables), Swizzles(tables),
+          IntegerUniforms(other.IntegerUniforms),
+          BooleanUniforms(other.BooleanUniforms),
+          ProgramWordCount(other.ProgramWordCount),
+          SwizzleWordCount(other.SwizzleWordCount) {}
 
     Oot3dPicaSharedArray<uint32_t, MaximumProgramWords> Program;
     Oot3dPicaSharedArray<uint32_t, MaximumSwizzleWords> Swizzles;
@@ -403,6 +429,12 @@ struct Oot3dPicaFrontendCaptureStats {
 // draw, so each packet shares them copy-on-write (Oot3dPicaSharedArray)
 // instead of copying their 4 KiB per draw on the guest's GX command.
 struct Oot3dPicaProcTexLutState {
+    Oot3dPicaProcTexLutState() = default;
+    // Every table empty (Oot3dPicaStateTablesDeferred).
+    explicit Oot3dPicaProcTexLutState(Oot3dPicaStateTablesDeferred tables) noexcept
+        : Noise(tables), ColorMap(tables), AlphaMap(tables), Color(tables),
+          ColorDifference(tables) {}
+
     Oot3dPicaSharedArray<uint32_t, 128> Noise;
     Oot3dPicaSharedArray<uint32_t, 128> ColorMap;
     Oot3dPicaSharedArray<uint32_t, 128> AlphaMap;
@@ -482,6 +514,21 @@ struct Oot3dPicaDrawPacket {
           GeometryShader(*source.GeometryShader, deferred),
           FogLut(*source.FogLut), ProcTexLuts(*source.ProcTexLuts),
           LightingLuts(source.LightingLuts) {
+        if (source.LightBinding != nullptr) LightBinding = *source.LightBinding;
+    }
+
+    // Nor the shared tables (Oot3dPicaStateTablesDeferred): empty, set with
+    // the arrays when the capture-delta log is replayed.
+    Oot3dPicaDrawPacket(const Oot3dPicaDrawPacketSource& source,
+                        Oot3dPicaStateArraysDeferred deferred,
+                        Oot3dPicaStateTablesDeferred tables)
+        : CommandListAddress(source.CommandListAddress),
+          CommandListOffsetWords(source.CommandListOffsetWords),
+          CompositionDomain(source.CompositionDomain),
+          Composition(source.Composition), Indexed(source.Indexed),
+          VertexShader(*source.VertexShader, deferred, tables),
+          GeometryShader(*source.GeometryShader, deferred, tables),
+          FogLut(tables), ProcTexLuts(tables) {
         if (source.LightBinding != nullptr) LightBinding = *source.LightBinding;
     }
 

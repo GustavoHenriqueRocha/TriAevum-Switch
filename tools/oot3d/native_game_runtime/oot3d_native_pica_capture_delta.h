@@ -13,6 +13,14 @@
 // render thread) for deferred batches, the queue itself for every other take.
 // The materialized arrays are byte for byte what the full copy at the draw
 // would have written (oot3d_native_capture_delta_tests).
+//
+// With config/texture_snapshot_fast the packet's shared tables (shader
+// programs and swizzles, fog and procedural texture tables, lighting LUTs)
+// are left empty too (Oot3dPicaStateTablesDeferred): the log keeps one
+// reference to each set of tables its draws used, recorded when one of them
+// is another storage than at the previous recorded draw, and the replay sets
+// them. A storage the log holds is shared, so the frontend never writes it in
+// place (copy-on-write): the replayed tables are the draw's.
 
 #include "oot3d_native_pica_frontend.h"
 
@@ -38,12 +46,19 @@ class Oot3dPicaCaptureDeltaLog final {
         size_t Bytes = 0;
         uint64_t RegisterTicks = 0;
         uint64_t UniformTicks = 0;
+        // Deferred tables: their comparison and recording (Append's tables).
+        uint64_t TableTicks = 0;
     };
 
     // Capture side (the queue, under its lock). Appends the draw's lines
     // (all of them for the first entry), clears the source's dirty lines and
-    // returns the entry index.
-    uint32_t Append(const Oot3dPicaDrawPacketSource& source, AppendCost& cost);
+    // returns the entry index. `tables`: the draw's packet left its shared
+    // tables empty (Oot3dPicaStateTablesDeferred); the entry refers to the
+    // source's.
+    uint32_t Append(const Oot3dPicaDrawPacketSource& source, AppendCost& cost,
+                    bool tables = false);
+    // Sets of tables recorded (one per change of a deferred draw's tables).
+    [[nodiscard]] size_t TableSets() const noexcept { return mTables.size(); }
     [[nodiscard]] size_t Entries() const noexcept { return mEntries.size(); }
     [[nodiscard]] bool Keyframe(uint32_t entry) const noexcept {
         return entry < mEntries.size() && mEntries[entry].Keyframe;
@@ -51,9 +66,10 @@ class Oot3dPicaCaptureDeltaLog final {
     // Empty, capacity kept.
     void Reset() noexcept;
 
-    // Consumer side: fills the arrays of draws[0..last] that refer to an
-    // entry and are not filled yet. `draws` is the vector the entries were
-    // appended for, in the same order. Serialized internally.
+    // Consumer side: fills the arrays (and deferred tables) of
+    // draws[0..last] that refer to an entry and are not filled yet. `draws`
+    // is the vector the entries were appended for, in the same order.
+    // Serialized internally.
     void MaterializeThrough(std::span<Oot3dPicaDrawSubmission> draws, size_t last);
     void MaterializeAll(std::span<Oot3dPicaDrawSubmission> draws) {
         if (!draws.empty()) MaterializeThrough(draws, draws.size() - 1U);
@@ -81,7 +97,21 @@ class Oot3dPicaCaptureDeltaLog final {
         uint32_t GeometryUniforms = 0;
         uint32_t DefaultAttributes = 0;
         uint32_t FirstLine = 0;
+        // The draw's tables in mTables, or kNoTables (its packet holds them).
+        uint32_t TableSet = 0;
         bool Keyframe = false;
+    };
+    static constexpr uint32_t kNoTables = 0xFFFFFFFFU;
+    struct Tables {
+        Oot3dPicaSharedArray<uint32_t, Oot3dPicaShaderState::MaximumProgramWords> VertexProgram;
+        Oot3dPicaSharedArray<uint32_t, Oot3dPicaShaderState::MaximumSwizzleWords> VertexSwizzles;
+        Oot3dPicaSharedArray<uint32_t, Oot3dPicaShaderState::MaximumProgramWords> GeometryProgram;
+        Oot3dPicaSharedArray<uint32_t, Oot3dPicaShaderState::MaximumSwizzleWords> GeometrySwizzles;
+        Oot3dPicaFogLut FogLut;
+        Oot3dPicaProcTexLutState ProcTexLuts;
+        std::shared_ptr<const Oot3dPicaLightingLutState> LightingLuts;
+
+        [[nodiscard]] bool SameAs(const Oot3dPicaDrawPacketSource& source) const noexcept;
     };
 
     void Apply(const Entry& entry) noexcept;
@@ -90,6 +120,7 @@ class Oot3dPicaCaptureDeltaLog final {
     Line* ReserveLines(size_t count);
 
     std::vector<Entry> mEntries;
+    std::vector<Tables> mTables;
     std::unique_ptr<Line[]> mLines;
     size_t mLineCount = 0;
     size_t mLineCapacity = 0;

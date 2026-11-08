@@ -880,6 +880,10 @@ void NativeA32WindowSession::Setup() {
     submissionQueue.SetVertexSnapshotFast(vertexSnapshotFast);
     Oot3dNativeGame::SetRangeWriteGenerationCardPeek(vertexSnapshotFast);
   }
+  // config/texture_snapshot_fast: textures viewed and certified directly,
+  // found through a front table, compared page by page; the next packet
+  // prefetched.
+  submissionQueue.SetTextureSnapshotFast(Oot3dNativeGame::ReadNativeTextureSnapshotFast());
   picaPresentationScheduler.SetMoveFreeFinish(offload.Plan);
 #if defined(__SWITCH__)
   if (offload.Perf) {

@@ -2245,6 +2245,43 @@ bool NativeA32WindowSession::RunFrame() {
                << usPerDraw(capture.GeometryCompareTicks, previousCapture.GeometryCompareTicks)
                << " vs_copy_us=" << usPerDraw(capture.GeometryCopyTicks, previousCapture.GeometryCopyTicks)
                << " vs_rest_us=" << usPerDraw(vertex >= steps ? vertex - steps : 0U, 0U);
+          // Texture snapshot steps (SWITCH_PORT.md "Texture snapshot and
+          // packet stages", config/texture_snapshot_fast), the same fields
+          // for textures: per host frame, textures looked up (with GPU copy
+          // references: tx_copy_referenced), proven unchanged or not, without
+          // a certificate, KiB unproven and compared, certified and changed
+          // pages, left to the previous path, made anew; µs per draw of
+          // cap_texture_us viewing (with the lookup), comparing, making new
+          // snapshots, and the rest.
+          const uint64_t textureSteps =
+              (capture.TextureViewTicks - previousCapture.TextureViewTicks) +
+              (capture.TextureCompareTicks - previousCapture.TextureCompareTicks) +
+              (capture.TextureCopyTicks - previousCapture.TextureCopyTicks);
+          const uint64_t texture = capture.TextureTicks - previousCapture.TextureTicks;
+          perf << " tsnap: texture_snapshot_fast=" << (submissionQueueStorage->TextureSnapshotFast() ? 1 : 0)
+               << " tx_resources=" << perFrame(capture.TextureResources, previousCapture.TextureResources)
+               << " tx_copy_referenced="
+               << perFrame(capture.TextureCopyReferenced, previousCapture.TextureCopyReferenced)
+               << " tx_version_hits="
+               << perFrame(capture.TextureVersionHits, previousCapture.TextureVersionHits)
+               << " tx_version_misses="
+               << perFrame(capture.TextureVersionMisses, previousCapture.TextureVersionMisses)
+               << " tx_uncertified="
+               << perFrame(capture.TextureUncertified, previousCapture.TextureUncertified)
+               << " tx_unproven_kb="
+               << perFrame(capture.TextureUnprovenBytes, previousCapture.TextureUnprovenBytes) / 1024.0
+               << " tx_compared_kb="
+               << perFrame(capture.TextureComparedBytes, previousCapture.TextureComparedBytes) / 1024.0
+               << " tx_pages=" << perFrame(capture.TexturePages, previousCapture.TexturePages)
+               << " tx_dirty_pages="
+               << perFrame(capture.TextureDirtyPages, previousCapture.TextureDirtyPages)
+               << " tx_fallbacks=" << perFrame(capture.TextureFallbacks, previousCapture.TextureFallbacks)
+               << " tx_misses=" << perFrame(capture.TextureMisses, previousCapture.TextureMisses)
+               << " tx_view_us=" << usPerDraw(capture.TextureViewTicks, previousCapture.TextureViewTicks)
+               << " tx_compare_us="
+               << usPerDraw(capture.TextureCompareTicks, previousCapture.TextureCompareTicks)
+               << " tx_copy_us=" << usPerDraw(capture.TextureCopyTicks, previousCapture.TextureCopyTicks)
+               << " tx_rest_us=" << usPerDraw(texture >= textureSteps ? texture - textureSteps : 0U, 0U);
         }
         previousCapture = capture;
         previousGuestInPica = phaseTiming.GuestInsidePicaSubmitSeconds;
