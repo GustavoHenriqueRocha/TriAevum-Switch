@@ -17,9 +17,13 @@
 //     sleep, an applet) and at exit;
 //   - each dump goes to a .tmp file that replaces the previous one only when
 //     complete, so a dump interrupted by closing the game keeps the last one.
+// Each dump also writes the session's indirect call census
+// (oot3d_native_indirect_profile.h, installed before guest code runs) beside
+// the stream as oot3d_pgo_<N>.indirect.txt, the same way.
 // On the PC, tools/oot3d/native_a32_runtime/whole_aot_pgo_merge.py turns the
 // sessions into .gcda files (gcov-tool merge-stream adds them) for the
-// OOT3D_WHOLE_AOT_PROFILE_MODE=use build. Steps in SWITCH_PORT.md.
+// OOT3D_WHOLE_AOT_PROFILE_MODE=use build, and whole_aot_indirect_census.py
+// adds up the censuses. Steps in SWITCH_PORT.md.
 //
 // Without OOT3D_WHOLE_AOT_GCOV_GENERATE every function does nothing.
 
@@ -40,6 +44,13 @@ inline std::string Oot3dWholeAotPgoStreamPath(std::string_view directory, uint32
     std::string path(directory);
     if (!path.empty() && path.back() != '/') path += '/';
     return path + "oot3d_pgo_" + std::to_string(session) + ".stream";
+}
+
+// "<dir>/oot3d_pgo_<n>.indirect.txt": the session's indirect call census.
+inline std::string Oot3dWholeAotPgoIndirectPath(std::string_view directory, uint32_t session) {
+    std::string path(directory);
+    if (!path.empty() && path.back() != '/') path += '/';
+    return path + "oot3d_pgo_" + std::to_string(session) + ".indirect.txt";
 }
 
 // The first session number >= 1 whose stream and .tmp are both absent

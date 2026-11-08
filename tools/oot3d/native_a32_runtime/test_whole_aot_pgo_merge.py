@@ -73,8 +73,10 @@ class SessionStreamsTest(unittest.TestCase):
     def test_complete_streams_by_number_and_lone_tmp_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp)
+            # The indirect call census (.indirect.txt) sits beside the streams.
             for name in ("oot3d_pgo_10.stream", "oot3d_pgo_2.stream",
                          "oot3d_pgo_2.stream.tmp", "oot3d_pgo_3.stream.tmp",
+                         "oot3d_pgo_2.indirect.txt", "oot3d_pgo_3.indirect.txt.tmp",
                          "dumps.txt"):
                 (folder / name).write_bytes(b"x")
             streams, skipped = session_streams(folder)
