@@ -1237,9 +1237,13 @@ void NativeA32WindowSession::Setup() {
   // says. The pack's generation changes when HD textures are turned on or
   // off, so the UI renderer resolves its textures again at once. A request
   // ahead of the first draw (N64UiFast3dRenderer::RequestAhead) only queues.
+  // The legacy hash (Henriko's pack; the HD images) is computed once per
+  // texture and returned for the provider's identity cache: a texture
+  // resolved again (a pack change, a poll) comes with both hashes and is
+  // neither decoded nor hashed again here.
   nativeUiTextureProvider.SetCustomTextureSource({
       [uiHdAtlas, uiHdImages](const Oot3dNativeGame::Oot3dNativeUiCustomTextureRequest &request) {
-        const Oot3d::Renderer::AzaharTextureRequest identity{
+        Oot3d::Renderer::AzaharTextureRequest identity{
             .Width = request.width,
             .Height = request.height,
             .NativeFormat = request.native_pica_format,
@@ -1248,21 +1252,26 @@ void NativeA32WindowSession::Setup() {
             .NativeRgba8 = request.rgba8,
             .UserInterface = true,
             .Ahead = request.ahead,
+            .KnownModernHash = request.modern_hash,
+            .KnownLegacyHash = request.legacy_hash,
         };
+        if (!identity.KnownLegacyHash && !request.ahead) {
+          std::string error;
+          const uint64_t legacy = Oot3d::Renderer::ComputeAzaharTextureHash(identity, false, &error);
+          if (error.empty()) identity.KnownLegacyHash = legacy;
+        }
         const auto pack = Oot3d::Renderer::AzaharTexturePackRuntime::Instance().ResolveOrQueue(identity);
         const Oot3dNativeGame::Oot3dUiHdAtlas *hdImage = nullptr;
-        std::optional<uint64_t> legacyHash;
         for (const auto &image : *uiHdImages) {
-          if (image.NativeWidth != request.width || image.NativeHeight != request.height ||
-              image.NativeFormat != request.native_pica_format)
-            continue;
-          if (!legacyHash) legacyHash = Oot3d::Renderer::ComputeAzaharTextureHash(identity, false);
-          if (*legacyHash == image.LegacyHash) {
+          if (image.NativeWidth == request.width && image.NativeHeight == request.height &&
+              image.NativeFormat == request.native_pica_format && identity.KnownLegacyHash == image.LegacyHash) {
             hdImage = &image.Image;
             break;
           }
         }
-        return Oot3dNativeGame::ChooseUiCustomTexture(pack, request, uiHdAtlas.get(), hdImage);
+        auto custom = Oot3dNativeGame::ChooseUiCustomTexture(pack, request, uiHdAtlas.get(), hdImage);
+        custom.legacy_hash = identity.KnownLegacyHash;
+        return custom;
       },
       [] { return Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Generation(); },
   });

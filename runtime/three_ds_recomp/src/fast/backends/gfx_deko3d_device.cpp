@@ -4,6 +4,7 @@
 
 #include "fast/backends/gfx_deko3d.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
+#include "fast/backends/gfx_deko3d_log_line.h"
 
 #include <switch.h>
 
@@ -199,14 +200,14 @@ void DebugCallback(void*, const char* context, DkResult result, const char* mess
 } // namespace
 
 void Log(const char* format, ...) {
-    char line[512];
     va_list args;
     va_start(args, format);
-    std::vsnprintf(line, sizeof(line), format, args);
+    // The queue holds the line's string either way; never cut (FormatLogLine).
+    std::string line = FormatLogLine(format, args);
     va_end(args);
     {
         const std::lock_guard lock(gLogMutex);
-        gLogQueue.emplace_back(line);
+        gLogQueue.push_back(std::move(line));
         if (!gLogThread.joinable() && !gLogStop) {
             gLogThread = std::thread(LogWriterLoop);
         }

@@ -1320,7 +1320,8 @@ bool NativeA32WindowSession::RunFrame() {
   // a waiting second core (oot3d_native_kernel_options.h).
   if (!uiSubmitHoldsKernel) hostWorkRelease.emplace();
   const auto uiSubmitStart = std::chrono::steady_clock::now();
-  const double uiPrepareBefore = untimed.UiPrepare;
+  const double uiPrepareBefore = untimed.UiPrepare + untimed.UiAhead;
+  const auto uiProviderBefore = nativeUiTextureProviderStorage->Stats();
   const auto uiLockBefore = Oot3dNativeGame::SecondCore::SampleCore0Lock();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::UiSubmit);
   // The HUD's texture pack images decode before its first frame: its
@@ -1417,9 +1418,11 @@ bool NativeA32WindowSession::RunFrame() {
   untimed.UiSubmit += SecondsSince(uiSubmitStart);
   {
     // A texture pack change in progress (deko3d.txt `texture pack change ...
-    // game thread: longest frame, longest HUD texture preparation`): this
-    // frame from the last one's UI submission (waits for the render thread
-    // included) and its HUD texture preparation. Game thread only.
+    // game thread: ... frames, longest frame, longest HUD texture
+    // preparation, over budget, HUD resolves, decoded`): this frame from the
+    // last one's UI submission (waits for the render thread included), its
+    // HUD texture preparation (asked ahead included) and the HUD textures it
+    // resolved and decoded. Game thread only.
     static std::chrono::steady_clock::time_point previousUiSubmit;
     const auto micros = [](double seconds) { return static_cast<uint64_t>(seconds * 1.0e6); };
     const uint64_t frameMicros =
@@ -1429,8 +1432,11 @@ bool NativeA32WindowSession::RunFrame() {
                                         uiSubmitStart - previousUiSubmit)
                                         .count());
     previousUiSubmit = uiSubmitStart;
-    Oot3d::Renderer::LiveTexturePackChangeGameWatch().Observe(frameMicros,
-                                                             micros(untimed.UiPrepare - uiPrepareBefore));
+    const auto &uiProvider = nativeUiTextureProviderStorage->Stats();
+    Oot3d::Renderer::LiveTexturePackChangeGameWatch().Observe(
+        frameMicros, micros(untimed.UiPrepare + untimed.UiAhead - uiPrepareBefore),
+        uiProvider.resolve_calls - uiProviderBefore.resolve_calls,
+        uiProvider.identity_decodes - uiProviderBefore.identity_decodes);
   }
   if (uiSubmitHoldsKernel) hostWorkRelease.emplace();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PresentSubmit);

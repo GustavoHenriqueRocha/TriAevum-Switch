@@ -652,9 +652,22 @@ class AzaharTexturePackRuntime::Impl {
         configuration = NormalizeConfiguration(std::move(configuration));
         std::scoped_lock lock(mMutex);
         if (mConfigured && configuration == mConfiguration) return;
+        // HUD images do not depend on the size cap (kUiTextureMaxScale): a
+        // change of only the cap keeps them, so the HUD and the menus draw the
+        // pack's art at once instead of waiting for the HUD worker to decode
+        // them all again (test.14: first sights waited up to 702 ms, menu
+        // textures 684 ms, after the toggles; logs22a/deko3d.txt:373-374).
+        auto otherCap = configuration;
+        otherCap.MaxReplacementScale = mConfiguration.MaxReplacementScale;
+        otherCap.GenerateMipmaps = mConfiguration.GenerateMipmaps;
+        const bool keepHud = mConfigured && configuration.LoadCustomTextures && otherCap == mConfiguration;
         mConfiguration = std::move(configuration);
         mConfigured = true;
         ++mGeneration;
+        if (!keepHud) {
+            mUiReplacementCache.clear();
+            mUiValidFromGeneration = mGeneration;
+        }
         ++mMaterialRevision;
         mPreview.reset();
         mPreviewSeamStatus.clear();
@@ -662,7 +675,6 @@ class AzaharTexturePackRuntime::Impl {
         mIndex.clear();
         mMaterialIndex.clear();
         mReplacementCache.clear();
-        mUiReplacementCache.clear();
         mMaterialCache.clear();
         mFailedLoadHashes.clear();
         mFailedUiLoadHashes.clear();
@@ -687,7 +699,10 @@ class AzaharTexturePackRuntime::Impl {
 
     void Reload() {
         std::scoped_lock lock(mMutex);
-        if (mConfigured) RequestRebuildLocked();
+        if (!mConfigured) return;
+        // The files may have changed: HUD images are decoded again.
+        mUiValidFromGeneration = mGeneration + 1U;
+        RequestRebuildLocked();
     }
 
     std::shared_ptr<const AzaharTextureReplacement> ResolveAndMaybeDump(const AzaharTextureRequest& request) {
@@ -720,7 +735,7 @@ class AzaharTexturePackRuntime::Impl {
             if (dumpEnabled) dumpDirectory = mDumpDirectory;
         }
         std::string error;
-        std::optional<uint64_t> modern, legacy;
+        std::optional<uint64_t> modern = request.KnownModernHash, legacy = request.KnownLegacyHash;
         const auto hashFor = [&](bool modernMode) {
             auto& value = modernMode ? modern : legacy;
             if (!value) value = ComputeAzaharTextureHash(request, modernMode, &error);
@@ -1043,7 +1058,10 @@ class AzaharTexturePackRuntime::Impl {
         const auto cached = cache.find(hash);
         const bool onSight = userInterface && !preload;
         const bool worldOnSight = !userInterface && !preload;
-        if ((cached == cache.end() || cached->second->Generation != mGeneration) && !failed.contains(hash) &&
+        // A HUD image stays valid across a size cap change (Configure).
+        const bool current = cached != cache.end() && (userInterface ? cached->second->Generation >= mUiValidFromGeneration
+                                                                      : cached->second->Generation == mGeneration);
+        if (!current && !failed.contains(hash) &&
             !pending.contains(hash)) {
             pending.emplace(hash, mGeneration);
             LoadJob job;
@@ -1840,6 +1858,9 @@ class AzaharTexturePackRuntime::Impl {
     bool mStopping = false, mConfigured = false, mIndexReady = false;
     bool mRebuildRequested = false, mBuilding = false;
     uint64_t mGeneration = 1U, mRebuildSerial = 0U;
+    // HUD images decoded at this generation or later are current (kept
+    // through a size cap change; Configure).
+    uint64_t mUiValidFromGeneration = 0U;
     uint64_t mMaterialRevision = 1U;
     std::optional<AzaharMaterialParameterPreview> mPreview;
     std::string mPreviewSeamStatus;

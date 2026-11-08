@@ -272,7 +272,7 @@ N64UiFast3dRenderer::ResolveTexture(const UiTextureIdentity& identity,
 
     ResidentTexture uploaded;
     uploaded.renderer_id = rendering_api_.CreateUiTexture(
-        pixels.rgba8, pixels.width, pixels.height, error);
+        pixels.Data(), pixels.width, pixels.height, error);
     if (uploaded.renderer_id == 0U) {
         ++stats_.unsupported_texture_resources;
         failed_textures_.insert(semanticKey);
@@ -367,14 +367,17 @@ PreparedUiTextures N64UiFast3dRenderer::PrepareTextures(
         hold_polls_.clear();
     }
     ++prepare_calls_;
-    // Resolves of this call beyond first sights: each reads and decodes the
-    // game's texture and identifies it in the pack (test.13: a pack change
-    // resolved every HUD texture again at once, and polled the ones still
-    // decoding at every call, 25-50 ms of the game thread per frame for
-    // ~10 frames). First sights and held ones count but are never deferred.
+    // Resolves of this call beyond first sights: each reads the game's
+    // texture and identifies it in the pack (test.13: a pack change resolved
+    // every HUD texture again at once, and polled the ones still decoding at
+    // every call, 25-50 ms of the game thread per frame for ~10 frames).
+    // First sights and held ones count but are never deferred. A count and a
+    // time budget (test.14: a resolve that decoded cost 2-6 ms on a desktop
+    // core, more on the console, and the TopScreen HUD prepares twice per frame).
     std::uint32_t budget = kUiResolvesPerPrepare;
-    const auto take = [&budget] {
-        if (budget == 0U) return false;
+    const auto start = std::chrono::steady_clock::now();
+    const auto take = [&budget, start] {
+        if (budget == 0U || std::chrono::steady_clock::now() - start >= kUiResolveTimeBudget) return false;
         --budget;
         return true;
     };
@@ -421,7 +424,7 @@ PreparedUiTextures N64UiFast3dRenderer::PrepareTextures(
                 texture_provider_->Resolve(primitive.texture, pixels,
                                            &texture.error) &&
                 pixels.width != 0U && pixels.height != 0U &&
-                pixels.rgba8.size() ==
+                pixels.Data().size() ==
                     static_cast<std::size_t>(pixels.width) * pixels.height * 4U;
             texture.status = resolved ? PreparedUiTexture::Status::Resolved
                                       : PreparedUiTexture::Status::Invalid;

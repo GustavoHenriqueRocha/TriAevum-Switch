@@ -516,6 +516,27 @@ TEST_F(Oot3dAzaharTexturePackTest, CapsHudTexturesAtThreeTimesWithoutMipmaps) {
     runtime.ReleaseDecoded(hash, worldImage.Replacement->Generation);
     EXPECT_EQ(runtime.ResolveOrQueue(hud).State, AzaharTextureResolveState::Ready);
 
+    // Another "HD texture size" (test.14: HUD first sights waited up to
+    // 702 ms after the toggles): the HUD image is kept, ready at once once
+    // the index is, with no decode; the world image is decoded at the new cap.
+    const auto hudKept = runtime.ResolveOrQueue(hud).Replacement;
+    runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack,
+                       .MaxReplacementScale = 1U, .GenerateMipmaps = true});
+    runtime.WaitForPendingLoads();
+    const auto afterCap = runtime.ResolveOrQueue(hud);
+    ASSERT_EQ(afterCap.State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(afterCap.Replacement, hudKept);
+    EXPECT_EQ(runtime.Snapshot().PendingLoads, 0U);
+    EXPECT_EQ(runtime.ResolveOrQueue(world).State, AzaharTextureResolveState::Pending);
+    runtime.WaitForPendingLoads();
+    EXPECT_EQ(runtime.ResolveOrQueue(world).Replacement->Width, 8U);
+    // Known hashes (the HUD's identity cache): no NativeRgba8 needed.
+    AzaharTextureRequest known{8U, 8U, 0U, 0U, native, {}};
+    known.UserInterface = true;
+    known.KnownModernHash = hash;
+    known.KnownLegacyHash = 1U;
+    EXPECT_EQ(runtime.ResolveOrQueue(known).Replacement, hudKept);
+
     // HD textures off: HUD replacements go at once, with a new generation.
     const uint64_t generation = runtime.Generation();
     runtime.Configure({.LoadCustomTextures = false, .UserDirectory = Root, .LoadDirectory = pack});
