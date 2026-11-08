@@ -22,8 +22,11 @@ constexpr uint32_t kActorUncullScale = 0x100U;
 constexpr uint32_t kActorUncullDownward = 0x104U;
 constexpr uint32_t kActorCullingState = 0x120U;
 constexpr uint32_t kObjMure2DistanceScalar = 0x1DCU;
-// En_Viewer hides behind culling during cutscene camera pans (SoH skips it).
-constexpr uint16_t kActorEnViewer = 0x002AU; // ACTOR_EN_VIEWER, actor_object_semantics.h
+constexpr uint32_t kActorParams = 0x1CU;
+// Actor_Draw applies the distance fade only with this flag (0x002D6254).
+constexpr uint32_t kActorFlagDistanceFade = 0x80000000U;
+constexpr uint32_t kActorFade = 0x19EU;
+constexpr uint32_t kActorFadeMaximum = 0x19FU;
 // The Kokiri SoH stops fading: En_Ko has its own fade, En_Md (Mido) and
 // En_Sa (Saria) share Actor_UpdateAlphaByDistance.
 constexpr uint16_t kActorEnSa = 0x0146U;
@@ -74,8 +77,7 @@ bool ReadCullingSample(MemoryBus& memory, uint32_t actor, ActorCullingSample& sa
 ActorCullingVolume PresentedVolume(MemoryBus& memory, uint32_t play,
                                    const NativeActorVisibilityState& visibility) {
     ActorCullingVolume volume;
-    volume.DistanceMultiplier =
-        visibility.ExtendedDrawDistance ? kExtendedActorDistanceMultiplier : 1.0F;
+    volume.DistanceMultiplier = visibility.DistanceMultiplier;
     if (play == 0U) return volume;
     std::array<float, 8> rows{};
     for (uint32_t i = 0; i < rows.size(); ++i)
@@ -97,6 +99,17 @@ ActorCullingVolume PresentedVolume(MemoryBus& memory, uint32_t play,
 
 bool Extends(const ActorCullingVolume& volume) {
     return volume.DistanceMultiplier > 1.0F || volume.Horizontal > 1.0F || volume.Vertical > 1.0F;
+}
+
+bool ExtendsDistance(const NativeActorVisibilityState& visibility) {
+    return visibility.DistanceMultiplier > 1.0F;
+}
+
+bool ReadExclusion(MemoryBus& memory, uint32_t actor, uint16_t id, bool& excluded) {
+    uint16_t params = 0U;
+    if (!memory.Read16(actor + kActorParams, &params)) return false;
+    excluded = ActorExtensionExcluded(id, params);
+    return true;
 }
 
 
@@ -132,16 +145,42 @@ void ReleaseReservation(NativeActorVisibilityState& v, NativeActorVisibilityRese
 
 void RestoreNativeCulling(MemoryBus& memory, NativeActorVisibilityReservation& entry) {
     if (!entry.Restore) return;
+    entry.Restore = false;
+    if (entry.Handoff) {
+        // Only the fade was the host's; a draw callback's own write stays.
+        uint8_t fade = 0U;
+        if (memory.Read8(entry.Actor + kActorFade, &fade) && fade == entry.HandoffFade)
+            (void)memory.Write8(entry.Actor + kActorFade, entry.NativeFade);
+        return;
+    }
     uint32_t flags = 0U;
-    (void)memory.Read8(entry.Actor + 0x19EU, &entry.ExtendedFade);
+    (void)memory.Read8(entry.Actor + kActorFade, &entry.ExtendedFade);
     if (memory.Read32(entry.Actor + 4U, &flags)) {
         flags = (flags & ~0x40U) | (entry.NativeFade != 0U ? 0x40U : 0U);
         (void)memory.Write32(entry.Actor + 4U, flags);
         (void)memory.Write8(entry.Actor + kActorCullingState, entry.NativeState);
-        (void)memory.Write8(entry.Actor + 0x19EU, entry.NativeFade);
+        (void)memory.Write8(entry.Actor + kActorFade, entry.NativeFade);
         if (!entry.NativeDraw) (void)memory.Write8(entry.Actor + 0x121U, 0U);
     }
-    entry.Restore = false;
+}
+
+// At Actor_Draw's entry for an actor the title shows again after an
+// extension: the title's fade restarted at its boundary, so show the
+// extension's continued fade instead, for this draw only.
+void ApplyHandoffFade(MemoryBus& memory, NativeActorVisibilityReservation& entry) {
+    if (!entry.Handoff || entry.Restore) return;
+    entry.Handoff = false;
+    uint32_t flags = 0U;
+    uint8_t fade = 0U, maximum = 0U;
+    if (!memory.Read32(entry.Actor + 4U, &flags) || (flags & kActorFlagDistanceFade) == 0U ||
+        !memory.Read8(entry.Actor + kActorFade, &fade) || !memory.Read8(entry.Actor + kActorFadeMaximum, &maximum))
+        return;
+    const uint8_t shown = ActorHandoffFade(entry.ExtendedFade, fade, maximum);
+    if (shown == fade || !memory.Write8(entry.Actor + kActorFade, shown)) return;
+    entry.Handoff = true;
+    entry.NativeFade = fade;
+    entry.HandoffFade = shown;
+    entry.Restore = true;
 }
 
 // These draw callbacks can allocate additional records (Fishing also loops
@@ -173,7 +212,7 @@ bool PrioritySample(MemoryBus& memory, uint32_t actor, const std::array<float, 1
 }
 
 void BeginBudgetWalk(GuestState& state, MemoryBus& memory, NativeActorVisibilityState& v) {
-    v.BudgetWalk = v.ExtendedDrawDistance;
+    v.BudgetWalk = ExtendsDistance(v);
     v.BudgetValid = false;
     v.Reservations.clear();
     v.RemainingLights = 0U;
@@ -217,7 +256,8 @@ void BeginBudgetWalk(GuestState& state, MemoryBus& memory, NativeActorVisibility
             v.Reservations.push_back(entry);
             v.RemainingLights += entry.LightCost;
             ActorCullingSample sample;
-            if (init == 0U && entry.Draw != 0U && entry.Id != kActorEnViewer &&
+            bool excluded = true;
+            if (init == 0U && entry.Draw != 0U && ReadExclusion(memory, actor, entry.Id, excluded) && !excluded &&
                 PrioritySample(memory, actor, matrix, sample) &&
                 !ActorInsideNativeCullingVolume(sample) &&
                 ActorInsideExtendedCullingVolume(sample, v.CullingVolume)) {
@@ -241,6 +281,9 @@ void EndBudgetWalk(MemoryBus& memory, NativeActorVisibilityState& v) {
     for (auto& entry : v.Reservations) {
         RestoreNativeCulling(memory, entry); // also covers deferred draws skipped by the title
         if (entry.Extended) v.Retained.push_back({ActorIdentity(entry.Actor, entry.Id), entry.ExtendedFade});
+        // The title's fade is still behind the shown one: keep continuing it.
+        else if (entry.HandoffFade > entry.NativeFade)
+            v.Retained.push_back({ActorIdentity(entry.Actor, entry.Id), entry.HandoffFade});
     }
     if (!v.BudgetValid) ++v.BudgetInvalidWalks;
     if (v.WalkDenied != 0U || !v.BudgetValid) {
@@ -270,7 +313,7 @@ bool ApplyBudgetedCulling(GuestState& state, MemoryBus& memory, NativeActorVisib
     }
     uint8_t fade = 0U;
     uint32_t flags = 0U, init = 0U, draw = 0U;
-    if (!memory.Read8(entry->Actor + 0x19EU, &fade) || !memory.Read32(entry->Actor + 4U, &flags) ||
+    if (!memory.Read8(entry->Actor + kActorFade, &fade) || !memory.Read32(entry->Actor + 4U, &flags) ||
         !memory.Read32(entry->Actor + 0x134U, &init) || !memory.Read32(entry->Actor + 0x140U, &draw) ||
         draw != entry->Draw || HasUnbudgetedDraw(draw)) {
         v.BudgetValid = false;
@@ -284,7 +327,7 @@ bool ApplyBudgetedCulling(GuestState& state, MemoryBus& memory, NativeActorVisib
     if (!memory.Write8(entry->Actor + kActorCullingState, 0U)) return false;
     const uint8_t beforeFade = std::max(entry->ExtendedFade,
         static_cast<uint8_t>(entry->NativeFade != 0U ? entry->NativeFade - 1U : 0U));
-    (void)memory.Write8(entry->Actor + 0x19EU, beforeFade);
+    (void)memory.Write8(entry->Actor + kActorFade, beforeFade);
     entry->Restore = true;
     entry->Extended = true;
     // Let the title ramp the extension's separate host-owned alpha. Restore
@@ -301,6 +344,10 @@ void ApplyActorCulling(GuestState& state, MemoryBus& memory, NativeActorVisibili
     visibility.DeferredCountBefore = state.r[5];
     if (state.r[0] != 0U) {
         ++visibility.NativeVisible;
+        // An actor the extension showed last walk: continue its fade.
+        if (visibility.BudgetWalk)
+            if (auto* entry = Reservation(visibility, actor); entry != nullptr && entry->ExtendedFade != 0U)
+                entry->Handoff = true;
         return;
     }
     ++visibility.NativeCulled;
@@ -321,11 +368,12 @@ void ApplyActorCulling(GuestState& state, MemoryBus& memory, NativeActorVisibili
     uint16_t id = 0U;
     ActorCullingSample sample;
     uint8_t nativeState = 0U;
-    if (!memory.Read16(actor, &id) || id == kActorEnViewer || !ReadCullingSample(memory, actor, sample) ||
-        !memory.Read8(actor + kActorCullingState, &nativeState))
+    bool excluded = true;
+    if (!memory.Read16(actor, &id) || !ReadExclusion(memory, actor, id, excluded) || excluded ||
+        !ReadCullingSample(memory, actor, sample) || !memory.Read8(actor + kActorCullingState, &nativeState))
         return;
     const auto classified = ClassifyExtendedActorCulling(sample, volume);
-    if (visibility.ExtendedDrawDistance) {
+    if (ExtendsDistance(visibility)) {
         if (classified == ActorCullingClass::Inside)
             (void)ApplyBudgetedCulling(state, memory, visibility, nativeState);
         return;
@@ -390,6 +438,25 @@ void ApplyObjMure2(GuestState& state, MemoryBus& memory, const NativeActorVisibi
         (void)memory.Write32(actor + kObjMure2DistanceScalar, std::bit_cast<uint32_t>(adjusted));
 }
 
+// En_Wood02 offspring (EUR 0x0034E7B4..0x0034E874): the title's view test
+// takes |1 / stored| of the spawner's +0xF8, which holds 1 / W, so it scales
+// by W and its lateral test seldom passes; offspring then appear only through
+// the fallback |z| + offset < forward * s16 near the camera. With
+// ExtendGroups the result passes inside the extended volume with the correct
+// 1 / W. The offspring are ordinary actors: culled and drawn as any other.
+void ApplyEnWood02(GuestState& state, MemoryBus& memory, const NativeActorVisibilityState& visibility) {
+    if (!visibility.ExtendGroups || !ExtendsDistance(visibility) || state.r[0] != 0U) return;
+    const uint32_t spawner = state.r[4];
+    ActorCullingSample sample;
+    float inverseW = 0.0F;
+    if (!ReadCullingSample(memory, spawner, sample) || !ReadFloat(memory, spawner + kActorProjectedW, inverseW) ||
+        !(inverseW > 0.0F) || !std::isfinite(inverseW))
+        return;
+    sample.W = 1.0F / inverseW;
+    if (ActorInsideExtendedCullingVolume(sample, PresentedVolume(memory, state.r[11] - kPlayHighHalf, visibility)))
+        state.r[0] = 1U;
+}
+
 } // namespace
 
 bool NativeActorVisibilityHasPendingRestore(const NativeActorVisibilityState& visibility) noexcept {
@@ -436,8 +503,10 @@ bool ApplyNativeActorVisibilityHook(
     }
     case kActorDrawEntry:
         if (visibility.BudgetWalk) {
-            if (auto* entry = Reservation(visibility, state.r[1])) ReleaseReservation(visibility, *entry);
-            else visibility.BudgetValid = false;
+            if (auto* entry = Reservation(visibility, state.r[1])) {
+                ReleaseReservation(visibility, *entry);
+                ApplyHandoffFade(memory, *entry);
+            } else visibility.BudgetValid = false;
             if (state.r[14] == kActorDeferredDrawReturn) visibility.DeferredActor = state.r[1];
         }
         return true;
@@ -480,19 +549,19 @@ bool ApplyNativeActorVisibilityHook(
         ApplyObjMure2(state, memory, visibility);
         return true;
     case kEnWood02SpawnZoneResult:
-        // Off was already a no-op. Group offspring remain at native range.
+        ApplyEnWood02(state, memory, visibility);
         return true;
     case kEnKoFadeDistanceA:
     case kEnKoFadeDistanceB:
         // Distance 0 is inside any appear distance: the Kokiri fade in with
         // the title's own smoothing and stay.
-        if (visibility.ExtendedDrawDistance) state.vfp[0] = 0U;
+        if (visibility.NoKokiriFade) state.vfp[0] = 0U;
         return true;
     case kAlphaByDistanceCompare: {
         // Distance 0 takes the near branch: the title raises the alpha to
         // 255 with its own smoothing.
         uint16_t id = 0U;
-        if (visibility.ExtendedDrawDistance && memory.Read16(state.r[4], &id) &&
+        if (visibility.NoKokiriFade && memory.Read16(state.r[4], &id) &&
             (id == kActorEnMd || id == kActorEnSa))
             state.vfp[0] = 0U;
         return true;

@@ -2,6 +2,7 @@
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
 #include "oot3d_native_a32_window_session.h"
 #include "oot3d_gameplay_settings_panel.h"
+#include "oot3d_draw_distance_config.h"
 #include "oot3d_landing_roll.h"
 #include "oot3d_native_block_entry_hooks.h"
 #include "oot3d_native_guest_overrides.h"
@@ -24,6 +25,7 @@
 #include <spdlog/spdlog.h>
 #endif
 #include <cstdio>
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -2065,7 +2067,15 @@ void NativeA32WindowSession::UpdateScenePresentation() {
   const auto graphics = Fast::Oot3d::GraphicsSettingsRuntime::Instance().Snapshot();
   widescreenProjection.Projection.FovMultiplier = graphics.FovMultiplier;
   auto &visibility = widescreenProjection.ActorVisibility;
-  visibility.ExtendedDrawDistance = graphics.ExtendedDrawDistance;
+  // F1 > Display > Extended draw distance (PC) or L3+R3 > Video > Draw
+  // distance (Switch, config/draw_distance): the farther one wins.
+  const auto choice = Oot3dNativeGame::LiveActorDrawDistance().load(std::memory_order_relaxed);
+  visibility.DistanceMultiplier = std::max(
+      graphics.ExtendedDrawDistance ? Oot3dNativeGame::kExtendedActorDistanceMultiplier : 1.0F,
+      Oot3dNativeGame::ActorDrawDistanceMultiplier(choice));
+  visibility.ExtendGroups = choice != Oot3dNativeGame::ActorDrawDistance::Original &&
+                            !Oot3dNativeGame::LiveDrawDistanceNativeGroups().load(std::memory_order_relaxed);
+  visibility.NoKokiriFade = graphics.ExtendedDrawDistance;
   visibility.Presentation = widescreenProjection.Projection.Presentation;
   visibility.FovMultiplier = graphics.FovMultiplier;
 }
