@@ -21,6 +21,22 @@ SOURCE_NAME = "oot3d_whole_aot_generated.cpp"
 INTERNAL_HEADER_NAME = "oot3d_whole_aot_generated_internal.h"
 SHARD_PREFIX = "oot3d_whole_aot_shard_"
 MANIFEST_NAME = "whole_aot_cpp_manifest.json"
+HOOK_GATES_FORMAT = "oot3d_whole_aot_hook_gates_v1"
+HOOK_GATES_NAME = "whole_aot_hook_gates.json"
+
+
+def load_hook_gates(path: Path) -> frozenset[int]:
+    """PCs of whole_aot_hook_gates.json ("pcs": hex strings or integers), the
+    union of every runtime block-entry hook list, written by the host tool
+    oot3d_block_entry_hook_census (oot3d_native_block_entry_hooks.h)."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("format") != HOOK_GATES_FORMAT:
+        raise ValueError(f"{path}: not an {HOOK_GATES_FORMAT} file")
+    pcs = frozenset(int(pc, 0) if isinstance(pc, str) else int(pc) for pc in data["pcs"])
+    misaligned = sorted(pc for pc in pcs if pc & 3)
+    if misaligned:
+        raise ValueError(f"{path}: hook gate 0x{misaligned[0]:08X} is not word aligned")
+    return pcs
 
 
 class LoweringError(ValueError):
@@ -75,6 +91,7 @@ class LiteralImage:
 # tests that call the emitters directly keep the original memory reads).
 _LITERAL_IMAGE: LiteralImage | None = None
 _FOLDED_LITERALS: set[int] = set()
+_FOLDED_VFP_LITERALS: set[int] = set()
 # Set by generate(): scalar binary32 VFP through native AArch64 instructions
 # with the guest FPSCR mode in FPCR (oot3d_native_a32_vfp_aarch64.h). Off by
 # default; the emitted code still compiles to the software operations on
@@ -109,6 +126,35 @@ _VFP_ZERO_AWARE = False
 # spanWords array of the single-page path never has its address taken and is
 # kept in registers. Same values, faults and order.
 _LEAN_STACK = False
+# Set by generate() (--sparse-block-entries, "N4"): the block budget and the
+# block-entry gate only where they are needed, instead of in every block.
+# Credit: ReXGlue/XenonRecomp-style recompilers emit loop barriers only at
+# loop headers (no per-block check); sa2-nx dropped the provably useless ones.
+# - Budget: kept at the function entry and at every target of a DFS back edge
+#   of the function's goto graph (each directed cycle contains such an edge,
+#   so every loop, irreducible ones included, passes a decrement), and charged
+#   once by the dispatch switch for every other block. Every nested call
+#   enters a callee at its entry, and every resume, indirect call into a block
+#   and re-dispatch of the registry loop goes through a dispatch switch, so
+#   the number of blocks a run executes stays bounded by the budget times the
+#   largest function, and the C++ call depth by the budget.
+# - Gate: only blocks whose PC is in _HOOK_GATES (whole_aot_hook_gates.json,
+#   the union of the runtime hook lists) call Oot3dAotEnterBlock; they charge
+#   the budget too. A run's first block is always charged (by itself or by the
+#   dispatch), so "first block" stays BlocksConsumed() == 1 after the gated
+#   block's own charge, as in the default lowering.
+# - Guest state is the same; BlockLimit exits (cooperative thread switches)
+#   happen only at charged blocks and dispatches, so run lengths change.
+_SPARSE_BLOCK_ENTRIES = False
+_HOOK_GATES: frozenset[int] = frozenset()
+# Block counts of the last sparse generation, for the manifest.
+_SPARSE_STATS: dict[str, int] = {}
+# Set by generate() (--fold-vfp-literals): VLDR Sd/Dd, [pc, #imm] from the
+# immutable text segment becomes a constant, like the LDR literal folding
+# above (same image, same host-written exclusions): no page-flag check, no
+# load and no fault path. Text is mapped read-only for the whole process, so
+# the read always yields the code.bin bytes and can never fault.
+_FOLD_VFP_LITERALS = False
 # Giant cold functions marked with GIANT_COLD_ATTRIBUTE (see generate).
 _GIANT_COLD_ENTRIES: frozenset[int] = frozenset()
 # The pre-allocation scheduler (sched1, which on AArch64 GCC enables only at -O3)
@@ -1520,6 +1566,19 @@ def _emit_vfp(item: Instruction) -> list[str]:
         offset = (raw & 0xFF) * 4
         base = f"0x{(pc + 8) & ~3:08X}U" if rn == 15 else _reg(rn)
         operator = "+" if add_offset else "-"
+        if _FOLD_VFP_LITERALS and _LITERAL_IMAGE is not None and load and rn == 15:
+            # VLDR [pc, #imm]: a literal-pool read from the immutable text
+            # segment (see _FOLD_VFP_LITERALS), folded like LDR [pc, #imm].
+            address = (((pc + 8) & ~3) + (offset if add_offset else -offset)) & 0xFFFFFFFF
+            size = 8 if double_register else 4
+            literal = _LITERAL_IMAGE.word(address, size)
+            if literal is not None:
+                _FOLDED_VFP_LITERALS.add(address)
+                body.append(f"// VFP literal at 0x{address:08X}")
+                body.append(f"{_lane(lane)} = 0x{literal & 0xFFFFFFFF:08X}U;")
+                if double_register:
+                    body.append(f"{_lane(lane + 1)} = 0x{literal >> 32:08X}U;")
+                return _conditional(raw, body)
         body.append(f"const uint32_t address = {base} {operator} {offset}U;")
         if double_register:
             # D0-D15 alias consecutive pairs of S registers, including the high word.
@@ -2158,6 +2217,70 @@ def _symbol(name: str, entry: int) -> str:
     return f"{sanitized}_{entry:08X}"
 
 
+def _sparse_charged_blocks(
+    function: Function, bodies: dict[int, list[str]]
+) -> frozenset[int]:
+    """--sparse-block-entries: the blocks that keep a budget decrement.
+
+    The function entry, every gated block (_HOOK_GATES) and every target of a
+    back edge of a depth-first search of the goto graph (the emitted
+    `goto block_X;`, which covers branches, fallthroughs, call returns and
+    internal PC tables). Every directed cycle contains a DFS back edge whose
+    target lies on the cycle, so no loop, irreducible or not, avoids a
+    decrement; the check below re-proves it on the result."""
+    successors = {
+        pc: sorted({int(target, 16) for line in body for target in _GOTO_BLOCK.findall(line)})
+        for pc, body in bodies.items()
+    }
+    for pc, targets in successors.items():
+        stray = [target for target in targets if target not in successors]
+        if stray:
+            raise LoweringError(
+                f"block 0x{pc:08X} jumps to 0x{stray[0]:08X} outside function 0x{function.entry:08X}")
+    charged = {function.entry} | {pc for pc in successors if pc in _HOOK_GATES}
+    on_stack: set[int] = set()
+    done: set[int] = set()
+    roots = [function.entry, *(block.pc for block in function.blocks if block.pc != function.entry)]
+    for root in roots:
+        if root in done:
+            continue
+        on_stack.add(root)
+        stack = [(root, iter(successors[root]))]
+        while stack:
+            node, pending = stack[-1]
+            target = next(pending, None)
+            if target is None:
+                stack.pop()
+                on_stack.discard(node)
+                done.add(node)
+            elif target in on_stack:
+                charged.add(target)  # back edge: target is on the cycle
+            elif target not in done:
+                on_stack.add(target)
+                stack.append((target, iter(successors[target])))
+    # Proof check: the blocks without a decrement form an acyclic graph.
+    free = {pc for pc in successors if pc not in charged}
+    indegree = {pc: 0 for pc in free}
+    for pc in free:
+        for target in successors[pc]:
+            if target in free:
+                indegree[target] += 1
+    ready = [pc for pc, count in indegree.items() if count == 0]
+    removed = 0
+    while ready:
+        pc = ready.pop()
+        removed += 1
+        for target in successors[pc]:
+            if target in free:
+                indegree[target] -= 1
+                if indegree[target] == 0:
+                    ready.append(target)
+    if removed != len(free):
+        raise LoweringError(f"function 0x{function.entry:08X}: a loop has no budget decrement")
+    return frozenset(charged)
+
+
+
 def _render_function(
     function: Function,
     function_symbols: dict[int, str],
@@ -2231,25 +2354,77 @@ def _render_function(
             lines.append("        flags = state.Flags;")
     if not promote:
         lines.append("    };")
+    # Instructions of each block (independent of its entry code).
+    bodies: dict[int, list[str]] = {}
+    for block in function.blocks:
+        body: list[str] = []
+        for item in block.instructions[:-1]:
+            live_flags = instruction_optimization[item.pc].required_flag_writes
+            for emitted in _emit_non_control(item, live_flags):
+                body.append("        " + emitted)
+        terminal_flags = instruction_optimization[
+            block.instructions[-1].pc
+        ].required_flag_writes
+        for emitted in _emit_terminal(
+            block,
+            block_pcs,
+            dict(function.direct_calls),
+            function_symbols,
+            external_entries,
+            terminal_flags,
+            promote=promote,
+        ):
+            body.append("        " + emitted)
+        bodies[block.pc] = body
+    dispatch = (function.entry, *_function_dispatch_entries(function))
     lines.append("    switch (entryPc) {")
-    lines.extend([
-        f"    case 0x{function.entry:08X}U:",
-        f"        goto block_{function.entry:08X};",
-    ])
-    for entry in _function_dispatch_entries(function):
-        lines.extend(
-            [
-                f"    case 0x{entry:08X}U:",
-                f"        goto block_{entry:08X};",
-            ]
-        )
-    lines.extend(
-        [
+    if _SPARSE_BLOCK_ENTRIES:
+        charged = _sparse_charged_blocks(function, bodies)
+        uncharged_dispatch = [entry for entry in dispatch if entry not in charged]
+        gated_blocks = sum(1 for pc in block_pcs if pc in _HOOK_GATES)
+        for key, value in (
+            ("blocks", len(block_pcs)),
+            ("gated_blocks", gated_blocks),
+            ("budget_only_blocks", len(charged) - gated_blocks),
+            ("blocks_without_entry_code", len(block_pcs) - len(charged)),
+        ):
+            _SPARSE_STATS[key] = _SPARSE_STATS.get(key, 0) + value
+        for entry in dispatch:
+            if entry in charged:
+                lines.extend([f"    case 0x{entry:08X}U:", f"        goto block_{entry:08X};"])
+        lines.extend(f"    case 0x{entry:08X}U:" for entry in uncharged_dispatch)
+        if uncharged_dispatch:
+            lines.append("        break;")
+        lines.extend([
             "    default:",
             "        return {Oot3dWholeAotFlowKind::Unsupported, entryPc, 0U};",
             "    }",
-        ]
-    )
+        ])
+        if uncharged_dispatch:
+            # A block without its own decrement is charged by its dispatch
+            # (resume, indirect call into the block, registry re-dispatch).
+            lines.extend([
+                "    if (!Oot3dAotConsumeBlock(context)) {",
+                "        return Oot3dAotBlockLimit(context, entryPc);",
+                "    }",
+                "    switch (entryPc) {",
+            ])
+            for entry in uncharged_dispatch:
+                lines.extend([f"    case 0x{entry:08X}U:", f"        goto block_{entry:08X};"])
+            lines.extend([
+                "    default:",
+                "        return {Oot3dWholeAotFlowKind::Unsupported, entryPc, 0U};",
+                "    }",
+            ])
+    else:
+        charged = frozenset(block_pcs)
+        for entry in dispatch:
+            lines.extend([f"    case 0x{entry:08X}U:", f"        goto block_{entry:08X};"])
+        lines.extend([
+            "    default:",
+            "        return {Oot3dWholeAotFlowKind::Unsupported, entryPc, 0U};",
+            "    }",
+        ])
     for block in function.blocks:
         lines.append(f"block_{block.pc:08X}:")
         lines.append("    {")
@@ -2268,9 +2443,10 @@ def _render_function(
                 "            }",
                 "        }",
             ])
+        gated = not _SPARSE_BLOCK_ENTRIES or block.pc in _HOOK_GATES
         enter = (
             "(regionBlocksRemaining != 0U)" if memory_view else
-            "Oot3dAotConsumeBlock(context)" if callback_free else
+            "Oot3dAotConsumeBlock(context)" if callback_free or not gated else
             f"Oot3dAotEnterBlock(context, frame, state, 0x{block.pc:08X}U, commitState, reloadState)"
         )
         if promote:
@@ -2288,7 +2464,7 @@ def _render_function(
                 "            reloadState();",
                 "        }",
             ])
-        else:
+        elif block.pc in charged:
             lines.extend(
                 [
                     f"        if (!{enter}) {{",
@@ -2298,23 +2474,7 @@ def _render_function(
             )
         if memory_view:
             lines.append("        --regionBlocksRemaining;")
-        for item in block.instructions[:-1]:
-            live_flags = instruction_optimization[item.pc].required_flag_writes
-            for emitted in _emit_non_control(item, live_flags):
-                lines.append("        " + emitted)
-        terminal_flags = instruction_optimization[
-            block.instructions[-1].pc
-        ].required_flag_writes
-        for emitted in _emit_terminal(
-            block,
-            block_pcs,
-            dict(function.direct_calls),
-            function_symbols,
-            external_entries,
-            terminal_flags,
-            promote=promote,
-        ):
-            lines.append("        " + emitted)
+        lines.extend(bodies[block.pc])
         lines.append("    }")
     lines.extend(
         [
@@ -2721,6 +2881,28 @@ def _render_region_function(
     return lines
 
 
+def _hook_gates_definition() -> list[str]:
+    """Oot3dWholeAotHookGates() of the registry: every block, or the sorted
+    PCs that --sparse-block-entries gated (the runtime refuses any other hook,
+    oot3d_native_compiled_functions.cpp)."""
+    if not _SPARSE_BLOCK_ENTRIES:
+        return [
+            "Oot3dWholeAotHookGateSet Oot3dWholeAotHookGates() noexcept {",
+            "    return {};",
+            "}",
+            "",
+        ]
+    gates = sorted(_HOOK_GATES)
+    values = ", ".join(f"0x{pc:08X}U" for pc in gates)
+    return [
+        "Oot3dWholeAotHookGateSet Oot3dWholeAotHookGates() noexcept {",
+        f"    static constexpr std::array<uint32_t, {len(gates)}> kHookGatePcs{{{values}}};",
+        "    return {false, kHookGatePcs};",
+        "}",
+        "",
+    ]
+
+
 def _native_vfp_entry_lines() -> list[str]:
     # Guest FPSCR mode in FPCR for the whole call; FPSR folded back into the
     # guest FPSCR on every exit, including an observable-exit unwind.
@@ -2740,6 +2922,9 @@ def _render_header() -> str:
 namespace Oot3dNativeGame {
 
 std::span<const uint32_t> Oot3dWholeAotEntryPoints() noexcept;
+// Blocks that test the block-entry gate (every block, or the sorted PCs of
+// --sparse-block-entries); see Oot3dWholeAotHookGateSet.
+Oot3dWholeAotHookGateSet Oot3dWholeAotHookGates() noexcept;
 bool ExecuteOot3dWholeAotFunction(
     uint32_t pc,
     oot3d::recomp::a32::GuestState& state,
@@ -2845,6 +3030,7 @@ def _render_source(
             "    return kEntryPoints;",
             "}",
             "",
+            *_hook_gates_definition(),
             "bool ExecuteOot3dWholeAotFunction(",
             "    uint32_t pc, a32::GuestState& state, NativeA32Memory& memory,",
             "    a32::ExecutionResult* result, Oot3dWholeAotStats* stats,",
@@ -3126,6 +3312,7 @@ def _render_registry_source(functions: tuple[Function, ...]) -> str:
             "    return kEntryPoints;",
             "}",
             "",
+            *_hook_gates_definition(),
             "bool ExecuteOot3dWholeAotFunction(",
             "    uint32_t pc, a32::GuestState& state, NativeA32Memory& memory,",
             "    a32::ExecutionResult* result, Oot3dWholeAotStats* stats,",
@@ -3643,19 +3830,37 @@ def generate(
     promote_registers: bool = False,
     vfp_zero_aware: bool = False,
     lean_stack: bool = False,
+    sparse_block_entries: bool = False,
+    hook_gates: frozenset[int] | None = None,
+    fold_vfp_literals: bool = False,
 ) -> dict[str, object]:
     """``giant_function_instructions`` > 0 marks the functions with at least
     that many guest instructions, except those in ``hot_entries`` (profile), with
-    GIANT_COLD_ATTRIBUTE. 0 (default) generates exactly the same C++ as before."""
+    GIANT_COLD_ATTRIBUTE. 0 (default) generates exactly the same C++ as before.
+
+    ``sparse_block_entries`` (N4, see _SPARSE_BLOCK_ENTRIES) needs
+    ``hook_gates``, the PCs that may carry a runtime block-entry hook
+    (whole_aot_hook_gates.json). ``fold_vfp_literals``: see _FOLD_VFP_LITERALS."""
     global _LITERAL_IMAGE, _NATIVE_VFP_AARCH64, _GIANT_COLD_ENTRIES
     global _VFP_ZERO_AWARE, _LEAN_STACK, _PROMOTE_REGISTERS
+    global _SPARSE_BLOCK_ENTRIES, _HOOK_GATES, _FOLD_VFP_LITERALS
     if vfp_zero_aware and not native_vfp_aarch64:
         raise ValueError("--vfp-zero-aware requires --native-vfp-aarch64")
+    if sparse_block_entries:
+        if hook_gates is None:
+            raise ValueError("--sparse-block-entries requires the hook gate list")
+        if region_entries or memory_entries or promote_registers:
+            raise ValueError(
+                "--sparse-block-entries does not support callback-free regions, "
+                "memory regions or register promotion")
     # Absent from the manifest when off: without the options the output (and
     # the manifest) is byte for byte the previous one.
     option_contract: dict[str, object] = {
         **({"vfp_zero_aware": True} if vfp_zero_aware else {}),
         **({"lean_stack": True} if lean_stack else {}),
+        **({"sparse_block_entries": True,
+            "hook_gates": sorted(hook_gates or ())} if sparse_block_entries else {}),
+        **({"fold_vfp_literals": True} if fold_vfp_literals else {}),
     }
     if giant_function_instructions < 0:
         raise ValueError("giant function threshold must not be negative")
@@ -3729,7 +3934,8 @@ def generate(
             == giant_function_instructions
         ) and all(
             cached.get(key, False) == (key in option_contract)
-            for key in ("vfp_zero_aware", "lean_stack")
+            for key in ("vfp_zero_aware", "lean_stack", "sparse_block_entries",
+                        "fold_vfp_literals")
         ) and all(
             (output / name).is_file() and
             _sha256((output / name).read_bytes()) == digest
@@ -3744,6 +3950,8 @@ def generate(
     selection = json.loads(selection_bytes)
     functions, external_entries = _load_functions(program, selection, code)
     _FOLDED_LITERALS.clear()
+    _FOLDED_VFP_LITERALS.clear()
+    _SPARSE_STATS.clear()
     _LITERAL_IMAGE = None
     # Without a declared text size (minimal fixtures) nothing is folded.
     if fold_literals and program.get("executable_size") is not None:
@@ -3755,6 +3963,9 @@ def generate(
     _PROMOTE_REGISTERS = promote_registers
     _VFP_ZERO_AWARE = vfp_zero_aware
     _LEAN_STACK = lean_stack
+    _SPARSE_BLOCK_ENTRIES = sparse_block_entries
+    _HOOK_GATES = frozenset(hook_gates or ()) if sparse_block_entries else frozenset()
+    _FOLD_VFP_LITERALS = fold_vfp_literals
     _GIANT_COLD_ENTRIES = frozenset(
         function.entry
         for function in functions
@@ -3775,6 +3986,9 @@ def generate(
         _PROMOTE_REGISTERS = False
         _VFP_ZERO_AWARE = False
         _LEAN_STACK = False
+        _SPARSE_BLOCK_ENTRIES = False
+        _HOOK_GATES = frozenset()
+        _FOLD_VFP_LITERALS = False
         _GIANT_COLD_ENTRIES = frozenset()
 
 
@@ -3896,6 +4110,22 @@ def _generate_files(
             else {}
         ),
         "folded_literal_addresses": len(_FOLDED_LITERALS),
+        **(
+            {"folded_vfp_literal_addresses": len(_FOLDED_VFP_LITERALS)}
+            if _FOLD_VFP_LITERALS
+            else {}
+        ),
+        **(
+            {
+                "sparse_block_entry_counts": dict(sorted(_SPARSE_STATS.items())),
+                # Listed gates that start no block: no hook can run there in
+                # either lowering.
+                "hook_gates_without_block": sorted(
+                    _HOOK_GATES - {block.pc for function in functions for block in function.blocks}),
+            }
+            if _SPARSE_BLOCK_ENTRIES
+            else {}
+        ),
         "folding_excluded_ranges": [
             [start, length] for start, length in HOST_WRITTEN_TEXT_RANGES
         ] if fold_literals else [],

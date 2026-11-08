@@ -8,7 +8,7 @@ from typing import Sequence
 
 from generate_aot import operational_path
 from generate_whole_aot import main as generate_program
-from whole_aot_cpp import generate
+from whole_aot_cpp import HOOK_GATES_NAME, generate, load_hook_gates
 
 
 ROOT = Path(__file__).resolve().parent
@@ -117,6 +117,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="hot functions that never get that attribute: one "
              "hex entry per line (the rest of the line and '#...' is ignored)",
     )
+    parser.add_argument(
+        "--sparse-block-entries", action="store_true",
+        help="N4: the block budget only at function entries, loop headers "
+             "and dispatches, the block-entry hook gate only at the PCs of "
+             "--hook-gates (same guest state; BlockLimit exits, the "
+             "cooperative thread switches, move; the runtime refuses hooks "
+             "elsewhere)",
+    )
+    parser.add_argument(
+        "--hook-gates", type=Path, default=ROOT / HOOK_GATES_NAME,
+        help="with --sparse-block-entries: every PC a runtime block-entry "
+             "hook can use (default: whole_aot_hook_gates.json, written by "
+             "oot3d_block_entry_hook_census)",
+    )
+    parser.add_argument(
+        "--fold-vfp-literals", action="store_true",
+        help="VLDR from the read-only text segment ([pc, #imm]) becomes a "
+             "constant, like LDR literals: no page-flag check, load or fault "
+             "path (same values)",
+    )
     args = parser.parse_args(argv)
     if args.shards <= 0:
         parser.error("--shards must be positive")
@@ -141,6 +161,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         promote_registers=args.promote_registers,
         vfp_zero_aware=args.vfp_zero_aware,
         lean_stack=args.lean_stack,
+        sparse_block_entries=args.sparse_block_entries,
+        hook_gates=load_hook_gates(args.hook_gates) if args.sparse_block_entries else None,
+        fold_vfp_literals=args.fold_vfp_literals,
     )
     if args.guest_overrides is not None:
         from apply_guest_overrides import apply as apply_overrides, load_manifest
