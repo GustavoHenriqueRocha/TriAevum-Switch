@@ -2136,6 +2136,13 @@ GUARDS = [
     Guard("cpunatives: perf.txt shows the mirror replacements' executions and declines per window",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'perf << Oot3dNativeGame::FormatOot3dGuestOverridesPerfLine\(\);'),
+    # --- 11/08: lighting LUT write of an equal value (ported from Gustavo's 014e0dee) ---
+    Guard("lighting LUT: a write of the value already there copied 24 KiB and rehashed with capture delta off",
+          "tools/oot3d/native_pica_frontend/oot3d_native_pica_frontend.cpp",
+          r'const uint32_t previous = std::as_const\(\*mLightingLuts\)\.Entry\(table, index\);\s*'
+          r'if \(previous == value\) \{',
+          "oot3d_native_pica_frontend_tests (repeated lighting LUT write)",
+          forbid=r'if \(mCaptureDelta && previous == value\)'),
     # --- 05/11: saves à prova de perda (docs/pesquisas/2026-11-05-saves-seguros.md) ---
     # weakly_canonical/canonical com raiz de dispositivo (sdmc:/) concatena o cwd
     # no devkitA64 e o DeleteFile respondia CommandNotAllowed no Switch.

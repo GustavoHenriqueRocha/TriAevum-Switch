@@ -250,8 +250,11 @@ void Oot3dNativePicaFrontend::WriteTable(Table& table, size_t index,
 void Oot3dNativePicaFrontend::WriteLightingLut(size_t table, size_t index,
                                                uint32_t value) {
     const uint32_t previous = std::as_const(*mLightingLuts).Entry(table, index);
-    if (mCaptureDelta && previous == value) {
-        // The content (and so its hash) does not change.
+    if (previous == value) {
+        // The content (and so its hash) does not change: no copy-on-write of
+        // the 24 KiB table and no new hash, with or without capture delta.
+        // Azahar's pica_core.cpp marks a LUT dirty only when prev != value.
+        // Ported from GustavoHenriqueRocha/TriAevum-Switch 014e0dee.
         ++mCaptureStats.SameValueWrites;
         return;
     }
