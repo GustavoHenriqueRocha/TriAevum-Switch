@@ -1703,7 +1703,8 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 
 ### Clocks in each `perf.txt` window (2026-10-17)
 - Each `host_frames=` line gains `clocks: cpu_mhz= gpu_mhz= mem_mhz= clk_src= op_mode=
-  perf_mode= sysclk_profile= sysclk_enabled= sysclk_api= clk_ipc_us=`
+  perf_mode= sysclk_profile= sysclk_enabled= sysclk_api= clk_ipc_us= req_cpu= req_gpu= req_mem=
+  cpu_reapply= cpu_override= cpu_err=` (the last six since 08/11: see "Performance mode")
   (`oot3d_switch_clocks.cpp`). Always compare measurements at the same clock; `perf.txt` now
   records which clock each window was measured at.
 - MHz source: sys-clk public IPC (`sys:clk`, command `GetCurrentContext`, the same one the
@@ -1717,8 +1718,10 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   fails. sys-clk is retried once a minute. Cost: the reads run on the clock reader thread (one per
   perf window, plus one per half second while the overlay is on); the game thread only copies the
   last result.
-- Read-only and no clkrst/pcv in the app (SwitchWakerHD issue #33: clkrst in the app hung the console
-  on wake from sleep); clocking remains sys-clk's job.
+- The reader opens no clkrst/pcv itself (SwitchWakerHD issue #33: CPU 1224 MHz set through clkrst from
+  the game hung Erista consoles on wake from sleep). With CPU High on (L3+R3 > Video, "Performance
+  mode") the MHz are the rates clkrst reports (`clk_src=clkrst`), read by `oot3d_switch_performance.cpp`
+  with one short session per read; with CPU Standard (the default) the app opens neither.
 - `op_mode` (handheld/docked) and `perf_mode` come from `appletGetOperationMode`/`appletGetPerformanceMode`
   (values cached by libnx, no IPC) and work even without sys-clk.
 - `perf_report.py` shows each session's clock; if it changes midway, it warns (window, before → after) and
@@ -1913,7 +1916,7 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   `config/fps_counter` (present = on, the same file as the old FPS counter). Two lines in the
   top-left corner, shadowed yellow ImGui text at 1/32 of the window height:
   `59.9 FPS  max 18.2 ms  speed 100%` and `CPU 1785  GPU 768  MEM 1600  sys-clk` (MHz; `stock`
-  without sys-clk, `--` when unknown).
+  without sys-clk, `clkrst` with CPU High on, `--` when unknown).
 - FPS = new images per 0.5 s window: a game step's frame or an fps60 in-between frame, each counted once
   however many refreshes it stays (a dropped in-between, which repeats the step image, is not one); `max`
   = longest time one image stayed on screen in the window (a held frame at 60 Hz reads 33.3 ms; an image
@@ -1938,32 +1941,94 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - Console check: overlay on, 60 FPS, Sacred Forest Meadow: reads about 30-35 FPS, `max 33.3 ms`
   (read 60.0 before); `perf.txt` there has `new_fps` ≈ 30 next to `fps=60`.
 
-### GPU clock: L3+R3 > Video (`config/gpu_performance`, 07/11, off by default)
-- "GPU clock" combo in the Video tab: **Standard (307 MHz)** (default, file absent) or **High (460.8 MHz,
-  more battery)** (file present). Applied at once and at start (the Video panel is created at window setup
-  and applies the file then); `oot3d_switch_gpu_performance.h`, implementation in `oot3d_switch_clocks.cpp`.
-- How: the application's own apm session (`apmInitialize`, kept open for the run) and
-  `apmSetPerformanceConfiguration(ApmPerformanceMode_Normal, 0x92220008)`, the official handheld
-  configuration CPU 1020 / GPU 460.8 / memory 1331.2 MHz (switchbrew PTM services). Only the handheld
-  (Normal) configuration is touched: docked already runs the GPU at 768 MHz. Standard puts back what
-  `apmGetPerformanceConfiguration(Normal)` reported before the first change (0x00020003 if that read
-  nothing or High). Standard with no prior High opens no apm session: the default build behaves as before.
-  No clkrst/pcv (the wake-from-sleep hang stays avoided); a running sys-clk overrides whatever HOS applies.
-  libnx in `retuned-switch-prep:local` has `apmSetPerformanceConfiguration`/`apmGetPerformanceConfiguration`
-  and the weak `__nx_applet_PerformanceConfiguration` (not used: it only applies at start and only for
-  applications).
-- Log: one game-log line per change, `TRIAEVUM_GPU_PERF high=1 available=1 rc=0x0 failed=- requested=0x92220008
-  standard=0x00020003 effective=0x92220008 gpu_mhz=461 mem_mhz=1331 op_mode=handheld` (`effective` is
-  `appletGetCurrentPerformanceConfiguration` right after). If apm refuses (`failed=apmInitialize` or
-  `failed=apmSetPerformanceConfiguration` with its result code), the menu shows "Unavailable: ... refused
-  (0x...)" and the clock is unchanged.
-- Effect: up to −33% on GPU-clock-bound work [estimate]: Forest Temple room 8 step frames 14.9 ms →
-  about 10-11.5 ms [estimate]. No CPU change; battery and heat as Nintendo's own titles that use it.
-- Tests: `oot3d_fps_counter_tests` (`GpuPerformance`: the configurations' MHz, the configuration to
-  restore, the file round trip, no apm off the Switch) and three guards.
-- Console check (1 minute, without sys-clk): overlay on, choose High: the overlay's `GPU` reads 461 (was
-  307); `perf.txt` windows show `gpu_mhz=461 perf_cfg=0x92220008`; the game log has the `TRIAEVUM_GPU_PERF`
-  line. Back to Standard: `GPU 307`. Restart with High saved: the line appears at start.
+### Performance mode: L3+R3 > Video (`config/cpu_performance`, `gpu_performance`, `memory_performance`, 08/11, off by default)
+- Rows in the Video tab: **Performance mode** Off / On (reads **Custom** when the three below differ),
+  then **CPU clock** Standard (1020 MHz) / High (1224 MHz), **GPU clock** Standard (307 MHz) / High
+  (460.8 MHz) and **Memory clock** Standard (1331 MHz) / High (1600 MHz). On sets the three to High, Off
+  to Standard. Each row is one file under `config/`, present = High (`gpu_performance` keeps its meaning
+  from 07/11); the mode is derived, it has no file. Everything applies at once and at start (the Video
+  panel is created at window setup). One line of help: more battery use; CPU High is above the clock
+  Nintendo gives games, GPU High and Memory High are official handheld settings.
+- Code: `oot3d_switch_performance.h` (files, configurations, restore rules, `CpuClockKeeper`, the
+  `perf.txt` fields; plain code, host-tested), `oot3d_switch_performance.cpp` (apm, clkrst, the applet
+  hook and the follow-up thread), the rows in `oot3d_video_settings_panel.cpp`.
+- **GPU and memory: one official configuration through apm.** The application's own apm session
+  (`apmInitialize`, kept open for the run) and `apmSetPerformanceConfiguration(ApmPerformanceMode_Normal,
+  id)` with GPU × memory → id (switchbrew PTM services, PerformanceConfiguration):
+
+  | GPU | Memory | Configuration | CPU / GPU / memory (MHz) |
+  |---|---|---|---|
+  | Standard | Standard | what apm reported before the first change (0x00020003, the handheld default) | 1020 / 307.2 / 1331.2 |
+  | Standard | High | 0x00020001 | 1020 / 307.2 / 1600 |
+  | High | Standard | 0x92220008 | 1020 / 460.8 / 1331.2 |
+  | High | High | 0x92220007 | 1020 / 460.8 / 1600 |
+
+  Restore rule: Standard/Standard puts back what `apmGetPerformanceConfiguration(Normal)` reported
+  before the first change, or 0x00020003 if that read nothing or one of the game's own three (a previous
+  run's choice HOS kept). apm is only called when GPU or memory changed; all Standard with no prior High
+  opens no apm session (the default build behaves as before). Only the handheld (Normal) configuration is
+  touched: docked already runs 768 / 1600 MHz, so GPU and memory High do nothing docked.
+- **CPU: a direct clock request.** No official configuration has CPU 1224 MHz outside SDEV units
+  (0x00010002 and 0x00020002; 0x10001 and 0x20000 exist only docked), so CPU High asks clkrst
+  (8.0.0+: `clkrstOpenSession(PcvModuleId_CpuBus, 3)` + `clkrstSetClockRate(1224000000)`) or pcv
+  (`pcvSetClockRate(PcvModule_CpuBus)`) before 8.0.0. Only two rates are ever requested: 1224 MHz and the
+  rate read before the first change (1020 MHz if that read failed or found 1224 left over). Applies docked
+  and handheld. Access: the NRO runs with hbloader's NPDM under Atmosphère, whose `service_access` is `*`
+  (nx-hbloader `hbl.json`), so clkrst opens like any service.
+- **Why it is built this way (sleep).** SwitchWakerHD shipped CPU 1224 MHz through clkrst from the game
+  and Erista consoles then did not wake from sleep (issue #33; commit `8d9a643e`: "Putting the stock
+  clocks back from an appletHook focus callback did not help: the program is suspended before the hook
+  runs"; its clkrst sessions stayed open for the whole run). With libnx's default focus handling
+  (`SuspendHomeSleep`) AM suspends the application for HOME and sleep without telling it (yuzu-lineage
+  AM: the focus state stays InFocus and `SetFocusHandlingMode` re-evaluates suspension at once). So:
+  - every clkrst/pcv access opens the service and one session, does one read or write and closes both
+    (sys-clk's and RetroArch's pattern): nothing of clkrst stays open while the game may be suspended;
+  - while CPU High is on (only then) the focus handling is `NoSuspend`, as RetroArch does with its CPU
+    clock, so HOME and sleep reach the applet hook as FocusState Background. The hook puts the earlier
+    CPU rate back first, then sets `SuspendHomeSleep` again, which lets AM suspend the game as always.
+    When that call returns after ≥ 200 ms the game was suspended and is in focus again: the follow-up
+    thread sets `NoSuspend` and CPU High again at once (after 1 s if it returned sooner);
+  - exit (`atexit` and the ExitRequest hook) puts the earlier rate back; CPU Standard puts it back at once
+    and returns to the default focus handling.
+  A crash leaves 1224 MHz until HOS applies a configuration again (the next title's start).
+- **Keeping 1224 MHz (`CpuClockKeeper`).** HOS sets the CPU of the applied configuration (1020 MHz)
+  again on focus changes, sleep and wake, dock changes and apm changes, ours included, sometimes with a
+  delay. Wake (`OnResume`), dock (`OnOperationMode`), performance mode (`OnPerformanceMode`), focus back
+  and our own apm change start read-backs at 0, 0.25, 1, 2 and 4 s on the follow-up thread; finding
+  1020 MHz within 5 s of such an event sets 1224 again. The cheap check: once per `perf.txt` window the
+  clock reader thread reads the rate back and sets 1224 again if it differs.
+- **Other tools.** A rate other than 1224 that is not HOS's 1020 right after an event (sys-clk with a CPU
+  target for this title sets its rate back within its polling interval) counts; 3 such checks in a row
+  and the game stops (`action=override`, menu: "another tool (sys-clk?) keeps setting N MHz"), leaves the
+  rate alone at HOME and exit and returns to the default focus handling. Choosing Standard, then High
+  again, retries. 3 failed requests in a row (or clkrst refusing to open) stop it as unavailable (menu:
+  "CPU High unavailable: … refused (0x…)").
+- **Logs.** Game log: `TRIAEVUM_PERF_APM gpu_high=1 mem_high=1 available=1 rc=0x0 failed=-
+  requested=0x92220007 standard=0x00020003 effective=0x92220007 gpu_mhz=461 mem_mhz=1600 op_mode=handheld`
+  per apm change; `TRIAEVUM_PERF_CPU event=<choose_high|choose_standard|focus|resume|wake|dock_change|
+  perf_mode_change|apm_change|perf_window|background|exit_request|exit> action=<set_high|restore|override>
+  mhz_before= requested_mhz= mhz_after= rc= failed= reapply= focus_mode= op_mode=` per request (read-backs
+  that find 1224 log nothing), plus `event=focus_mode` and `event=background ... waited_ms=` lines.
+  `perf.txt`: with CPU High the `clocks:` MHz are the rates clkrst reports (`clk_src=clkrst`, also the
+  overlay's `clkrst`); every window adds `req_cpu= req_gpu= req_mem=` (the settings), `cpu_reapply=` (CPU
+  requests after the first), `cpu_override=` and `cpu_err=<step>:0x<Result>` (`-` when none failed).
+- Effect: GPU High up to −33% on GPU-clock-bound work [estimate]: Forest Temple room 8 step frames
+  14.9 ms → about 10-11.5 ms [estimate]; CPU High +20% CPU clock for the CPU-bound areas [estimate, not
+  measured]; memory High [not measured].
+- Tests: `oot3d_switch_performance_tests` (the files, the mode, GPU × memory → configuration, the restore
+  rules, the keeper against a fake clock: HOS resets, sys-clk fight, HOME, exit, failures; the `perf.txt`
+  fields), `oot3d_fps_counter_tests` (the `clkrst` overlay line) and the guards under "08/11: L3+R3 >
+  Video > Performance mode".
+- Risks: the self-suspend through `SetFocusHandlingMode` follows emulator reimplementations of AM, not a
+  console trace [INFERENCE]; if AM suspended later, the game would run up to 1 s in the background
+  (logged as a short `waited_ms`). Sleep entered before the game's next event pump (a long load) keeps
+  1224 MHz into sleep, as sys-clk does with short sessions.
+- Console check (1 minute, without sys-clk, handheld): overlay on, Performance mode On: the overlay reads
+  `CPU 1224  GPU 461  MEM 1600  clkrst`; `perf.txt` windows show `cpu_mhz=1224 gpu_mhz=461 mem_mhz=1600
+  clk_src=clkrst req_cpu=1 req_gpu=1 req_mem=1`. Press HOME: the game log has `event=background
+  action=restore`; back in the game, `event=resume action=set_high`. Sleep and wake once: the console
+  wakes and the overlay reads 1224 again. Performance mode Off: `CPU 1020  GPU 307  MEM 1331  stock`
+  at once. Exit the game: the log's last `TRIAEVUM_PERF_CPU` line is `action=restore`.
 
 ### Draw distance: L3+R3 > Video (`config/draw_distance`, 11/08, Original by default)
 - **Cause of the pop-in (test.12 report, item 2).** The title culls each actor in Actor_DrawAll

@@ -25,7 +25,10 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
   item, X/Y and D-pad icons; drag a finger on empty screen to aim.
 - **Updates:** L3+R3 → Updates → Check for updates. Saves, settings and game files are kept.
 - **Performance:** at stock clocks lighter areas run at full speed and busy ones slow down (the CPU is
-  the limit); a higher CPU clock with sys-clk helps.
+  the limit). L3+R3 → Video → **Performance mode** On raises the CPU to 1224 MHz, the GPU to 460.8 MHz
+  and the memory to 1600 MHz (each also on its own row; off by default, more battery use); the clocks
+  go back to normal when you turn it off, press HOME, sleep or exit. sys-clk still works and takes
+  precedence.
 - **Defaults:** 60 fps interpolation (delete `switch/oot3dre/config/fps60` for 30 fps) and Master Quest
   unlocked from the start (delete `switch/oot3dre/config/unlock_master_quest`).
 - **HUD art, downloaded on the console:** the single-screen HUD's art comes from the TopScreen mod

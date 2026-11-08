@@ -1090,8 +1090,10 @@ romfs, reaproveitando o `AzaharTexturePackRuntime` que já existia para o Vulkan
 - `clocks:` `cpu_mhz gpu_mhz mem_mhz` (clock real medido pelo sys-clk; `clk_src=sysclk_real`, ou
   `sysclk` = alvo, `none` = sys-clk ausente → MHz -1), `op_mode=handheld|docked`,
   `perf_mode=normal|boost`, `sysclk_profile`, `sysclk_enabled`, `sysclk_api`, `clk_ipc_us`. Só
-  leitura: uma chamada `GetCurrentContext` ao `sys:clk` por janela, sessão aberta uma vez; o app
-  nunca abre clkrst/pcv nem altera clock (SwitchWakerHD issue #33).
+  leitura: uma chamada `GetCurrentContext` ao `sys:clk` por janela, sessão aberta uma vez; o leitor
+  nunca abre clkrst/pcv (SwitchWakerHD issue #33). Mudar clock é opcional, L3+R3 > Video >
+  Performance mode (`oot3d_switch_performance.cpp`, SWITCH_PORT.md): com CPU High os MHz vêm do
+  clkrst (`clk_src=clkrst`) e a linha ganha `req_cpu/gpu/mem`, `cpu_reapply`, `cpu_override`, `cpu_err`.
 - Planos: `plan_worker_ms`, `plan_late_ms`, `plan_late_draws`, `plan_batches_live/queued/allocated`
   (pequenos e constantes), `plan_lock_wait_*`.
 - Picos (com `config/frame_spikes`/`gpu_timing`, por janela): `missed_refresh` (refreshes perdidos

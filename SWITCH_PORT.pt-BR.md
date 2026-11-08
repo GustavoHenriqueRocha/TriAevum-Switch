@@ -775,8 +775,9 @@ carregamentos).
   (`AtmosphereHasService`, 65100) porque `smGetService` de serviço não registrado fica esperando.
   Sem sys-clk: MHz -1, `clk_src=none`, nova tentativa a cada 60 janelas. Custo: uma IPC por janela
   de 150 quadros (`clk_ipc_us`), feita depois de fechar o tempo da janela.
-- Somente leitura e sem clkrst/pcv no app (SwitchWakerHD issue #33: clkrst no app travou o console
-  ao acordar do sleep); clock continua sendo papel do sys-clk.
+- O leitor não abre clkrst/pcv (SwitchWakerHD issue #33: CPU 1224 MHz via clkrst no app travou consoles
+  Erista ao acordar do sleep). Com CPU High ligado (L3+R3 > Video, "Performance mode", ver SWITCH_PORT.md)
+  os MHz são os que o clkrst informa (`clk_src=clkrst`), com uma sessão curta por leitura.
 - `op_mode` (portátil/dock) e `perf_mode` vêm de `appletGetOperationMode`/`appletGetPerformanceMode`
   (valores guardados pela libnx, sem IPC) e funcionam mesmo sem sys-clk.
 - `perf_report.py` mostra o clock de cada sessão; se mudar no meio, avisa (janela, antes → depois) e

@@ -459,8 +459,19 @@ and the `SysClkContext` layout are reproduced, from
   part of the SDK). Independent implementation; no code was copied.
 - [masseffect-nx](https://github.com/nebadasSwifty/masseffect-nx)
   (NebadasSwifty): the official handheld configuration `0x92220008` that
-  `oot3d_switch_gpu_performance.h` requests through apm, from its
+  `oot3d_switch_performance.h` requests through apm, from its
   `sdk/src/ui/switch_apm.cpp` findings. Independent implementation.
+- CPU High of `oot3d_switch_performance.cpp`, findings only, no code copied:
+  [retronx-team/sys-clk](https://github.com/retronx-team/sys-clk) (Beer-Ware
+  License, Revision 42; `sysmodule/src/board.cpp`: a clkrst session opened,
+  used and closed for each clock request, pcv before 8.0.0),
+  [RetroArch](https://github.com/libretro/RetroArch) (GPL-3.0;
+  `frontend/drivers/platform_switch.c`: CPU clock set from an application with
+  `AppletFocusHandlingMode_NoSuspend` and put back to 1020 MHz when focus is
+  lost) and SwitchWakerHD (MPL-2.0; issue #33 and commit `8d9a643e`: a CPU
+  clock set from the game through long-lived clkrst sessions, without a focus
+  notification before suspension, left Erista consoles unable to wake from
+  sleep).
 - [sa2-nx](https://github.com/ChanseyIsTheBest/sa2-nx) (ChanseyIsTheBest),
   findings only, no code: store cards (`oot3d_native_a32_memory.*`, after its
   `tools/store_cards.py`), the flat indirect-call dispatch table of the
