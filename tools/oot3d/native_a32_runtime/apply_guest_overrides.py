@@ -82,7 +82,11 @@ def load_manifest(path: Path, include_disabled: bool = False) -> list[dict[str, 
 
 
 def definition_pattern(entry: int) -> re.Pattern[str]:
-    return re.compile(r"^Oot3dWholeAotFlow (Execute_\w+_%08X)\($" % entry)
+    # A giant function generated without a hot list (no PGO profile yet, e.g.
+    # the PGO=generate build) carries whole_aot_cpp.GIANT_COLD_ATTRIBUTE at
+    # the start of its signature line.
+    return re.compile(
+        r"^(?:\[\[gnu::optimize\([^\]]*\)\]\] )?Oot3dWholeAotFlow (Execute_\w+_%08X)\($" % entry)
 
 
 def find_definition(lines: list[str], entry: int) -> tuple[int, str] | None:

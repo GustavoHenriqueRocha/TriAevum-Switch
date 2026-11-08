@@ -1,23 +1,31 @@
 // Console log diagnostics, pure parts: the game's area (scene, room) for
 // hitches.txt and perf.txt (oot3d_native_area.h), the actor name tables
 // (oot3d_native_actor_names.h) and the actor cost profile's pairing,
-// per-window aggregation, top actors and line (oot3d_native_actor_profile.h).
+// per-window aggregation, top actors and line (oot3d_native_actor_profile.h),
+// and the indirect call profile's window line, PGO census text and
+// concurrent recording (oot3d_native_indirect_profile.h).
 
 #include "oot3d_native_actor_names.h"
 #include "oot3d_native_actor_profile.h"
 #include "oot3d_native_indirect_profile.h"
 #include "oot3d_native_area.h"
+#include "oot3d_whole_aot_gcov.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <iterator>
 #include <regex>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -320,8 +328,8 @@ void TestProfileTop() {
   Require(line.find(",En_Door/enemy:4.00x1\n") != std::string::npos, "top ends at 8: " + line);
 }
 
-// config/indirect_profile: pairs counted per window, the hottest first (ties
-// by return then target), the line and the reset.
+// config/indirect_profile: session counts, the window line as the difference
+// from the previous window (the hottest first, ties by return then target).
 void TestIndirectProfile() {
   Oot3dIndirectProfile profile;
   RequireEqual(profile.TakeLine(), "indirect: calls=0 pairs=0 dropped=0 top=-\n", "empty indirect line");
@@ -329,28 +337,128 @@ void TestIndirectProfile() {
   for (int index = 0; index < 3; ++index) profile.Record(0x002E4058U, 0x00461344U);
   profile.Record(0x002E4058U, 0x00461340U);
   profile.Record(0x00100004U, 0x00461340U);
-  Require(profile.Calls() == 10U && profile.Pairs() == 4U, "indirect counts");
+  Require(profile.Calls() == 10U && profile.Pairs() == 4U && profile.Threads() == 1U, "indirect counts");
   RequireEqual(profile.TakeLine(),
                "indirect: calls=10 pairs=4 dropped=0 "
                "top=00461788>0021A000:5,002E4058>00461344:3,00100004>00461340:1,002E4058>00461340:1\n",
                "indirect line");
-  Require(profile.Calls() == 0U && profile.Pairs() == 0U, "indirect reset");
+  // The session keeps counting; the next window starts from zero.
+  Require(profile.Calls() == 10U && profile.Pairs() == 4U, "indirect session counts kept");
+  RequireEqual(profile.TakeLine(), "indirect: calls=0 pairs=0 dropped=0 top=-\n", "quiet indirect window");
+  profile.Record(0x00461788U, 0x0021A000U);
+  profile.Record(0x00461788U, 0x0021A000U);
+  RequireEqual(profile.TakeLine(), "indirect: calls=2 pairs=1 dropped=0 top=00461788>0021A000:2\n",
+               "indirect window difference");
+  const std::vector<Oot3dIndirectProfile::Pair> session = profile.Snapshot();
+  Require(session.size() == 4U && session[0].Return == 0x00461788U && session[0].Count == 7U &&
+              profile.Calls() == 12U,
+          "indirect session snapshot");
   // More distinct pairs than the top holds: the line keeps the 16 hottest.
   for (uint32_t pair = 0; pair < 40U; ++pair) {
     for (uint32_t count = 0; count <= pair; ++count) profile.Record(0x00200000U + pair * 4U, 0x00300000U);
   }
   const std::string line = profile.TakeLine();
-  Require(line.find(" top=0020009C>00300000:40,00200098>00300000:39,") != std::string::npos, "indirect top: " + line);
+  Require(line.find("indirect: calls=820 pairs=40 dropped=0 top=0020009C>00300000:40,00200098>00300000:39,") == 0U,
+          "indirect top: " + line);
   Require(line.find(",00200060>00300000:25\n") != std::string::npos, "indirect top ends at 16: " + line);
-  // A full table drops instead of evicting.
+  // A full table drops instead of evicting (and the free-slot marker pair
+  // is never stored).
   for (uint32_t pair = 0; pair < 2U * Oot3dIndirectProfile::kSlots; ++pair) profile.Record(pair * 4U, 0U);
-  Require(profile.Dropped() != 0U && profile.Pairs() + profile.Dropped() == 2U * Oot3dIndirectProfile::kSlots,
+  profile.Record(0xFFFFFFFFU, 0xFFFFFFFFU);
+  Require(profile.Dropped() > Oot3dIndirectProfile::kSlots / 2U &&
+              profile.Pairs() + profile.Dropped() == 44U + 2U * Oot3dIndirectProfile::kSlots + 1U,
           "indirect drops when full");
+  const std::string full = profile.TakeLine();
+  Require(full.find(" dropped=" + std::to_string(profile.Dropped()) + " ") != std::string::npos,
+          "indirect window drops: " + full);
   {
     Oot3dIndirectProfileInstall install;
-    Require(gOot3dIndirectProfile == &install.Profile(), "indirect profile installed");
+    Require(gOot3dIndirectProfile == &install.Profile() && !install.Shared(), "indirect profile installed");
+    {
+      // config/indirect_profile in a PGO generate build: one profile.
+      Oot3dIndirectProfileInstall again;
+      Require(&again.Profile() == &install.Profile() && again.Shared(), "indirect profile shared");
+    }
+    Require(gOot3dIndirectProfile == &install.Profile(), "shared indirect profile kept");
   }
   Require(gOot3dIndirectProfile == nullptr, "indirect profile removed");
+}
+
+// The PGO census (oot3d_pgo_<N>.indirect.txt): header, then every pair of the
+// session, most calls first.
+void TestIndirectCensusText() {
+  Oot3dIndirectProfile profile;
+  RequireEqual(profile.CensusText(),
+               "# oot3d indirect census v1\n# calls=0 pairs=0 dropped=0 threads=0\n# return target count\n",
+               "empty census");
+  for (int index = 0; index < 5; ++index) profile.Record(0x00461788U, 0x0021A000U);
+  for (int index = 0; index < 3; ++index) profile.Record(0x002E4058U, 0x00461344U);
+  profile.Record(0x002E4058U, 0x00461340U);
+  profile.Record(0x00100004U, 0x00461340U);
+  (void)profile.TakeLine();  // windows do not change the census
+  profile.Record(0x00100004U, 0x00461340U);
+  RequireEqual(profile.CensusText(),
+               "# oot3d indirect census v1\n"
+               "# calls=11 pairs=4 dropped=0 threads=1\n"
+               "# return target count\n"
+               "00461788 0021A000 5\n"
+               "002E4058 00461344 3\n"
+               "00100004 00461340 2\n"
+               "002E4058 00461340 1\n",
+               "census text");
+  RequireEqual(Oot3dWholeAotPgoIndirectPath("sdmc:/switch/oot3dre/pgo", 3U),
+               "sdmc:/switch/oot3dre/pgo/oot3d_pgo_3.indirect.txt", "census beside the stream");
+}
+
+// The dispatcher records on the game thread and the second-core thread at
+// once, while the perf window and the PGO dump read: no count is lost (run
+// under -fsanitize=thread too). Six writers: four get their own shard, two
+// share the overflow shard.
+void TestIndirectProfileConcurrent() {
+  constexpr uint32_t kWriters = 6U;
+  constexpr uint32_t kRounds = 20000U;
+  constexpr uint32_t kSites = 64U;
+  Oot3dIndirectProfile profile;
+  std::atomic<bool> go{false};
+  std::atomic<uint32_t> done{0U};
+  std::vector<std::thread> writers;
+  for (uint32_t writer = 0; writer < kWriters; ++writer) {
+    writers.emplace_back([&profile, &go, &done, writer] {
+      while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+      for (uint32_t round = 0; round < kRounds; ++round) {
+        // Every writer calls the same pairs (claimed by whichever comes
+        // first) and one pair of its own.
+        profile.Record(0x00300000U + (round % kSites) * 4U, 0x00400000U + (round % 3U) * 0x40U);
+        profile.Record(0x00500000U + writer * 4U, 0x00600000U);
+      }
+      done.fetch_add(1U, std::memory_order_release);
+    });
+  }
+  go.store(true, std::memory_order_release);
+  uint64_t windowCalls = 0U;
+  const auto addWindow = [&windowCalls](const std::string& line) {
+    windowCalls += std::strtoull(line.c_str() + std::strlen("indirect: calls="), nullptr, 10);
+  };
+  while (done.load(std::memory_order_acquire) != kWriters) {
+    addWindow(profile.TakeLine());
+    (void)profile.CensusText();
+  }
+  for (std::thread& thread : writers) thread.join();
+  addWindow(profile.TakeLine());
+  Require(profile.Threads() == kWriters, "indirect writer threads");
+  Require(profile.Calls() == uint64_t{kWriters} * kRounds * 2U && windowCalls == profile.Calls() &&
+              profile.Dropped() == 0U,
+          "indirect concurrent calls");
+  std::map<std::pair<uint32_t, uint32_t>, uint64_t> expected;
+  for (uint32_t round = 0; round < kRounds; ++round)
+    expected[{0x00300000U + (round % kSites) * 4U, 0x00400000U + (round % 3U) * 0x40U}] += kWriters;
+  for (uint32_t writer = 0; writer < kWriters; ++writer) expected[{0x00500000U + writer * 4U, 0x00600000U}] = kRounds;
+  const std::vector<Oot3dIndirectProfile::Pair> pairs = profile.Snapshot();
+  Require(pairs.size() == expected.size() && profile.Pairs() == expected.size(), "indirect concurrent pairs");
+  for (const Oot3dIndirectProfile::Pair& pair : pairs) {
+    const auto found = expected.find({pair.Return, pair.Target});
+    Require(found != expected.end() && found->second == pair.Count, "indirect concurrent pair count");
+  }
 }
 
 } // namespace
@@ -365,6 +473,8 @@ int main() {
   TestProfilePairing();
   TestProfileTop();
   TestIndirectProfile();
+  TestIndirectCensusText();
+  TestIndirectProfileConcurrent();
   std::puts("perf diagnostics: PASS");
   return 0;
 }

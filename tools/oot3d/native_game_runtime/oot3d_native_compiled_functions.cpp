@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace Oot3dNativeGame {
@@ -1022,6 +1023,9 @@ Oot3dWholeAotFlow ContinueWholeAotExternalCallInGuest(
 struct Oot3dBlockEntrySelection final {
     std::span<const uint32_t> Entries;
     const Oot3dAotBlockEntryFilter* Filter = nullptr;
+    // Empty when the linked code's gates (Oot3dWholeAotHookGates) cover the
+    // list; a callback must not run otherwise (ExecuteOot3dCompiledFunction).
+    const std::string* GateError = nullptr;
 };
 
 // Sorted, unique block entries and their filter, cached per caller list.
@@ -1032,6 +1036,7 @@ Oot3dBlockEntrySelection SelectBlockEntries(
         size_t EntryCount = 0U;
         std::vector<uint32_t> Merged;
         Oot3dAotBlockEntryFilter Filter;
+        std::string GateError;
         bool Initialized = false;
     };
     thread_local Cache cache;
@@ -1052,10 +1057,15 @@ Oot3dBlockEntrySelection SelectBlockEntries(
         for (const uint32_t pc : cache.Merged) {
             cache.Filter.Insert(pc);
         }
+        // Checked once per list: sparse code (--sparse-block-entries) has no
+        // gate elsewhere, so a hook outside its list would silently never run.
+        cache.GateError = Oot3dWholeAotHookGatesError(
+            Oot3dLinkedWholeAotHookGates(), cache.Merged);
     }
     return {
         cache.Merged,
         cache.Merged.empty() ? nullptr : &cache.Filter,
+        &cache.GateError,
     };
 }
 
@@ -1152,6 +1162,14 @@ bool Oot3dWholeAotAvailable() noexcept {
     return !Oot3dWholeAotEntryPoints().empty();
 #else
     return false;
+#endif
+}
+
+Oot3dWholeAotHookGateSet Oot3dLinkedWholeAotHookGates() noexcept {
+#if defined(OOT3D_NATIVE_GENERATED_WHOLE_AOT)
+    return Oot3dWholeAotHookGates();
+#else
+    return {};
 #endif
 }
 
@@ -1317,6 +1335,11 @@ bool ExecuteOot3dCompiledFunction(
     }
     const auto blockEntrySelection = SelectBlockEntries(
         blockEntryPcs, blockEntryPcCount);
+    // Before any guest instruction runs: the guest thread faults with the
+    // message (window setup refuses the same lists up front).
+    if (blockEntry != nullptr && !blockEntrySelection.GateError->empty()) [[unlikely]] {
+        throw std::runtime_error(*blockEntrySelection.GateError);
+    }
     return ExecuteOot3dWholeAotFunction(
         pc, state, memory, result, &gWholeAotStats,
         enableManualCompiledFunctions

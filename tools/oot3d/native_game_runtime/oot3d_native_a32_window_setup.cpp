@@ -3,6 +3,7 @@
 #include "oot3d_native_a32_window_session.h"
 #include "oot3d_gameplay_settings_panel.h"
 #include "oot3d_landing_roll.h"
+#include "oot3d_native_block_entry_hooks.h"
 #include "oot3d_native_guest_overrides.h"
 #include "oot3d_native_a32_memory_peek.h"
 #include "oot3d_native_kernel_options.h"
@@ -376,6 +377,20 @@ void NativeA32WindowSession::Setup() {
       guestProfileOptions.FunctionMapPath = guestFunctionMap;
       guestProfileOn = true;
     }
+    // The profile takes the block-entry callback on every block, which sparse
+    // whole-AOT code (--sparse-block-entries) never calls outside its gates:
+    // it would see nothing and the runtime refuses the request. The game runs
+    // on without it.
+    if (guestProfileOn &&
+        !Oot3dNativeGame::Oot3dLinkedWholeAotHookGates().EveryBlock) {
+      std::fprintf(stderr,
+                   "TRIAEVUM_GUEST_PROFILE refused: the whole-AOT code was "
+                   "generated with --sparse-block-entries, which calls the "
+                   "block-entry callback only at its hook gates; the guest "
+                   "profile (config/guest_profile, config/guest_spike_ms) needs "
+                   "a build without that flag\n");
+      guestProfileOn = false;
+    }
     if (guestProfileOn) {
       // OoT3D text segment (ExHeader): 0x00100000..0x004CA000.
       guestProfiler.Start(guestProfileOptions, 0x00100000U, 0x003CA000U);
@@ -401,138 +416,26 @@ void NativeA32WindowSession::Setup() {
   }
   auto &blockTraceWriter = blockTraceWriterStorage.emplace(
       launch.A32BlockTracePath, widescreenProjection);
-  blockEntryHooks = std::vector<uint32_t>{
-      kMtx4x4BuildFrustum,
-      kMtx4x4BuildOrthographicProjectionRotated,
-      kGameStateUpdate,
-      Oot3dNativeGame::kOot3dPlayerUpdateEntry,
-      Oot3dNativeGame::kOot3dFramePacingBeginEntry,
-      Oot3dNativeGame::kOot3dFramePacingDecisionEntry,
-      Oot3dNativeGame::kOot3dFramePacingCommitEntry,
-      Oot3dNativeGame::kOot3dMeshCommandPacketSubmitEntry,
-      // Landing roll (N64): the policy diverts to the game's roll setup.
-      Oot3dNativeGame::kLandingRollHookPc,
-  };
-  const auto actorVisibilityHooks =
-      Oot3dNativeGame::NativeActorVisibilityHookPcs();
-  blockEntryHooks.insert(blockEntryHooks.end(), actorVisibilityHooks.begin(),
-                         actorVisibilityHooks.end());
   widescreenProjection.ActorVisibility.Diagnostics =
       std::getenv("OOT3D_ACTOR_VISIBILITY_DIAGNOSTICS") != nullptr;
   picaCompositionHooks =
       Oot3dNativeGame::Oot3dNativePicaCompositionHookPcs();
-  blockEntryHooks.insert(blockEntryHooks.end(),
-                         picaCompositionHooks.begin(),
-                         picaCompositionHooks.end());
-  if (widescreenProjection.PlayerTemporalBridge != nullptr) {
-    const auto temporalHooks =
-        Oot3dNativeGame::NativeA32PlayerTemporalHookPcs();
-    blockEntryHooks.insert(blockEntryHooks.end(), temporalHooks.begin(),
-                           temporalHooks.end());
-  }
   typedGameplayObservableExitHooks =
       Oot3dNativeGame::Oot3dTypedGameplayObservableExitPoints();
+  // The block-entry hook list comes only from Oot3dNativeBlockEntryHookPcs
+  // (oot3d_native_block_entry_hooks.h): sparse whole-AOT code
+  // (--sparse-block-entries) gates exactly the union it reports, through
+  // tools/oot3d/native_a32_runtime/whole_aot_hook_gates.json.
+  Oot3dNativeGame::Oot3dBlockEntryHookOptions blockEntryHookOptions;
+  blockEntryHookOptions.PlayerTemporal =
+      widescreenProjection.PlayerTemporalBridge != nullptr;
 #if !defined(OOT3D_WHOLE_AOT_PRODUCT_MODE)
-  blockEntryHooks.insert(blockEntryHooks.end(),
-                         typedGameplayObservableExitHooks.begin(),
-                         typedGameplayObservableExitHooks.end());
+  blockEntryHookOptions.TypedGameplayObservableExits = true;
 #endif
-  const auto &uiLifecycleEntries =
-      Oot3dNativeGame::Oot3dNativeUiLifecycleBridge::GuestEntryPoints();
-  blockEntryHooks.insert(blockEntryHooks.end(), uiLifecycleEntries.begin(),
-                         uiLifecycleEntries.end());
-  if (launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen) {
-    const std::array topScreenHooks{
-        Oot3dNativeGame::kTopScreenQuestMaterializedHook,
-        Oot3dNativeGame::kTopScreenQuestSubmitModelsHook,
-        Oot3dNativeGame::kTopScreenQuestDrawHook,
-        0x00300588U,
-        0x002FEABCU,
-        0x00311364U,
-        kPauseProjectionPrepare,
-        kPauseUiDraw,
-        kPauseUiDrawReturn,
-        kPauseRendererVisibilityNativeDraw,
-        kPauseIconBuild};
-    // Texture payloads are patched when the native pause owner has loaded
-    // them, before its update can submit HUD or pause draws.
-    blockEntryHooks.push_back(kPauseUiUpdate);
-    blockEntryHooks.insert(blockEntryHooks.end(), topScreenHooks.begin(),
-                           topScreenHooks.end());
-    const std::array topScreenSourcePortHooks{
-        kPauseTouchButtonsDrawCall,
-        kPauseTouchButtonsTouchBranch,
-        kPauseLowerScreenBlock,
-        kPauseUiNativeUpdateCall,
-        kPauseProjectionPrepareCall,
-        kPauseAlternateViewportDrawCall,
-        kPauseConditionalDrawCall,
-        kPauseRoutedCommandCallA,
-        kPauseRoutedCommandCallB,
-        kPauseOverlayViewportDrawCall,
-        kPauseAlternateRendererUpdateCall,
-        kPauseSceneSevenDrawCall,
-        kPauseSceneViewportDrawCall,
-        kPauseSceneFiveDrawCall,
-        Oot3dNativeGame::kTopScreenSystemPageBoundary,
-        kPauseTouchButtonsHeldDownQuery,
-        kPauseTouchCoordinateUpdateCall,
-        kPauseRendererVisibilityCall,
-        kPauseControllerDrawCall,
-        kTopScreenCameraNormal1Scalar,
-        kTopScreenCameraFovScalar,
-        kTopScreenCameraUpdateEntry,
-        kTopScreenCameraUpdatePatchSite,
-        kTopScreenGameplayCompositionPrefix,
-        Oot3dNativeGame::kTopScreenPageProjectionUploadCall,
-        Oot3dNativeGame::kTopScreenItemsPageDrawCall,
-        Oot3dNativeGame::kTopScreenItemsCursorDrawCallA,
-        Oot3dNativeGame::kTopScreenItemsCursorDrawCallB,
-    };
-    blockEntryHooks.insert(blockEntryHooks.end(),
-                           topScreenSourcePortHooks.begin(),
-                           topScreenSourcePortHooks.end());
-    for (const auto &contract :
-         Oot3dNativeGame::TopScreenVerifiedControlFlowContracts()) {
-      blockEntryHooks.push_back(contract.Entry);
-    }
-    for (const auto &contract :
-         Oot3dNativeGame::TopScreenVerifiedFloatLoadContracts()) {
-      blockEntryHooks.push_back(contract.Entry);
-    }
-    for (const auto pc : Oot3dNativeGame::TopScreenDungeonMapIconCoordinateSites())
-      blockEntryHooks.push_back(pc);
-    const auto itemHooks = Oot3dNativeGame::TopScreenItemDispatchEntries();
-    blockEntryHooks.insert(blockEntryHooks.end(), itemHooks.begin(), itemHooks.end());
-    blockEntryHooks.push_back(Oot3dNativeGame::kTopScreenInputUpdateBoundary);
-  }
-  if (launch.ExtendedDiagnostics) {
-    const std::array diagnosticHooks{
-        kEnMagInit,
-        kEnMagUpdate,
-        kEnMagDraw,
-        kPauseUiUpdate,
-        kPauseUiDraw,
-        kFileSelectUpdate,
-        kFileSelectInit,
-        kFileChooseInit,
-        kPlayTransitionUpdate,
-        kFileSelectActivate,
-        kBlockingQueuePop,
-        kBlockingQueuePush,
-        kRendererCommandQueueProcessPending,
-        kBlockingQueueTryPush,
-        kTaskQueueTakeFirstFromPriority,
-        kTaskQueueEnqueuePriorityNode,
-        kTaskQueueWorkerDrainPriorityNodes,
-        kNngxP3dCallback,
-        kNngxCommonInterruptHandler,
-        kNngxCmdlistCompletionDispatch,
-        kRendererGlobalCallbackAfterLookup,
-    };
-    blockEntryHooks.insert(blockEntryHooks.end(), diagnosticHooks.begin(),
-                           diagnosticHooks.end());
-  }
+  blockEntryHookOptions.TopScreen =
+      launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen;
+  blockEntryHookOptions.ExtendedDiagnostics = launch.ExtendedDiagnostics;
+  blockEntryHookOptions.HdFonts = hdFontsLoaded;
 #if defined(__SWITCH__)
   // Actor cost profile (config/actor_profile; off by default): its hooks
   // exist only while it is on (oot3d_native_actor_profile.h).
@@ -540,25 +443,23 @@ void NativeA32WindowSession::Setup() {
       std::filesystem::exists("sdmc:/switch/oot3dre/config/actor_profile", profileError)) {
     actorProfile.emplace(Oot3dNativeGame::NativeProfileTicksPerMs());
     widescreenProjection.ActorProfile = &*actorProfile;
-    const auto profileHooks = Oot3dNativeGame::NativeActorProfile::HookPcs();
-    blockEntryHooks.insert(blockEntryHooks.end(), profileHooks.begin(), profileHooks.end());
-    std::fprintf(stderr, "TRIAEVUM_ACTOR_PROFILE enabled=1 hooks=%zu\n", profileHooks.size());
+    blockEntryHookOptions.ActorProfile = true;
+    std::fprintf(stderr, "TRIAEVUM_ACTOR_PROFILE enabled=1 hooks=%zu\n",
+                 Oot3dNativeGame::NativeActorProfile::HookPcs().size());
   }
   // Indirect call profile (config/indirect_profile; off by default): the
   // dispatcher counts call site and target pairs while it is installed
-  // (oot3d_native_indirect_profile.h).
+  // (oot3d_native_indirect_profile.h). A PGO generate build has installed its
+  // session profile already (oot3d_whole_aot_pgo.cpp): the perf line reuses it.
   if (std::error_code profileError;
       std::filesystem::exists("sdmc:/switch/oot3dre/config/indirect_profile", profileError)) {
     indirectProfile.emplace();
-    std::fprintf(stderr, "TRIAEVUM_INDIRECT_PROFILE enabled=1\n");
+    std::fprintf(stderr, "TRIAEVUM_INDIRECT_PROFILE enabled=1 shared=%d\n",
+                 indirectProfile->Shared() ? 1 : 0);
   }
 #endif
-  std::sort(blockEntryHooks.begin(), blockEntryHooks.end());
-  if (hdFontsLoaded) blockEntryHooks.push_back(Oot3dNativeGame::kNativeQbfA4Blit);
-  std::sort(blockEntryHooks.begin(), blockEntryHooks.end());
-  blockEntryHooks.erase(
-      std::unique(blockEntryHooks.begin(), blockEntryHooks.end()),
-      blockEntryHooks.end());
+  blockEntryHooks =
+      Oot3dNativeGame::Oot3dNativeBlockEntryHookPcs(blockEntryHookOptions);
 #if defined(__SWITCH__)
   gSwitchBlockHookCount = blockEntryHooks.size();
   gSwitchBlockHooksSorted =
@@ -808,6 +709,17 @@ void NativeA32WindowSession::Setup() {
       blockEntryForAll || guestProfiler.Active()
           ? std::span<const uint32_t>{}
           : std::span<const uint32_t>{blockEntryHooks};
+  // Sparse whole-AOT code (--sparse-block-entries) calls the callback only at
+  // the PCs of whole_aot_hook_gates.json: refuse a hook outside them, and the
+  // every-block callback of --trace-a32-blocks/--profile-a32-blocks, here
+  // rather than let them silently never run (ExecuteOot3dCompiledFunction
+  // refuses the same at run time).
+  if (enableWholeAot) {
+    if (const std::string error = Oot3dNativeGame::Oot3dWholeAotHookGatesError(
+            Oot3dNativeGame::Oot3dLinkedWholeAotHookGates(), nativeBlockEntryPcs);
+        !error.empty())
+      throw std::runtime_error(error);
+  }
   nativeCandidateDispatch = NativeCandidateDispatchState{
       guestProfiler.Active() ? &Oot3dNativeGame::GuestBlockProfiler::OnBlockEntry
                              : &ApplyNativeWidescreenProjectionPolicy,

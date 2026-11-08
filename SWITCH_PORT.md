@@ -430,6 +430,18 @@ the counts go (`pgo: instrumented build, <n> objects streamed to …`, one objec
 libgcov's value profilers out (shared lists that need atomics; the indirect-call one read
 `tpidr_el0`).
 
+**Indirect call census (since 11/08).** The instrumented build also counts every whole-AOT
+indirect call (`BLX reg`, computed `ADD pc` calls) per return address and target for the whole
+session (`oot3d_native_indirect_profile.h`, installed by `Oot3dWholeAotPgoStart` before guest code
+runs; lock-free, both guest cores record). Each dump writes it beside the stream as
+`sdmc:/switch/oot3dre/pgo/oot3d_pgo_<N>.indirect.txt` (same session number, same `.tmp` → remove →
+rename steps; `dumps.txt` lines gain `indirect_bytes=`): a `# oot3d indirect census v1` header with
+`calls= pairs= dropped= threads=`, then one `return target count` row per pair (hex, hex, decimal),
+most calls first. `return` is the guest LR at the call (call pc + 4 for `BLX`, the resume pc for
+computed calls). It costs ~1.5 MiB plus 512 KiB per recording thread. The census is data for a
+later round of guarded direct calls (N2); this round promotes nothing, so the generate and use
+builds compile the same dispatcher.
+
 **Size and cost (measured on shard 064, devkitA64 GCC 16.1).** 35 functions, 342 KB of code
 without instrumentation: 570 KB instrumented (x1.67) and 90.8 KB of counters (0.27 byte per byte of
 code). Over the 133.8 MB `.text`: about 36 MB of counters at most (`.bss`, RAM) and a `.text` of about
@@ -452,6 +464,10 @@ The instrumented game runs slower (every branch counts): play it for coverage, n
    compile instrumented (more memory per shard: keep `AOT_JOBS` at 4-6). Install
    `build-switch-pgo-gen/oot3d_native_game.nro` in place of the normal NRO (same
    `switch/oot3dre/`, so the game data and settings are used); keep the release NRO to put back.
+   A round with extra generator flags (11/08: `--sparse-block-entries --fold-vfp-literals`, see
+   "Generator round of 11/08") passes them to both generations through the wrapper's
+   `AOT_GEN_FLAGS`; the generate and the use build must get the same value (the flags are part of
+   the cache key, so the use build would otherwise look for another `-pgo` path).
 2. Play 20-30 minutes, in one or several sessions (each makes its own stream; they add up), with the
    default settings (no `config/fps60`): title and file select, Kokiri Forest, Hyrule Field by day and
    night, Market/Kakariko, a dungeon with fights (the Forest Temple Wolfos, the slowest spot of the
@@ -470,6 +486,15 @@ The instrumented game runs slower (every branch counts): play it for coverage, n
    sum_max = the largest count: the stream API writes zeros, which would make every block hot.) It
    refuses an `--output` that already has `.gcda` files (merging adds); lone `.stream.tmp` files are
    skipped. Then empty `pgo/` on the SD card. Keep `~/workshop-OOT/pgo/profile` with the release.
+   The `.indirect.txt` files in the same folder (ignored by the merge) are added up with
+   ```sh
+   python3 tools/oot3d/native_a32_runtime/whole_aot_indirect_census.py ~/workshop-OOT/pgo/streams \
+     --program ~/workshop-OOT/aot-cache/fork-gen-<key>/aot_program.json \
+     --output ~/workshop-OOT/pgo/indirect_census.json
+   ```
+   which prints the calls, the share of calls from single-target sites, the share the 1/2/3
+   hottest targets of each site cover and the hottest sites (N2 candidates), and writes every site
+   with its targets as JSON.
 4. Optimized build:
    ```sh
    PGO=use PGO_PROFILE=~/workshop-OOT/pgo/profile scripts/build-fork.sh   # BUILD_DIR defaults to build-switch-deko3d
@@ -859,6 +884,86 @@ Round proofs (scripts in the repository; run on the Ryzen and the notebook):
 - `test_whole_aot_cpp.py` (44 tests, including those for the new flags: optional, dropped from the manifest
   when off, identical C++ without them).
 
+### Generator round of 11/08: N4, VFP literals, indirect census
+Changes for the next PGO collection (they change every shard, so the old profile no longer applies).
+Each is a generator flag; without them the shards are byte for byte the previous ones (the registry
+gains `Oot3dWholeAotHookGates()`, which says "every block").
+
+**Generation command** (from `tools/oot3d/native_a32_runtime`; the wrapper passes the two new
+flags through `AOT_GEN_FLAGS`):
+```sh
+python3.12 generate_whole_aot_cpp.py --program <aot_program.json> --selection whole_aot_functions.json \
+  --code <code.bin> --output <cpp> --shards 256 --shard-strategy affinity \
+  --native-vfp-aarch64 --vfp-zero-aware --lean-stack --guest-overrides \
+  --giant-function-instructions 1000 --sparse-block-entries --fold-vfp-literals
+python3.12 apply_guest_overrides.py --generated <cpp>
+```
+
+1. **N4: budget and hook gate only where needed (`--sparse-block-entries`, `--hook-gates`).**
+   Every block used to run `Oot3dAotEnterBlock` (budget decrement and hook gate test). Now
+   (credit: ReXGlue/XenonRecomp-style loop barriers only at loop headers; sa2-nx's pruning):
+   - the **budget** stays at each function entry and at every target of a DFS back edge of the
+     function's `goto` graph (every directed cycle contains a back edge, so every loop, irreducible
+     ones too, passes a decrement; the generator re-proves it with a topological sort of the rest);
+     a block without its own decrement is charged by its dispatch (`switch (entryPc)`: resumes,
+     indirect calls into a block, the registry's re-dispatch). Every nested call enters a callee at
+     a charged entry, so the native call depth is still bounded by the budget (the 2048 of the
+     Switch keeps its stack bound), and a run executes at most budget × largest function blocks;
+   - the **hook gate** stays only at the PCs of `whole_aot_hook_gates.json` (330 PCs), the union
+     of every runtime hook list, written by the host tool `oot3d_block_entry_hook_census` from
+     `Oot3dNativeBlockEntryHookPcs()` (`oot3d_native_block_entry_hooks.{h,cpp}`, the only place
+     that builds the list; `tests/switch/run.sh` checks the file is current). A gated block charges
+     too, so a run's first block is always charged and "first block" stays `BlocksConsumed() == 1`;
+   - every block stays a dispatch entry (resumable anywhere; the product audit is unchanged);
+   - **refusal**: under sparse code, setup throws (fatal screen, boot status) when a hook PC has
+     no gate or a mode wants every block (`--trace-a32-blocks`, `--profile-a32-blocks`), the
+     dispatch throws for any later ungated list, `config/guest_profile` and `config/guest_spike_ms`
+     are refused with a `TRIAEVUM_GUEST_PROFILE refused:` line (the game continues), and the
+     title plugin refuses sparse code (its ABI has no gate list).
+   - **What changes for the guest:** nothing in state; `BlockLimit` exits (the cooperative thread
+     switches and the core-0 kernel-lock retakes) come only at charged blocks. Measured on the
+     last PGO session's real block counts (16 hottest shards, half of guest time, 1.30 G block
+     entries, `.gcda` paired with rebuilt notes): 73.7 % of block entries now run no entry code,
+     25.8 % only the decrement, 0.5 % the gate; 3.8 block entries per budget unit. With the
+     unchanged Switch budget of 2048 a slice runs ~3.8× as many blocks (about 0.7 → 2.5 ms of guest
+     code), so `BlockLimit` exits per step drop ~3.8× and a thread readied by core 1 or by host
+     events may wait up to ~2.5 ms more at worst (SVCs still switch as before). World stops wait
+     correspondingly longer for core 1 to leave guest code.
+   - Static (devkitA64 16.1, Switch shard flags, no PGO; shards 077/091/180/217, the hottest):
+     instructions 454,854 → 389,835 (−14.3 %), loads 118,552 → 101,351 (−14.5 %), stores
+     69,102 → 53,778 (−22.2 %), `.text` 1.82 → 1.56 MB; all 256 shards: 169,729 entry sites →
+     314 gated + 20,862 budget-only + 10,236 dispatch charges, C++ 349 → 325 MB.
+   - A pre-existing gap found on the way: 29 hook PCs start no block in the whole-AOT code, so their
+     hooks never run in either lowering (`hook_gates_without_block` in the manifest): 26 typed-gameplay
+     exits (developer builds) and 3 player-temporal PCs (0x0023C8A4, 0x0023C8F0, 0x0023CAB0).
+2. **Loads without the page-flag check (`--fold-vfp-literals`).** `VLDR Sd/Dd, [pc, #imm]` reads
+   the read-only text segment like `LDR [pc]`, which was already folded: it becomes a constant
+   (same `LiteralImage`, same host-written exclusions; text is mapped read-only for the whole
+   process, so the read always returns the `code.bin` bytes and can never fault; only the
+   diagnostic read-watch counters stop seeing it, as for `LDR`). 30,246 sites (27,755 addresses,
+   11 % of the `ReadFast` sites); 0.073 per block entry in the real profile. Every other load keeps
+   its check: a page without `kGuestPageLoadFast` means unmapped (a guest fault), window off,
+   write tracing, a watch or a deferred GPU readback, and none of those is static. The next
+   provable subset, one check for consecutive loads from the same unmodified base on one page,
+   would remove 0.22 checks per block entry (static: 13,473 of ~270k sites); not done this round
+   (~0.03 ms per step [estimate]). Stores are unchanged.
+3. **Indirect call census** for a later N2 round: see "PGO: collecting a profile on the console".
+4. **Fix:** `apply_guest_overrides.py` found no definition for overrides inside a giant function
+   marked `GIANT_COLD_ATTRIBUTE`, which a generation without a hot list (every `PGO=generate`
+   build) produces: the mirror natives of 0x0046C204 made that generation fail.
+
+Tests: `test_whole_aot_cpp.py` (N4 shape, irreducible loop, refused combinations, VFP literals,
+byte-identical when off), `test_apply_guest_overrides.py`, `oot3d_native_block_entry_hooks_tests`
+(the 64 option combinations against the previous inline list), the census `--check`,
+`oot3d_native_perf_diagnostics_tests` (concurrent recording, also under TSan),
+`test_whole_aot_indirect_census.py`, and the A/B of `run_register_promotion_equivalence.py
+--n4` (`OOT3D_N4_EQUIVALENCE`: base vs sparse on 60 real functions with their 1,706-function call
+closure, run to completion through every `BlockLimit` resume, half the trials with 1-48-block
+slices, hooks only at gates incl. hooks that change state and skip-first; guest state, memory,
+write generations, write trace and the hook sequence must be equal, the budget counters are
+free): 60/60 cases, 11,845 trials, 1.86 M hooks, zero differences (host g++ -O2; first run only,
+200 trials per case; random inputs fault early in several hot functions).
+
 ### Audio off the game thread (2026-10-17)
 - The DSP HLE (mixing) stays on the game thread: each audio frame reads the DSP shared regions,
   writes status/aux/final_samples to guest memory and signals the guest, which runs right
@@ -1204,7 +1309,8 @@ scheduler. Absent = the previous single-thread code paths exactly (nothing below
 - **Not made safe** (inline header paths, no shard rebuild): a page-pointer flip on core 0
   (`ObserveWrites`, `DeferWrites`) can meet a second-core store through the old pointer; store
   marks from both cores share the `mWritten` byte (plain stores, cache-line traffic); the guest
-  override call counters and `config/indirect_profile` are not atomic (diagnostics only).
+  override call counters are not atomic (diagnostics only). (`config/indirect_profile` records
+  safely from both cores since the generator round of 11/08.)
 - **Tests**: `oot3d_native_a32_second_core_tests` (monitor rules and two host threads, guest
   LDREX/STREX counter, event ping-pong, arbitration, sleep timeout, fault, savestate, scheduler
   exclusion, switch absent; DSP frames on the second core: never with the sound thread running,
@@ -1706,11 +1812,15 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - **Indirect call profile, `config/indirect_profile` (file exists, content ignored; off by
   default).** While it is on, the dispatcher counts calls per site and target
   (`oot3d_native_indirect_profile.h`); off, it costs one load and one predicted branch per indirect
-  call. Each `perf.txt` window gains a line
-  `indirect: calls=N pairs=K dropped=D top=002E4058>00461344:3000,...`: the calls in the window, the
-  distinct pairs, the pairs that found no slot (4,096), and the 16 hottest `return>target:count`.
+  call. The counts cover the whole session (lock-free: keys claimed by CAS, counts in per-thread
+  single-writer tables, so both guest cores may record); each `perf.txt` window gains a line
+  `indirect: calls=N pairs=K dropped=D top=002E4058>00461344:3000,...`, the difference from the
+  previous window: the calls in the window, the distinct pairs, the calls whose pair found no slot
+  (65,536), and the 16 hottest `return>target:count`.
   `return` is the guest LR at the call: the call pc + 4 for `BLX`, the resume pc for computed calls.
-  It is meant to pick the targets worth a guarded direct call.
+  It is meant to pick the targets worth a guarded direct call. A `PGO=generate` build always
+  records and writes the session census beside its PGO stream (see "PGO: collecting a profile on
+  the console").
 - **VFP multiple transfers: one page walk.** `VLDM`/`VSTM`/`VPUSH`/`VPOP` of two or more words
   (8,062 sites in the 256 shards: 5,060 loads, 3,002 stores) walked the two-level page table once
   per word. They now take `ReadWordsFast`/`WriteWordsFast` first, like `LDM`/`STM`: one page check

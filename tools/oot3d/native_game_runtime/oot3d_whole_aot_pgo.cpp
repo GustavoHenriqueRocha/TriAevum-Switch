@@ -6,9 +6,10 @@
 // (https://github.com/ChanseyIsTheBest/sa2-nx, ChanseyIsTheBest, GPL-3.0):
 // the gcov_info section walk, the Stream/Write/Filename/Allocate callbacks
 // and the .tmp-then-rename dump. This port's own: the applet hook that asks
-// for the focus-loss dump, the dump log, the session numbering and the stdio
-// file handling.
+// for the focus-loss dump, the dump log, the session numbering, the stdio
+// file handling and the indirect call census beside each stream.
 #include "oot3d_whole_aot_gcov.h"
+#include "oot3d_native_indirect_profile.h"
 
 #if defined(OOT3D_WHOLE_AOT_GCOV_GENERATE) && defined(__SWITCH__)
 
@@ -40,7 +41,11 @@ namespace {
 
 std::mutex gDumpMutex;  // one dump at a time (the thread, the exit)
 std::string gStream;    // this session's stream; empty = collection off
+std::string gIndirect;  // this session's indirect call census
 std::string gProblem;   // why it is off
+// The session's indirect call profile, installed before guest code runs and
+// never freed (guest threads may still record during the exit dump).
+Oot3dIndirectProfile* gIndirectProfile = nullptr;
 std::mutex gThreadMutex;
 std::condition_variable gWake;
 bool gStop = false;
@@ -81,16 +86,33 @@ size_t ObjectCount() {
 
 // Appends one line to pgo/dumps.txt: when, why, size and time of each dump
 // (the logger may already be gone at exit).
-void Note(const char* why, uint64_t bytes, double milliseconds, bool ok) {
+void Note(const char* why, uint64_t bytes, uint64_t indirectBytes, double milliseconds, bool ok,
+          bool indirectOk) {
     const std::string path = std::string(OOT3D_WHOLE_AOT_GCOV_DIR) + "/dumps.txt";
     if (std::FILE* file = std::fopen(path.c_str(), "a")) {
-        std::fprintf(file, "%s %s bytes=%llu ms=%.0f%s\n", gStream.c_str(), why,
-                     static_cast<unsigned long long>(bytes), milliseconds, ok ? "" : " FAILED");
+        std::fprintf(file, "%s %s bytes=%llu indirect_bytes=%llu ms=%.0f%s%s\n", gStream.c_str(), why,
+                     static_cast<unsigned long long>(bytes),
+                     static_cast<unsigned long long>(indirectBytes), milliseconds, ok ? "" : " FAILED",
+                     indirectOk ? "" : " INDIRECT_FAILED");
         std::fclose(file);
     }
 }
 
-// The whole session so far into the .tmp, which then replaces the stream.
+// The session's indirect call pairs (text) into indirect.tmp, which then
+// replaces the census: the stream's scheme. Its size, 0 when it failed.
+uint64_t DumpIndirect() {
+    const std::string text = gIndirectProfile->CensusText();
+    const std::string temporary = gIndirect + ".tmp";
+    std::FILE* file = std::fopen(temporary.c_str(), "wb");
+    if (file == nullptr) return 0U;
+    const bool written = std::fwrite(text.data(), 1, text.size(), file) == text.size();
+    if (std::fclose(file) != 0 || !written) return 0U;
+    std::remove(gIndirect.c_str());
+    return std::rename(temporary.c_str(), gIndirect.c_str()) == 0 ? text.size() : 0U;
+}
+
+// The whole session so far into the .tmp, which then replaces the stream;
+// then the indirect call census.
 void DumpNow(const char* why) {
     std::lock_guard<std::mutex> lock(gDumpMutex);
     if (gStream.empty()) return;
@@ -99,7 +121,8 @@ void DumpNow(const char* why) {
     Stream stream;
     stream.File = std::fopen(temporary.c_str(), "wb");
     if (stream.File == nullptr) {
-        Note(why, 0, 0.0, false);
+        const uint64_t indirectBytes = DumpIndirect();
+        Note(why, 0, indirectBytes, 0.0, false, indirectBytes != 0U);
         return;
     }
     static std::vector<char> buffer(1U << 20U);  // one SD write per MB, not per record
@@ -119,8 +142,9 @@ void DumpNow(const char* why) {
         std::remove(gStream.c_str());
         ok = std::rename(temporary.c_str(), gStream.c_str()) == 0;
     }
-    Note(why, stream.Bytes,
-         static_cast<double>(armTicksToNs(armGetSystemTick() - start)) / 1.0e6, ok);
+    const uint64_t indirectBytes = DumpIndirect();
+    Note(why, stream.Bytes, indirectBytes,
+         static_cast<double>(armTicksToNs(armGetSystemTick() - start)) / 1.0e6, ok, indirectBytes != 0U);
 }
 
 void ThreadLoop() {
@@ -193,6 +217,12 @@ void Oot3dWholeAotPgoStart() {
         return;
     }
     gStream = Oot3dWholeAotPgoStreamPath(directory, session);
+    gIndirect = Oot3dWholeAotPgoIndirectPath(directory, session);
+    // Before guest code runs (window setup, then the second core): the
+    // dispatcher counts every indirect call of the session. With
+    // config/indirect_profile the perf window shares it.
+    gIndirectProfile = new Oot3dIndirectProfile();
+    gOot3dIndirectProfile = gIndirectProfile;
     // A pthread: oot3d_switch_threads.cpp makes it a service thread (0x3B on
     // cores 1-2), off the game's core.
     gThread = std::thread(ThreadLoop);
@@ -203,7 +233,7 @@ void Oot3dWholeAotPgoStart() {
 std::string Oot3dWholeAotPgoDescribe() {
     if (gStream.empty()) return "pgo: instrumented build, counts NOT saved: " + gProblem;
     return "pgo: instrumented build, " + std::to_string(ObjectCount()) +
-           " objects streamed to " + gStream + " every " +
+           " objects streamed to " + gStream + " and indirect calls to " + gIndirect + " every " +
            std::to_string(kOot3dWholeAotPgoPeriodSeconds) +
            " s, on focus loss and at exit (dump log: " OOT3D_WHOLE_AOT_GCOV_DIR "/dumps.txt)";
 }

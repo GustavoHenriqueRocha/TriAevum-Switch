@@ -503,6 +503,26 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'exists\("sdmc:/switch/oot3dre/config/indirect_profile", profileError\)\) \{\s+indirectProfile\.emplace\(\);',
           test="oot3d_native_perf_diagnostics_tests"),
+    # --- GenRound: indirect call census for guarded direct calls (N2) ---
+    # The dispatcher records on the game thread and the second-core thread
+    # without a lock: keys claimed by CAS, counts in single-writer shards.
+    Guard("the indirect call profile is recorded from both guest cores: no plain shared increments",
+          "tools/oot3d/native_game_runtime/oot3d_native_indirect_profile.h",
+          r'void Record\(uint32_t returnPc, uint32_t target\) noexcept \{.*?'
+          r'cell\.compare_exchange_strong\(seen, key,.*?Bump\(shard\.Counts\[slot\], shared\);',
+          test="oot3d_native_perf_diagnostics_tests (TestIndirectProfileConcurrent, also under -fsanitize=thread)",
+          forbid=r'\+\+pair\.Count|\+\+mCalls|\+\+mUsed'),
+    Guard("PGO generate: the session's indirect call profile is installed at start and written beside every stream dump",
+          "tools/oot3d/native_game_runtime/oot3d_whole_aot_pgo.cpp",
+          r'#if defined\(OOT3D_WHOLE_AOT_GCOV_GENERATE\) && defined\(__SWITCH__\).*?'
+          r'const std::string temporary = gIndirect \+ ".tmp";.*?std::remove\(gIndirect\.c_str\(\)\);\s+'
+          r'return std::rename\(temporary\.c_str\(\), gIndirect\.c_str\(\)\) == 0.*?'
+          r'void DumpNow\(const char\* why\) \{.*?const uint64_t indirectBytes = DumpIndirect\(\);.*?'
+          r'gIndirect = Oot3dWholeAotPgoIndirectPath\(directory, session\);.*?'
+          r'gOot3dIndirectProfile = gIndirectProfile;.*?#else',
+          test="oot3d_native_perf_diagnostics_tests (TestIndirectCensusText), "
+               "tools/oot3d/native_a32_runtime/test_whole_aot_indirect_census.py",
+          forbid=r'#else.*gOot3dIndirectProfile ='),
     # VLDM/VSTM/VPUSH/VPOP walked the page table once per word; the span path
     # walks it once when the whole range lies on one page.
     Guard("VFP multiple transfers must take the single-page span path before the word-by-word one",
@@ -572,8 +592,16 @@ GUARDS = [
     Guard("the actor profile's hooks must stay opt-in (config/actor_profile): each hook costs a guest flush and a policy call",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'exists\("sdmc:/switch/oot3dre/config/actor_profile", profileError\)\) \{.*?'
-          r'NativeActorProfile::HookPcs\(\);\s+blockEntryHooks\.insert',
+          r'blockEntryHookOptions\.ActorProfile = true;',
           test="oot3d_native_perf_diagnostics_tests"),
+    Guard("the actor profile's hooks must stay opt-in: the hook list adds them only under its option",
+          "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
+          r'if \(options\.ActorProfile\) add\("actor_profile", NativeActorProfile::HookPcs\(\)\);',
+          test="oot3d_native_block_entry_hooks_tests"),
+    Guard("dungeon map: 0x00442F38 must not go back into the block-entry hook list",
+          "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
+          r'kPauseLowerScreenBlock,\s+kPauseUiNativeUpdateCall,',
+          forbid=r'kPauseDungeonMapCursorInput|0x00442F38'),
     Guard("perf.txt guest_in_pica was the running total in seconds, not ms per frame",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'guest_in_pica="\s*<< \(\(phaseTiming\.GuestInsidePicaSubmitSeconds - windowGuestInPica\) \* 1000\.0 / hostFrames\)',
@@ -1574,9 +1602,36 @@ GUARDS = [
           r'Oot3dWholeAotExitAt\(Oot3dNativeGame::kLandingRollSetupPc, state\)',
           "oot3d_landing_roll_tests"),
     Guard("Landing roll: the hook pc is a block-entry hook",
+          "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
+          r'add\("base", std::array\{[^}]*kLandingRollHookPc,',
+          "oot3d_landing_roll_tests, oot3d_native_block_entry_hooks_tests"),
+    # --- 11/08: N4 hook gates (--sparse-block-entries) ---
+    # Sparse whole-AOT code calls the block-entry callback only at the PCs of
+    # whole_aot_hook_gates.json, the census of Oot3dNativeBlockEntryHookPcs: a
+    # hook list assembled anywhere else would silently miss its gate.
+    Guard("N4: the window must take its block-entry hook list from Oot3dNativeBlockEntryHookPcs (the gated census)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
-          r'blockEntryHooks = std::vector<uint32_t>\{[^}]*Oot3dNativeGame::kLandingRollHookPc,',
-          "oot3d_landing_roll_tests"),
+          r'blockEntryHooks =\s+Oot3dNativeGame::Oot3dNativeBlockEntryHookPcs\(blockEntryHookOptions\);',
+          "oot3d_native_block_entry_hooks_tests",
+          forbid=r'blockEntryHooks\.(?:insert|push_back|emplace_back)\(|blockEntryHooks = std::vector'),
+    Guard("N4: the window refuses a hook list (or every-block callback) that sparse whole-AOT code does not gate",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'if \(enableWholeAot\) \{\s+if \(const std::string error = Oot3dNativeGame::Oot3dWholeAotHookGatesError\(\s+'
+          r'Oot3dNativeGame::Oot3dLinkedWholeAotHookGates\(\), nativeBlockEntryPcs\);\s+!error\.empty\(\)\)\s+'
+          r'throw std::runtime_error\(error\);',
+          "oot3d_native_block_entry_hooks_tests"),
+    Guard("N4: generated code never runs a block-entry callback whose list its gates do not cover",
+          "tools/oot3d/native_game_runtime/oot3d_native_compiled_functions.cpp",
+          r'if \(blockEntry != nullptr && !blockEntrySelection\.GateError->empty\(\)\) \[\[unlikely\]\] \{\s+'
+          r'throw std::runtime_error\(\*blockEntrySelection\.GateError\);',
+          "oot3d_native_block_entry_hooks_tests"),
+    Guard("N4: the guest profile refuses to start on sparse whole-AOT code (it needs every block)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'if \(guestProfileOn &&\s+!Oot3dNativeGame::Oot3dLinkedWholeAotHookGates\(\)\.EveryBlock\) \{.*?'
+          r'guestProfileOn = false;'),
+    Guard("N4: a title plugin never exports sparse whole-AOT code (the plugin ABI has no gate list)",
+          "tools/oot3d/native_game_runtime/triaevum_title_whole_aot_plugin.cpp",
+          r'if \(!Oot3dWholeAotHookGates\(\)\.EveryBlock\) \{.*?return nullptr;'),
     # --- 07/11: fixes from upstream coccofresco/TriAevum after beta.1c ---
     # dsp::DSP 0x14 (header 0x00140082) went unserved shortly before the end credits
     # (TRIAEVUM_HOST_REQUEST_UNSERVED detail=0x140082); upstream 657e3d0f (#104).

@@ -12,6 +12,7 @@
 namespace Oot3dNativeGame {
 
 class NativeA32Memory;
+struct Oot3dWholeAotHookGateSet;
 
 struct Oot3dCompiledFunctionStats {
     uint64_t Calls = 0;
@@ -46,6 +47,12 @@ struct Oot3dWholeAotExternalTarget {
 };
 
 bool Oot3dWholeAotAvailable() noexcept;
+// The block-entry gates of the linked whole-AOT code (Oot3dWholeAotHookGates):
+// every block for the default lowering and builds without whole-AOT; the
+// gate list for code generated with --sparse-block-entries (N4). A
+// block-entry callback whose list the gates do not cover is refused
+// (Oot3dWholeAotHookGatesError in oot3d_native_whole_aot_runtime.h).
+Oot3dWholeAotHookGateSet Oot3dLinkedWholeAotHookGates() noexcept;
 
 // Native overrides of guest functions (oot3d_native_guest_overrides).
 // No effect when the build doesn't compile them (precompiled whole-AOT module).

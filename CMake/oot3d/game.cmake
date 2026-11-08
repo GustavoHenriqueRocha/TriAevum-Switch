@@ -132,8 +132,9 @@ oot3d_target_defaults(oot3d_hitch_recorder_tests NO_WARNING_OVERRIDE FOLDER Test
 
 # Console log diagnostics: area ids (hitches.txt, perf.txt), the actor cost
 # profile (config/actor_profile) and the indirect call profile
-# (config/indirect_profile); header-only. The name tables are checked against
-# the decomp's actor ids and scene_lights.py's scene table.
+# (config/indirect_profile, the PGO census; recorded from several threads);
+# header-only. The name tables are checked against the decomp's actor ids and
+# scene_lights.py's scene table.
 add_executable(oot3d_native_perf_diagnostics_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_perf_diagnostics_tests.cpp
 )
@@ -141,6 +142,7 @@ target_compile_features(oot3d_native_perf_diagnostics_tests PRIVATE cxx_std_20)
 target_compile_definitions(oot3d_native_perf_diagnostics_tests PRIVATE
     OOT3D_ACTOR_SEMANTICS_HEADER="${CMAKE_SOURCE_DIR}/tools/oot3d/decomp_support/include/oot3d/actor_object_semantics.h"
     OOT3D_SCENE_LIGHTS_SCRIPT="${CMAKE_SOURCE_DIR}/tools/triaevum_release/scene_lights.py")
+target_link_libraries(oot3d_native_perf_diagnostics_tests PRIVATE Threads::Threads)
 oot3d_target_defaults(oot3d_native_perf_diagnostics_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
 # Guest fault report in the game log (registers, backtrace, memory around
@@ -383,6 +385,43 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 set_property(TARGET oot3d_native_a32_actor_visibility_tests PROPERTY FOLDER Tests)
 
+# The block-entry hook list (oot3d_native_block_entry_hooks.h) with the
+# sources that define its PCs: the census tool, which writes and checks
+# tools/oot3d/native_a32_runtime/whole_aot_hook_gates.json (the gate list of
+# --sparse-block-entries; tests/switch/run.sh runs --check), and its tests.
+set(OOT3D_BLOCK_ENTRY_HOOK_SOURCES
+    tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp
+    tools/oot3d/native_game_runtime/oot3d_actor_visibility_policy.cpp
+    tools/oot3d/native_game_runtime/oot3d_native_a32_actor_visibility.cpp
+    tools/oot3d/native_game_runtime/oot3d_top_screen_wide_items_runtime.cpp
+    runtime/three_ds_recomp/src/fast/oot3d/perspective_fov_policy.cpp
+)
+add_executable(oot3d_block_entry_hook_census EXCLUDE_FROM_ALL
+    ${OOT3D_BLOCK_ENTRY_HOOK_SOURCES}
+    tools/oot3d/native_game_runtime/oot3d_block_entry_hook_census.cpp)
+add_executable(oot3d_native_block_entry_hooks_tests EXCLUDE_FROM_ALL
+    ${OOT3D_BLOCK_ENTRY_HOOK_SOURCES}
+    tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks_tests.cpp)
+foreach(target oot3d_block_entry_hook_census oot3d_native_block_entry_hooks_tests)
+    target_include_directories(${target} PRIVATE
+        runtime/three_ds_recomp/include
+        tools/oot3d/native_game_runtime
+        tools/oot3d/ui_topscreen)
+    target_link_libraries(${target} PRIVATE
+        oot3d_native_a32_process
+        oot3d_native_game_runtime
+        oot3d_native_pica_composition
+        oot3d_native_ui_lifecycle_bridge
+        oot3d_ui_topscreen)
+    target_compile_options(${target} PRIVATE "${WARNING_OVERRIDE}")
+    if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        target_compile_definitions(${target} PRIVATE NOMINMAX)
+        set_property(TARGET ${target} PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+    set_property(TARGET ${target} PROPERTY FOLDER Tests)
+endforeach()
+
 add_library(oot3d_native_crash_diagnostics STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_crash_diagnostics.cpp
 )
@@ -437,6 +476,7 @@ if (TARGET oot3d_native_a32_aot OR TARGET oot3d_native_whole_aot OR
     target_sources(oot3d_native_game PRIVATE
         tools/oot3d/native_game_runtime/oot3d_native_a32_window.cpp
         tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp
+        tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp
         tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp
         tools/oot3d/native_game_runtime/oot3d_native_guest_profile.cpp
         tools/oot3d/native_game_runtime/oot3d_native_a32_window_savestate.cpp
