@@ -553,6 +553,205 @@ class WholeAotCppTests(unittest.TestCase):
             self.assertNotIn("lean_stack", manifest)
             self.assertEqual(original, (output / SOURCE_NAME).read_bytes())
 
+    def write_program(
+        self, root: Path, code: bytes, blocks: list[dict], *,
+        executable_size: int | None = None,
+    ) -> tuple[Path, Path, Path]:
+        """One function at 0x1000 made of `blocks` (pc, end_pc, successors)."""
+        code_path = root / "code.bin"
+        program_path = root / "program.json"
+        selection_path = root / "selection.json"
+        code_path.write_bytes(code)
+        program = {
+            "format": PROGRAM_FORMAT,
+            "base": 0x1000,
+            "code_sha256": hashlib.sha256(code).hexdigest(),
+            "blocks": [{"id": index, **block} for index, block in enumerate(blocks)],
+            "functions": [{
+                "entry": 0x1000, "name": "Synthetic", "blocks": list(range(len(blocks))),
+                "closed_static_cfg": True, "direct_calls": [], "tail_calls": [],
+                "indirect_sites": [],
+            }],
+        }
+        if executable_size is not None:
+            program["executable_size"] = executable_size
+        program_path.write_text(json.dumps(program), encoding="utf-8")
+        selection_path.write_text(json.dumps({
+            "format": SELECTION_FORMAT, "functions": [{"entry": 0x1000}],
+        }), encoding="utf-8")
+        return program_path, selection_path, code_path
+
+    @staticmethod
+    def block_text(source: str, pc: int) -> str:
+        start = source.index(f"block_{pc:08X}:\n")
+        end = source.index("\n    }\n", start)
+        return source[start:end]
+
+    def test_sparse_block_entries_budget_at_entry_loops_and_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs = self.write_program(
+                root,
+                words(
+                    0xE3A00000,  # 0x1000 MOV r0, #0
+                    0xE2800001,  # 0x1004 ADD r0, r0, #1   (loop header)
+                    0xE350000A,  # 0x1008 CMP r0, #10
+                    0x1AFFFFFC,  # 0x100C BNE 0x1004
+                    0xE3A01002,  # 0x1010 MOV r1, #2      (gated)
+                    0xE12FFF1E,  # 0x1014 BX LR           (plain)
+                ),
+                [
+                    {"pc": 0x1000, "end_pc": 0x1004, "successors": [
+                        {"site": 0x1000, "kind": "fallthrough", "target": 0x1004}]},
+                    {"pc": 0x1004, "end_pc": 0x1010, "successors": [
+                        {"site": 0x100C, "kind": "branch", "target": 0x1004, "condition": "ne"},
+                        {"site": 0x100C, "kind": "fallthrough", "target": 0x1010}]},
+                    {"pc": 0x1010, "end_pc": 0x1014, "successors": [
+                        {"site": 0x1010, "kind": "fallthrough", "target": 0x1014}]},
+                    {"pc": 0x1014, "end_pc": 0x1018, "successors": [
+                        {"site": 0x1014, "kind": "return"}]},
+                ],
+            )
+            output = root / "output"
+            generate(*inputs, output)
+            original = (output / SOURCE_NAME).read_bytes()
+            header = (output / HEADER_NAME).read_bytes()
+            text = original.decode("utf-8")
+            self.assertEqual(text.count("Oot3dAotEnterBlock(context, frame, state, 0x"), 4)
+            self.assertIn("Oot3dWholeAotHookGateSet Oot3dWholeAotHookGates() noexcept {\n"
+                          "    return {};", text)
+            with self.assertRaisesRegex(ValueError, "hook gate list"):
+                generate(*inputs, output, sparse_block_entries=True)
+            manifest = generate(*inputs, output, sparse_block_entries=True,
+                                hook_gates=frozenset({0x1010, 0x2000}))
+            self.assertTrue(manifest["sparse_block_entries"])
+            self.assertEqual(manifest["hook_gates"], [0x1010, 0x2000])
+            self.assertEqual(manifest["hook_gates_without_block"], [0x2000])
+            self.assertEqual(manifest["sparse_block_entry_counts"], {
+                "blocks": 4, "gated_blocks": 1, "budget_only_blocks": 2,
+                "blocks_without_entry_code": 1,
+            })
+            # Same dispatch entries (resumable at every block).
+            self.assertEqual(manifest["functions"][0]["dispatch_entries"], [0x1004, 0x1010, 0x1014])
+            self.assertEqual(header, (output / HEADER_NAME).read_bytes())
+            source = (output / SOURCE_NAME).read_text(encoding="utf-8")
+            # Entry and loop header: budget only; gated block: budget and gate;
+            # the plain block: nothing.
+            for pc in (0x1000, 0x1004):
+                block = self.block_text(source, pc)
+                self.assertIn("if (!Oot3dAotConsumeBlock(context)) {", block)
+                self.assertIn(f"return Oot3dAotBlockLimit(context, 0x{pc:08X}U);", block)
+            self.assertIn("Oot3dAotEnterBlock(context, frame, state, 0x00001010U, commitState, reloadState)",
+                          self.block_text(source, 0x1010))
+            plain = self.block_text(source, 0x1014)
+            self.assertNotIn("Oot3dAotConsumeBlock", plain)
+            self.assertNotIn("Oot3dAotEnterBlock", plain)
+            self.assertNotIn("BlockLimit", plain)
+            # Dispatch: self-charging blocks jump directly; the plain block is
+            # charged by the dispatch, which may stop there with BlockLimit.
+            function = source[source.index("Oot3dWholeAotFlow Execute_Synthetic_00001000(\n"):]
+            dispatch = function[function.index("    switch (entryPc) {"):function.index("block_00001000:")]
+            self.assertIn("    case 0x00001004U:\n        goto block_00001004;", dispatch)
+            self.assertIn("    case 0x00001010U:\n        goto block_00001010;", dispatch)
+            self.assertIn("    case 0x00001014U:\n        break;", dispatch)
+            charge = dispatch.index("    if (!Oot3dAotConsumeBlock(context)) {")
+            self.assertLess(dispatch.index("case 0x00001014U:\n        break;"), charge)
+            self.assertIn("return Oot3dAotBlockLimit(context, entryPc);", dispatch[charge:])
+            self.assertIn("    case 0x00001014U:\n        goto block_00001014;", dispatch[charge:])
+            self.assertEqual(dispatch.count("goto block_00001014;"), 1)
+            self.assertIn("static constexpr std::array<uint32_t, 2> kHookGatePcs{0x00001010U, 0x00002000U};", source)
+            self.assertIn("return {false, kHookGatePcs};", source)
+            # Turned off again: the C++ is exactly the same as before.
+            manifest = generate(*inputs, output)
+            self.assertNotIn("sparse_block_entries", manifest)
+            self.assertNotIn("hook_gates", manifest)
+            self.assertEqual(original, (output / SOURCE_NAME).read_bytes())
+
+    def test_sparse_block_entries_charge_irreducible_loops(self) -> None:
+        # A enters the B <-> C cycle at both B and C (no single header).
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs = self.write_program(
+                root,
+                words(
+                    0xE3500000,  # 0x1000 CMP r0, #0
+                    0x0A000000,  # 0x1004 BEQ 0x100C  (into C)
+                    0xE2800001,  # 0x1008 ADD r0, r0, #1  (B)
+                    0xE3500005,  # 0x100C CMP r0, #5      (C)
+                    0x1AFFFFFC,  # 0x1010 BNE 0x1008  (back into B)
+                    0xE12FFF1E,  # 0x1014 BX LR
+                ),
+                [
+                    {"pc": 0x1000, "end_pc": 0x1008, "successors": [
+                        {"site": 0x1004, "kind": "branch", "target": 0x100C, "condition": "eq"},
+                        {"site": 0x1004, "kind": "fallthrough", "target": 0x1008}]},
+                    {"pc": 0x1008, "end_pc": 0x100C, "successors": [
+                        {"site": 0x1008, "kind": "fallthrough", "target": 0x100C}]},
+                    {"pc": 0x100C, "end_pc": 0x1014, "successors": [
+                        {"site": 0x1010, "kind": "branch", "target": 0x1008, "condition": "ne"},
+                        {"site": 0x1010, "kind": "fallthrough", "target": 0x1014}]},
+                    {"pc": 0x1014, "end_pc": 0x1018, "successors": [
+                        {"site": 0x1014, "kind": "return"}]},
+                ],
+            )
+            output = root / "output"
+            manifest = generate(*inputs, output, sparse_block_entries=True, hook_gates=frozenset())
+            source = (output / SOURCE_NAME).read_text(encoding="utf-8")
+            charged = {
+                pc for pc in (0x1000, 0x1008, 0x100C, 0x1014)
+                if "Oot3dAotConsumeBlock(context)" in self.block_text(source, pc)
+            }
+            self.assertIn(0x1000, charged)
+            # The cycle B <-> C passes a decrement whichever way it is entered.
+            self.assertTrue(charged & {0x1008, 0x100C})
+            self.assertNotIn(0x1014, charged)
+            self.assertEqual(manifest["sparse_block_entry_counts"]["gated_blocks"], 0)
+            self.assertIn("static constexpr std::array<uint32_t, 0> kHookGatePcs{};", source)
+
+    def test_sparse_block_entries_reject_other_lowerings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs = self.write_inputs(root, words(0xE2800002, 0xE12FFF1E))
+            for options in ({"region_entries": frozenset({0x1000})},
+                            {"promote_registers": True}):
+                with self.subTest(options=options):
+                    with self.assertRaisesRegex(ValueError, "does not support"):
+                        generate(*inputs, root / "out", sparse_block_entries=True,
+                                 hook_gates=frozenset(), **options)
+
+    def test_fold_vfp_literals_is_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs = self.write_program(
+                root,
+                words(
+                    0xED9F0A01,  # 0x1000 VLDR s0, [pc, #4] -> 0x100C
+                    0xED9F1B01,  # 0x1004 VLDR d1, [pc, #4] -> 0x1010
+                    0xE12FFF1E,  # 0x1008 BX LR
+                    0x3F800000,  # 0x100C 1.0f
+                    0x00000000, 0x3FF00000,  # 0x1010 1.0
+                ),
+                [{"pc": 0x1000, "end_pc": 0x100C, "successors": [
+                    {"site": 0x1008, "kind": "return"}]}],
+                executable_size=0x18,
+            )
+            output = root / "output"
+            generate(*inputs, output)
+            original = (output / SOURCE_NAME).read_bytes()
+            self.assertEqual(original.decode("utf-8").count("context.Memory.ReadFast<"), 2)
+            manifest = generate(*inputs, output, fold_vfp_literals=True)
+            self.assertTrue(manifest["fold_vfp_literals"])
+            self.assertEqual(manifest["folded_vfp_literal_addresses"], 2)
+            source = (output / SOURCE_NAME).read_text(encoding="utf-8")
+            self.assertNotIn("ReadFast<", source)
+            self.assertIn("// VFP literal at 0x0000100C", source)
+            self.assertIn("frame.Guest.vfp[0] = 0x3F800000U;", source)
+            self.assertIn("frame.Guest.vfp[2] = 0x00000000U;", source)
+            self.assertIn("frame.Guest.vfp[3] = 0x3FF00000U;", source)
+            manifest = generate(*inputs, output)
+            self.assertNotIn("fold_vfp_literals", manifest)
+            self.assertEqual(original, (output / SOURCE_NAME).read_bytes())
+
     def test_emits_exact_vfp_square_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
