@@ -28,34 +28,6 @@ class Guard:
 
 
 GUARDS = [
-    # --- 11/08: a 30-100 ms game-thread stall every 600 frames since test.11 (hitches.txt presents
-    # 600k-3, game_ms far above guest_ms): the boot-status.txt heartbeat rewrote the SD file inside the
-    # frame. It goes through a service thread (config/async_status_writes, 0 = the old write here).
-    Guard("boot-status heartbeat: posted to the service thread, not written on the game thread (switch on)",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
-          r'runFrameCount % 600U == 0U\) \{.*?if \(asyncStatusWrites\) \{\s+'
-          r'PostSwitchBootStage\("runtime_running"\);\s+\} else \{\s+WriteSwitchBootStage\("runtime_running"\);',
-          test="oot3d_native_status_file_tests (TestPostNeverWaits)"),
-    Guard("boot-status: config/async_status_writes is on when the file is absent",
-          "tools/oot3d/native_game_runtime/oot3d_native_status_file.h",
-          r'"sdmc:/switch/oot3dre/config/async_status_writes"\);\s+if \(!input\) return true;',
-          test="oot3d_native_status_file_tests (TestSwitch)"),
-    Guard("boot-status: every write goes through the one writer, so a queued heartbeat never overwrites "
-          "a boot stage or completed/failed",
-          "tools/oot3d/native_game_runtime/oot3d_native_a32_window.cpp",
-          r'void WriteSwitchBootStage\(const char\* stage\) \{\s+'
-          r'\(void\)Oot3dNativeGame::SwitchBootStatusFile\(\)\.WriteNow\(FormatSwitchBootStage\(stage\)\);',
-          test="oot3d_native_status_file_tests (TestWriteNowWins)",
-          forbid=r'std::ofstream stream\("sdmc:/switch/oot3dre/boot-status\.txt"'),
-    Guard("boot-status: completed/failed go through the same writer as the heartbeat",
-          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
-          r'void WriteSwitchBootStatus\(.*?Oot3dNativeGame::SwitchBootStatusFile\(\)\.WriteNow\(text\);',
-          forbid=r'std::ofstream stream\(kSwitchBootStatusPath'),
-    Guard("boot-status writer: the text is taken only under the file lock (a later WriteNow always wins)",
-          "tools/oot3d/native_game_runtime/oot3d_native_status_file.h",
-          r'std::lock_guard file\(mFileMutex\);\s+std::optional<std::string> text;\s+\{\s+'
-          r'std::lock_guard again\(mMutex\);\s+text\.swap\(mPending\);',
-          test="oot3d_native_status_file_tests (TestWriteNowWins)"),
     # --- 11/07: Upscaling looked live on deko3d; only the OpenGL backend reads config/upscaler ---
     Guard("Video > Upscaling: disabled with a note on deko3d (no FSR step there)",
           "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
@@ -1016,6 +988,34 @@ GUARDS = [
     Guard("boot-status stayed at host_frames=1/guest_frames=1 without geometry cache (deko3d): looked like a hung guest",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'runFrameCount == 1U \|\| gSwitchPicaGeometryCacheObserved \|\|\s*runFrameCount % 600U == 0U'),
+    # --- 11/08: a 30-100 ms game-thread stall every 600 frames since test.11 (hitches.txt presents
+    # 600k-3, game_ms far above guest_ms): the boot-status.txt heartbeat rewrote the SD file inside the
+    # frame. It goes through a service thread (config/async_status_writes, 0 = the old write here).
+    Guard("boot-status heartbeat: posted to the service thread, not written on the game thread (switch on)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'runFrameCount % 600U == 0U\) \{.*?if \(asyncStatusWrites\) \{\s+'
+          r'PostSwitchBootStage\("runtime_running"\);\s+\} else \{\s+WriteSwitchBootStage\("runtime_running"\);',
+          test="oot3d_native_status_file_tests (TestPostNeverWaits)"),
+    Guard("boot-status: config/async_status_writes is on when the file is absent",
+          "tools/oot3d/native_game_runtime/oot3d_native_status_file.h",
+          r'"sdmc:/switch/oot3dre/config/async_status_writes"\);\s+if \(!input\) return true;',
+          test="oot3d_native_status_file_tests (TestSwitch)"),
+    Guard("boot-status: every write goes through the one writer, so a queued heartbeat never overwrites "
+          "a boot stage or completed/failed",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window.cpp",
+          r'void WriteSwitchBootStage\(const char\* stage\) \{\s+'
+          r'\(void\)Oot3dNativeGame::SwitchBootStatusFile\(\)\.WriteNow\(FormatSwitchBootStage\(stage\)\);',
+          test="oot3d_native_status_file_tests (TestWriteNowWins)",
+          forbid=r'std::ofstream stream\("sdmc:/switch/oot3dre/boot-status\.txt"'),
+    Guard("boot-status: completed/failed go through the same writer as the heartbeat",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'void WriteSwitchBootStatus\(.*?Oot3dNativeGame::SwitchBootStatusFile\(\)\.WriteNow\(text\);',
+          forbid=r'std::ofstream stream\(kSwitchBootStatusPath'),
+    Guard("boot-status writer: the text is taken only under the file lock (a later WriteNow always wins)",
+          "tools/oot3d/native_game_runtime/oot3d_native_status_file.h",
+          r'std::lock_guard file\(mFileMutex\);\s+std::optional<std::string> text;\s+\{\s+'
+          r'std::lock_guard again\(mMutex\);\s+text\.swap\(mPending\);',
+          test="oot3d_native_status_file_tests (TestWriteNowWins)"),
     Guard("deko3d.txt didn't say which NRO it came from or whether PICA reached the backend (p5 log looked like p3's)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'pica: first draw.*?pica: first %s.*?pica: first render-target clear.*?pica: first memory fill',
