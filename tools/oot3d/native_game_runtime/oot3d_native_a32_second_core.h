@@ -88,13 +88,43 @@ inline void SetActive(bool active) noexcept {
 
 // Every wait of the second core's host thread for the kernel lock (after
 // its dispatches and DSP frames, in its SVCs and memory paths), in
-// nanoseconds: the perf line's core1_lock_wait_ms. The game thread's
-// acquisitions are not timed.
+// nanoseconds: the perf line's core1_lock_wait_ms.
 inline std::atomic<uint64_t> gCore1LockWaitNanoseconds{0};
+// The game thread's acquisitions at depth 0 (each guest memory access of a
+// region that released the lock takes one), those that found it taken (the
+// second core held it, or Horizon handed it over at an unlock) and their
+// wait. Written by the game thread only; perf.txt untimed: *_lock_* fields
+// sample them around the frame loop's released regions.
+inline std::atomic<uint64_t> gCore0LockTakes{0};
+inline std::atomic<uint64_t> gCore0LockWaits{0};
+inline std::atomic<uint64_t> gCore0LockWaitNanoseconds{0};
+
+inline void AddCore0Counter(std::atomic<uint64_t>& counter, uint64_t value) noexcept {
+    counter.store(counter.load(std::memory_order_relaxed) + value, std::memory_order_relaxed);
+}
+
+struct Core0LockSample {
+    uint64_t Takes = 0;
+    uint64_t Waits = 0;
+    uint64_t WaitNanoseconds = 0;
+};
+[[nodiscard]] inline Core0LockSample SampleCore0Lock() noexcept {
+    return {gCore0LockTakes.load(std::memory_order_relaxed),
+            gCore0LockWaits.load(std::memory_order_relaxed),
+            gCore0LockWaitNanoseconds.load(std::memory_order_relaxed)};
+}
 
 inline void AcquireKernelMutex() {
     if (tProcessor == 0U) {
+        AddCore0Counter(gCore0LockTakes, 1U);
+        if (gKernelMutex.try_lock()) return;
+        const auto start = std::chrono::steady_clock::now();
         gKernelMutex.lock();
+        AddCore0Counter(gCore0LockWaits, 1U);
+        AddCore0Counter(gCore0LockWaitNanoseconds,
+                        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                  std::chrono::steady_clock::now() - start)
+                                                  .count()));
         return;
     }
     if (gKernelMutex.try_lock()) return;

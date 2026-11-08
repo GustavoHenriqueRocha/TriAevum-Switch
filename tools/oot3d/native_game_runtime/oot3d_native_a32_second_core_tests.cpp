@@ -22,6 +22,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -1230,6 +1231,91 @@ void TestQuietWakes(bool quiet) {
     Require(guest.Read32(kData + 12U) == 1U, "the woken thread ran on");
 }
 
+// config/kernel_ui_lock: the UI submission reads guest memory the way
+// NativeA32Memory does (a KernelGuard per read) while a second core keeps
+// taking the kernel lock for short work units. Released (the old path)
+// every read is one game-thread acquisition, counted by gCore0LockTakes and,
+// when it found the lock taken, gCore0LockWaits; kept (the new path) the
+// reads take none and the second core waits instead. The reads see the
+// same values either way (nothing writes them here).
+void TestUiLockHandOff() {
+    constexpr uint32_t kReads = 600U;
+    constexpr uint32_t kRounds = 50U;
+    SecondCore::SetActive(true);
+    SecondCore::LockKernel();  // the frame loop's base level
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> core1Units{0};
+    const auto spin = [](std::chrono::nanoseconds duration) {
+        const auto until = std::chrono::steady_clock::now() + duration;
+        while (std::chrono::steady_clock::now() < until) {
+        }
+    };
+    std::thread core1([&] {
+        SecondCore::tProcessor = 1U;
+        while (!stop.load(std::memory_order_relaxed)) {
+            SecondCore::LockKernel();
+            spin(std::chrono::microseconds(20));  // an SVC or a DSP frame
+            SecondCore::UnlockKernel();
+            core1Units.fetch_add(1U, std::memory_order_relaxed);
+            spin(std::chrono::microseconds(5));  // guest code
+        }
+    });
+    std::array<uint32_t, 64> guestWords{};
+    for (size_t index = 0; index < guestWords.size(); ++index)
+        guestWords[index] = static_cast<uint32_t>(index * 2654435761U);
+    struct Result {
+        SecondCore::Core0LockSample Locks;
+        double Microseconds = 0.0;
+        uint64_t Sum = 0;
+    };
+    const auto submit = [&](bool holdKernel) {
+        const auto before = SecondCore::SampleCore0Lock();
+        const auto start = std::chrono::steady_clock::now();
+        uint64_t sum = 0;
+        {
+            std::optional<SecondCore::HostWaitRelease> release;
+            if (!holdKernel) release.emplace();
+            for (uint32_t read = 0; read < kReads; ++read) {
+                const SecondCore::KernelGuard kernel;
+                sum += guestWords[read % guestWords.size()];
+            }
+        }
+        const auto after = SecondCore::SampleCore0Lock();
+        return Result{{after.Takes - before.Takes, after.Waits - before.Waits,
+                       after.WaitNanoseconds - before.WaitNanoseconds},
+                      std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start)
+                          .count(),
+                      sum};
+    };
+    Result released, held;
+    for (uint32_t round = 0; round < kRounds; ++round) {
+        const Result off = submit(false);
+        const Result on = submit(true);
+        Require(off.Locks.Takes == kReads, "released: one acquisition per read");
+        Require(on.Locks.Takes == 0U && on.Locks.Waits == 0U, "kept: no acquisition while held");
+        Require(off.Sum == on.Sum, "the reads saw different values");
+        released.Locks.Takes += off.Locks.Takes;
+        released.Locks.Waits += off.Locks.Waits;
+        released.Locks.WaitNanoseconds += off.Locks.WaitNanoseconds;
+        released.Microseconds += off.Microseconds;
+        held.Microseconds += on.Microseconds;
+        // The second core must make progress between submissions.
+        const uint64_t units = core1Units.load(std::memory_order_relaxed);
+        SecondCore::UnlockKernel();
+        while (core1Units.load(std::memory_order_relaxed) == units) std::this_thread::yield();
+        SecondCore::LockKernel();
+    }
+    stop.store(true, std::memory_order_relaxed);
+    SecondCore::UnlockKernel();
+    core1.join();
+    SecondCore::SetActive(false);
+    std::cout << "    ui_lock: " << kReads << " reads, released "
+              << released.Microseconds / kRounds << " us per submission ("
+              << static_cast<double>(released.Locks.Waits) / kRounds << " waited, "
+              << static_cast<double>(released.Locks.WaitNanoseconds) / 1000.0 / kRounds
+              << " us waiting), kept " << held.Microseconds / kRounds << " us\n";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1265,6 +1351,7 @@ int main(int argc, char** argv) {
     }
     SecondCore::gQuietWakes = false;
     TestSecondCoreLine();
+    TestUiLockHandOff();
     std::cout << "oot3d_native_a32_second_core_tests: ok\n";
     return 0;
 }

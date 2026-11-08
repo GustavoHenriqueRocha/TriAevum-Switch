@@ -22,6 +22,14 @@
 //        name is written when the diagnostics read it; handle lookups go
 //        through a small exact cache (NativeA32CtrHostConfig::FastSvc).
 //        perf.txt guest_kernel: top= (microseconds per call).
+//  ui_lock: config/second_core only. The UI submission (HUD build, texture
+//        preparation, its render-stream submit) keeps the kernel lock the
+//        frame loop holds instead of releasing it and taking it once per
+//        guest memory read: on Horizon an unlock with the second core
+//        waiting hands it the lock, and the next read then waits for that
+//        core's whole SVC or DSP frame. The second core waits at most the
+//        submission instead. perf.txt untimed: ui_lock_takes /
+//        ui_lock_waits / ui_lock_wait (0 takes with it on).
 
 #include "oot3d_native_offload.h"
 
@@ -35,6 +43,7 @@ namespace Oot3dNativeGame {
 struct NativeKernelOptions {
     bool Wake = false;
     bool Svc = false;
+    bool UiLock = false;
 };
 
 inline NativeKernelOptions ReadNativeKernelOptions() {
@@ -60,6 +69,7 @@ inline NativeKernelOptions ReadNativeKernelOptions() {
 #endif
     options.Wake = part("wake");
     options.Svc = part("svc");
+    options.UiLock = part("ui_lock");
     return options;
 }
 

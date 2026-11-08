@@ -162,6 +162,7 @@ void NativeRenderCommandStream::Enqueue(Command command, bool endsFrame,
     mQueue.push_back({std::move(command), endsFrame, synchronous});
     ++mSubmitted;
     if (mWorkerWaiting) {
+        ++mWaitStats.WorkerWakes;
         mWork.notify_one();
     } else {
         ++mWaitStats.SkippedNotifies;

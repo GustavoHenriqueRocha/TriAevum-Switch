@@ -281,10 +281,12 @@ void NativeA32WindowSession::Setup() {
       Oot3dNativeGame::ReadNativeKernelOptions();
   hostConfig.FastSvc = kernelOptions.Svc;
   Oot3dNativeGame::SecondCore::gQuietWakes = kernelOptions.Wake;
+  uiSubmitHoldsKernel = kernelOptions.UiLock;
   {
     const std::string line = std::string("kernel_fast: wake=") +
                              (kernelOptions.Wake ? "1" : "0") +
-                             " svc=" + (kernelOptions.Svc ? "1" : "0");
+                             " svc=" + (kernelOptions.Svc ? "1" : "0") +
+                             " ui_lock=" + (kernelOptions.UiLock ? "1" : "0");
 #if defined(__SWITCH__)
     SPDLOG_WARN("{}", line);
 #else

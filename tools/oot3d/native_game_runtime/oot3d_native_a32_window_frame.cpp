@@ -801,6 +801,7 @@ bool NativeA32WindowSession::RunFrame() {
     });
   }
   const auto presentationTime = std::chrono::steady_clock::now();
+  untimed.HeadPolicy += std::chrono::duration<double>(presentationTime - frameHeadStart).count();
   renderStream.Submit([&, presentationTime] {
     realtimePacer.ObservePresentation(presentationTime);
   });
@@ -844,6 +845,8 @@ bool NativeA32WindowSession::RunFrame() {
     });
   }
 #endif
+  const auto headAreaEnd = std::chrono::steady_clock::now();
+  untimed.HeadArea += std::chrono::duration<double>(headAreaEnd - presentationTime).count();
   // Presentation cadence (config/fps60_mode): the previous host frame's
   // game-thread cost (its duration minus the waits for the renderer) goes
   // to the render thread's governor.
@@ -906,6 +909,8 @@ bool NativeA32WindowSession::RunFrame() {
   const bool cadenceThirtyPair = false;
   const float visualInterpolationAlpha = static_cast<float>(
       std::clamp(presentationStep.InterpolationAlpha, 0.0, 1.0));
+  const auto headCadenceEnd = std::chrono::steady_clock::now();
+  untimed.HeadCadence += std::chrono::duration<double>(headCadenceEnd - headAreaEnd).count();
   ApplyTopScreenConfigSnapshot();
   uiLifecycleBridge.BeginHostFrame(
       static_cast<uint32_t>(presentationFrameCount));
@@ -918,6 +923,7 @@ bool NativeA32WindowSession::RunFrame() {
   hdFonts.SetOutputHeight(height);
   UpdateScenePresentation();
   phaseStart = std::chrono::steady_clock::now();
+  untimed.HeadUi += std::chrono::duration<double>(phaseStart - headCadenceEnd).count();
   untimed.FrameHead += std::chrono::duration<double>(phaseStart - frameHeadStart).count();
   Fast::Renderer3ds::SlowStepTrace hostStartSteps("host_frame_start");
   window.GetMouseStateManager()->StartFrame();
@@ -932,6 +938,7 @@ bool NativeA32WindowSession::RunFrame() {
   // by StartDraw above stay under the lock.
   std::optional<Oot3dNativeGame::SecondCore::HostWaitRelease> hostWorkRelease;
   hostWorkRelease.emplace();
+  const auto startLockBefore = Oot3dNativeGame::SecondCore::SampleCore0Lock();
   // Performance overlay (L3+R3 > Video, config/fps_counter): new images
   // per second (steps and fps60 in-betweens, each once however many
   // refreshes it stays; a dropped in-between is not one), the longest time
@@ -1192,6 +1199,11 @@ bool NativeA32WindowSession::RunFrame() {
   cpuRendererStart.Stop();
   phaseTiming.FrameStartSeconds += SecondsSince(phaseStart);
   {
+    const auto startLockAfter = Oot3dNativeGame::SecondCore::SampleCore0Lock();
+    untimed.StartLockTakes += startLockAfter.Takes - startLockBefore.Takes;
+    untimed.StartLockWaits += startLockAfter.Waits - startLockBefore.Waits;
+    untimed.StartLockWait +=
+        static_cast<double>(startLockAfter.WaitNanoseconds - startLockBefore.WaitNanoseconds) / 1.0e9;
     const auto reacquireStart = std::chrono::steady_clock::now();
     hostWorkRelease.reset();
     untimed.KernelReacquire += SecondsSince(reacquireStart);
@@ -1253,9 +1265,14 @@ bool NativeA32WindowSession::RunFrame() {
 
   // config/second_core: the UI submission and the presentation hand-off
   // read guest memory only (through paths that take the kernel lock) and
-  // talk to the render thread: released as the frame start.
-  hostWorkRelease.emplace();
+  // talk to the render thread: released as the frame start. With
+  // config/kernel_ui_lock (absent = on) the UI submission keeps the lock
+  // and the release starts at the presentation hand-off: one acquisition
+  // instead of one per guest memory read, each of which Horizon may hand to
+  // a waiting second core (oot3d_native_kernel_options.h).
+  if (!uiSubmitHoldsKernel) hostWorkRelease.emplace();
   const auto uiSubmitStart = std::chrono::steady_clock::now();
+  const auto uiLockBefore = Oot3dNativeGame::SecondCore::SampleCore0Lock();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::UiSubmit);
   // The HUD's texture pack images decode before its first frame: its
   // textures are asked for ahead, one per frame, as soon as the game has
@@ -1271,6 +1288,13 @@ bool NativeA32WindowSession::RunFrame() {
       hudTexturesAheadRevision = revision;
     }
   }
+  auto uiMark = std::chrono::steady_clock::now();
+  untimed.UiAhead += std::chrono::duration<double>(uiMark - uiSubmitStart).count();
+  const auto uiSplit = [&uiMark](double &total) {
+    const auto now = std::chrono::steady_clock::now();
+    total += std::chrono::duration<double>(now - uiMark).count();
+    uiMark = now;
+  };
   for (std::size_t subsystemIndex = 0;
        subsystemIndex < oot3d::ui::kUiSubsystemCount; ++subsystemIndex) {
     const auto subsystem =
@@ -1303,6 +1327,7 @@ bool NativeA32WindowSession::RunFrame() {
     if (topScreenPresentation) {
       lastTopScreenPrimitivesBySubsystem[subsystemIndex] = primitives;
     }
+    uiSplit(untimed.UiBuild);
     const auto canvasMode =
         topScreenPresentation
             ? oot3d::ui::N64UiCanvasMode::NativeTopScreen400x240
@@ -1310,6 +1335,7 @@ bool NativeA32WindowSession::RunFrame() {
     // Texture payloads are read from guest memory here; the renderer
     // only uploads them.
     auto preparedTextures = n64UiRenderer.PrepareTextures(primitives);
+    uiSplit(untimed.UiPrepare);
     renderStream.Submit([&, primitives = std::move(primitives), width,
                          height, canvasMode,
                          prepared = std::move(preparedTextures)]() mutable {
@@ -1329,9 +1355,18 @@ bool NativeA32WindowSession::RunFrame() {
                                  renderError);
       }
     });
+    uiSplit(untimed.UiQueue);
   }
 
+  {
+    const auto uiLockAfter = Oot3dNativeGame::SecondCore::SampleCore0Lock();
+    untimed.UiLockTakes += uiLockAfter.Takes - uiLockBefore.Takes;
+    untimed.UiLockWaits += uiLockAfter.Waits - uiLockBefore.Waits;
+    untimed.UiLockWait +=
+        static_cast<double>(uiLockAfter.WaitNanoseconds - uiLockBefore.WaitNanoseconds) / 1.0e9;
+  }
   untimed.UiSubmit += SecondsSince(uiSubmitStart);
+  if (uiSubmitHoldsKernel) hostWorkRelease.emplace();
   Oot3dNativeGame::HangWatch::Mark(Oot3dNativeGame::HangWatch::Stage::PresentSubmit);
   phaseStart = std::chrono::steady_clock::now();
   CpuProbe::Scope cpuPresent(CpuProbe::Phase::Present);
@@ -1600,6 +1635,9 @@ bool NativeA32WindowSession::RunFrame() {
              << " render_idle_ms="
              << perFrameMs(waits.WorkerIdleNanoseconds, previousWaits.WorkerIdleNanoseconds)
              << " signals_skipped=" << (waits.SkippedNotifies - previousWaits.SkippedNotifies)
+             // Submissions that woke the idle render thread, per host frame.
+             << " render_wakes="
+             << static_cast<double>(waits.WorkerWakes - previousWaits.WorkerWakes) / hostFrames
              << " pacer_spin_ms="
              << perFrameMs(tail.SpinNanoseconds, previousTail.SpinNanoseconds)
              << " pacer_oversleep_ms="
@@ -2214,13 +2252,42 @@ bool NativeA32WindowSession::RunFrame() {
         const auto perFrame = [&](double now, double before) {
           return (now - before) * 1000.0 / hostFrames;
         };
+        const auto perFrameCount = [&](uint64_t now, uint64_t before) {
+          return static_cast<double>(now - before) / hostFrames;
+        };
         perf << " untimed: frame_head=" << perFrame(untimed.FrameHead, previousUntimed.FrameHead)
              << " refresh_prep=" << perFrame(untimed.RefreshPrep, previousUntimed.RefreshPrep)
              << " ui_submit=" << perFrame(untimed.UiSubmit, previousUntimed.UiSubmit)
              << " kernel_reacquire="
              << perFrame(untimed.KernelReacquire, previousUntimed.KernelReacquire)
              // Part of `input`: PollNativeA32Input alone (SDL pad, bindings).
-             << " input_poll=" << perFrame(untimed.InputPoll, previousUntimed.InputPoll);
+             << " input_poll=" << perFrame(untimed.InputPoll, previousUntimed.InputPoll)
+             // frame_head split: frame-rate policy, area + pack scene note
+             // (with the pacer's presentation submit), cadence report +
+             // refresh plan, UI/config head.
+             << " head_policy=" << perFrame(untimed.HeadPolicy, previousUntimed.HeadPolicy)
+             << " head_area=" << perFrame(untimed.HeadArea, previousUntimed.HeadArea)
+             << " head_cadence=" << perFrame(untimed.HeadCadence, previousUntimed.HeadCadence)
+             << " head_ui=" << perFrame(untimed.HeadUi, previousUntimed.HeadUi)
+             // ui_submit split: textures ahead, HUD build, PrepareTextures,
+             // render-stream submit; then its kernel-lock acquisitions (per
+             // host frame), those that waited and their ms
+             // (config/kernel_ui_lock: 0 takes when on).
+             << " ui_ahead=" << perFrame(untimed.UiAhead, previousUntimed.UiAhead)
+             << " ui_build=" << perFrame(untimed.UiBuild, previousUntimed.UiBuild)
+             << " ui_prepare=" << perFrame(untimed.UiPrepare, previousUntimed.UiPrepare)
+             << " ui_queue=" << perFrame(untimed.UiQueue, previousUntimed.UiQueue)
+             << " ui_lock=" << (uiSubmitHoldsKernel ? 1 : 0)
+             << " ui_lock_takes=" << perFrameCount(untimed.UiLockTakes, previousUntimed.UiLockTakes)
+             << " ui_lock_waits=" << perFrameCount(untimed.UiLockWaits, previousUntimed.UiLockWaits)
+             << " ui_lock_wait=" << perFrame(untimed.UiLockWait, previousUntimed.UiLockWait)
+             // The same for the frame start's released region (host frame
+             // start, input, savestate requests).
+             << " start_lock_takes="
+             << perFrameCount(untimed.StartLockTakes, previousUntimed.StartLockTakes)
+             << " start_lock_waits="
+             << perFrameCount(untimed.StartLockWaits, previousUntimed.StartLockWaits)
+             << " start_lock_wait=" << perFrame(untimed.StartLockWait, previousUntimed.StartLockWait);
         previousUntimed = untimed;
       }
       // Totals of a Mesa built with the Horizon shader cache (absent from

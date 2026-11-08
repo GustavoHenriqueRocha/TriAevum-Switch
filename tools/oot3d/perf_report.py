@@ -377,6 +377,17 @@ def summarize_offload(windows: list[Window]) -> None:
         parts = ("frame_head", "refresh_prep", "ui_submit", "kernel_reacquire", "input_poll")
         print("    outside the phases: " + ", ".join(f"{key} {fmt(mean(key), 3)}" for key in parts)
               + " ms/frame")
+    if any("ui_build" in m for m in marked):
+        # Their split (SWITCH_PORT.md "ui_submit and frame_head split").
+        head = ("head_policy", "head_area", "head_cadence", "head_ui")
+        ui = ("ui_ahead", "ui_build", "ui_prepare", "ui_queue", "ui_lock_wait")
+        print("    frame_head: " + ", ".join(f"{key[5:]} {fmt(mean(key), 3)}" for key in head)
+              + "; ui_submit: " + ", ".join(f"{key[3:]} {fmt(mean(key), 3)}" for key in ui)
+              + f" ms/frame (ui_lock={int(num(marked[-1], 'ui_lock'))},"
+              f" {fmt(mean('ui_lock_takes'), 0)} takes, {fmt(mean('ui_lock_waits'), 1)} waited;"
+              f" frame start {fmt(mean('start_lock_takes'), 0)} takes,"
+              f" {fmt(mean('start_lock_waits'), 1)} waited, {fmt(mean('start_lock_wait'), 3)} ms;"
+              f" render wakes {fmt(mean('render_wakes'), 1)})")
     if any("cap_regs_us" in m for m in marked):
         # "capture:" block: sub-stages of pica_capture_ms per draw
         # (config/capture_delta; SWITCH_PORT.md "Capture delta").

@@ -4169,6 +4169,56 @@ core on, in `visual_present`, `pica_submit_host_ms` and `total_ms`; shared table
 in `pica_capture_ms`/`guest`; the LRU change saves ~0.4 ms per eviction, which shows up only where
 `geometry_evictions` is non-zero (room changes, effects at new addresses).
 
+### ui_submit and frame_head split, `config/kernel_ui_lock` (08/11)
+From test.10 to test.11, `untimed:` `frame_head` / `ui_submit` grew 0.2–0.75 ms per host frame
+(Kokiri 0.48/0.55 → 0.76/0.90). What the logs show (`logs19`, `logs19b`, `logs18a`):
+- `ui_submit` grew where the HUD is drawn, also in calm 60 FPS windows: Temple of Time
+  0.5 → 0.8–1.1 ms, Hyrule Field 0.5 → 0.6–0.75. Without the HUD (title, room changes) it stays at
+  0.04–0.07 in both builds. The second start (HUD pack decoded ahead) shows the same values, so it is
+  not the HUD pack's provisional polling. The HUD code itself only lost work in test.11.
+- `frame_head` and `input` grew only in game-bound windows (Kokiri at 42 FPS: 0.48 → 0.76 and
+  0.27 → 0.44), where `render_idle_ms` also rose (8–12 → 12–14): the render thread waits more, so
+  more submissions wake it. Calm windows are unchanged.
+- The UI submission reads guest memory with the kernel lock released (`HostWaitRelease`), so each of
+  its reads is one lock acquisition. On Horizon an unlock with the second core waiting hands it
+  the lock, and the next read waits for that core's whole SVC or DSP frame.
+
+The logs cannot split the two fields further, so `perf.txt` now does (`untimed:` block, ms or
+counts per host frame):
+- `head_policy` (PrepareNextWindowDemoFrame, a frame-rate change), `head_area` (the pacer's
+  presentation submit, the area read, the pack's `NoteScene`), `head_cadence` (cadence report,
+  refresh plan), `head_ui` (`ApplyTopScreenConfigSnapshot` .. `UpdateScenePresentation`);
+- `ui_ahead` (HUD textures asked for ahead), `ui_build` (the presentation build: guest memory reads),
+  `ui_prepare` (`PrepareTextures`: keys, provider resolves), `ui_queue` (the render-stream submit);
+- `ui_lock_takes` / `ui_lock_waits` / `ui_lock_wait`: game-thread kernel-lock acquisitions inside
+  `ui_submit`, those that found the lock taken, and their wait; `start_lock_*` the same for the
+  frame start's released region (host frame start, input). The game thread's acquisitions now
+  `try_lock` first and time only a failed one (`SecondCore::gCore0Lock*`);
+- `sync:` `render_wakes`: submissions that woke the idle render thread.
+
+**`config/kernel_ui_lock`** (absent = on, `0` = the previous path; desktop
+`TRIAEVUM_KERNEL_UI_LOCK`; logged in the `kernel_fast:` start line and as `ui_lock=` in each
+window): the UI submission keeps the kernel lock the frame loop holds, and the release starts at the
+presentation hand-off. The second core then waits at most the submission instead of the game thread
+waiting at every read. Guest-visible behaviour is unchanged: the reads were each atomic before and
+now read one consistent state; the second core's SVCs only move later within the frame, which the
+release never ordered. Test: `oot3d_native_a32_second_core_tests` (TestUiLockHandOff: 600 reads
+against a core that keeps taking the lock for 20 µs units; released, one acquisition per read,
+4.3 of them waited, 2.38 ms per submission on the host; kept, no acquisition, 3.3 µs, same values).
+The host's 80 % lock duty is a worst case; the console's share is what `ui_lock_wait` shows with
+the switch off.
+
+Expected on the console [not measured]: `ui_submit` loses the `ui_lock_wait` it shows with the
+switch off. Up to the 0.25–0.5 ms per host frame it grew by where the second core waits for the lock
+(Temple of Time, Kokiri); nothing where `ui_lock_waits` is 0.
+
+**A/B (one minute, Kokiri Forest, walking in the grass):** run 30 s as is, then create
+`config/kernel_ui_lock` containing `0`, restart, run 30 s on the same path. Compare `ui_submit`,
+`ui_lock_wait`, `ui_lock_waits`, `ui_build`, `game_pair_ms` and `fps` (`perf_report.py` prints the
+split under "outside the phases"). If `frame_head` stays high, `head_*` names the part and
+`render_wakes` shows whether wake-ups follow it; `start_lock_wait` shows whether the frame start's
+reads (input) wait for the second core as well.
+
 ### Plan build cost per draw: `config/plan_*` (07/11)
 When Link cuts bushes (`logs18a` `perf.txt` window 27300, 133 draws per step), the render thread
 used 27.2 ms per step frame (`rt_ms_step`; 8.3 ms in the calm window just after). The plan fields

@@ -123,6 +123,9 @@ class NativeRenderCommandStream final {
         uint64_t WorkerIdleNanoseconds = 0U;
         // Condition-variable signals skipped because nobody waited.
         uint64_t SkippedNotifies = 0U;
+        // Submissions that woke the idle worker (a kernel call on Horizon,
+        // and the worker's core leaves its idle state for that command).
+        uint64_t WorkerWakes = 0U;
         // Frame slots handed back by ReleaseFrameSlot before the command
         // ended.
         uint64_t EarlyFrameSlotReleases = 0U;

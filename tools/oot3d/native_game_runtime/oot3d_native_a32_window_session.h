@@ -769,7 +769,35 @@ private:
     double KernelReacquire = 0.0;
     // Inside `input`: PollNativeA32Input alone.
     double InputPoll = 0.0;
+    // frame_head in four parts: the frame-rate policy (PrepareNextWindowDemoFrame
+    // and a mode change), the area read and texture-pack scene note, the
+    // cadence report and refresh plan, and the UI/config head
+    // (ApplyTopScreenConfigSnapshot .. UpdateScenePresentation).
+    double HeadPolicy = 0.0;
+    double HeadArea = 0.0;
+    double HeadCadence = 0.0;
+    double HeadUi = 0.0;
+    // ui_submit in four parts: the HUD textures asked for ahead, the
+    // presentation build (guest memory reads), PrepareTextures (texture
+    // keys, provider resolves) and the render-stream submission.
+    double UiAhead = 0.0;
+    double UiBuild = 0.0;
+    double UiPrepare = 0.0;
+    double UiQueue = 0.0;
+    // Game-thread kernel-lock acquisitions (SecondCore::gCore0Lock*) inside
+    // ui_submit and inside the frame start's released region (host frame
+    // start, input, savestate requests: up to the kernel_reacquire there).
+    uint64_t UiLockTakes = 0U;
+    uint64_t UiLockWaits = 0U;
+    double UiLockWait = 0.0;
+    uint64_t StartLockTakes = 0U;
+    uint64_t StartLockWaits = 0U;
+    double StartLockWait = 0.0;
   } untimed;
+  // config/kernel_ui_lock (oot3d_native_kernel_options.h): the UI submission
+  // keeps the kernel lock (one acquisition) instead of releasing it and
+  // taking it again at every guest memory read.
+  bool uiSubmitHoldsKernel = false;
   // DSP HLE frames of one refresh: storage reused across refreshes.
   std::vector<int16_t> refreshAudioSamples;
   // config/audio_deferred (Switch, absent = on, "0" = off): DSP frames of
