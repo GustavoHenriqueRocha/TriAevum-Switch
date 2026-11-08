@@ -561,7 +561,9 @@ The instrumented game runs slower (every branch counts): play it for coverage, n
 
 ## On-console diagnostics
 
-- `sdmc:/switch/oot3dre/boot-status.txt` — startup stage and readable error.
+- `sdmc:/switch/oot3dre/boot-status.txt` — startup stage and readable error; in game, a heartbeat
+  (`host_frames`/`guest_frames`) every 600 frames, written by a service thread
+  (`config/async_status_writes`, "boot-status.txt heartbeat off the game thread").
 - `logs/perf.txt` — FPS and ms per phase, the area of each window and, with `config/actor_profile`,
   the cost of the actors (format below, "Area ids and actor costs"); `logs/hitches.txt` — one line
   per late presentation, with its area; `logs/oot3d_native_game.log` (with a guest fault report,
@@ -5283,6 +5285,92 @@ The image must be identical.
 - A texture rewritten whole every frame only pays for its page certificates.
 - A table read from an unreplayed capture-delta packet would dereference an empty storage. Every reader
   found also reads the register file, which is already under the replay rule.
+
+### boot-status.txt heartbeat off the game thread: `config/async_status_writes` (11/08)
+**Symptom:** a 30–100 ms stutter about every 10 s, already in test.11. The game thread is busy, but
+not in game code.
+
+**Cause (confirmed from the logs):** on deko3d the game thread rewrote `boot-status.txt` every 600
+host frames (`oot3d_native_a32_window_frame.cpp`, the `runtime_running` heartbeat added for p5,
+DEKO3D_PROGRESS.md). That is one SD open, truncate, write and close inside the frame.
+- **Hitches line up with it.** In `hitches.txt`, take every line whose `game_ms` is more than 8 ms
+  above its `guest_ms`. Across logs19–logs20f, 187 of the 201 such lines are at present 600k−3, and
+  every hitch line at 600k−3 is one of them. The present counter runs 3 behind `runFrameCount`.
+  The excess averages 43–51 ms per session, with a maximum of 77 ms.
+- **The SD write costs that much.** `perf_writer_ms` shows that one append to `perf.txt` costs
+  10–60 ms on the service thread.
+- **The two writes collide at frame 600k.** The `perf.txt` line written then takes about 3 times
+  longer. In the windows that end at 600k+150 the mean is 41.8–46.2 ms, against 14.3–32.4 ms in the
+  others (logs20a, 20d, 20f).
+- **Nothing else on these threads runs at that cadence.** Every other periodic SD write already goes
+  through a queue and a service thread: the `perf.txt` line every 150 frames (`offload_perf`),
+  `hitches.txt`, `deko3d.txt` (including its 600-frame `grass:` and 1800-frame `pica` lines) and the
+  game log (spdlog async). The perf window itself costs 0.7–1.5 ms (`perf_line_ms`) and hitches at
+  none of its other three windows. The other writes run only on a config switch or a user action:
+  guest spike log, PGO dumps, settings files, savestates and the game's own save.
+
+**Who reads `boot-status.txt`:**
+- **People after a crash or a hang:** the last stage, `host_frames`/`guest_frames` (is the game still
+  advancing?) and `status=failed detail=...`.
+- **`tests/switch/eden_smoke.sh`, `eden_deko3d.sh`:** `status=failed` and its `detail=`.
+- **`scripts/switch/run-product-eden.sh` (GL product):** the receipt fields after the timeout kill.
+- **Neither the launcher nor the next boot reads it.** The updater skips it
+  (`oot3d_update_release.cpp`). HangWatch writes its own `logs/hang.txt`.
+
+All of this is still written. Only the thread that writes the heartbeat changes.
+
+**Change** (`oot3d_native_status_file.h`):
+- **The writer.** `StatusFileWriter` keeps the latest text, and a service thread replaces the file.
+  - `Post` hands the text over and never waits for the SD. A text that is still waiting is
+    superseded by the newer one.
+  - `WriteNow` writes on the calling thread, after the write in flight. It drops a posted text that
+    has not been written yet.
+  - The text is taken from the queue only under the file lock, so a later `WriteNow` always wins.
+- **One writer for the whole file.** Every write of `boot-status.txt` goes through
+  `SwitchBootStatusFile()`: the boot stages (`WriteSwitchBootStage`, synchronous as before), the
+  heartbeat (`PostSwitchBootStage`), `runtime_window_closed`/`runtime_guest_terminated`, and
+  `launching`/`completed`/`failed` (`oot3d_native_game.cpp`). A heartbeat still queued can never
+  replace a final state.
+- **Same text, same frames.** The heartbeat is still formatted on the game thread, so it has the same
+  counters at the same frames. If the game thread stops, the file stops advancing, as before.
+- **The switch.** `config/async_status_writes`: absent means on; `0` writes the heartbeat on the game
+  thread, as before.
+
+**Log** (`perf.txt`, `offload:` block, after `perf_writer_ms`):
+- `status_async`: the switch.
+- `status_updates`: heartbeats so far.
+- `status_game_ms`: game-thread time spent on the heartbeat in the window. That is the formatting and
+  the post, or the whole SD replace with the switch at `0`.
+- `status_writer_ms`: the service thread's write time.
+- `status_superseded`: heartbeats replaced before they were written.
+- `hitch_writer_ms`: the `hitches.txt` writer's time. The render thread only queues its lines.
+
+**Tests and guards:**
+- `oot3d_native_status_file_tests`:
+  - **TestLatestWins:** the file always ends as the newest text.
+  - **TestWriteNowWins:** a synchronous write is never overwritten by an earlier post, over 300
+    rounds.
+  - **TestPostNeverWaits:** posts return at once while the writer is blocked in `open` on a FIFO.
+    The in-flight text is written, then only the newest post.
+  - **TestStop:** stopping writes what was still waiting.
+  - **TestSwitch:** the switch's default and `0`.
+- Guards: 11/08 boot-status in `tests/switch/test_bug_guards.py`.
+
+**Risks:**
+- **A torn file is now possible.** The SD write runs while the game runs, so a host crash in the
+  ~30–60 ms of a write every 10 s can leave the file truncated or partly written. Before, the game
+  thread was inside the write and could not crash elsewhere at that moment. The boot stages and the
+  final state are still written synchronously.
+- **One more service thread,** idle between heartbeats.
+
+**Console check (1 minute):** play about a minute in a quiet spot at 60 FPS.
+- **In `hitches.txt`:** there should be no more lines at presents 600k−3 whose `game_ms` is about
+  45 ms above `guest_ms`.
+- **In `perf.txt`:** `status_async=1`, `status_game_ms` below 0.1, and `status_writer_ms` at 10–80 in
+  one window out of four.
+- **In `boot-status.txt`:** `host_frames` still advances.
+- **To compare:** create `config/async_status_writes` containing `0`. The 600k−3 lines come back,
+  and `status_game_ms` takes the size of the write.
 
 ### Status as of 2026-10-17 (best version so far)
 - PGO (2nd collection) + lean mode + PICA plans on core 1 + render thread on core 2 + audio on its own thread.

@@ -365,6 +365,15 @@ def summarize_offload(windows: list[Window]) -> None:
           f" perf.txt line on the game thread {fmt(mean('perf_line_ms'), 3)} ms/window"
           + (f"; writer {fmt(mean('perf_writer_ms'), 2)} ms/window,"
              f" dropped {int(num(marked[-1], 'perf_dropped'))}" if "perf_writer_ms" in marked[-1] else ""))
+    if any("status_async" in m for m in marked):
+        # boot-status.txt heartbeat (config/async_status_writes; SWITCH_PORT.md
+        # "boot-status.txt heartbeat off the game thread").
+        print(f"    boot-status heartbeat (status_async={int(num(marked[-1], 'status_async'))}):"
+              f" game thread {fmt(mean('status_game_ms'), 3)} ms/window,"
+              f" writer {fmt(mean('status_writer_ms'), 2)} ms/window,"
+              f" superseded {int(num(marked[-1], 'status_superseded'))}"
+              + (f"; hitches.txt writer {fmt(mean('hitch_writer_ms'), 2)} ms/window"
+                 if "hitch_writer_ms" in marked[-1] else ""))
     # pica_plan is inside pica_submit; frame_start contains input and
     # host_frame_start.
     host = sum(mean(key) for key in ("pica_submit_host_ms", "visual_present",
