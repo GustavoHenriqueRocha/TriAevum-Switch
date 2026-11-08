@@ -887,6 +887,7 @@ private:
     // frames of an entry window with its work still running.
     uint64_t FailedProbes = 0;
     uint64_t EntryProbes = 0;
+    uint64_t StaleProbes = 0; // probes made early for a stale ratio
     uint64_t Entries = 0;
     uint64_t EntryBelowDecisions = 0;
     uint32_t ProbeInterval = 0U;

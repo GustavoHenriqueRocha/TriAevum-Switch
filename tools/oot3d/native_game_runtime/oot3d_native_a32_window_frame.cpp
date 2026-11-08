@@ -511,6 +511,7 @@ void NativeA32WindowSession::FinishRenderFrameCost() {
   perf.Probes = stats.Probes;
   perf.FailedProbes = stats.FailedProbes;
   perf.EntryProbes = stats.EntryProbes;
+  perf.StaleProbes = stats.StaleProbes;
   perf.Entries = stats.Entries;
   perf.EntryBelowDecisions = stats.EntryBelowDecisions;
   perf.ProbeInterval = interpolationPacing.ProbeIntervalNow(false);
@@ -1769,10 +1770,13 @@ bool NativeA32WindowSession::RunFrame() {
              // decisions x the pair) and the probe interval now (60 doubled
              // per failed probe in a row); render-thread holds left out of
              // the frame cost (frames, ms) and the frames whose entry work
-             // (pack decodes, grass placements) was still running.
+             // (pack decodes, grass placements) was still running;
+             // stale_probes: probes made at once for a stale full-frame
+             // ratio (InterpolationPacingGovernor::StaleRatio).
              << " entry_recover=" << (interpolationPacingOptions.PacerEntryRecover ? 1 : 0)
              << " failed_probes=" << (current.FailedProbes - previous.FailedProbes)
              << " entry_probes=" << (current.EntryProbes - previous.EntryProbes)
+             << " stale_probes=" << (current.StaleProbes - previous.StaleProbes)
              << " entries=" << (current.Entries - previous.Entries)
              << " entry_30_s="
              << static_cast<double>(current.EntryBelowDecisions - previous.EntryBelowDecisions) *
