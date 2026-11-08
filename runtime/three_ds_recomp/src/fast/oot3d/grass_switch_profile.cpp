@@ -95,29 +95,34 @@ bool SaveGrassSwitchMode(const std::filesystem::path& configDirectory, GrassSwit
     return static_cast<bool>(file);
 }
 
-GrassSwitchDistance ParseGrassSwitchDistance(std::optional<std::string_view> fileText) noexcept {
+GrassSwitchDistance ParseGrassSwitchDistance(std::optional<std::string_view> fileText, bool* retiredFar) noexcept {
+    if (retiredFar != nullptr) *retiredFar = false;
     if (!fileText.has_value()) return GrassSwitchDistance::Near;
     const std::string_view word = FirstWord(*fileText);
-    if (word == "far") return GrassSwitchDistance::Far;
     if (word == "area") return GrassSwitchDistance::Area;
+    if (word == "far") {
+        // Far was removed after test.15: grass far away, as Whole area draws it.
+        if (retiredFar != nullptr) *retiredFar = true;
+        return GrassSwitchDistance::Area;
+    }
     return GrassSwitchDistance::Near;
 }
 
 std::string_view GrassSwitchDistanceWord(GrassSwitchDistance distance) noexcept {
     switch (distance) {
     case GrassSwitchDistance::Near: return "near";
-    case GrassSwitchDistance::Far: return "far";
     case GrassSwitchDistance::Area: return "area";
     }
     return "near";
 }
 
-GrassSwitchDistance ReadGrassSwitchDistance(const std::filesystem::path& configDirectory) {
+GrassSwitchDistance ReadGrassSwitchDistance(const std::filesystem::path& configDirectory, bool* retiredFar) {
+    if (retiredFar != nullptr) *retiredFar = false;
     std::ifstream file(configDirectory / "grass_distance");
     if (!file) return GrassSwitchDistance::Near;
     std::string text;
     std::getline(file, text);
-    return ParseGrassSwitchDistance(std::string_view(text));
+    return ParseGrassSwitchDistance(std::string_view(text), retiredFar);
 }
 
 bool SaveGrassSwitchDistance(const std::filesystem::path& configDirectory, GrassSwitchDistance distance) {
@@ -231,13 +236,6 @@ GrassSwitchProfile SelectGrassSwitchProfile(bool fps60, GrassSwitchDistance dist
             profile.FillDistance = 1600.0F;
             profile.MaxVisibleInstances = 22000U;
         }
-        break;
-    case GrassSwitchDistance::Far:
-        profile.FullDensityDistance = fps60 ? 2000.0F : 3200.0F;
-        profile.DrawDistance = fps60 ? 6000.0F : 8000.0F;
-        profile.FadeStart = fps60 ? 5000.0F : 6800.0F;
-        profile.FillDistance = profile.FullDensityDistance;
-        profile.MaxVisibleInstances = fps60 ? 16000U : 40000U;
         break;
     case GrassSwitchDistance::Area:
         profile.FullDensityDistance = kGrassWholeAreaDistance;

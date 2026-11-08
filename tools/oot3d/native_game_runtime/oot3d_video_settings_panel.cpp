@@ -304,21 +304,21 @@ private:
       ImGui::TextUnformatted("Saved. Close and reopen the game to apply.");
     ImGui::TextDisabled("deko3d renderer only. Drawn grass costs GPU time; "
                         "with 30 FPS it reaches farther.");
-    const char *const distances[] = {"Near (default)", "Far", "Whole area"};
+    // Far was removed after test.15 (SWITCH_PORT.md "Grass distance: Near
+    // and Whole area"); a saved "far" reads as Whole area.
+    const char *const distances[] = {"Near (default)", "Whole area"};
     int distance = static_cast<int>(mGrassDistance);
-    if (ImGui::Combo("Grass distance", &distance, distances, 3)) {
+    if (ImGui::Combo("Grass distance", &distance, distances, 2)) {
       mGrassDistance = static_cast<Fast::Oot3d::GrassSwitchDistance>(distance);
       mGrassDistanceError = !Fast::Oot3d::SaveGrassSwitchDistance(mConfig, mGrassDistance);
       Fast::Oot3d::PublishGrassSwitchDistance(mGrassDistance);
     }
     if (mGrassDistanceError)
       ImGui::TextWrapped("Could not write config/grass_distance.");
-    ImGui::TextDisabled("Applies at once. Grass costs GPU time per tuft drawn (about 0.5 ms per 1,000 "
-                        "tufts at 3.0x resolution). Near: full density to 10 m (16 m at 30 FPS), thinner "
-                        "beyond, at most 8,000 tufts (22,000 at 30 FPS). Far: full density to twice that, "
-                        "about twice the GPU time of Near. Whole area: every tuft of the area, no "
-                        "thinning (up to 65,000 drawn): up to 30 ms per frame in large fields such as "
-                        "Hyrule Field, more than a 60 FPS frame has. Use 30 FPS with Whole area.");
+    ImGui::TextDisabled("Applies at once. Near: full density to 10 m (16 m at 30 FPS), thinner beyond. "
+                        "Whole area adds distant grass in open places like Hyrule Field; in small areas "
+                        "like Kokiri Forest it looks the same as Near. In Hyrule Field it costs up to "
+                        "about 1.5 ms more GPU time per frame.");
     // config/grass_lod (SWITCH_PORT.md "Grass on deko3d: cost per tuft"):
     // applied at once (the renderer's next cull takes the published choice).
     const char *const details[] = {"Levels (fewer, wider blades far away; default)",
