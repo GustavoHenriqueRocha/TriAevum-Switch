@@ -17,9 +17,37 @@ constexpr size_t kVectorsPerLine = 4U;
 
 } // namespace
 
+bool Oot3dPicaCaptureDeltaLog::Tables::SameAs(const Oot3dPicaDrawPacketSource& source) const noexcept {
+    const auto& procTex = *source.ProcTexLuts;
+    return LightingLuts == source.LightingLuts &&
+           VertexProgram.SharesStorageWith(source.VertexShader->Program) &&
+           VertexSwizzles.SharesStorageWith(source.VertexShader->Swizzles) &&
+           GeometryProgram.SharesStorageWith(source.GeometryShader->Program) &&
+           GeometrySwizzles.SharesStorageWith(source.GeometryShader->Swizzles) &&
+           FogLut.SharesStorageWith(*source.FogLut) &&
+           ProcTexLuts.Noise.SharesStorageWith(procTex.Noise) &&
+           ProcTexLuts.ColorMap.SharesStorageWith(procTex.ColorMap) &&
+           ProcTexLuts.AlphaMap.SharesStorageWith(procTex.AlphaMap) &&
+           ProcTexLuts.Color.SharesStorageWith(procTex.Color) &&
+           ProcTexLuts.ColorDifference.SharesStorageWith(procTex.ColorDifference);
+}
+
 uint32_t Oot3dPicaCaptureDeltaLog::Append(const Oot3dPicaDrawPacketSource& source,
-                                          AppendCost& cost) {
+                                          AppendCost& cost, bool tables) {
     Entry entry;
+    entry.TableSet = kNoTables;
+    if (tables) {
+        const uint64_t tablesStarted = CaptureTicks();
+        // One reference per change: the storages of the previous recorded
+        // draw are still the frontend's unless it replaced one.
+        if (mTables.empty() || !mTables.back().SameAs(source)) {
+            mTables.push_back({source.VertexShader->Program, source.VertexShader->Swizzles,
+                               source.GeometryShader->Program, source.GeometryShader->Swizzles,
+                               *source.FogLut, *source.ProcTexLuts, source.LightingLuts});
+        }
+        entry.TableSet = static_cast<uint32_t>(mTables.size() - 1U);
+        cost.TableTicks += CaptureTicks() - tablesStarted;
+    }
     entry.Keyframe = mEntries.empty();
     if (entry.Keyframe) {
         entry.Registers = Oot3dPicaStateDirtyLines::AllRegisters;
@@ -77,6 +105,7 @@ Oot3dPicaCaptureDeltaLog::Line* Oot3dPicaCaptureDeltaLog::ReserveLines(size_t co
 void Oot3dPicaCaptureDeltaLog::Reset() noexcept {
     std::lock_guard lock(mMutex);
     mEntries.clear();
+    mTables.clear();
     mLineCount = 0U;
     mCursor = 0U;
     mNextEntry = 0U;
@@ -111,12 +140,23 @@ void Oot3dPicaCaptureDeltaLog::MaterializeThrough(
         if (draw.DeltaEntry != mNextEntry || mNextEntry >= mEntries.size()) {
             throw std::logic_error("capture delta log replayed out of draw order");
         }
-        Apply(mEntries[mNextEntry++]);
+        const Entry& entry = mEntries[mNextEntry++];
+        Apply(entry);
         auto& packet = draw.Packet;
         packet.Registers = mRegisters;
         packet.VertexShader.FloatUniforms = mVertexUniforms;
         packet.GeometryShader.FloatUniforms = mGeometryUniforms;
         packet.DefaultAttributes = mDefaultAttributes;
+        if (entry.TableSet != kNoTables) {
+            const Tables& set = mTables[entry.TableSet];
+            packet.VertexShader.Program = set.VertexProgram;
+            packet.VertexShader.Swizzles = set.VertexSwizzles;
+            packet.GeometryShader.Program = set.GeometryProgram;
+            packet.GeometryShader.Swizzles = set.GeometrySwizzles;
+            packet.FogLut = set.FogLut;
+            packet.ProcTexLuts = set.ProcTexLuts;
+            packet.LightingLuts = set.LightingLuts;
+        }
         draw.DeltaEntry = kOot3dPicaNoDeltaEntry;
         ++materialized;
     }

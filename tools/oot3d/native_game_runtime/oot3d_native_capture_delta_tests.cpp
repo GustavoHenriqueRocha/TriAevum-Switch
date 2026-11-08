@@ -461,8 +461,13 @@ bool SameShader(const Oot3dPicaShaderState& a, const Oot3dPicaShaderState& b) {
            a.ProgramWordCount == b.ProgramWordCount && a.SwizzleWordCount == b.SwizzleWordCount;
 }
 
+// Draws compared before the replay with their tables deferred.
+uint64_t gDeferredTableDraws = 0U;
+
 // Everything but the register file, float uniforms and default attributes
 // (the arrays capture delta fills later) and, if `resources`, the snapshots.
+// Before the replay (!arrays) the shared tables of `b` may be deferred too
+// (config/texture_snapshot_fast): then all of them are empty.
 void RequireSameSubmission(const Oot3dPicaDrawSubmission& a, const Oot3dPicaDrawSubmission& b,
                            bool arrays, bool resources, std::string_view what) {
     const auto fail = [&](std::string_view field) {
@@ -475,28 +480,51 @@ void RequireSameSubmission(const Oot3dPicaDrawSubmission& a, const Oot3dPicaDraw
         p.CompositionDomain != q.CompositionDomain || !(p.Composition == q.Composition) ||
         !(p.LightBinding == q.LightBinding) || p.Indexed != q.Indexed)
         fail("packet identity");
-    if (p.VertexShader.Program.Values() != q.VertexShader.Program.Values() ||
-        p.VertexShader.Swizzles.Values() != q.VertexShader.Swizzles.Values() ||
-        p.GeometryShader.Program.Values() != q.GeometryShader.Program.Values() ||
-        p.VertexShader.ProgramWordCount != q.VertexShader.ProgramWordCount ||
+    const Oot3dPicaFogLut noTable{Oot3dPicaStateTablesDeferred{}};
+    const bool deferredTables = q.FogLut.SharesStorageWith(noTable);
+    if (deferredTables) {
+        ++gDeferredTableDraws;
+        const Oot3dPicaProcTexLutState none{Oot3dPicaStateTablesDeferred{}};
+        const Oot3dPicaShaderState noShader(Oot3dPicaShaderState{}, Oot3dPicaStateArraysDeferred{},
+                                            Oot3dPicaStateTablesDeferred{});
+        if (arrays || q.LightingLuts != nullptr ||
+            !q.VertexShader.Program.SharesStorageWith(noShader.Program) ||
+            !q.VertexShader.Swizzles.SharesStorageWith(noShader.Swizzles) ||
+            !q.GeometryShader.Program.SharesStorageWith(noShader.Program) ||
+            !q.GeometryShader.Swizzles.SharesStorageWith(noShader.Swizzles) ||
+            !q.ProcTexLuts.Noise.SharesStorageWith(none.Noise) ||
+            !q.ProcTexLuts.ColorMap.SharesStorageWith(none.ColorMap) ||
+            !q.ProcTexLuts.AlphaMap.SharesStorageWith(none.AlphaMap) ||
+            !q.ProcTexLuts.Color.SharesStorageWith(none.Color) ||
+            !q.ProcTexLuts.ColorDifference.SharesStorageWith(none.ColorDifference))
+            fail("deferred tables (some set, or left after the replay)");
+    }
+    if (p.VertexShader.ProgramWordCount != q.VertexShader.ProgramWordCount ||
         p.VertexShader.IntegerUniforms != q.VertexShader.IntegerUniforms ||
         p.VertexShader.BooleanUniforms != q.VertexShader.BooleanUniforms ||
         p.GeometryShader.IntegerUniforms != q.GeometryShader.IntegerUniforms ||
         p.GeometryShader.BooleanUniforms != q.GeometryShader.BooleanUniforms)
-        fail("shader words or integer/boolean uniforms");
-    if (p.FogLut.Values() != q.FogLut.Values() ||
-        p.ProcTexLuts.Noise.Values() != q.ProcTexLuts.Noise.Values() ||
-        p.ProcTexLuts.ColorMap.Values() != q.ProcTexLuts.ColorMap.Values() ||
-        p.ProcTexLuts.AlphaMap.Values() != q.ProcTexLuts.AlphaMap.Values() ||
-        p.ProcTexLuts.Color.Values() != q.ProcTexLuts.Color.Values() ||
-        p.ProcTexLuts.ColorDifference.Values() != q.ProcTexLuts.ColorDifference.Values())
-        fail("fog or procedural tables");
-    if ((p.LightingLuts == nullptr) != (q.LightingLuts == nullptr) ||
-        (p.LightingLuts != nullptr &&
-         (p.LightingLuts->PackedEntries != q.LightingLuts->PackedEntries ||
-          p.LightingLuts->ContentHash != q.LightingLuts->ContentHash ||
-          p.LightingLuts->ContentHashAvailable != q.LightingLuts->ContentHashAvailable)))
-        fail("lighting LUT");
+        fail("integer/boolean uniforms or word counts");
+    if (!deferredTables) {
+        if (p.VertexShader.Program.Values() != q.VertexShader.Program.Values() ||
+            p.VertexShader.Swizzles.Values() != q.VertexShader.Swizzles.Values() ||
+            p.GeometryShader.Program.Values() != q.GeometryShader.Program.Values() ||
+            p.GeometryShader.Swizzles.Values() != q.GeometryShader.Swizzles.Values())
+            fail("shader words");
+        if (p.FogLut.Values() != q.FogLut.Values() ||
+            p.ProcTexLuts.Noise.Values() != q.ProcTexLuts.Noise.Values() ||
+            p.ProcTexLuts.ColorMap.Values() != q.ProcTexLuts.ColorMap.Values() ||
+            p.ProcTexLuts.AlphaMap.Values() != q.ProcTexLuts.AlphaMap.Values() ||
+            p.ProcTexLuts.Color.Values() != q.ProcTexLuts.Color.Values() ||
+            p.ProcTexLuts.ColorDifference.Values() != q.ProcTexLuts.ColorDifference.Values())
+            fail("fog or procedural tables");
+        if ((p.LightingLuts == nullptr) != (q.LightingLuts == nullptr) ||
+            (p.LightingLuts != nullptr &&
+             (p.LightingLuts->PackedEntries != q.LightingLuts->PackedEntries ||
+              p.LightingLuts->ContentHash != q.LightingLuts->ContentHash ||
+              p.LightingLuts->ContentHashAvailable != q.LightingLuts->ContentHashAvailable)))
+            fail("lighting LUT");
+    }
     if (arrays) {
         if (p.Registers != q.Registers) fail("register file");
         if (!SameShader(p.VertexShader, q.VertexShader)) fail("vertex float uniforms");
@@ -699,6 +727,12 @@ void TestReplay(uint64_t seed, size_t lists) {
     Run reference(false, true);
     Run delta(true, true, true);
     Run packets(true, false, true);
+    // config/texture_snapshot_fast (deferred tables in the delta log, the
+    // next packet prefetched): on in the two capture-delta runs, switched off
+    // and on between lists now and then (logs with both kinds of entries).
+    std::mt19937_64 toggles(seed ^ 0x7E5U);
+    delta.Queue->SetTextureSnapshotFast(true);
+    packets.Queue->SetTextureSnapshotFast(true);
     const auto write = [&](const MemoryWrite& memoryWrite) {
         reference.Write(memoryWrite);
         delta.Write(memoryWrite);
@@ -711,6 +745,8 @@ void TestReplay(uint64_t seed, size_t lists) {
     std::string errorC;
     for (size_t list = 0; list < lists; ++list) {
         for (const auto& memoryWrite : Mutations(random, reference.Mirror)) write(memoryWrite);
+        if (toggles() % 4U == 0U) delta.Queue->SetTextureSnapshotFast(!delta.Queue->TextureSnapshotFast());
+        if (toggles() % 4U == 0U) packets.Queue->SetTextureSnapshotFast(!packets.Queue->TextureSnapshotFast());
         const bool fail = random() % 40U == 0U;
         const auto words = stream.NextList(24U, fail);
         Oot3dGspCommandPacket command{};
@@ -769,6 +805,8 @@ void TestReplay(uint64_t seed, size_t lists) {
     Require(counters.Draws == referenceCounters.Draws && counters.Keyframes != 0U && counters.DeltaDraws != 0U &&
                 counters.Keyframes + counters.DeltaDraws + stats.Failures == counters.Draws,
             "capture delta did not record its draws as keyframes and deltas");
+    Require(gDeferredTableDraws != 0U && gDeferredTableDraws < stats.Draws,
+            "the delta draws did not come both with deferred and with copied tables");
     Require(counters.StateBytes < referenceCounters.StateBytes, "capture delta did not copy less state");
     // A restored LUT content needs a long enough stream (short TSan runs).
     Require(frontend.SameValueWrites != 0U && (frontend.LutReuses != 0U || lists < 200U) &&
@@ -789,6 +827,9 @@ void TestReplay(uint64_t seed, size_t lists) {
                 static_cast<unsigned long long>(frontend.TableCopies),
                 static_cast<unsigned long long>(frontend.SameValueWrites));
     if (!stats.FirstPlanError.empty()) std::printf("  first plan error: %s\n", stats.FirstPlanError.c_str());
+    std::printf("  draws checked with deferred tables before the replay: %llu\n",
+                static_cast<unsigned long long>(gDeferredTableDraws));
+    gDeferredTableDraws = 0U;
 }
 
 // ------------------------------------------------------------------- bench
