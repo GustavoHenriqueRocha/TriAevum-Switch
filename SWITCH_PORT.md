@@ -2252,11 +2252,13 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   every cached texture becomes an earlier "epoch". Off: draws use native textures from that frame
   on (made from the draw's own bytes where missing), pack images leave GPU memory once no frame in
   flight can read them (two frames, the eviction rule), and the pack worker drops its decoded
-  images and queued decodes. On, or another size: each native texture is retired and made again on
-  its next draw, so it resolves through the pack; the pack is scanned again and images decode
-  lazily, as at start. Textures drawn while that scan runs have no hash yet and are made again once
-  it is done (08/11; before, the textures in view stayed native: see "HD textures applied at once,
-  also to the textures in view" below). Only the deko3d renderer loads packs.
+  images and queued decodes. On: each native texture is retired and made again on its next draw,
+  so it resolves through the pack; the pack is scanned again and images decode lazily, as at start.
+  Textures drawn while that scan runs have no hash yet and are made again once it is done (08/11;
+  before, the textures in view stayed native: see "HD textures applied at once, also to the
+  textures in view" below). Another size only: the index is kept and only the images the new size
+  draws otherwise are made again (see "HD texture size changes: nothing on the game thread, the
+  index kept"). Only the deko3d renderer loads packs.
 - **Size cap (pack worker):** after the PNG decode, an image wider or taller than native x N is
   reduced to at most native x N on each axis (`azahar_texture_scale.cpp`): every output texel is
   the area-weighted average of the source texels it covers (any ratio, e.g. 3 → 2, not only
