@@ -2,6 +2,7 @@
 #include "oot3d_native_a32_ctr_host_internal.h"
 #include "oot3d_native_master_quest_unlock.h"
 #include "oot3d_native_a32_ctr_save_safety.h"
+#include "oot3d_game_log.h"
 
 #include <array>
 #include <cstdio>
@@ -1165,10 +1166,13 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                        !(input >> info[0] >> info[1] >> info[2] >> info[3])) {
                 if (const auto legacy = CtrLegacySaveFormatInfo(mConfig.SaveDataDirectory)) {
                     info = *legacy;
-                    std::fprintf(stderr,
-                                 "TRIAEVUM_FS_SAVE_ADOPTED %s sem .format: formato sintetizado "
-                                 "(%u bytes, %u pastas, %u arquivos)\n",
-                                 mConfig.SaveDataDirectory.string().c_str(), info[0], info[1], info[2]);
+                    char line[512];
+                    std::snprintf(line, sizeof(line),
+                                  "TRIAEVUM_FS_SAVE_ADOPTED %s without .format: synthesized format "
+                                  "(%u bytes, %u folders, %u files)",
+                                  mConfig.SaveDataDirectory.string().c_str(), info[0], info[1], info[2]);
+                    std::fprintf(stderr, "%s\n", line);
+                    WriteGameLog(line);
                 } else {
                     result = kFsNotFormatted;
                 }

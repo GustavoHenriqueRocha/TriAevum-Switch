@@ -50,20 +50,6 @@ inline constexpr std::string_view kCtrSaveJournalPreviousSuffix = ".triaevum-old
 inline constexpr std::string_view kCtrSaveBackupOrderFile = ".triaevum-geracoes";
 inline constexpr size_t kCtrSaveBackupGenerations = 20U;
 
-// Layout do Switch. O OoT3D fica EXATAMENTE onde sempre esteve (o argv padrão
-// de oot3d_native_game.cpp usa o mesmo literal; guarda em test_bug_guards.py).
-inline constexpr std::string_view kOot3dSwitchSaveDataDirectory = "sdmc:/switch/oot3dre/savedata";
-inline constexpr std::string_view kTriAevumSwitchTitlesRoot = "sdmc:/switch/triaevum";
-
-// sdmc:/switch/oot3dre/savedata para o OoT3D; sdmc:/switch/triaevum/<id de 16
-// dígitos hex>/savedata para qualquer outro título.
-std::filesystem::path CtrSwitchSaveDataDirectory(bool oot3dTitle, std::optional<uint64_t> titleId);
-// A pasta pedida, exceto quando um título que não é o OoT3D cairia dentro da
-// pasta de save do OoT3D (argv padrão do NRO): aí vai para a pasta do título.
-std::filesystem::path ResolveCtrTitleSaveDataDirectory(const std::filesystem::path& requested,
-                                                       bool oot3dTitle,
-                                                       std::optional<uint64_t> titleId);
-
 // Pasta sem separador final, normalizada só lexicalmente (funciona com
 // "sdmc:/...", que o std::filesystem do devkitA64 trata como relativo).
 std::filesystem::path CtrLexicalDirectory(const std::filesystem::path& directory);

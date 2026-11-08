@@ -1322,33 +1322,9 @@ void TestBackupPruneKeepsOnlyCopies() {
     fs::remove_all(root);
 }
 
-// Pasta por título: o OoT3D fica em sdmc:/switch/oot3dre/savedata; nenhum
-// outro título resolve para lá (o argv padrão do NRO passa esse caminho).
-void TestTitleSaveLayout() {
-    const fs::path oot3d("sdmc:/switch/oot3dre/savedata");
-    for (const uint64_t id : {0x0004000000033400ULL, 0x0004000000033500ULL, 0x0004000000033600ULL}) {
-        Require(IsOot3dTitleId(id) && CtrSwitchSaveDataDirectory(true, id) == oot3d, "OoT3D save path changed");
-        Require(ResolveCtrTitleSaveDataDirectory(oot3d, true, id) == oot3d, "OoT3D save path redirected");
-    }
-    Require(CtrSwitchSaveDataDirectory(false, 0x0004000000053F00ULL) ==
-                fs::path("sdmc:/switch/triaevum/0004000000053f00/savedata"),
-            "generic title layout");
-    for (const uint64_t id : {0x0004000000053F00ULL, 0ULL, 0x0004000000033500ULL, 0xFFFFFFFFFFFFFFFFULL}) {
-        for (const fs::path requested : {oot3d, fs::path("sdmc:/switch/oot3dre/savedata/"),
-                                         fs::path("sdmc:/switch/oot3dre/savedata/sub"),
-                                         fs::path("sdmc:/switch/oot3dre"),
-                                         fs::path("sdmc:/switch/oot3dre/./savedata")}) {
-            const auto resolved = ResolveCtrTitleSaveDataDirectory(requested, false, id);
-            Require(resolved == CtrSwitchSaveDataDirectory(false, id), "generic title kept the OoT3D folder");
-            Require(!CtrPathWithin(oot3d, resolved) && CtrLexicalDirectory(resolved) != oot3d &&
-                        !CtrPathWithin(resolved, oot3d),
-                    "generic title resolves into the OoT3D save");
-        }
-    }
-    Require(ResolveCtrTitleSaveDataDirectory("/home/x/save", false, 1U) == fs::path("/home/x/save") &&
-                ResolveCtrTitleSaveDataDirectory("sdmc:/switch/oot3dre/savedata-mario", false, 1U) ==
-                    fs::path("sdmc:/switch/oot3dre/savedata-mario"),
-            "unrelated folders must not be redirected");
+// The save's sibling paths on the console: <save>.format beside the folder and
+// <save>-backups (sdmc:/switch/oot3dre/savedata-backups), never inside it.
+void TestSaveSiblingPaths() {
     Require(CtrSaveFormatPath("sdmc:/switch/oot3dre/savedata/") == fs::path("sdmc:/switch/oot3dre/savedata.format") &&
                 CtrSaveBackupRoot("sdmc:/switch/oot3dre/savedata/") ==
                     fs::path("sdmc:/switch/oot3dre/savedata-backups"),
@@ -1796,7 +1772,7 @@ int main(int argc, char** argv) {
         {"TestArchiveContainmentLexical", TestArchiveContainmentLexical},
         {"TestHorizonRenameCommit", TestHorizonRenameCommit},
         {"TestBackupPruneKeepsOnlyCopies", TestBackupPruneKeepsOnlyCopies},
-        {"TestTitleSaveLayout", TestTitleSaveLayout},
+        {"TestSaveSiblingPaths", TestSaveSiblingPaths},
         {"TestFailedWriteIsNotCommitted", TestFailedWriteIsNotCommitted},
         {"TestReadOnlyCloseDoesNotCommit", TestReadOnlyCloseDoesNotCommit},
         {"TestBackupPruneUsesSequence", TestBackupPruneUsesSequence},

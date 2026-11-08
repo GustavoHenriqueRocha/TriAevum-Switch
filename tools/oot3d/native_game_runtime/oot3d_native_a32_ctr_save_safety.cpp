@@ -1,8 +1,10 @@
 // Saves à prova de perda no backend de pasta (ver o .h e
 // docs/pesquisas/2026-11-05-saves-seguros.md).
 #include "oot3d_native_a32_ctr_save_safety.h"
+#include "oot3d_game_log.h"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -20,6 +22,19 @@
 namespace Oot3dNativeGame {
 
 namespace {
+
+// TRIAEVUM_SAVE_* lines go to stderr and to the game log
+// (logs/oot3d_native_game.log): on the Switch stderr is a null device unless
+// nxlink is connected.
+void SaveLog(const char* format, ...) {
+    char line[1024];
+    va_list arguments;
+    va_start(arguments, format);
+    std::vsnprintf(line, sizeof(line), format, arguments);
+    va_end(arguments);
+    std::fprintf(stderr, "%s\n", line);
+    WriteGameLog(line);
+}
 
 bool gRenameFailsOnExisting = false;
 std::function<bool(const std::filesystem::path&, const std::filesystem::path&)> gRenameFault;
@@ -121,8 +136,8 @@ bool CopyBytes(const std::filesystem::path& source, const std::filesystem::path&
     const bool verified = ReadBytes(destination, copy) && copy.size() == bytes.size() &&
                           Checksum(copy) == Checksum(bytes);
     if (!verified) {
-        std::fprintf(stderr, "TRIAEVUM_SAVE_COPY_MISMATCH %s -> %s (%zu de %zu bytes; cópia descartada)\n",
-                     source.string().c_str(), destination.string().c_str(), copy.size(), bytes.size());
+        SaveLog("TRIAEVUM_SAVE_COPY_MISMATCH %s -> %s (%zu of %zu bytes; copy discarded)",
+                source.string().c_str(), destination.string().c_str(), copy.size(), bytes.size());
         std::filesystem::remove(destination, error);
     }
     return verified;
@@ -232,8 +247,8 @@ void MoveAside(const std::filesystem::path& directory, const std::filesystem::pa
             moveError.clear();
             std::filesystem::remove(path, moveError);
         }
-        std::fprintf(stderr, "TRIAEVUM_SAVE_RECOVERED %s %s -> %s%s\n", reason, path.string().c_str(),
-                     destination.string().c_str(), moveError ? " (FALHOU)" : "");
+        SaveLog("TRIAEVUM_SAVE_RECOVERED %s %s -> %s%s", reason, path.string().c_str(),
+                destination.string().c_str(), moveError ? " (FAILED)" : "");
     }
 }
 
@@ -282,31 +297,6 @@ bool CtrArchivePathContained(const std::filesystem::path& root, const std::files
             return false;
     }
     return true;
-}
-
-std::filesystem::path CtrSwitchSaveDataDirectory(bool oot3dTitle, std::optional<uint64_t> titleId) {
-    if (oot3dTitle) return std::filesystem::path(kOot3dSwitchSaveDataDirectory);
-    char id[17];
-    std::snprintf(id, sizeof(id), "%016llx", static_cast<unsigned long long>(titleId.value_or(0U)));
-    return std::filesystem::path(kTriAevumSwitchTitlesRoot) / id / "savedata";
-}
-
-std::filesystem::path ResolveCtrTitleSaveDataDirectory(const std::filesystem::path& requested,
-                                                       bool oot3dTitle,
-                                                       std::optional<uint64_t> titleId) {
-    if (oot3dTitle) return requested;
-    const std::filesystem::path oot3dSave(kOot3dSwitchSaveDataDirectory);
-    const auto normal = CtrLexicalDirectory(requested);
-    if (normal == oot3dSave || CtrPathWithin(oot3dSave, normal) || CtrPathWithin(normal, oot3dSave)) {
-        const auto own = CtrSwitchSaveDataDirectory(false, titleId);
-        std::fprintf(stderr,
-                     "TRIAEVUM_SAVE_LAYOUT título %016llx não usa a pasta de save do OoT3D (%s); "
-                     "usando %s\n",
-                     static_cast<unsigned long long>(titleId.value_or(0U)), normal.string().c_str(),
-                     own.string().c_str());
-        return own;
-    }
-    return requested;
 }
 
 std::optional<std::array<uint32_t, 4>> CtrLegacySaveFormatInfo(const std::filesystem::path& saveDirectory) {
@@ -400,9 +390,9 @@ bool ReplaceCtrSaveFile(const std::filesystem::path& source, const std::filesyst
         if (error) {
             std::error_code backError;
             RenamePath(previous, destination, backError);
-            std::fprintf(stderr, "TRIAEVUM_SAVE_REPLACE_FAILED %s: %s\n", destination.string().c_str(),
-                         backError ? "versões em .triaevum-old e .triaevum-new até a recuperação"
-                                   : "versão anterior devolvida; a nova fica em .triaevum-new");
+            SaveLog("TRIAEVUM_SAVE_REPLACE_FAILED %s: %s", destination.string().c_str(),
+                    backError ? "versions in .triaevum-old and .triaevum-new until the recovery"
+                              : "previous version put back; the new one stays in .triaevum-new");
             return false;
         }
         std::error_code removeError;
@@ -456,8 +446,8 @@ void CtrSaveJournal::RecoverOnce() {
         const auto target = WithoutSuffix(path, kCtrSaveJournalCommittedSuffix);
         const bool finished = ReplaceCtrSaveFile(path, target);
         if (!finished) mStranded.insert(Key(target));  // a E/S lê o .new até instalar
-        std::fprintf(stderr, "TRIAEVUM_SAVE_RECOVERED troca interrompida de %s %s\n", target.string().c_str(),
-                     finished ? "concluída" : "FALHOU (lendo do .triaevum-new)");
+        SaveLog("TRIAEVUM_SAVE_RECOVERED interrupted replace of %s %s", target.string().c_str(),
+                finished ? "finished" : "FAILED (reading from .triaevum-new)");
     }
     // <nome>.triaevum-old: versão anterior tirada do lugar por uma troca. Se o
     // arquivo sumiu (queda entre os dois renames, sem .new), ela volta; se o
@@ -468,9 +458,9 @@ void CtrSaveJournal::RecoverOnce() {
         const bool present = std::filesystem::exists(target, fixError);
         if (present) std::filesystem::remove(path, fixError);
         else std::filesystem::rename(path, target, fixError);
-        std::fprintf(stderr, "TRIAEVUM_SAVE_RECOVERED %s %s%s\n", target.string().c_str(),
-                     present ? "versão anterior que sobrou removida" : "versão anterior devolvida",
-                     fixError ? " (FALHOU)" : "");
+        SaveLog("TRIAEVUM_SAVE_RECOVERED %s %s%s", target.string().c_str(),
+                present ? "leftover previous version removed" : "previous version put back",
+                fixError ? " (FAILED)" : "");
     }
     // Temporário sem confirmação: escrita que não chegou ao Flush/Close. O
     // save continua o anterior; o temporário vai para os backups.
@@ -504,12 +494,12 @@ bool CtrSaveJournal::Backup(const std::filesystem::path& file, bool beforeDelete
     // de antes da execução; a de agora (com o progresso da sessão) vai junto.
     if (already) destination = WithSuffix(destination, ".apagado");
     if (!CopyBackup(source, destination)) {
-        std::fprintf(stderr, "TRIAEVUM_SAVE_BACKUP_FAILED %s -> %s\n", source.string().c_str(),
-                     destination.string().c_str());
+        SaveLog("TRIAEVUM_SAVE_BACKUP_FAILED %s -> %s", source.string().c_str(), destination.string().c_str());
         if (std::filesystem::is_empty(mGeneration, error) && !error) std::filesystem::remove(mGeneration, error);
         return false;
     }
     mBackedUp.insert(key);
+    SaveLog("TRIAEVUM_SAVE_BACKUP %s -> %s", source.string().c_str(), destination.string().c_str());
     if (!mGenerationRegistered) {
         // Primeira cópia conferida da execução: entra na ordem e roda o prune
         // (que nunca apaga esta geração).
@@ -578,8 +568,8 @@ bool CtrSaveJournal::CommitNow(const std::string& key) {
     mPending.erase(pending);
     if (!ReplaceCtrSaveFile(committed, file)) {
         mStranded.insert(key);
-        std::fprintf(stderr, "TRIAEVUM_SAVE_COMMIT_FAILED %s (fica em %s até instalar)\n", file.string().c_str(),
-                     committed.string().c_str());
+        SaveLog("TRIAEVUM_SAVE_COMMIT_FAILED %s (kept in %s until it is installed)", file.string().c_str(),
+                committed.string().c_str());
         return false;
     }
     return true;
@@ -649,7 +639,7 @@ bool CtrSaveJournal::MoveSaveAsideForFormat() {
     // O .format anterior vai junto, ao lado da cópia (format-<data>.format).
     if (std::filesystem::is_regular_file(CtrSaveFormatPath(mDirectory), error))
         CopyBytes(CtrSaveFormatPath(mDirectory), CtrSaveFormatPath(destination));
-    std::fprintf(stderr, "TRIAEVUM_SAVE_FORMAT save anterior movido para %s\n", destination.string().c_str());
+    SaveLog("TRIAEVUM_SAVE_FORMAT previous save moved to %s", destination.string().c_str());
     mPending.clear();
     mStranded.clear();
     mBackedUp.clear();
