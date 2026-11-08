@@ -420,6 +420,9 @@ namespace Deko3d {
 // grass sources) and the end of the frame (placements, the next cull).
 void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame);
 void GrassEndFrame(uint64_t frame);
+// Frame start (EnsureFrame, after the texture hold): config/grass_hold's
+// wait for a scene's first grass (grass_scene_hold.h).
+void GrassBeginFrame();
 // The sample the next draws of `frame` belong to: synthetic (an fps60
 // in-between frame) or real.
 void GrassNoteSample(bool synthetic, uint64_t frame);

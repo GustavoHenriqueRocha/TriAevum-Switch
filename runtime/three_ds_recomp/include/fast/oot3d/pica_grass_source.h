@@ -71,7 +71,11 @@ class PicaGrassPlacements {
     void SetCacheDirectory(std::filesystem::path directory, uint64_t byteLimit, size_t entryLimit) {
         mBuilder.SetCacheDirectory(std::move(directory), byteLimit, entryLimit);
     }
+    // config/grass_placement_reuse (GrassPlacementDiskMatch).
+    void SetDiskReuse(bool reuse) { mBuilder.SetDiskReuse(reuse); }
     [[nodiscard]] GrassAsyncPlacementStats BuilderStats() const { return mBuilder.Stats(); }
+    // config/grass_hold: until the placements queued so far are made, at most `timeout`.
+    [[nodiscard]] bool WaitForPending(std::chrono::microseconds timeout) { return mBuilder.WaitForPending(timeout); }
 
   private:
     GrassAsyncPlacementBuilder mBuilder;

@@ -336,7 +336,12 @@ set_property(TARGET oot3d_graphics_settings_schedule_tests PROPERTY
 set(_oot3d_grass_runtime "${CMAKE_CURRENT_SOURCE_DIR}/runtime/three_ds_recomp")
 add_executable(oot3d_grass_switch_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_grass_switch_tests.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_async_placement_builder.cpp
     ${_oot3d_grass_runtime}/src/fast/oot3d/grass_instance_stream.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_persistent_placement_cache.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_placement_cache.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_shadow_refinement.cpp
+    ${_oot3d_grass_runtime}/src/fast/oot3d/grass_world_placement_cache.cpp
     ${_oot3d_grass_runtime}/src/fast/oot3d/grass_overlay_mask.cpp
     ${_oot3d_grass_runtime}/src/fast/oot3d/grass_surface_extractor.cpp
     ${_oot3d_grass_runtime}/src/fast/oot3d/grass_switch_profile.cpp

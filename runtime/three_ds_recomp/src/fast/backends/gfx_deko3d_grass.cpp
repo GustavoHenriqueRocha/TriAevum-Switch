@@ -28,9 +28,11 @@
 #if defined(__SWITCH__)
 #include "fast/backends/gfx_deko3d_pica_pipeline.h"
 #include "fast/oot3d/grass_draw_preparation.h"
+#include "fast/oot3d/grass_persistent_placement_cache.h"
 #include "fast/oot3d/grass_instance_stream.h"
 #include "fast/oot3d/grass_interaction_bridge.h"
 #include "fast/oot3d/grass_scene_bridge.h"
+#include "fast/oot3d/grass_scene_hold.h"
 #include "fast/oot3d/grass_stream_handoff.h"
 #include "fast/oot3d/grass_switch_profile.h"
 #include "fast/oot3d/grass_texture_source_cache.h"
@@ -164,6 +166,12 @@ class GrassCullWorker {
         std::scoped_lock lock(mMutex);
         return mJob.has_value() || mRunning;
     }
+    // config/grass_hold: until the posted and the running job are done, at
+    // most `timeout`; true when idle.
+    [[nodiscard]] bool WaitIdle(std::chrono::microseconds timeout) {
+        std::unique_lock lock(mMutex);
+        return mIdle.wait_for(lock, timeout, [this] { return !mJob.has_value() && !mRunning; });
+    }
     // The slot the worker may still be writing (when busy).
     [[nodiscard]] std::optional<uint32_t> WritingSlot() {
         std::scoped_lock lock(mMutex);
@@ -215,11 +223,13 @@ class GrassCullWorker {
             std::scoped_lock lock(mMutex);
             mResult = std::move(result);
             mRunning = false;
+            mIdle.notify_all();
         }
     }
 
     std::mutex mMutex;
     std::condition_variable mWake;
+    std::condition_variable mIdle; // a job finished (WaitIdle)
     std::optional<Job> mJob;
     Result mResult;
     bool mRunning = false;
@@ -344,6 +354,12 @@ struct GrassState {
     // In-between frames, and those that had the real frame's placements but
     // none of its source draws to take their camera from.
     uint64_t InBetweenFrames = 0, InBetweenWithoutCamera = 0;
+    // config/grass_hold: the scene's wait for its first grass (frame start,
+    // GrassBeginFrame), its draw points without a cull before that grass,
+    // and the waits of the log window.
+    Oot3d::GrassSceneHold Hold{0U};
+    uint64_t SceneNoResult = 0;
+    uint64_t HoldMicros = 0, HoldFrames = 0, HoldTimeouts = 0;
 };
 
 // Set once before the first frame (Deko3dConfigureGrass), read by the render
@@ -564,10 +580,19 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
         state->Placements->SetCacheDirectory("sdmc:/switch/oot3dre/shadercache/grass_placements_v1",
                                              Oot3d::kGrassPlacementCacheBytes, Oot3d::kGrassPlacementCacheEntries);
     }
+    const bool reuse = Oot3d::ReadGrassPlacementReuse(config);
+    state->Placements->SetDiskReuse(reuse);
+    state->Hold.SetBudget(Oot3d::ReadGrassSceneHoldMs(config));
     Deko3d::Log("grass: placement cache %s (config/grass_placement_cache; shadercache/grass_placements_v1, at most "
                 "%llu MiB)",
                 placementCache ? "on" : "off",
                 static_cast<unsigned long long>(Oot3d::kGrassPlacementCacheBytes >> 20));
+    Deko3d::Log("grass: placement reuse %s (config/grass_placement_reuse: a stored ground loads although its first "
+                "camera rounded its transform by up to %g / %g units or it sits at other guest addresses), hold %llu "
+                "ms per scene for its first grass (config/grass_hold)",
+                reuse ? "on" : "off", static_cast<double>(Oot3d::kGrassPlacementReuseRotation),
+                static_cast<double>(Oot3d::kGrassPlacementReuseTranslation),
+                static_cast<unsigned long long>(state->Hold.BudgetMicros() / 1000U));
     Deko3d::Log("grass: on (config/grass = %s), %zu rules, %.0f tufts/m2 of %u blades, at most %u per placement, "
                 "%.1f MiB retained",
                 mode == Oot3d::GrassSwitchMode::Draw ? "draw" : "placements", state->Settings.Rules.size(),
@@ -666,6 +691,33 @@ void GrassNoteSample(bool synthetic, uint64_t frame) {
     else if (state->InBetweenFrame == frame) state->InBetweenFrame = ~0ULL;
 }
 
+// config/grass_hold: at a scene's start, this frame waits for what the
+// scene's first grass still needs (grass_scene_hold.h): placements the last
+// frame queued, else the first cull of the ready ones.
+void GrassBeginFrame() {
+    GrassState* state = gGrass.load(std::memory_order_acquire);
+    if (state == nullptr || state->Mode != Oot3d::GrassSwitchMode::Draw || !state->DrawReady || state->DrawFailed)
+        return;
+    state->Hold.BeginFrame();
+    if (!state->Hold.Open()) return;
+    // Placements requested and not made yet (failed or invalid requests aside).
+    const auto& placements = state->Placements->Stats();
+    const bool pending = placements.Queued != 0U && state->Placements->BuilderStats().Pending != 0U;
+    const auto kind = state->Hold.Next(pending, placements.Ready != 0U,
+                                       state->Worker != nullptr && state->Worker->Busy());
+    if (kind == Oot3d::GrassHoldWait::None) return;
+    const auto begin = std::chrono::steady_clock::now();
+    const auto budget = std::chrono::microseconds(state->Hold.LeftMicros());
+    const bool done = kind == Oot3d::GrassHoldWait::Placements ? state->Placements->WaitForPending(budget)
+                                                               : state->Worker->WaitIdle(budget);
+    const auto waited = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count());
+    state->Hold.Waited(kind, waited, done);
+    state->HoldMicros += waited;
+    ++state->HoldFrames;
+    state->HoldTimeouts += done ? 0U : 1U;
+}
+
 // A scene change: the drawn cull, the sources' memo (whose geometry
 // identities the new scene may reuse) and this and the last real frame's
 // placements are dropped, so no grass of the previous scene is ever drawn in
@@ -686,6 +738,9 @@ void CheckGrassArea(GrassState& state) {
     state.RealFrame.Clear();
     state.InBetween.Clear();
     state.SourceFrame = ~0ULL;
+    // config/grass_hold: a new window and budget for the scene's first grass.
+    state.Hold.BeginScene();
+    state.SceneNoResult = 0;
 }
 
 namespace {
@@ -866,9 +921,15 @@ void GrassEndFrame(uint64_t frame) {
     const uint64_t builds = builder.Builds - base.Builds, loads = builder.DiskHits - base.DiskHits;
     const double loadMs = builder.DiskLoadMilliseconds - base.DiskLoadMilliseconds;
     const double buildMs = builder.BuildMilliseconds - base.BuildMilliseconds - loadMs;
+    // Loads that reused a ground of another first camera / address
+    // (config/grass_placement_reuse, largest offsets this session), and why
+    // the builds were not loaded: no file, a file of another transform
+    // (nearest offsets this session), another address (exact matching), damaged.
     Log("grass: frame %llu %s %s | rules_seen %u meshes %u placements %u queued %u tufts %llu (max %llu) "
         "retained %.1f MiB | sources %.3f ms/frame (max %.2f, %llu published) placements %.3f ms/frame (max %.2f) | "
-        "built %llu in %.0f ms (longest %.0f ms this session), loaded %llu in %.0f ms, written %llu",
+        "built %llu in %.0f ms (longest %.0f ms this session), loaded %llu in %.0f ms (reused %llu of another "
+        "transform, up to %g / %g; %llu of another address), written %llu | not loaded: no file %llu, other "
+        "transform %llu (nearest %g / %g), other address %llu, damaged %llu",
         static_cast<unsigned long long>(frame), state->Mode == Oot3d::GrassSwitchMode::Draw ? "draw" : "placements",
         state->Fps60 ? "fps60" : "fps30", stats.Rules, stats.Meshes, stats.Ready, stats.Queued,
         static_cast<unsigned long long>(stats.Anchors), static_cast<unsigned long long>(state->AnchorsMax),
@@ -876,7 +937,16 @@ void GrassEndFrame(uint64_t frame) {
         state->ObserveMaxMs, static_cast<unsigned long long>(state->Published), state->UpdateMs / frames,
         state->UpdateMaxMs, static_cast<unsigned long long>(builds), buildMs, builder.BuildMaxMilliseconds,
         static_cast<unsigned long long>(loads), loadMs,
-        static_cast<unsigned long long>(builder.DiskWrites - base.DiskWrites));
+        static_cast<unsigned long long>(builder.DiskReusedTransform - base.DiskReusedTransform),
+        static_cast<double>(builder.DiskReusedRotation), static_cast<double>(builder.DiskReusedTranslation),
+        static_cast<unsigned long long>(builder.DiskReusedGeometry - base.DiskReusedGeometry),
+        static_cast<unsigned long long>(builder.DiskWrites - base.DiskWrites),
+        static_cast<unsigned long long>(builder.DiskMisses - base.DiskMisses),
+        static_cast<unsigned long long>(builder.DiskOtherTransform - base.DiskOtherTransform),
+        static_cast<double>(builder.DiskOtherTransformRotation),
+        static_cast<double>(builder.DiskOtherTransformTranslation),
+        static_cast<unsigned long long>(builder.DiskOtherGeometry - base.DiskOtherGeometry),
+        static_cast<unsigned long long>(builder.DiskRejects - base.DiskRejects));
     state->BuilderBase = builder;
     if (state->Mode == Oot3d::GrassSwitchMode::Draw) {
         const double jobs = std::max<double>(1.0, static_cast<double>(state->CullJobs));
@@ -910,7 +980,7 @@ void GrassEndFrame(uint64_t frame) {
             "area %s scene %d room %d, changes %llu "
             "(scene %llu), foreign culls dropped %llu (other scene), without a shared placement %llu, gaps %llu, "
             "ranges drawn with another target's placement %llu | empty placements %u | in-between frames %llu "
-            "(without a camera %llu)",
+            "(without a camera %llu) | hold %llu ms over %llu frames (%llu timed out)",
             static_cast<unsigned long long>(frame), static_cast<unsigned long long>(state->RasterDraws),
             static_cast<unsigned long long>(state->DepthDraws),
             static_cast<unsigned long long>(state->Slots.FreshFrames - state->FreshBase),
@@ -932,7 +1002,10 @@ void GrassEndFrame(uint64_t frame) {
             static_cast<unsigned long long>(state->Gaps.Gaps - state->GapsBase),
             static_cast<unsigned long long>(state->OtherTargetRanges), state->Placements->Stats().Empty,
             static_cast<unsigned long long>(state->InBetweenFrames),
-            static_cast<unsigned long long>(state->InBetweenWithoutCamera));
+            static_cast<unsigned long long>(state->InBetweenWithoutCamera),
+            static_cast<unsigned long long>(state->HoldMicros / 1000U),
+            static_cast<unsigned long long>(state->HoldFrames),
+            static_cast<unsigned long long>(state->HoldTimeouts));
     }
     state->Frames = 0;
     state->Published = 0;
@@ -955,6 +1028,7 @@ void GrassEndFrame(uint64_t frame) {
     state->OtherTargetRanges = 0;
     state->GapsBase = state->Gaps.Gaps;
     state->InBetweenFrames = state->InBetweenWithoutCamera = 0;
+    state->HoldMicros = state->HoldFrames = state->HoldTimeouts = 0;
     state->StaleBase = state->Slots.StaleFrames;
 }
 
@@ -1051,7 +1125,10 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
         ++state->NoPlacementFrames;
     }
     const auto drawnSlot = pick.Slot;
-    if (!pick.Fit || pick.Fit == Oot3d::GrassCullFit::OtherScene) ++state->NoResultFrames;
+    if (!pick.Fit || pick.Fit == Oot3d::GrassCullFit::OtherScene) {
+        ++state->NoResultFrames;
+        ++state->SceneNoResult;
+    }
     if (drawnSlot) state->DrawnArea = state->Area;
     const auto& current = state->Current;
     const auto timestamp = [&](uint32_t index) {
@@ -1318,6 +1395,20 @@ void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::
         state->Visible += visible;
         state->VisibleMax = std::max(state->VisibleMax, visible);
         state->Draws += draws;
+        // The scene's first grass: when it came, and what waited for it.
+        if (state->Hold.Drawn()) {
+            const auto& hold = state->Hold.Stats();
+            Log("grass: scene %d first drawn at its frame %llu (draw points without grass before: %llu) | hold %llu "
+                "ms over %llu frames (placements %llu, cull %llu, timed out %llu; budget %llu ms)",
+                state->Area == 0xffffffffU ? -1 : static_cast<int>(state->Area >> 8U),
+                static_cast<unsigned long long>(hold.FirstDrawnFrame),
+                static_cast<unsigned long long>(state->SceneNoResult),
+                static_cast<unsigned long long>(hold.HoldMicros / 1000U),
+                static_cast<unsigned long long>(hold.HoldFrames),
+                static_cast<unsigned long long>(hold.PlacementWaits),
+                static_cast<unsigned long long>(hold.CullWaits), static_cast<unsigned long long>(hold.Timeouts),
+                static_cast<unsigned long long>(state->Hold.BudgetMicros() / 1000U));
+        }
     }
     PostCull(*state, frame);
     const double ms = MillisecondsSince(begin);

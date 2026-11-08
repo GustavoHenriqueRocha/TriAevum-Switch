@@ -167,6 +167,8 @@ std::shared_ptr<const GrassWorldPlacement> Build(const GrassAsyncPlacementReques
     world.MidrangeMaskRule = &request.Rule;
     auto result = std::make_shared<GrassWorldPlacement>(BuildGrassWorldPlacement(world));
     result->ContentVersion = world.ContentVersion;
+    if (!request.TransformBakedIntoVertices)
+        result->ModelToWorld = request.ModelToWorld;
     if (diagnose) {
         const auto elapsed = [](auto begin, auto end) {
             return std::chrono::duration<double, std::milli>(end - begin).count();
@@ -215,6 +217,7 @@ struct GrassAsyncPlacementBuilder::Impl {
         // the settle delay, so the intermediate states of an F1 edit (one per
         // slider step) are never written.
         std::optional<GrassPlacementDiskKey> PendingDiskKey;
+        GrassPlacementDiskMatch PendingDiskMatch;
         std::filesystem::path PendingDiskDirectory;
         std::chrono::steady_clock::time_point ReadyTime;
     };
@@ -224,10 +227,12 @@ struct GrassAsyncPlacementBuilder::Impl {
         uint64_t Generation = 0U;
         GrassAsyncPlacementRequest Request;
         std::filesystem::path Directory;
+        bool DiskReuse = false; // config/grass_placement_reuse (GrassPlacementDiskMatch)
         std::shared_ptr<std::promise<GrassPlacementCompletion>> Completion;
         // A store job: no build, no completion.
         std::shared_ptr<const GrassWorldPlacement> Store;
         GrassPlacementDiskKey StoreKey;
+        GrassPlacementDiskMatch StoreMatch;
     };
 
     Impl(size_t capacity, size_t workerCount, size_t byteCapacity)
@@ -270,7 +275,7 @@ struct GrassAsyncPlacementBuilder::Impl {
                 bool written = false;
                 try {
                     written = GrassPersistentPlacementCache(job.Directory, DiskByteLimit, DiskEntryLimit)
-                                  .Store(job.StoreKey, *job.Store);
+                                  .Store(job.StoreKey, *job.Store, job.StoreMatch);
                 } catch (...) {}
                 std::scoped_lock lock(Mutex);
                 --RunningJobs;
@@ -282,16 +287,18 @@ struct GrassAsyncPlacementBuilder::Impl {
 
             std::shared_ptr<const GrassWorldPlacement> placement;
             bool failed = false;
-            bool diskHit = false, diskMiss = false, diskReject = false;
+            bool diskHit = false;
             const bool diskEnabled = !job.Directory.empty() && !job.Request.PlacementView.Enabled;
             GrassPlacementDiskKey diskKey;
+            GrassPlacementDiskMatch diskMatch;
+            GrassPlacementDiskResult disk;
             const auto begin = std::chrono::steady_clock::now();
             try {
-                if (diskEnabled)
-                    diskKey = GrassPlacementPersistentKey(job.Request);
-                GrassPersistentPlacementCache disk(job.Directory, DiskByteLimit, DiskEntryLimit);
                 if (diskEnabled) {
-                    auto cached = disk.Load(diskKey, &diskReject);
+                    diskKey = GrassPlacementPersistentKey(job.Request);
+                    diskMatch = GrassPlacementDiskMatchFor(job.Request, job.DiskReuse);
+                    auto cached = GrassPersistentPlacementCache(job.Directory, DiskByteLimit, DiskEntryLimit)
+                                      .Load(diskKey, diskMatch, &disk);
                     if (cached && std::any_of(cached->Anchors.begin(), cached->Anchors.end(), [&](const auto& anchor) {
                             const auto& ref = anchor.SurfaceReference;
                             return (ref[0] & 65535U) >= job.Request.Vertices->size() ||
@@ -299,7 +306,7 @@ struct GrassAsyncPlacementBuilder::Impl {
                                    (ref[1] & 65535U) >= job.Request.Vertices->size();
                         })) {
                         cached.reset();
-                        diskReject = true;
+                        disk.Outcome = GrassPlacementDiskOutcome::Damaged;
                     }
                     if (cached) {
                         cached->Identity = job.Request.WorldIdentity;
@@ -310,8 +317,7 @@ struct GrassAsyncPlacementBuilder::Impl {
                         cached->LastUsedFrame = job.Request.FrameId;
                         placement = std::move(cached);
                         diskHit = true;
-                    } else
-                        diskMiss = true;
+                    }
                 }
                 if (!placement)
                     placement = Build(job.Request);
@@ -330,6 +336,7 @@ struct GrassAsyncPlacementBuilder::Impl {
                     found->second.State = failed ? EntryState::Failed : EntryState::Ready;
                     if (diskEnabled && !diskHit && placement) {
                         found->second.PendingDiskKey = diskKey;
+                        found->second.PendingDiskMatch = diskMatch;
                         found->second.PendingDiskDirectory = job.Directory;
                         found->second.ReadyTime = std::chrono::steady_clock::now();
                     }
@@ -337,8 +344,15 @@ struct GrassAsyncPlacementBuilder::Impl {
                     found->second.BuildMilliseconds = elapsed;
                     Statistics.Builds += !diskHit;
                     Statistics.DiskHits += diskHit;
-                    Statistics.DiskMisses += diskMiss;
-                    Statistics.DiskRejects += diskReject;
+                    if (diskEnabled && !diskHit)
+                        CountDiskMiss(disk);
+                    if (diskHit && (disk.Offset.Rotation != 0.0F || disk.Offset.Translation != 0.0F)) {
+                        ++Statistics.DiskReusedTransform;
+                        Statistics.DiskReusedRotation = std::max(Statistics.DiskReusedRotation, disk.Offset.Rotation);
+                        Statistics.DiskReusedTranslation =
+                            std::max(Statistics.DiskReusedTranslation, disk.Offset.Translation);
+                    }
+                    Statistics.DiskReusedGeometry += diskHit && disk.OtherGeometry;
                     Statistics.BuildMilliseconds += elapsed;
                     if (diskHit) {
                         Statistics.DiskLoadMilliseconds += elapsed;
@@ -354,6 +368,24 @@ struct GrassAsyncPlacementBuilder::Impl {
                 if (Jobs.empty() && RunningJobs == 0U) {
                     Idle.notify_all();
                 }
+            }
+            Settled.notify_all(); // WaitForPending
+        }
+    }
+
+    void CountDiskMiss(const GrassPlacementDiskResult& disk) {
+        switch (disk.Outcome) {
+            case GrassPlacementDiskOutcome::Loaded:
+            case GrassPlacementDiskOutcome::Missing: ++Statistics.DiskMisses; break;
+            case GrassPlacementDiskOutcome::Damaged: ++Statistics.DiskRejects; break;
+            case GrassPlacementDiskOutcome::OtherGeometry: ++Statistics.DiskOtherGeometry; break;
+            case GrassPlacementDiskOutcome::OtherTransform: {
+                const bool first = Statistics.DiskOtherTransform++ == 0U;
+                if (first || disk.Offset.Rotation < Statistics.DiskOtherTransformRotation)
+                    Statistics.DiskOtherTransformRotation = disk.Offset.Rotation;
+                if (first || disk.Offset.Translation < Statistics.DiskOtherTransformTranslation)
+                    Statistics.DiskOtherTransformTranslation = disk.Offset.Translation;
+                break;
             }
         }
     }
@@ -403,6 +435,7 @@ struct GrassAsyncPlacementBuilder::Impl {
         job.Directory = std::move(entry.PendingDiskDirectory);
         job.Store = entry.Placement;
         job.StoreKey = *entry.PendingDiskKey;
+        job.StoreMatch = entry.PendingDiskMatch;
         entry.PendingDiskKey.reset();
         Jobs.push_back(std::move(job));
         return true;
@@ -423,6 +456,8 @@ struct GrassAsyncPlacementBuilder::Impl {
     mutable std::mutex Mutex;
     std::condition_variable WorkReady;
     std::condition_variable Idle;
+    std::condition_variable Settled; // a placement job finished
+    bool DiskReuse = false;
     std::deque<Job> Jobs;
     std::vector<std::thread> Workers;
     std::unordered_map<BuildKey, Entry, BuildKeyHash> Entries;
@@ -519,13 +554,14 @@ GrassAsyncPlacementResult GrassAsyncPlacementBuilder::ResolveOrQueue(GrassAsyncP
                                         request.FrameId,
                                         nullptr, 0.0, completion,
                                     });
-        mImpl->Jobs.push_back({
-            key,
-            mImpl->Generation,
-            std::move(request),
-            mImpl->Directory,
-            std::move(promise),
-        });
+        Impl::Job job;
+        job.Key = key;
+        job.Generation = mImpl->Generation;
+        job.Request = std::move(request);
+        job.Directory = mImpl->Directory;
+        job.DiskReuse = mImpl->DiskReuse;
+        job.Completion = std::move(promise);
+        mImpl->Jobs.push_back(std::move(job));
         mImpl->RefreshCounts();
     }
     mImpl->WorkReady.notify_one();
@@ -561,6 +597,11 @@ void GrassAsyncPlacementBuilder::SetCacheDirectory(std::filesystem::path directo
     mImpl->DiskEntryLimit = entryLimit;
 }
 
+void GrassAsyncPlacementBuilder::SetDiskReuse(bool reuse) {
+    std::scoped_lock lock(mImpl->Mutex);
+    mImpl->DiskReuse = reuse;
+}
+
 void GrassAsyncPlacementBuilder::Clear() {
     std::scoped_lock lock(mImpl->Mutex);
     ++mImpl->Generation;
@@ -570,12 +611,22 @@ void GrassAsyncPlacementBuilder::Clear() {
     mImpl->Jobs.clear();
     mImpl->Entries.clear();
     mImpl->Statistics = {};
+    mImpl->Settled.notify_all();
     mImpl->RefreshCounts();
 }
 
 void GrassAsyncPlacementBuilder::WaitForIdle() {
     std::unique_lock lock(mImpl->Mutex);
     mImpl->Idle.wait(lock, [this] { return mImpl->Jobs.empty() && mImpl->RunningJobs == 0U; });
+}
+
+bool GrassAsyncPlacementBuilder::WaitForPending(std::chrono::microseconds timeout) {
+    std::unique_lock lock(mImpl->Mutex);
+    return mImpl->Settled.wait_for(lock, timeout, [this] {
+        return std::none_of(mImpl->Entries.begin(), mImpl->Entries.end(), [](const auto& entry) {
+            return entry.second.State == Impl::EntryState::Pending;
+        });
+    });
 }
 
 } // namespace Fast::Oot3d

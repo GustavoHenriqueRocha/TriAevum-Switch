@@ -97,6 +97,21 @@ void PublishGrassSwitchFill(bool fixed) noexcept;
 // recently used go first). Hyrule Field's ground is ~8 MiB.
 inline constexpr uint64_t kGrassPlacementCacheBytes = 256ULL << 20;
 inline constexpr size_t kGrassPlacementCacheEntries = 96U;
+// config/grass_placement_reuse (read at start; SWITCH_PORT.md "Grass at a
+// scene's start"): a stored ground loads although the camera of its first
+// frame rounded its transform differently, or it sits at other guest
+// addresses (GrassPlacementDiskMatch); its tufts are drawn with the
+// transform they were made with.
+// - On (absent file, any other word).
+// - Off ("0", "off", "false"): exact matching (the PC's); a different
+//   first camera builds the ground again.
+[[nodiscard]] bool ParseGrassPlacementReuse(std::optional<std::string_view> fileText) noexcept;
+[[nodiscard]] bool ReadGrassPlacementReuse(const std::filesystem::path& configDirectory);
+// config/grass_hold (read at start; grass_scene_hold.h): ms per scene the
+// render thread may wait for the scene's first grass. Absent or unreadable:
+// kGrassSceneHoldDefaultMs; "0"/"off": never; at most kGrassSceneHoldLimitMs.
+[[nodiscard]] uint32_t ParseGrassSceneHoldMs(std::optional<std::string_view> fileText) noexcept;
+[[nodiscard]] uint32_t ReadGrassSceneHoldMs(const std::filesystem::path& configDirectory);
 
 struct GrassSwitchProfile {
     // Placement: one anchor is one tuft.

@@ -5,7 +5,10 @@
 #include <algorithm>
 #include <atomic>
 #include <fstream>
+#include <charconv>
 #include <string>
+
+#include "fast/oot3d/grass_scene_hold.h"
 
 namespace Fast::Oot3d {
 
@@ -175,6 +178,32 @@ bool ParseGrassPlacementCache(std::optional<std::string_view> fileText) noexcept
 
 bool ReadGrassPlacementCache(const std::filesystem::path& configDirectory) {
     return ReadOnUnlessOff(configDirectory / "grass_placement_cache");
+}
+
+bool ParseGrassPlacementReuse(std::optional<std::string_view> fileText) noexcept {
+    return ParseOnUnlessOff(fileText);
+}
+
+bool ReadGrassPlacementReuse(const std::filesystem::path& configDirectory) {
+    return ReadOnUnlessOff(configDirectory / "grass_placement_reuse");
+}
+
+uint32_t ParseGrassSceneHoldMs(std::optional<std::string_view> fileText) noexcept {
+    if (!fileText.has_value()) return kGrassSceneHoldDefaultMs;
+    const std::string_view word = FirstWord(*fileText);
+    if (word == "off" || word == "false") return 0U;
+    uint32_t value = 0U;
+    const auto [end, error] = std::from_chars(word.data(), word.data() + word.size(), value);
+    if (word.empty() || error != std::errc{} || end != word.data() + word.size()) return kGrassSceneHoldDefaultMs;
+    return std::min(value, kGrassSceneHoldLimitMs);
+}
+
+uint32_t ReadGrassSceneHoldMs(const std::filesystem::path& configDirectory) {
+    std::ifstream file(configDirectory / "grass_hold");
+    if (!file) return kGrassSceneHoldDefaultMs;
+    std::string text;
+    std::getline(file, text);
+    return ParseGrassSceneHoldMs(std::string_view(text));
 }
 
 bool SaveGrassSwitchFill(const std::filesystem::path& configDirectory, bool fixed) {

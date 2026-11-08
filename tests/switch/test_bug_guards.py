@@ -1608,6 +1608,22 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
           r'if \(placementCache\) \{\s+state->Placements->SetCacheDirectory\(',
           "oot3d_grass_switch_tests (Oot3dGrassPlacementCache), oot3d_grass_async_placement_builder_tests"),
+    # --- 08/11 (test.12): Hyrule Field grass popped in after the fade-in. The
+    # disk cache's file name held the ground's exact model-to-world, rounded
+    # differently by each session's first camera (logs20b/c built it again).
+    Guard("a stored grass ground is named by its rounded transform and matched in the file (config/grass_placement_reuse)",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_persistent_placement_cache.cpp",
+          r'settings\.Add\(RoundedTransform\(r\.ModelToWorld\)\);',
+          "oot3d_grass_switch_tests (TheNextSessionReusesTheGroundOfAnotherFirstCamera)",
+          forbid=r'settings\.Add\(r\.ModelToWorld\);'),
+    Guard("a reused grass ground is drawn with the transform its tufts were made with",
+          "runtime/three_ds_recomp/src/fast/oot3d/pica_grass_source.cpp",
+          r'drawn\.ModelToWorld = \*result\.Placement->ModelToWorld;',
+          "oot3d_grass_switch_tests (TheNextSessionReusesTheGroundOfAnotherFirstCamera)"),
+    Guard("a scene's first frames wait for its first grass at frame start (config/grass_hold)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'mResources\.BeginFrame\(mResourcesFrame\);\s+Deko3d::GrassBeginFrame\(\);',
+          "oot3d_grass_switch_tests (Oot3dGrassSceneHold)"),
     Guard("HUD button labels draw over the item icons (a pack's bigger bomb hid the R of ZR)",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
           r'primitive\.layer = kTopScreenButtonLabelLayer;.*?'
