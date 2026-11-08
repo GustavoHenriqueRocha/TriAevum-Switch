@@ -1,4 +1,5 @@
 #include "oot3d_native_a32_memory.h"
+#include "oot3d_native_a32_memory_peek.h"
 #include "oot3d_native_a32_second_core.h"
 #include "oot3d_switch_guest_window.h"
 
@@ -90,6 +91,19 @@ bool TakeCardBit(GuestCard& card, GuestCardState bit) noexcept {
     return (__atomic_fetch_and(reinterpret_cast<unsigned char*>(&card.State),
                                static_cast<unsigned char>(~mask), __ATOMIC_ACQ_REL) &
             mask) != 0U;
+}
+
+// config/vertex_snapshot_fast (oot3d_native_a32_memory_peek.h): a certificate
+// reads the card first and takes the bit only when it is set. A clean card's
+// and-fetch changes nothing but costs an exclusive load/store pair with
+// acquire/release ordering on the A57 (no LSE) and makes the card's line
+// exclusive to this core; a set bit is still taken by the same and-fetch.
+bool gRangeCardPeek = false;
+
+bool CardBitSeenClean(const GuestCard& card, GuestCardState bit) noexcept {
+    return gRangeCardPeek &&
+           (__atomic_load_n(reinterpret_cast<const unsigned char*>(&card.State), __ATOMIC_ACQUIRE) &
+            static_cast<unsigned char>(bit)) == 0U;
 }
 
 // A store's mark from the lock-free exclusive/swap paths (another core may
@@ -662,8 +676,10 @@ NativeA32Memory::RangeWriteGeneration(uint32_t address,
       if (!group) return std::nullopt;
       auto& stamp = group->Pages[page & FastGroupPageMask].WriteGeneration;
       // Seen and cleared in one step (TakeCardBit): a mark a second core
-      // sets meanwhile survives for the next certificate.
-      if (TakeCardBit(mCards[page], GuestCardState::RangeWritten)) {
+      // sets meanwhile survives for the next certificate. A card read clean
+      // first (the peek) is left as it is.
+      if (!CardBitSeenClean(mCards[page], GuestCardState::RangeWritten) &&
+          TakeCardBit(mCards[page], GuestCardState::RangeWritten)) {
           // Written since its last certificate: a value no earlier
           // certificate can equal (one per call is enough for the max).
           if (fresh == 0U) fresh = NextRangeGeneration();
@@ -674,6 +690,10 @@ NativeA32Memory::RangeWriteGeneration(uint32_t address,
   }
   if (!mRangeVersionsValid) return std::nullopt;
   return generation;
+}
+
+void SetRangeWriteGenerationCardPeek(bool enabled) noexcept {
+    gRangeCardPeek = enabled;
 }
 
 void NativeA32Memory::EnableWriteTraceFingerprint(bool enabled) noexcept {

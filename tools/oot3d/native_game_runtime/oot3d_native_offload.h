@@ -122,6 +122,24 @@ inline bool ReadNativeListWalkFast() {
 #endif
 }
 
+// config/vertex_snapshot_fast (SWITCH_PORT.md "Vertex snapshot hit path"):
+// index and vertex snapshots certified page by page, only the pages written
+// since compared with the cached bytes. Switch: the file absent = on, "0" =
+// one certificate per range and a compare of every byte. Desktop:
+// TRIAEVUM_VERTEX_SNAPSHOT_FAST=1 (off otherwise).
+inline bool ReadNativeVertexSnapshotFast() {
+#if defined(__SWITCH__)
+    std::ifstream input("sdmc:/switch/oot3dre/config/vertex_snapshot_fast");
+    if (!input) return true;
+    std::string text;
+    std::getline(input, text);
+    return ParseOffloadSwitch(text);
+#else
+    const char* value = std::getenv("TRIAEVUM_VERTEX_SNAPSHOT_FAST");
+    return value != nullptr && std::string_view(value) != "" && ParseOffloadSwitch(value);
+#endif
+}
+
 // Appends lines to one file from a service thread, in submission order.
 // Push never waits for the file: it takes a mutex the writer holds only to
 // pop (never during the write) and drops the line when the queue is full.
