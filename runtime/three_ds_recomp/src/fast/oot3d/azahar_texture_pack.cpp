@@ -764,6 +764,10 @@ class AzaharTexturePackRuntime::Impl {
         std::scoped_lock lock(mMutex);
         return mGeneration;
     }
+    bool IndexReady() const {
+        std::scoped_lock lock(mMutex);
+        return mConfigured && mIndexReady;
+    }
     AzaharHudPackStatus HudStatus() const {
         std::scoped_lock lock(mMutex);
         return mHud;
@@ -1669,6 +1673,10 @@ AzaharTexturePackStatus AzaharTexturePackRuntime::Snapshot() const {
 
 uint64_t AzaharTexturePackRuntime::Generation() const {
     return mImpl->Generation();
+}
+
+bool AzaharTexturePackRuntime::IndexReady() const {
+    return mImpl->IndexReady();
 }
 
 AzaharHudPackStatus AzaharTexturePackRuntime::HudStatus() const {

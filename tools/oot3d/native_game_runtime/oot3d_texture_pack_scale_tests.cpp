@@ -290,15 +290,20 @@ void PreloadAndHoldSettings() {
                     ("oot3d_pack_preload_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
   std::filesystem::create_directories(root);
   auto settings = TexturePackSettings::Load(root);
-  Require(settings.ScenePreload && settings.HoldMs == kTexturePackHoldDefaultMs, "absent files: preload and hold on");
+  Require(settings.ScenePreload && settings.HoldMs == kTexturePackHoldDefaultMs && settings.Reresolve,
+          "absent files: preload, hold and the second resolve on");
   std::ofstream(root / "texture_pack_preload") << "0\n";
   std::ofstream(root / "texture_pack_hold") << "250\n";
+  std::ofstream(root / "texture_pack_reresolve") << "0\n";
   settings = TexturePackSettings::Load(root);
-  Require(!settings.ScenePreload && settings.HoldMs == 250U, "files read");
+  Require(!settings.ScenePreload && settings.HoldMs == 250U && !settings.Reresolve, "files read");
+  std::ofstream(root / "texture_pack_reresolve") << "1\n";
+  Require(TexturePackSettings::Load(root).Reresolve, "texture_pack_reresolve: only a leading 0 turns it off");
   // The Video tab's Save leaves them alone.
   settings.Enabled = true;
   Require(settings.Save(root).empty() && std::filesystem::exists(root / "texture_pack_preload") &&
-              std::filesystem::exists(root / "texture_pack_hold"),
+              std::filesystem::exists(root / "texture_pack_hold") &&
+              std::filesystem::exists(root / "texture_pack_reresolve"),
           "save keeps the start-only files");
   std::filesystem::remove_all(root);
 }
@@ -306,14 +311,35 @@ void PreloadAndHoldSettings() {
 void ToggleCache() {
   using Action = TexturePackEntryAction;
   // Same epoch: nothing changed.
-  Require(TexturePackEntryActionFor(false, 3, 3, true) == Action::Keep, "current native kept");
-  Require(TexturePackEntryActionFor(true, 3, 3, true) == Action::Keep, "current pack image kept");
+  Require(TexturePackEntryActionFor(false, 3, 3, true, false, true) == Action::Keep, "current native kept");
+  Require(TexturePackEntryActionFor(true, 3, 3, true, false, true) == Action::Keep, "current pack image kept");
   // Turned off: pack images go, native textures stay.
-  Require(TexturePackEntryActionFor(true, 3, 4, false) == Action::Release, "off releases pack images");
-  Require(TexturePackEntryActionFor(false, 3, 4, false) == Action::Keep, "off keeps native textures");
+  Require(TexturePackEntryActionFor(true, 3, 4, false, false, false) == Action::Release, "off releases pack images");
+  Require(TexturePackEntryActionFor(false, 3, 4, false, false, false) == Action::Keep, "off keeps native textures");
+  Require(TexturePackEntryActionFor(false, 3, 4, false, true, true) == Action::Keep,
+          "off keeps a native made while the index was built");
   // Turned on (or another cap): native textures resolve through the pack again.
-  Require(TexturePackEntryActionFor(false, 4, 5, true) == Action::Rebuild, "on rebuilds native textures");
-  Require(TexturePackEntryActionFor(true, 4, 5, true) == Action::Release, "new cap releases old pack images");
+  Require(TexturePackEntryActionFor(false, 4, 5, true, false, false) == Action::Rebuild, "on rebuilds native textures");
+  Require(TexturePackEntryActionFor(true, 4, 5, true, false, false) == Action::Release,
+          "new cap releases old pack images");
+  // The change's first frames draw while the pack indexes again: those natives
+  // have no hash, so they wait for the index and are made again once it is
+  // ready (08/11: they stayed native until evicted, pack images=0 in logs6).
+  Require(TexturePackEntryActionFor(false, 5, 5, true, true, false) == Action::Keep,
+          "made while indexing: drawn native until the index is ready");
+  Require(TexturePackEntryActionFor(false, 5, 5, true, true, true) == Action::Rebuild,
+          "made while indexing: resolved again once the index is ready");
+  Require(TexturePackEntryActionFor(false, 5, 5, true, false, true) == Action::Keep,
+          "a native that had its hash is kept (its pack image is polled)");
+  Require(TexturePackEntryActionFor(true, 5, 5, true, true, true) == Action::Keep, "a current pack image is kept");
+
+  // When a change has taken effect (the `texture pack change took effect` log line).
+  Require(!TexturePackChangeTookEffect(false, false, 0U, true), "off: earlier pack images still cached");
+  Require(TexturePackChangeTookEffect(false, false, 3U, false), "off: done once they are gone, natives drawn");
+  Require(!TexturePackChangeTookEffect(true, false, 0U, false), "on: not before the index is ready");
+  Require(!TexturePackChangeTookEffect(true, true, 2U, false), "on: textures on screen still wait for their image");
+  Require(!TexturePackChangeTookEffect(true, true, 0U, true), "new cap: images of the earlier cap still cached");
+  Require(TexturePackChangeTookEffect(true, true, 0U, false), "on: done");
 
   // The Video tab publishes; the renderer sees a new revision.
   auto &live = LiveTexturePackSettings();

@@ -1,6 +1,7 @@
 #include "oot3d/renderer/azahar_texture_pack.h"
 #include "oot3d/renderer/azahar_hud_image_list.h"
 #include "oot3d/renderer/azahar_scene_image_list.h"
+#include "oot3d/renderer/azahar_texture_pack_settings.h"
 #include "oot3d/renderer/pica_texture_decode.h"
 
 #include <gtest/gtest.h>
@@ -15,6 +16,12 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -1072,5 +1079,94 @@ TEST_F(Oot3dAzaharTexturePackTest, SceneChangesDropTheBacklogAndTheHoldWaitsForI
     runtime.WaitForPendingLoads();
     EXPECT_EQ(runtime.WaitForImages(all, std::chrono::microseconds(0)), 0U);
 }
+
+#if !defined(_WIN32)
+// HD textures turned on (or another size) in the Video tab index the pack
+// again; textures drawn meanwhile get no hash. Until 08/11 the renderer polled
+// them with that empty hash, the new index answered Missing, and they stayed
+// native until evicted (texture_pack_reresolve). Here pack.json is a FIFO: the
+// index waits until the test writes it, so "meanwhile" is deterministic.
+TEST_F(Oot3dAzaharTexturePackTest, TexturesDrawnWhileThePackIndexesResolveOnceItIsReady) {
+    using namespace Oot3d::Renderer;
+    std::array<uint8_t, 256> native{};
+    for (size_t index = 0; index < native.size(); ++index) native[index] = static_cast<uint8_t>(index * 5U + 1U);
+    const uint64_t hash = AzaharCityHash64(native);
+    const auto pack = Root / "indexing";
+    std::filesystem::create_directories(pack);
+    // A 32x32 image (4x) for an 8x8 native texture.
+    WriteAzaharTexturePng(pack / MakeAzaharTextureFilename(8U, 8U, hash, 0U, 0U), 32U, 32U,
+                          std::vector<uint8_t>(32U * 32U * 4U, 200U));
+    const auto packJson = pack / "pack.json";
+    ASSERT_EQ(mkfifo(packJson.c_str(), 0600), 0);
+    // Writes pack.json once the index worker waits in it (a non-blocking open
+    // fails until the FIFO has a reader). Should it never come, a plain file
+    // takes its place so that the worker cannot block for good.
+    const auto feedPackJson = [&] {
+        const std::string json =
+            nlohmann::json{{"options", {{"flip_png_files", true}, {"use_new_hash", true}}}}.dump();
+        int fifo = -1;
+        for (int attempt = 0; attempt < 2000 && fifo < 0; ++attempt) {
+            fifo = open(packJson.c_str(), O_WRONLY | O_NONBLOCK);
+            if (fifo < 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (fifo < 0) {
+            std::filesystem::remove(packJson);
+            std::ofstream(packJson) << json;
+            return false;
+        }
+        const bool written = write(fifo, json.data(), json.size()) == static_cast<ssize_t>(json.size());
+        close(fifo);
+        return written;
+    };
+    const AzaharTextureRequest request{8U, 8U, 0U, 0U, native, {}};
+    constexpr uint32_t kEpoch = 2U; // the renderer's epoch: one change, no other
+
+    AzaharTexturePackRuntime runtime;
+    runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack,
+                       .MaxReplacementScale = 2U, .GenerateMipmaps = true});
+    // Drawn while the worker waits in pack.json: no hash, drawn native.
+    EXPECT_FALSE(runtime.IndexReady());
+    const auto drawn = runtime.ResolveOrQueue(request);
+    EXPECT_EQ(drawn.State, AzaharTextureResolveState::Pending);
+    EXPECT_FALSE(drawn.NativeHashAvailable);
+    EXPECT_EQ(drawn.NativeHash, 0U);
+    EXPECT_EQ(TexturePackEntryActionFor(false, kEpoch, kEpoch, true, true, runtime.IndexReady()),
+              TexturePackEntryAction::Keep);
+
+    ASSERT_TRUE(feedPackJson());
+    runtime.WaitForPendingLoads();
+    ASSERT_TRUE(runtime.IndexReady());
+    // Polled with the empty hash it never finds its image (the path before 08/11)...
+    EXPECT_EQ(runtime.PollOrQueue(drawn.NativeHash, 8U, 8U).State, AzaharTextureResolveState::Missing);
+    // ...so the renderer makes it again, and that resolve has the hash and the image.
+    EXPECT_EQ(TexturePackEntryActionFor(false, kEpoch, kEpoch, true, true, runtime.IndexReady()),
+              TexturePackEntryAction::Rebuild);
+    const auto again = runtime.ResolveOrQueue(request);
+    EXPECT_TRUE(again.NativeHashAvailable);
+    EXPECT_EQ(again.NativeHash, hash);
+    EXPECT_EQ(again.State, AzaharTextureResolveState::Pending);
+    runtime.WaitForPendingLoads();
+    const auto capped = runtime.PollOrQueue(hash, 8U, 8U);
+    ASSERT_EQ(capped.State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(capped.Replacement->Width, 16U); // the 2x cap
+
+    // "HD texture size" No limit: indexed again, the same in between, and the
+    // second resolve decodes the file at its own size.
+    runtime.Configure({.LoadCustomTextures = true, .UserDirectory = Root, .LoadDirectory = pack,
+                       .MaxReplacementScale = 0U, .GenerateMipmaps = true});
+    EXPECT_FALSE(runtime.IndexReady());
+    const auto meanwhile = runtime.ResolveOrQueue(request);
+    EXPECT_EQ(meanwhile.State, AzaharTextureResolveState::Pending);
+    EXPECT_FALSE(meanwhile.NativeHashAvailable);
+    ASSERT_TRUE(feedPackJson());
+    runtime.WaitForPendingLoads();
+    ASSERT_TRUE(runtime.IndexReady());
+    EXPECT_EQ(runtime.ResolveOrQueue(request).State, AzaharTextureResolveState::Pending);
+    runtime.WaitForPendingLoads();
+    const auto full = runtime.PollOrQueue(hash, 8U, 8U);
+    ASSERT_EQ(full.State, AzaharTextureResolveState::Ready);
+    EXPECT_EQ(full.Replacement->Width, 32U); // the file's own size, never enlarged
+}
+#endif
 
 } // namespace

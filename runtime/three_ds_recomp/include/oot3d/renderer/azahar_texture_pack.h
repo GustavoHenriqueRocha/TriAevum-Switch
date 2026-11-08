@@ -261,6 +261,11 @@ class AzaharTexturePackRuntime final {
     [[nodiscard]] AzaharTexturePackStatus Snapshot() const;
     [[nodiscard]] AzaharHudPackStatus HudStatus() const;
     [[nodiscard]] uint64_t Generation() const;
+    // The index of the configured pack is built (Configure starts a new one on
+    // the pack worker). Until then a request answers Pending without a hash
+    // (AzaharTextureResolveResult::NativeHashAvailable false): the caller has to
+    // ask again once it is ready, nothing remembers it.
+    [[nodiscard]] bool IndexReady() const;
     // The game's scene (render thread, in frame order, at each change; -1
     // outside gameplay). The queued world decodes of the scene before are
     // dropped (a draw asks again for what it still needs), its unused images

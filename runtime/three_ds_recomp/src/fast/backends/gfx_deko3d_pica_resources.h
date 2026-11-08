@@ -19,6 +19,7 @@
 #include "oot3d/renderer/azahar_texture_pack_settings.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -75,6 +76,28 @@ struct PicaSceneTextureStats {
 };
 // The frames of a scene's start (about its fade-in at 60 FPS).
 inline constexpr uint64_t kSceneStartFrames = 60U;
+
+// A texture pack change (the Video tab, or the configuration at start) from
+// the frame it applies until it has taken effect on screen
+// (TexturePackChangeTookEffect), then logged once: `resources: texture pack
+// change took effect (...)`.
+struct PicaPackChangeStats {
+    bool Active = false;
+    bool AtStart = false;
+    bool PackOn = false;             // the settings it applied
+    uint32_t MaxScale = 0;
+    uint64_t Frame = 0;              // the frame it applied in
+    std::chrono::steady_clock::time_point Start{};
+    uint64_t IndexMicros = 0;        // to the pack's index ready (pack on; 0 = not yet)
+    uint64_t ResolvedAgain = 0;      // textures retired at their draw and resolved again (earlier settings)
+    uint64_t MadeWhileIndexing = 0;  // natives made while the index was being built (no hash yet)
+    uint64_t ResolvedAfterIndex = 0; // of those: resolved again once the index was ready
+    uint64_t Uploaded = 0;           // pack images uploaded since
+    uint64_t UploadedBytes = 0;
+    uint64_t Released = 0;           // pack images of earlier settings dropped
+};
+// About 30 s at 60 FPS: a change still waiting then is logged as incomplete.
+inline constexpr uint64_t kPackChangeReportFrames = 1800U;
 
 // What one draw binds: texture handles for bindings 1..3 and 13, the vertex
 // streams and the uniform blocks (vertex binding 0, fragment binding 4).
@@ -164,6 +187,10 @@ class PicaResources {
         uint64_t LastUsedFrame = 0;
         uint64_t PackHash = 0;          // texture pack identity (while decoding, and of a pack image)
         bool PackPending = false;
+        // Made while the pack's index was being built (no hash, PackHash 0;
+        // config/texture_pack_reresolve): made again at its first draw once the
+        // index is ready (TexturePackEntryActionFor).
+        bool PackUnindexed = false;
         bool PackMenu = false;          // resolved as a HUD image (PicaTextureIsMenuArt)
         bool Replacement = false;       // a texture pack image (under the replacement key)
         uint32_t PackEpoch = 0;         // mPackEpoch when made
@@ -208,6 +235,18 @@ class PicaResources {
     // ended. In the scene's first frames (config/texture_pack_hold), waits
     // for the pack images of the world textures drawn native last frame.
     void BeginScene();
+    // The change in mPackChange: counted, and logged once it took effect
+    // (TrackPackChange, at each frame's start), was superseded or ran out.
+    // Its log names the textures drawn last frame (PackOnScreen).
+    struct PackOnScreen {
+        uint64_t PackImages = 0;
+        uint64_t Natives = 0;
+        uint64_t Waiting = 0; // natives of the current settings still waiting for their pack image
+    };
+    void StartPackChange(bool atStart);
+    void TrackPackChange();
+    [[nodiscard]] PackOnScreen CountPackOnScreen() const;
+    void LogPackChange(const char* outcome, const PackOnScreen& onScreen);
     void LogScene(const PicaSceneTextureStats& stats, const char* when);
     std::vector<uint64_t> mHoldHashes;
     uint64_t mSceneSerial = 0;
@@ -233,6 +272,8 @@ class PicaResources {
     uint32_t mPackEpoch = 1;                   // grows on every pack change (TexturePackEntryActionFor)
     bool mReleaseStalePack = false;            // pack images of earlier settings may still be cached
     bool mPackConfigured = false;              // the pack runtime was configured (the pack was on once)
+    bool mPackIndexReady = false;              // the pack's index was ready at this frame's start
+    PicaPackChangeStats mPackChange{};
     bool mMenuImages = true;                   // config/texture_pack_menu (ParseTexturePackMenuSetting)
     std::vector<Texture> mRetired;
     // Replacement keys uploaded under the current pack settings (TextureReplacementReuploads).
