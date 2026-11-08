@@ -138,10 +138,10 @@ constexpr uint32_t kInvalidBufferDescriptor = 0xD9001830U;
 constexpr uint32_t kInvalidSessionHandle = 0xD8E007F7U;
 constexpr uint32_t kSessionClosed = 0xC920181AU;
 constexpr uint32_t kFsSaveDataArchiveId = 4U;
-// ExtSaveData (6, do próprio título) e SharedExtSaveData (7, do sistema: Play
-// Coins 0xF000000B etc.). Backend de pasta: <pai do save>/extdata/<mídia>/
-// <id alto>/<id baixo>/ (CtrExtDataDirectory). Path binário de 12 bytes:
-// u32 mídia, u32 id baixo, u32 id alto (como o Azahar).
+// ExtSaveData (6, the title's own) and SharedExtSaveData (7, system: Play
+// Coins 0xF000000B etc.). Directory backend: <save parent>/extdata/<media>/
+// <id high>/<id low>/ (CtrExtDataDirectory). 12-byte binary path:
+// u32 media, u32 id low, u32 id high (like Azahar).
 constexpr uint32_t kFsExtSaveDataArchiveId = 6U;
 constexpr uint32_t kFsSharedExtSaveDataArchiveId = 7U;
 constexpr uint32_t kFsExtDataNotFound = 0xC8804478U;

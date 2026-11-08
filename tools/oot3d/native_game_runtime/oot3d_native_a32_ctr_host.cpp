@@ -541,9 +541,9 @@ bool NativeA32CtrHostServices::CloseHandle(uint32_t handle) {
             const auto object = record->Object;
             mHandles.erase(record);
             ++mHandlesVersion;
-            // svcCloseHandle do último handle de um arquivo do save sem
-            // FSFILE_Close: conta como Close (confirma se era o último
-            // escritor da transação; oot3d_native_a32_ctr_save_safety.h).
+            // svcCloseHandle of the last handle of a save file without
+            // FSFILE_Close: counts as Close (commits if it was the last
+            // writer of the transaction; oot3d_native_a32_ctr_save_safety.h).
             if (object && object->Type == "client_session:file:savedata" && !object->FileClosed &&
                 object->SaveJournalWriter != 0U &&
                 std::none_of(mHandles.begin(), mHandles.end(),

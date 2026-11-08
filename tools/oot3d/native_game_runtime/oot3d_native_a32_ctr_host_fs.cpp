@@ -12,7 +12,7 @@ namespace Oot3dNativeGame {
 
 namespace {
 
-// gamecoin.dat padrão do extdata compartilhado 0xF000000B, como o PTM do
+// Default gamecoin.dat of shared extdata 0xF000000B, as the PTM of the
 // Azahar (default_game_coin): magic 0x4F00, 42 Play Coins, 0 moedas no dia,
 // passos 0/0, data 2014-12-29. 0x14 bytes, little-endian.
 constexpr uint16_t kDefaultPlayCoins = 42U;
@@ -27,19 +27,19 @@ bool CreateDefaultPlayCoinsExtData(const std::filesystem::path& directory) {
             data[offset + index] = static_cast<uint8_t>(value >> (8U * index));
     };
     put(0x00, 0x4F00U, 4);           // magic
-    put(0x04, kDefaultPlayCoins, 2); // total de moedas
+    put(0x04, kDefaultPlayCoins, 2); // total coins
     put(0x06, 0U, 2);                // moedas obtidas na data abaixo
-    put(0x08, 0U, 4);                // passos quando ganhou a última moeda
-    put(0x0C, 0U, 4);                // passos do dia da última moeda
+    put(0x08, 0U, 4);                // steps when the last coin was earned
+    put(0x0C, 0U, 4);                // steps on the day of the last coin
     put(0x10, 2014U, 2);             // ano
-    data[0x12] = 12U;                // mês
+    data[0x12] = 12U;                // month
     data[0x13] = 29U;                // dia
     std::ofstream output(directory / "gamecoin.dat", std::ios::binary | std::ios::trunc);
     output.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
     return static_cast<bool>(output);
 }
 
-// Path binário de ExtSaveData/SharedExtSaveData: u32 mídia, u32 id baixo, u32 id alto.
+// ExtSaveData/SharedExtSaveData binary path: u32 media, u32 id low, u32 id high.
 bool ReadExtDataLowPath(NativeA32Memory& memory, uint32_t type, uint32_t size, uint32_t address,
                         uint32_t* media, uint32_t* low, uint32_t* high) {
     return type == 2U && size == 12U && memory.Read32(address, media) &&
@@ -52,9 +52,9 @@ CtrSaveJournal* NativeA32CtrHostServices::SaveJournal() {
     if (mConfig.Filesystem != nullptr || mConfig.SaveDataDirectory.empty()) return nullptr;
     if (!mSaveJournal) {
         mSaveJournal = std::make_shared<CtrSaveJournal>(mConfig.SaveDataDirectory);
-        // Primeiro acesso ao save da execução (OpenArchive, OpenFile, E/S,
-        // GetFormatInfo, restore de savestate): termina troca interrompida
-        // antes de qualquer leitura.
+        // First save access of the run (OpenArchive, OpenFile, I/O,
+        // GetFormatInfo, savestate restore): finishes an interrupted swap
+        // before any read.
         mSaveJournal->RecoverOnce();
     }
     return mSaveJournal.get();
@@ -170,12 +170,12 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
         return fail(kSessionClosed, "closed-file");
     }
     const bool romfs = *sessionType == "client_session:file:romfs";
-    // Arquivo do save no backend de pasta (NRO do Switch e PC): a E/S passa
-    // pelo diário (oot3d_native_a32_ctr_save_safety.h). A primeira escrita
-    // copia o arquivo para <nome>.triaevum-tmp, que recebe as escritas e as
-    // leituras. Confirma o Flush/Close do último handle que escreveu, ou o
-    // ControlArchive; handle só de leitura não confirma; escrita que falha
-    // impede a confirmação. Extdata fica direto.
+    // Save file on the directory backend (Switch NRO and PC): I/O goes
+    // through the journal (oot3d_native_a32_ctr_save_safety.h). The first write
+    // copies the file to <name>.triaevum-tmp, which takes the writes and
+    // reads. Commit happens on Flush/Close of the last handle that wrote, or on
+    // ControlArchive; a read-only handle never commits; a failed write
+    // blocks the commit. Extdata is accessed directly.
     CtrSaveJournal* journal = !romfs && !file.FileBackend && *sessionType == "client_session:file:savedata"
                                   ? SaveJournal() : nullptr;
     if (journal != nullptr && !journal->Covers(file.FilePath)) journal = nullptr;
@@ -296,7 +296,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
                 const auto size = std::filesystem::file_size(target, error);
                 success = success && !error;
                 if (success) { file.FileSize = size; written = length; }
-                // SD cheio/erro no meio: a transação não pode ser confirmada.
+                // SD full/error midway: the transaction must not be committed.
                 if (!success && journal != nullptr) journal->MarkFailed(file.FilePath);
             }
             if (!success) return fail(kFsBackendFailure, "backend-write-failed", offset, length);
@@ -369,7 +369,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleRomFsRequest(
     }
     if (event.Detail == kFileFlushRequest) {
         // RootedFilesystemBackendV1::Write flushes before returning success.
-        // Backend de pasta: confirma a transação do save (troca atômica).
+        // Directory backend: commit the save transaction (atomic swap).
         if (journal != nullptr && !journal->Flush(file.FilePath, file.SaveJournalWriter))
             return fail(kFsBackendFailure, "save-commit-failed");
         return reply(kFileFlushResponse, "Flush");
@@ -767,9 +767,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                     }
                 } else {
                     const auto filePath = archive->Root / *relativePath;
-                    // Diário antes de olhar o disco: recupera troca
-                    // interrompida e enxerga o .triaevum-new que ainda não
-                    // entrou (nunca recria o arquivo vazio por cima dele).
+                    // Journal before looking at the disk: recovers an
+                    // interrupted swap and sees the .triaevum-new that has not
+                    // been installed yet (never recreates an empty file over it).
                     auto* journal = archive->Id == kFsSaveDataArchiveId ? SaveJournal() : nullptr;
                     if (journal != nullptr && !journal->Covers(filePath)) journal = nullptr;
                     const auto diskPath = journal != nullptr ? journal->ActivePath(filePath) : filePath;
@@ -844,9 +844,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             (descriptor & 0x3FFU) == 2U &&
             (descriptor >> 14U) == pathSize &&
             memory.IsMapped(pathAddress, pathSize);
-        // ExtSaveData / SharedExtSaveData: só no backend de pasta, uma pasta
-        // por (mídia, id). O 0xF000000B (Play Coins) nasce com o gamecoin.dat
-        // padrão, como o PTM faz no console/Azahar.
+        // ExtSaveData / SharedExtSaveData: directory backend only, one directory
+        // per (media, id). 0xF000000B (Play Coins) is created with the default
+        // gamecoin.dat, as the PTM does on console/Azahar.
         if (validStaticBuffer && IsCtrExtDataArchiveId(archiveId)) {
             const bool shared = archiveId == kFsSharedExtSaveDataArchiveId;
             event.Name += shared ? ":OpenArchive:SharedExtSaveData:" : ":OpenArchive:ExtSaveData:";
@@ -903,8 +903,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
                 std::filesystem::create_directories(
                     mConfig.SaveDataDirectory, directoryError);
                 openedSaveRoot = !directoryError;
-                // Primeira abertura da execução: termina troca interrompida e
-                // tira de dentro do save a escrita que não foi confirmada.
+                // First open of the run: finishes an interrupted swap and
+                // moves uncommitted writes out of the save.
                 if (openedSaveRoot) SaveJournal()->RecoverOnce();
             }
             if (openedSaveRoot) {
@@ -973,8 +973,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             uint32_t result = archive == mArchives.end()
                                   ? kFsInvalidArchiveHandle
                                   : kResultSuccess;
-            // ControlArchive no save (o OoT3D chama ao salvar): confirma as
-            // escritas pendentes do diário.
+            // ControlArchive on the save (OoT3D calls it when saving): commits the
+            // journal's pending writes.
             if (archive != mArchives.end() && archive->Id == kFsSaveDataArchiveId) {
                 if (auto* journal = SaveJournal(); journal != nullptr && !journal->CommitAll())
                     result = kFsBackendFailure;
@@ -1034,9 +1034,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             }
         }
     }
-    // GetFormatInfo de ExtSaveData/SharedExtSaveData (backend de pasta): o
-    // layout pedido no CreateExtSaveData fica em <pasta>.format; extdata sem
-    // esse arquivo (ex.: Play Coins criado pelo host) responde zeros.
+    // GetFormatInfo of ExtSaveData/SharedExtSaveData (directory backend): the
+    // layout requested in CreateExtSaveData is kept in <dir>.format; extdata without
+    // that file (e.g. Play Coins created by the host) answers zeros.
     if (event.Detail == kFsGetFormatInfoRequest && sessionType == "client_session:fs:USER") {
         uint32_t archiveId = 0, pathType = 0, pathSize = 0, descriptor = 0, pathAddress = 0;
         uint32_t media = 0, low = 0, high = 0;
@@ -1075,8 +1075,8 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             }
         }
     }
-    // CreateExtSaveData (backend de pasta): ExtSaveDataInfo (u8 mídia, u8, u16,
-    // u64 id, u32), dirs, arquivos, u64 limite, tamanho do ícone + buffer mapeado.
+    // CreateExtSaveData (directory backend): ExtSaveDataInfo (u8 media, u8, u16,
+    // u64 id, u32), dirs, files, u64 limit, icon size + mapped buffer.
     if (event.Detail == kFsCreateExtSaveDataRequest && sessionType == "client_session:fs:USER") {
         std::array<uint32_t, 12> words{};
         bool readable = true;
@@ -1123,23 +1123,23 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             }
         }
     }
-    // GetFormatInfo / FormatSaveData do save do próprio título (Super Mario
-    // 3D Land pergunta se o save está formatado antes de abri-lo e formata
-    // na primeira vez). O formato fica em <save>.format, ao lado da pasta
-    // (CtrSaveFormatPath: sem barra final, nunca dentro do save). O NRO do
-    // Switch usa este mesmo backend de pasta sobre o sdmc.
-    // Diferente do Azahar, de propósito: save legado (pasta com arquivos e
-    // sem .format, como o do Zelda no Switch ou um save importado) responde
-    // um formato sintetizado em vez de NotFormatted, para o jogo nunca ser
-    // levado a formatar; e FormatSaveData move a pasta para
-    // <save>-backups/format-<data> em vez de apagar.
+    // GetFormatInfo / FormatSaveData of the title's own save (Super Mario
+    // 3D Land asks whether the save is formatted before opening it and formats
+    // it the first time). The format is kept in <save>.format, next to the directory
+    // (CtrSaveFormatPath: no trailing slash, never inside the save). The Switch
+    // NRO uses this same directory backend on top of sdmc.
+    // Deliberately unlike Azahar: a legacy save (directory with files and
+    // no .format, like Zelda's on the Switch or an imported save) answers
+    // a synthesized format instead of NotFormatted, so the game is never
+    // led to format; and FormatSaveData moves the directory to
+    // <save>-backups/format-<date> instead of deleting it.
     if ((event.Detail == kFsGetFormatInfoRequest ||
          event.Detail == kFsFormatSaveDataRequest) &&
         sessionType == "client_session:fs:USER" && mConfig.Filesystem == nullptr &&
         !mConfig.SaveDataDirectory.empty()) {
         const bool format = event.Detail == kFsFormatSaveDataRequest;
         uint32_t archiveId = 0, pathType = 0, pathSize = 0;
-        std::array<uint32_t, 6> values{};  // tamanho do bloco, dirs, arquivos, buckets x2, duplicado
+        std::array<uint32_t, 6> values{};  // block size, dirs, files, buckets x2, duplicate
         bool readable = memory.Read32(commandBuffer + 4U, &archiveId) &&
                         memory.Read32(commandBuffer + 8U, &pathType) &&
                         memory.Read32(commandBuffer + 12U, &pathSize);
@@ -1155,7 +1155,7 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
             if (format) {
                 info = {values[0] * 512U, values[1], values[2], values[5] & 0xFFU};
                 if (!journal->MoveSaveAsideForFormat()) {
-                    result = kFsBackendFailure;  // sem cópia segura, não formata
+                    result = kFsBackendFailure;  // no safe copy, do not format
                 } else {
                     std::filesystem::create_directories(mConfig.SaveDataDirectory, error);
                     std::ofstream output(formatPath, std::ios::trunc);

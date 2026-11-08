@@ -1,35 +1,35 @@
 #pragma once
 
-// Saves à prova de perda no backend de pasta (PC e NRO do Switch, que usam o
-// mesmo código sobre o devoptab da libnx). Decisões e alternativas rejeitadas:
-// docs/pesquisas/2026-11-05-saves-seguros.md.
+// Loss-proof saves on the directory backend (PC and the Switch NRO, which share
+// the same code on top of libnx's devoptab). Decisions and rejected alternatives:
+// docs/SAVE_SAFETY.pt-BR.md.
 //
-// - Escrita atômica: a primeira escrita de uma transação copia o arquivo para
-//   <nome>.triaevum-tmp e toda E/S vai para essa cópia. Regra de commit (por
-//   transação e handle): a transação de um arquivo é confirmada quando o
-//   ÚLTIMO handle que escreveu nela dá Flush ou fecha (FSFILE_Close ou
-//   svcCloseHandle), ou no ControlArchive (commit do archive inteiro, como o
-//   commit de save com journaling do 3DS). Handle só de leitura nunca
-//   confirma. Write/SetSize que falha (SD cheio) marca a transação como
-//   falha: ela nunca é instalada; vai para <save>-backups/incompleto-*.
-//   Confirmar = tmp -> <nome>.triaevum-new -> <nome>. O rename do Horizon
-//   não sobrescreve (EEXIST): o destino vira <nome>.triaevum-old, o novo
-//   entra, e só então o .old sai; se o rename do novo falha, o .old volta.
-//   A recuperação (primeiro acesso ao save da execução: OpenArchive,
-//   OpenFile, E/S, GetFormatInfo ou restore de savestate) instala o .new,
-//   devolve o .old se o arquivo sumiu e tira de dentro do save o temporário
-//   que não foi confirmado (vai para incompleto-*, nunca é apagado).
-// - Backup rotativo: antes da primeira escrita (ou do DeleteFile) de cada
-//   arquivo numa execução, a versão anterior vai para
-//   <save>-backups/<AAAAMMDD-HHMMSS>/. A cópia é gravada como
-//   <nome>.triaevum-tmp, conferida (tamanho + checksum contra a origem) e só
-//   então renomeada; cópia que não confere é descartada e não conta como
-//   cópia. A ordem das gerações vem de <save>-backups/.triaevum-geracoes
-//   (ordem de criação), não da data no nome (o relógio do console pode
-//   voltar). Ficam as últimas kCtrSaveBackupGenerations, sem apagar uma
-//   geração que tenha a única cópia de um arquivo nem a recém-criada.
-// - Formatação sem perda: FormatSaveData move a pasta para
-//   <save>-backups/format-<AAAAMMDD-HHMMSS>/ antes de recriar.
+// - Atomic writes: the first write of a transaction copies the file to
+//   <name>.triaevum-tmp and all I/O goes to that copy. Commit rule (per
+//   transaction and handle): a file's transaction is committed when the
+//   LAST handle that wrote to it Flushes or closes (FSFILE_Close or
+//   svcCloseHandle), or on ControlArchive (whole-archive commit, like the
+//   3DS journaled save commit). A read-only handle never
+//   commits. A failed Write/SetSize (SD full) marks the transaction as
+//   failed: it is never installed; it goes to <save>-backups/incompleto-*.
+//   Commit = tmp -> <name>.triaevum-new -> <name>. Horizon's rename
+//   does not overwrite (EEXIST): the destination becomes <name>.triaevum-old, the new
+//   file goes in, and only then is the .old removed; if the new rename fails, the .old is restored.
+//   Recovery (first save access of the run: OpenArchive,
+//   OpenFile, I/O, GetFormatInfo or savestate restore) installs the .new,
+//   restores the .old if the file vanished and moves the uncommitted temporary
+//   out of the save (to incompleto-*, never deleted).
+// - Rotating backup: before the first write (or DeleteFile) of each
+//   file in a run, the previous version goes to
+//   <save>-backups/<YYYYMMDD-HHMMSS>/. The copy is written as
+//   <name>.triaevum-tmp, verified (size + checksum against the source) and only
+//   then renamed; a copy that fails verification is discarded and does not count as a
+//   copy. Generation order comes from <save>-backups/.triaevum-geracoes
+//   (creation order), not from the date in the name (the console clock can
+//   go back). The last kCtrSaveBackupGenerations are kept, never deleting a
+//   generation holding the only copy of a file nor the just-created one.
+// - Lossless format: FormatSaveData moves the directory to
+//   <save>-backups/format-<YYYYMMDD-HHMMSS>/ before recreating it.
 
 #include <array>
 #include <cstdint>
@@ -46,82 +46,82 @@ namespace Oot3dNativeGame {
 inline constexpr std::string_view kCtrSaveJournalTemporarySuffix = ".triaevum-tmp";
 inline constexpr std::string_view kCtrSaveJournalCommittedSuffix = ".triaevum-new";
 inline constexpr std::string_view kCtrSaveJournalPreviousSuffix = ".triaevum-old";
-// Ordem de criação das gerações (um nome por linha), dentro de <save>-backups.
+// Generation creation order (one name per line), inside <save>-backups.
 inline constexpr std::string_view kCtrSaveBackupOrderFile = ".triaevum-geracoes";
 inline constexpr size_t kCtrSaveBackupGenerations = 20U;
 
-// Pasta sem separador final, normalizada só lexicalmente (funciona com
-// "sdmc:/...", que o std::filesystem do devkitA64 trata como relativo).
+// Directory without trailing separator, normalized lexically only (works with
+// "sdmc:/...", which devkitA64's std::filesystem treats as relative).
 std::filesystem::path CtrLexicalDirectory(const std::filesystem::path& directory);
-// <pasta>.format, ao lado da pasta (nunca dentro dela, mesmo com '/' final).
+// <dir>.format, next to the directory (never inside it, even with a trailing '/').
 std::filesystem::path CtrSaveFormatPath(const std::filesystem::path& saveDirectory);
-// <pai>/<nome da pasta>-backups (savedata -> savedata-backups).
+// <parent>/<directory name>-backups (savedata -> savedata-backups).
 std::filesystem::path CtrSaveBackupRoot(const std::filesystem::path& saveDirectory);
-// relative (já decodificado, sem '..' nem raiz) fica dentro de root, por
-// comparação lexical; nenhum componente intermediário pode ser symlink (no
-// PC um subdiretório-symlink apontando para fora é recusado). Sem
-// absolute/canonical: com raiz "sdmc:/..." eles concatenam o cwd no Switch.
+// relative (already decoded, no '..' or root) stays inside root, by
+// lexical comparison; no intermediate component may be a symlink (on
+// PC a symlinked subdirectory pointing outside is rejected). No
+// absolute/canonical: with a "sdmc:/..." root they prepend the cwd on the Switch.
 bool CtrArchivePathContained(const std::filesystem::path& root, const std::filesystem::path& relative);
-// candidate (absoluto ou não) está dentro de root, lexicalmente.
+// candidate (absolute or not) is inside root, lexically.
 bool CtrPathWithin(const std::filesystem::path& root, const std::filesystem::path& candidate);
-// Formato sintetizado de save legado (pasta com arquivos e sem .format):
-// {tamanho, dirs, arquivos, duplicado}. nullopt se a pasta não tem arquivo.
+// Synthesized format of a legacy save (directory with files and no .format):
+// {size, dirs, files, duplicate}. nullopt if the directory has no file.
 std::optional<std::array<uint32_t, 4>> CtrLegacySaveFormatInfo(const std::filesystem::path& saveDirectory);
-// Apaga as gerações mais antigas além de keep, sem apagar uma geração que
-// tenha a única cópia de algum arquivo nem keepGeneration (a recém-criada).
-// Só toca pastas AAAAMMDD-HHMMSS[-n]. Ordem: as que não estão em
-// kCtrSaveBackupOrderFile (anteriores ao arquivo de ordem) por nome, depois
-// as listadas na ordem do arquivo. Sobra de cópia (*.triaevum-tmp) não conta.
+// Deletes the oldest generations beyond keep, never deleting a generation that
+// holds the only copy of some file nor keepGeneration (the just-created one).
+// Only touches YYYYMMDD-HHMMSS[-n] directories. Order: those not in
+// kCtrSaveBackupOrderFile (older than the order file) by name, then
+// the listed ones in file order. Copy leftovers (*.triaevum-tmp) do not count.
 void PruneCtrSaveBackups(const std::filesystem::path& backupRoot, size_t keep,
                          const std::filesystem::path& keepGeneration = {});
-// Troca destination por source. Tenta rename; se o destino existe e o rename
-// não sobrescreve (Horizon: EEXIST), o destino vira <destino>.triaevum-old, o
-// source entra e o .old é removido; se o rename do source falha, o .old volta
-// para o lugar. destination nunca fica sem nenhuma das duas versões no disco.
+// Replaces destination with source. Tries rename; if the destination exists and rename
+// does not overwrite (Horizon: EEXIST), the destination becomes <destination>.triaevum-old,
+// source goes in and the .old is removed; if the source rename fails, the .old goes back
+// in place. destination is never left without either version on disk.
 bool ReplaceCtrSaveFile(const std::filesystem::path& source, const std::filesystem::path& destination);
-// Testes no PC: simula o rename do Horizon (destino existente -> EEXIST).
+// PC tests: simulates Horizon's rename (existing destination -> EEXIST).
 void SetCtrSaveRenameFailsOnExistingForTesting(bool enabled) noexcept;
-// Testes: o rename de from para to falha (EIO) quando fault devolve true.
+// Tests: the rename from from to to fails (EIO) when fault returns true.
 void SetCtrSaveRenameFaultForTesting(
     std::function<bool(const std::filesystem::path& from, const std::filesystem::path& to)> fault);
-// Testes: chamado depois de gravar cada cópia (backup ou temporário), antes
-// da conferência; permite estragar a cópia (SD que grava errado).
+// Tests: called after writing each copy (backup or temporary), before
+// verification; allows corrupting the copy (an SD that writes wrong data).
 void SetCtrSaveCopyFaultForTesting(std::function<void(const std::filesystem::path& destination)> fault);
 
-// Estado de uma execução sobre uma pasta de save (sobrevive ao restore de
-// savestate: o host repassa o mesmo objeto).
+// State of one run over a save directory (survives a savestate
+// restore: the host passes the same object along).
 class CtrSaveJournal {
   public:
     explicit CtrSaveJournal(std::filesystem::path saveDirectory);
 
     const std::filesystem::path& Directory() const noexcept { return mDirectory; }
-    // file é arquivo do save (e não de extdata/RomFS)?
+    // Is file a save file (not extdata/RomFS)?
     bool Covers(const std::filesystem::path& file) const;
-    // Uma vez por execução: termina trocas interrompidas e põe de lado os
-    // temporários não confirmados. O host chama na criação do diário, ou
-    // seja, no primeiro acesso ao save da execução (inclusive restore).
+    // Once per run: finishes interrupted swaps and sets aside
+    // uncommitted temporaries. The host calls it when creating the journal, i.e.
+    // on the first save access of the run (including restore).
     void RecoverOnce();
-    // Onde ler/escrever agora: o temporário se há escrita pendente; o
-    // .triaevum-new se a troca desta execução não conseguiu instalá-lo.
+    // Where to read/write now: the temporary if a write is pending; the
+    // .triaevum-new if this run's swap could not install it.
     std::filesystem::path ActivePath(const std::filesystem::path& file) const;
-    // Antes de escrever/redimensionar: backup (1x por execução), cópia para o
-    // temporário (1x por transação) e registro do handle como escritor.
-    // writer = identificador do handle (0: o diário atribui um novo).
+    // Before writing/resizing: backup (once per run), copy to the
+    // temporary (once per transaction) and register the handle as a writer.
+    // writer = handle identifier (0: the journal assigns a new one).
     bool BeginWrite(const std::filesystem::path& file, uint64_t& writer);
-    // Write/SetSize falhou depois do BeginWrite: a transação não é instalada.
+    // Write/SetSize failed after BeginWrite: the transaction is not installed.
     void MarkFailed(const std::filesystem::path& file);
-    // FSFILE_Flush do handle writer: confirma se ele é o único escritor.
+    // FSFILE_Flush of handle writer: commits if it is the only writer.
     bool Flush(const std::filesystem::path& file, uint64_t writer);
-    // FSFILE_Close/svcCloseHandle do handle writer: confirma se era o último.
+    // FSFILE_Close/svcCloseHandle of handle writer: commits if it was the last.
     bool Close(const std::filesystem::path& file, uint64_t writer);
-    // ControlArchive(commit): confirma todas (falha se alguma falhou).
+    // ControlArchive(commit): commits all (fails if any failed).
     bool CommitAll();
-    // Restore de savestate: esquece escritores que não existem mais.
+    // Savestate restore: forgets writers that no longer exist.
     void RetainWriters(const std::set<uint64_t>& writers);
-    // DeleteFile: guarda a versão atual nos backups e descarta a transação.
+    // DeleteFile: keeps the current version in the backups and discards the transaction.
     bool PrepareDelete(const std::filesystem::path& file);
-    // FormatSaveData: confirma o pendente e move a pasta (se tem algo) para
-    // <save>-backups/format-<data>. Falso = não formatar.
+    // FormatSaveData: commits pending writes and moves the directory (if non-empty) to
+    // <save>-backups/format-<date>. False = do not format.
     bool MoveSaveAsideForFormat();
 
   private:
@@ -132,9 +132,9 @@ class CtrSaveJournal {
     std::string Key(const std::filesystem::path& file) const;
     bool Backup(const std::filesystem::path& file, bool beforeDelete);
     std::filesystem::path Generation();
-    // Confirma a transação (ou, se falhou, põe o temporário de lado).
+    // Commits the transaction (or, if it failed, sets the temporary aside).
     bool CommitNow(const std::string& key);
-    // Termina a instalação de um .triaevum-new que ficou para trás.
+    // Finishes installing a .triaevum-new left behind.
     bool InstallStranded(const std::string& key);
 
     std::filesystem::path mDirectory;

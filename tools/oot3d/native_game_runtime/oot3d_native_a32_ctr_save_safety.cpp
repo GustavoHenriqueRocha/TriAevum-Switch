@@ -1,5 +1,5 @@
-// Saves à prova de perda no backend de pasta (ver o .h e
-// docs/pesquisas/2026-11-05-saves-seguros.md).
+// Loss-proof saves on the directory backend (see the .h and
+// docs/SAVE_SAFETY.pt-BR.md).
 #include "oot3d_native_a32_ctr_save_safety.h"
 #include "oot3d_game_log.h"
 
@@ -40,8 +40,8 @@ bool gRenameFailsOnExisting = false;
 std::function<bool(const std::filesystem::path&, const std::filesystem::path&)> gRenameFault;
 std::function<void(const std::filesystem::path&)> gCopyFault;
 
-// rename com os ganchos de teste: falha injetada (EIO) e a semântica do
-// Horizon (destino existente -> EEXIST).
+// rename with the test hooks: injected failure (EIO) and Horizon
+// semantics (existing destination -> EEXIST).
 void RenamePath(const std::filesystem::path& from, const std::filesystem::path& to, std::error_code& error) {
     error.clear();
     if (gRenameFault && gRenameFault(from, to)) {
@@ -90,7 +90,7 @@ std::string Timestamp() {
     return text;
 }
 
-// base/name, ou base/name-2, -3...: nunca reaproveita uma pasta existente.
+// base/name, or base/name-2, -3...: never reuses an existing directory.
 std::filesystem::path UnusedPath(const std::filesystem::path& base, const std::string& name) {
     std::error_code error;
     auto candidate = base / name;
@@ -99,7 +99,7 @@ std::filesystem::path UnusedPath(const std::filesystem::path& base, const std::s
     return candidate;
 }
 
-// FNV-1a de 64 bits: checksum da conferência das cópias.
+// 64-bit FNV-1a: checksum for verifying copies.
 uint64_t Checksum(const std::vector<char>& bytes) {
     uint64_t hash = 0xCBF29CE484222325ULL;
     for (const char byte : bytes) {
@@ -116,11 +116,11 @@ bool ReadBytes(const std::filesystem::path& path, std::vector<char>& bytes) {
     return !input.bad();
 }
 
-// Cópia por stream (5 KB por arquivo): não depende do copy_file da libstdc++
-// do devkitA64 (sendfile/permissões) no devoptab. A cópia só vale depois de
-// relida e conferida contra a origem (tamanho + checksum): SD cheio grava
-// uma cópia truncada sem erro visível em todo lugar. Cópia que não confere é
-// apagada (é cópia de um original que continua intacto).
+// Stream copy (5 KB per file): does not depend on libstdc++'s copy_file
+// on devkitA64 (sendfile/permissions) over devoptab. The copy only counts once
+// re-read and verified against the source (size + checksum): a full SD writes
+// a truncated copy without a visible error everywhere. A copy that fails verification is
+// deleted (it is a copy of an original that stays intact).
 bool CopyBytes(const std::filesystem::path& source, const std::filesystem::path& destination) {
     std::vector<char> bytes;
     if (!ReadBytes(source, bytes)) return false;
@@ -143,9 +143,9 @@ bool CopyBytes(const std::filesystem::path& source, const std::filesystem::path&
     return verified;
 }
 
-// fsync antes da troca. No Switch não há o que chamar além do que já foi
-// feito: cada escrita abre, escreve e fecha o arquivo, e o fsFileClose da
-// libnx descarrega no SD. No Windows o fechamento do stream basta.
+// fsync before the swap. On the Switch there is nothing to call beyond what is already
+// done: each write opens, writes and closes the file, and libnx's fsFileClose
+// flushes to the SD. On Windows closing the stream is enough.
 bool SyncToDisk(const std::filesystem::path& path, bool directory) {
 #if !defined(_WIN32) && !defined(__SWITCH__)
     const int descriptor = ::open(path.c_str(), directory ? (O_RDONLY | O_DIRECTORY) : O_RDONLY);
@@ -160,8 +160,8 @@ bool SyncToDisk(const std::filesystem::path& path, bool directory) {
 #endif
 }
 
-// Cópia de backup: grava <destino>.triaevum-tmp, confere e só então dá o nome
-// final. Uma queda no meio deixa só o .triaevum-tmp, que o prune não conta.
+// Backup copy: writes <destination>.triaevum-tmp, verifies, and only then gives it the final
+// name. A crash midway leaves only the .triaevum-tmp, which prune does not count.
 bool CopyBackup(const std::filesystem::path& source, std::filesystem::path destination) {
     std::error_code error;
     if (std::filesystem::exists(destination, error))
@@ -192,7 +192,7 @@ bool CopyTree(const std::filesystem::path& source, const std::filesystem::path& 
     return !error;
 }
 
-// Gerações: AAAAMMDD-HHMMSS ou AAAAMMDD-HHMMSS-n. Devolve (data, n).
+// Generations: YYYYMMDD-HHMMSS or YYYYMMDD-HHMMSS-n. Returns (date, n).
 std::optional<std::pair<std::string, unsigned>> ParseGeneration(const std::string& name) {
     const auto digits = [&](size_t from, size_t count) {
         return name.size() >= from + count &&
@@ -206,8 +206,8 @@ std::optional<std::pair<std::string, unsigned>> ParseGeneration(const std::strin
     return std::make_pair(name.substr(0U, 15U), static_cast<unsigned>(std::stoul(name.substr(16U))));
 }
 
-// Arquivos de uma árvore. Sem withJournal, sobras do diário e de cópia
-// interrompida (*.triaevum-tmp/-new/-old) não contam.
+// Files of a tree. Without withJournal, journal and interrupted-copy leftovers
+// (*.triaevum-tmp/-new/-old) do not count.
 std::set<std::string> FilesIn(const std::filesystem::path& directory, bool withJournal) {
     std::set<std::string> files;
     std::error_code error;
@@ -223,7 +223,7 @@ std::vector<std::string> ReadBackupOrder(const std::filesystem::path& backupRoot
     std::vector<std::string> names;
     std::ifstream input(backupRoot / std::string(kCtrSaveBackupOrderFile));
     for (std::string line; std::getline(input, line);)
-        if (ParseGeneration(line)) names.push_back(line);  // linha cortada por queda não conta
+        if (ParseGeneration(line)) names.push_back(line);  // a line cut by a crash does not count
     return names;
 }
 
@@ -232,8 +232,8 @@ void AppendBackupOrder(const std::filesystem::path& backupRoot, const std::strin
     output << name << '\n';
 }
 
-// Põe os arquivos (de dentro de directory) em <backups>/incompleto-<data>/,
-// com o mesmo caminho relativo. Nunca apaga sem antes ter a cópia conferida.
+// Puts the files (from inside directory) in <backups>/incompleto-<date>/,
+// with the same relative path. Never deletes before the copy is verified.
 void MoveAside(const std::filesystem::path& directory, const std::filesystem::path& backupRoot,
                const std::vector<std::filesystem::path>& files, const char* reason) {
     if (files.empty()) return;
@@ -285,9 +285,9 @@ bool CtrArchivePathContained(const std::filesystem::path& root, const std::files
     const auto target = (base / relative).lexically_normal();
     const auto within = target.lexically_relative(base);
     if (within.empty() || within == "." || *within.begin() == ".." || !target.has_filename()) return false;
-    // Componentes intermediários (entre a raiz e o arquivo) não podem ser
-    // symlink. A raiz em si pode (o usuário pode apontar savedata para outro
-    // disco). No sdmc não existe symlink e o lstat vai direto ao devoptab.
+    // Intermediate components (between the root and the file) must not be
+    // symlinks. The root itself may be (the user can point savedata to another
+    // disk). sdmc has no symlinks and lstat goes straight to devoptab.
     auto walk = base;
     auto part = within.begin();
     for (auto next = std::next(part); next != within.end(); ++part, ++next) {
@@ -321,7 +321,7 @@ std::optional<std::array<uint32_t, 4>> CtrLegacySaveFormatInfo(const std::filesy
 void PruneCtrSaveBackups(const std::filesystem::path& backupRoot, size_t keep,
                          const std::filesystem::path& keepGeneration) {
     struct Generation {
-        // (posição no arquivo de ordem, ou -1 se não está nele; data; n)
+        // (position in the order file, or -1 if absent; date; n)
         std::tuple<long, std::string, unsigned> Order;
         std::filesystem::path Path;
         std::set<std::string> Files;
@@ -354,7 +354,7 @@ void PruneCtrSaveBackups(const std::filesystem::path& backupRoot, size_t keep,
                                    generations.end(),
                                    [&](const Generation& later) { return later.Files.contains(file); });
             });
-        if (generations[index].Protected || !coveredLater) {  // recém-criada ou única cópia: fica
+        if (generations[index].Protected || !coveredLater) {  // just created or only copy: keep
             ++index;
             continue;
         }
@@ -372,15 +372,15 @@ bool ReplaceCtrSaveFile(const std::filesystem::path& source, const std::filesyst
     std::error_code error;
     RenamePath(source, destination, error);
     if (error == std::errc::file_exists) {
-        // Horizon: rename por cima de arquivo existente dá EEXIST. Nunca
-        // remover o destino antes do novo entrar: ele vira <destino>.triaevum-old
-        // e só sai depois; se o rename do novo falha, volta para o lugar.
-        // Queda no meio: a recuperação instala o .new e devolve o .old.
+        // Horizon: rename over an existing file gives EEXIST. Never
+        // remove the destination before the new one is in: it becomes <destination>.triaevum-old
+        // and is removed only afterwards; if the new rename fails, it goes back in place.
+        // Crash midway: recovery installs the .new and restores the .old.
         const auto previous = WithSuffix(destination, kCtrSaveJournalPreviousSuffix);
         std::error_code asideError;
         RenamePath(destination, previous, asideError);
         if (asideError == std::errc::file_exists) {
-            // .old de uma troca anterior: o destino é mais novo que ele.
+            // .old from an earlier swap: the destination is newer than it.
             std::error_code staleError;
             std::filesystem::remove(previous, staleError);
             RenamePath(destination, previous, asideError);
@@ -440,18 +440,18 @@ void CtrSaveJournal::RecoverOnce() {
         if (HasSuffix(name, kCtrSaveJournalTemporarySuffix)) temporary.push_back(entry->path());
         if (HasSuffix(name, kCtrSaveJournalPreviousSuffix)) previous.push_back(entry->path());
     }
-    // <nome>.triaevum-new só existe depois que o temporário foi escrito por
-    // inteiro: é a versão confirmada e termina a troca.
+    // <name>.triaevum-new only exists after the temporary was written in
+    // full: it is the committed version and finishes the swap.
     for (const auto& path : committed) {
         const auto target = WithoutSuffix(path, kCtrSaveJournalCommittedSuffix);
         const bool finished = ReplaceCtrSaveFile(path, target);
-        if (!finished) mStranded.insert(Key(target));  // a E/S lê o .new até instalar
+        if (!finished) mStranded.insert(Key(target));  // I/O reads the .new until installed
         SaveLog("TRIAEVUM_SAVE_RECOVERED interrupted replace of %s %s", target.string().c_str(),
                 finished ? "finished" : "FAILED (reading from .triaevum-new)");
     }
-    // <nome>.triaevum-old: versão anterior tirada do lugar por uma troca. Se o
-    // arquivo sumiu (queda entre os dois renames, sem .new), ela volta; se o
-    // arquivo está lá, ele é mais novo e o .old sobrou.
+    // <name>.triaevum-old: previous version moved aside by a swap. If the
+    // file vanished (crash between the two renames, no .new), it is restored; if the
+    // file is there, it is newer and the .old is a leftover.
     for (const auto& path : previous) {
         const auto target = WithoutSuffix(path, kCtrSaveJournalPreviousSuffix);
         std::error_code fixError;
@@ -462,9 +462,9 @@ void CtrSaveJournal::RecoverOnce() {
                 present ? "leftover previous version removed" : "previous version put back",
                 fixError ? " (FAILED)" : "");
     }
-    // Temporário sem confirmação: escrita que não chegou ao Flush/Close. O
-    // save continua o anterior; o temporário vai para os backups.
-    MoveAside(mDirectory, mBackupRoot, temporary, "escrita não confirmada");
+    // Uncommitted temporary: a write that never reached Flush/Close. The
+    // save stays the previous one; the temporary goes to the backups.
+    MoveAside(mDirectory, mBackupRoot, temporary, "uncommitted write");
 }
 
 std::filesystem::path CtrSaveJournal::ActivePath(const std::filesystem::path& file) const {
@@ -486,12 +486,12 @@ bool CtrSaveJournal::Backup(const std::filesystem::path& file, bool beforeDelete
     const auto source = ActivePath(file);
     std::error_code error;
     if (!std::filesystem::is_regular_file(source, error)) {
-        mBackedUp.insert(key);  // arquivo novo nesta execução: nada a guardar
+        mBackedUp.insert(key);  // file new in this run: nothing to keep
         return true;
     }
     auto destination = Generation() / file.lexically_normal().lexically_relative(mDirectory);
-    // Apagar depois de já ter escrito nesta execução: a geração tem a versão
-    // de antes da execução; a de agora (com o progresso da sessão) vai junto.
+    // Deleting after already writing in this run: the generation has the version
+    // from before the run; the current one (with the session's progress) goes along.
     if (already) destination = WithSuffix(destination, ".apagado");
     if (!CopyBackup(source, destination)) {
         SaveLog("TRIAEVUM_SAVE_BACKUP_FAILED %s -> %s", source.string().c_str(), destination.string().c_str());
@@ -501,8 +501,8 @@ bool CtrSaveJournal::Backup(const std::filesystem::path& file, bool beforeDelete
     mBackedUp.insert(key);
     SaveLog("TRIAEVUM_SAVE_BACKUP %s -> %s", source.string().c_str(), destination.string().c_str());
     if (!mGenerationRegistered) {
-        // Primeira cópia conferida da execução: entra na ordem e roda o prune
-        // (que nunca apaga esta geração).
+        // First verified copy of the run: joins the order and runs prune
+        // (which never deletes this generation).
         mGenerationRegistered = true;
         AppendBackupOrder(mBackupRoot, mGeneration.filename().string());
         PruneCtrSaveBackups(mBackupRoot, kCtrSaveBackupGenerations, mGeneration);
@@ -525,11 +525,11 @@ bool CtrSaveJournal::BeginWrite(const std::filesystem::path& file, uint64_t& wri
         pending->second.Writers.insert(writer);
         return true;
     }
-    // Versão confirmada que ainda não entrou (rename falhou): termina antes,
-    // senão a nova transação partiria do arquivo antigo e o .new seria
-    // sobrescrito. Se ainda não dá, a escrita falha e o .new fica.
+    // Committed version not yet installed (rename failed): finish it first,
+    // otherwise the new transaction would start from the old file and the .new would be
+    // overwritten. If it still cannot, the write fails and the .new stays.
     if (mStranded.contains(key) && !InstallStranded(key)) return false;
-    // Sem backup o save continua protegido pela troca atômica: não bloqueia.
+    // Without a backup the save is still protected by the atomic swap: do not block.
     Backup(file, false);
     const auto temporary = WithSuffix(file, kCtrSaveJournalTemporarySuffix);
     std::error_code error;
@@ -537,7 +537,7 @@ bool CtrSaveJournal::BeginWrite(const std::filesystem::path& file, uint64_t& wri
                             ? CopyBytes(file, temporary)
                             : static_cast<bool>(std::ofstream(temporary, std::ios::binary | std::ios::trunc));
     if (!copied) {
-        std::filesystem::remove(temporary, error);  // cópia parcial de um original intacto
+        std::filesystem::remove(temporary, error);  // partial copy of an intact original
         return false;
     }
     mPending[key].Writers.insert(writer);
@@ -554,16 +554,16 @@ bool CtrSaveJournal::CommitNow(const std::string& key) {
     const std::filesystem::path file(key);
     const auto temporary = WithSuffix(file, kCtrSaveJournalTemporarySuffix);
     if (pending->second.Failed) {
-        // Write/SetSize falhou: o temporário tem buraco ou tamanho errado.
-        // Nunca é instalado; o save continua o anterior.
+        // Write/SetSize failed: the temporary has a hole or the wrong size.
+        // It is never installed; the save stays the previous one.
         mPending.erase(pending);
-        MoveAside(mDirectory, mBackupRoot, {temporary}, "transação com escrita que falhou");
+        MoveAside(mDirectory, mBackupRoot, {temporary}, "transaction with a failed write");
         return false;
     }
     const auto committed = WithSuffix(file, kCtrSaveJournalCommittedSuffix);
     if (!SyncToDisk(temporary, false)) return false;
     std::error_code error;
-    RenamePath(temporary, committed, error);  // destino não existe: vale no Horizon
+    RenamePath(temporary, committed, error);  // destination does not exist: works on Horizon
     if (error) return false;
     mPending.erase(pending);
     if (!ReplaceCtrSaveFile(committed, file)) {
@@ -611,8 +611,8 @@ bool CtrSaveJournal::PrepareDelete(const std::filesystem::path& file) {
     const auto key = Key(file);
     std::error_code error;
     if (mPending.erase(key) != 0U) std::filesystem::remove(WithSuffix(file, kCtrSaveJournalTemporarySuffix), error);
-    // .new que não entrou: já está no backup (.apagado); não pode voltar na
-    // recuperação depois do DeleteFile.
+    // .new that was not installed: already in the backup (.apagado); must not come back in
+    // recovery after DeleteFile.
     if (mStranded.erase(key) != 0U) std::filesystem::remove(WithSuffix(file, kCtrSaveJournalCommittedSuffix), error);
     return true;
 }
@@ -629,14 +629,14 @@ bool CtrSaveJournal::MoveSaveAsideForFormat() {
     error.clear();
     std::filesystem::rename(mDirectory, destination, error);
     if (error) {
-        // Sem rename de pasta: copia tudo, confere e só então esvazia.
+        // No directory rename: copy everything, verify, and only then empty it.
         if (!CopyTree(mDirectory, destination) || FilesIn(destination, true) != FilesIn(mDirectory, true))
             return false;
         error.clear();
         std::filesystem::remove_all(mDirectory, error);
         if (error) return false;
     }
-    // O .format anterior vai junto, ao lado da cópia (format-<data>.format).
+    // The previous .format goes along, next to the copy (format-<date>.format).
     if (std::filesystem::is_regular_file(CtrSaveFormatPath(mDirectory), error))
         CopyBytes(CtrSaveFormatPath(mDirectory), CtrSaveFormatPath(destination));
     SaveLog("TRIAEVUM_SAVE_FORMAT previous save moved to %s", destination.string().c_str());

@@ -2149,61 +2149,61 @@ GUARDS = [
           r'if \(previous == value\) \{',
           "oot3d_native_pica_frontend_tests (repeated lighting LUT write)",
           forbid=r'if \(mCaptureDelta && previous == value\)'),
-    # --- 05/11: saves à prova de perda (docs/pesquisas/2026-11-05-saves-seguros.md) ---
-    # weakly_canonical/canonical com raiz de dispositivo (sdmc:/) concatena o cwd
-    # no devkitA64 e o DeleteFile respondia CommandNotAllowed no Switch.
-    Guard("DeleteFile (Erase file) no Switch: contenção lexical, sem canonical/weakly_canonical com sdmc:/",
+    # --- 11/05: loss-proof saves (docs/SAVE_SAFETY.pt-BR.md) ---
+    # weakly_canonical/canonical with a device root (sdmc:/) prepends the cwd
+    # on devkitA64, so DeleteFile answered CommandNotAllowed on the Switch.
+    Guard("DeleteFile (Erase file) on the Switch: lexical containment, no canonical/weakly_canonical with sdmc:/",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
           r'CtrArchivePathContained\(archive->Root, \*relative\)',
           "oot3d_native_a32_ctr_fs_tests (TestArchiveContainmentLexical)",
           forbid=r'std::filesystem::(weakly_canonical|canonical|absolute)\('),
-    Guard("FormatSaveData apagava a pasta do save (remove_all); agora move para <save>-backups/format-*",
+    Guard("FormatSaveData deleted the save directory (remove_all); now moves it to <save>-backups/format-*",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
           r'journal->MoveSaveAsideForFormat\(',
           "oot3d_native_a32_ctr_fs_tests (TestFormatNeverDeletesSave)",
           forbid=r'remove_all\(mConfig\.SaveDataDirectory'),
-    # Commit por handle (05/11, rodada 2): a forma antiga journal->Commit(file.FilePath)
-    # confirmava no Close/Flush de QUALQUER handle, até só de leitura (S3).
-    Guard("escrita de save no lugar (queda no meio truncava o save): diário .triaevum-tmp/.triaevum-new, commit por handle",
+    # Per-handle commit (11/05, round 2): the old journal->Commit(file.FilePath)
+    # committed on Close/Flush of ANY handle, even a read-only one (S3).
+    Guard("in-place save write (a crash midway truncated the save): journal .triaevum-tmp/.triaevum-new, per-handle commit",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
           r'journal->BeginWrite\(file\.FilePath, file\.SaveJournalWriter\).*?'
           r'journal->Flush\(file\.FilePath, file\.SaveJournalWriter\).*?'
           r'journal->Close\(file\.FilePath, file\.SaveJournalWriter\)',
           "oot3d_native_a32_ctr_fs_tests (TestSaveWriteIsAtomic, TestReadOnlyCloseDoesNotCommit)",
           forbid=r'journal->Commit\(file\.FilePath\)'),
-    # A forma antiga (remove do destino + rename) deixava o save sumido se o rename
-    # do novo falhasse depois do remove; agora o destino vira .triaevum-old e volta.
-    Guard("troca do save no Switch (EEXIST): destino vira .triaevum-old e volta se o rename do novo falhar",
+    # The old way (remove destination + rename) lost the save if the rename
+    # of the new file failed after the remove; now the destination becomes .triaevum-old and is restored.
+    Guard("save swap on the Switch (EEXIST): destination becomes .triaevum-old and is restored if the new rename fails",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_save_safety.cpp",
           r'error == std::errc::file_exists.*?RenamePath\(destination, previous, asideError\).*?'
           r'RenamePath\(source, destination, error\);\s+if \(error\) \{.*?RenamePath\(previous, destination, backError\)',
           "oot3d_native_a32_ctr_fs_tests (TestHorizonRenameCommit, TestRenameFailureNeverLosesSave)",
           forbid=r'std::filesystem::remove\(destination, \w+\);\s+error\.clear\(\);\s+'
                  r'(std::filesystem::rename|RenamePath)\(source, destination'),
-    Guard("Write/SetSize do save que falha (SD cheio) era confirmado no Close (S2)",
+    Guard("failed save Write/SetSize (SD full) was committed on Close (S2)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
           r'if \(!success && journal != nullptr\) journal->MarkFailed\(file\.FilePath\);.*?'
           r'if \(!resized && journal != nullptr\) journal->MarkFailed\(file\.FilePath\);',
           "oot3d_native_a32_ctr_fs_tests (TestFailedWriteIsNotCommitted)"),
-    Guard("svcCloseHandle do último handle escritor confirma a transação do save (S3)",
+    Guard("svcCloseHandle of the last writer handle commits the save transaction (S3)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
           r'object->Type == "client_session:file:savedata".*?journal->Close\(object->FilePath, object->SaveJournalWriter\)',
           "oot3d_native_a32_ctr_fs_tests (TestReadOnlyCloseDoesNotCommit)"),
-    Guard("prune dos backups apagava a geração recém-criada (ordem pela data do nome; relógio para trás) (S4)",
+    Guard("backup prune deleted the just-created generation (ordered by name date; clock went back) (S4)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_save_safety.cpp",
           r'AppendBackupOrder\(mBackupRoot, mGeneration\.filename\(\)\.string\(\)\);\s+'
           r'PruneCtrSaveBackups\(mBackupRoot, kCtrSaveBackupGenerations, mGeneration\);',
           "oot3d_native_a32_ctr_fs_tests (TestBackupPruneUsesSequence)"),
-    Guard("backup truncado/estragado contava como cópia: cópia em .triaevum-tmp conferida (tamanho + checksum) (S1)",
+    Guard("truncated/corrupt backup counted as a copy: copy to .triaevum-tmp is verified (size + checksum) (S1)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_save_safety.cpp",
           r'copy\.size\(\) == bytes\.size\(\) &&\s+Checksum\(copy\) == Checksum\(bytes\).*?'
           r'const auto partial = WithSuffix\(destination, kCtrSaveJournalTemporarySuffix\);',
           "oot3d_native_a32_ctr_fs_tests (TestBackupIsVerified)"),
-    Guard("troca interrompida não era recuperada quando a execução começa por savestate (S8)",
+    Guard("interrupted swap was not recovered when the run starts from a savestate (S8)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
           r'mSaveJournal = std::make_shared<CtrSaveJournal>\(mConfig\.SaveDataDirectory\);.*?mSaveJournal->RecoverOnce\(\);',
           "oot3d_native_a32_ctr_fs_tests (TestRecoveryBeforeFirstAccess)"),
-    Guard("[compatibilidade] o save do OoT3D no Switch continua em sdmc:/switch/oot3dre/savedata",
+    Guard("[compatibility] the OoT3D save on the Switch stays at sdmc:/switch/oot3dre/savedata",
           "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
           r'const_cast<char\*>\("--save-data"\),\s+const_cast<char\*>\("sdmc:/switch/oot3dre/savedata"\)'),
 ]

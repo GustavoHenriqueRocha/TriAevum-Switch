@@ -552,8 +552,8 @@ void TestSlotEraseWithRelativeSaveRoot() {
 } // namespace
 
 
-// Super Mario 3D Land: GetFormatInfo (0x0845) antes de abrir o save e
-// FormatSaveData (0x084C) na primeira vez; sem isso o jogo ia para err:f.
+// Super Mario 3D Land: GetFormatInfo (0x0845) before opening the save and
+// FormatSaveData (0x084C) the first time; without it the game went to err:f.
 void TestSaveDataFormatInfo() {
     const auto directory =
         std::filesystem::temp_directory_path() / "triaevum_fs_format_test" / "save";
@@ -611,8 +611,8 @@ void TestSaveDataFormatInfo() {
     std::filesystem::remove_all(directory.parent_path());
 }
 
-// Extdata compartilhado de Play Coins (SharedExtSaveData 7, NAND, 0xF000000B):
-// Super Mario 3D Land abre no boot. Backend de pasta ao lado do save.
+// Play Coins shared extdata (SharedExtSaveData 7, NAND, 0xF000000B):
+// Super Mario 3D Land opens it at boot. Directory backend next to the save.
 void TestSharedExtDataPlayCoins() {
     const auto root = std::filesystem::temp_directory_path() / "triaevum_fs_extdata_test";
     const auto directory = root / "save";
@@ -658,7 +658,7 @@ void TestSharedExtDataPlayCoins() {
                 "extdata path");
     };
 
-    // Extdata compartilhado desconhecido: NotFound, sem criar nada.
+    // Unknown shared extdata: NotFound, creating nothing.
     extPath(0xF000000AU);
     call(fs, {0x080C00C2U, 7U, 2U, 12U, (12U << 14U) | 2U, buffer});
     Require(word(0) == 0x080C00C0U && word(1) == 0xC8804478U && word(2) == 0U,
@@ -673,7 +673,7 @@ void TestSharedExtDataPlayCoins() {
     Require(std::filesystem::file_size(extdata / "gamecoin.dat") == 0x14U,
             "default gamecoin.dat was not created");
 
-    // gamecoin.dat padrão pelo IPC: magic 0x4F00, 42 moedas, 2014-12-29.
+    // Default gamecoin.dat via IPC: magic 0x4F00, 42 coins, 2014-12-29.
     const std::array<uint8_t, 13> coinName{'/', 'g', 'a', 'm', 'e', 'c', 'o', 'i', 'n', '.', 'd', 'a', 't'};
     Require(memory.Fill(buffer, 16U, 0U) && memory.WriteBytes(buffer, coinName), "coin path");
     call(fs, {0x080201C2U, 0U, archive, 0U, 3U, 14U, 1U, 0U, (14U << 14U) | 2U, buffer});
@@ -688,7 +688,7 @@ void TestSharedExtDataPlayCoins() {
                 coin[0x12] == 12U && coin[0x13] == 29U,
             "gamecoin.dat default layout");
 
-    // CreateFile + Write num arquivo novo do extdata.
+    // CreateFile + Write on a new extdata file.
     const std::array<uint8_t, 7> testName{'/', 't', '.', 'b', 'i', 'n', 0};
     Require(memory.Fill(buffer, 16U, 0U) && memory.WriteBytes(buffer, testName), "test path");
     call(fs, {0x08080202U, 0U, archive, 0U, 3U, 7U, 0U, 4U, 0U, (7U << 14U) | 2U, buffer});
@@ -706,7 +706,7 @@ void TestSharedExtDataPlayCoins() {
         Require(input.read(disk.data(), 4) && disk[0] == 1 && disk[3] == 4, "extdata write on disk");
     }
 
-    // GetFormatInfo do extdata existente responde sucesso; o desconhecido, NotFound.
+    // GetFormatInfo of existing extdata answers success; unknown, NotFound.
     extPath(0xF000000BU);
     call(fs, {0x084500C2U, 7U, 2U, 12U, (12U << 14U) | 2U, buffer});
     Require(word(0) == 0x08450140U && word(1) == 0U, "extdata GetFormatInfo");
@@ -717,10 +717,10 @@ void TestSharedExtDataPlayCoins() {
 }
 
 // ---------------------------------------------------------------------------
-// 05/11: saves à prova de perda (docs/pesquisas/2026-11-05-saves-seguros.md).
-// Backend de pasta (o do NRO do Switch: SaveDataDirectory sem Filesystem).
-// Layout sintético que imita o save real do Zelda no Switch: save00.bin,
-// save03.bin e save04.bin de 5340 bytes, system.dat de 34 bytes, sem .format.
+// 11/05: loss-proof saves (docs/SAVE_SAFETY.pt-BR.md).
+// Directory backend (the Switch NRO's: SaveDataDirectory without Filesystem).
+// Synthetic layout mimicking the real Zelda save on the Switch: save00.bin,
+// save03.bin and save04.bin of 5340 bytes, system.dat of 34 bytes, no .format.
 namespace {
 namespace fs = std::filesystem;
 constexpr size_t kZeldaSaveSize = 5340U;
@@ -741,7 +741,7 @@ std::vector<uint8_t> Pattern(size_t size, uint8_t seed) {
         bytes[index] = static_cast<uint8_t>(seed + index * 31U + (index >> 7U));
     return bytes;
 }
-// Arquivos (relativos, com '/') de uma árvore; vazio se não existe.
+// Files (relative, with '/') of a tree; empty if it does not exist.
 std::vector<std::string> ListTree(const fs::path& root) {
     std::vector<std::string> names;
     std::error_code error;
@@ -770,7 +770,7 @@ fs::path FreshRoot(std::string_view name) {
     fs::create_directories(root);
     return root;
 }
-// Gerações de backup (AAAAMMDD-HHMMSS[-n]) dentro de <save>-backups.
+// Backup generations (YYYYMMDD-HHMMSS[-n]) inside <save>-backups.
 std::vector<fs::path> Generations(const fs::path& backups) {
     std::vector<fs::path> found;
     std::error_code error;
@@ -795,7 +795,7 @@ std::vector<fs::path> DirectoriesStartingWith(const fs::path& backups, std::stri
     return found;
 }
 
-// fs:USER sobre uma pasta de save, pelo mesmo caminho de IPC do jogo.
+// fs:USER over a save directory, through the game's same IPC path.
 struct DirFs {
     static constexpr uint32_t Tls = FsFixture::Tls, Cmd = FsFixture::Cmd, Path = FsFixture::Buffer;
     static constexpr uint32_t Data = 0x10000000U, DataSize = 0x4000U;
@@ -834,7 +834,7 @@ struct DirFs {
         Require(Memory.Read32(Cmd + index * 4U, &value), "reply word");
         return value;
     }
-    uint32_t PutPath(std::string_view name) {  // ASCII com '/' inicial e NUL
+    uint32_t PutPath(std::string_view name) {  // ASCII with leading '/' and NUL
         std::vector<uint8_t> bytes{'/'};
         bytes.insert(bytes.end(), name.begin(), name.end());
         bytes.push_back(0U);
@@ -858,7 +858,7 @@ struct DirFs {
         Call(Fs, {0x08040142U, 0U, archive, 0U, 3U, size, (size << 14U) | 2U, Path});
         return Word(1);
     }
-    // Escreve em pedaços de 1 KiB, como um jogo que salva por partes.
+    // Writes in 1 KiB chunks, like a game that saves in parts.
     void Write(uint32_t file, uint64_t offset, const std::vector<uint8_t>& bytes) {
         Require(bytes.size() <= DataSize, "write too large");
         Require(Memory.WriteBytes(Data, bytes), "write payload");
@@ -884,7 +884,7 @@ struct DirFs {
         Require(Word(1) == 0U, "GetSize");
         return Word(2) | (static_cast<uint64_t>(Word(3)) << 32U);
     }
-    // Versões que devolvem o resultado sem exigir sucesso (disco cheio etc.).
+    // Variants that return the result without requiring success (disk full etc.).
     uint32_t TryWrite(uint32_t file, uint64_t at, const std::vector<uint8_t>& bytes) {
         Require(bytes.size() <= DataSize && Memory.WriteBytes(Data, bytes), "write payload");
         const uint32_t length = static_cast<uint32_t>(bytes.size());
@@ -902,7 +902,7 @@ struct DirFs {
         Call(Fs, {0x080D0144U, archive, 0U, 0U, 1U, 1U, 0x1AU, Path + 0x40U, 0x1CU, Path + 0x44U});
         return Word(1);
     }
-    // svcCloseHandle direto na sessão do arquivo, sem FSFILE_Close.
+    // svcCloseHandle directly on the file session, without FSFILE_Close.
     void SvcClose(uint32_t handle) {
         State.r[0] = handle;
         NativeA32HostContext context{Process, 0U};
@@ -912,7 +912,7 @@ struct DirFs {
     }
     void Flush(uint32_t file) { Call(file, {0x08090000U}); Require(Word(1) == 0U, "Flush"); }
     void Close(uint32_t file) { Call(file, {0x08080000U}); Require(Word(1) == 0U, "Close"); }
-    void Commit(uint32_t archive) {  // ControlArchive(commit), como o OoT3D faz ao salvar
+    void Commit(uint32_t archive) {  // ControlArchive(commit), as OoT3D does when saving
         Call(Fs, {0x080D0144U, archive, 0U, 0U, 1U, 1U, 0x1AU, Path + 0x40U, 0x1CU, Path + 0x44U});
         Require(Word(1) == 0U, "ControlArchive");
     }
@@ -935,8 +935,8 @@ struct DirFs {
 };
 } // namespace
 
-// Compatibilidade: o save existente do Zelda (sem .format) abre e é lido byte
-// a byte igual, e abrir/ler não cria nada dentro nem ao lado da pasta.
+// Compatibility: the existing Zelda save (no .format) opens and reads byte
+// for byte the same, and opening/reading creates nothing inside or next to the directory.
 void TestLegacyZeldaSaveOpensUnchanged() {
     SetMasterQuestUnlockOptionForTesting(false);
     const auto root = FreshRoot("legado");
@@ -957,7 +957,7 @@ void TestLegacyZeldaSaveOpensUnchanged() {
                     "legacy file not read byte for byte");
             f.Close(file);
         }
-        // O OoT3D abre os slots para leitura e escrita (modo 3) no menu.
+        // OoT3D opens the slots for read and write (mode 3) in the menu.
         const uint32_t slot = f.OpenFile(archive, "save00.bin", 3U);
         Require(f.Read(slot, 0U, kZeldaSaveSize) == zelda.Save00, "mode 3 read");
         f.Close(slot);
@@ -969,9 +969,9 @@ void TestLegacyZeldaSaveOpensUnchanged() {
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
 
-// Escrita atômica: o jogo escreve por partes; até o Flush/Close/ControlArchive
-// o save no disco continua o antigo, e uma queda no meio não deixa o arquivo
-// meio novo meio velho. Durante a sessão o Read vê as escritas.
+// Atomic write: the game writes in parts; until Flush/Close/ControlArchive
+// the save on disk stays the old one, and a crash midway does not leave the file
+// half new, half old. During the session Read sees the writes.
 void TestSaveWriteIsAtomic() {
     SetMasterQuestUnlockOptionForTesting(false);
     const auto root = FreshRoot("atomico");
@@ -991,16 +991,16 @@ void TestSaveWriteIsAtomic() {
         std::copy(firstHalf.begin(), firstHalf.end(), expected.begin());
         Require(f.Size(file) == kZeldaSaveSize, "size during the session");
         Require(f.Read(file, 0U, kZeldaSaveSize) == expected, "Read did not see the session writes");
-        // Outro handle no mesmo arquivo também vê as escritas.
+        // Another handle on the same file also sees the writes.
         const uint32_t other = f.OpenFile(archive, "save00.bin", 1U);
         Require(f.Read(other, 0U, kZeldaSaveSize) == expected, "second handle did not see the writes");
-        // "Queda": o host morre sem Flush/Close.
+        // "Crash": the host dies without Flush/Close.
     }
     Require(ReadAll(save / "save00.bin") == zelda.Save00, "crash left save00.bin changed");
     {
         DirFs f(save);
         const uint32_t archive = f.OpenArchive();
-        // A recuperação tira o temporário de dentro do save (sem apagar: vai para os backups).
+        // Recovery moves the temporary out of the save (not deleted: it goes to the backups).
         Require(ListTree(save) == std::vector<std::string>{"save00.bin", "save03.bin", "save04.bin", "system.dat"},
                 "journal files left inside the save after recovery");
         Require(DirectoriesStartingWith(save.parent_path() / "savedata-backups", "incompleto-").size() == 1U,
@@ -1010,7 +1010,7 @@ void TestSaveWriteIsAtomic() {
         f.Write(file, 0U, fresh);
         f.Flush(file);
         Require(ReadAll(save / "save00.bin") == fresh, "Flush did not commit");
-        // ControlArchive também confirma (sequência do OoT3D: escreve, flush, commit).
+        // ControlArchive also commits (OoT3D's sequence: write, flush, commit).
         const auto again = Pattern(kZeldaSaveSize, 0xB7U);
         f.Write(file, 0U, again);
         f.Commit(archive);
@@ -1026,9 +1026,9 @@ void TestSaveWriteIsAtomic() {
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
 
-// Queda entre "temporário completo" e "trocar o arquivo": no Switch o rename
-// não sobrescreve (EEXIST), então a troca é remove + rename; quem abre depois
-// termina a troca com a versão completa.
+// Crash between "temporary complete" and "swap the file": on the Switch rename
+// does not overwrite (EEXIST), so the swap is remove + rename; whoever opens next
+// finishes the swap with the complete version.
 void TestInterruptedCommitIsFinished() {
     SetMasterQuestUnlockOptionForTesting(false);
     const auto root = FreshRoot("troca");
@@ -1036,10 +1036,10 @@ void TestInterruptedCommitIsFinished() {
     const ZeldaSave zelda;
     zelda.Write(save);
     const auto committed = Pattern(kZeldaSaveSize, 0x5AU);
-    // (a) caiu depois de apagar o antigo e antes do rename final.
+    // (a) crashed after deleting the old one and before the final rename.
     fs::remove(save / "save00.bin");
     WriteAll(save / "save00.bin.triaevum-new", committed);
-    // (b) caiu antes de apagar o antigo.
+    // (b) crashed before deleting the old one.
     WriteAll(save / "save03.bin.triaevum-new", committed);
     {
         DirFs f(save);
@@ -1055,8 +1055,8 @@ void TestInterruptedCommitIsFinished() {
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
 
-// Backup rotativo: antes da primeira escrita de cada arquivo numa execução, a
-// versão anterior vai para <save>-backups/<AAAAMMDD-HHMMSS>/.
+// Rotating backup: before the first write of each file in a run, the
+// previous version goes to <save>-backups/<YYYYMMDD-HHMMSS>/.
 void TestSaveBackupBeforeFirstWrite() {
     SetMasterQuestUnlockOptionForTesting(false);
     const auto root = FreshRoot("backup");
@@ -1101,8 +1101,8 @@ void TestSaveBackupBeforeFirstWrite() {
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
 
-// Formatação sem perda: save legado (arquivos, sem .format) não responde
-// NotFormatted, e FormatSaveData move a pasta para os backups antes de recriar.
+// Lossless format: a legacy save (files, no .format) does not answer
+// NotFormatted, and FormatSaveData moves the directory to the backups before recreating.
 void TestFormatNeverDeletesSave() {
     const auto root = FreshRoot("formato");
     const auto save = root / "savedata";
@@ -1123,14 +1123,14 @@ void TestFormatNeverDeletesSave() {
         Require(f.GetFormatInfo() == 0U && f.Word(2) == 0x10U * 512U && f.Word(4) == 16U,
                 "formatted layout");
     }
-    // Pasta vazia continua NotFormatted (como o Azahar).
+    // An empty directory stays NotFormatted (like Azahar).
     const auto empty = root / "vazio";
     fs::create_directories(empty);
     {
         DirFs f(empty);
         Require(f.GetFormatInfo() == 0xC8A04554U, "empty save must stay NotFormatted");
     }
-    // --save-data com '/' no fim: o .format fica fora da pasta, sem barra.
+    // --save-data with a trailing '/': the .format stays outside the directory, no slash.
     const auto slash = root / "barra";
     {
         DirFs f(fs::path(slash.string() + "/"));
@@ -1141,7 +1141,7 @@ void TestFormatNeverDeletesSave() {
     fs::remove_all(root);
 }
 
-// DeleteFile (Erase file do OoT3D): o arquivo apagado fica nos backups.
+// DeleteFile (OoT3D's Erase file): the deleted file is kept in the backups.
 void TestDeleteFileKeepsBackup() {
     const auto root = FreshRoot("apagar");
     const auto save = root / "savedata";
@@ -1161,9 +1161,9 @@ void TestDeleteFileKeepsBackup() {
     fs::remove_all(root);
 }
 
-// Savestate: arquivo de save aberto é guardado relativo à raiz do save
-// (restaura com outra pasta, ex.: PC -> Switch), e arquivo de extdata aberto
-// não impede o restore.
+// Savestate: an open save file is stored relative to the save root
+// (restores with another directory, e.g. PC -> Switch), and an open extdata file
+// does not block the restore.
 void TestSavestateSavePathsAreRelative() {
     SetMasterQuestUnlockOptionForTesting(false);
     const auto root = FreshRoot("savestate");
@@ -1195,8 +1195,8 @@ void TestSavestateSavePathsAreRelative() {
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
 
-// Restore de savestate com arquivo de extdata (Play Coins) aberto falhava:
-// validFilePath só aceitava caminhos dentro do save.
+// Savestate restore with an open extdata file (Play Coins) failed:
+// validFilePath only accepted paths inside the save.
 void TestSavestateWithExtDataFileOpen() {
     const auto root = FreshRoot("savestate_extdata");
     {
@@ -1219,9 +1219,9 @@ void TestSavestateWithExtDataFileOpen() {
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
 
-// Contenção do DeleteFile sem absolute/canonical: com raiz "sdmc:/..." o
-// std::filesystem do devkitA64 trata o caminho como relativo e canonical
-// concatenava o cwd (DeleteFile/Erase respondia CommandNotAllowed no Switch).
+// DeleteFile containment without absolute/canonical: with a "sdmc:/..." root
+// devkitA64's std::filesystem treats the path as relative and canonical
+// prepended the cwd (DeleteFile/Erase answered CommandNotAllowed on the Switch).
 void TestArchiveContainmentLexical() {
     for (const fs::path root : {fs::path("sdmc:/switch/x/savedata"), fs::path("sdmc:/switch/x/savedata/")}) {
         Require(CtrArchivePathContained(root, "save03.bin") && CtrArchivePathContained(root, "sub/a.bin"),
@@ -1235,7 +1235,7 @@ void TestArchiveContainmentLexical() {
                 !CtrPathWithin("sdmc:/switch/x/savedata", "sdmc:/switch/x/savedata-backups/a") &&
                 !CtrPathWithin("sdmc:/switch/x/savedata", "sdmc:/switch/x/extdata/a"),
             "CtrPathWithin");
-    // PC: subdiretório-symlink apontando para fora continua barrado.
+    // PC: a symlinked subdirectory pointing outside is still rejected.
     const auto root = FreshRoot("contencao");
     fs::create_directories(root / "save");
     fs::create_directories(root / "fora");
@@ -1243,8 +1243,8 @@ void TestArchiveContainmentLexical() {
     fs::create_directory_symlink(root / "fora", root / "save" / "link", error);
     if (!error)
         Require(!CtrArchivePathContained(root / "save", "link/a.bin"), "symlinked subdirectory accepted");
-    // Ponta a ponta pelo IPC com raiz literal "sdmc:/switch/x/savedata" (no
-    // PC é relativa ao cwd, que aponta para uma pasta temporária).
+    // End to end via IPC with the literal root "sdmc:/switch/x/savedata" (on
+    // PC it is relative to the cwd, which points to a temporary directory).
     const auto previous = fs::current_path();
     fs::current_path(root);
     const ZeldaSave zelda;
@@ -1266,7 +1266,7 @@ void TestArchiveContainmentLexical() {
     fs::remove_all(root);
 }
 
-// Troca no Switch: o rename não sobrescreve (EEXIST); o commit faz remove + rename.
+// Swap on the Switch: rename does not overwrite (EEXIST); commit does remove + rename.
 void TestHorizonRenameCommit() {
     SetMasterQuestUnlockOptionForTesting(false);
     SetCtrSaveRenameFailsOnExistingForTesting(true);
@@ -1295,8 +1295,8 @@ void TestHorizonRenameCommit() {
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
 
-// Rotação: ficam as últimas N gerações, mas a mais antiga com a única cópia
-// de um arquivo nunca é apagada; format-* e incompleto-* não entram na conta.
+// Rotation: the last N generations are kept, but the oldest one with the only copy
+// of a file is never deleted; format-* and incompleto-* are not counted.
 void TestBackupPruneKeepsOnlyCopies() {
     const auto root = FreshRoot("rotacao");
     std::vector<std::string> names;
@@ -1305,9 +1305,9 @@ void TestBackupPruneKeepsOnlyCopies() {
         std::snprintf(name, sizeof(name), "202601%02d-120000", index + 1);
         names.push_back(name);
     }
-    names.push_back("20260124-120000-2");  // mesma hora, segunda execução
+    names.push_back("20260124-120000-2");  // same time, second run
     for (const auto& name : names) WriteAll(root / name / "save00.bin", {1});
-    WriteAll(root / names[0] / "save04.bin", {4});  // única cópia
+    WriteAll(root / names[0] / "save04.bin", {4});  // only copy
     WriteAll(root / "format-20250101-000000" / "save00.bin", {7});
     WriteAll(root / "incompleto-20250101-000000" / "save00.bin.triaevum-tmp", {8});
     PruneCtrSaveBackups(root, 20U);
@@ -1332,10 +1332,10 @@ void TestSaveSiblingPaths() {
 }
 
 // ---------------------------------------------------------------------------
-// 05/11 (rodada 2): pendências da verificação adversarial (S1..S8).
+// 11/05 (round 2): open items from the adversarial review (S1..S8).
 namespace {
 #if defined(__linux__)
-// "SD cheio": RLIMIT_FSIZE faz toda escrita além de bytes falhar (EFBIG).
+// "SD full": RLIMIT_FSIZE makes every write past bytes fail (EFBIG).
 struct FileSizeLimit {
     explicit FileSizeLimit(rlim_t bytes) {
         previousHandler = std::signal(SIGXFSZ, SIG_IGN);
@@ -1353,7 +1353,7 @@ struct FileSizeLimit {
 };
 #endif
 const std::vector<std::string> kZeldaFiles{"save00.bin", "save03.bin", "save04.bin", "system.dat"};
-// Todos os arquivos regulares de todas as gerações AAAAMMDD-HHMMSS[-n].
+// All regular files of all YYYYMMDD-HHMMSS[-n] generations.
 std::vector<fs::path> BackupFiles(const fs::path& backups) {
     std::vector<fs::path> files;
     for (const auto& generation : Generations(backups))
@@ -1363,10 +1363,10 @@ std::vector<fs::path> BackupFiles(const fs::path& backups) {
 }
 } // namespace
 
-// S2: um Write (ou SetSize) que falha no meio, com o SD cheio, marca a
-// transação como falha: Close, Flush e ControlArchive não instalam o
-// temporário meio escrito; o save antigo fica e o temporário vai para
-// <save>-backups/incompleto-*. A transação seguinte recomeça do save antigo.
+// S2: a Write (or SetSize) that fails midway, with the SD full, marks the
+// transaction as failed: Close, Flush and ControlArchive do not install the
+// half-written temporary; the old save stays and the temporary goes to
+// <save>-backups/incompleto-*. The next transaction starts over from the old save.
 void TestFailedWriteIsNotCommitted() {
 #if defined(__linux__)
     SetMasterQuestUnlockOptionForTesting(false);
@@ -1378,7 +1378,7 @@ void TestFailedWriteIsNotCommitted() {
     {
         DirFs f(save);
         const uint32_t archive = f.OpenArchive();
-        // (a) Write falha e o jogo fecha o arquivo.
+        // (a) Write fails and the game closes the file.
         uint32_t file = f.OpenFile(archive, "save00.bin", 3U);
         Require(f.TryWrite(file, 0U, Pattern(1024U, 0xA1U)) == 0U, "first chunk");
         {
@@ -1392,14 +1392,14 @@ void TestFailedWriteIsNotCommitted() {
         const auto aside = DirectoriesStartingWith(backups, "incompleto-");
         Require(aside.size() == 1U && fs::exists(aside[0] / "save00.bin.triaevum-tmp"),
                 "failed transaction was not kept in incompleto-*");
-        // A transação seguinte começa do save antigo, não do temporário com erro.
+        // The next transaction starts from the old save, not the failed temporary.
         file = f.OpenFile(archive, "save00.bin", 3U);
         Require(f.Read(file, 0U, kZeldaSaveSize) == zelda.Save00, "new transaction saw the failed writes");
         const auto fresh = Pattern(kZeldaSaveSize, 0x2EU);
         f.Write(file, 0U, fresh);
         f.Close(file);
         Require(ReadAll(save / "save00.bin") == fresh, "transaction after a failed one did not commit");
-        // (b) Write falha e o jogo chama Flush: falha, nada instalado.
+        // (b) Write fails and the game calls Flush: fails, nothing installed.
         file = f.OpenFile(archive, "save03.bin", 3U);
         f.Write(file, 0U, Pattern(1024U, 0x31U));
         {
@@ -1410,7 +1410,7 @@ void TestFailedWriteIsNotCommitted() {
         Require(ReadAll(save / "save03.bin") == zelda.Save03, "Flush committed a failed transaction");
         f.TryClose(file);
         Require(ReadAll(save / "save03.bin") == zelda.Save03, "Close after Flush committed a failed transaction");
-        // (c) SetSize falha e o jogo chama ControlArchive.
+        // (c) SetSize fails and the game calls ControlArchive.
         file = f.OpenFile(archive, "save04.bin", 3U);
         f.Write(file, 0U, Pattern(512U, 0x41U));
         {
@@ -1428,11 +1428,11 @@ void TestFailedWriteIsNotCommitted() {
 #endif
 }
 
-// S3: commit por handle. Close/Flush de um handle que não escreveu (só
-// leitura) não confirma a escrita pela metade de outro handle; a transação de
-// um arquivo é confirmada quando o último handle com escrita pendente fecha
-// ou dá Flush (svcCloseHandle sem FSFILE_Close conta como Close), ou no
-// ControlArchive (commit do archive, como no 3DS).
+// S3: per-handle commit. Close/Flush of a handle that did not write (read
+// only) does not commit another handle's partial write; a file's transaction
+// is committed when the last handle with a pending write closes
+// or Flushes (svcCloseHandle without FSFILE_Close counts as Close), or on
+// ControlArchive (archive commit, as on the 3DS).
 void TestReadOnlyCloseDoesNotCommit() {
     SetMasterQuestUnlockOptionForTesting(false);
     const auto root = FreshRoot("handle_leitura");
@@ -1454,7 +1454,7 @@ void TestReadOnlyCloseDoesNotCommit() {
         f.Close(reader);
         Require(ReadAll(save / "save00.bin") == zelda.Save00,
                 "Flush/Close of a read-only handle committed another handle's partial write");
-        // Dois handles escrevendo: só o último a fechar confirma.
+        // Two handles writing: only the last to close commits.
         const uint32_t other = f.OpenFile(archive, "save00.bin", 3U);
         f.Write(other, 2048U, secondHalf);
         f.Close(other);
@@ -1462,12 +1462,12 @@ void TestReadOnlyCloseDoesNotCommit() {
                 "Close of one writer committed while another writer was still pending");
         f.Close(writer);
         Require(ReadAll(save / "save00.bin") == fresh, "last writer's Close did not commit");
-        // svcCloseHandle sem FSFILE_Close: conta como Close do handle.
+        // svcCloseHandle without FSFILE_Close: counts as the handle's Close.
         const uint32_t closer = f.OpenFile(archive, "save03.bin", 3U);
         f.Write(closer, 0U, a);
         f.SvcClose(closer);
         Require(ReadAll(save / "save03.bin") == a, "svcCloseHandle of the writer did not commit");
-        // Flush confirma; escrever de novo deixa o handle pendente outra vez.
+        // Flush commits; writing again leaves the handle pending again.
         const uint32_t again = f.OpenFile(archive, "save04.bin", 3U);
         f.Write(again, 0U, a);
         f.Flush(again);
@@ -1476,7 +1476,7 @@ void TestReadOnlyCloseDoesNotCommit() {
         const uint32_t peek = f.OpenFile(archive, "save04.bin", 1U);
         f.Close(peek);
         Require(ReadAll(save / "save04.bin") == a, "read-only Close committed a partial write after a Flush");
-        // Queda com o handle `again` pendente.
+        // Crash with handle `again` pending.
     }
     Require(ReadAll(save / "save04.bin") == a, "crash left save04.bin half written");
     {
@@ -1490,9 +1490,9 @@ void TestReadOnlyCloseDoesNotCommit() {
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
 
-// S4: a rotação ordena as gerações pela sequência de criação, não pelo nome
-// com a data (o relógio do console pode voltar), e a geração recém-criada
-// nunca é apagada pelo próprio prune.
+// S4: rotation orders generations by creation sequence, not by the name
+// with the date (the console clock can go back), and the just-created generation
+// is never deleted by its own prune.
 void TestBackupPruneUsesSequence() {
     SetMasterQuestUnlockOptionForTesting(false);
     const auto root = FreshRoot("relogio");
@@ -1500,8 +1500,8 @@ void TestBackupPruneUsesSequence() {
     const auto backups = root / "savedata-backups";
     const ZeldaSave zelda;
     zelda.Write(save);
-    // 20 gerações antigas com data no futuro (relógio adiantado na época).
-    // Sementes 0x80+ para não coincidir com o save do fixture (0x11...).
+    // 20 old generations dated in the future (clock was ahead at the time).
+    // Seeds 0x80+ so they do not collide with the fixture save (0x11...).
     for (int index = 0; index < 20; ++index) {
         char name[32];
         std::snprintf(name, sizeof(name), "20270101-0000%02d", index);
@@ -1524,13 +1524,13 @@ void TestBackupPruneUsesSequence() {
         Require(holding(bytes == &first ? zelda.Save00 : first).size() == 1U,
                 "the backup made by this run was pruned (ordered by the date in the name)");
     }
-    // A geração da primeira execução (mais nova que as 2027 pela sequência)
-    // sobrevive à segunda; quem sai são as 2027 mais antigas.
+    // The first run's generation (newer than the 2027 ones by sequence)
+    // survives the second; the oldest 2027 ones are removed.
     Require(holding(zelda.Save00).size() == 1U, "older run's generation pruned before the 2027 ones");
     Require(!fs::exists(backups / "20270101-000000") && !fs::exists(backups / "20270101-000001") &&
                 fs::exists(backups / "20270101-000002"),
             "prune did not remove the oldest generations by sequence");
-    // Direto: a geração protegida nunca sai, mesmo sendo a mais antiga.
+    // Directly: the protected generation is never removed, even when oldest.
     const auto direct = FreshRoot("relogio_direto");
     for (int index = 0; index < 3; ++index) {
         char name[32];
@@ -1544,9 +1544,9 @@ void TestBackupPruneUsesSequence() {
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
 
-// S1: a cópia de backup só conta depois de conferida (tamanho e checksum
-// contra a origem). Cópia truncada (SD cheio) ou estragada é descartada e não
-// aparece na geração com o nome do arquivo (o prune contaria como cópia).
+// S1: the backup copy only counts once verified (size and checksum
+// against the source). A truncated (SD full) or corrupt copy is discarded and does not
+// appear in the generation under the file's name (prune would count it as a copy).
 void TestBackupIsVerified() {
     SetMasterQuestUnlockOptionForTesting(false);
     const auto root = FreshRoot("backup_conferido");
@@ -1573,10 +1573,10 @@ void TestBackupIsVerified() {
     fs::remove_all(root);
     fs::create_directories(root);
 #endif
-    // SD que grava errado (mesmo tamanho, um byte trocado).
+    // An SD that writes wrong data (same size, one byte changed).
     zelda.Write(save);
     SetCtrSaveCopyFaultForTesting([&](const fs::path& destination) {
-        // Só a cópia de backup (a cópia de trabalho do diário fica no save).
+        // Only the backup copy (the journal's working copy stays in the save).
         if (!CtrPathWithin(backups, destination) || !destination.filename().string().starts_with("save03.bin"))
             return;
         std::fstream stream(destination, std::ios::binary | std::ios::in | std::ios::out);
@@ -1596,9 +1596,9 @@ void TestBackupIsVerified() {
     for (const auto& copy : BackupFiles(backups))
         Require(ReadAll(copy) == zelda.Save03, "corrupted backup copy kept (" + copy.string() + ")");
 #if defined(__linux__)
-    // Queda REAL no meio da cópia de backup (cópia cortada em 100 bytes e
-    // SIGKILL): a sobra nunca tem o nome do arquivo (o prune contaria como
-    // cópia); só <nome>.triaevum-tmp, e o save fica intacto.
+    // REAL crash midway through the backup copy (copy cut at 100 bytes and
+    // SIGKILL): the leftover never has the file's name (prune would count it as a
+    // copy); only <name>.triaevum-tmp, and the save stays intact.
     fs::remove_all(root);
     zelda.Write(save);
     const pid_t child = fork();
@@ -1628,9 +1628,9 @@ void TestBackupIsVerified() {
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
 
-// S8: a recuperação (.triaevum-new / .triaevum-old) roda no primeiro acesso
-// da execução, não só no OpenArchive: uma execução que começa pelo restore de
-// savestate ou pelo GetFormatInfo acha o save trocado.
+// S8: recovery (.triaevum-new / .triaevum-old) runs on the first access
+// of the run, not only on OpenArchive: a run that starts with a savestate
+// restore or with GetFormatInfo finds the swapped save.
 void TestRecoveryBeforeFirstAccess() {
     SetMasterQuestUnlockOptionForTesting(false);
     const auto root = FreshRoot("recupera_estado");
@@ -1646,7 +1646,7 @@ void TestRecoveryBeforeFirstAccess() {
         file = f.OpenFile(archive, "save00.bin", 1U);
         snapshot = f.Host.CaptureState();
     }
-    // Queda no meio da troca: o antigo já saiu, o novo está completo.
+    // Crash midway through the swap: the old one is gone, the new one is complete.
     fs::remove(save / "save00.bin");
     WriteAll(save / "save00.bin.triaevum-new", committed);
     {
@@ -1660,7 +1660,7 @@ void TestRecoveryBeforeFirstAccess() {
         Require(ReadAll(save / "save00.bin") == committed && ListTree(save) == kZeldaFiles,
                 "restore did not finish the interrupted commit");
     }
-    // Primeiro acesso pelo GetFormatInfo (Mario 3D Land pergunta antes de abrir).
+    // First access via GetFormatInfo (Mario 3D Land asks before opening).
     fs::remove(save / "save03.bin");
     WriteAll(save / "save03.bin.triaevum-new", committed);
     {
@@ -1673,11 +1673,11 @@ void TestRecoveryBeforeFirstAccess() {
     SetMasterQuestUnlockOptionForTesting(std::nullopt);
 }
 
-// Horizon: o rename não sobrescreve, então a troca precisa tirar o destino do
-// lugar. Se o rename do novo falha depois disso, o save não pode sumir: o
-// destino vira <nome>.triaevum-old e volta se o rename falhar; a recuperação
-// conhece .triaevum-old; e escrita nova na mesma execução não estraga o
-// .triaevum-new bom.
+// Horizon: rename does not overwrite, so the swap must move the destination out
+// of the way. If the new rename fails after that, the save must not vanish: the
+// destination becomes <name>.triaevum-old and is restored if the rename fails; recovery
+// knows .triaevum-old; and a new write in the same run does not clobber the
+// good .triaevum-new.
 void TestRenameFailureNeverLosesSave() {
     SetMasterQuestUnlockOptionForTesting(false);
     SetCtrSaveRenameFailsOnExistingForTesting(true);
@@ -1702,12 +1702,12 @@ void TestRenameFailureNeverLosesSave() {
         Require(fs::is_regular_file(save / "save00.bin"),
                 "save00.bin vanished after a failed commit rename (Horizon)");
         Require(ReadAll(save / "save00.bin.triaevum-new") == fresh, "committed data lost");
-        // Na mesma execução o jogo vê o que confirmou e não estraga o .new.
+        // In the same run the game sees what it committed and does not clobber the .new.
         file = f.OpenFile(archive, "save00.bin", 3U);
         Require(f.Read(file, 0U, kZeldaSaveSize) == fresh, "Read after a failed install");
         Require(f.TryWrite(file, 0U, more) != 0U || ReadAll(save / "save00.bin.triaevum-new") == fresh,
                 "write after a failed install clobbered the committed .triaevum-new");
-        failInstall = false;  // o SD voltou: a próxima escrita termina a troca
+        failInstall = false;  // the SD is back: the next write finishes the swap
         f.Write(file, 0U, more);
         f.Close(file);
         auto expected = fresh;
@@ -1715,8 +1715,8 @@ void TestRenameFailureNeverLosesSave() {
         Require(ReadAll(save / "save00.bin") == expected, "write after recovering the install");
         Require(ListTree(save) == kZeldaFiles, "journal leftovers after recovering the install");
     }
-    // Rename do novo e a volta do antigo falham: o save sai do lugar durante
-    // a execução, mas a próxima execução instala o .triaevum-new.
+    // Both the new rename and the old restore fail: the save is missing during
+    // the run, but the next run installs the .triaevum-new.
     failInstall = failRollback = true;
     const auto last = Pattern(kZeldaSaveSize, 0x9CU);
     {
@@ -1734,7 +1734,7 @@ void TestRenameFailureNeverLosesSave() {
         Require(ReadAll(save / "save00.bin") == last && ListTree(save) == kZeldaFiles,
                 "recovery after a double rename failure");
     }
-    // Só sobrou o .triaevum-old (destino tirado do lugar, sem .new): volta.
+    // Only the .triaevum-old is left (destination moved aside, no .new): it is restored.
     fs::rename(save / "save04.bin", save / "save04.bin.triaevum-old");
     {
         DirFs f(save);
@@ -1749,7 +1749,7 @@ void TestRenameFailureNeverLosesSave() {
 }
 
 int main(int argc, char** argv) {
-    // Sem argumento: todos. Com nomes: só esses (para ver um teste falhar sozinho).
+    // No arguments: all. With names: only those (to watch one test fail alone).
     const std::vector<std::pair<std::string_view, void (*)()>> tests{
         {"TestFullHistoryIntentionalWait", TestFullHistoryIntentionalWait},
         {"TestFsFailuresAndRestore", TestFsFailuresAndRestore},

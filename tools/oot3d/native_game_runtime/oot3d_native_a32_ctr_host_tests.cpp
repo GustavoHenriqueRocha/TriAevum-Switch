@@ -754,7 +754,7 @@ void RunAllTests() {
         "oot3d_native_a32_ctr_host_test_savedata";
     std::error_code cleanupError;
     std::filesystem::remove_all(saveDataPath, cleanupError);
-    // Backups do diário do save (<save>-backups, ao lado da pasta).
+    // Save journal backups (<save>-backups, next to the directory).
     std::filesystem::remove_all(saveDataPath.string() + "-backups", cleanupError);
     constexpr std::array<uint8_t, 16> romFsBytes{
         0x49, 0x56, 0x46, 0x43, 0x00, 0x01, 0x02, 0x03,
@@ -961,11 +961,11 @@ void RunAllTests() {
                 memory.Read32(0x1FF82088, &response) &&
                 response == writeBytes.size(),
             "SaveData File:Write did not persist the mapped payload");
-    // 05/11 (saves à prova de perda): o backend de pasta deixou de ser
-    // write-through. Write e SetSize vão para <arquivo>.triaevum-tmp e só
-    // trocam o arquivo no Flush/Close/ControlArchive, como o save transacional
-    // do 3DS; uma queda no meio não deixa mais o save metade novo. As mesmas
-    // asserções de bytes e tamanho valem no ponto de confirmação (Flush).
+    // 11/05 (loss-proof saves): the directory backend is no longer
+    // write-through. Write and SetSize go to <file>.triaevum-tmp and only
+    // swap the file on Flush/Close/ControlArchive, like the 3DS transactional
+    // save; a crash midway no longer leaves the save half new. The same
+    // byte and size assertions hold at the commit point (Flush).
     const auto persisted = [&]() {
         std::ifstream input(saveDataPath / "test.dat", std::ios::binary);
         return std::vector<uint8_t>((std::istreambuf_iterator<char>(input)),
