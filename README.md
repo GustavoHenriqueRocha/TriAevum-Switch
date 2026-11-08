@@ -61,7 +61,10 @@ HenrikoMagnifico's texture pack replaces the world, character and HUD textures w
 3. Copy the contents of `textures` (the folders and `pack.json`) to `switch/oot3dre/textures/` on the SD
    card, whatever your dump's region.
 4. In the game, L3+R3 → Video → **HD textures**. It applies at once and turns off the same way.
-   "HD texture size" (default 2x) is the most the world textures are drawn at.
+   "HD texture size" (default 2x) is the most the world textures are drawn at. Once the game has
+   checked your pack (a few seconds after HD textures come on, the first time), the menu offers only
+   sizes your pack has: 1x and 2x for the copy from step 2, up to 3x with `--models 3`, all of them for
+   the 1080p pack.
 
 Higher resolution costs some GPU time and memory (about 10–50 MB of textures per area at 2x): if a busy
 area slows down, compare the same spot with HD textures off, using the performance overlay.

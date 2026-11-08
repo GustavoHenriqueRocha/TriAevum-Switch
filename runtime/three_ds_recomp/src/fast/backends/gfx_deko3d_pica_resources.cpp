@@ -392,6 +392,7 @@ void PicaResources::BeginFrame(uint64_t frame) {
     BeginScene();
     UploadReadyReplacements();
     TrackPackChange();
+    LogPackSizes();
 }
 
 void PicaResources::UploadReadyReplacements() {
@@ -558,6 +559,30 @@ void PicaResources::LogPackChange(const char* outcome, const PackOnScreen& onScr
         static_cast<unsigned long long>(onScreen.PackImages), static_cast<unsigned long long>(onScreen.Natives),
         static_cast<unsigned long long>(onScreen.Waiting));
     mPackChange.Active = false;
+}
+
+void PicaResources::LogPackSizes() {
+    auto& runtime = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance();
+    // Lock-free until a new result.
+    if (!mPackConfigured || runtime.ImageScaleSerial() == mPackSizesSerial) {
+        return;
+    }
+    const auto sizes = runtime.ImageScaleStatus();
+    mPackSizesSerial = sizes.Serial;
+    char source[96];
+    if (sizes.Remembered) {
+        std::snprintf(source, sizeof(source), "remembered in config/%s", ::Oot3d::Renderer::kTexturePackSizesName);
+    } else {
+        std::snprintf(source, sizeof(source), "%llu PNG headers read (%zu unreadable)",
+                      static_cast<unsigned long long>(sizes.Measured + sizes.Unreadable), sizes.Unreadable);
+    }
+    Log("resources: texture pack sizes: world and model images up to %ux native (%llu measured; left out: %zu "
+        "HUD/menu in UI and MAPS, %zu without a native size in their name); %s; %llu files listed in %llu ms; "
+        "ready %llu ms after the index, pack worker busy %llu ms",
+        sizes.Largest, static_cast<unsigned long long>(sizes.Measured), sizes.Hud, sizes.Unnamed, source,
+        static_cast<unsigned long long>(sizes.Files), static_cast<unsigned long long>(sizes.ListMicros / 1000U),
+        static_cast<unsigned long long>(sizes.Micros / 1000U),
+        static_cast<unsigned long long>(sizes.BusyMicros / 1000U));
 }
 
 void PicaResources::LogScene(const PicaSceneTextureStats& stats, const char* when) {

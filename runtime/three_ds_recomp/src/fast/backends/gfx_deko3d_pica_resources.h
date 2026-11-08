@@ -248,6 +248,10 @@ class PicaResources {
     [[nodiscard]] PackOnScreen CountPackOnScreen() const;
     void LogPackChange(const char* outcome, const PackOnScreen& onScreen);
     void LogScene(const PicaSceneTextureStats& stats, const char* when);
+    // The pack's image sizes (AzaharTexturePackRuntime::ImageScaleStatus),
+    // logged once per new result (`resources: texture pack sizes`).
+    void LogPackSizes();
+    uint64_t mPackSizesSerial = 0;
     std::vector<uint64_t> mHoldHashes;
     uint64_t mSceneSerial = 0;
     uint64_t mHoldLeftMicros = 0;

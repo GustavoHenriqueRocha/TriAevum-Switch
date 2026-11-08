@@ -32,16 +32,6 @@ constexpr std::array<ScaleOption, 5> kHandheld{{{1.0F, "1x (400x240)"},
                                                 {2.0F, "2x (800x480)"},
                                                 {2.5F, "2,5x (1000x600)"},
                                                 {3.0F, "3x (720p)"}}};
-// Texture pack size cap, as a multiple of the original texture.
-struct PackScaleOption {
-  uint32_t Scale;
-  const char *Label;
-};
-constexpr std::array<PackScaleOption, 5> kPackScales{{{1U, "1x (original size)"},
-                                                      {2U, "2x (default)"},
-                                                      {3U, "3x"},
-                                                      {4U, "4x (full 1080p pack)"},
-                                                      {0U, "No limit"}}};
 
 bool ScaleCombo(const char *label, float &value, std::span<const ScaleOption> options) {
   std::string current;
@@ -228,15 +218,27 @@ private:
   void DrawTexturePack() {
     ImGui::Separator();
     bool changed = ImGui::Checkbox("HD textures (texture pack)", &mPack.Enabled);
-    const char *current = "Custom";
-    for (const auto &option : kPackScales)
-      if (option.Scale == mPack.MaxScale) current = option.Label;
+    // The sizes this pack has (azahar_pack_scale.h): known once the pack
+    // worker measured it; until then, and with HD textures off, all of them.
+    const uint32_t largest =
+        mPack.Enabled ? ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().LargestImageScale() : 0U;
+    if (largest != mScaleMenuLargest || mPack.MaxScale != mScaleMenuCap || mScaleMenu.Choices.empty()) {
+      mScaleMenu = ::Oot3d::Renderer::MakeTexturePackScaleMenu(mPack.MaxScale, largest);
+      mScaleMenuLargest = largest;
+      mScaleMenuCap = mPack.MaxScale;
+    }
+    const char *current =
+        mScaleMenu.Selected >= 0 ? mScaleMenu.Choices[static_cast<size_t>(mScaleMenu.Selected)].Label.c_str()
+                                 : "Custom";
     if (ImGui::BeginCombo("HD texture size", current)) {
-      for (const auto &option : kPackScales) {
-        const bool selected = option.Scale == mPack.MaxScale;
-        if (ImGui::Selectable(option.Label, selected)) {
-          changed |= !selected;
-          mPack.MaxScale = option.Scale;
+      for (size_t index = 0; index < mScaleMenu.Choices.size(); ++index) {
+        const auto &choice = mScaleMenu.Choices[index];
+        // A cap above the pack's largest shows the largest selected: picking
+        // it again leaves config/texture_pack_scale as it is.
+        const bool selected = static_cast<int>(index) == mScaleMenu.Selected;
+        if (ImGui::Selectable(choice.Label.c_str(), selected) && !selected) {
+          changed = true;
+          mPack.MaxScale = choice.Scale;
         }
         if (selected) ImGui::SetItemDefaultFocus();
       }
@@ -252,6 +254,10 @@ private:
                          ::Oot3d::Renderer::TexturePackDisplayFolder(mPack.Folder).c_str());
     if (!mPackError.empty())
       ImGui::TextWrapped("Could not write config/%s.", mPackError.c_str());
+    if (mScaleMenuLargest != 0U)
+      ImGui::TextDisabled("Only the sizes this pack has: its world and character textures go up to %ux "
+                          "(the HUD stays at most 3x).",
+                          mScaleMenuLargest);
     ImGui::TextDisabled("Applies at once. Larger sizes use more memory and GPU time.");
   }
 
@@ -366,6 +372,9 @@ private:
   ::Oot3d::Renderer::TexturePackSettings mPack;
   bool mPackFound = false;
   std::string mPackError;
+  ::Oot3d::Renderer::TexturePackScaleMenu mScaleMenu;
+  uint32_t mScaleMenuLargest = 0;
+  uint32_t mScaleMenuCap = 0;
   Fast::Oot3d::GrassSwitchMode mGrassBoot = Fast::Oot3d::GrassSwitchMode::Off;
   Fast::Oot3d::GrassSwitchMode mGrass = Fast::Oot3d::GrassSwitchMode::Off;
   bool mGrassError = false;

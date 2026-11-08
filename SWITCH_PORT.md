@@ -2152,7 +2152,8 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - **Settings:** `config/texture_pack` present = HD textures on (first line, optional: another
   folder). `config/texture_pack_scale`: the size cap as a multiple of the native texture, `0` = no
   cap, `1`–`8`; absent = 2. The Video tab writes both ("HD textures", "HD texture size": 1x, 2x
-  default, 3x, 4x, No limit) and says when `switch/oot3dre/textures/` (or the configured folder)
+  default, 3x, 4x, No limit, or only the sizes the pack has once it is measured: see "HD texture
+  size: only the sizes the pack has" below) and says when `switch/oot3dre/textures/` (or the configured folder)
   does not exist. Turning HD textures off deletes `config/texture_pack`; a custom folder line comes
   back when they are turned on again in the same session, but not after a restart while off.
 - **Applies at once:** the tab publishes the values (`LiveTexturePackSettings`), and the deko3d
@@ -2467,6 +2468,62 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   ground, Link and the houses are the pack's again (before: native until another area), and `deko3d.txt`
   has `texture pack change took effect (on, cap 3x)` with `again once it was ready` > 0 and `W` 0. Then
   "HD texture size" 2x: the same line with `cap 2x`.
+
+### HD texture size: only the sizes the pack has (`config/texture_pack_sizes`, 08/11)
+- **Report (test.13):** "if we have 3x textures max, the setting shouldn't show 4." The cap only reduces
+  (above), so a size above the pack's largest world/model image draws the same as that largest one.
+- **What the user's SD has [INFERENCE]:** world at 2x, models at 3x (the default shrunk copy with the
+  `--models 3` overlay copied over it). `logs21/deko3d.txt:695-712` toggles the cap with the same 21 pack
+  images drawn: 1x `uploaded 21 (3 MiB)`, 2x `(6 MiB)`, 3x `(8 MiB)`, 4x and No limit `(8 MiB)`: some of
+  them are bigger than 2x, none bigger than 3x (to the MiB). Menu textures are HUD images (3x whatever the
+  cap), so the change comes from world/model images. The local copies (`textures-switch`,
+  `textures-switch-models-3x`) measure 2x and 3x; the 1080p pack 32x (17 world images at 32x).
+- **Measure (pack worker, `azahar_pack_scale.h`):** once the index is ready, the files the index uses,
+  without the `UI` and `MAPS` folders (HUD and menu art, capped at 3x apart; the folders
+  `shrink_texture_pack.py` treats as the HUD). The native size comes from the Azahar name,
+  `tex1_<W>x<H>_<hash>_<fmt>_mip0.png`: a `mipN` file above 0 or a name that only `pack.json`'s
+  `textures` map gives has none and is left out (counted). Each PNG's size is read from its IHDR header (24
+  bytes, unbuffered, no decode). An image's scale is the smallest cap that keeps it whole,
+  `max(ceil(W / w), ceil(H / h))`; the pack's is the largest.
+- **Never before HD textures:** the measure runs one step at a time (plan, one folder listed, the record,
+  16 headers) on the pack worker, and only while no decode is queued or running on any worker, no dump, no
+  index, no scene list write (`ImageScaleScanRunnableLocked`); while the other workers decode, it looks
+  again every 100 ms. A decode queued meanwhile waits for at most one step, on the pack worker only (the
+  other world worker takes it). The index itself only copies the paths it found (about 2,000).
+- **Remembered:** `config/texture_pack_sizes`, one line `<sum> <files> <bytes> <largest> <measured>`:
+  the pack's fingerprint (every file below the folder, path and size, summed in any order) and the result.
+  At the next start the folder is listed and, with the same fingerprint, the result is taken without
+  reading a header. On the Switch the listing reads the sizes from the directory reads themselves
+  (`fsDirRead`; a `stat` would open every file); elsewhere `std::filesystem`. A pack copied again at other
+  sizes (same names) changes sizes, so it is measured again. A size cap change indexes the same folder
+  again: the result stays (the menu does not flicker) and is not logged again; another folder, or HD
+  textures off, forgets it until measured.
+- **Menu:** 1x up to the largest (labelled `the largest in this pack`), No limit only when an image is
+  larger than 4x (`No limit (up to Nx in this pack)`): the 2x copy offers 1x and 2x, the 1080p pack every
+  size. A saved cap above the largest (or 0) shows the largest selected; choosing it again writes nothing,
+  so `config/texture_pack_scale` keeps its value and its meaning. Before the first result, and with HD
+  textures off, the five sizes as before. A cap of 5–7 under a larger pack stays "Custom".
+- **Cost:** the index lists the same ~2,000 files in 1282 ms at start and 322–436 ms after a change
+  (`logs21/deko3d.txt:27`, `:695-712`, `:760`, `:764`). The listing here is the same walk without the
+  index work, and the first measure opens ~1,800 files [INFERENCE: about 0.5–1 ms each on the SD card, so
+  1–2 s of the pack worker's idle time once per pack; later starts only list]. On the PC (WSL, ext4):
+  2,009 files listed in 14 ms, 1,812 headers in 40 ms in all; remembered 20 ms; the 1080p pack 52 ms.
+  Logged once per result: `resources: texture pack sizes: world and model images up to Nx native (M
+  measured; left out: H HUD/menu in UI and MAPS, U without a native size in their name); R PNG headers read
+  (B unreadable) | remembered in config/texture_pack_sizes; F files listed in L ms; ready T ms after the
+  index, pack worker busy W ms`.
+- **Shrink script:** not changed. A size recorded by it would describe one run: the `--models 3` overlay
+  brings its own `pack.json` over the base copy's, and a cap is not the size the files reached, so the
+  console would measure anyway; the record above makes later starts as quick.
+- Tests: `oot3d_texture_pack_scale_tests` (`PackImageScales`: IHDR, names, mips, odd names, HUD
+  folders, scale against `CappedReplacementSize`, plan with a mapped file twice, fingerprint, record;
+  `ScaleMenu`: unknown, 1x/2x/3x/4x/32x packs, caps above the largest), `oot3d_azahar_texture_pack_tests`
+  (`MeasuresThePacksLargestImageScaleAndRemembersIt`: 3x with a mip 1, a mapped name and an 8x HUD image
+  left out; kept through a cap change; 0 when off; remembered at the next start; measured again after a
+  file changed size; standalone build). Guards.
+- **Console check:** L3+R3 > Video with HD textures on: "HD texture size" offers 1x, 2x, 3x on the SD
+  above (3x labelled the largest), and `deko3d.txt` has `texture pack sizes: … up to 3x` once; the next
+  start says `remembered`.
 
 ### HUD against the mod's screenshots (07/11, test.9 report)
 - **Report:** two images (`2026110713043700-…` and `2026110713045100-…`), "the normal looks better but

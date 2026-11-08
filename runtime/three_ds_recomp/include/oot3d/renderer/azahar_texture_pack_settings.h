@@ -20,12 +20,16 @@
 //   textures drawn while the pack's index was being built (at start, or after
 //   a change in the Video tab), which then stay native until evicted (the
 //   behaviour before 08/11); absent = on.
+// - config/texture_pack_sizes: written by the pack worker, the pack's largest
+//   world/model image scale with the pack's fingerprint (azahar_pack_scale.h):
+//   the Video tab offers only the sizes the pack has.
 //
 // The Video tab writes the files and publishes the values in
 // LiveTexturePackSettings(); the renderer applies a new revision at the start
 // of its next frame.
 
 #include "oot3d/renderer/azahar_hud_image_list.h"
+#include "oot3d/renderer/azahar_pack_scale.h"
 #include "oot3d/renderer/azahar_scene_image_list.h"
 #include "oot3d/renderer/azahar_texture_pack.h"
 
@@ -176,6 +180,7 @@ struct TexturePackSettings {
     if (!config.empty()) configuration.HudImageList = config / kTexturePackHudListName;
     if (!config.empty() && settings.ScenePreload)
         configuration.SceneImageList = config / kTexturePackSceneListName;
+    if (!config.empty()) configuration.ImageScaleRecord = config / kTexturePackSizesName;
     return configuration;
 }
 

@@ -1,5 +1,7 @@
-// Texture pack size cap, mipmaps and the HD textures setting
-// (azahar_texture_scale.h, azahar_texture_pack_settings.h).
+// Texture pack size cap, mipmaps, the HD textures setting and the sizes a pack
+// has (azahar_texture_scale.h, azahar_texture_pack_settings.h,
+// azahar_pack_scale.h).
+#include "oot3d/renderer/azahar_pack_scale.h"
 #include "oot3d/renderer/azahar_texture_pack_settings.h"
 #include "oot3d/renderer/azahar_texture_scale.h"
 
@@ -8,7 +10,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -352,6 +356,136 @@ void ToggleCache() {
           "publish bumps the revision");
 }
 
+// The PNG header, the native size in an Azahar name, the HUD folders, the
+// scale of one image and the files a pack's index gives to measure.
+void PackImageScales() {
+  // Signature, IHDR length 13, "IHDR", width 300, height 0x10000.
+  std::vector<uint8_t> png{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, 'I', 'H', 'D', 'R',
+                           0, 0, 0x01, 0x2C, 0, 1, 0, 0, 8, 6, 0, 0, 0};
+  Require(ReadPngSize(png) == TextureSize{300, 0x10000}, "IHDR width and height, big-endian");
+  Require(!ReadPngSize(std::span<const uint8_t>(png.data(), 23)), "short header");
+  auto bad = png;
+  bad[1] = 'J';
+  Require(!ReadPngSize(bad), "not a PNG");
+  bad = png;
+  bad[12] = 'X';
+  Require(!ReadPngSize(bad), "first chunk not IHDR");
+  bad = png;
+  bad[18] = bad[19] = 0;
+  Require(!ReadPngSize(bad), "zero width");
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("oot3d_pack_scale_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::create_directories(root);
+  { std::ofstream(root / "a.png", std::ios::binary).write(reinterpret_cast<const char *>(png.data()), png.size()); }
+  { std::ofstream(root / "short.png", std::ios::binary) << "\x89PNG"; }
+  Require(ReadPngFileSize(root / "a.png") == TextureSize{300, 0x10000}, "header read from a file");
+  Require(!ReadPngFileSize(root / "short.png") && !ReadPngFileSize(root / "missing.png"), "short or missing file");
+  std::filesystem::remove_all(root);
+
+  Require(AzaharNativeSizeFromName("tex1_64x32_0123456789ABCDEF_5_mip0.png") == TextureSize{64, 32}, "Azahar name");
+  Require(AzaharNativeSizeFromName("tex1_8x8_ab_0_mip0.PNG") == TextureSize{8, 8}, "short lowercase hash, any extension");
+  Require(AzaharNativeSizeFromName("tex1_16x16_0123456789ABCDEF_2.png") == TextureSize{16, 16}, "no mip part");
+  Require(!AzaharNativeSizeFromName("tex1_64x32_0123456789ABCDEF_5_mip1.png"), "mip 1: not the native size");
+  Require(!AzaharNativeSizeFromName("grass.png") && !AzaharNativeSizeFromName("TEX1_64x32_01_5_mip0.png") &&
+              !AzaharNativeSizeFromName("tex1_64_32_01_5_mip0.png") &&
+              !AzaharNativeSizeFromName("tex1_0x32_01_5_mip0.png") &&
+              !AzaharNativeSizeFromName("tex1_64x32_zz_5_mip0.png") &&
+              !AzaharNativeSizeFromName("tex1_64x32_01_5_mip0_n.png") &&
+              !AzaharNativeSizeFromName("tex1_64x32__5_mip0.png"),
+          "odd names: no native size");
+
+  Require(IsHudPackPath("UI/tex.png") && IsHudPackPath("maps/a/tex.png") && IsHudPackPath("Ui/x.png"),
+          "UI and MAPS at the top, any case");
+  Require(!IsHudPackPath("ENVIRONMENT/UI/tex.png") && !IsHudPackPath("UI.png") && !IsHudPackPath("LINK/tex.png"),
+          "other folders, or a file named UI");
+
+  // The smallest cap that keeps the image whole (CappedReplacementSize).
+  for (const auto &[native, image, scale] :
+       {std::tuple{TextureSize{8, 8}, TextureSize{16, 16}, 2U}, std::tuple{TextureSize{8, 8}, TextureSize{17, 16}, 3U},
+        std::tuple{TextureSize{8, 4}, TextureSize{24, 8}, 3U}, std::tuple{TextureSize{64, 64}, TextureSize{32, 32}, 1U},
+        std::tuple{TextureSize{8, 8}, TextureSize{256, 256}, 32U}, std::tuple{TextureSize{8, 8}, TextureSize{8, 8}, 1U}}) {
+    Require(ImageScaleOf(native, image) == scale, "image scale");
+    Require(CappedReplacementSize(native, image, scale) == image, "the scale keeps the image");
+    Require(scale == 1U || CappedReplacementSize(native, image, scale - 1U) != image, "one less reduces it");
+  }
+
+  // The index's files: each once, HUD art and names without a native size apart.
+  const std::filesystem::path pack = "sdmc:/switch/oot3dre/textures";
+  const auto plan = PlanPackScaleScan(
+      pack, {pack / "LINK/tex1_8x8_11_0_mip0.png", pack / "UI/tex1_8x8_12_0_mip0.png",
+             pack / "ENVIRONMENT/grass.png", pack / "ENVIRONMENT/tex1_16x8_13_0_mip0.png",
+             pack / "LINK/tex1_8x8_11_0_mip0.png" /* a file pack.json maps to a second hash */,
+             pack / "MAPS/tex1_8x8_14_0_mip0.png", pack / "EFFECTS/tex1_8x8_15_0_mip1.png"});
+  Require(plan.Files.size() == 2U && plan.Hud == 2U && plan.Unnamed == 2U, "plan: 2 measured, 2 HUD, 2 unnamed");
+  Require(plan.Files[0].Path == pack / "ENVIRONMENT/tex1_16x8_13_0_mip0.png" &&
+              plan.Files[0].Native == TextureSize{16, 8} && plan.Files[1].Native == TextureSize{8, 8},
+          "plan: native sizes from the names");
+
+  // The fingerprint: any order, and a file of another size is another pack.
+  PackFingerprint first, second, resized, renamed;
+  first.Add("ENVIRONMENT/a.png", 100);
+  first.Add("pack.json", 20);
+  second.Add("pack.json", 20);
+  second.Add("ENVIRONMENT\\a.png", 100);
+  resized.Add("ENVIRONMENT/a.png", 101);
+  resized.Add("pack.json", 20);
+  renamed.Add("ENVIRONMENT/b.png", 100);
+  renamed.Add("pack.json", 20);
+  Require(first == second && first.Files == 2U && first.Bytes == 120U, "fingerprint: order and separators");
+  Require(!(first == resized) && !(first == renamed), "fingerprint: a size or a name changed");
+
+  const PackScaleRecord record{first, 3U, 1234U};
+  Require(ParsePackScaleRecord(FormatPackScaleRecord(record)) == record, "record round trip");
+  Require(!ParsePackScaleRecord("") && !ParsePackScaleRecord("zz 1 2 3 4") && !ParsePackScaleRecord("1 2 3 4") &&
+              !ParsePackScaleRecord("1 2 3 4 5 6"),
+          "damaged record");
+}
+
+// "HD texture size": only the sizes the pack has.
+void ScaleMenu() {
+  const auto scales = [](const TexturePackScaleMenu &menu) {
+    std::vector<uint32_t> result;
+    for (const auto &choice : menu.Choices) result.push_back(choice.Scale);
+    return result;
+  };
+  const auto selected = [](const TexturePackScaleMenu &menu) {
+    return menu.Selected < 0 ? 99U : menu.Choices[static_cast<size_t>(menu.Selected)].Scale;
+  };
+  // Not known (HD textures off, not measured yet): as before.
+  auto menu = MakeTexturePackScaleMenu(2U, 0U);
+  Require(scales(menu) == std::vector<uint32_t>{1, 2, 3, 4, 0} && selected(menu) == 2U &&
+              menu.Choices[1].Label == "2x (default)" && menu.Choices[3].Label == "4x (full 1080p pack)",
+          "unknown: every size");
+  Require(MakeTexturePackScaleMenu(6U, 0U).Selected == -1, "unknown: a cap the menu does not name is Custom");
+  // The 2x copy shrink_texture_pack.py writes: 1x and 2x.
+  menu = MakeTexturePackScaleMenu(2U, 2U);
+  Require(scales(menu) == std::vector<uint32_t>{1, 2} && selected(menu) == 2U &&
+              menu.Choices[1].Label == "2x (default, the largest in this pack)",
+          "2x pack: 1x and 2x");
+  // A saved cap above the pack's largest shows the largest (the file is kept).
+  for (const uint32_t cap : {3U, 4U, 8U, 0U}) {
+    Require(selected(MakeTexturePackScaleMenu(cap, 2U)) == 2U, "cap above a 2x pack: 2x shown");
+  }
+  Require(selected(MakeTexturePackScaleMenu(1U, 2U)) == 1U, "cap below the largest: as saved");
+  // With models at 3x (--models 3).
+  menu = MakeTexturePackScaleMenu(4U, 3U);
+  Require(scales(menu) == std::vector<uint32_t>{1, 2, 3} && selected(menu) == 3U &&
+              menu.Choices[2].Label == "3x (the largest in this pack)",
+          "3x pack: up to 3x");
+  Require(scales(MakeTexturePackScaleMenu(2U, 1U)) == std::vector<uint32_t>{1} &&
+              MakeTexturePackScaleMenu(2U, 1U).Choices[0].Label == "1x (original size, the largest in this pack)",
+          "1x pack");
+  Require(scales(MakeTexturePackScaleMenu(2U, 4U)) == std::vector<uint32_t>{1, 2, 3, 4}, "4x pack: no No limit");
+  // The full 1080p pack (world images up to 32x): every size.
+  menu = MakeTexturePackScaleMenu(0U, 32U);
+  Require(scales(menu) == std::vector<uint32_t>{1, 2, 3, 4, 0} && selected(menu) == 0U &&
+              menu.Choices[4].Label == "No limit (up to 32x in this pack)",
+          "1080p pack: every size");
+  Require(selected(MakeTexturePackScaleMenu(3U, 32U)) == 3U, "1080p pack, cap 3");
+  Require(MakeTexturePackScaleMenu(6U, 32U).Selected == -1, "1080p pack, cap 6: Custom");
+  Require(selected(MakeTexturePackScaleMenu(6U, 5U)) == 0U, "cap 6 above a 5x pack: No limit");
+}
+
 } // namespace
 
 int main() {
@@ -364,6 +498,8 @@ int main() {
   HudImageList();
   SceneImageList();
   PreloadAndHoldSettings();
+  PackImageScales();
+  ScaleMenu();
   std::puts("oot3d_texture_pack_scale_tests: ok");
   return 0;
 }

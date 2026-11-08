@@ -1,4 +1,5 @@
 #include "oot3d/renderer/azahar_texture_pack.h"
+#include "oot3d/renderer/azahar_pack_scale.h"
 #include "oot3d/renderer/azahar_hud_image_list.h"
 #include "oot3d/renderer/azahar_scene_image_list.h"
 #include "oot3d/renderer/azahar_texture_scale.h"
@@ -9,6 +10,9 @@
 #include <nlohmann/json.hpp>
 #include <stb_image.h>
 #include <zlib.h>
+#if defined(__SWITCH__)
+#include <switch.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -530,6 +534,62 @@ struct LoadJob {
     std::shared_ptr<std::promise<AzaharImageLoadResult>> EditorImage;
 };
 
+// One folder of the pack, for its fingerprint (azahar_pack_scale.h): the size
+// of each regular file, and its folders. On the Switch from the directory
+// reads themselves (fsDirRead returns each file's size: no file is opened,
+// where a stat would open each one); elsewhere, or if that fails,
+// std::filesystem.
+struct PackFolderListing {
+    std::vector<std::pair<std::string, uint64_t>> Files;
+    std::vector<std::string> Folders;
+};
+
+PackFolderListing ListPackFolder(const std::filesystem::path& folder) {
+    PackFolderListing listing;
+#if defined(__SWITCH__)
+    FsFileSystem* device = nullptr;
+    char native[FS_MAX_PATH] = {};
+    FsDir directory;
+    if (fsdevTranslatePath(folder.string().c_str(), &device, native) != -1 && device != nullptr &&
+        R_SUCCEEDED(fsFsOpenDirectory(device, native, FsDirOpenMode_ReadDirs | FsDirOpenMode_ReadFiles, &directory))) {
+        std::vector<FsDirectoryEntry> entries(64U);
+        s64 count = 0;
+        while (R_SUCCEEDED(fsDirRead(&directory, &count, entries.size(), entries.data())) && count > 0) {
+            for (s64 index = 0; index < count; ++index) {
+                const auto& entry = entries[static_cast<size_t>(index)];
+                if (entry.type == FsDirEntryType_Dir) {
+                    listing.Folders.emplace_back(entry.name);
+                } else if (entry.type == FsDirEntryType_File) {
+                    listing.Files.emplace_back(entry.name, static_cast<uint64_t>(std::max<s64>(0, entry.file_size)));
+                }
+            }
+        }
+        fsDirClose(&directory);
+        return listing;
+    }
+#endif
+    std::error_code error;
+    for (std::filesystem::directory_iterator
+             iterator(folder, std::filesystem::directory_options::skip_permission_denied, error),
+         end;
+         iterator != end && !error; iterator.increment(error)) {
+        std::error_code entryError;
+        if (iterator->is_directory(entryError)) {
+            listing.Folders.push_back(iterator->path().filename().string());
+        } else if (iterator->is_regular_file(entryError)) {
+            const uint64_t size = iterator->file_size(entryError);
+            if (!entryError) listing.Files.emplace_back(iterator->path().filename().string(), size);
+        }
+    }
+    return listing;
+}
+
+// The pack's image scale (azahar_pack_scale.h) is measured a few PNG headers
+// at a time, so that a decode queued meanwhile waits for at most these; while
+// decodes are still running, the pack worker looks again this often.
+constexpr size_t kImageScaleHeadersPerStep = 16U;
+constexpr std::chrono::milliseconds kImageScaleRecheck{100};
+
 } // namespace
 
 uint64_t AzaharCityHash64(std::span<const uint8_t> bytes) noexcept {
@@ -613,10 +673,15 @@ class AzaharTexturePackRuntime::Impl {
         ResetScenePreloadLocked();
         mSceneListAppend.clear();
         const auto title = Hex16(mConfiguration.TitleId);
+        const auto previousLoadDirectory = std::move(mLoadDirectory);
         mLoadDirectory = mConfiguration.LoadDirectory.empty()
             ? mConfiguration.UserDirectory / "load" / "textures" / title : mConfiguration.LoadDirectory;
         mDumpDirectory = mConfiguration.DumpDirectory.empty()
             ? mConfiguration.UserDirectory / "dump" / "textures" / title : mConfiguration.DumpDirectory;
+        // A size cap change indexes the same folder again: the Video tab keeps
+        // the pack's sizes meanwhile. Another folder, or HD textures off,
+        // forgets them.
+        if (!mConfiguration.LoadCustomTextures || mLoadDirectory != previousLoadDirectory) ForgetImageScaleLocked();
         RequestRebuildLocked();
     }
 
@@ -767,6 +832,12 @@ class AzaharTexturePackRuntime::Impl {
     bool IndexReady() const {
         std::scoped_lock lock(mMutex);
         return mConfigured && mIndexReady;
+    }
+    uint32_t LargestImageScale() const { return mLargestImageScale.load(std::memory_order_relaxed); }
+    uint64_t ImageScaleSerial() const { return mImageScaleSerial.load(std::memory_order_acquire); }
+    AzaharImageScaleStatus ImageScaleStatus() const {
+        std::scoped_lock lock(mMutex);
+        return mImageScaleStatus;
     }
     AzaharHudPackStatus HudStatus() const {
         std::scoped_lock lock(mMutex);
@@ -1122,10 +1193,189 @@ class AzaharTexturePackRuntime::Impl {
     void RequestRebuildLocked() {
         ++mRebuildSerial;
         mRebuildRequested = true;
+        // The new index starts its own measure (StartImageScaleScanLocked).
+        mImageScaleScan.Active = false;
         mWorkAvailable.notify_all();
     }
+
+    // The pack's largest world/model image scale (azahar_pack_scale.h): from
+    // the new index on, one step at a time on the pack worker, only while
+    // ImageScaleScanRunnableLocked. Steps: plan the files to measure; list
+    // the pack's folders (fingerprint); compare with the result kept for this
+    // folder, then ImageScaleRecord; read the PNG headers; publish and
+    // remember.
+    struct ImageScaleScan {
+        bool Active = false;
+        uint64_t Generation = 0;
+        std::filesystem::path Root, Record;
+        std::vector<std::filesystem::path> Indexed; // the index's files, until planned
+        bool Planned = false;
+        PackScalePlan Plan;
+        std::vector<std::string> Folders; // still to list, below Root ("" = Root)
+        PackFingerprint Fingerprint;
+        bool RecordChecked = false;
+        size_t Next = 0; // Plan.Files measured
+        uint32_t Largest = 0;
+        uint64_t Measured = 0;
+        size_t Unreadable = 0;
+        uint64_t ListMicros = 0, BusyMicros = 0;
+        std::chrono::steady_clock::time_point Start;
+    };
+    void StartImageScaleScanLocked(const AzaharTexturePackConfiguration& configuration,
+                                   const std::filesystem::path& root, std::vector<std::filesystem::path> indexed) {
+        mImageScaleScan = {};
+        mImageScaleScan.Active = true;
+        mImageScaleScan.Generation = mGeneration;
+        mImageScaleScan.Root = root;
+        mImageScaleScan.Record = configuration.ImageScaleRecord;
+        mImageScaleScan.Indexed = std::move(indexed);
+        mImageScaleScan.Folders.emplace_back();
+        mImageScaleScan.Start = std::chrono::steady_clock::now();
+    }
+    void ForgetImageScaleLocked() {
+        mImageScaleKnown.reset();
+        mLargestImageScale.store(0U, std::memory_order_relaxed);
+    }
+    void FinishImageScaleScanLocked(const PackScaleRecord& record, bool remembered) {
+        auto& scan = mImageScaleScan;
+        mImageScaleKnown = record;
+        AzaharImageScaleStatus status;
+        status.Serial = mImageScaleStatus.Serial + 1U;
+        status.Largest = record.Largest;
+        status.Remembered = remembered;
+        status.Measured = record.Measured;
+        status.Hud = scan.Plan.Hud;
+        status.Unnamed = scan.Plan.Unnamed;
+        status.Unreadable = scan.Unreadable;
+        status.Files = scan.Fingerprint.Files;
+        status.ListMicros = scan.ListMicros;
+        status.BusyMicros = scan.BusyMicros;
+        status.Micros = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - scan.Start)
+                .count());
+        mImageScaleStatus = status;
+        mLargestImageScale.store(record.Largest, std::memory_order_relaxed);
+        mImageScaleSerial.store(status.Serial, std::memory_order_release);
+        scan.Active = false;
+    }
+    // Lowest priority: nothing else for any pack worker, decodes running included.
+    bool ImageScaleScanRunnableLocked() const {
+        return mImageScaleScan.Active && mImageScaleScan.Generation == mGeneration && mPendingLoads == 0U &&
+               mLoadJobs.empty() && mUiLoadJobs.empty() && mDumpJobs.empty() && !mRebuildRequested && !mBuilding &&
+               mSceneListAppend.empty() && !mSceneListWriting;
+    }
+    void StepImageScaleScan() {
+        enum class Step : uint8_t { Plan, List, Record, Headers, Finish };
+        Step step = Step::Finish;
+        uint64_t generation = 0;
+        std::filesystem::path root, record;
+        std::vector<std::filesystem::path> indexed;
+        std::string folder;
+        std::vector<PackScaleFile> batch;
+        {
+            std::scoped_lock lock(mMutex);
+            auto& scan = mImageScaleScan;
+            if (!scan.Active || scan.Generation != mGeneration) return;
+            generation = scan.Generation;
+            root = scan.Root;
+            record = scan.Record;
+            if (!scan.Planned) {
+                step = Step::Plan;
+                indexed = std::move(scan.Indexed);
+            } else if (!scan.Folders.empty()) {
+                step = Step::List;
+                folder = std::move(scan.Folders.back());
+                scan.Folders.pop_back();
+            } else if (!scan.RecordChecked) {
+                step = Step::Record;
+            } else if (scan.Next < scan.Plan.Files.size()) {
+                step = Step::Headers;
+                const size_t end = std::min(scan.Plan.Files.size(), scan.Next + kImageScaleHeadersPerStep);
+                batch.assign(scan.Plan.Files.begin() + static_cast<std::ptrdiff_t>(scan.Next),
+                             scan.Plan.Files.begin() + static_cast<std::ptrdiff_t>(end));
+            }
+        }
+        // Off the lock.
+        const auto begin = std::chrono::steady_clock::now();
+        PackScalePlan plan;
+        PackFolderListing listing;
+        std::optional<PackScaleRecord> remembered;
+        uint32_t largest = 0U;
+        uint64_t measured = 0U;
+        size_t unreadable = 0U;
+        switch (step) {
+        case Step::Plan: plan = PlanPackScaleScan(root, std::move(indexed)); break;
+        case Step::List: listing = ListPackFolder(folder.empty() ? root : root / folder); break;
+        case Step::Record:
+            if (std::ifstream file(record, std::ios::binary); !record.empty() && file) {
+                std::string line;
+                std::getline(file, line);
+                remembered = ParsePackScaleRecord(line);
+            }
+            break;
+        case Step::Headers:
+            for (const auto& file : batch) {
+                if (const auto size = ReadPngFileSize(file.Path)) {
+                    largest = std::max(largest, ImageScaleOf(file.Native, *size));
+                    ++measured;
+                } else {
+                    ++unreadable;
+                }
+            }
+            break;
+        case Step::Finish: break;
+        }
+        const auto micros = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - begin).count());
+        std::optional<PackScaleRecord> write;
+        {
+            std::scoped_lock lock(mMutex);
+            auto& scan = mImageScaleScan;
+            if (!scan.Active || scan.Generation != generation) return;
+            scan.BusyMicros += micros;
+            switch (step) {
+            case Step::Plan:
+                scan.Plan = std::move(plan);
+                scan.Planned = true;
+                break;
+            case Step::List:
+                scan.ListMicros += micros;
+                for (auto& name : listing.Folders)
+                    scan.Folders.push_back(folder.empty() ? std::move(name) : folder + "/" + name);
+                for (const auto& [name, size] : listing.Files)
+                    scan.Fingerprint.Add(folder.empty() ? name : folder + "/" + name, size);
+                break;
+            case Step::Record:
+                scan.RecordChecked = true;
+                if (mImageScaleKnown && mImageScaleKnown->Fingerprint == scan.Fingerprint) {
+                    scan.Active = false; // the same pack, indexed again (a size cap change)
+                } else if (remembered && remembered->Fingerprint == scan.Fingerprint) {
+                    FinishImageScaleScanLocked(*remembered, true);
+                } else {
+                    ForgetImageScaleLocked(); // another pack in the folder: not known until measured
+                }
+                break;
+            case Step::Headers:
+                scan.Next += batch.size();
+                scan.Largest = std::max(scan.Largest, largest);
+                scan.Measured += measured;
+                scan.Unreadable += unreadable;
+                break;
+            case Step::Finish:
+                write = PackScaleRecord{scan.Fingerprint, scan.Largest, scan.Measured};
+                FinishImageScaleScanLocked(*write, false);
+                if (record.empty()) write.reset();
+                break;
+            }
+        }
+        // An SD write, off the lock.
+        if (write) std::ofstream(record, std::ios::binary | std::ios::trunc) << FormatPackScaleRecord(*write);
+    }
+
     void Rebuild(const AzaharTexturePackConfiguration& configuration, uint64_t serial,
                  const std::filesystem::path& loadDirectory, const std::filesystem::path& dumpDirectory) {
+        // The paths the new index uses, for the image scale measured after it.
+        std::vector<std::filesystem::path> indexedPaths;
         PackState pack;
         bool dumpModern = true;
         size_t unsupported = 0;
@@ -1159,6 +1409,10 @@ class AzaharTexturePackRuntime::Impl {
                 const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
                 sceneList = ParseSceneImageList(text);
             }
+        }
+        if (error.empty() && configuration.LoadCustomTextures) {
+            indexedPaths.reserve(index.size());
+            for (const auto& [hash, texture] : index) indexedPaths.push_back(texture.Path);
         }
         std::optional<std::vector<HudImageEntry>> hudListRewrite;
         std::optional<std::vector<SceneImageEntry>> sceneListRewrite;
@@ -1202,6 +1456,11 @@ class AzaharTexturePackRuntime::Impl {
                 }
                 if (error.empty()) hudListRewrite = PreloadHudImagesLocked(configuration, hudList);
                 if (error.empty()) sceneListRewrite = LoadSceneListsLocked(configuration, sceneList);
+                if (error.empty() && configuration.LoadCustomTextures) {
+                    StartImageScaleScanLocked(configuration, loadDirectory, std::move(indexedPaths));
+                } else {
+                    ForgetImageScaleLocked();
+                }
             }
         }
         // Lines of a pack no longer installed are dropped from the list, under
@@ -1496,15 +1755,22 @@ class AzaharTexturePackRuntime::Impl {
             AzaharTexturePackConfiguration configuration;
             std::filesystem::path loadDirectory, dumpDirectory;
             uint64_t rebuild = 0;
-            bool loading = false;
+            bool loading = false, measuring = false;
             std::string sceneLines;
             std::filesystem::path sceneList;
             {
                 std::unique_lock lock(mMutex);
-                mWorkAvailable.wait(lock, [&] {
+                const auto ready = [&] {
                     return mStopping || mRebuildRequested || !mLoadJobs.empty() || !mDumpJobs.empty() ||
-                           !mSceneListAppend.empty();
-                });
+                           !mSceneListAppend.empty() || ImageScaleScanRunnableLocked();
+                };
+                // A measure waiting for the other workers' decodes looks again
+                // now and then (they do not wake this worker).
+                if (mImageScaleScan.Active) {
+                    mWorkAvailable.wait_for(lock, kImageScaleRecheck, ready);
+                } else {
+                    mWorkAvailable.wait(lock, ready);
+                }
                 if (mRebuildRequested) {
                     rebuild = mRebuildSerial;
                     configuration = mConfiguration;
@@ -1523,9 +1789,16 @@ class AzaharTexturePackRuntime::Impl {
                 } else if (!mDumpJobs.empty()) {
                     dump = std::move(mDumpJobs.front());
                     mDumpJobs.pop_front();
-                } else if (mStopping) return;
+                } else if (mStopping) {
+                    return;
+                } else if (ImageScaleScanRunnableLocked()) {
+                    measuring = true;
+                } else {
+                    continue;
+                }
             }
             if (rebuild != 0) { Rebuild(configuration, rebuild, loadDirectory, dumpDirectory); continue; }
+            if (measuring) { StepImageScaleScan(); continue; }
             // New scene list lines: an SD append, off the lock.
             if (!sceneLines.empty()) {
                 if (!sceneList.empty()) std::ofstream(sceneList, std::ios::binary | std::ios::app) << sceneLines;
@@ -1610,6 +1883,14 @@ class AzaharTexturePackRuntime::Impl {
     std::unordered_map<uint64_t, ScenePreload> mScenePreloaded;
     std::unordered_set<uint64_t> mSceneOnSight;
     uint64_t mScenePreloadBytes = 0U;
+    // The pack's image scale: the measure running, the last result for this
+    // folder (kept through a size cap change), its details and the published
+    // values (0 = not known).
+    ImageScaleScan mImageScaleScan;
+    std::optional<PackScaleRecord> mImageScaleKnown;
+    AzaharImageScaleStatus mImageScaleStatus;
+    std::atomic<uint32_t> mLargestImageScale{0U};
+    std::atomic<uint64_t> mImageScaleSerial{0U};
 };
 
 AzaharTexturePackRuntime::AzaharTexturePackRuntime() : mImpl(std::make_unique<Impl>()) {
@@ -1677,6 +1958,18 @@ uint64_t AzaharTexturePackRuntime::Generation() const {
 
 bool AzaharTexturePackRuntime::IndexReady() const {
     return mImpl->IndexReady();
+}
+
+uint32_t AzaharTexturePackRuntime::LargestImageScale() const {
+    return mImpl->LargestImageScale();
+}
+
+uint64_t AzaharTexturePackRuntime::ImageScaleSerial() const {
+    return mImpl->ImageScaleSerial();
+}
+
+AzaharImageScaleStatus AzaharTexturePackRuntime::ImageScaleStatus() const {
+    return mImpl->ImageScaleStatus();
 }
 
 AzaharHudPackStatus AzaharTexturePackRuntime::HudStatus() const {

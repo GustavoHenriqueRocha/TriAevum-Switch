@@ -36,6 +36,10 @@ struct AzaharTexturePackConfiguration {
     // when the game enters the scene (NoteScene); the images a scene asks for
     // are appended. Empty = no scene lists, no preload.
     std::filesystem::path SceneImageList;
+    // Where the pack's largest world/model image scale is remembered with the
+    // pack's fingerprint (azahar_pack_scale.h). Empty = measured each time,
+    // not remembered.
+    std::filesystem::path ImageScaleRecord;
 
     bool operator==(const AzaharTexturePackConfiguration&) const = default;
 };
@@ -201,6 +205,23 @@ struct AzaharScenePackStatus {
     size_t Dropped = 0;           // decodes of the scene before still queued at the change
 };
 
+// The pack's largest world and model image, as the smallest size cap that
+// keeps all of them whole (azahar_pack_scale.h): measured on the pack worker
+// after the index, only while no decode, dump or index is waiting.
+struct AzaharImageScaleStatus {
+    uint64_t Serial = 0;          // grows with each new result
+    uint32_t Largest = 0;         // 0: none measured
+    bool Remembered = false;      // from ImageScaleRecord (same fingerprint), no header read
+    uint64_t Measured = 0;        // world/model images whose size was read (or remembered)
+    size_t Hud = 0;               // indexed HUD/menu art (UI, MAPS), left out
+    size_t Unnamed = 0;           // indexed images without a native size in their name, left out
+    size_t Unreadable = 0;        // headers that could not be read
+    uint64_t Files = 0;           // files the pack folder has (fingerprint)
+    uint64_t ListMicros = 0;      // listing them (sizes)
+    uint64_t BusyMicros = 0;      // the pack worker's time on it, listing included
+    uint64_t Micros = 0;          // from the index to the result
+};
+
 // RAM the images decoded ahead for a scene may hold before a draw uses them
 // (released after the upload, as every world image): 3x cap with mips, a
 // dungeon's whole list is ~65 MiB.
@@ -266,6 +287,13 @@ class AzaharTexturePackRuntime final {
     // (AzaharTextureResolveResult::NativeHashAvailable false): the caller has to
     // ask again once it is ready, nothing remembers it.
     [[nodiscard]] bool IndexReady() const;
+    // The pack's largest world/model image scale (0 = not known: HD textures
+    // off, or not measured yet). Lock-free, for the Video tab every frame.
+    // Kept while a size cap change re-indexes the same folder.
+    [[nodiscard]] uint32_t LargestImageScale() const;
+    // Grows with each new result (lock-free); its details.
+    [[nodiscard]] uint64_t ImageScaleSerial() const;
+    [[nodiscard]] AzaharImageScaleStatus ImageScaleStatus() const;
     // The game's scene (render thread, in frame order, at each change; -1
     // outside gameplay). The queued world decodes of the scene before are
     // dropped (a draw asks again for what it still needs), its unused images

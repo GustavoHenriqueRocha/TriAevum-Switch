@@ -1169,4 +1169,97 @@ TEST_F(Oot3dAzaharTexturePackTest, TexturesDrawnWhileThePackIndexesResolveOnceIt
 }
 #endif
 
+// L3+R3 > Video offers the sizes the pack has: once the index is ready, the
+// pack worker measures the largest world/model image from the PNG headers (HUD
+// art in UI left out, names without a native size skipped), remembers it with
+// the pack's fingerprint, keeps it through a size cap change, and measures
+// again when the pack changed.
+TEST_F(Oot3dAzaharTexturePackTest, MeasuresThePacksLargestImageScaleAndRemembersIt) {
+    using namespace Oot3d::Renderer;
+    using namespace std::chrono_literals;
+    const auto pack = Root / "sizes";
+    const auto record = Root / "config" / kTexturePackSizesName;
+    std::filesystem::create_directories(pack / "ENVIRONMENT");
+    std::filesystem::create_directories(pack / "UI");
+    std::filesystem::create_directories(Root / "config");
+    {
+        std::ofstream output(pack / "pack.json");
+        output << nlohmann::json{{"options", {{"use_new_hash", true}}},
+                                 {"textures", {{"00000000000000AB", "odd_name.png"}}}};
+    }
+    const auto image = [](const std::filesystem::path& path, uint32_t width, uint32_t height) {
+        WriteAzaharTexturePng(path, width, height, std::vector<uint8_t>(static_cast<size_t>(width) * height * 4U, 255U));
+    };
+    const auto world = pack / "ENVIRONMENT";
+    image(world / MakeAzaharTextureFilename(8U, 8U, 0x11U, 0U, 0U), 16U, 16U);  // 2x
+    image(world / MakeAzaharTextureFilename(8U, 8U, 0x11U, 0U, 1U), 64U, 64U);  // its mip 1: not the indexed file
+    image(world / MakeAzaharTextureFilename(8U, 4U, 0x12U, 0U, 0U), 24U, 8U);   // 3x on one axis
+    image(world / MakeAzaharTextureFilename(8U, 8U, 0x14U, 0U, 1U), 64U, 64U);  // only a mip 1: no native size
+    image(world / "odd_name.png", 128U, 128U);                                  // pack.json's name map
+    image(pack / "UI" / MakeAzaharTextureFilename(8U, 8U, 0x13U, 0U, 0U), 64U, 64U); // HUD, 8x
+    const auto waitForResult = [](const AzaharTexturePackRuntime& runtime, uint64_t after) {
+        for (int tries = 0; tries < 500 && runtime.ImageScaleSerial() <= after; ++tries) std::this_thread::sleep_for(10ms);
+        return runtime.ImageScaleSerial() > after;
+    };
+    const AzaharTexturePackConfiguration configuration{.LoadCustomTextures = true, .UserDirectory = Root,
+                                                       .LoadDirectory = pack, .MaxReplacementScale = 2U,
+                                                       .ImageScaleRecord = record};
+    {
+        AzaharTexturePackRuntime runtime;
+        EXPECT_EQ(runtime.LargestImageScale(), 0U);
+        runtime.Configure(configuration);
+        ASSERT_TRUE(waitForResult(runtime, 0U));
+        const auto status = runtime.ImageScaleStatus();
+        EXPECT_EQ(status.Largest, 3U);
+        EXPECT_EQ(runtime.LargestImageScale(), 3U);
+        EXPECT_FALSE(status.Remembered);
+        EXPECT_EQ(status.Measured, 2U);
+        EXPECT_EQ(status.Hud, 1U);
+        EXPECT_EQ(status.Unnamed, 2U);
+        EXPECT_EQ(status.Unreadable, 0U);
+        EXPECT_EQ(status.Files, 7U); // pack.json and the six images
+        std::ifstream file(record);
+        std::string line;
+        std::getline(file, line);
+        const auto remembered = ParsePackScaleRecord(line);
+        ASSERT_TRUE(remembered.has_value());
+        EXPECT_EQ(remembered->Largest, 3U);
+        EXPECT_EQ(remembered->Measured, 2U);
+        EXPECT_EQ(remembered->Fingerprint.Files, 7U);
+
+        // A size cap change indexes the same pack again: the sizes stay known.
+        auto otherCap = configuration;
+        otherCap.MaxReplacementScale = 4U;
+        runtime.Configure(otherCap);
+        EXPECT_EQ(runtime.LargestImageScale(), 3U);
+        runtime.WaitForPendingLoads();
+        std::this_thread::sleep_for(300ms);
+        EXPECT_EQ(runtime.LargestImageScale(), 3U);
+        EXPECT_EQ(runtime.ImageScaleSerial(), status.Serial); // same pack: no new result
+
+        // HD textures off: not known.
+        auto off = configuration;
+        off.LoadCustomTextures = false;
+        runtime.Configure(off);
+        EXPECT_EQ(runtime.LargestImageScale(), 0U);
+    }
+    {
+        // The next start lists the pack and finds it remembered.
+        AzaharTexturePackRuntime runtime;
+        runtime.Configure(configuration);
+        ASSERT_TRUE(waitForResult(runtime, 0U));
+        EXPECT_TRUE(runtime.ImageScaleStatus().Remembered);
+        EXPECT_EQ(runtime.LargestImageScale(), 3U);
+    }
+    // The pack copied again at other sizes (same names): measured again.
+    image(world / MakeAzaharTextureFilename(8U, 4U, 0x12U, 0U, 0U), 40U, 20U); // 5x
+    {
+        AzaharTexturePackRuntime runtime;
+        runtime.Configure(configuration);
+        ASSERT_TRUE(waitForResult(runtime, 0U));
+        EXPECT_FALSE(runtime.ImageScaleStatus().Remembered);
+        EXPECT_EQ(runtime.LargestImageScale(), 5U);
+    }
+}
+
 } // namespace

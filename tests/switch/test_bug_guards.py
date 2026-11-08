@@ -326,7 +326,8 @@ GUARDS = [
           r'dkQueueSubmitCommands\(mQueue, list\);\s+dkQueueFlush\(mQueue\);'),
     Guard("deko3d pack images: finished ones upload at frame top, never one barrier per draw mid-frame",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_resources.cpp",
-          r'Evict\(\);\s+BeginScene\(\);\s+UploadReadyReplacements\(\);\s+TrackPackChange\(\);\s+\}',
+          r'Evict\(\);\s+BeginScene\(\);\s+UploadReadyReplacements\(\);\s+TrackPackChange\(\);\s+'
+          r'(?:LogPackSizes\(\);\s+)?\}',
           forbid=r'PollOrQueue\(\s*native\.PackHash, static_cast<uint16_t>\(view\.Width\)'),
     # --- 07/11: colour compression (config/deko3d_compression "0" = off). The display controller can't
     # read compressed images: window images handed to nwindow without dkQueuePresentImage stay uncompressed.
@@ -1655,6 +1656,28 @@ GUARDS = [
           "runtime/three_ds_recomp/include/oot3d/renderer/azahar_texture_pack_settings.h",
           r'return !replacement && packOn && unindexed && indexReady \? TexturePackEntryAction::Rebuild',
           "oot3d_texture_pack_scale_tests (ToggleCache)"),
+    # --- 08/11 (TexSizes, test.13 report): "if we have 3x textures max, the setting shouldn't show 4." The
+    # Video tab offers only the sizes the pack has, measured by the pack worker when it has nothing else to
+    # do (SWITCH_PORT.md "HD texture size: only the sizes the pack has").
+    Guard("the pack's image scale is measured only while no decode, dump or index waits on any pack worker",
+          "runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_pack.cpp",
+          r'return mImageScaleScan\.Active && mImageScaleScan\.Generation == mGeneration && mPendingLoads == 0U &&\s+'
+          r'mLoadJobs\.empty\(\) && mUiLoadJobs\.empty\(\) && mDumpJobs\.empty\(\) && !mRebuildRequested && !mBuilding &&.*?'
+          r'\} else if \(mStopping\) \{\s+return;\s+\} else if \(ImageScaleScanRunnableLocked\(\)\) \{\s+measuring = true;',
+          "oot3d_azahar_texture_pack_tests (MeasuresThePacksLargestImageScaleAndRemembersIt)"),
+    Guard("the Video tab offers the sizes the pack has, and keeps a saved cap above them unwritten",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'mPack\.Enabled \? ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.LargestImageScale\(\) : 0U;.*?'
+          r'MakeTexturePackScaleMenu\(mPack\.MaxScale, largest\).*?'
+          r'if \(ImGui::Selectable\(choice\.Label\.c_str\(\), selected\) && !selected\) \{',
+          "oot3d_texture_pack_scale_tests (ScaleMenu)",
+          forbid=r'kPackScales'),
+    Guard("a saved cap at or above the pack's largest image shows the largest (No limit only above 4x)",
+          "runtime/three_ds_recomp/include/oot3d/renderer/azahar_pack_scale.h",
+          r'if \(largest == 0U \|\| largest > kTexturePackLargestNamedScale\) \{.*?'
+          r'if \(largest != 0U && \(cap == 0U \|\| cap >= largest\)\)\s+'
+          r'shown = largest > kTexturePackLargestNamedScale \? 0U : largest;',
+          "oot3d_texture_pack_scale_tests (ScaleMenu)"),
     Guard("deko3d grass keeps placements on the SD card (config/grass_placement_cache)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
           r'if \(placementCache\) \{\s+state->Placements->SetCacheDirectory\(',
