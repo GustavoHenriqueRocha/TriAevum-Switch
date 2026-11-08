@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -117,6 +118,11 @@ constexpr uint32_t kFsOpenArchiveResponse = 0x080C00C0U;
 constexpr uint32_t kFsControlArchiveRequest = 0x080D0144U;
 constexpr uint32_t kFsControlArchiveResponse = 0x080D0040U;
 constexpr uint32_t kFsCloseArchiveRequest = 0x080E0080U;
+constexpr uint32_t kFsGetFormatInfoRequest = 0x084500C2U;
+constexpr uint32_t kFsGetFormatInfoResponse = 0x08450140U;
+constexpr uint32_t kFsFormatSaveDataRequest = 0x084C0242U;
+constexpr uint32_t kFsFormatSaveDataResponse = 0x084C0040U;
+constexpr uint32_t kFsNotFormatted = 0xC8A04554U;
 constexpr uint32_t kFsCloseArchiveResponse = 0x080E0040U;
 constexpr uint32_t kFsInvalidArchiveHandle = 0xC8804465U;
 constexpr uint32_t kFsFileNotFound = 0xC8804470U;
@@ -132,6 +138,34 @@ constexpr uint32_t kInvalidBufferDescriptor = 0xD9001830U;
 constexpr uint32_t kInvalidSessionHandle = 0xD8E007F7U;
 constexpr uint32_t kSessionClosed = 0xC920181AU;
 constexpr uint32_t kFsSaveDataArchiveId = 4U;
+// ExtSaveData (6, the title's own) and SharedExtSaveData (7, system: Play
+// Coins 0xF000000B etc.). Directory backend: <save parent>/extdata/<media>/
+// <id high>/<id low>/ (CtrExtDataDirectory). 12-byte binary path:
+// u32 media, u32 id low, u32 id high (like Azahar).
+constexpr uint32_t kFsExtSaveDataArchiveId = 6U;
+constexpr uint32_t kFsSharedExtSaveDataArchiveId = 7U;
+constexpr uint32_t kFsExtDataNotFound = 0xC8804478U;
+constexpr uint32_t kFsCreateExtSaveDataRequest = 0x08510242U;
+constexpr uint32_t kFsCreateExtSaveDataResponse = 0x08510042U;
+constexpr uint32_t kPlayCoinsExtDataLow = 0xF000000BU;
+
+inline bool IsCtrExtDataArchiveId(uint32_t id) {
+    return id == kFsExtSaveDataArchiveId || id == kFsSharedExtSaveDataArchiveId;
+}
+
+inline std::filesystem::path CtrExtDataBaseDirectory(const std::filesystem::path& saveDirectory) {
+    auto normal = saveDirectory.lexically_normal();
+    if (!normal.has_filename()) normal = normal.parent_path();
+    return normal.parent_path() / "extdata";
+}
+
+inline std::filesystem::path CtrExtDataDirectory(const std::filesystem::path& saveDirectory,
+                                                 uint32_t media, uint32_t low, uint32_t high) {
+    char highText[9], lowText[9];
+    std::snprintf(highText, sizeof(highText), "%08x", high);
+    std::snprintf(lowText, sizeof(lowText), "%08x", low);
+    return CtrExtDataBaseDirectory(saveDirectory) / std::to_string(media) / highText / lowText;
+}
 constexpr uint32_t kFileReadRequest = 0x080200C2U;
 constexpr uint32_t kFileReadResponse = 0x08020082U;
 constexpr uint32_t kFileWriteRequest = 0x08030102U;

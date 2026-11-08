@@ -67,7 +67,9 @@ void TestPaths() {
     Require(IsManagedInstallPath(good), "accept a runtime path");
   for (const char *bad :
        {"", "/oot3d_native_game.nro", "../x", "a/../b", "./x", "game/romfs.bin", "Game/romfs.bin",
-        "savedata/save.bin", "logs/perf.txt", "config/renderer", "CONFIG/fps60", "update/pending.json",
+        "savedata/save.bin", "savedata/save00.bin.triaevum-tmp", "SaveData/system.dat",
+        "savedata-backups/20261108-120000/save00.bin", "savedata-backups/incompleto-x/a.bin",
+        "savedata.format", "savedata.icon", "savestates/state-1.oot3dsav", "logs/perf.txt", "config/renderer", "CONFIG/fps60", "update/pending.json",
         "game_language.json", "oot3d_native_game.nro.old", "x.new", "x.tmp", "a//b", "a\\b",
         "a b", ".hidden", "a/b/c/d/e", "config", "sd:/x"})
     if (IsManagedInstallPath(bad)) {
@@ -315,6 +317,8 @@ void TestInstall() {
   Write(root / "shadercache/deko3d.pack", "PACK");
   Write(root / "resources.o2r", "OLD");
   Write(root / "savedata/save.bin", "SAVE");
+  Write(root / "savedata-backups/20261108-120000/save.bin", "BACKUP");
+  Write(root / "savedata-backups/.triaevum-geracoes", "20261108-120000\n");
   const auto manifest = ManifestFor(newNro, 6);
   Write(root / "oot3d_native_game.nro.new", newNro);
   Write(root / "shadercache/deko3d.pack.new", "NEW!");
@@ -341,7 +345,10 @@ void TestInstall() {
   Require(Read(root / "resources.o2r") == "NEW" && Read(root / "shadercache/deko3d.pack") == "NEW!" &&
               !fs::exists(root / "resources.o2r.old") && !fs::exists(root / kPendingJournal),
           "the next start swaps the remaining files");
-  Require(Read(root / "savedata/save.bin") == "SAVE", "saves are untouched");
+  Require(Read(root / "savedata/save.bin") == "SAVE" &&
+              Read(root / "savedata-backups/20261108-120000/save.bin") == "BACKUP" &&
+              Read(root / "savedata-backups/.triaevum-geracoes") == "20261108-120000\n",
+          "saves and save backups are untouched");
   Require(ApplyPendingUpdate(root, 6).empty(), "nothing left to do");
 
   // A commit with an incomplete download changes nothing.

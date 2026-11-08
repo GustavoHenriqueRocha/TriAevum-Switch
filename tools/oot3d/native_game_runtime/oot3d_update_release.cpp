@@ -246,11 +246,16 @@ bool IsManagedInstallPath(std::string_view relative) {
   // FAT is case-insensitive: compare lower case.
   const std::string lower = Lower(relative);
   const std::string first = Lower(components.front());
-  static constexpr std::array<std::string_view, 7> kPlayerDirectories{
-      "game", "savedata", "logs", "config", "update", "lab", "bench"};
+  static constexpr std::array<std::string_view, 8> kPlayerDirectories{
+      "game", "savedata", "savestates", "logs", "config", "update", "lab", "bench"};
   // The player's data, also as a plain file name.
   if (std::find(kPlayerDirectories.begin(), kPlayerDirectories.end(), first) != kPlayerDirectories.end())
     return false;
+  // The save's siblings: savedata-backups/ (rotating backups, incomplete
+  // writes, formatted saves) and savedata.format / savedata.icon
+  // (oot3d_native_a32_ctr_save_safety.h). Anything named savedata* is the
+  // player's.
+  if (first.starts_with("savedata")) return false;
   if (lower == "game_language.json" || lower == "boot-status.txt") return false;
   const auto endsWith = [&](std::string_view suffix) {
     return lower.size() >= suffix.size() && lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) == 0;

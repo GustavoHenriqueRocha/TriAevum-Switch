@@ -19,6 +19,7 @@
 
 namespace Oot3dNativeGame {
 
+class CtrSaveJournal;
 class Oot3dNativePicaFrontend;
 class Oot3dPicaCommandListCompositionProvider;
 struct Oot3dGspCommandPacket;
@@ -385,6 +386,9 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         uint64_t FileSize = 0;
         uint32_t FileOpenMode = 0;
         bool FileClosed = false;
+        // Save file on the directory backend: this handle's identifier
+        // as a journal writer (CtrSaveJournal; 0 = has not written yet).
+        uint64_t SaveJournalWriter = 0;
         std::shared_ptr<NativeA32CtrFile> FileBackend;
         std::shared_ptr<RomFsBackingFile> RomFsBacking;
         std::optional<uint32_t> MappedAddress;
@@ -533,6 +537,11 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     std::vector<SynchronizationWaiter> mSynchronizationWaiters;
     std::vector<SleepWaiter> mSleepWaiters;
     std::vector<ArchiveRecord> mArchives;
+    // Save journal on the directory backend (oot3d_native_a32_ctr_save_safety.h):
+    // atomic writes, backups and recovery. Once per run; a savestate restore
+    // passes the same object along.
+    std::shared_ptr<CtrSaveJournal> mSaveJournal;
+    CtrSaveJournal* SaveJournal();
     uint16_t mNextSlot = 0;
     uint16_t mNextGeneration = 1;
     uint32_t mFallbackPc = 0;
