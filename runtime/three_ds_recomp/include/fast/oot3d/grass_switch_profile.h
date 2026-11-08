@@ -34,16 +34,23 @@ enum class GrassSwitchMode : uint8_t { Off, Placements, Draw };
 // how far the grass reaches.
 // - Near (absent file, "near"): full density to 1000 units at 60 fps (1600
 //   at 30), then thinning with distance.
-// - Far ("far"): full density to twice that, thinning to a farther end.
 // - Area ("area"): every tuft of the area's placements, no distance
 //   thinning or end; the visible cap is what the stream memory holds, the
 //   nearest clusters first when it bites.
-enum class GrassSwitchDistance : uint8_t { Near, Far, Area };
+// Far ("far", full density to twice Near's) was removed after test.15: it
+// cost the most in small areas (Kokiri Forest 1.43 ms at its 16k cap) and
+// added nothing Whole area does not. A saved "far" reads as Area (grass far
+// away, what that player chose); the file keeps its word until the option
+// is changed.
+enum class GrassSwitchDistance : uint8_t { Near, Area };
 
-[[nodiscard]] GrassSwitchDistance ParseGrassSwitchDistance(std::optional<std::string_view> fileText) noexcept;
-// "near", "far" or "area" (the log's `distance=` too).
+// `retiredFar` (optional): set when the file says the removed "far".
+[[nodiscard]] GrassSwitchDistance ParseGrassSwitchDistance(std::optional<std::string_view> fileText,
+                                                           bool* retiredFar = nullptr) noexcept;
+// "near" or "area" (the log's `distance=` too).
 [[nodiscard]] std::string_view GrassSwitchDistanceWord(GrassSwitchDistance distance) noexcept;
-[[nodiscard]] GrassSwitchDistance ReadGrassSwitchDistance(const std::filesystem::path& configDirectory);
+[[nodiscard]] GrassSwitchDistance ReadGrassSwitchDistance(const std::filesystem::path& configDirectory,
+                                                          bool* retiredFar = nullptr);
 // Writes config/grass_distance (removes it for Near); false when that failed.
 [[nodiscard]] bool SaveGrassSwitchDistance(const std::filesystem::path& configDirectory,
                                            GrassSwitchDistance distance);
@@ -146,8 +153,8 @@ struct GrassSwitchProfile {
     float SingleBladeDistance = 400.0F;
     // Fill near the camera (GrassStreamFillMultiplier): FillDistance /
     // distance tufts per placement tuft, within FillRadius of it, so the grass
-    // around Link covers the screen as the full-density band does. Near and
-    // Far: FullDensityDistance; Whole area: Near's.
+    // around Link covers the screen as the full-density band does. Near:
+    // FullDensityDistance; Whole area: Near's.
     float FillDistance = 1000.0F;
     float FillRadius = 18.0F;
     uint32_t MaxVisibleInstances = 8000U;
@@ -162,9 +169,8 @@ inline constexpr float kGrassWholeAreaDistance = 100000.0F;
 
 // Near: 60 fps (60 FPS presented) ≤8k visible, full density to 1000 units,
 // thinning to 4000; 30 fps: the frame has 33 ms, so 22k visible, full
-// density to 1600, thinning to 5000. Far: full density to twice that,
-// thinning to 6000 (8000), at most 16k (40k). Area: kGrassWholeAreaInstances,
-// no distance. Thinned tufts are drawn wider. L3+R3 > Video > FPS and
+// density to 1600, thinning to 5000. Area: kGrassWholeAreaInstances, no
+// distance. Thinned tufts are drawn wider. L3+R3 > Video > FPS and
 // "Grass distance" switch between them while the game runs
 // (Deko3dSetGrassFrameRate, PublishGrassSwitchDistance).
 [[nodiscard]] GrassSwitchProfile SelectGrassSwitchProfile(bool fps60, GrassSwitchDistance distance) noexcept;

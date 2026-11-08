@@ -307,25 +307,19 @@ TEST(Oot3dGrassSwitchProfile, ConfigFileMeaning) {
     std::filesystem::remove_all(dir);
 }
 
-// L3+R3 > Video > "Grass distance": Near is the profile of before, Far
-// doubles the full-density distance, Whole area keeps every tuft. Only
-// what each cull job reads changes, so the switch applies at once.
+// L3+R3 > Video > "Grass distance": Near is the profile of before, Whole
+// area keeps every tuft (Far was removed after test.15). Only what each
+// cull job reads changes, so the switch applies at once.
 TEST(Oot3dGrassSwitchProfile, GrassDistanceModes) {
     for (const bool fps60 : {true, false}) {
         const auto near = SelectGrassSwitchProfile(fps60, GrassSwitchDistance::Near);
-        const auto far = SelectGrassSwitchProfile(fps60, GrassSwitchDistance::Far);
         const auto area = SelectGrassSwitchProfile(fps60, GrassSwitchDistance::Area);
         EXPECT_EQ(near.FullDensityDistance, fps60 ? 1000.0F : 1600.0F);
         EXPECT_EQ(near.MaxVisibleInstances, fps60 ? 8000U : 22000U);
-        EXPECT_EQ(far.FullDensityDistance, 2.0F * near.FullDensityDistance);
-        EXPECT_GT(far.DrawDistance, near.DrawDistance);
-        EXPECT_GT(far.FadeStart, far.FullDensityDistance);
-        EXPECT_LT(far.FadeStart, far.DrawDistance);
-        EXPECT_GT(far.MaxVisibleInstances, near.MaxVisibleInstances);
         EXPECT_EQ(area.FullDensityDistance, kGrassWholeAreaDistance);
         EXPECT_EQ(area.DrawDistance, kGrassWholeAreaDistance);
         EXPECT_EQ(area.MaxVisibleInstances, GrassSwitchStreamCapacity());
-        for (const auto& profile : {near, far, area}) {
+        for (const auto& profile : {near, area}) {
             // Placement fields are the same: no placement is rebuilt.
             EXPECT_EQ(profile.TuftsPerSquareMeter, near.TuftsPerSquareMeter);
             EXPECT_EQ(profile.MaxAnchorsPerPlacement, near.MaxAnchorsPerPlacement);
@@ -349,20 +343,40 @@ TEST(Oot3dGrassSwitchProfile, GrassDistanceModes) {
 TEST(Oot3dGrassSwitchProfile, GrassDistanceConfigFile) {
     EXPECT_EQ(ParseGrassSwitchDistance(std::nullopt), GrassSwitchDistance::Near);
     EXPECT_EQ(ParseGrassSwitchDistance(""), GrassSwitchDistance::Near);
-    EXPECT_EQ(ParseGrassSwitchDistance(" far\r\n"), GrassSwitchDistance::Far);
-    EXPECT_EQ(ParseGrassSwitchDistance("area"), GrassSwitchDistance::Area);
+    bool retiredFar = true;
+    EXPECT_EQ(ParseGrassSwitchDistance("area", &retiredFar), GrassSwitchDistance::Area);
+    EXPECT_FALSE(retiredFar);
     EXPECT_EQ(ParseGrassSwitchDistance("everything"), GrassSwitchDistance::Near);
+    // Far was removed after test.15: a saved "far" (grass far away) is Whole
+    // area, at 60 and 30 FPS alike (one profile per distance and rate).
+    EXPECT_EQ(ParseGrassSwitchDistance(" far\r\n", &retiredFar), GrassSwitchDistance::Area);
+    EXPECT_TRUE(retiredFar);
     EXPECT_EQ(GrassSwitchDistanceWord(GrassSwitchDistance::Near), "near");
-    EXPECT_EQ(GrassSwitchDistanceWord(GrassSwitchDistance::Far), "far");
     EXPECT_EQ(GrassSwitchDistanceWord(GrassSwitchDistance::Area), "area");
     const auto dir = std::filesystem::temp_directory_path() / "oot3d_grass_distance_tests";
     std::filesystem::remove_all(dir);
-    EXPECT_EQ(ReadGrassSwitchDistance(dir), GrassSwitchDistance::Near);
-    for (auto distance : {GrassSwitchDistance::Area, GrassSwitchDistance::Far, GrassSwitchDistance::Near}) {
+    EXPECT_EQ(ReadGrassSwitchDistance(dir, &retiredFar), GrassSwitchDistance::Near);
+    EXPECT_FALSE(retiredFar);
+    for (auto distance : {GrassSwitchDistance::Area, GrassSwitchDistance::Near}) {
         ASSERT_TRUE(SaveGrassSwitchDistance(dir, distance));
         EXPECT_EQ(ReadGrassSwitchDistance(dir), distance);
     }
     EXPECT_FALSE(std::filesystem::exists(dir / "grass_distance"));
+    // A test.15 file saying "far": read as Whole area, the file left as it is
+    // (only a change in the menu writes it).
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "grass_distance") << "far\n";
+    EXPECT_EQ(ReadGrassSwitchDistance(dir, &retiredFar), GrassSwitchDistance::Area);
+    EXPECT_TRUE(retiredFar);
+    {
+        std::ifstream file(dir / "grass_distance");
+        std::string text;
+        std::getline(file, text);
+        EXPECT_EQ(text, "far");
+    }
+    ASSERT_TRUE(SaveGrassSwitchDistance(dir, GrassSwitchDistance::Area));
+    EXPECT_EQ(ReadGrassSwitchDistance(dir, &retiredFar), GrassSwitchDistance::Area);
+    EXPECT_FALSE(retiredFar);
     std::filesystem::remove_all(dir);
     // The menu's live choice reaches the renderer.
     EXPECT_FALSE(PublishedGrassSwitchDistance().has_value());
@@ -945,7 +959,7 @@ TEST(Oot3dGrassNearLink, NothingGrowsNearLinkAsHeWalks) {
     EXPECT_GT(test9.Grown, 0U);
     for (const auto& [distance, fps60, steps] :
          {std::tuple{GrassSwitchDistance::Near, true, 100}, std::tuple{GrassSwitchDistance::Near, false, 50},
-          std::tuple{GrassSwitchDistance::Far, true, 50}, std::tuple{GrassSwitchDistance::Area, true, 50}}) {
+          std::tuple{GrassSwitchDistance::Area, true, 50}}) {
         const auto fixed = walk(distance, fps60, true, steps);
         EXPECT_GT(fixed.NearCompared, 0U);
         EXPECT_EQ(fixed.NearChanged, 0U);
@@ -974,10 +988,8 @@ TEST(Oot3dGrassNearDensity, FillMultiplierFollowsTheDistanceToItsCap) {
     // Every mode fills to its full-density band; Whole area as Near does.
     for (const bool fps60 : {true, false}) {
         const auto near = SelectGrassSwitchProfile(fps60, GrassSwitchDistance::Near);
-        const auto far = SelectGrassSwitchProfile(fps60, GrassSwitchDistance::Far);
         const auto area = SelectGrassSwitchProfile(fps60, GrassSwitchDistance::Area);
         EXPECT_EQ(near.FillDistance, near.FullDensityDistance);
-        EXPECT_EQ(far.FillDistance, far.FullDensityDistance);
         EXPECT_EQ(area.FillDistance, near.FillDistance);
     }
 }
@@ -1068,7 +1080,7 @@ TEST(Oot3dGrassNearDensity, FillComesOnlyNearTheCameraAndOnScreen) {
 // GrassFixedFillFar, never above the count, and no fill from full density
 // on; the fill tufts' widths add up to the multiplier less one.
 TEST(Oot3dGrassNearLink, FixedFillMultiplierAndWidths) {
-    for (const auto distance : {GrassSwitchDistance::Near, GrassSwitchDistance::Far, GrassSwitchDistance::Area})
+    for (const auto distance : {GrassSwitchDistance::Near, GrassSwitchDistance::Area})
         for (const bool fps60 : {true, false}) {
             const auto settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(fps60, distance));
             EXPECT_TRUE(settings.FillFixed); // the default
@@ -1692,7 +1704,7 @@ TEST(Oot3dGrassLod, LevelsRegroupTheSameInstancesByDistance) {
     const std::array<float, 3> eye{0.0F, 100.0F, 0.0F};
     // 45 degrees vertical at 16:9, and the game's 60 degrees at the top screen's 5:3.
     for (const auto& camera : {FieldCamera(eye, 12.0F), FieldCamera(eye, 12.0F, 60.0F, 5.0F / 3.0F)})
-    for (const auto distance : {GrassSwitchDistance::Near, GrassSwitchDistance::Far, GrassSwitchDistance::Area}) {
+    for (const auto distance : {GrassSwitchDistance::Near, GrassSwitchDistance::Area}) {
         GrassStreamPlacement placement{placementWorld, camera, eye};
         auto settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(true, distance));
         std::vector<GrassStreamInstance> off(GrassSwitchStreamCapacity()), on(GrassSwitchStreamCapacity());

@@ -570,7 +570,11 @@ void Deko3dConfigureGrass(std::string_view graphicsJson, bool fps60) {
                 kept, Oot3d::GrassKnownTwins().size());
     state->Lod = Oot3d::ReadGrassSwitchLod(config);
     state->Fill = Oot3d::ReadGrassSwitchFill(config);
-    ApplyProfile(*state, fps60, Oot3d::ReadGrassSwitchDistance(config));
+    bool retiredFar = false;
+    ApplyProfile(*state, fps60, Oot3d::ReadGrassSwitchDistance(config, &retiredFar));
+    if (retiredFar)
+        Deko3d::Log("grass: config/grass_distance says \"far\", an option removed after test.15: drawn as Whole area "
+                    "(the file stays until Grass distance is changed in L3+R3 > Video)");
     state->Placements = std::make_unique<Oot3d::PicaGrassPlacements>(state->Profile.RetainedBytes);
     // A ground placed in an earlier visit or session loads from the SD card
     // instead of being built again (the PC's cache; one write per new ground,

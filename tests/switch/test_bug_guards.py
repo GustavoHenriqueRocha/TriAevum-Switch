@@ -953,6 +953,16 @@ GUARDS = [
           r'case GrassSwitchDistance::Area:\s+profile\.FullDensityDistance = kGrassWholeAreaDistance;.*?'
           r'profile\.MaxVisibleInstances = kGrassWholeAreaInstances;',
           test="oot3d_grass_switch_tests (WholeAreaDrawsEveryTuftAndTheCapKeepsTheNearest)"),
+    # --- test.16: "Near and Whole area look the same for grass": Far removed
+    # (Kokiri Forest: Far 1.43 ms at its 16k cap, the most of the three). ---
+    Guard("Grass distance has two options, Near and Whole area; a saved \"far\" reads as Whole area",
+          "runtime/three_ds_recomp/src/fast/oot3d/grass_switch_profile.cpp",
+          r'if \(word == "far"\) \{.*?\*retiredFar = true;\s+return GrassSwitchDistance::Area;',
+          test="oot3d_grass_switch_tests (GrassDistanceConfigFile)",
+          forbid=r'GrassSwitchDistance::Far'),
+    Guard("the Grass distance menu lists Near and Whole area only",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'distances\[\] = \{"Near \(default\)", "Whole area"\};.*?ImGui::Combo\("Grass distance", &distance, distances, 2\)'),
     # --- 06/11: a save that starts in the Forest Temple drew no grass at its entrance (logs15) ---
     Guard("grass (deko3d): rule textures' signatures are kept across sessions, so a twin in an area entered first finds its rule",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",

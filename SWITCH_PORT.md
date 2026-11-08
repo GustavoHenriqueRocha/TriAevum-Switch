@@ -3822,7 +3822,8 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
     round-3 distances, at most 8k visible at 60 fps, 22k at 30), Far (full density to twice that,
     thinning to 6000 (8000), at most 16k (40k)) and Whole area (every tuft of the area, no thinning,
     at most 65,536: the stream holds that cap for every mode, 4 slots of 32 bytes each, 8 MiB). The
-    log's profile line and the third `grass:` line show `distance=near|far|area`.
+    log's profile line and the third `grass:` line show `distance=near|far|area`. (Far was removed
+    after test.15: see "Grass distance: Near and Whole area".)
   - *Tufts:* blade triangles, no `discard` (early depth stays on for every fragment variant).
   - *Log:* the second line splits `gpu` into `blades` and `tufts`; the third ends with
     `foreign culls dropped F (other area A, no shared placement P)` and
@@ -4231,6 +4232,38 @@ temple entry had `no shared placement 2` too.
   `grass:` window should say `loaded 4` (possibly `reused 4 of another transform`), and the scene line
   should say `draw points without grass before: 0`. The grass should be there as the picture fades
   in, with no pop. For an A/B, write `0` to `config/grass_hold` and `config/grass_placement_reuse`.
+
+### Grass distance: Near and Whole area (Far removed, 08/11, after test.15)
+- **Report (test.16):** "Near and Whole area look the same for grass, so we can remove one of these
+  options and leave the other, or rename".
+- **Measured** (`logs23/deko3d.txt:403-491`, Grass detail on; `logs18a/deko3d.txt:398-399`):
+
+  | Setting | Kokiri Forest | Hyrule Field |
+  |---|---|---|
+  | Near | 7.8k visible (its 8,000 cap), 0.68-0.73 ms GPU per frame | 3.3-4.7k visible, 0.58 ms |
+  | Far | 16,000 (its cap in 597 of 600 culls), fill doubled near the camera (10.9k), 1.43 ms | - |
+  | Whole area | 21.1k, 1.07 ms | 65.3k (the cap), 2.16 ms |
+
+  In Kokiri Forest the extra grass of Whole area is mostly single blades thinner than a pixel, so it
+  looks like Near there. In open areas the distant slopes past 4,000 units make the difference.
+  Far cost the most in Kokiri Forest and added nothing that Whole area doesn't.
+- **Change:** Far is gone from L3+R3 > Video > "Grass distance" (`Near (default)`, `Whole area`),
+  from `GrassSwitchDistance` and from `SelectGrassSwitchProfile`. The 30 fps profiles follow the
+  same rule: one per distance and rate.
+  - A help line under the option says: Whole area adds distant grass in open places like Hyrule Field;
+    in small areas like Kokiri Forest it looks the same as Near; in Hyrule Field it costs up to about
+    1.5 ms more GPU time per frame.
+  - `config/grass_distance` keeps its name and format (absent = Near, `area`).
+  - A saved `far` reads as Whole area: the player chose grass far away. The file is not rewritten
+    until the option is changed (`ParseGrassSwitchDistance`/`ReadGrassSwitchDistance` report it,
+    `retiredFar`), and `deko3d.txt` says it once at start: `grass: config/grass_distance says "far",
+    an option removed after test.15: drawn as Whole area (...)`.
+- Tests: `oot3d_grass_switch_tests` (`GrassDistanceModes`, `GrassDistanceConfigFile`: `far` reads
+  as Whole area with the flag, and the file is left as it is until a save). Guards: two options, and
+  `far` maps to Whole area. No shader change.
+- Console check: with `far` in `config/grass_distance` (test.15), the Video menu shows Whole area and
+  `deko3d.txt` has the line above. Pick Near, then Whole area again: the file now says `area`, and
+  Hyrule Field's distant slopes have grass at Whole area only.
 
 ### Mirror natives for the render loops (Profile18 items 2 and 5, 11/07)
 Guest replacements for the hottest loops of the game's CPU renderer, in the existing mechanism
