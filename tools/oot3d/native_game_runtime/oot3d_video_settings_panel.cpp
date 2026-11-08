@@ -2,6 +2,7 @@
 #include "oot3d_video_settings.h"
 #include "oot3d_fps_counter.h"
 #include "oot3d_native_launch_frame_rate.h"
+#include "oot3d_draw_distance_config.h"
 #include "oot3d_switch_gpu_performance.h"
 #include "fast/backends/gfx_deko3d.h"
 #include "fast/backends/gfx_deko3d_lighting.h"
@@ -83,6 +84,9 @@ public:
     // window setup); Standard opens no apm session.
     mGpuHigh = ReadGpuPerformanceHigh(mConfig);
     if (mGpuHigh) mGpuStatus = ApplyGpuPerformance(true);
+    mDrawDistance = ReadActorDrawDistance(mConfig);
+    LiveActorDrawDistance().store(mDrawDistance, std::memory_order_relaxed);
+    LiveDrawDistanceNativeGroups().store(ReadDrawDistanceNativeGroups(mConfig), std::memory_order_relaxed);
   }
   const char *Label() const noexcept override { return "Video"; }
   void Draw() override {
@@ -156,6 +160,7 @@ public:
     if (!mOverlayError.empty())
       ImGui::TextWrapped("Could not write config/%s.", mOverlayError.c_str());
     DrawGpuClock();
+    DrawDrawDistance();
     DrawTexturePack();
     DrawGrass();
     DrawLighting();
@@ -193,6 +198,28 @@ private:
     ImGui::TextDisabled("Handheld only (docked already runs the GPU at 768 MHz). High is Nintendo's "
                         "official handheld mode with a faster GPU: more frames in busy rooms, shorter "
                         "battery life. Applies at once; sys-clk overrides it.");
+  }
+
+  // config/draw_distance (oot3d_draw_distance_config.h, SWITCH_PORT.md "Draw
+  // distance"): applied at once (the game thread reads the published choice
+  // every frame).
+  void DrawDrawDistance() {
+    ImGui::Separator();
+    const char *const choices[] = {"Original (default)", "Far (2x)", "Farther (3x)", "Maximum (5x)"};
+    int choice = static_cast<int>(mDrawDistance);
+    if (ImGui::Combo("Draw distance", &choice, choices, 4)) {
+      mDrawDistance = static_cast<ActorDrawDistance>(choice);
+      LiveActorDrawDistance().store(mDrawDistance, std::memory_order_relaxed);
+      mDrawDistanceError = !SaveActorDrawDistance(mConfig, mDrawDistance);
+    }
+    if (mDrawDistanceError)
+      ImGui::TextWrapped("Could not write config/%s.", kDrawDistanceConfigName);
+    ImGui::TextDisabled("Applies at once. How far away trees, signs, people and enemies are drawn. "
+                        "Original: the game's own distance, so they appear as Link comes near. The "
+                        "others draw them from farther away (up to 32 more at a time), and the trees "
+                        "and bushes that grow around a tree appear with it. Far away they are only "
+                        "drawn: they may stand still until Link comes near, as they would in "
+                        "Original. Costs some CPU time in busy places.");
   }
 
   // HD textures (config/texture_pack) and their size cap
@@ -353,6 +380,8 @@ private:
   bool mGpuHigh = false;
   bool mGpuSaveError = false;
   GpuPerformanceStatus mGpuStatus;
+  ActorDrawDistance mDrawDistance = kDefaultActorDrawDistance;
+  bool mDrawDistanceError = false;
 };
 } // namespace
 std::shared_ptr<Fast::Oot3d::GraphicsSettingsPanelTab>

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <tuple>
 #include <vector>
 
 using namespace Oot3dNativeGame;
@@ -21,10 +22,12 @@ struct Fixture {
     GuestState State{};
     uint32_t Count = 0U, DeferredCount = 0U;
     std::vector<uint32_t> Deferred;
+    // The fade Actor_Draw read at each draw (actor+0x19E at its entry).
+    std::vector<uint8_t> DrawnFade;
     Fixture(uint32_t count) : Count(count) {
         Expect(Memory.MapRegion({"actors", Play, 0x100000U, true, false, {}}), "map actors");
         Expect(Memory.MapRegion({"scratch", 0x00565000U, 0x5000U, true, false, {}}), "map scratch");
-        Visibility.ExtendedDrawDistance = true;
+        Visibility.DistanceMultiplier = kExtendedActorDistanceMultiplier;
         Write(Play, Arena); Write(Arena, 0x4000U); Write(Arena + 4, 0x005656A0U);
         Write(Arena + 8, 0x005656A0U); Used(1U);
         Float(Play + 0x5BB4U, 1); Float(Play + 0x5BB4U + 20U, 1);
@@ -64,6 +67,7 @@ struct Fixture {
         State.r[0] = Play; State.r[1] = actor;
         State.r[14] = deferred ? kActorDeferredDrawReturn : 0x00461BB8U;
         Hook(kActorDrawEntry);
+        DrawnFade.push_back(Byte(actor + 0x19EU));
         if ((Read(actor + 4U) & 0x20000000U) == 0U) Allocate();
         if (deferred) Hook(kActorDeferredDrawReturn);
         else Byte(actor + 0x121U, 1U);
@@ -213,7 +217,7 @@ void TestSavestateLifecycle() {
            f.Visibility.Reservations.empty() && f.Visibility.Retained.empty() &&
            f.Visibility.LightAllocations == 0 && f.Visibility.PreviousLightAllocations == 0,
            "load discards stale reservations, retention, projections, and epoch counters");
-    Expect(f.Visibility.ExtendedDrawDistance && f.Visibility.FovMultiplier == 1.1F &&
+    Expect(f.Visibility.DistanceMultiplier == kExtendedActorDistanceMultiplier && f.Visibility.FovMultiplier == 1.1F &&
            f.Visibility.HostMemory == &f.Memory, "load preserves settings and host ownership");
     f.Begin(); Expect(f.Step(0, false), "resumed walk reads loaded cursor"); f.End();
     Expect(f.Used() == 116U && f.Byte(f.Actor(0) + 0x19EU) == 6U,
@@ -251,7 +255,7 @@ void TestInvalidAndOff() {
     Expect(!cycle.Visibility.BudgetValid, "cyclic lists fail closed");
     Fixture corrupt(1); corrupt.Write(corrupt.Arena + 12U, 0x00565620U); corrupt.Begin();
     Expect(!corrupt.Visibility.BudgetValid && !corrupt.Step(0, false), "bad arena cannot grant"); corrupt.End();
-    Fixture off(1); off.Visibility.ExtendedDrawDistance = false; off.Begin();
+    Fixture off(1); off.Visibility.DistanceMultiplier = 1.0F; off.Begin();
     Expect(!off.Step(0, false), "option off keeps native far result"); off.End();
     Expect(off.Used() == 1 && off.Visibility.BudgetLimitedWalks == 0, "off budget is inactive");
     // The pre-existing width-only policy remains active while distance is off.
@@ -277,7 +281,7 @@ void TestSpawnHooksAndRateLimit() {
         Expect(f.Read(0x005354B8U + i * 4U) == std::bit_cast<uint32_t>(distances[i]), "native spawn table restored");
     Expect(f.Read(0x003CC430U) == std::bit_cast<uint32_t>(40.0F), "old extended retire margin restored");
     for (bool enabled : {false, true}) {
-        f.Visibility.ExtendedDrawDistance = enabled;
+        f.Visibility.DistanceMultiplier = enabled ? kExtendedActorDistanceMultiplier : 1.0F;
         f.State.r[0] = f.Actor(0); f.State.r[1] = Fixture::Play;
         f.Float(f.Actor(0) + 0x1DCU, 1); f.Hook(kObjMure2SpawnEntry);
         Expect(f.Read(f.Actor(0) + 0x1DCU) == std::bit_cast<uint32_t>(1.0F), "group scalar remains native ahead");
@@ -290,6 +294,97 @@ void TestSpawnHooksAndRateLimit() {
     Expect(limited.Visibility.BudgetLimitedWalks == 16 && limited.Visibility.BudgetDenied == 16,
            "denial counters count every walk, independent of log sampling");
 }
+
+void TestMultipliers() {
+    // Fixture actor 0 of 1: z = 2001, forward 1000, scale 50.
+    for (const auto [choice, z, expected] : {std::tuple{ActorDrawDistance::Original, 2001.0F, false},
+                                             std::tuple{ActorDrawDistance::Far, 2001.0F, true},
+                                             std::tuple{ActorDrawDistance::Far, 2100.0F, false},
+                                             std::tuple{ActorDrawDistance::Farther, 2100.0F, true},
+                                             std::tuple{ActorDrawDistance::Farther, 3100.0F, false},
+                                             std::tuple{ActorDrawDistance::Maximum, 5000.0F, true}}) {
+        Fixture f(1);
+        f.Visibility.DistanceMultiplier = ActorDrawDistanceMultiplier(choice);
+        for (uint32_t offset : {0x30U, 0xF4U, 0xF8U}) f.Float(f.Actor(0) + offset, z);
+        f.Begin();
+        Expect(f.Step(0, false) == expected, "draw distance choice sets the extended depth");
+        f.End();
+        Expect((f.Read(f.Actor(0) + 4U) & 0x40U) == 0U && f.Byte(f.Actor(0) + 0x120U) == 2U,
+               "any choice leaves the title's culling state");
+    }
+}
+
+void TestExclusions() {
+    for (const auto [id, params, expected] : {std::tuple{uint16_t{0x0095}, uint16_t{0x2000}, false},
+                                              std::tuple{uint16_t{0x0095}, uint16_t{0x4000}, false},
+                                              std::tuple{uint16_t{0x002A}, uint16_t{0x0000}, false},
+                                              std::tuple{uint16_t{0x0095}, uint16_t{0x0000}, true}}) {
+        Fixture f(1);
+        Expect(f.Memory.Write16(f.Actor(0), id) && f.Memory.Write16(f.Actor(0) + 0x1CU, params), "identity");
+        f.Begin();
+        Expect(f.Step(0, false) == expected, "excluded actors are never extended");
+        f.End();
+        Expect(f.DrawnFade.size() == (expected ? 1U : 0U), "excluded actors are not drawn");
+    }
+    // The Kokiri fade follows only NoKokiriFade (F1), never the multiplier.
+    for (bool noFade : {false, true}) {
+        Fixture f(1);
+        f.Visibility.NoKokiriFade = noFade;
+        f.State.vfp[0] = std::bit_cast<uint32_t>(900.0F);
+        f.Hook(kEnKoFadeDistanceA);
+        Expect((f.State.vfp[0] == 0U) == noFade, "Kokiri fade distance only with NoKokiriFade");
+    }
+}
+
+void TestEnWood02Groups() {
+    // Spawner at z, +0xF8 = 1 / W as the title's projection helper stores it.
+    for (const auto [groups, multiplier, z, nativeResult, expected] :
+         {std::tuple{true, 5.0F, 2001.0F, 0U, 1U}, std::tuple{true, 5.0F, 6000.0F, 0U, 0U},
+          std::tuple{true, 2.0F, 2001.0F, 0U, 1U}, std::tuple{true, 2.0F, 2100.0F, 0U, 0U},
+          std::tuple{false, 5.0F, 2001.0F, 0U, 0U}, std::tuple{true, 1.0F, 2001.0F, 0U, 0U},
+          std::tuple{true, 5.0F, 6000.0F, 1U, 1U}}) {
+        Fixture f(1);
+        f.Visibility.ExtendGroups = groups;
+        f.Visibility.DistanceMultiplier = multiplier;
+        f.Float(f.Actor(0) + 0xF4U, z); f.Float(f.Actor(0) + 0xF8U, 1.0F / z);
+        f.State.r[0] = nativeResult; f.State.r[4] = f.Actor(0); f.State.r[11] = Fixture::Play + 0x2000U;
+        const auto fingerprint = f.Memory.ContentFingerprint();
+        f.Hook(kEnWood02SpawnZoneResult);
+        Expect(f.State.r[0] == expected, "offspring spawn in the extended volume only with ExtendGroups");
+        Expect(f.Memory.ContentFingerprint() == fingerprint, "the spawn test writes no guest memory");
+    }
+}
+
+void TestHandoffFade() {
+    for (bool fadeFlag : {true, false}) {
+        Fixture f(1);
+        const auto actor = f.Actor(0);
+        if (fadeFlag) f.Write(actor + 4U, 0x80000000U);
+        for (int walk = 0; walk < 10; ++walk) {
+            f.Used(1); f.Begin(); Expect(f.Step(0, false), "extended in"); f.End();
+        }
+        Expect(f.Visibility.Retained.front().Fade == 10, "extension fully faded in");
+        // The title takes over: its fade restarts at 1 and ramps to 10.
+        for (uint8_t native = 1; native <= 10; ++native) {
+            f.Used(1); f.DrawnFade.clear(); f.Begin();
+            Expect(!f.Step(0, true), "native result");
+            f.End();
+            Expect(f.DrawnFade.size() == 1U, "natively drawn");
+            Expect(f.DrawnFade.front() == (fadeFlag ? 10U : native), "drawn at the continued fade");
+            Expect(f.Byte(actor + 0x19EU) == native, "the title's fade history is untouched");
+            Expect((f.Read(actor + 4U) & 0x40U) != 0U && f.Byte(actor + 0x120U) == 0U, "native state");
+            Expect(f.Visibility.Retained.empty() == (!fadeFlag || native == 10), "retained until caught up");
+        }
+        Expect(f.Used() == 2U, "a handoff costs no light record");
+    }
+    // A lens (deferred) handoff restores after its draw too.
+    Fixture lens(1); lens.Write(lens.Actor(0) + 4U, 0x80000000U);
+    for (int walk = 0; walk < 10; ++walk) { lens.Used(1); lens.Begin(); lens.Step(0, false); lens.End(); }
+    lens.Used(1); lens.DrawnFade.clear(); lens.Begin(); lens.Step(0, true, true);
+    Expect(NativeActorVisibilityHasPendingRestore(lens.Visibility) == false, "nothing written before the draw");
+    lens.End();
+    Expect(lens.DrawnFade.front() == 10U && lens.Byte(lens.Actor(0) + 0x19EU) == 1U, "deferred handoff restored");
+}
 } // namespace
 
 int main() {
@@ -298,6 +393,7 @@ int main() {
         Expect(std::is_sorted(hooks.begin(), hooks.end()) &&
                std::adjacent_find(hooks.begin(), hooks.end()) == hooks.end(), "sorted unique hook filter");
         TestReservationsAndBurst(); TestExactCapacityWithUnexpectedNativeSuffix(); TestDeferredAndNativeFade(); TestIndependentExtensionFade(); TestMultipleWalksAndColdRestore(); TestSavestateLifecycle(); TestPlayerAndCustomConsumers(); TestInvalidAndOff(); TestSpawnHooksAndRateLimit();
+        TestMultipliers(); TestExclusions(); TestHandoffFade(); TestEnWood02Groups();
     } catch (const std::exception& error) {
         std::cerr << "oot3d_native_a32_actor_visibility_tests: " << error.what() << '\n'; return 1;
     }

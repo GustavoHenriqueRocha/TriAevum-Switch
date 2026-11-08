@@ -1963,6 +1963,88 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   307); `perf.txt` windows show `gpu_mhz=461 perf_cfg=0x92220008`; the game log has the `TRIAEVUM_GPU_PERF`
   line. Back to Standard: `GPU 307`. Restart with High saved: the line appears at start.
 
+### Draw distance: L3+R3 > Video (`config/draw_distance`, 11/08, Original by default)
+- **Cause of the pop-in (test.12 report, item 2).** The title culls each actor in Actor_DrawAll
+  (EUR 0x00461A18..0x00461AC0): visible only while its view depth z < `uncullZoneForward` (actor+0xFC) +
+  `uncullZoneScale` (+0x100), and inside the projected square grown by the scale; beyond the forward
+  range the state is "far" (actor+0x120 = 2) and the 10-step fade at actor+0x19E runs out. Actor_Init
+  (0x004A3290) sets 1000 / 350 / 700 (forward, scale, downward), as N64 OoT, so most actors (signs,
+  bushes, Kokiri, many enemies) appear about 1350 units ahead. The same pass sets flag 0x40, which gates
+  their update (`tst flags, #0x50` at 0x00461750: 0x10 "always update" or 0x40): culled actors do not
+  move. Hyrule Field room 0 places 27 En_Wood02 (6 large trees, 5 tree groups, 10 bush groups, ...), 7
+  Obj_Mure2 rings and 7 Peahats; Kokiri Forest room 0 places 8 signs, 8 Kokiri and 12 bushes (scene ZSI
+  actor lists). Trees have larger ranges (SoH z_en_wood02.c: forward 4000), but **tree and bush groups**
+  spawn the trees around their parent only when the parent updates and the child passes the spawn test
+  (0x0034E7B4..0x0034E874). That test takes |1 / stored| of +0xF8, which the projection helper
+  (0x00368CC0) already stores as 1 / W, so it multiplies by W and its sides seldom pass; children then
+  come from the fallback |z| + offset < forward × s16 near the camera. Video `2026110806510900`
+  (logs20a, Hyrule Field at night towards the Kokiri bridge): a tree appears beside an already drawn
+  tree at frames 421-423 (faint, faint, full), as a group child does. Not the cause: the widescreen policy
+  (it already widens the sides to the presented view). Left to the title: Obj_Mure/Obj_Mure2 rings
+  (bushes, rocks, fish, insects) and the night Stalchildren (En_Encount1), which spawn near Link.
+- **The option.** "Draw distance" combo: **Original (default)** (file absent), **Far (2x)**, **Farther
+  (3x)**, **Maximum (5x)** (file `far`, `farther`, `maximum`). Applies at once: the panel publishes
+  the choice (`LiveActorDrawDistance`, `oot3d_draw_distance_config.h`), `UpdateScenePresentation`
+  copies it each host frame into `NativeActorVisibilityState::DistanceMultiplier` (the larger of it and
+  the PC's F1 Extended draw distance, 5x) and `ExtendGroups` (any choice but Original, unless
+  `config/draw_distance_native_groups` exists: the A/B switch for the groups, read at start).
+- **How.** The existing actor visibility hooks (`oot3d_native_a32_actor_visibility.cpp`, all in the gate
+  list under `actor_visibility`; no new hook PC, no regeneration): Ship of Harkinian's extended culling
+  (`Ship_CalcShouldDrawAndUpdate` in soh/src/code/z_actor.c, HarbourMasters/Shipwright; same rule: a
+  forward range under 500 gains 1000, then times the multiplier, plus the scale) decides, at the culling
+  result (0x00461AC4), whether a natively culled actor is drawn. Unlike SoH it is **draw only**: the
+  title's culling state, flag 0x40, fade and isDrawn are restored after the draw
+  (`RestoreNativeCulling`), so the drawn actor updates and despawns exactly as in Original. Limits
+  from #69/#74 kept: at most 32 extensions per frame (nearest first, incumbents first) and the light
+  arena budget (120 of 128 records). Excluded: En_Viewer and Gold Skulltulas (En_Sw types 1 and 2, whose
+  draw places the hitbox; SoH's "exclude glitch-useful actors" also skips them).
+- **New: no fade dip at the old boundary.** When the title takes over an actor the extension already
+  shows, it restarts its own fade from 0 (alpha 0.1 for one step, 10 steps back to full). For actors
+  with the distance-fade flag (0x80000000, read by Actor_Draw at 0x002D6254) the hook at Actor_Draw's
+  entry (0x002D5F68) writes the extension's continued fade for that draw and puts the title's back after
+  it (`ActorHandoffFade`), until the title's catches up; a draw callback's own write is kept.
+- **Tree and bush groups** (`ExtendGroups`, hook 0x0034E854, existing): when the title's spawn test fails
+  and the child's projection (spawner +0xEC..+0xF4, 1 / W at +0xF8) is inside the extended volume with
+  the correct 1 / W, the result passes and the child spawns, as SoH's extended culling does in
+  EnWood02_SpawnZoneCheck. Only while the parent updates (within its own range), so children are added
+  only around groups the title already runs; the children are ordinary En_Wood02 (flags 0x80000000:
+  distance fade, no "always update"), culled and drawn natively within their own range and by the
+  budgeted extension beyond. a556c0d7 had turned this off with the rest of the group spawns; the light
+  arena argument there was the unbudgeted pre-a556c0d7 extension, and a child can be natively drawn only
+  inside its own range, where the title would also have spawned it on reaching it. The children persist
+  as in Original (a culled En_Wood02 does not update, so it never despawns).
+- **Gameplay.** By design no update, collision or fade state differs, with one exception: tree and bush
+  group children exist sooner (farther) than in Original. They do nothing until Link is near (no update
+  while culled); a bush child drops items only when Link runs through it, as in Original. What can
+  differ: work done inside the extra draws themselves (an actor's draw callback can update body-part
+  positions or consume random numbers) [inference: not observed]. Visible difference: distant actors
+  that the title does not update stand still until Link is within the original range (actors flagged
+  "always update" keep moving). The Kokiri, Mido and Saria fade stays: removing it (the PC's F1
+  Extended draw distance, `NoKokiriFade`) also changes when they can be targeted (SoH z_en_ko.c: alpha
+  under 10 clears the attention flag).
+- **Cost [estimate].** Per extra actor draw, from logs20a-e `actors:` lines (draws per pass = (hooks −
+  8 − 2n) / 2): Kokiri Forest 2.2 ms for 21.7 draws (0.10 ms each), Hyrule Field 1.05 ms for 16.7 (0.06
+  ms each), game-thread time per step. Extra actors from the scene actor lists (default ranges, 8 view
+  directions at every placed actor): Hyrule Field 2x +0.9 (p95 4), 3x +1.8 (p95 6), 5x +4.6 (p95 11);
+  Kokiri Forest is small, so every choice adds about the same, +3.7 (p95 17, capped at 32). So Field at
+  3x: about +0.1 ms per step (p95 +0.4); Kokiri Forest: +0.4 ms (p95 +1.7 ms), where the game thread
+  is already the limit (52-58 FPS in logs20a-e). GPU: far actors are small on screen, a few PICA draws
+  each. Light arena: extension draws bounded by the budget (120 of 128 records); group children add
+  native draws only inside their own range, as when the title spawns them. Recommended setting: Farther
+  (3x), where the Field cost stays small; the default stays Original until the console check below
+  passes (the extension path, written for #69/#74, has not run on the Switch before).
+- Tests: `oot3d_actor_visibility_policy_tests` (multipliers, words, the config file, 2x/3x ranges,
+  exclusions, handoff fade) and `oot3d_native_a32_actor_visibility_tests` (each choice's depth with the
+  title's state restored, exclusions, the handoff with and without the fade flag, immediate and lens
+  draws, no light record, the Kokiri fade only with `NoKokiriFade`, group children only with
+  `ExtendGroups` and inside the extended volume).
+- Console check (1 minute): L3+R3 > Video > Draw distance > Farther (3x). Hyrule Field from the Kokiri
+  bridge towards the castle: the trees far ahead, and the trees beside them, are drawn and do not appear
+  as Link walks; no blink when he comes near them (rings of bushes and rocks still appear near him, as in
+  Original). Kokiri Forest: the signs across the village are drawn. Walk into Kokiri Forest and back, save
+  the game: no freeze. Back to Original: the old distances return at once. A/B for the tree groups:
+  create `config/draw_distance_native_groups` and restart.
+
 ### FPS: L3+R3 > Video, applied at once (`config/fps60`, 06/11)
 - **Was a bug, not a limit.** "30 FPS" and "60 FPS (interpolated)" both run the game at 30 steps a
   second (60 guest refreshes, the A32 update rate 2, the same gameplay clock); only the presentation

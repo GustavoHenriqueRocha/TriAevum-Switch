@@ -59,9 +59,13 @@ struct NativeActorVisibilityReservation {
     bool Extended = false;
     bool Restore = false;
     bool NativeDraw = false;
+    // Natively visible again after an extension: Actor_Draw shows the
+    // continued extension fade, written at its entry and restored after.
+    bool Handoff = false;
     uint8_t NativeState = 0U;
     uint8_t NativeFade = 0U;
     uint8_t ExtendedFade = 0U;
+    uint8_t HandoffFade = 0U;
 };
 
 struct NativeActorVisibilityRetention {
@@ -70,8 +74,17 @@ struct NativeActorVisibilityRetention {
 };
 
 struct NativeActorVisibilityState {
-    // Snapshot of the settings and presentation, taken between host frames.
-    bool ExtendedDrawDistance = false;
+    // Snapshot of the settings and presentation, taken between host frames:
+    // the forward range multiplier, 1 = the title's draw distance.
+    float DistanceMultiplier = 1.0F;
+    // SoH's Kokiri option (F1's Extended draw distance only): En_Ko, Mido and
+    // Saria stop fading by distance. Not draw-only: their fade also gates
+    // targeting (SoH z_en_ko.c), so the Switch draw distance leaves it.
+    bool NoKokiriFade = false;
+    // L3+R3 > Video > Draw distance above Original, unless
+    // config/draw_distance_native_groups: En_Wood02 groups (trees and bushes
+    // around a parent tree) also spawn their offspring in the extended volume.
+    bool ExtendGroups = false;
     // The presented view: the frustum hook widens every perspective the
     // GPU draws with, but the title builds its culling matrix separately.
     Fast::Oot3d::ScenePresentationPolicy Presentation{};

@@ -111,9 +111,9 @@ bool GraphicsSettingsPanel::DrawMotionSettings(GraphicsSettings& settings, const
                                   1.0F, 1.5F, "%.2fx");
     changed |= ImGui::Checkbox("Extended draw distance", &settings.ExtendedDrawDistance);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Draws and updates actors up to 5x farther, spawns bush, rock and tree groups farther "
-                          "away and removes the Kokiri fade. Distant actors keep moving, so gameplay can differ "
-                          "from the original.");
+        ImGui::SetTooltip("Draws actors up to 5x farther (at most 32 more at a time) and removes the Kokiri "
+                          "fade. Distant actors are only drawn: they update, spawn and play as in the "
+                          "original.");
 
     return changed;
 }

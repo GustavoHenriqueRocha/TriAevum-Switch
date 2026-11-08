@@ -95,6 +95,28 @@ void SelectActorExtensions(std::span<ActorExtensionCandidate> candidates);
 [[nodiscard]] uint8_t NativeCulledActorFade(ActorCullingClass classification,
                                          uint8_t fade) noexcept;
 
+// SoH's largest "Increase Actor Draw Distance" step, and the F1 option's.
 inline constexpr float kExtendedActorDistanceMultiplier = 5.0F;
+
+// L3+R3 > Video > "Draw distance" (config/draw_distance): the title's ranges
+// or the forward range times 2, 3 or 5 (SoH's multiplier, same rule).
+enum class ActorDrawDistance : uint8_t { Original = 0, Far = 1, Farther = 2, Maximum = 3 };
+[[nodiscard]] float ActorDrawDistanceMultiplier(ActorDrawDistance choice) noexcept;
+// The config file's word ("far", "farther", "maximum"); anything else,
+// including no file, is Original.
+[[nodiscard]] ActorDrawDistance ParseActorDrawDistance(const char* word) noexcept;
+[[nodiscard]] const char* ActorDrawDistanceWord(ActorDrawDistance choice) noexcept;
+
+// Actors the extension never draws: En_Viewer hides behind culling during
+// cutscene camera pans, and a Gold Skulltula's draw places its hitbox (SoH's
+// "exclude glitch-useful actors" skips it entirely, as here).
+[[nodiscard]] bool ActorExtensionExcluded(uint16_t id, uint16_t params) noexcept;
+
+// The fade (actor+0x19E, alpha = fade / max) Actor_Draw shows for an actor
+// the title takes over from the extension: the title restarts its own fade
+// from 0 at its boundary, so the extension's fade continues (one step up per
+// walk, to max) until the title's catches up. max: actor+0x19F, 0 = 10.
+[[nodiscard]] uint8_t ActorHandoffFade(uint8_t extendedFade, uint8_t nativeFade,
+                                       uint8_t maximum) noexcept;
 
 } // namespace Oot3dNativeGame
