@@ -6,16 +6,14 @@
 #include "oot3d_switch_guard_alloc.h"
 #include "oot3d_switch_threads.h"
 #include "fast/backends/gfx_deko3d.h"
+#include <sstream>
 
 namespace Oot3dA32Window {
 
 #if defined(__SWITCH__)
-void WriteSwitchBootStage(const char* stage) {
-  std::ofstream stream("sdmc:/switch/oot3dre/boot-status.txt",
-                       std::ios::trunc);
-  if (!stream) {
-    return;
-  }
+namespace {
+std::string FormatSwitchBootStage(const char* stage) {
+  std::ostringstream stream;
   stream << "status=launching\n"
          << "stage=" << stage << '\n'
          << "whole_aot_functions=12419\n"
@@ -47,6 +45,16 @@ void WriteSwitchBootStage(const char* stage) {
          << gSwitchPicaGeometryPersistentUploads << '\n'
          << "pica_geometry_registry_entries="
          << gSwitchPicaGeometryRegistryEntries << '\n';
+  return std::move(stream).str();
+}
+} // namespace
+
+void WriteSwitchBootStage(const char* stage) {
+  (void)Oot3dNativeGame::SwitchBootStatusFile().WriteNow(FormatSwitchBootStage(stage));
+}
+
+void PostSwitchBootStage(const char* stage) {
+  Oot3dNativeGame::SwitchBootStatusFile().Post(FormatSwitchBootStage(stage));
 }
 #endif
 

@@ -47,6 +47,7 @@ UNIT_TESTS=(
     oot3d_native_guest_profile_tests
     oot3d_native_interpolation_pacing_tests
     oot3d_native_offload_tests
+    oot3d_native_status_file_tests
     oot3d_native_capture_delta_tests
     oot3d_native_vertex_snapshot_tests
     oot3d_native_texture_snapshot_tests

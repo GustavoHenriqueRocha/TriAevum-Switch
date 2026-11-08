@@ -69,6 +69,7 @@
 #include "oot3d_native_pica_vulkan_plan.h"
 #include "oot3d_native_pica_deferred_plan.h"
 #include "oot3d_native_offload.h"
+#include "oot3d_native_status_file.h"
 #include "oot3d_hitch_recorder.h"
 #include "oot3d_native_guest_fault_report.h"
 #include "oot3d_frame_spike_log.h"
@@ -182,7 +183,10 @@ inline uint64_t gSwitchPicaGeometryPersistentUploads = 0U;
 inline uint64_t gSwitchPicaGeometryRegistryEntries = 0U;
 inline bool gSwitchPicaGeometryCacheObserved = false;
 
+// boot-status.txt (oot3d_native_status_file.h): Write on this thread, Post
+// through the service thread (config/async_status_writes).
 void WriteSwitchBootStage(const char* stage);
+void PostSwitchBootStage(const char* stage);
 #endif
 
 inline double SecondsSince(std::chrono::steady_clock::time_point start) {
@@ -710,6 +714,13 @@ private:
   Oot3dNativeGame::NativeOffloadOptions offload;
   // logs/perf.txt through a service thread (config/offload_perf).
   std::optional<Oot3dNativeGame::AsyncLineWriter> perfWriter;
+  // boot-status.txt's heartbeat every 600 host frames: posted to a service
+  // thread (config/async_status_writes, default) or written here, as before.
+  // Game-thread time spent on it and the updates, cumulative (perf.txt
+  // status_* fields).
+  bool asyncStatusWrites = true;
+  uint64_t statusUpdates = 0U;
+  uint64_t statusGameNanoseconds = 0U;
   // logs/hitches.txt (render thread): one line per late presentation.
   std::optional<Oot3dNativeGame::AsyncLineWriter> hitchWriter;
   Oot3dNativeGame::HitchRecorder hitchRecorder;

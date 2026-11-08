@@ -130,6 +130,15 @@ add_executable(oot3d_hitch_recorder_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_hitch_recorder_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_hitch_recorder_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# boot-status.txt's heartbeat through a service thread
+# (config/async_status_writes; header-only).
+add_executable(oot3d_native_status_file_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_status_file_tests.cpp
+)
+target_compile_features(oot3d_native_status_file_tests PRIVATE cxx_std_20)
+target_link_libraries(oot3d_native_status_file_tests PRIVATE Threads::Threads)
+oot3d_target_defaults(oot3d_native_status_file_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Console log diagnostics: area ids (hitches.txt, perf.txt), the actor cost
 # profile (config/actor_profile) and the indirect call profile
 # (config/indirect_profile, the PGO census; recorded from several threads);

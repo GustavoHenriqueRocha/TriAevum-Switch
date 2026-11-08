@@ -891,6 +891,9 @@ void NativeA32WindowSession::Setup() {
     hitchWriter.emplace("sdmc:/switch/oot3dre/logs/hitches.txt", 64U);
     (void)hitchWriter->Push("session_start\n");
   }
+  // config/async_status_writes: boot-status.txt's heartbeat through a
+  // service thread (oot3d_native_status_file.h).
+  asyncStatusWrites = Oot3dNativeGame::ReadNativeAsyncStatusWrites();
 #endif
 
   hostArgs = launch.Host;
