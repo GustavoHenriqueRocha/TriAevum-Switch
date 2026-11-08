@@ -471,7 +471,7 @@ note is `docs/SAVE_SAFETY.pt-BR.md`; the code is `oot3d_native_a32_ctr_save_safe
 - **Updater and release zip:** the updater refuses any `savedata*` or `savestates/` path in a
   `release.json` (`IsManagedInstallPath`, `oot3d_update_release_tests`). It writes only the listed
   runtime files, as before. The ROM and TopScreen imports write only `game/` and `config/`.
-- **Tests:** `oot3d_native_a32_ctr_fs_tests` (Gustavo's 27 cases plus ours), `oot3d_native_a32_ctr_host_tests`
+- **Tests:** `oot3d_native_a32_ctr_fs_tests` (26 cases: 24 of Gustavo's as they are, his title-folder test cut to the sibling paths, and our slot-erase test; his two system-archive tests are not taken), `oot3d_native_a32_ctr_host_tests`
   (the old write-through check now runs after Flush), guards `11/05` in `tests/switch/test_bug_guards.py`.
 - **Console check:** save in game (any slot). `sdmc:/switch/oot3dre/savedata-backups/` now has a
   dated folder with the slot's previous `save0N.bin`. The game log has `TRIAEVUM_SAVE_BACKUP`.
