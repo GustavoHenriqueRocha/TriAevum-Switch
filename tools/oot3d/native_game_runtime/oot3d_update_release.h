@@ -68,8 +68,10 @@ struct ReleaseManifest {
 
 // Whether a release may write `relative` (under sdmc:/switch/oot3dre/): a
 // plain relative path of [A-Za-z0-9._-] components, outside the player's
-// data (game/, savedata/, logs/, config/, game_language.json, update/) and
-// never one of the updater's own .new/.old names.
+// data (game/, savedata/ and every savedata* sibling such as
+// savedata-backups/ and savedata.format, savestates/, logs/, config/,
+// game_language.json, update/) and never one of the updater's own .new/.old
+// names.
 bool IsManagedInstallPath(std::string_view relative);
 // Parses and checks a release.json: format, version, build > 0, channel,
 // managed and unique paths with unique asset names, sizes > 0, sha256 hex,
