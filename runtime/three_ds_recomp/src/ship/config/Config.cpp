@@ -175,6 +175,9 @@ void Config::Copy(const std::string& fromKey, const std::string& toKey) {
 }
 
 void Config::Reload() {
+    if (mPath != "None") {
+        RestoreInterruptedReplace(mPath);
+    }
     if (mPath == "None" || !fs::exists(mPath) || !fs::is_regular_file(mPath)) {
         mIsNewInstance = true;
         mFlattenedJson = nlohmann::json::object();

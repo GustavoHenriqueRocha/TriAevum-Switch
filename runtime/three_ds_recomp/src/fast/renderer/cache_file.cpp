@@ -1,4 +1,5 @@
 #include "fast/renderer/cache_file.h"
+#include "ship/config/FileReplace.h"
 
 #include <fstream>
 #include <random>
@@ -32,7 +33,9 @@ bool WriteCacheFileAtomically(const std::filesystem::path& path,
         if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
             throw std::runtime_error("cache atomic replacement failed");
 #else
-        std::filesystem::rename(temporary, path);
+        // Horizon's FS cannot rename over an existing file (EEXIST).
+        if (const auto code = Ship::ReplaceFileWithTemporary(temporary, path))
+            throw std::filesystem::filesystem_error("cache atomic replacement failed", temporary, path, code);
 #endif
         if (error) error->clear();
         return true;

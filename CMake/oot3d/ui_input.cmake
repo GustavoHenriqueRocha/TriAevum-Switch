@@ -322,12 +322,35 @@ add_library(oot3d_native_control_config STATIC EXCLUDE_FROM_ALL
 target_include_directories(oot3d_native_control_config PUBLIC
     tools/oot3d/native_game_runtime
 )
+# The replace on save (ship/config/FileReplace.h, header-only).
+target_include_directories(oot3d_native_control_config PRIVATE
+    runtime/three_ds_recomp/include
+)
 target_link_libraries(oot3d_native_control_config PUBLIC
     nlohmann_json::nlohmann_json
     three_ds_recomp_input)
 target_compile_options(oot3d_native_control_config PRIVATE
     "${WARNING_OVERRIDE}")
 oot3d_target_defaults(oot3d_native_control_config NO_WARNING_OVERRIDE FOLDER Tools)
+
+# Saving a file again on the Switch (ship/config/FileReplace.h): the config and
+# cache writers against Horizon's rename semantics (EEXIST over an existing
+# file), simulated by the test's own rename(). Linux hosts (renameat2).
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(oot3d_config_file_replace_tests EXCLUDE_FROM_ALL
+        tools/oot3d/native_game_runtime/oot3d_config_file_replace_tests.cpp
+        tools/oot3d/ui_topscreen/oot3d_top_screen_config.cpp
+        runtime/three_ds_recomp/src/ship/config/ConfigPersistence.cpp
+        runtime/three_ds_recomp/src/fast/renderer/cache_file.cpp
+    )
+    target_include_directories(oot3d_config_file_replace_tests PRIVATE
+        tools/oot3d/ui_topscreen
+        runtime/three_ds_recomp/include
+    )
+    target_link_libraries(oot3d_config_file_replace_tests PRIVATE
+        oot3d_native_control_config)
+    oot3d_target_defaults(oot3d_config_file_replace_tests FOLDER Tests)
+endif()
 
 add_library(oot3d_native_a32_input STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_a32_input.cpp

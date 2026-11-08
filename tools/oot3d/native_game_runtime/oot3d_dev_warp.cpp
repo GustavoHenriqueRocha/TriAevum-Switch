@@ -463,6 +463,7 @@ void DevWarpRuntime::Advance(DevWarpGuest &guest, uint32_t playState, uint64_t g
 
 void DevWarpRuntime::Load() {
   if (mStorage.empty()) return;
+  Ship::RestoreInterruptedReplace(mStorage);
   std::error_code exists;
   if (!std::filesystem::exists(mStorage, exists)) return;
   try {

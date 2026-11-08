@@ -11,6 +11,7 @@
 
 #include "fast/Fast3dWindow.h"
 #include "ship/Context.h"
+#include "ship/config/FileReplace.h"
 
 #include "oot3d_native_frame_rate.h"
 
@@ -484,6 +485,9 @@ bool ParseOot3dNativeGameArgs(int argc, char** argv, Oot3dNativeGameLaunch& laun
             throw std::runtime_error(
                 "--topscreen-config requires --ui-profile topscreen");
         }
+        // A save cut off on the Switch leaves the file only in its backup
+        // (ship/config/FileReplace.h).
+        Ship::RestoreInterruptedReplace(launch.TopScreenConfigPath);
         if (!std::filesystem::is_regular_file(launch.TopScreenConfigPath)) {
             throw std::runtime_error(
                 "TopScreen UI config does not exist: " +
@@ -506,6 +510,8 @@ bool ParseOot3dNativeGameArgs(int argc, char** argv, Oot3dNativeGameLaunch& laun
         launch.ControlConfigPath =
             runtimePath.parent_path() / "oot3d_controls.json";
     }
+    // A save cut off on the Switch leaves the controls only in their backup.
+    Ship::RestoreInterruptedReplace(launch.ControlConfigPath);
     if (std::filesystem::is_regular_file(launch.ControlConfigPath)) {
         std::string configError;
         if (!Oot3dNativeGame::LoadNativeControlConfig(

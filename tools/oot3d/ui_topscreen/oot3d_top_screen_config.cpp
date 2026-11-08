@@ -1,5 +1,7 @@
 #include "oot3d_top_screen_config.h"
 
+#include "ship/config/FileReplace.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -489,6 +491,7 @@ bool ParseTopScreenUiConfigText(std::string_view text,
 
 bool LoadTopScreenUiConfig(const std::filesystem::path &path,
                            TopScreenUiConfig *config, std::string *error) {
+  Ship::RestoreInterruptedReplace(path);
   std::ifstream stream(path, std::ios::binary);
   if (!stream) {
     SetError(error, "cannot open TopScreen UI config: " + path.string());
@@ -592,8 +595,10 @@ bool SaveTopScreenUiConfig(const std::filesystem::path &path,
     return false;
   }
 #else
-  std::error_code replaceError;
-  std::filesystem::rename(temporary, path, replaceError);
+  // Horizon's FS cannot rename over an existing file (EEXIST): see
+  // ship/config/FileReplace.h for the replace and its recovery.
+  const std::error_code replaceError =
+      Ship::ReplaceFileWithTemporary(temporary, path);
   if (replaceError) {
     std::error_code ignored;
     std::filesystem::remove(temporary, ignored);

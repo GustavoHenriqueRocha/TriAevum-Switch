@@ -1,5 +1,6 @@
 #include "oot3d_scene_environment_codec.h"
 #include "fast/renderer3ds/point_shadow_map.h"
+#include "ship/config/FileReplace.h"
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -468,6 +469,8 @@ SceneEnvironmentFile LoadSceneEnvironmentFile(const std::filesystem::path &path,
                                               std::optional<uint16_t> expectedScene,
                                               std::optional<bool> expectedNight, std::optional<SceneEnvironmentGroup> expectedGroup) {
   SceneEnvironmentFile file;
+  // Saved by Ship::WriteConfigFileAtomically: finish a replace cut off on the Switch.
+  Ship::RestoreInterruptedReplace(path);
   std::error_code error;
   file.Exists = std::filesystem::exists(path, error);
   if (error) {

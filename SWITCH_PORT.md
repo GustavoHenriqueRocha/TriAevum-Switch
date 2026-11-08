@@ -34,7 +34,7 @@ Bugs that kept the Switch from running (they only showed up on the console; Eden
 | Crash on startup | devkitA64 newlib's `pthread_detach` returns `ENOSYS` | no `detach()` on Switch |
 | Black screen / shader failing | parallel presentation ran GL on a thread without a context | GL context moved to the render thread (`Submit`+`Drain`) |
 | Game in slow motion (½ speed) | 60 refreshes/s expected, but 1 per presentation at 30 Hz | up to 4 refreshes per presentation |
-| Settings not saving | Horizon FS does not rename over an existing file | remove then rename |
+| Settings not saving | Horizon FS does not rename over an existing file | old file aside, new file in place, recovery on load (see "Saving a file again on the SD card") |
 | Crash with warm-up on a thread | nvc0 contexts share a push buffer without a lock | warm-up on the render thread |
 | Game closed when erasing a file on the file select screen | the host's DeleteFile made the save root `sdmc:/switch/oot3dre/savedata` canonical; std::filesystem treats devoptab paths as relative and put the cwd in front, so every delete failed and the game called its fatal-error handler | delete `save root / path`, as OpenFile and CreateFile do (`oot3d_native_a32_ctr_fs_tests`) |
 
@@ -382,6 +382,48 @@ Both fixes have guards in `tests/switch/test_bug_guards.py`.
   `32855408`, `a4b881da`, `1ec489b8`, `c291e707`, `17218b0c`, `0d1c5637`, `a56f9649`, `f3524220`,
   `13a95dcc`, `16befec8`, `e53ac808`, `a741eda6`, `6fed40ae`, `48590372`, `8f69a26f`) and the merge
   `b9f248bb`.
+
+### Saving a file again on the SD card (08/11, test.12 report)
+
+- **Symptom:** saving a setting showed "cannot replace TopScreen UI config: File exists". This
+  happened with L3+R3 > HUD > Save TopScreen, and with L3+R3 > Controls > Save controls after a
+  camera or C-stick change. The HUD, camera and C-stick settings were not saved.
+- **Cause:** every writer writes a temporary file and renames it onto the real one. POSIX and Windows
+  replace the old file in that rename; Horizon's FS (the SD card) refuses with `EEXIST` ("File
+  exists"). `ed3e6418` (04/11) taught the controls, dev warp and save-state writers to remove the old
+  file and rename again, and `8e68d030` did it for `Ship::WriteConfigFileAtomically`. The TopScreen
+  UI writer (`SaveTopScreenUiConfig`, `config/topscreen_ui.json`, from the public snapshot `034820ca`)
+  was missed. The release ships that file, so its first save already failed. "Save controls" writes the
+  controls first, then the TopScreen file, so the controls were saved and the camera/HUD settings were
+  not. The renderer cache writer (`WriteCacheFileAtomically`) had the same gap.
+- **Fix:** one replace for every writer, `ship/config/FileReplace.h` (header-only, so the small
+  controls and TopScreen libraries use it without the ship runtime). `ReplaceFileWithTemporary`
+  renames first. If that fails with `EEXIST`, it moves the old file to `<file>.bak`, moves the
+  temporary into place, then deletes the backup. If the second move fails, the old file goes back.
+  It is used by `SaveTopScreenUiConfig`, `SaveNativeControlConfig`, `Ship::WriteConfigFileAtomically`
+  (settings, dev warps, game language, save-state preferences, environment profiles, PBR descriptors)
+  and `WriteCacheFileAtomically`. On Windows the existing `MoveFileExW` paths stay as they were.
+- **Cut-off save:** if the console loses power or the game is closed between the two moves, the file
+  is missing and its `.bak` holds the last complete version. Before reading, each loader calls
+  `RestoreInterruptedReplace`, which moves the `.bak` back when the file is missing. The loaders that
+  do this are start-up (TopScreen and controls, before the existence checks), `LoadTopScreenUiConfig`,
+  `LoadNativeControlConfig`, `Ship::Config::Reload`, dev warp, game language, save-state preferences
+  and `LoadSceneEnvironmentFile`. The setting being saved at that moment is lost, and the one before
+  it stays. PBR descriptors are found by the texture-pack scan, which does not restore them: after a
+  cut-off PBR save the `.json.bak` sits beside the missing descriptor, to be renamed by hand.
+- **Unchanged:** save states (`ReplaceStateFile`), the ROM and TopScreen imports, the updater, the PGO
+  dumps and the grass and PICA caches already remove the old file and then rename, or move it aside
+  themselves, so they work on Horizon.
+- **Test:** `oot3d_config_file_replace_tests` (Linux host) defines its own `rename()`.
+  libstdc++'s `std::filesystem::rename` calls it, and in Horizon mode it uses `renameat2` with
+  `RENAME_NOREPLACE`, so a rename onto an existing file gets `EEXIST` like the console. The test
+  checks that the old single rename fails with "File exists". It then saves twice through the
+  TopScreen, controls, Ship config and cache writers, makes the move aside and the move into place
+  fail, and loads after a cut-off save. Guards: `11/08` in `tests/switch/test_bug_guards.py`.
+- **Console check:** in L3+R3 > HUD, change the HUD scale and press Save TopScreen twice. Then, in
+  L3+R3 > Controls, change a free-camera option and press Save controls. No error should appear, and
+  both changes should still be there after a restart. `sdmc:/switch/oot3dre/config/` should have no
+  `topscreen_ui.json.bak`, `topscreen_ui.json.tmp` or `oot3d_controls.json.bak`.
 
 ## How to build (Linux)
 

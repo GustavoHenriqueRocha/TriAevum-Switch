@@ -25,6 +25,7 @@ UNIT_TESTS=(
     oot3d_native_pica_frontend_tests
     oot3d_graphics_settings_schedule_tests
     oot3d_grass_switch_tests
+    oot3d_config_file_replace_tests
     oot3d_debug_menu_tests
     oot3d_fps_counter_tests
     oot3d_frame_spike_tests
