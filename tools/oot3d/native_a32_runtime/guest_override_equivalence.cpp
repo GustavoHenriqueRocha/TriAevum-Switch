@@ -66,6 +66,46 @@ constexpr uint32_t kDataBase = 0x004F9000U, kDataEnd = 0x005C7000U;
 constexpr uint32_t kRamBase = 0x08000000U, kRamSize = 0x8000U;
 constexpr uint32_t kRomBase = 0x08100000U, kRomSize = 0x1000U;
 constexpr uint32_t kUnmapped = 0x0A000000U;
+#if defined(OOT3D_N4_EQUIVALENCE)
+// N4 mode: a fake heap of plausible game data (small integers, game-range
+// floats, pointers back into the heap or into data) that shaped trials point
+// their arguments at, so hot functions get past their first loads. Shaped
+// trials also put sp near its top: some hot functions have stack frames far
+// larger than the 32 KiB "ram" region.
+constexpr uint32_t kHeapBase = 0x08200000U, kHeapSize = 0x40000U;
+
+uint64_t SplitMix(uint64_t& state) noexcept {
+    uint64_t z = (state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27U)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31U);
+}
+
+// An object pointer: in the lower 192 KiB (the top 64 KiB is the shaped stack).
+uint32_t HeapPointer(uint32_t bits) noexcept {
+    return kHeapBase + ((bits % (kHeapSize - 0x10000U)) & ~3U);
+}
+
+// A plausible heap word from 64 random bits; pointer-heavy (6 in 14), so
+// chains of loads through object fields stay in mapped memory.
+uint32_t PlausibleWord(uint64_t bits) noexcept {
+    const uint32_t lo = static_cast<uint32_t>(bits), hi = static_cast<uint32_t>(bits >> 32U);
+    switch (hi % 14U) {
+    case 0: return 0U;
+    case 1: return lo & 0xFFU;
+    case 2: return (hi & 0x100U) != 0U ? lo & 0xFFFFU : 0xFFFFFFFFU - (lo & 0xFU);
+    case 3: case 4: case 5: case 6: case 7: return HeapPointer(lo);
+    case 8: return HeapPointer(lo) & ~15U;
+    case 9: case 10: { // floats in [2^-10, 2^11)
+        const uint32_t exponent = 117U + (hi >> 8U) % 21U;
+        return (((hi >> 16U) & 1U) << 31U) | (exponent << 23U) | (lo & 0x007FFFFFU);
+    }
+    case 11: return (hi & 0x100U) != 0U ? 0x3F800000U : 0xBF800000U;
+    case 12: return kDataBase + ((lo % (kDataEnd - kDataBase - 0x100U)) & ~3U);
+    default: return static_cast<uint32_t>(static_cast<int32_t>(lo % 2001U) - 1000);
+    }
+}
+#endif
 
 std::vector<uint8_t> gCode;
 
@@ -77,12 +117,38 @@ bool BuildMemory(NativeA32Memory& memory) {
     const size_t fileData = std::min<size_t>(gCode.size() - (kDataBase - kTextBase),
                                              data.size());
     std::copy_n(gCode.begin() + (kDataBase - kTextBase), fileData, data.begin());
+#if defined(OOT3D_N4_EQUIVALENCE)
+    // .bss (past code.bin) and half of the zero words of .data (mostly
+    // null global pointers): plausible words, so the globals of the hot
+    // functions lead somewhere mapped.
+    uint64_t bss = 0xB55U;
+    for (size_t i = 0; i + 4U <= data.size(); i += 4U) {
+        const uint64_t bits = SplitMix(bss);
+        uint32_t word;
+        std::memcpy(&word, data.data() + i, 4U);
+        if (i < fileData && (word != 0U || (bits & 1U) != 0U)) continue;
+        word = PlausibleWord(bits >> 1U);
+        std::memcpy(data.data() + i, &word, 4U);
+    }
+#endif
     std::vector<uint8_t> ram(kRamSize, 0U), rom(kRomSize, 0x5AU);
-    return memory.MapRegion({"text", kTextBase, text.size(), false, true, text}) &&
-           memory.MapRegion({"rodata", kTextEnd, rodata.size(), false, false, rodata}) &&
-           memory.MapRegion({"data", kDataBase, data.size(), true, false, data}) &&
-           memory.MapRegion({"ram", kRamBase, ram.size(), true, false, ram}) &&
-           memory.MapRegion({"rom", kRomBase, rom.size(), false, false, rom});
+    if (!(memory.MapRegion({"text", kTextBase, text.size(), false, true, text}) &&
+          memory.MapRegion({"rodata", kTextEnd, rodata.size(), false, false, rodata}) &&
+          memory.MapRegion({"data", kDataBase, data.size(), true, false, data}) &&
+          memory.MapRegion({"ram", kRamBase, ram.size(), true, false, ram}) &&
+          memory.MapRegion({"rom", kRomBase, rom.size(), false, false, rom}))) {
+        return false;
+    }
+#if defined(OOT3D_N4_EQUIVALENCE)
+    std::vector<uint8_t> heap(kHeapSize);
+    uint64_t state = 0x4EA9U;
+    for (size_t i = 0; i < heap.size(); i += 4U) {
+        const uint32_t word = PlausibleWord(SplitMix(state));
+        std::memcpy(heap.data() + i, &word, 4U);
+    }
+    if (!memory.MapRegion({"heap", kHeapBase, heap.size(), true, false, heap})) return false;
+#endif
+    return true;
 }
 
 uint64_t CycleCounter() noexcept {
@@ -413,6 +479,9 @@ bool SameMemory(NativeA32Memory& a, NativeA32Memory& b, bool full,
         return true;
     };
     if (!compare(kRamBase, kRamSize)) return false;
+#if defined(OOT3D_N4_EQUIVALENCE)
+    if (!compare(kHeapBase, kHeapSize)) return false;
+#endif
     if (full && !compare(kDataBase, kDataEnd - kDataBase)) return false;
     return true;
 }
@@ -1641,9 +1710,43 @@ struct N4CaseStats {
     uint64_t BaseConsumed = 0, SparseConsumed = 0;             // all compared trials
     uint64_t LargeBaseConsumed = 0, LargeSparseConsumed = 0;   // single-slice trials
     uint64_t BaseLimits = 0, SparseLimits = 0, Hooks = 0, MutatingTrials = 0;
-    uint64_t SkipHooked = 0, Flows[6] = {};
+    uint64_t SkipHooked = 0;
+    // [shaped]: random inputs (0) and inputs pointing into the fake heap (1).
+    uint64_t Trials[2] = {}, UnfinishedBy[2] = {}, Flows[2][6] = {};
     std::vector<std::pair<Scenario, std::vector<uint8_t>>> Bench;
 };
+
+// Input shaping: argument and callee-saved registers point into the fake
+// heap, the stack arguments and four 1 KiB heap windows get fresh plausible
+// words (identically in both memories).
+void ShapeInputs(Rng& rng, Scenario& s, NativeA32Memory& memoryA, NativeA32Memory& memoryB) {
+    auto& g = s.Guest;
+    for (int i = 0; i < 4; ++i) g.r[i] = rng.Chance(85) ? HeapPointer(rng.U32()) : PlausibleWord(rng.engine());
+    for (int i = 4; i < 12; ++i) {
+        if (rng.Chance(50)) g.r[i] = rng.Chance(70) ? HeapPointer(rng.U32()) : PlausibleWord(rng.engine());
+    }
+    // The top 64 KiB of the heap is the stack (object pointers stay below).
+    g.r[13] = (kHeapBase + kHeapSize - 0x80U - rng.Below(0x800U)) & ~7U;
+    std::array<uint8_t, 1024> window{};
+    const auto write = [&](uint32_t address, std::span<const uint8_t> bytes) {
+        for (auto* memory : {&memoryA, &memoryB}) {
+            if (memory->IsWritable(address, bytes.size())) memory->WriteBytes(address, bytes);
+        }
+    };
+    for (int w = 0; w < 4; ++w) {
+        for (size_t i = 0; i < window.size(); i += 4U) {
+            const uint32_t word = PlausibleWord(rng.engine());
+            std::memcpy(window.data() + i, &word, 4U);
+        }
+        write(HeapPointer(rng.U32()), window);
+    }
+    std::array<uint8_t, 64> args{};
+    for (size_t i = 0; i < args.size(); i += 4U) {
+        const uint32_t word = rng.Chance(60) ? HeapPointer(rng.U32()) : PlausibleWord(rng.engine());
+        std::memcpy(args.data() + i, &word, 4U);
+    }
+    write(g.r[13], args);
+}
 
 // One trial in N4 mode; false (after printing the case) on a difference.
 bool N4Trial(const GeneratedWholeAot::OverrideCase& testCase, Scenario& s, uint64_t trial,
@@ -1677,6 +1780,9 @@ bool N4Trial(const GeneratedWholeAot::OverrideCase& testCase, Scenario& s, uint6
     setup.StopPc = s.Guest.r[14];
     setup.Cap = s.Budget >= kN4LargeBudget ? kN4LargeCap : kN4SmallCap;
     setup.SegmentSeed = rng.U32() | (uint64_t{rng.U32()} << 32U);
+    const bool shaped = rng.Chance(50);
+    if (shaped) ShapeInputs(rng, s, memoryA, memoryB);
+    ++stats.Trials[shaped];
 
     std::vector<uint8_t> snapshot;
     if (bench && stats.Bench.size() < 256U && setup.HookCount == 0U && !s.Trace &&
@@ -1688,6 +1794,7 @@ bool N4Trial(const GeneratedWholeAot::OverrideCase& testCase, Scenario& s, uint6
     if (!a.Unresumable && !a.Finished) {
         // Base never finished (an endless guest loop): nothing to compare.
         ++stats.Unfinished;
+        ++stats.UnfinishedBy[shaped];
         if (!ResetMemories(memoryA, memoryB)) {
             std::printf("failed to map memory\n");
             return false;
@@ -1732,7 +1839,7 @@ bool N4Trial(const GeneratedWholeAot::OverrideCase& testCase, Scenario& s, uint6
         return false;
     }
     ++stats.Compared;
-    ++stats.Flows[std::min<size_t>(static_cast<size_t>(a.Flow.Kind), 5U)];
+    ++stats.Flows[shaped][std::min<size_t>(static_cast<size_t>(a.Flow.Kind), 5U)];
     stats.BaseConsumed += a.Consumed;
     stats.SparseConsumed += b.Consumed;
     if (a.Slices == 0U && b.Slices == 0U) {
@@ -1758,16 +1865,21 @@ void PrintN4Case(const GeneratedWholeAot::OverrideCase& testCase, const N4CaseSt
         return base == 0U ? 0.0 : static_cast<double>(sparse) / static_cast<double>(base);
     };
     std::printf("%s %08X %-36s trials=%" PRIu64 " compared=%" PRIu64 " unfinished=%" PRIu64
-                " flows[ret=%" PRIu64 " br=%" PRIu64 " svc=%" PRIu64 " fault=%" PRIu64
-                " nsup=%" PRIu64 "] consumed base=%" PRIu64 " n4=%" PRIu64 " (%.3f)"
+                " consumed base=%" PRIu64 " n4=%" PRIu64 " (%.3f)"
                 " single-slice %.3f limits base=%" PRIu64 " n4=%" PRIu64 " hooks=%" PRIu64
                 " mutating=%" PRIu64 " skip-gated=%" PRIu64 "\n",
                 failed ? "FAILED" : "OK    ", testCase.Entry, testCase.Name, trials,
-                n4.Compared, n4.Unfinished, n4.Flows[0], n4.Flows[1], n4.Flows[2], n4.Flows[4],
-                n4.Flows[5], n4.BaseConsumed, n4.SparseConsumed,
+                n4.Compared, n4.Unfinished, n4.BaseConsumed, n4.SparseConsumed,
                 ratio(n4.SparseConsumed, n4.BaseConsumed),
                 ratio(n4.LargeSparseConsumed, n4.LargeBaseConsumed), n4.BaseLimits,
                 n4.SparseLimits, n4.Hooks, n4.MutatingTrials, n4.SkipHooked);
+    for (int shaped = 0; shaped < 2; ++shaped) {
+        const auto& f = n4.Flows[shaped];
+        std::printf("       %08X %s trials=%" PRIu64 " ret=%" PRIu64 " br=%" PRIu64
+                    " svc=%" PRIu64 " fault=%" PRIu64 " nsup=%" PRIu64 " unfinished=%" PRIu64 "\n",
+                    testCase.Entry, shaped ? "shaped  " : "unshaped", n4.Trials[shaped], f[0],
+                    f[1], f[2], f[4], f[5], n4.UnfinishedBy[shaped]);
+    }
 }
 
 #if defined(__x86_64__) && !defined(OOT3D_GUEST_OVERRIDE_QEMU)

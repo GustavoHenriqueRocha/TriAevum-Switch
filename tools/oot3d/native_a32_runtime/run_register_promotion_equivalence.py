@@ -178,21 +178,22 @@ def spread(values: list[int], count: int) -> list[int]:
 def write_hook_gates(baseline: Path, cases: list[tuple[int, int, str]], real: Path | None,
                      output: Path) -> None:
     """Gate list for the N4 directory: the real gates, OUTSIDE_GATES and, per
-    case, the hooked PCs (its entry, 8 spread blocks of its function and the
-    entry plus a middle block of up to 3 direct callees), chosen
-    deterministically from the baseline."""
+    case, the hooked PCs (its entry, 8 spread blocks of its function, the
+    real gates among its blocks and the entry plus a middle block of up to 3
+    direct callees), chosen deterministically from the baseline."""
+    real_gates = load_hook_gates(real) if real is not None else frozenset()
     texts = shards(baseline.expanduser(), False)
     bodies, _ = extract(texts, sorted({function for _, function, _ in cases}))
     inside: dict[str, list[str]] = {}
     for entry, function, _ in cases:
         body = bodies[function]
-        hooks = {entry, *spread(sorted(block_pcs(body)), 8)}
+        blocks = block_pcs(body)
+        hooks = {entry, *spread(sorted(blocks), 8), *(real_gates & set(blocks))}
         callees = list(dict.fromkeys(int(c, 16) for c in CALL.findall("\n".join(body))))
         for callee in callees[:3]:
-            blocks = sorted(block_pcs(bodies[callee]))
-            hooks |= {callee, blocks[len(blocks) // 2]}
+            callee_blocks = sorted(block_pcs(bodies[callee]))
+            hooks |= {callee, callee_blocks[len(callee_blocks) // 2]}
         inside[f"0x{entry:08X}"] = [f"0x{pc:08X}" for pc in sorted(hooks)]
-    real_gates = load_hook_gates(real) if real is not None else frozenset()
     pcs = set(real_gates) | set(OUTSIDE_GATES)
     for hooks in inside.values():
         pcs |= {int(pc, 16) for pc in hooks}
