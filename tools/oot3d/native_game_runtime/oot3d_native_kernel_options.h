@@ -37,9 +37,11 @@
 //        audio submit run with it released (the game thread used to wait at
 //        its next guest exit for the rest of the frame: guest_kernel: lock=
 //        of thread 0, ~72 % of dsp_core1_ms in test.11). Only when the
-//        interrupt woke no game-thread thread and left nothing for one to
-//        take (otherwise the frame keeps the lock). perf.txt second_core:
-//        dsp_released / dsp_held_ms / core0_gated / core0_lock_wait_ms.
+//        interrupt woke no game-thread thread and none waits on it (otherwise
+//        the frame keeps the lock); a game-thread wait listing the (sticky)
+//        interrupt meanwhile starts after the mix. perf.txt second_core:
+//        dsp_released / dsp_held_ms / dsp_held_woken / dsp_held_waiter /
+//        core0_gated / core0_svc_gated / core0_lock_wait_ms.
 
 #include "oot3d_native_offload.h"
 

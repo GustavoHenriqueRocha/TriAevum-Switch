@@ -311,10 +311,17 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
     size_t PendingSleepCount() const;
     uint32_t TakePendingDspAudioFrames();
     bool SignalDspAudioFrame();
-    // The audio pipe's interrupt event is signaled: no waiter took the last
-    // SignalDspAudioFrame (or the event resets manually), so a thread could
-    // still take it (config/kernel_retake keeps the kernel lock for the mix).
-    bool DspAudioInterruptPending() const;
+    // config/kernel_retake: who could see the audio pipe's interrupt before
+    // the frame it announces is mixed. A game-thread (host core 0) thread
+    // already waiting on it (any wait listing it, also wait-all ones the
+    // signal did not satisfy)...
+    bool DspAudioInterruptHasCore0Waiter() const;
+    // ... or a wait SVC (0x24 WaitSynchronization1, 0x25 WaitSynchronizationN)
+    // about to start that lists it (a list it cannot read counts as listing
+    // it). Kernel lock held; reads only.
+    bool SvcWaitsOnDspAudioInterrupt(uint32_t immediate,
+                                     const oot3d::recomp::a32::GuestState& state,
+                                     const NativeA32Memory& memory) const;
     NativeA32CtrHidUpdateResult
     AdvanceHidToCurrentTick(NativeA32Memory& memory,
                             const NativeA32HidState& state);

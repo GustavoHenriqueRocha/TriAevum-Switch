@@ -183,14 +183,19 @@ struct NativeA32GuestThreadProfile {
     uint64_t SecondCoreIdleWakes = 0;
     uint64_t SecondCoreEmptyWakes = 0;
     // config/kernel_retake: the idle work's ticks and units with the kernel
-    // lock released (RunSecondCoreIdleWorkAfterEffect), the game thread's
-    // waits for such a unit before dispatching a thread above the main
-    // thread's priority, and all its waits for the kernel lock
+    // lock released (RunSecondCoreIdleWorkAfterEffect), the units that kept
+    // it and why (the effect woke a game-thread thread; one waits on it), the
+    // game thread's waits for a released unit (before dispatching a thread
+    // above the main thread's priority; before a wait SVC that lists the
+    // effect's object), and all its waits for the kernel lock
     // (SecondCore::gCore0Lock*: retakes after guest code, guest memory paths,
     // the frame loop's released regions).
     uint64_t SecondCoreIdleReleasedTicks = 0;
     uint64_t SecondCoreIdleReleasedUnits = 0;
+    uint64_t SecondCoreIdleHeldWoken = 0;
+    uint64_t SecondCoreIdleHeldWaiting = 0;
     uint64_t Core0IdleGateWaits = 0;
+    uint64_t Core0IdleSvcGateWaits = 0;
     uint64_t Core0LockWaits = 0;
     uint64_t Core0LockWaitNanoseconds = 0;
 };
@@ -226,7 +231,8 @@ struct NativeA32SecondCoreDspWindow {
 // dsp_wait_ms= dsp_core1= dsp_core1_ms= core1_lock_wait_ms=
 // core1_preempted_ms= core0_saved_ms= core1_wakes= core1_empty_wakes=
 // dsp_released= dsp_held_ms= core0_gated= core0_lock_waits=
-// core0_lock_wait_ms=", per host frame of the window:
+// core0_lock_wait_ms= dsp_held_woken= dsp_held_waiter= core0_svc_gated=", per
+// host frame of the window:
 // dsp_core1 the frames the second core delivered (idle work) and their ms;
 // core1_lock_wait_ms all its waits for the kernel lock; core1_preempted_ms
 // its busy wall time (guest code, SVCs, DSP frames) minus those waits minus
@@ -238,7 +244,11 @@ struct NativeA32SecondCoreDspWindow {
 // dsp_core1_ms (what the game thread could wait for); core0_gated the game
 // thread's waits for a released frame before a thread above the main
 // thread's priority; core0_lock_waits / core0_lock_wait_ms every game-thread
-// acquisition of the kernel lock that found it taken, and their wait.
+// acquisition of the kernel lock that found it taken, and their wait;
+// dsp_held_woken / dsp_held_waiter the frames that kept the lock because the
+// interrupt woke a game-thread thread / one waited on it (with
+// config/kernel_retake on, dsp_core1 = dsp_released + both); core0_svc_gated
+// the game thread's wait SVCs on the interrupt held until the frame was mixed.
 std::string FormatNativeA32SecondCoreLine(const NativeA32GuestThreadProfile& now,
                                           const NativeA32GuestThreadProfile& windowStart,
                                           const NativeA32SecondCoreDspWindow& dsp,
@@ -255,6 +265,10 @@ struct NativeA32SecondCoreIdleWork {
     std::function<bool()> Pending;
     std::function<void()> Run;
 };
+// A game-thread SVC about to start (immediate, the caller's registers), kernel
+// lock held; reads only (NativeA32Process::RunSecondCoreIdleWorkAfterEffect).
+using NativeA32SvcFilter =
+    std::function<bool(uint32_t immediate, const oot3d::recomp::a32::GuestState& state)>;
 
 class NativeA32Process {
   public:
@@ -362,19 +376,25 @@ class NativeA32Process {
     // lock held), right after the unit's kernel-visible effect (the DSP
     // interrupt): runs `work`, the rest of the unit, with the kernel lock
     // released if that effect readied no game-thread thread since
-    // `core0WakesBefore` (Core0ThreadWakes() before it) and left nothing such
-    // a thread could take later (`effectPending` false); otherwise with the
-    // lock held, as before (no one can tell an effect before the work from one
+    // `core0WakesBefore` (Core0ThreadWakes() before it) and no game-thread
+    // thread waits on its object (`core0Waits` false); otherwise with the lock
+    // held, as before (no one can tell an effect before the work from one
     // after it while the lock is held across both). Returns whether it ran
-    // released. While released the second core counts as inside an SVC (a
-    // world stop waits for the work) and the game thread dispatches no thread
-    // above the main thread's priority (none ever ran during a DSP frame);
-    // the game thread's SVCs, guest memory paths and host work go on and see
-    // the kernel state the effect left. `work` touches no kernel, thread,
-    // host-service or session state, and guest memory only through
-    // NativeA32Memory's paths (they take the lock) or the ranges the unit
-    // resolved under the lock.
-    bool RunSecondCoreIdleWorkAfterEffect(uint64_t core0WakesBefore, bool effectPending,
+    // released. While released:
+    // - the second core counts as inside an SVC (a world stop waits for it);
+    // - the game thread dispatches no thread above the main thread's priority
+    //   (none ever ran during a DSP frame);
+    // - a game-thread SVC for which `observesEffect` is true (a wait listing
+    //   the effect's object, which stays signaled while the work runs) starts
+    //   only once the work is over, so it finds what it found when the effect
+    //   came after the work;
+    // - every other SVC, guest memory path and host work of the game thread
+    //   goes on and sees the kernel state the effect left.
+    // `work` touches no kernel, thread, host-service or session state, and
+    // guest memory only through NativeA32Memory's paths (they take the lock)
+    // or the ranges the unit resolved under the lock.
+    bool RunSecondCoreIdleWorkAfterEffect(uint64_t core0WakesBefore, bool core0Waits,
+                                          const NativeA32SvcFilter& observesEffect,
                                           const std::function<void()>& work);
 
     uint64_t StateFingerprint() const;
@@ -484,6 +504,11 @@ class NativeA32Process {
     // a thread above the main thread's priority waits for it, then the choice
     // is made again.
     void WaitOutReleasedIdleWork();
+    // Kernel lock held, game thread, an SVC exit not yet handled: while the
+    // second core's idle work runs released, an SVC its filter names waits
+    // for it (nothing of the SVC has run yet).
+    void WaitOutReleasedIdleWorkForSvc(uint32_t immediate,
+                                       const oot3d::recomp::a32::GuestState& state);
 
     const oot3d::recomp::a32::Registry& mRegistry;
     NativeA32HostServices& mHostServices;
@@ -524,8 +549,10 @@ class NativeA32Process {
     // replaced.
     uint64_t mThreadRecordGeneration = 0;
     // config/kernel_retake: the second core's idle work runs with the kernel
-    // lock released; game-thread threads readied (ResumeThread).
+    // lock released (and the SVCs that wait for it then); game-thread threads
+    // readied (ResumeThread).
     bool mSecondCoreIdleReleased = false;
+    const NativeA32SvcFilter* mReleasedSvcFilter = nullptr;
     uint64_t mCore0ThreadWakes = 0;
     std::optional<NativeA32ProcessRunResult> mSecondCoreFault;
     PendingFallback mSecondCorePendingFallback;
@@ -550,6 +577,9 @@ class NativeA32Process {
     std::atomic<uint64_t> mSecondCoreIdleReleasedTicks{0};
     std::atomic<uint64_t> mSecondCoreIdleReleasedUnits{0};
     std::atomic<uint64_t> mCore0IdleGateWaits{0};
+    std::atomic<uint64_t> mSecondCoreIdleHeldWoken{0};
+    std::atomic<uint64_t> mSecondCoreIdleHeldWaiting{0};
+    std::atomic<uint64_t> mCore0IdleSvcGateWaits{0};
     // CPU time of the second core's host thread since RunSecondCore began,
     // sampled each time it goes to sleep.
     std::atomic<uint64_t> mSecondCoreCpuTicks{0};

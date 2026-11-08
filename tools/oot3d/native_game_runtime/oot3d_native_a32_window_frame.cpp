@@ -3285,14 +3285,18 @@ void NativeA32WindowSession::AccountDspSamples(
 // - On: under the lock the frame is claimed, its shared regions resolved
 //   (BeginFrame: the only failure, before anything the guest can see) and its
 //   interrupt signaled first; the mix and the submit then run with the lock
-//   released, unless the interrupt readied a game-thread thread or stayed
-//   signaled (RunSecondCoreIdleWorkAfterEffect keeps it then). Nothing could
-//   tell the interrupt's place in the held frame (no kernel operation ran
-//   between the mix and it), and the thread it wakes runs on this host thread,
-//   after the mix. The game thread's SVCs during the mix see the kernel as
-//   after the whole frame; its guest code overlapped the mix before as well.
-//   The mix's memory paths (sample reads) take the lock themselves; the
-//   regions are accounted (EndFrame) and the statistics updated under it.
+//   released, unless the interrupt readied a game-thread thread or one waits
+//   on it (RunSecondCoreIdleWorkAfterEffect keeps it then; dsp_held_woken,
+//   dsp_held_waiter). Nothing could tell the interrupt's place in the held
+//   frame (no kernel operation ran between the mix and it), and the thread it
+//   wakes runs on this host thread, after the mix. The game's interrupt event
+//   is sticky (svcCreateEvent reset type 1 at 0x002FA2C4): it stays signaled
+//   until the sound thread clears it, after the mix, so a game-thread wait
+//   listing it starts only once the mix is over (core0_svc_gated); the game
+//   thread's other SVCs during the mix see the kernel as after the whole
+//   frame, and its guest code overlapped the mix before as well. The mix's
+//   memory paths (sample reads) take the lock themselves; the regions are
+//   accounted (EndFrame) and the statistics updated under it.
 void NativeA32WindowSession::DeliverDspAudioFrameOnSecondCore() {
   auto &hostServices = *hostServicesStorage;
   auto &process = *processStorage;
@@ -3324,8 +3328,14 @@ void NativeA32WindowSession::DeliverDspAudioFrameOnSecondCore() {
   const uint64_t core0Wakes = process.Core0ThreadWakes();
   // As the game thread's batch: with the DSP stopped the rest is dropped.
   if (!hostServices.SignalDspAudioFrame()) deferredDspAudioFrames = 0U;
+  const Oot3dNativeGame::NativeA32SvcFilter waitsOnInterrupt =
+      [&](uint32_t immediate, const oot3d::recomp::a32::GuestState &state) {
+        return hostServices.SvcWaitsOnDspAudioInterrupt(immediate, state,
+                                                        process.Memory());
+      };
   process.RunSecondCoreIdleWorkAfterEffect(
-      core0Wakes, hostServices.DspAudioInterruptPending(), [&] {
+      core0Wakes, hostServices.DspAudioInterruptHasCore0Waiter(), waitsOnInterrupt,
+      [&] {
         dspHle.MixFrame(memory, frame, samples);
         if (!samples.empty()) hostAudioStream->Submit(samples);
       });

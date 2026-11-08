@@ -1417,9 +1417,49 @@ bool NativeA32CtrHostServices::SignalDspAudioFrame() {
     return mDspAudioRunning && SignalDspInterrupt(2U, kDspAudioPipe);
 }
 
-bool NativeA32CtrHostServices::DspAudioInterruptPending() const {
+bool NativeA32CtrHostServices::DspAudioInterruptHasCore0Waiter() const {
     const auto& event = mDspInterruptEvents[2U][kDspAudioPipe];
-    return event != nullptr && event->AvailableCount != 0;
+    if (event == nullptr) return false;
+    for (const auto& waiter : mSynchronizationWaiters) {
+        if (waiter.Process != nullptr && waiter.Process->ThreadHostCore(waiter.ThreadId) == 0U &&
+            std::find(waiter.Objects.begin(), waiter.Objects.end(), event) !=
+                waiter.Objects.end()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool NativeA32CtrHostServices::SvcWaitsOnDspAudioInterrupt(
+    uint32_t immediate, const oot3d::recomp::a32::GuestState& state,
+    const NativeA32Memory& memory) const {
+    const auto& event = mDspInterruptEvents[2U][kDspAudioPipe];
+    if (event == nullptr) return false;
+    const auto lists = [&](uint32_t handle) {
+        const auto* record = LookupHandle(handle);
+        return record != nullptr && record->Object == event;
+    };
+    switch (immediate & 0xFFU) {
+    case 0x24U:
+        return lists(state.r[0]);
+    case 0x25U: {
+        const uint32_t count = state.r[2];
+        if (count > 0x40U) return false;  // refused before any handle is read
+        // The view resolves pending device writes as the SVC's own reads
+        // will, and counts no watched read.
+        const auto handles =
+            memory.SynchronousReadView(state.r[1], static_cast<size_t>(count) * 4U);
+        if (handles.size() != static_cast<size_t>(count) * 4U) return true;
+        for (uint32_t index = 0; index < count; ++index) {
+            uint32_t handle = 0;
+            std::memcpy(&handle, handles.data() + index * 4U, sizeof(handle));
+            if (lists(handle)) return true;
+        }
+        return false;
+    }
+    default:
+        return false;
+    }
 }
 
 NativeA32CtrHidRuntimeProfile

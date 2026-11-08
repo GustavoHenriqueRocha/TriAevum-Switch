@@ -215,21 +215,37 @@ GUARDS = [
     # --- 11/08 (Perf19 #6): the game thread's kernel-lock retakes (guest_kernel: lock= of thread 0,
     # 0.5-1.4 ms per host frame in test.11) tracked the second core's DSP frames (~72 % of
     # dsp_core1_ms, correlation 0.96), which held the lock through the mix. config/kernel_retake ---
-    Guard("kernel_retake: the DSP frame signals first and mixes released only if no game-thread thread woke and the interrupt was taken",
+    # 11/08 (logs21, test.13): dsp_released 0.00 in every window. The game's DSP interrupt event is
+    # sticky (svcCreateEvent reset type 1 at 0x002FA2C4): the wait does not take it, so the old rule
+    # "released only if the interrupt was taken" never held. A game-thread wait listing it now
+    # waits for the mix instead.
+    Guard("kernel_retake: the DSP frame signals first and mixes released unless a game-thread thread woke or waits on it",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'if \(!dspHle\.BeginFrame\(memory, frame, &mixError\)\) \{.*?'
           r'const uint64_t core0Wakes = process\.Core0ThreadWakes\(\);.*?'
-          r'if \(!hostServices\.SignalDspAudioFrame\(\)\) deferredDspAudioFrames = 0U;\s+'
-          r'process\.RunSecondCoreIdleWorkAfterEffect\(\s+core0Wakes, hostServices\.DspAudioInterruptPending\(\), \[&\] \{\s+'
+          r'if \(!hostServices\.SignalDspAudioFrame\(\)\) deferredDspAudioFrames = 0U;.*?'
+          r'return hostServices\.SvcWaitsOnDspAudioInterrupt\(immediate, state,.*?'
+          r'process\.RunSecondCoreIdleWorkAfterEffect\(\s+'
+          r'core0Wakes, hostServices\.DspAudioInterruptHasCore0Waiter\(\), waitsOnInterrupt,\s+\[&\] \{\s+'
           r'dspHle\.MixFrame\(memory, frame, samples\);.*?'
           r'if \(!dspHle\.EndFrame\(memory, frame, &mixError\)\)',
-          test="oot3d_native_a32_second_core_tests (TestRetakeSchedule, TestReleasedIdleWork)"),
-    Guard("kernel_retake: released idle work is a kernel section (a world stop waits for it), else held",
+          test="oot3d_native_a32_second_core_tests (TestRetakeSchedule with the game's sticky event, "
+               "TestReleasedIdleWorkWaitGate)",
+          forbid=r'DspAudioInterruptPending'),
+    Guard("kernel_retake: released idle work is a kernel section (a world stop waits for it), else held and counted",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
-          r'mCore0ThreadWakes != core0WakesBefore \|\| effectPending\) \{\s+work\(\);\s+return false;.*?'
+          r'woken \|\| core0Waits\) \{\s+if \(woken\) \{\s+mSecondCoreIdleHeldWoken.*?work\(\);\s+return false;.*?'
           r'\+\+SecondCore::gInKernel\[1\];\s+Process\.mSecondCoreIdleReleased = true;.*?'
-          r'Process\.mSecondCoreIdleReleased = false;\s+--SecondCore::gInKernel\[1\];\s+SecondCore::NotifyKernel\(\);',
+          r'Process\.mSecondCoreIdleReleased = false;\s+Process\.mReleasedSvcFilter = nullptr;\s+'
+          r'--SecondCore::gInKernel\[1\];\s+SecondCore::NotifyKernel\(\);',
           test="oot3d_native_a32_second_core_tests (TestReleasedIdleWork)"),
+    Guard("kernel_retake: a game-thread wait on the DSP interrupt starts only after a released mix",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'if \(exit\.kind == oot3d::recomp::a32::ExitKind::Svc\) \{\s+'
+          r'if \(concurrent\) WaitOutReleasedIdleWorkForSvc\(exit\.detail, state\);.*?'
+          r'if \(exit\.kind == oot3d::recomp::a32::ExitKind::Svc\) \{\s+'
+          r'if \(SecondCore::Active\(\)\) WaitOutReleasedIdleWorkForSvc\(exit\.detail, state\);',
+          test="oot3d_native_a32_second_core_tests (TestReleasedIdleWorkWaitGate)"),
     Guard("kernel_retake: no thread above the main thread's priority is dispatched during a released DSP frame",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
           r'if \(concurrent\) WaitOutReleasedIdleWork\(\);\s+auto& state = CurrentThreadState\(\);',

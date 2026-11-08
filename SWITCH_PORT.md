@@ -4859,8 +4859,9 @@ logged as `retake=` in the `kernel_fast:` start line) changes the DSP frame on t
 `ProcessFrame` is now these three steps in a row: same bytes, samples, memory traffic and order.
 
 The mix keeps the lock (the previous timing, with the interrupt first) when the interrupt readied
-a game-thread thread (`Core0ThreadWakes`), or when it stayed signaled so that one could take it
-later (`DspAudioInterruptPending`).
+a game-thread thread (`Core0ThreadWakes`), or when a game-thread thread already waits on it
+(`DspAudioInterruptHasCore0Waiter`: any wait listing it, also a wait-all the signal did not
+satisfy).
 
 While the mix runs released:
 - the second core counts as inside an SVC (`gInKernel`), so a world stop (savestate, page-table
@@ -4868,16 +4869,34 @@ While the mix runs released:
 - the game thread does not dispatch a thread above the main thread's priority
   (`WaitOutReleasedIdleWork`, then it chooses again), because no such thread ever ran during a DSP
   frame;
-- the game thread's SVCs, memory paths and host work go on.
+- a game-thread wait SVC that lists the interrupt (0x24/0x25, `SvcWaitsOnDspAudioInterrupt`)
+  starts only once the mix is over (`WaitOutReleasedIdleWorkForSvc`, in `Run` and in host-driven
+  guest calls), before any of it runs;
+- the game thread's other SVCs, memory paths and host work go on.
+
+**Test.13 never released (logs21).** `dsp_released` was 0.00 in every window and `dsp_held_ms`
+equalled `dsp_core1_ms`. The first rule also kept the lock when the interrupt event stayed signaled
+after the signal. The game creates that event **sticky**: in `code.bin`, `svcCreateEvent` with reset
+type 1 at `0x002FA2C4`, registered for the audio pipe (type 2, channel 2) at `0x002FA308`. The sound
+thread's wait does not take it, and the thread clears it itself after it wakes, which is after the
+mix. The host tests had modelled a one-shot event. They now use the game's: sticky, cleared by the
+sound thread. On test.13's code they fail with 0 releases.
+
+The new rule does not need the event taken. A signaled event can only be seen through a wait, and a
+game-thread wait that lists it during the mix now starts after the mix. That is what it found when
+the interrupt came after the mix.
 
 **Why the guest sees the same:**
 - **The interrupt's position is invisible.** Before, no kernel operation ran between the mix and
-  the interrupt (the lock was held across both), so signaling before the mix changes nothing a
-  thread can observe.
-- **The woken thread runs after the mix.** The thread the interrupt wakes is the sound thread, on
-  this same host thread, so it runs only once the mix is done. A game-thread thread woken by the
-  interrupt, or one that could still take it, keeps the held path.
-- **SVCs see the state after the whole frame.** The game thread's SVCs during the mix see the
+  the interrupt (the lock was held across both). A thread observes the interrupt only by being
+  woken by it, or by a wait that finds it signaled.
+  - The thread it wakes is the sound thread, on this same host thread, so it runs only once the mix
+    is done.
+  - A woken game-thread thread, or one already waiting, keeps the held path.
+  - A game-thread wait that lists the interrupt starts after the mix.
+  - Clearing, signaling or closing it during the mix is what happened after the frame before. The
+    sound thread was already woken at the signal.
+- **SVCs see the state after the whole frame.** The game thread's other SVCs during the mix see the
   kernel exactly as after the whole frame (the effect is already applied), which is what they saw
   when they waited for it. Its guest code already ran alongside the mix before.
 - **The region pointers stay valid.** They are only replaced under a world stop, which waits.
@@ -4890,8 +4909,11 @@ writes DSP RAM or a playing sound buffer].
 **`perf.txt` `second_core:`** gains, per host frame:
 - `dsp_released`: frames mixed released;
 - `dsp_held_ms`: the rest of `dsp_core1_ms`, the part the game thread can still wait for;
+- `dsp_held_woken` / `dsp_held_waiter`: frames that kept the lock because the interrupt woke a
+  game-thread thread / one waited on it. With the switch on, `dsp_core1` = `dsp_released` + both;
 - `core0_gated`: game-thread waits for a released frame before a thread above the main thread's
   priority;
+- `core0_svc_gated`: game-thread wait SVCs on the interrupt held until the frame was mixed;
 - `core0_lock_waits` / `core0_lock_wait_ms`: every game-thread acquisition of the kernel lock that
   found it taken, and the time waited. This covers the retakes, the guest memory paths and the
   released regions; minus `guest_kernel:` `lock_ms`, it gives the memory paths' share.
@@ -4899,26 +4921,36 @@ writes DSP RAM or a playing sound buffer].
 **Tests:**
 - `oot3d_native_audio_dsp_mix_tests`: every other frame goes through the three steps, with the
   same digests.
-- `oot3d_native_a32_ctr_host_tests`: `DspAudioInterruptPending` after clear, signal and a
-  manual-reset wait.
+- `oot3d_native_a32_ctr_host_tests`: `SvcWaitsOnDspAudioInterrupt` for single and list waits, other
+  handles, other SVCs and an over-long list; no waiter.
 - `oot3d_native_a32_second_core_tests` (both `kernel_wake` modes):
-  - `TestReleasedIdleWork` checks that the work stays held after a game-thread wake or a pending
-    effect, that a world stop waits for the released work, that the main thread runs during it, and
-    that a thread above the main thread's priority runs only after it.
-  - `TestRetakeSchedule` runs 100 DSP frames of 300 µs against a game thread making an SVC every
-    ~400 blocks. The sound thread sees the same frames in the same order, never a half-mixed one
-    (same checksum, `dsp_released` 0 and 1.00 per frame).
-  - Host (WSL2, RelWithDebInfo), game-thread waits for the lock per frame: 344 → 20 µs with
-    `kernel_wake` on, 362 → 23 µs with it off. Retake time (`lock`, uncontended cost included):
-    368 → 44 µs and 423 → 83 µs.
+  - `TestReleasedIdleWork` checks:
+    - the work stays held after a game-thread wake or with a game-thread waiter, and the reason is
+      counted;
+    - a world stop waits for the released work;
+    - the main thread runs during it;
+    - a thread above the main thread's priority runs only after it.
+  - `TestReleasedIdleWorkWaitGate` uses the game's sticky interrupt, signaled before a released
+    mix:
+    - a game-thread wait listing it returns only after the mix, and is counted once;
+    - a wait on another event does not wait;
+    - a game-thread wait-all on it and another event keeps the next frame held.
+  - `TestRetakeSchedule` runs 100 DSP frames of 300 µs with the game's event (sticky, cleared by the
+    sound thread) against a game thread making an SVC every ~400 blocks.
+    - The sound thread sees the same frames in the same order, never a half-mixed one (same
+      checksum).
+    - `dsp_released` is 0 off and 1.00 per frame on; test.13's code: 0.
+    - Host (WSL2, RelWithDebInfo), game-thread waits for the lock per frame: 353 → 17 µs with
+      `kernel_wake` on, 417 → 66 µs with it off.
   - The suite is also run under TSan.
 
 **Expected on the console [not measured]:**
 - Thread 0's `lock` in `guest_kernel:` falls from 0.5–1.4 ms per host frame to the share left by
-  core 1's short holds (SVC exits, frame claim and accounting, sample reads): host 20 of 344 µs per
+  core 1's short holds (SVC exits, frame claim and accounting, sample reads): host 17 of 353 µs per
   frame.
-- In Kokiri at 42 FPS that is −0.8 to −1.4 ms per step of the 1.58 ms. A little more can come off
-  `guest` where the memory paths waited for a frame.
+- logs21 (test.13): `core0_lock_wait_ms` was 0.68–1.29 per host frame, 1.36–1.66 ms per step, with
+  `dsp_held_ms` 1.8–1.9 per step. Expect about −1.0 to −1.4 ms per step in the busy Kokiri windows.
+  A little more can come off `guest` where the memory paths waited for a frame.
 - Core 1's mix may now wait for the lock at its sample reads (`core1_lock_wait_ms`), behind the
   game thread's GSP SVCs. That is time on core 1, which has the slack: a frame every 4.9 ms against
   ~0.3 ms of mix.
@@ -4929,9 +4961,9 @@ writes DSP RAM or a playing sound buffer].
 3. Compare `guest_kernel:` `lock_ms` and thread 0's `lock=`, `second_core:` `dsp_held_ms`,
    `core0_lock_wait_ms`, `dsp_released`, `core1_lock_wait_ms`, then `guest`, `game_pair_ms` and
    `fps`.
-4. With it on, `dsp_released` should equal `dsp_core1`. If it is lower, either a game-thread thread
-   waits on the DSP interrupt, or the game's interrupt event stays signaled after the wake (manual
-   reset). In both cases those frames keep the previous timing; nothing is lost but the gain.
+4. With it on, `dsp_released` should equal `dsp_core1`. If it does not, `dsp_held_woken` /
+   `dsp_held_waiter` say why, and those frames keep the previous timing. `core0_svc_gated` counts
+   the game-thread waits on the interrupt during a mix; 0 is expected for this game.
 
 ### Plan build cost per draw: `config/plan_*` (07/11)
 When Link cuts bushes (`logs18a` `perf.txt` window 27300, 133 draws per step), the render thread

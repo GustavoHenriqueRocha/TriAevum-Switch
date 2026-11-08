@@ -193,9 +193,11 @@ struct Guest {
         return state;
     }
 
-    uint32_t CreateEvent() {
+    // resetType 0 = one-shot (a wait takes it), 1 = sticky (stays signaled
+    // until ClearEvent).
+    uint32_t CreateEvent(uint32_t resetType = 0U) {
         GuestState state{};
-        state.r[1] = 0U;  // one-shot
+        state.r[1] = resetType;
         return Svc(kSvcCreateEvent, state).r[1];
     }
 
@@ -1160,6 +1162,11 @@ void TestSecondCoreLine() {
     now.Core0IdleGateWaits = 2U;
     now.Core0LockWaits = 3U;
     now.Core0LockWaitNanoseconds = 250'000U;
+    // ... and of the 2 held frames, 1 for a woken game-thread thread, 1 for a
+    // waiting one; 4 game-thread waits on the interrupt held for a mix.
+    now.SecondCoreIdleHeldWoken = 1U;
+    now.SecondCoreIdleHeldWaiting = 1U;
+    now.Core0IdleSvcGateWaits = 4U;
     const std::string line =
         FormatNativeA32SecondCoreLine(now, start, {0U, 0U, 0U, 0.0005}, 1U);
     Require(line ==
@@ -1167,7 +1174,8 @@ void TestSecondCoreLine() {
                 "dsp_core1=7.00 dsp_core1_ms=1.000 core1_lock_wait_ms=2.000 "
                 "core1_preempted_ms=3.000 core0_saved_ms=4.500 core1_wakes=0.0 "
                 "core1_empty_wakes=0.0 dsp_released=5.00 dsp_held_ms=0.400 core0_gated=2.00 "
-                "core0_lock_waits=3.0 core0_lock_wait_ms=0.250",
+                "core0_lock_waits=3.0 core0_lock_wait_ms=0.250 dsp_held_woken=1.00 "
+                "dsp_held_waiter=1.00 core0_svc_gated=4.00",
             "second_core line: " + line);
     now.SecondCoreIdleWakes = 30U;
     now.SecondCoreEmptyWakes = 25U;
@@ -1331,15 +1339,17 @@ void TestUiLockHandOff() {
 // The second core's side of RunSecondCoreIdleWorkAfterEffect on its own host
 // thread (as the idle work calls it, kernel lock held); `work` runs inside.
 struct Core1IdleUnit {
-    Core1IdleUnit(NativeA32Process& process, uint64_t wakes, bool pending,
-                  std::function<void()> work)
-        : Thread([&process, wakes, pending, work = std::move(work), this] {
+    Core1IdleUnit(NativeA32Process& process, uint64_t wakes, bool core0Waits,
+                  std::function<void()> work, NativeA32SvcFilter filter = {})
+        : Filter(std::move(filter)),
+          Thread([&process, wakes, core0Waits, work = std::move(work), this] {
               SecondCore::tProcessor = 1U;
               SecondCore::LockKernel();
-              Released = process.RunSecondCoreIdleWorkAfterEffect(wakes, pending, [&] {
-                  HeldInside = SecondCore::KernelHeld();
-                  work();
-              });
+              Released =
+                  process.RunSecondCoreIdleWorkAfterEffect(wakes, core0Waits, Filter, [&] {
+                      HeldInside = SecondCore::KernelHeld();
+                      work();
+                  });
               HeldAfter = SecondCore::KernelHeld();
               SecondCore::UnlockKernel();
           }) {}
@@ -1351,14 +1361,16 @@ struct Core1IdleUnit {
     bool Released = false;
     bool HeldInside = false;
     bool HeldAfter = false;
+    NativeA32SvcFilter Filter;
     std::thread Thread;
 };
 
 // RunSecondCoreIdleWorkAfterEffect: the work runs with the kernel lock
-// released only when the effect readied no game-thread thread and left
-// nothing pending (otherwise held, as config/kernel_retake 0); released, a
-// world stop waits for it, and the game thread dispatches the main thread
-// but not a thread above its priority until it ends.
+// released only when the effect readied no game-thread thread and none waits
+// on its object (otherwise held, as config/kernel_retake 0, and counted by
+// reason); released, a world stop waits for it, and the game thread
+// dispatches the main thread but not a thread above its priority until it
+// ends.
 void TestReleasedIdleWork() {
     constexpr auto kHold = std::chrono::milliseconds(200);
     Program& program = Programs().emplace_back(kText);
@@ -1375,17 +1387,26 @@ void TestReleasedIdleWork() {
     NativeA32Process& process = guest.process;
     process.EnableSecondCore();
     SecondCore::LockKernel();
-    // The decision.
-    for (const auto& [wakesOff, pending, released] :
+    // The decision, and why a unit kept the lock.
+    for (const auto& [wakesOff, waits, released] :
          {std::tuple{0U, false, true}, std::tuple{1U, false, false},
           std::tuple{0U, true, false}}) {
+        const auto before = process.GuestThreadProfile();
         bool ran = false;
-        Core1IdleUnit unit(process, process.Core0ThreadWakes() + wakesOff, pending,
+        Core1IdleUnit unit(process, process.Core0ThreadWakes() + wakesOff, waits,
                            [&] { ran = true; });
         unit.Join();
         Require(ran && unit.Released == released && unit.HeldInside == !released &&
                     unit.HeldAfter,
                 "released idle work: wrong decision or lock state");
+        const auto after = process.GuestThreadProfile();
+        Require(after.SecondCoreIdleReleasedUnits - before.SecondCoreIdleReleasedUnits ==
+                        (released ? 1U : 0U) &&
+                    after.SecondCoreIdleHeldWoken - before.SecondCoreIdleHeldWoken ==
+                        (wakesOff != 0U ? 1U : 0U) &&
+                    after.SecondCoreIdleHeldWaiting - before.SecondCoreIdleHeldWaiting ==
+                        (waits ? 1U : 0U),
+                "released idle work: the hold reason was not counted");
     }
     // A world stop waits for the released work.
     {
@@ -1506,7 +1527,116 @@ void StartDspAudio(Guest& guest, uint32_t event) {
     GuestState clear{};
     clear.r[0] = event;
     guest.Svc(0x19U, clear);  // ClearEvent
-    Require(!guest.host.DspAudioInterruptPending(), "the DSP interrupt stayed signaled");
+}
+
+// The session's filter: a game-thread wait SVC that lists the DSP interrupt.
+NativeA32SvcFilter DspWaitFilter(Guest& guest) {
+    return [&guest](uint32_t immediate, const GuestState& state) {
+        return guest.host.SvcWaitsOnDspAudioInterrupt(immediate, state, guest.process.Memory());
+    };
+}
+
+// The game's sticky DSP interrupt, signaled before a released mix: a
+// game-thread wait that lists it starts only once the mix is over (it would
+// find it signaled early), a wait on another object does not wait; a
+// game-thread thread already waiting on it (a wait-all the signal did not
+// satisfy) keeps the next unit's lock.
+void TestReleasedIdleWorkWaitGate() {
+    constexpr auto kHold = std::chrono::milliseconds(200);
+    Program& program = Programs().emplace_back(kText);
+    // r9 = kData: [0] DSP interrupt, [4] an unsignaled event, [8] a signaled
+    // one; results of the waits at [16] (on [8]), [20] (on [0]), [24] (all of
+    // [0], [4]).
+    const uint32_t mainEntry = program.Here();
+    EmitWait(program, 8);
+    program.Op(Str(0, 9, 16));
+    EmitWait(program, 0);
+    program.Op(Str(0, 9, 20));
+    program.Svc(kSvcExitThread);
+    const uint32_t waitAllEntry = program.Here();  // r0 = kData
+    program.Op(AddImm(9, 0, 0));
+    program.Op(AddImm(1, 9, 0));
+    program.Op(MovImm(2, 2));
+    program.Op(MovImm(3, 1));
+    program.Op(MvnZero(0));
+    program.Op(MvnZero(4));
+    program.Svc(kSvcWaitSynchronizationN);
+    program.Op(Str(0, 9, 24));
+    program.Svc(kSvcExitThread);
+    Guest guest(program.Seal());
+    guest.Boot(mainEntry, kData);
+    NativeA32Process& process = guest.process;
+    process.EnableSecondCore();
+    SecondCore::LockKernel();
+    const uint32_t dsp = guest.CreateEvent(1U);
+    guest.Write32(kData, dsp);
+    guest.Write32(kData + 4U, guest.CreateEvent(1U));
+    const uint32_t other = guest.CreateEvent(1U);
+    guest.Write32(kData + 8U, other);
+    GuestState signal{};
+    signal.r[0] = other;
+    guest.Svc(kSvcSignalEvent, signal);
+    guest.Write32(kData + 16U, 0xFFFFFFFFU);
+    guest.Write32(kData + 20U, 0xFFFFFFFFU);
+    StartDspAudio(guest, dsp);
+    // The filter reads the wait's handle list.
+    GuestState waitState{};
+    waitState.r[1] = kData;
+    waitState.r[2] = 1U;
+    Require(guest.host.SvcWaitsOnDspAudioInterrupt(0x25U, waitState, process.Memory()),
+            "a wait listing the DSP interrupt was not recognized");
+    waitState.r[1] = kData + 8U;
+    Require(!guest.host.SvcWaitsOnDspAudioInterrupt(0x25U, waitState, process.Memory()) &&
+                !guest.host.SvcWaitsOnDspAudioInterrupt(0x28U, waitState, process.Memory()),
+            "an SVC that does not list the DSP interrupt was taken for a wait on it");
+    // The session's frame: interrupt first (nothing waits on it), then the
+    // released mix.
+    const uint64_t wakes = process.Core0ThreadWakes();
+    Require(guest.host.SignalDspAudioFrame(), "DSP interrupt");
+    Require(!guest.host.DspAudioInterruptHasCore0Waiter(), "a game-thread waiter appeared");
+    std::atomic<bool> inWork{false};
+    std::atomic<bool> mixed{false};
+    Core1IdleUnit unit(
+        process, wakes, false,
+        [&] {
+            inWork.store(true);
+            std::this_thread::sleep_for(kHold);
+            mixed.store(true);
+        },
+        DspWaitFilter(guest));
+    {
+        const SecondCore::KernelRelease release;
+        while (!inWork.load()) std::this_thread::yield();
+    }
+    const uint64_t gated = process.GuestThreadProfile().Core0IdleSvcGateWaits;
+    const auto result = process.Run(kBudget);
+    Require(result.Kind == NativeA32ProcessRunKind::Terminated,
+            "main thread did not run to its exit: " + result.Error);
+    Require(mixed.load(), "a game-thread wait found the DSP interrupt before its frame was mixed");
+    Require(process.GuestThreadProfile().Core0IdleSvcGateWaits == gated + 1U,
+            "exactly the wait on the DSP interrupt waits for the mix");
+    unit.Join();
+    Require(unit.Released, "the frame did not mix released");
+    Require(guest.Read32(kData + 16U) == 0U && guest.Read32(kData + 20U) == 0U,
+            "the waits did not succeed");
+    // A game-thread thread waiting for the DSP interrupt and another object
+    // together: the next frame keeps the lock.
+    GuestState create{};
+    create.r[0] = 0x31U;
+    create.r[1] = waitAllEntry;
+    create.r[2] = kData;
+    create.r[3] = kSecondStack;
+    create.r[4] = 0U;
+    guest.Svc(0x08U, create);
+    process.Run(kBudget);
+    Require(guest.host.DspAudioInterruptHasCore0Waiter(),
+            "a wait-all listing the DSP interrupt is not a game-thread waiter");
+    Core1IdleUnit held(process, process.Core0ThreadWakes(),
+                       guest.host.DspAudioInterruptHasCore0Waiter(), [] {});
+    held.Join();
+    Require(!held.Released && held.HeldInside, "a frame with a game-thread waiter released");
+    process.DisableSecondCore();
+    SecondCore::UnlockKernel();
 }
 
 struct RetakeRun {
@@ -1521,9 +1651,13 @@ struct RetakeRun {
 
 // The window session's DSP frame, both shapes, against a game thread that
 // keeps making SVCs: the sound thread (second core) waits on the DSP audio
-// interrupt and reads the frame's words; the "mix" fills them in place
-// between BeginHostUpdate and EndHostUpdate, first word, `mix` of work with
-// a few memory-path reads (as sample reads), then the rest.
+// interrupt, clears it and reads the frame's words; the "mix" fills them in
+// place between BeginHostUpdate and EndHostUpdate, first word, `mix` of work
+// with a few memory-path reads (as sample reads), then the rest. The
+// interrupt event is the game's: sticky (svcCreateEvent reset type 1 at
+// 0x002FA2C4, registered for the audio pipe at 0x002FA308), so a wait does
+// not take it and it stays signaled until the sound thread clears it, after
+// the mix (logs21: dsp_released 0 with the one-shot model's rule).
 // - retake off: claim, update, account, signal, all with the kernel lock;
 // - retake on: claim, resolve, signal, the update through
 //   RunSecondCoreIdleWorkAfterEffect, account.
@@ -1549,6 +1683,8 @@ RetakeRun RunRetakeSchedule(bool retake, uint32_t frames, uint32_t calls,
     program.Op(MovImm(11, 0));
     const uint32_t soundLoop = program.Here();
     EmitWait(program, 0);
+    program.Op(Ldr(0, 9, 0));
+    program.Svc(0x19U);  // ClearEvent, as the game's sound thread
     program.Op(Ldr(5, 9, 0x100));
     program.Op(Ldr(6, 9, 0x100 + (kMixWords - 1U) * 4U));
     program.Op(EorReg(12, 5, 6));
@@ -1566,6 +1702,7 @@ RetakeRun RunRetakeSchedule(bool retake, uint32_t frames, uint32_t calls,
     NativeA32Process& process = guest.process;
     NativeA32Memory& memory = process.Memory();
     RetakeRun run;
+    const NativeA32SvcFilter filter = DspWaitFilter(guest);
     uint32_t pending = 0U;  // kernel lock held
     uint32_t delivered = 0U;
     process.SetSecondCoreIdleWork(
@@ -1594,13 +1731,14 @@ RetakeRun RunRetakeSchedule(bool retake, uint32_t frames, uint32_t calls,
              const uint64_t wakes = process.Core0ThreadWakes();
              Require(guest.host.SignalDspAudioFrame(), "DSP interrupt");
              if (process.RunSecondCoreIdleWorkAfterEffect(
-                     wakes, guest.host.DspAudioInterruptPending(), [&] { mixFrame(bytes); })) {
+                     wakes, guest.host.DspAudioInterruptHasCore0Waiter(), filter,
+                     [&] { mixFrame(bytes); })) {
                  ++run.Released;
              }
              Require(memory.EndHostUpdate(kData + 0x100U, kMixWords * 4U), "account");
          }});
     TwoCores cores(process, kDspBudget);
-    const uint32_t event = guest.CreateEvent();
+    const uint32_t event = guest.CreateEvent(1U);
     guest.Write32(kData, event);
     StartDspAudio(guest, event);
     const uint32_t sound = guest.CreateThread(soundEntry, 1, kData);
@@ -1706,6 +1844,7 @@ int main(int argc, char** argv) {
         TestDspOnSecondCore(sizes.DspRefreshes);
         TestQuietWakes(quiet);
         TestReleasedIdleWork();
+        TestReleasedIdleWorkWaitGate();
         TestRetakeSchedule(sizes.RetakeFrames);
     }
     SecondCore::gQuietWakes = false;
