@@ -67,9 +67,13 @@ DISPATCH_CASE = re.compile(r"^    case 0x([0-9A-F]{8})U:$")
 BLOCK_LABEL = re.compile(r"^block_([0-9A-F]{8}):$")
 REGISTRY_ENTRY = re.compile(r"^    \{0x([0-9A-F]{8})U, Execute_\w+_([0-9A-F]{8})\},$")
 DEVKIT_CXX = "/opt/devkitpro/devkitA64/bin/aarch64-none-elf-g++"
+# The Switch shards' CPU and floating-point options, without __SWITCH__ (no
+# libnx headers under the minimal qemu runtime) and with thread_local made
+# global (no TLS there; the test is single-threaded), as
+# run_guest_override_equivalence.py --qemu-aarch64 does.
 SWITCH_FLAGS = ("-march=armv8-a+crc+crypto -mtune=cortex-a57 -O3 -ffunction-sections "
-                "-fdata-sections -D__SWITCH__ -finline-functions -fno-fast-math "
-                "-ffp-contract=off -w")
+                "-fdata-sections -finline-functions -fno-fast-math "
+                "-ffp-contract=off -w -Dthread_local=")
 # Gated PCs outside every call closure, hooked by the "outside" hook lists.
 OUTSIDE_GATES = (0x00100000, 0x00600000)
 
