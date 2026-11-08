@@ -1274,8 +1274,9 @@ scheduler. Absent = the previous single-thread code paths exactly (nothing below
   core 0, a frame pending — so the in-place HLE mix never meets the sound thread and each
   frame's interrupt is consumed before the next (a frame waits, never drops). It mixes, signals
   the DSP interrupt, updates the DSP statistics and submits to the host audio stream with the
-  kernel lock held throughout (the mix is ~0.1 ms, and its region and sample reads take the lock
-  anyway); a mix error becomes the game thread's next `Run()` fault. The game thread only adds
+  kernel lock held throughout with `config/kernel_retake` `0`; by default the mix and the submit
+  run with it released (section "Kernel-lock retake: the DSP mix without the lock" below); a
+  mix error becomes the game thread's next `Run()` fault. The game thread only adds
   the refresh's frames and notifies (no pump, no flush, no wait: `dsp_wait_ms` 0); a core-0
   thread above the main thread's priority that waits or exits notifies too. The frames go out as
   soon as they are pending, where the switch-off path delivers them at the same point (or, with
@@ -4328,6 +4329,132 @@ switch off. Up to the 0.25–0.5 ms per host frame it grew by where the second c
 split under "outside the phases"). If `frame_head` stays high, `head_*` names the part and
 `render_wakes` shows whether wake-ups follow it; `start_lock_wait` shows whether the frame start's
 reads (input) wait for the second core as well.
+
+### Kernel-lock retake: the DSP mix without the lock, `config/kernel_retake` (08/11)
+Perf19 item 6: in test.11 the game thread spends 0.8–1.6 ms per step retaking the kernel lock, and
+core 1 waits 1.5–7 ms per host frame for it.
+
+**Where the game thread drops and retakes the lock** (second core on):
+- `Run()` releases it around each guest dispatch and retakes it at each exit (SVC, block limit,
+  fallback). This is `guest_kernel:` `lock=`. In Kokiri (`logs19/perf.txt:1041`), thread 0 spends
+  1.10 ms per host frame there (1.58 ms per step) over 13.5 SVCs. Threads 4 and 7 make 19.8 and 9.6
+  SVCs but spend only 0.008 and 0.013 ms.
+- The frame loop's released regions (`HostWaitRelease`: host frame start and input, presentation
+  hand-off) show `kernel_reacquire` 0.0013 ms per host frame, so nothing waits there. The UI
+  submission keeps the lock since `kernel_ui_lock`, and a render-stream submit releases it only
+  when it waits for a slot.
+- Out-of-line guest memory paths inside guest code each take the lock. Their waits fall inside
+  `guest`; there was no field for them until `core0_lock_wait_ms` below.
+
+**Why core 1 needs it:**
+- the SVC exits of the sound thread (thread 6): 45 per host frame, 0.23 ms;
+- its scheduling;
+- the DSP frames: 4.8 per host frame, 1.36 ms (`dsp_core1_ms`). Each frame mixes, signals the
+  interrupt, updates the statistics and submits to the host audio stream, all with the lock held.
+  The submit wakes the audio worker (0x2B, on core 1, above core 1's 0x2D), which then ran while
+  the guest-core thread still held the lock.
+
+Core 1 itself waits for the game thread's long holds (GSP IPC: 8.5 calls × 595 µs per host frame).
+
+**The pattern:**
+1. Core 1 queues for the lock during a GSP SVC.
+2. When the game thread re-enters guest code, Horizon's unlock hands the lock to core 1.
+3. Core 1 handles the sound thread's SVC. The sound thread is then parked, so core 1 runs the whole
+   DSP frame without releasing the lock.
+4. The game thread's next exit waits for the rest of that frame.
+
+Evidence from the 200 test.11 windows: thread 0's `lock` follows `dsp_core1_ms` (correlation 0.96,
+median ratio 0.72). Threads 4 and 7 stay at about 0.01 ms, because a DSP frame never starts while
+either is ready or running (`AuxiliaryWorkPending`).
+
+**`config/kernel_retake`** (absent = on, `0` = the previous path; desktop `TRIAEVUM_KERNEL_RETAKE`;
+logged as `retake=` in the `kernel_fast:` start line) changes the DSP frame on the second core
+(`DeliverDspAudioFrameOnSecondCore`):
+1. With the lock held, it claims the frame and resolves both shared regions (`BeginFrame`, the only
+   step that can fail, still before anything the guest can see). Then it signals the DSP
+   interrupt.
+2. The mix (`MixFrame`) and the host-audio submit then run with the lock released
+   (`NativeA32Process::RunSecondCoreIdleWorkAfterEffect`). The sample reads take the lock
+   themselves.
+3. With the lock held again, it accounts the regions as written back (`EndFrame`) and updates the
+   statistics.
+
+`ProcessFrame` is now these three steps in a row: same bytes, samples, memory traffic and order.
+
+The mix keeps the lock (the previous timing, with the interrupt first) when the interrupt readied
+a game-thread thread (`Core0ThreadWakes`), or when it stayed signaled so that one could take it
+later (`DspAudioInterruptPending`).
+
+While the mix runs released:
+- the second core counts as inside an SVC (`gInKernel`), so a world stop (savestate, page-table
+  rebuild) waits for the frame;
+- the game thread does not dispatch a thread above the main thread's priority
+  (`WaitOutReleasedIdleWork`, then it chooses again), because no such thread ever ran during a DSP
+  frame;
+- the game thread's SVCs, memory paths and host work go on.
+
+**Why the guest sees the same:**
+- **The interrupt's position is invisible.** Before, no kernel operation ran between the mix and
+  the interrupt (the lock was held across both), so signaling before the mix changes nothing a
+  thread can observe.
+- **The woken thread runs after the mix.** The thread the interrupt wakes is the sound thread, on
+  this same host thread, so it runs only once the mix is done. A game-thread thread woken by the
+  interrupt, or one that could still take it, keeps the held path.
+- **SVCs see the state after the whole frame.** The game thread's SVCs during the mix see the
+  kernel exactly as after the whole frame (the effect is already applied), which is what they saw
+  when they waited for it. Its guest code already ran alongside the mix before.
+- **The region pointers stay valid.** They are only replaced under a world stop, which waits.
+
+As with `kernel_ui_lock`, what moves is when the game thread's SVCs run relative to the mix's
+memory traffic, which nothing ordered. The DSP regions and sample buffers are touched only by the
+sound thread (parked) and the mix [INFERENCE for the game's own SVC targets: no SVC of the game
+writes DSP RAM or a playing sound buffer].
+
+**`perf.txt` `second_core:`** gains, per host frame:
+- `dsp_released`: frames mixed released;
+- `dsp_held_ms`: the rest of `dsp_core1_ms`, the part the game thread can still wait for;
+- `core0_gated`: game-thread waits for a released frame before a thread above the main thread's
+  priority;
+- `core0_lock_waits` / `core0_lock_wait_ms`: every game-thread acquisition of the kernel lock that
+  found it taken, and the time waited. This covers the retakes, the guest memory paths and the
+  released regions; minus `guest_kernel:` `lock_ms`, it gives the memory paths' share.
+
+**Tests:**
+- `oot3d_native_audio_dsp_mix_tests`: every other frame goes through the three steps, with the
+  same digests.
+- `oot3d_native_a32_ctr_host_tests`: `DspAudioInterruptPending` after clear, signal and a
+  manual-reset wait.
+- `oot3d_native_a32_second_core_tests` (both `kernel_wake` modes):
+  - `TestReleasedIdleWork` checks that the work stays held after a game-thread wake or a pending
+    effect, that a world stop waits for the released work, that the main thread runs during it, and
+    that a thread above the main thread's priority runs only after it.
+  - `TestRetakeSchedule` runs 100 DSP frames of 300 µs against a game thread making an SVC every
+    ~400 blocks. The sound thread sees the same frames in the same order, never a half-mixed one
+    (same checksum, `dsp_released` 0 and 1.00 per frame).
+  - Host (WSL2, RelWithDebInfo), game-thread waits for the lock per frame: 344 → 20 µs with
+    `kernel_wake` on, 362 → 23 µs with it off. Retake time (`lock`, uncontended cost included):
+    368 → 44 µs and 423 → 83 µs.
+  - The suite is also run under TSan.
+
+**Expected on the console [not measured]:**
+- Thread 0's `lock` in `guest_kernel:` falls from 0.5–1.4 ms per host frame to the share left by
+  core 1's short holds (SVC exits, frame claim and accounting, sample reads): host 20 of 344 µs per
+  frame.
+- In Kokiri at 42 FPS that is −0.8 to −1.4 ms per step of the 1.58 ms. A little more can come off
+  `guest` where the memory paths waited for a frame.
+- Core 1's mix may now wait for the lock at its sample reads (`core1_lock_wait_ms`), behind the
+  game thread's GSP SVCs. That is time on core 1, which has the slack: a frame every 4.9 ms against
+  ~0.3 ms of mix.
+
+**A/B (one minute, Kokiri Forest, the same path):**
+1. Run 30 s as is.
+2. Create `config/kernel_retake` containing `0`, restart, and run 30 s again.
+3. Compare `guest_kernel:` `lock_ms` and thread 0's `lock=`, `second_core:` `dsp_held_ms`,
+   `core0_lock_wait_ms`, `dsp_released`, `core1_lock_wait_ms`, then `guest`, `game_pair_ms` and
+   `fps`.
+4. With it on, `dsp_released` should equal `dsp_core1`. If it is lower, either a game-thread thread
+   waits on the DSP interrupt, or the game's interrupt event stays signaled after the wake (manual
+   reset). In both cases those frames keep the previous timing; nothing is lost but the gain.
 
 ### Plan build cost per draw: `config/plan_*` (07/11)
 When Link cuts bushes (`logs18a` `perf.txt` window 27300, 133 draws per step), the render thread
