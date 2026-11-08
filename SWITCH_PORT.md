@@ -4412,6 +4412,44 @@ Guest replacements for the hottest loops of the game's CPU renderer, in the exis
   - `held_frames` is 1-2 with `held_ms` matching the `world pack ... hold` line in `deko3d.txt`.
   - In the Hyrule Field grove at Full, `failed_probes` per window falls to 0-1 as `probe_interval`
     climbs to 240.
+- **Stale ratio (09/11, test.15; logs22a, Perf21 §1, Perf22 §7).** At 30, no full in-between frame is
+  drawn, so the full frame's ratio stays whatever it last measured.
+  - **What the logs show:**
+    - 22a's Hyrule Field entry learnt 1.24 (`est_full_ms` 26.2 against `est_step_ms` 21.1,
+      `perf.txt:352`). Then 150+ decisions passed with nothing drawn and no probe (pair 42–47 ms, beyond
+      the 1.25 × budget probe limit; `:359,366` show `probes=0`).
+    - At 6600 the step was down to 14.43 ms, but 14.43 × 2.24 = 32.37 missed the 32.33 return
+      threshold (`:366`). Measured in the next window, the ratio was 1.12 (`:373`).
+    - The Kokiri entry's 1.19 (`:422,429`) came with a hopeless pair; the probe at 8100 measured 0.94.
+    - Steady scenes measure 0.94–1.12 (Perf21: 0.98–1.10).
+  - **Change** (`StaleRatio`, part of `config/pacer_entry_recover`; `0` turns it off with the rest):
+    - **When it fires:** the step is down far enough that a pair with ratio 1.10 would return to full
+      (step ≤ 0.97 × 33.33 / 2.10 = 15.4 ms at 60 FPS), while the full frame's ratio is above 1.10 and
+      has gone unmeasured for 30 decisions (1 s).
+    - **What it does:** probes the full level at once, ignoring the probe interval, the back-off and
+      the 1.25 limit.
+    - **Back-off:** a failed stale probe doubles its own wait (30 → 60 → … → 240 decisions). Failed
+      regular probes don't count towards it, because they were measured in the heavier view the falling
+      step has left.
+    - **Why heavy views are unaffected:** above 15.4 ms of step it never fires, whatever the ratio.
+      That covers every heavy view in Perf21 and Perf22: 15.9–22.3 ms per step frame. A probe never
+      changes the level by itself; only its measurement can bring 60 back.
+  - **Counter:** `stale_probes` in the `interp:` block (probes made early for a stale ratio).
+  - **Estimate** (`[INFERENCE]`, from window ends only):
+    - **22a 6600:** going back to 60 needs the step at ≤ 15.25 ms with the fresh 1.12, against ≤ 14.43
+      with the stale 1.24. If the step fell evenly through that window (gS 18.3 → est 14.43), that
+      gap is about 13 decisions, so about 0.45 s less at 30.
+    - **A step that settles between 14.4 and 15.4 ms:** before, it stayed at 30 until the next regular
+      probe: up to 2 s, or up to 8 s once the back-off had grown. Now it returns within about 1 s.
+  - **Tests:**
+    - `TestStaleRatioRecoversWithinOneProbe`, fall case: the step falls from 19.5 to 11 ms with a real
+      ratio of 1.12. At every phase of the probe schedule it is back at full after one probe (worst 32
+      pairs, against 37).
+    - Same test, plateau case: a 15.0 ms plateau after the back-off had reached 240 returns within 22
+      pairs, against 52 before.
+    - `TestStaleRatioHeavyViewsDoNotFlap`: steps of 16.0 ms with noise, 16.8, 17.4 and 20.4 ms give no
+      stale probe and no extra level change. A view whose ratio really is 1.2 (15 ms) gets 3 stale
+      probes in 20 s and no level change, against 10 regular probes before.
 
 ### Texture/object flicker when turning the camera fast (fps60, 2026-10-24)
 - **Symptom** (pgo5o, `config/fps60`, `dynamic_resolution`, `fps60_mode=adaptive`): when turning the

@@ -1809,12 +1809,24 @@ GUARDS = [
     Guard("after a scene entry the pacer probes 60 again soon after the entry work ends (config/pacer_entry_recover)",
           "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
           r'bool EntryRecover = true;.*?const bool entryProbe = mConfig\.EntryRecover && entry && !mEntryWork &&'
-          r'.*?if \(\+\+mBelowPreferred >= ProbeIntervalNow\(entryProbe\) \|\|',
+          r'.*?const bool due = \+\+mBelowPreferred >= ProbeIntervalNow\(entryProbe\) \|\|',
           "oot3d_native_interpolation_pacing_tests (TestEntrySpikeThenRecovery)"),
     Guard("a failed probe doubles the probe interval (no extra probes in a view that really is too heavy)",
           "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
           r'interval \*= 2U;.*?\+\+mFailedProbes;\s+\+\+mStats\.FailedProbes;',
           "oot3d_native_interpolation_pacing_tests (TestFailedProbeBacksOff, TestSustainedHeavyViewDoesNotOscillate)"),
+    # --- 09/11 (test.15): a stale in-between ratio kept 30 after the view got lighter (logs22a:366) ---
+    Guard("a full-frame ratio above 1.10 left unmeasured while the step alone would fit is probed at once",
+          "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
+          r'const bool stale = StaleRatio\(probe, budget\);.*?if \(due \|\| stale\) \{'
+          r'.*?\(probePair <= 1\.25 \* budget \|\| stale\)'
+          r'.*?mRatio\[index\] > mConfig\.FreshRatio &&\s+mRatioAge\[index\] >= StaleAfterNow\(\) &&'
+          r'\s+mStepCostMs \* \(1\.0 \+ mConfig\.FreshRatio\) <=',
+          "oot3d_native_interpolation_pacing_tests (TestStaleRatioRecoversWithinOneProbe)"),
+    Guard("stale probes back off on their own failures only, and only the full level's ratio is judged stale",
+          "tools/oot3d/native_game_runtime/oot3d_native_interpolation_pacing.h",
+          r'failed < mStaleFailures && after < cap.*?mConfig\.EntryRecover && level == InterpolatedSampleLevel::Full',
+          "oot3d_native_interpolation_pacing_tests (TestStaleRatioHeavyViewsDoNotFlap)"),
     Guard("the game thread hands each scene entry to the pacer, the render thread its entry work",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'renderStream\.Submit\(\[this\] \{ interpolationPacing\.NoteEntry\(\); \}\);'),

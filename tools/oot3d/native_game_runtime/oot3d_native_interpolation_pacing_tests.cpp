@@ -578,6 +578,172 @@ void TestFailedProbeBacksOff() {
   CHECK(former.ProbeIntervalNow(true) == 60U);
 }
 
+// Learns a full-frame ratio of about 1.24 (22a 6150-6300, the Hyrule Field
+// entry: est_full 26.2 against est_step 21.1) and drops.
+void LearnHighRatio(InterpolationPacingGovernor &governor) {
+  for (int pair = 0; pair < 60; ++pair)
+    Pair(governor, 11.0, [](auto level) { return Costs(level, 12.3, 12.3); });
+  CHECK(governor.Level() == InterpolatedSampleLevel::Full);
+  // The full frames measured while the step average still climbs: the
+  // ratio settles at about 1.24.
+  for (int pair = 0; pair < 10; ++pair)
+    Pair(governor, 21.0, [](auto level) { return Costs(level, 20.5, 20.5); });
+  CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
+  const double ratio =
+      governor.Estimate(InterpolatedSampleLevel::Full) / governor.StepCostMs();
+  CHECK(ratio > 1.2 && ratio < 1.3);
+}
+
+struct StaleRun {
+  int RecoveredAt = -1; // pair of the fall at which full came back
+  uint64_t Probes = 0, StaleProbes = 0, LevelChanges = 0;
+};
+
+// logs22a/perf.txt:359-373: after the drop a long heavy stretch with
+// nothing drawn (pair 42-47 ms: no probe, `probes=0` in 6450 and 6600),
+// then the step falls to 11 ms while the full frame really costs 1.12 x
+// the step (as 6750 measured). heavyPairs sets where the fall lands in the
+// 60-decision probe schedule.
+StaleRun StaleRatioFall(bool on, int heavyPairs) {
+  auto governor = MakeEntryRecover(on);
+  LearnHighRatio(governor);
+  for (int pair = 0; pair < heavyPairs; ++pair)
+    Pair(governor, 19.5, [](auto level) { return Costs(level, 19.5, 19.5); });
+  CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
+  CHECK(governor.Estimate(InterpolatedSampleLevel::Full) >
+        1.2 * governor.StepCostMs());
+  CHECK(governor.RatioAge(InterpolatedSampleLevel::Full) >=
+        static_cast<uint32_t>(heavyPairs));
+  const auto before = governor.Stats();
+  StaleRun run;
+  for (int pair = 0; pair < 120; ++pair) {
+    const double step = std::max(11.0, 19.5 - 0.15 * pair);
+    const auto level = Pair(governor, step, [&](auto level) {
+      return Costs(level, 1.12 * step, 1.12 * step, 0.6);
+    });
+    if (level == InterpolatedSampleLevel::Full && run.RecoveredAt < 0 &&
+        governor.Level() == InterpolatedSampleLevel::Full)
+      run.RecoveredAt = pair;
+  }
+  CHECK(governor.Level() == InterpolatedSampleLevel::Full);
+  run.Probes = governor.Stats().Probes - before.Probes;
+  run.StaleProbes = governor.Stats().StaleProbes - before.StaleProbes;
+  run.LevelChanges = governor.Stats().LevelChanges - before.LevelChanges;
+  return run;
+}
+
+void TestStaleRatioRecoversWithinOneProbe() {
+  // The fall at every phase of the 60-decision schedule: with the stale
+  // probe, full comes back after one probe, at the first decision whose
+  // step alone fits with a fresh ratio; formerly at the next scheduled
+  // probe or when the step fits the stale 1.24.
+  int worstOn = 0, worstOff = 0;
+  uint64_t staleProbes = 0;
+  for (int heavy = 150; heavy < 210; heavy += 6) {
+    const auto on = StaleRatioFall(true, heavy);
+    const auto off = StaleRatioFall(false, heavy);
+    std::printf("stale ratio 1.24, %d heavy pairs, step falling 19.5 -> 11 "
+                "ms: back at full after %d pairs (probes %llu, stale %llu), "
+                "formerly %d (%llu)\n",
+                heavy, on.RecoveredAt, static_cast<unsigned long long>(on.Probes),
+                static_cast<unsigned long long>(on.StaleProbes), off.RecoveredAt,
+                static_cast<unsigned long long>(off.Probes));
+    CHECK(on.RecoveredAt >= 0 && on.RecoveredAt <= off.RecoveredAt);
+    // One probe and one level change: back to full.
+    CHECK(on.Probes == 1U);
+    CHECK(on.LevelChanges == 1U);
+    CHECK(off.StaleProbes == 0U);
+    worstOn = std::max(worstOn, on.RecoveredAt);
+    worstOff = std::max(worstOff, off.RecoveredAt);
+    staleProbes += on.StaleProbes;
+  }
+  CHECK(worstOn < worstOff);
+  CHECK(staleProbes >= 5U);
+  // The step settles between the two thresholds (15.0 ms: 32.33 / 2.24 =
+  // 14.43 < 15.0 < 32.33 / 2.10 = 15.40) after regular probes failed in a
+  // heavier view whose in-between frame really cost 1.24 x (the back-off
+  // at 240 decisions): at every phase of that schedule the stale probe
+  // still comes within about a second.
+  int plateauOn = 0, plateauOff = 0;
+  for (int heavy = 600; heavy < 840; heavy += 12) {
+    for (const bool on : {false, true}) {
+      auto governor = MakeEntryRecover(on);
+      for (int pair = 0; pair < 60; ++pair)
+        Pair(governor, 11.0, [](auto level) { return Costs(level, 12.3, 12.3); });
+      for (int pair = 0; pair < heavy; ++pair)
+        Pair(governor, 17.0, [](auto level) { return Costs(level, 21.1, 21.1); });
+      CHECK(governor.Level() == InterpolatedSampleLevel::Dropped);
+      if (on)
+        CHECK(governor.ProbeIntervalNow(false) == 240U);
+      int recovered = -1;
+      for (int pair = 0; pair < 300; ++pair) {
+        const auto level = Pair(governor, 15.0, [](auto level) {
+          return Costs(level, 15.0, 15.0, 0.6);
+        });
+        if (level == InterpolatedSampleLevel::Full && recovered < 0 &&
+            governor.Level() == InterpolatedSampleLevel::Full)
+          recovered = pair;
+      }
+      CHECK(governor.Level() == InterpolatedSampleLevel::Full);
+      CHECK(recovered >= 0);
+      int &worst = on ? plateauOn : plateauOff;
+      worst = std::max(worst, recovered);
+    }
+  }
+  std::printf("stale ratio 1.24 after failed probes, step settling at 15.0 "
+              "ms: back at full within %d pairs at any phase, formerly %d\n",
+              plateauOn, plateauOff);
+  CHECK(plateauOn <= 40 && plateauOn < plateauOff);
+}
+
+// The heavy views of Perf21 and Perf22 (steps of 15.9-22 ms; the step alone
+// keeps the pair out even with a fresh ratio) with a stale ratio of 1.24
+// first: no stale probe and no extra level change. A view whose ratio
+// really is high (15 ms, 1.2: pair 33.0, over 32.33) gets stale probes with
+// the back-off and never changes level.
+void TestStaleRatioHeavyViewsDoNotFlap() {
+  struct View {
+    double Step, Ratio, Noise;
+  };
+  for (const View view : {View{16.8, 1.02, 0.0}, View{16.0, 1.0, 0.45},
+                          View{17.4, 1.01, 0.0}, View{20.4, 1.08, 0.0},
+                          View{15.0, 1.2, 0.0}}) {
+    uint64_t changes[2]{}, stale[2]{}, probes[2]{};
+    for (const bool on : {false, true}) {
+      auto governor = MakeEntryRecover(on);
+      LearnHighRatio(governor);
+      const auto before = governor.Stats();
+      uint32_t seed = 4242U;
+      for (int pair = 0; pair < 600; ++pair) {
+        seed = seed * 1664525U + 1013904223U;
+        const double noise =
+            view.Noise * (((seed >> 8) % 1000U) / 500.0 - 1.0);
+        const double step = view.Step + noise;
+        Pair(governor, step, [&](auto level) {
+          return Costs(level, view.Ratio * step, view.Ratio * step, 0.6);
+        });
+      }
+      changes[on] = governor.Stats().LevelChanges - before.LevelChanges;
+      stale[on] = governor.Stats().StaleProbes - before.StaleProbes;
+      probes[on] = governor.Stats().Probes - before.Probes;
+    }
+    std::printf("heavy view %.1f ms x %.2f (noise %.2f): %llu level changes, "
+                "%llu stale probes of %llu; formerly %llu changes, %llu "
+                "probes\n",
+                view.Step, view.Ratio, view.Noise,
+                static_cast<unsigned long long>(changes[1]),
+                static_cast<unsigned long long>(stale[1]),
+                static_cast<unsigned long long>(probes[1]),
+                static_cast<unsigned long long>(changes[0]),
+                static_cast<unsigned long long>(probes[0]));
+    CHECK(changes[1] <= changes[0]);
+    if (view.Step * (1.0 + 1.10) > 0.97 * kPair)
+      CHECK(stale[1] == 0U);
+    else
+      CHECK(stale[1] <= 5U && changes[1] == 0U);
+  }
+}
+
 void TestSampleClearsEveryTarget() {
   using Oot3dNativeGame::ReducedReplayDraw;
   using Oot3dNativeGame::ReducedReplayFill;
@@ -702,6 +868,8 @@ int main() {
   TestEntrySpikeThenRecovery();
   TestSustainedHeavyViewDoesNotOscillate();
   TestFailedProbeBacksOff();
+  TestStaleRatioRecoversWithinOneProbe();
+  TestStaleRatioHeavyViewsDoNotFlap();
   TestSampleClearsEveryTarget();
   TestParseReducedScale();
   if (gFailures != 0) {
