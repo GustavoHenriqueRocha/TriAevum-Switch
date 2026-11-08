@@ -36,6 +36,7 @@ Bugs that kept the Switch from running (they only showed up on the console; Eden
 | Game in slow motion (½ speed) | 60 refreshes/s expected, but 1 per presentation at 30 Hz | up to 4 refreshes per presentation |
 | Settings not saving | Horizon FS does not rename over an existing file | old file aside, new file in place, recovery on load (see "Saving a file again on the SD card") |
 | Crash with warm-up on a thread | nvc0 contexts share a push buffer without a lock | warm-up on the render thread |
+| A crash or power loss while saving could leave a half-written save; a deleted slot was gone for good | the host wrote the save in place, chunk by chunk, with no copy | atomic save writes and rotating backups in `savedata-backups/` (Gustavo's save safety; see "Saves that survive a crash") |
 | Game closed when erasing a file on the file select screen | the host's DeleteFile made the save root `sdmc:/switch/oot3dre/savedata` canonical; std::filesystem treats devoptab paths as relative and put the cwd in front, so every delete failed and the game called its fatal-error handler | delete `save root / path`, as OpenFile and CreateFile do (`oot3d_native_a32_ctr_fs_tests`) |
 
 Performance and usability:
@@ -424,6 +425,57 @@ Both fixes have guards in `tests/switch/test_bug_guards.py`.
   L3+R3 > Controls, change a free-camera option and press Save controls. No error should appear, and
   both changes should still be there after a restart. `sdmc:/switch/oot3dre/config/` should have no
   `topscreen_ui.json.bak`, `topscreen_ui.json.tmp` or `oot3d_controls.json.bak`.
+
+### Saves that survive a crash (Gustavo's save safety, ported 11/08)
+
+Ported from GustavoHenriqueRocha/TriAevum-Switch `47c00ee2` and `699144ae` (with their
+prerequisites `8a5ec74e`, GetFormatInfo/FormatSaveData, and `d6c0b894`, ExtSaveData). His research
+note is `docs/SAVE_SAFETY.pt-BR.md`; the code is `oot3d_native_a32_ctr_save_safety.{h,cpp}`.
+
+- **Before:** the game's save went straight into `savedata/save0N.bin` in 1 KiB pieces. A crash or
+  power loss in the middle left a file half new, half old. Erasing a file slot removed the only copy.
+- **Atomic writes.** The first write of a save file copies it to `<name>.triaevum-tmp`, and the
+  game's reads and writes use that copy. The save is installed when the last handle that wrote
+  flushes or closes, or when the game commits the archive (`ControlArchive`, which OoT3D does after
+  every save). Installing goes `tmp -> <name>.triaevum-new -> <name>`. Horizon refuses a rename over
+  a file, so the old file first becomes `<name>.triaevum-old` and is deleted only after the new one is
+  in place. A failed write (full SD) is never installed.
+- **Recovery** at the first save access of a run (or a save-state restore): a leftover
+  `.triaevum-new` is installed, an orphan `.triaevum-old` is put back, and an unconfirmed
+  `.triaevum-tmp` moves to `savedata-backups/incompleto-<date>/`. Nothing is deleted.
+- **Backups.** Before the first write (or erase) of each file in a run, the previous version is
+  copied to `sdmc:/switch/oot3dre/savedata-backups/<YYYYMMDD-HHMMSS>/`. The copy is checked
+  (size + checksum) before it counts. An erased slot that was also written in the same run is kept
+  as `<name>.apagado`. 20 generations are kept, in the creation order recorded in
+  `savedata-backups/.triaevum-geracoes` (the console clock can go back). A generation holding the
+  only copy of a file is never pruned, and neither is the newest. `incompleto-*` and `format-*` are
+  never pruned. To restore, copy files from a generation folder back into `savedata/`.
+- **Space:** a generation holds only the files written in that run: the slot's `save0N.bin`
+  (5340 bytes) and often `system.dat` (34 bytes). 20 generations is about 110–220 KB of data. On
+  exFAT every file takes a whole cluster (128 KiB on large cards), so allow up to ~5 MB.
+  [INFERENCE: cluster size from the SD format, not measured.]
+- **Format:** a FormatSaveData moves the folder to `savedata-backups/format-<date>/` instead of
+  deleting it. An existing save without `.format` (all OoT3D saves) reports a synthesized format
+  (`TRIAEVUM_FS_SAVE_ADOPTED`) instead of NotFormatted. [INFERENCE: OoT3D never formats; Gustavo's
+  note says no OoT3D path changes.]
+- **Save states:** open save files and archives are stored relative to the save folder
+  (`file_path_base`/`root_base`), so a state restores with another save folder. States from test.15
+  and earlier (absolute paths) still load. The journal belongs to the run, not to the state: a restore
+  keeps the pending writes and backups and forgets writer handles the state does not have. A run
+  that starts by loading a state runs the recovery first.
+- **This branch:** no per-title save folders (english runs only OoT3D); DeleteFile keeps
+  `bce4b02e`'s per-component walk after Gustavo's lexical check; `TRIAEVUM_SAVE_*` lines also go to
+  `logs/oot3d_native_game.log` (stderr is a null device on the Switch), with one
+  `TRIAEVUM_SAVE_BACKUP <file> -> <copy>` per backed-up file. On-disk names are Gustavo's, so an
+  SD card used with both builds shares one backup history.
+- **Updater and release zip:** the updater refuses any `savedata*` or `savestates/` path in a
+  `release.json` (`IsManagedInstallPath`, `oot3d_update_release_tests`). It writes only the listed
+  runtime files, as before. The ROM and TopScreen imports write only `game/` and `config/`.
+- **Tests:** `oot3d_native_a32_ctr_fs_tests` (Gustavo's 27 cases plus ours), `oot3d_native_a32_ctr_host_tests`
+  (the old write-through check now runs after Flush), guards `11/05` in `tests/switch/test_bug_guards.py`.
+- **Console check:** save in game (any slot). `sdmc:/switch/oot3dre/savedata-backups/` now has a
+  dated folder with the slot's previous `save0N.bin`. The game log has `TRIAEVUM_SAVE_BACKUP`.
+  `savedata/` has no `*.triaevum-*` files. After an OTA update, both folders are unchanged.
 
 ## How to build (Linux)
 
@@ -3459,7 +3511,8 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
 - `release.json`: `{"format": "oot3dre_switch_release_v1", "version", "build" (> 0), "channel"
   ("stable" for a full release, "test" for a pre-release), "files": [{"path", "size", "sha256"}]}`.
   Paths are relative to `sdmc:/switch/oot3dre/`, `[A-Za-z0-9._-]` components, never under
-  `game/`, `savedata/`, `logs/`, `config/`, `update/`, `lab/`, `bench/`, never
+  `game/`, `savedata/` or any other `savedata*` name (`savedata-backups/`, `savedata.format`),
+  `savestates/`, `logs/`, `config/`, `update/`, `lab/`, `bench/`, never
   `game_language.json`, `.new`/`.old`/`.tmp`; `oot3d_native_game.nro` is required; each file's
   asset is named after its last component.
 - Install (worker thread; sockets and libcurl only while it runs; libcurl follows the redirect to
@@ -5250,6 +5303,10 @@ prints them under `offload`.
   every other take of the queue (`TakePendingDraws`, `TakePendingBatch`).
 - Table writes of the value already present are skipped: shader program and swizzle words, fog and
   procedural tables, lighting LUT entries. There is no copy-on-write, and the LUT hash stays valid.
+  Lighting LUT entries are skipped with the switch off too (Gustavo's `014e0dee`, as Azahar's
+  `pica_core.cpp`): with `capture_delta` `0` a repeated entry no longer copies the 24 KiB table
+  or forces a new hash. `logs23` (capture delta on in all 179 windows): `lut_copies=0` and
+  `lut_hashes` 0 in 178 windows, `same_value_writes` 3400–8900 per frame across all tables.
 - A lighting LUT whose uploads restored an earlier content takes that table object and its hash.
   The check is an incremental XOR fingerprint per entry plus a byte compare, against the last 8
   hashed tables, instead of hashing 24 KiB byte by byte again.
@@ -5772,7 +5829,8 @@ Tools and distribution:
 - [coccofresco/TriAevum](https://github.com/coccofresco/TriAevum) — original project (GPL-3.0-or-later);
   [GustavoHenriqueRocha/TriAevum-Switch](https://github.com/GustavoHenriqueRocha/TriAevum-Switch) —
   the Switch port this English fork comes from (branch `deko3d`, base `311d8fd7`). Upstream work
-  ported later names its commit in the source (`68d527c6`, `14edc1eb`).
+  ported later names its commit in the source (`68d527c6`, `14edc1eb`; save safety `47c00ee2`,
+  `699144ae`, `8a5ec74e`, `d6c0b894`; lighting LUT `014e0dee`).
 - TopScreen / Single Screen Experience by M-1 — [GameBanana 695893](https://gamebanana.com/mods/695893)
   (CC BY-NC-ND 4.0): layouts and rules reimplemented from its `code.ips`, no code or art copied; the
   player's console downloads it.

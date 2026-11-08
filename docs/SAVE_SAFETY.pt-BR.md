@@ -1,5 +1,9 @@
 # Saves à prova de perda (backend de pasta: PC e NRO do Switch)
 
+> Neste ramo (`english`): pesquisa de Gustavo Henrique Rocha (GustavoHenriqueRocha/TriAevum-Switch,
+> commits 47c00ee2 e 699144ae), trazida com o código. A "pasta por título" (item 4 da decisão) não
+> entrou: este ramo só roda o OoT3D. Resumo em inglês: `SWITCH_PORT.md`, "Saves that survive a crash".
+
 Data: 2026-11-05 · Título(s): OoT3D (compatibilidade), genérico · Commits: nenhum (branch `saves-seguros`, worktree `.claude/worktrees/saves-seguros`, sobre `531bf3c0`)
 
 ## Pergunta

@@ -1067,7 +1067,7 @@ romfs, reaproveitando o `AzaharTexturePackRuntime` que já existia para o Vulkan
 
 O NRO usa o backend de pasta do PC sobre o devoptab da libnx (`SaveDataDirectory`, sem
 `Filesystem`). Receita (`oot3d_native_a32_ctr_save_safety.h`, pesquisa
-`docs/pesquisas/2026-11-05-saves-seguros.md`):
+`docs/SAVE_SAFETY.pt-BR.md`):
 
 - **Transação por arquivo:** a primeira escrita copia `<nome>` para `<nome>.triaevum-tmp`; Read,
   Write, GetSize e SetSize usam a cópia. Confirma o Flush/Close do **último handle que escreveu**
@@ -1089,8 +1089,8 @@ O NRO usa o backend de pasta do PC sobre o devoptab da libnx (`SaveDataDirectory
   save legado (arquivos sem `.format`) recebe formato sintetizado em vez de NotFormatted.
 - **Caminho `sdmc:/` não é absoluto para o `std::filesystem`:** nada de `absolute`, `canonical` ou
   `weakly_canonical` no FS do host (concatenam o cwd); contenção lexical (`CtrArchivePathContained`).
-- **Pasta por título:** o OoT3D fica em `sdmc:/switch/oot3dre/savedata`; outro título vai para
-  `sdmc:/switch/triaevum/<title id>/savedata` (`ResolveCtrTitleSaveDataDirectory`).
+- **Pasta do save:** o OoT3D fica em `sdmc:/switch/oot3dre/savedata`. (A pasta por título do
+  upstream, `ResolveCtrTitleSaveDataDirectory`, não entrou neste ramo: ele só roda o OoT3D.)
 
 ## 5. Medição e diagnóstico
 
