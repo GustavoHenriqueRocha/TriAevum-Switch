@@ -121,6 +121,7 @@ void GfxRenderingAPIDeko3d::EnsureFrame() {
         // Right after the slot's fence wait: evictions are safe here.
         mResourcesFrame = mDevice.Frame();
         mResources.BeginFrame(mResourcesFrame);
+        Deko3d::GrassBeginFrame(); // config/grass_hold: a scene's first grass
         if (mFrameBarrier) {
             mResources.RequestInvalidate(); // config/deko3d_barrier "frame" (A/B)
         }

@@ -410,7 +410,13 @@ const std::vector<PicaGrassDrawable>& PicaGrassPlacements::Update(uint64_t frame
                 ++mStats.Ready;
                 mStats.Anchors += result.Placement->Anchors.size();
                 mStats.BuildMilliseconds += result.BuildMilliseconds;
-                mReady.push_back({std::move(result.Placement), mesh});
+                // A ground loaded from disk with reuse was made with its own
+                // (nearly the same) transform: its anchors go back to model
+                // space with that one, so the tufts sit where they were made.
+                auto drawn = mesh;
+                if (result.Placement->ModelToWorld && !mesh.TransformBakedIntoVertices)
+                    drawn.ModelToWorld = *result.Placement->ModelToWorld;
+                mReady.push_back({std::move(result.Placement), std::move(drawn)});
             }
         }
     }

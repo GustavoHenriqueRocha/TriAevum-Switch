@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <optional>
 #include <vector>
 
 namespace Fast::Oot3d {
@@ -91,6 +92,10 @@ struct GrassWorldPlacement {
     std::vector<GrassShadowGridPoint> ShadowPoints;
     std::vector<GrassShadowGridReference> ShadowReferences;
     std::vector<GrassShadowSurface> ShadowSurfaces;
+    // The model-to-world the anchors were made with (the request's, or the
+    // stored one of a ground loaded from disk, GrassPlacementDiskMatch): the
+    // world anchors go back to model space with it, exactly.
+    std::optional<std::array<float, 16>> ModelToWorld;
 };
 
 struct GrassWorldPlacementRequest {

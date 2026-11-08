@@ -2,7 +2,9 @@
 // of the placements, the Switch profile's budgets and config/grass, and the
 // per-frame culling and instance stream of the deko3d draw.
 #include "fast/oot3d/grass_anchor_codec.h"
+#include "fast/oot3d/grass_persistent_placement_cache.h"
 #include "fast/oot3d/grass_instance_stream.h"
+#include "fast/oot3d/grass_scene_hold.h"
 #include "fast/oot3d/grass_stream_handoff.h"
 #include "fast/oot3d/grass_surface_extractor.h"
 #include "fast/oot3d/grass_switch_profile.h"
@@ -1137,6 +1139,243 @@ TEST(Oot3dGrassPlacementCache, ConfigFileMeaning) {
     EXPECT_FALSE(ReadGrassPlacementCache(dir));
     std::filesystem::remove_all(dir);
     EXPECT_GE(kGrassPlacementCacheBytes, 64ULL << 20); // a few fields' grounds at ~8 MiB each
+}
+
+// config/grass_placement_reuse: on unless a leading 0/off/false.
+TEST(Oot3dGrassPlacementCache, ReuseConfigFileMeaning) {
+    EXPECT_TRUE(ParseGrassPlacementReuse(std::nullopt));
+    EXPECT_TRUE(ParseGrassPlacementReuse("on\n"));
+    EXPECT_FALSE(ParseGrassPlacementReuse("0\n"));
+    EXPECT_FALSE(ParseGrassPlacementReuse("false"));
+    const auto dir = std::filesystem::temp_directory_path() / "oot3d_grass_placement_reuse_config";
+    std::filesystem::remove_all(dir);
+    EXPECT_TRUE(ReadGrassPlacementReuse(dir));
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "grass_placement_reuse") << "off\n";
+    EXPECT_FALSE(ReadGrassPlacementReuse(dir));
+    std::filesystem::remove_all(dir);
+}
+
+// config/grass_hold: ms per scene; absent or unreadable the default, 0/off
+// never, at most the limit.
+TEST(Oot3dGrassSceneHold, ConfigFileMeaning) {
+    EXPECT_EQ(ParseGrassSceneHoldMs(std::nullopt), kGrassSceneHoldDefaultMs);
+    EXPECT_EQ(ParseGrassSceneHoldMs(""), kGrassSceneHoldDefaultMs);
+    EXPECT_EQ(ParseGrassSceneHoldMs("abc"), kGrassSceneHoldDefaultMs);
+    EXPECT_EQ(ParseGrassSceneHoldMs("0\n"), 0U);
+    EXPECT_EQ(ParseGrassSceneHoldMs("off"), 0U);
+    EXPECT_EQ(ParseGrassSceneHoldMs(" 800\r\n"), 800U);
+    EXPECT_EQ(ParseGrassSceneHoldMs("99999"), kGrassSceneHoldLimitMs);
+    const auto dir = std::filesystem::temp_directory_path() / "oot3d_grass_hold_config";
+    std::filesystem::remove_all(dir);
+    EXPECT_EQ(ReadGrassSceneHoldMs(dir), kGrassSceneHoldDefaultMs);
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "grass_hold") << "400\n";
+    EXPECT_EQ(ReadGrassSceneHoldMs(dir), 400U);
+    std::filesystem::remove_all(dir);
+    // Hyrule Field's longest build (logs20c: 1194 ms) fits the default.
+    EXPECT_GE(kGrassSceneHoldDefaultMs, 1200U);
+}
+
+// logs20c (video 07131300, frames 0-7 bare ground, grass from frame 8):
+// Hyrule Field's placements were built for 1194 ms while the fade-in ran.
+// The hold makes the scene's first frames wait for them, then for their
+// first cull, and stops at the first grass drawn.
+TEST(Oot3dGrassSceneHold, WaitsForPlacementsThenTheirFirstCullThenStops) {
+    GrassSceneHold hold(1500U);
+    hold.BeginScene();
+    hold.BeginFrame(); // scene frame 1: the ground is drawn, its placements queued at the draw point
+    EXPECT_EQ(hold.Next(false, false, false), GrassHoldWait::None);
+    hold.BeginFrame(); // frame 2: queued last frame, still building
+    ASSERT_EQ(hold.Next(true, false, false), GrassHoldWait::Placements);
+    hold.Waited(GrassHoldWait::Placements, 1'194'000U, true);
+    EXPECT_EQ(hold.LeftMicros(), 306'000U);
+    hold.BeginFrame(); // frame 3: ready; the first cull was posted at the last draw point
+    ASSERT_EQ(hold.Next(false, true, true), GrassHoldWait::Cull);
+    hold.Waited(GrassHoldWait::Cull, 28'000U, true);
+    EXPECT_TRUE(hold.Drawn()); // drawn at frame 3
+    EXPECT_FALSE(hold.Drawn());
+    hold.BeginFrame();
+    EXPECT_EQ(hold.Next(true, true, true), GrassHoldWait::None); // closed by the first grass
+    const auto& stats = hold.Stats();
+    EXPECT_EQ(stats.FirstDrawnFrame, 3U);
+    EXPECT_EQ(stats.HoldFrames, 2U);
+    EXPECT_EQ(stats.PlacementWaits, 1U);
+    EXPECT_EQ(stats.CullWaits, 1U);
+    EXPECT_EQ(stats.Timeouts, 0U);
+    EXPECT_EQ(stats.HoldMicros, 1'222'000U);
+    // A ready placement whose cull is not running: nothing to wait for.
+    hold.BeginScene();
+    hold.BeginFrame();
+    EXPECT_EQ(hold.Next(false, true, false), GrassHoldWait::None);
+    EXPECT_EQ(hold.LeftMicros(), 1'500'000U); // a new scene, a new budget
+}
+
+TEST(Oot3dGrassSceneHold, TheBudgetAndTheWindowBoundIt) {
+    GrassSceneHold hold(1000U);
+    hold.BeginScene();
+    hold.BeginFrame();
+    hold.Waited(GrassHoldWait::Placements, 1'000'000U, false); // a build longer than the budget
+    EXPECT_EQ(hold.Stats().Timeouts, 1U);
+    hold.BeginFrame();
+    EXPECT_EQ(hold.Next(true, false, false), GrassHoldWait::None);
+    GrassSceneHold late(1000U);
+    late.BeginScene();
+    for (uint64_t frame = 0; frame <= kGrassSceneHoldFrames; ++frame) late.BeginFrame();
+    EXPECT_EQ(late.Next(true, false, false), GrassHoldWait::None); // past the scene's start
+    GrassSceneHold off(0U);
+    off.BeginScene();
+    off.BeginFrame();
+    EXPECT_EQ(off.Next(true, false, false), GrassHoldWait::None); // config/grass_hold = 0
+    GrassSceneHold never(1000U); // before the first scene change: no window
+    never.BeginFrame();
+    EXPECT_EQ(never.Next(true, false, false), GrassHoldWait::None);
+    EXPECT_EQ(GrassSceneHold(99999U).BudgetMicros(), uint64_t{kGrassSceneHoldLimitMs} * 1000U);
+}
+
+// A ground's model-to-world is derived from the camera of the scene's first
+// drawn frame: inverse(world-to-view) x view x model (pica_grass_source.cpp;
+// the inverse in double rounded to float, as InvertDirectionalShadowMatrix,
+// the products in float). Two first cameras (Hyrule Field from the market:
+// Link walks in, the first resolved frame varies) round it differently.
+std::array<float, 16> FirstFrameModelToWorld(float yaw, std::array<float, 3> eye) {
+    using M = std::array<float, 16>; // row-major
+    const float c = std::cos(yaw), s = std::sin(yaw);
+    // world-to-view: rotation about y, then -R x eye.
+    M view{c, 0.0F, -s, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, s, 0.0F, c, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F};
+    for (int row = 0; row < 3; ++row)
+        view[row * 4 + 3] = -(view[row * 4] * eye[0] + view[row * 4 + 1] * eye[1] + view[row * 4 + 2] * eye[2]);
+    M inverse{};
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) inverse[row * 4 + column] = view[column * 4 + row];
+        double translation = 0.0;
+        for (int k = 0; k < 3; ++k) translation -= double(view[k * 4 + row]) * double(view[k * 4 + 3]);
+        inverse[row * 4 + 3] = static_cast<float>(translation);
+    }
+    inverse[15] = 1.0F;
+    M result{};
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column)
+            for (int k = 0; k < 4; ++k) result[row * 4 + column] += inverse[row * 4 + k] * view[k * 4 + column];
+    return result; // the model matrix is the identity: ideally the identity
+}
+
+GrassAsyncPlacementRequest GroundRequest(const std::array<float, 16>& modelToWorld) {
+    const Field field = MakeField(8U, 800.0F);
+    GrassAsyncPlacementRequest request;
+    request.PlacementKey = {11U, 22U, 33U, 44U};
+    request.SourceContentVersion = 77U;
+    request.WorldIdentity = 55U;
+    request.FrameId = 1U;
+    request.InstanceId = 66U;
+    request.TextureHash = 33U;
+    request.ModelToWorld = modelToWorld;
+    request.TransformBakedIntoVertices = false;
+    request.Vertices = std::make_shared<const std::vector<GrassSourceVertex>>(field.Vertices);
+    request.Indices = std::make_shared<const std::vector<uint32_t>>(field.Indices);
+    auto mask = std::make_shared<GrassScalarMask>();
+    mask->Width = mask->Height = 1U;
+    mask->Channel = GrassSampleChannel::Luminance;
+    mask->Samples = {255U};
+    request.Mask = std::move(mask);
+    request.Rule.RuleId = 44U;
+    request.Rule.InputBlack = 0.0F;
+    request.Rule.InputWhite = 1.0F;
+    request.Rule.MaximumSlopeDegrees = 90.0F;
+    request.Generation.InstancesPerSquareMeter = 10.0F;
+    request.Generation.MinimumSpacing = 0.0F;
+    request.Generation.Seed = 7U;
+    request.Budget = 2000U;
+    request.ClusterSize = 300.0F;
+    request.NormalOffset = 2.0F;
+    return request;
+}
+
+TEST(Oot3dGrassPlacementCache, TwoFirstCamerasRoundTheGroundsTransformWithinReuse) {
+    const auto a = FirstFrameModelToWorld(0.7F, {-1800.0F, 120.0F, 3400.0F});
+    const auto b = FirstFrameModelToWorld(0.71F, {-1795.0F, 121.0F, 3390.0F});
+    EXPECT_NE(a, b); // test.11's file name held these bits: another first camera, another file
+    const auto offset = GrassPlacementTransformDifference(a, b);
+    EXPECT_LE(offset.Rotation, kGrassPlacementReuseRotation);
+    EXPECT_LE(offset.Translation, kGrassPlacementReuseTranslation);
+    EXPECT_EQ(GrassPlacementPersistentKey(GroundRequest(a)), GrassPlacementPersistentKey(GroundRequest(b)));
+}
+
+// logs20b/c: Hyrule Field was built again (1086, 1194 ms) although logs20a
+// had loaded it. With reuse the next session's first camera loads it, drawn
+// with the transform its tufts were made with; exact matching builds again
+// and says why (another transform).
+TEST(Oot3dGrassPlacementCache, TheNextSessionReusesTheGroundOfAnotherFirstCamera) {
+    const auto dir = std::filesystem::temp_directory_path() / "oot3d_grass_placement_reuse_disk";
+    std::filesystem::remove_all(dir);
+    const auto first = GroundRequest(FirstFrameModelToWorld(0.7F, {-1800.0F, 120.0F, 3400.0F}));
+    auto next = GroundRequest(FirstFrameModelToWorld(0.71F, {-1795.0F, 121.0F, 3390.0F}));
+    next.WorldIdentity = 99U;
+    ASSERT_TRUE(first.ModelToWorld != next.ModelToWorld);
+    std::shared_ptr<const GrassWorldPlacement> built;
+    {
+        GrassAsyncPlacementBuilder session(64U, 1U);
+        session.SetCacheDirectory(dir);
+        session.SetDiskReuse(true);
+        session.SetDiskSettleDelay({});
+        auto result = session.ResolveOrQueue(first);
+        result.WaitUntilReady();
+        session.WaitForIdle();
+        ASSERT_TRUE(result.Placement);
+        built = result.Placement;
+        (void)session.ResolveOrQueue(first); // still in use: written
+        session.WaitForIdle();
+        EXPECT_EQ(session.Stats().DiskWrites, 1U);
+        EXPECT_EQ(session.Stats().DiskMisses, 1U);
+    }
+    {
+        GrassAsyncPlacementBuilder exact(64U, 1U);
+        exact.SetCacheDirectory(dir);
+        auto result = exact.ResolveOrQueue(next);
+        result.WaitUntilReady();
+        exact.WaitForIdle();
+        EXPECT_EQ(exact.Stats().Builds, 1U);
+        EXPECT_EQ(exact.Stats().DiskOtherTransform, 1U);
+    }
+    {
+        GrassAsyncPlacementBuilder reuse(64U, 1U);
+        reuse.SetCacheDirectory(dir);
+        reuse.SetDiskReuse(true);
+        auto result = reuse.ResolveOrQueue(next);
+        EXPECT_TRUE(reuse.WaitForPending(std::chrono::seconds(30)));
+        result.WaitUntilReady();
+        reuse.WaitForIdle();
+        EXPECT_EQ(reuse.Stats().Builds, 0U);
+        EXPECT_EQ(reuse.Stats().DiskHits, 1U);
+        EXPECT_EQ(reuse.Stats().DiskReusedTransform, 1U);
+        ASSERT_TRUE(result.Placement && result.Placement->ModelToWorld);
+        EXPECT_TRUE(*result.Placement->ModelToWorld == first.ModelToWorld);
+        EXPECT_EQ(result.Placement->Identity, next.WorldIdentity);
+        ASSERT_EQ(result.Placement->Anchors.size(), built->Anchors.size());
+        EXPECT_EQ(std::memcmp(result.Placement->Anchors.data(), built->Anchors.data(),
+                              built->Anchors.size() * sizeof(GrassWorldAnchor)),
+                  0);
+    }
+    {
+        // The same ground at other guest addresses (another geometry identity).
+        auto moved = first;
+        moved.PlacementKey.GeometryId = 12U;
+        GrassAsyncPlacementBuilder exact(64U, 1U);
+        exact.SetCacheDirectory(dir);
+        auto result = exact.ResolveOrQueue(moved);
+        result.WaitUntilReady();
+        exact.WaitForIdle();
+        EXPECT_EQ(exact.Stats().DiskOtherGeometry, 1U);
+        GrassAsyncPlacementBuilder reuse(64U, 1U);
+        reuse.SetCacheDirectory(dir);
+        reuse.SetDiskReuse(true);
+        auto again = reuse.ResolveOrQueue(moved);
+        again.WaitUntilReady();
+        reuse.WaitForIdle();
+        EXPECT_EQ(reuse.Stats().DiskReusedGeometry, 1U);
+        EXPECT_EQ(reuse.Stats().Builds, 0U);
+    }
+    std::filesystem::remove_all(dir);
 }
 
 TEST(Oot3dGrassNearLink, FillConfigFileMeaning) {

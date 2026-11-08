@@ -728,7 +728,7 @@ TEST(Oot3dGrassOverlayBenchmark, OfflineRoomFixture) {
     }
     GrassPersistentPlacementCache disk(directory);
     const auto diskKey = GrassPlacementPersistentKey(request);
-    ASSERT_TRUE(disk.Store(diskKey, *reference));
+    ASSERT_TRUE(disk.Store(diskKey, *reference, GrassPlacementDiskMatchFor(request, false)));
     for (size_t i = 0; i < 5; ++i) {
         GrassAsyncPlacementBuilder worker;
         worker.SetCacheDirectory(directory);

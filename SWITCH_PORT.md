@@ -2259,7 +2259,8 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   `shadercache/grass_placements_v1`, at most 256 MiB / 96 files, least recently used out; one write per
   new ground, 2 s after its build, on the builder worker): a ground of an earlier visit or session loads
   instead of building. The key holds the geometry identity (guest addresses), so a scene loaded at other
-  addresses builds again `[INFERENCE]`.
+  addresses builds again `[INFERENCE]`. The key also held the exact transform the first camera rounds (Hyrule
+  Field was built again in 2 of 5 test.12 sessions): see "Grass at a scene's start".
 - **Log** (`deko3d.txt`): `resources: ... scene lists on (config/texture_pack_preload), hold N ms per scene`;
   at each scene change and with the frame statistics `world pack (scene S left|now, F frames): first draws
   ready=R native=N; swapped at start=A later=L (pop-ins); hold W ms over H frames (T with images left);
@@ -3681,6 +3682,82 @@ temple entry had `no shared placement 2` too.
   "Grass near Link" to "Grows in (test.9)" to compare. Then Sacred Forest Meadow -> Forest Temple:
   the entrance's grass stays through the Wolfos fight; the third `grass:` line of the entry window
   should read `without a shared placement 0, gaps 0`.
+
+### Grass at a scene's start: stored grounds reused, then a hold (`config/grass_placement_reuse`, `config/grass_hold`, 08/11, after test.12)
+- **Report (test.12):** the Hyrule Field grass still briefly pops in.
+- **What the logs and the video show** (logs20a-e, the same route every session: scenes 107, 67, 37,
+  34, 29, then Hyrule Field 81): the pop is the scene's first frames. It is not the LOD (`lod off`),
+  and it is not the edge at 4000 units (`distance=area`; after the arrival window every window has `no
+  result 0` and `over_budget 0`).
+  - Arrival window (the first `grass:` line, then the third line's `no result`): 20a `loaded 4 in 327
+    ms`, 8 draw points without grass; 20b `built 4 in 1086 ms ... written 4`, 44 draw points; 20c
+    `built 4 in 1194 ms`, 53; 20d `loaded 4 in 391 ms`, 8; 20e `loaded 4 in 374 ms`, 8. Builds and
+    loads both run on the one builder worker while the fade-in plays. The first cull then takes 26-28
+    ms (65536 visible looking across the field).
+  - Video `2026110807130400` (logs20c) ends on the fade-in with a bare ground. In
+    `2026110807131300`, frames 0-7 (30 fps) show bare ground with the HUD already up, and the grass
+    appears at frame 8.
+- **Cause 1: the disk cache missed in 2 of 5 sessions.** The file name (`GrassPlacementPersistentKey`)
+  held the exact bits of the ground's model-to-world. `pica_grass_source.cpp` derives that matrix from
+  the scene's first drawn frame as inverse(light-binding world-to-view) x view x model, in float.
+  Different first cameras round it differently: Link walks in, so the first resolved frame varies.
+  `GrassSceneBridge` keeps the matrix for the session, but not across sessions. The name also held
+  the geometry identity, which contains guest physical addresses. Which of the two differed in 20b
+  and 20c is not logged `[INFERENCE: the transform]`; the new counters below will show it.
+- **Cause 2: even a hit is late.** The load (330-390 ms for 4 files) and the first cull run while
+  the fade-in plays. A build takes about 1.1 s.
+- **Fix 1: `config/grass_placement_reuse`** (on by default; `0`/`off` gives the exact matching of
+  test.11, which the PC also uses):
+  - Disk format v2 (`kGrassPlacementDiskVersion`; v1 files are rejected, built again once, and
+    evicted as least recently used). The file name holds the ground's payload and bake settings, with
+    the model-to-world rounded: rotation to 1/64, translation to 16 units, with offsets that keep
+    round values off the step edges. The header holds the geometry identity and the exact
+    model-to-world, both in the checksum.
+  - `GrassPersistentPlacementCache::Load` with a `GrassPlacementDiskMatch` accepts a transform at
+    most `1e-4` per rotation element and 0.5 units per translation element away. It also accepts the
+    same ground under another geometry identity. Otherwise it reports `OtherTransform` or
+    `OtherGeometry`, and the ground is built again.
+  - The loaded placement keeps the transform it was made with (`GrassWorldPlacement::ModelToWorld`),
+    and `PicaGrassPlacements::Update` draws with it. The anchors therefore go back to model space
+    exactly, and the tufts sit where they were made on the ground.
+  - **What changes visually:** with a reused ground, the world frame used for culling distances and
+    for Link's collider is off by the rounding (at most ~0.5 units). A ground reused from other
+    addresses shows the tufts of that earlier build: the geometry identity seeds them, so the pattern
+    differs, but the density and look are the same. Exact matching (switch off) keeps test.11's
+    behaviour.
+- **Fix 2: `config/grass_hold`** (ms per scene, default 1500, `0`/`off` = never, at most 2500;
+  `grass_scene_hold.h`). At frame start, after the texture hold, `Deko3d::GrassBeginFrame` waits in
+  the scene's first 120 frames:
+  - for placements the last frame requested and not made yet (`GrassAsyncPlacementBuilder::WaitForPending`;
+    writes left aside);
+  - then for their first cull (`GrassCullWorker::WaitIdle`);
+  - within what is left of the budget, until the scene's first grass draw.
+  As with the texture hold, the game follows once the frame queue is full, so the fade-in starts that
+  much later: about 0.35 s with a stored ground, up to 1.2 s for a first build of Hyrule Field. The
+  first frames of the fade-in then show the grass.
+- **Log** (`deko3d.txt`):
+  - Start: `grass: placement reuse on|off (...), hold N ms per scene for its first grass`.
+  - First `grass:` line: `loaded L in Y ms (reused R of another transform, up to r / t; G of another
+    address), written W | not loaded: no file M, other transform T (nearest r / t), other address A,
+    damaged D`. Offsets are the largest or nearest of the session.
+  - Third `grass:` line: `... | hold H ms over F frames (X timed out)`.
+  - At each scene's first grass: `grass: scene S first drawn at its frame F (draw points without grass
+    before: N) | hold W ms over H frames (placements P, cull C, timed out T; budget B ms)`.
+    With the fix, Hyrule Field should read `draw points without grass before: 0`.
+- Tests: `oot3d_grass_switch_tests`:
+  - `Oot3dGrassPlacementCache` (`TwoFirstCamerasRoundTheGroundsTransformWithinReuse`,
+    `TheNextSessionReusesTheGroundOfAnotherFirstCamera`: exact builds again with `other transform 1`;
+    reuse loads the same anchors with the stored transform; another address; `ReuseConfigFileMeaning`);
+  - `Oot3dGrassSceneHold` (the logs20c arrival as a frame sequence, budget, window, config).
+  The target now builds the placement builder and the disk cache. `oot3d_graphics_foundation_tests`
+  (`StoredGroundMatchesItsTransformAndIdentityExactlyOrWithReuse`,
+  `BuilderReusesAGroundOfAnotherFirstCameraAndCountsWhyNot`, `WaitForPendingEndsWhenTheRequestedPlacementsAreMade`;
+  the old key tests moved to the v2 name) is not built in the host image (no gtest).
+- No shader change: `deko3d.pack` is unchanged.
+- Console check: enter Hyrule Field from the market twice (two sessions). The second time the first
+  `grass:` window should say `loaded 4` (possibly `reused 4 of another transform`), and the scene line
+  should say `draw points without grass before: 0`. The grass should be there as the picture fades
+  in, with no pop. For an A/B, write `0` to `config/grass_hold` and `config/grass_placement_reuse`.
 
 ### Mirror natives for the render loops (Profile18 items 2 and 5, 11/07)
 Guest replacements for the hottest loops of the game's CPU renderer, in the existing mechanism
