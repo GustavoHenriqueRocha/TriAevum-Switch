@@ -165,7 +165,7 @@ def main() -> int:
     parser.add_argument("--cxx", default="g++")
     parser.add_argument("--trials", type=int, default=1000000)
     parser.add_argument("--seed", type=lambda value: int(value, 0), default=0x5EED)
-    parser.add_argument("--only", help="hex entry to test a single function")
+    parser.add_argument("--only", help="hex entry (or comma-separated entries) to test")
     parser.add_argument("--extra-flags", default="", help="extra compiler options")
     parser.add_argument("--qemu-aarch64", metavar="QEMU",
                         help="qemu-aarch64 (user mode): compiles with --qemu-cxx and runs under it")
@@ -256,14 +256,15 @@ def run_qemu(args, fixture: Path) -> int:
     ]
     includes = [out, RUNTIME, HERE, upstream, upstream / "recomp",
                 HERE / "mass_cpp", args.nlohmann.expanduser()]
-    only = int(args.only, 16) if args.only else 0
+    only = [int(entry, 16) for entry in args.only.split(",")] if args.only else [0]
     # Those from the Switch shards build; thread_local becomes global (the minimal
     # runtime has no TLS and the test is single-threaded).
     flags = ["-std=c++20", "-O2", "-march=armv8-a+crc+crypto", "-mtune=cortex-a57",
              "-fno-fast-math", "-ffp-contract=off", "-w", "-static", "-nostartfiles",
              "-Dthread_local=", "-DOOT3D_GUEST_OVERRIDE_QEMU=1",
              f"-DOOT3D_QEMU_TRIALS={args.trials}ULL", f"-DOOT3D_QEMU_SEED={args.seed}ULL",
-             f"-DOOT3D_QEMU_ONLY={only}U", *args.extra_flags.split()]
+             "-DOOT3D_QEMU_ONLY=" + ",".join(f"{entry}U" for entry in only),
+             *args.extra_flags.split()]
     objects = []
     for source in sources:
         obj = out / (source.stem + ".a64.o")

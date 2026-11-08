@@ -1410,7 +1410,7 @@ int main() {
     }
     const uint64_t trials = OOT3D_QEMU_TRIALS;
     const uint64_t seed = OOT3D_QEMU_SEED;
-    const uint32_t only = OOT3D_QEMU_ONLY;
+    const std::vector<uint32_t> only{OOT3D_QEMU_ONLY};
 #else
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -1431,7 +1431,18 @@ int main(int argc, char** argv) {
     }
     const uint64_t trials = argc > 2 ? std::strtoull(argv[2], nullptr, 0) : 1000000ULL;
     const uint64_t seed = argc > 3 ? std::strtoull(argv[3], nullptr, 0) : 0x5EEDULL;
-    const uint32_t only = argc > 4 ? static_cast<uint32_t>(std::strtoul(argv[4], nullptr, 16)) : 0U;
+    // Entries to test: one, or several separated by commas (none or 0: all).
+    std::vector<uint32_t> only;
+    {
+        const std::string list = argc > 4 ? argv[4] : "0";
+        size_t at = 0U;
+        while (at <= list.size()) {
+            const size_t comma = std::min(list.find(',', at), list.size());
+            only.push_back(static_cast<uint32_t>(
+                std::strtoul(list.substr(at, comma - at).c_str(), nullptr, 16)));
+            at = comma + 1U;
+        }
+    }
 #endif
 
     gOot3dGuestOverrideProfileHook = {FakeProfileEntry, FakeProfileForwards, FakeProfileMark};
@@ -1442,7 +1453,10 @@ int main(int argc, char** argv) {
     }
     int failures = 0;
     for (const auto& testCase : GeneratedWholeAot::kOverrideCases) {
-        if (only != 0U && testCase.Entry != only) continue;
+        if (only.front() != 0U &&
+            std::find(only.begin(), only.end(), testCase.Entry) == only.end()) {
+            continue;
+        }
         Rng rng(seed ^ (uint64_t{testCase.Entry} << 20U));
         const auto* table = Oot3dGuestOverrideTable();
         const Oot3dGuestOverrideInfo* info = nullptr;

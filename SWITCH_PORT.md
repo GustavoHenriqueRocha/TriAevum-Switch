@@ -3432,9 +3432,14 @@ Guest replacements for the hottest loops of the game's CPU renderer, in the exis
   0x00452934 (calls in every mesh iteration; the skip path is 2 blocks), 0x00350820 `Array_Construct`
   (an indirect constructor call per element), 0x002DC370 (double-precision `pow`, 1,921 calls in the
   whole session from `AudioPitchTable_Generate`, software binary64 in the translation).
-- **Exactness:** `run_guest_override_equivalence.py`, 200 thousand trials per replacement, all 33
-  entries, host with the fastmem window on and off and qemu-aarch64 (devkitA64, Switch flags, native
-  VFP): zero differences. The harness gained scenarios for the nine new entries, a stub for indirect
+- **Exactness:** `run_guest_override_equivalence.py`, 200 thousand trials per replacement, zero
+  differences: host with the fastmem window on (all 33 entries) and off (the nine new ones), and
+  qemu-aarch64 (devkitA64, Switch flags, native VFP) for the five enabled ones (`--only` now takes a
+  comma-separated list). The five do no floating point: in the Switch build (`-ffp-contract=off`, as
+  the shards) four use no FP/SIMD register at all and 0x0046DA6C only moves integer state through
+  SIMD registers (no arithmetic, no FPCR). Under qemu, the older 0x0046700C case takes hours at 200
+  thousand trials (1,106 s on the host: two thirds of its trials run to the 1 M-block budget), so a
+  full 33-entry qemu run needs a lower trial count for that case. The harness gained scenarios for the nine new entries, a stub for indirect
   calls in the call closure (both sides take the same exit), the renamed translation in patched copies
   that call a function with its own override, and a loop-only benchmark.
 - **Benchmark:** `GUEST_OVERRIDE_BENCH=loop TRIAEVUM_FASTMEM_WINDOW=1`: both sides on the window
