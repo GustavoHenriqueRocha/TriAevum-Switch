@@ -704,6 +704,7 @@ OOT3D_AOT_COLD inline void Oot3dAotRunBlockEntryHook(
 // Appended after the namespace (with its own #include) so that the lines above,
 // and the PGO data of code built from them, do not move.
 #include <span>
+#include <string>
 
 namespace Oot3dNativeGame {
 
@@ -739,5 +740,12 @@ inline bool Oot3dWholeAotHookGatesCover(
     }
     return true;
 }
+
+// Empty when generated code with `gates` can run a block-entry callback
+// whose hook list is `sortedHooks` (empty = every block); otherwise the error
+// to report, naming the first hook without a gate. Callers throw it
+// (window setup, ExecuteOot3dCompiledFunction).
+std::string Oot3dWholeAotHookGatesError(
+    const Oot3dWholeAotHookGateSet& gates, std::span<const uint32_t> sortedHooks);
 
 } // namespace Oot3dNativeGame

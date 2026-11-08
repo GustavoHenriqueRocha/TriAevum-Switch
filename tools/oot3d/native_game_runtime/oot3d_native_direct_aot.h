@@ -12,6 +12,10 @@ namespace Oot3dNativeGame {
 class NativeA32Memory;
 
 std::span<const uint32_t> Oot3dWholeAotEntryPoints() noexcept;
+// Every block: the plugin ABI carries no gate list, so a plugin exports only
+// code of the default lowering (triaevum_title_whole_aot_plugin.cpp refuses
+// --sparse-block-entries code).
+Oot3dWholeAotHookGateSet Oot3dWholeAotHookGates() noexcept;
 
 bool Oot3dWholeAotPluginV2Available() noexcept;
 bool Oot3dWholeAotPluginObservesMemoryWrites() noexcept;

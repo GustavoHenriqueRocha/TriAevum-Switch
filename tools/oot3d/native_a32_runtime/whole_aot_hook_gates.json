@@ -1,0 +1,1352 @@
+{
+  "format": "oot3d_whole_aot_hook_gates_v1",
+  "generated_by": "oot3d_block_entry_hook_census",
+  "pcs": [
+    "0x00111CB0",
+    "0x001344F0",
+    "0x00144EE8",
+    "0x00150CFC",
+    "0x0015F25C",
+    "0x0015F2CC",
+    "0x0016CB78",
+    "0x0018CBB8",
+    "0x001B5FE0",
+    "0x001B6028",
+    "0x001B6074",
+    "0x001B60E8",
+    "0x001DA4F4",
+    "0x001DA9F8",
+    "0x001E0474",
+    "0x001E1B54",
+    "0x002029C4",
+    "0x002033E4",
+    "0x00213DFC",
+    "0x0022C2C4",
+    "0x0022C31C",
+    "0x0022C32C",
+    "0x0022C374",
+    "0x0022C93C",
+    "0x0022CA9C",
+    "0x0022CB48",
+    "0x0022CF00",
+    "0x0022D1E0",
+    "0x00234E38",
+    "0x00235508",
+    "0x00236CB8",
+    "0x002378FC",
+    "0x0023A268",
+    "0x0023A340",
+    "0x0023A45C",
+    "0x0023A930",
+    "0x0023C8A4",
+    "0x0023C8F0",
+    "0x0023CAB0",
+    "0x0023D3FC",
+    "0x00250B08",
+    "0x00250B50",
+    "0x00250BE4",
+    "0x00250C30",
+    "0x0025101C",
+    "0x00251374",
+    "0x00251708",
+    "0x002518B4",
+    "0x00251DDC",
+    "0x00252038",
+    "0x0025205C",
+    "0x0025344C",
+    "0x00253460",
+    "0x00253A74",
+    "0x0025B6C8",
+    "0x0025CB84",
+    "0x00275F28",
+    "0x00297508",
+    "0x002C3950",
+    "0x002C3960",
+    "0x002C3970",
+    "0x002CE040",
+    "0x002CF63C",
+    "0x002D0A80",
+    "0x002D2504",
+    "0x002D2EF4",
+    "0x002D33CC",
+    "0x002D5F68",
+    "0x002D6314",
+    "0x002D644C",
+    "0x002D646C",
+    "0x002D649C",
+    "0x002D64BC",
+    "0x002D64E0",
+    "0x002D7974",
+    "0x002D7A78",
+    "0x002D7C28",
+    "0x002D84C4",
+    "0x002D84C8",
+    "0x002D86F0",
+    "0x002D89D0",
+    "0x002D8E70",
+    "0x002D8FB4",
+    "0x002D9120",
+    "0x002D9490",
+    "0x002D9664",
+    "0x002DBCBC",
+    "0x002E25F0",
+    "0x002E278C",
+    "0x002E27C0",
+    "0x002E2B8C",
+    "0x002E2BB8",
+    "0x002E2BD0",
+    "0x002E2BDC",
+    "0x002E2BE8",
+    "0x002E2C04",
+    "0x002E2CD0",
+    "0x002E2CE0",
+    "0x002E2D2C",
+    "0x002E2D34",
+    "0x002E2D78",
+    "0x002E2DA4",
+    "0x002E2E60",
+    "0x002E401C",
+    "0x002E4028",
+    "0x002E4058",
+    "0x002E6CD4",
+    "0x002E7AE0",
+    "0x002E9B4C",
+    "0x002EB05C",
+    "0x002EBA9C",
+    "0x002EC3E4",
+    "0x002FADDC",
+    "0x002FADF4",
+    "0x002FAEC0",
+    "0x002FAED8",
+    "0x002FBC50",
+    "0x002FDE9C",
+    "0x002FEA68",
+    "0x002FEA74",
+    "0x002FEABC",
+    "0x002FFA20",
+    "0x002FFA40",
+    "0x002FFF7C",
+    "0x003004E0",
+    "0x0030051C",
+    "0x00300520",
+    "0x00300524",
+    "0x0030052C",
+    "0x00300530",
+    "0x00300538",
+    "0x0030053C",
+    "0x00300544",
+    "0x00300548",
+    "0x00300550",
+    "0x00300554",
+    "0x0030055C",
+    "0x00300588",
+    "0x00300AA8",
+    "0x003025C0",
+    "0x0030AB9C",
+    "0x0030F4D0",
+    "0x00310F7C",
+    "0x00311364",
+    "0x00313444",
+    "0x00313C48",
+    "0x0031487C",
+    "0x00316CEC",
+    "0x00322054",
+    "0x00324638",
+    "0x0032464C",
+    "0x00324658",
+    "0x00324664",
+    "0x0032EEB4",
+    "0x0032F75C",
+    "0x0033187C",
+    "0x0033C1B8",
+    "0x0033C20C",
+    "0x0033C25C",
+    "0x0033C730",
+    "0x0033D14C",
+    "0x0033D174",
+    "0x00340F44",
+    "0x00341CD8",
+    "0x003494F4",
+    "0x00349504",
+    "0x0034BE04",
+    "0x0034E854",
+    "0x00353998",
+    "0x00355830",
+    "0x0035BBE0",
+    "0x0035BF50",
+    "0x0035BFB4",
+    "0x0035D190",
+    "0x00372170",
+    "0x00377A04",
+    "0x003AEF48",
+    "0x003B30AC",
+    "0x003BC5DC",
+    "0x003CC298",
+    "0x003FB5EC",
+    "0x003FB984",
+    "0x003FB998",
+    "0x003FBC5C",
+    "0x003FD27C",
+    "0x003FD3A8",
+    "0x003FD3B8",
+    "0x003FD420",
+    "0x003FE408",
+    "0x003FE414",
+    "0x003FE430",
+    "0x003FE43C",
+    "0x00415AE4",
+    "0x0041633C",
+    "0x00417014",
+    "0x00417024",
+    "0x0041952C",
+    "0x00419824",
+    "0x00419830",
+    "0x00419838",
+    "0x0041983C",
+    "0x0041984C",
+    "0x00419850",
+    "0x00419874",
+    "0x0041988C",
+    "0x00419890",
+    "0x004198B0",
+    "0x0041AFAC",
+    "0x0041DDC8",
+    "0x0041DEF0",
+    "0x0041E968",
+    "0x0041E984",
+    "0x0041E988",
+    "0x0041EAE0",
+    "0x0041EB14",
+    "0x0041EB28",
+    "0x0041EC50",
+    "0x0041EE1C",
+    "0x0041EE74",
+    "0x0041F308",
+    "0x004228E4",
+    "0x0042401C",
+    "0x00424324",
+    "0x00424C20",
+    "0x00424F20",
+    "0x00425164",
+    "0x004252BC",
+    "0x00425930",
+    "0x00427A3C",
+    "0x00427CE4",
+    "0x0042A278",
+    "0x0042B86C",
+    "0x0042B884",
+    "0x0042B9F4",
+    "0x0042BF6C",
+    "0x0042CB54",
+    "0x0042CBCC",
+    "0x0042D0E4",
+    "0x0042DA14",
+    "0x0042DDA8",
+    "0x0042DF3C",
+    "0x0042E644",
+    "0x0042EC2C",
+    "0x0042F5A8",
+    "0x0042F5CC",
+    "0x0042F9A8",
+    "0x004338EC",
+    "0x00433AB4",
+    "0x00433B6C",
+    "0x00434C80",
+    "0x00434CDC",
+    "0x00434D48",
+    "0x00438740",
+    "0x004392C8",
+    "0x004426B4",
+    "0x004426D4",
+    "0x00442704",
+    "0x00442730",
+    "0x00442760",
+    "0x0044278C",
+    "0x004456A8",
+    "0x00449A38",
+    "0x0044E0D4",
+    "0x00450B60",
+    "0x004527BC",
+    "0x0045554C",
+    "0x0045598C",
+    "0x00457318",
+    "0x0045945C",
+    "0x004596D0",
+    "0x0045ACCC",
+    "0x0045C25C",
+    "0x0045D3E8",
+    "0x0045DC34",
+    "0x0045FE28",
+    "0x0045FEB0",
+    "0x00460548",
+    "0x00461344",
+    "0x00461460",
+    "0x004615D8",
+    "0x004615E8",
+    "0x00461730",
+    "0x00461784",
+    "0x004617A4",
+    "0x004617B4",
+    "0x00461904",
+    "0x00461AC4",
+    "0x00461BB8",
+    "0x00461BBC",
+    "0x00461D2C",
+    "0x00461EC8",
+    "0x0046345C",
+    "0x00463544",
+    "0x0046423C",
+    "0x00465304",
+    "0x00465318",
+    "0x00465348",
+    "0x00465364",
+    "0x004667B8",
+    "0x00466E2C",
+    "0x004676A4",
+    "0x004682A0",
+    "0x00469AE8",
+    "0x00469AEC",
+    "0x00469B70",
+    "0x0046ACB8",
+    "0x0046B114",
+    "0x0046B554",
+    "0x00470DF0",
+    "0x004715C0",
+    "0x00471F60",
+    "0x00475CA8",
+    "0x00476E1C",
+    "0x00477E30",
+    "0x004788DC",
+    "0x00478EB8",
+    "0x0047955C",
+    "0x0047956C",
+    "0x004795EC",
+    "0x00479660",
+    "0x0047A940",
+    "0x0047AF24",
+    "0x00480BD8",
+    "0x004848F0",
+    "0x00484944",
+    "0x004849B0",
+    "0x00490D60",
+    "0x004BC080",
+    "0x004BF6D8",
+    "0x004C1044"
+  ],
+  "sources": {
+    "0x00111CB0": [
+      "typed_gameplay_exits"
+    ],
+    "0x001344F0": [
+      "typed_gameplay_exits"
+    ],
+    "0x00144EE8": [
+      "typed_gameplay_exits"
+    ],
+    "0x00150CFC": [
+      "typed_gameplay_exits"
+    ],
+    "0x0015F25C": [
+      "typed_gameplay_exits"
+    ],
+    "0x0015F2CC": [
+      "typed_gameplay_exits"
+    ],
+    "0x0016CB78": [
+      "extended_diagnostics"
+    ],
+    "0x0018CBB8": [
+      "extended_diagnostics"
+    ],
+    "0x001B5FE0": [
+      "actor_visibility"
+    ],
+    "0x001B6028": [
+      "typed_gameplay_exits"
+    ],
+    "0x001B6074": [
+      "typed_gameplay_exits"
+    ],
+    "0x001B60E8": [
+      "actor_visibility"
+    ],
+    "0x001DA4F4": [
+      "extended_diagnostics"
+    ],
+    "0x001DA9F8": [
+      "extended_diagnostics"
+    ],
+    "0x001E0474": [
+      "typed_gameplay_exits"
+    ],
+    "0x001E1B54": [
+      "base"
+    ],
+    "0x002029C4": [
+      "typed_gameplay_exits"
+    ],
+    "0x002033E4": [
+      "typed_gameplay_exits"
+    ],
+    "0x00213DFC": [
+      "pica_composition"
+    ],
+    "0x0022C2C4": [
+      "typed_gameplay_exits"
+    ],
+    "0x0022C31C": [
+      "typed_gameplay_exits"
+    ],
+    "0x0022C32C": [
+      "typed_gameplay_exits"
+    ],
+    "0x0022C374": [
+      "typed_gameplay_exits"
+    ],
+    "0x0022C93C": [
+      "typed_gameplay_exits"
+    ],
+    "0x0022CA9C": [
+      "typed_gameplay_exits"
+    ],
+    "0x0022CB48": [
+      "typed_gameplay_exits"
+    ],
+    "0x0022CF00": [
+      "typed_gameplay_exits"
+    ],
+    "0x0022D1E0": [
+      "typed_gameplay_exits"
+    ],
+    "0x00234E38": [
+      "typed_gameplay_exits"
+    ],
+    "0x00235508": [
+      "typed_gameplay_exits"
+    ],
+    "0x00236CB8": [
+      "typed_gameplay_exits"
+    ],
+    "0x002378FC": [
+      "typed_gameplay_exits"
+    ],
+    "0x0023A268": [
+      "typed_gameplay_exits"
+    ],
+    "0x0023A340": [
+      "typed_gameplay_exits"
+    ],
+    "0x0023A45C": [
+      "typed_gameplay_exits"
+    ],
+    "0x0023A930": [
+      "top_screen_source_port"
+    ],
+    "0x0023C8A4": [
+      "player_temporal"
+    ],
+    "0x0023C8F0": [
+      "player_temporal"
+    ],
+    "0x0023CAB0": [
+      "player_temporal"
+    ],
+    "0x0023D3FC": [
+      "typed_gameplay_exits"
+    ],
+    "0x00250B08": [
+      "typed_gameplay_exits"
+    ],
+    "0x00250B50": [
+      "typed_gameplay_exits"
+    ],
+    "0x00250BE4": [
+      "typed_gameplay_exits"
+    ],
+    "0x00250C30": [
+      "typed_gameplay_exits"
+    ],
+    "0x0025101C": [
+      "typed_gameplay_exits"
+    ],
+    "0x00251374": [
+      "typed_gameplay_exits"
+    ],
+    "0x00251708": [
+      "player_temporal"
+    ],
+    "0x002518B4": [
+      "typed_gameplay_exits"
+    ],
+    "0x00251DDC": [
+      "player_temporal"
+    ],
+    "0x00252038": [
+      "typed_gameplay_exits"
+    ],
+    "0x0025205C": [
+      "typed_gameplay_exits"
+    ],
+    "0x0025344C": [
+      "typed_gameplay_exits"
+    ],
+    "0x00253460": [
+      "typed_gameplay_exits"
+    ],
+    "0x00253A74": [
+      "pica_composition"
+    ],
+    "0x0025B6C8": [
+      "typed_gameplay_exits"
+    ],
+    "0x0025CB84": [
+      "typed_gameplay_exits"
+    ],
+    "0x00275F28": [
+      "typed_gameplay_exits"
+    ],
+    "0x00297508": [
+      "pica_composition"
+    ],
+    "0x002C3950": [
+      "top_screen_item_dispatch"
+    ],
+    "0x002C3960": [
+      "top_screen_item_dispatch"
+    ],
+    "0x002C3970": [
+      "top_screen_item_dispatch"
+    ],
+    "0x002CE040": [
+      "extended_diagnostics"
+    ],
+    "0x002CF63C": [
+      "pica_composition"
+    ],
+    "0x002D0A80": [
+      "typed_gameplay_exits"
+    ],
+    "0x002D2504": [
+      "hd_fonts"
+    ],
+    "0x002D2EF4": [
+      "extended_diagnostics"
+    ],
+    "0x002D33CC": [
+      "extended_diagnostics"
+    ],
+    "0x002D5F68": [
+      "actor_visibility",
+      "pica_composition",
+      "actor_profile"
+    ],
+    "0x002D6314": [
+      "pica_composition"
+    ],
+    "0x002D644C": [
+      "pica_composition",
+      "typed_gameplay_exits"
+    ],
+    "0x002D646C": [
+      "typed_gameplay_exits"
+    ],
+    "0x002D649C": [
+      "typed_gameplay_exits"
+    ],
+    "0x002D64BC": [
+      "typed_gameplay_exits"
+    ],
+    "0x002D64E0": [
+      "typed_gameplay_exits"
+    ],
+    "0x002D7974": [
+      "ui_lifecycle"
+    ],
+    "0x002D7A78": [
+      "ui_lifecycle"
+    ],
+    "0x002D7C28": [
+      "ui_lifecycle"
+    ],
+    "0x002D84C4": [
+      "top_screen_source_port"
+    ],
+    "0x002D84C8": [
+      "top_screen_source_port"
+    ],
+    "0x002D86F0": [
+      "typed_gameplay_exits"
+    ],
+    "0x002D89D0": [
+      "typed_gameplay_exits"
+    ],
+    "0x002D8E70": [
+      "typed_gameplay_exits"
+    ],
+    "0x002D8FB4": [
+      "typed_gameplay_exits"
+    ],
+    "0x002D9120": [
+      "typed_gameplay_exits"
+    ],
+    "0x002D9490": [
+      "pica_composition"
+    ],
+    "0x002D9664": [
+      "pica_composition"
+    ],
+    "0x002DBCBC": [
+      "extended_diagnostics"
+    ],
+    "0x002E25F0": [
+      "pica_composition"
+    ],
+    "0x002E278C": [
+      "top_screen_source_port"
+    ],
+    "0x002E27C0": [
+      "top_screen_control_flow_contracts"
+    ],
+    "0x002E2B8C": [
+      "pica_composition"
+    ],
+    "0x002E2BB8": [
+      "pica_composition"
+    ],
+    "0x002E2BD0": [
+      "pica_composition"
+    ],
+    "0x002E2BDC": [
+      "pica_composition"
+    ],
+    "0x002E2BE8": [
+      "pica_composition"
+    ],
+    "0x002E2C04": [
+      "pica_composition"
+    ],
+    "0x002E2CD0": [
+      "pica_composition"
+    ],
+    "0x002E2CE0": [
+      "actor_profile"
+    ],
+    "0x002E2D2C": [
+      "pica_composition"
+    ],
+    "0x002E2D34": [
+      "pica_composition"
+    ],
+    "0x002E2D78": [
+      "pica_composition"
+    ],
+    "0x002E2DA4": [
+      "pica_composition"
+    ],
+    "0x002E2E60": [
+      "ui_lifecycle",
+      "extended_diagnostics"
+    ],
+    "0x002E401C": [
+      "actor_profile"
+    ],
+    "0x002E4028": [
+      "actor_profile"
+    ],
+    "0x002E4058": [
+      "actor_profile"
+    ],
+    "0x002E6CD4": [
+      "top_screen"
+    ],
+    "0x002E7AE0": [
+      "extended_diagnostics"
+    ],
+    "0x002E9B4C": [
+      "ui_lifecycle"
+    ],
+    "0x002EB05C": [
+      "ui_lifecycle"
+    ],
+    "0x002EBA9C": [
+      "ui_lifecycle"
+    ],
+    "0x002EC3E4": [
+      "ui_lifecycle",
+      "top_screen_item_dispatch"
+    ],
+    "0x002FADDC": [
+      "pica_composition"
+    ],
+    "0x002FADF4": [
+      "pica_composition"
+    ],
+    "0x002FAEC0": [
+      "pica_composition"
+    ],
+    "0x002FAED8": [
+      "pica_composition"
+    ],
+    "0x002FBC50": [
+      "top_screen"
+    ],
+    "0x002FDE9C": [
+      "base"
+    ],
+    "0x002FEA68": [
+      "pica_composition"
+    ],
+    "0x002FEA74": [
+      "pica_composition"
+    ],
+    "0x002FEABC": [
+      "top_screen"
+    ],
+    "0x002FFA20": [
+      "typed_gameplay_exits"
+    ],
+    "0x002FFA40": [
+      "typed_gameplay_exits"
+    ],
+    "0x002FFF7C": [
+      "pica_composition"
+    ],
+    "0x003004E0": [
+      "pica_composition"
+    ],
+    "0x0030051C": [
+      "pica_composition"
+    ],
+    "0x00300520": [
+      "top_screen_source_port"
+    ],
+    "0x00300524": [
+      "pica_composition"
+    ],
+    "0x0030052C": [
+      "top_screen_source_port"
+    ],
+    "0x00300530": [
+      "pica_composition"
+    ],
+    "0x00300538": [
+      "top_screen_source_port"
+    ],
+    "0x0030053C": [
+      "pica_composition"
+    ],
+    "0x00300544": [
+      "top_screen_source_port"
+    ],
+    "0x00300548": [
+      "pica_composition"
+    ],
+    "0x00300550": [
+      "top_screen_source_port"
+    ],
+    "0x00300554": [
+      "pica_composition"
+    ],
+    "0x0030055C": [
+      "pica_composition",
+      "top_screen_source_port"
+    ],
+    "0x00300588": [
+      "top_screen"
+    ],
+    "0x00300AA8": [
+      "base"
+    ],
+    "0x003025C0": [
+      "extended_diagnostics"
+    ],
+    "0x0030AB9C": [
+      "extended_diagnostics"
+    ],
+    "0x0030F4D0": [
+      "pica_composition"
+    ],
+    "0x00310F7C": [
+      "pica_composition"
+    ],
+    "0x00311364": [
+      "top_screen"
+    ],
+    "0x00313444": [
+      "pica_composition"
+    ],
+    "0x00313C48": [
+      "typed_gameplay_exits"
+    ],
+    "0x0031487C": [
+      "pica_composition"
+    ],
+    "0x00316CEC": [
+      "ui_lifecycle"
+    ],
+    "0x00322054": [
+      "typed_gameplay_exits"
+    ],
+    "0x00324638": [
+      "top_screen_control_flow_contracts"
+    ],
+    "0x0032464C": [
+      "top_screen_control_flow_contracts"
+    ],
+    "0x00324658": [
+      "top_screen_control_flow_contracts"
+    ],
+    "0x00324664": [
+      "top_screen_control_flow_contracts"
+    ],
+    "0x0032EEB4": [
+      "player_temporal"
+    ],
+    "0x0032F75C": [
+      "player_temporal"
+    ],
+    "0x0033187C": [
+      "ui_lifecycle"
+    ],
+    "0x0033C1B8": [
+      "ui_lifecycle"
+    ],
+    "0x0033C20C": [
+      "ui_lifecycle"
+    ],
+    "0x0033C25C": [
+      "ui_lifecycle"
+    ],
+    "0x0033C730": [
+      "ui_lifecycle"
+    ],
+    "0x0033D14C": [
+      "pica_composition"
+    ],
+    "0x0033D174": [
+      "pica_composition"
+    ],
+    "0x00340F44": [
+      "pica_composition"
+    ],
+    "0x00341CD8": [
+      "actor_visibility"
+    ],
+    "0x003494F4": [
+      "top_screen_item_dispatch"
+    ],
+    "0x00349504": [
+      "top_screen_item_dispatch"
+    ],
+    "0x0034BE04": [
+      "ui_lifecycle"
+    ],
+    "0x0034E854": [
+      "actor_visibility"
+    ],
+    "0x00353998": [
+      "ui_lifecycle"
+    ],
+    "0x00355830": [
+      "ui_lifecycle"
+    ],
+    "0x0035BBE0": [
+      "pica_composition"
+    ],
+    "0x0035BF50": [
+      "pica_composition"
+    ],
+    "0x0035BFB4": [
+      "actor_visibility",
+      "pica_composition"
+    ],
+    "0x0035D190": [
+      "ui_lifecycle"
+    ],
+    "0x00372170": [
+      "pica_composition"
+    ],
+    "0x00377A04": [
+      "ui_lifecycle"
+    ],
+    "0x003AEF48": [
+      "actor_visibility"
+    ],
+    "0x003B30AC": [
+      "actor_visibility"
+    ],
+    "0x003BC5DC": [
+      "actor_visibility"
+    ],
+    "0x003CC298": [
+      "actor_visibility"
+    ],
+    "0x003FB5EC": [
+      "pica_composition"
+    ],
+    "0x003FB984": [
+      "pica_composition"
+    ],
+    "0x003FB998": [
+      "pica_composition"
+    ],
+    "0x003FBC5C": [
+      "pica_composition"
+    ],
+    "0x003FD27C": [
+      "base"
+    ],
+    "0x003FD3A8": [
+      "base"
+    ],
+    "0x003FD3B8": [
+      "base"
+    ],
+    "0x003FD420": [
+      "extended_diagnostics"
+    ],
+    "0x003FE408": [
+      "pica_composition"
+    ],
+    "0x003FE414": [
+      "pica_composition"
+    ],
+    "0x003FE430": [
+      "pica_composition"
+    ],
+    "0x003FE43C": [
+      "pica_composition"
+    ],
+    "0x00415AE4": [
+      "extended_diagnostics"
+    ],
+    "0x0041633C": [
+      "actor_visibility"
+    ],
+    "0x00417014": [
+      "base",
+      "typed_gameplay_exits"
+    ],
+    "0x00417024": [
+      "typed_gameplay_exits"
+    ],
+    "0x0041952C": [
+      "top_screen_source_port"
+    ],
+    "0x00419824": [
+      "pica_composition"
+    ],
+    "0x00419830": [
+      "pica_composition",
+      "top_screen"
+    ],
+    "0x00419838": [
+      "top_screen_source_port"
+    ],
+    "0x0041983C": [
+      "pica_composition"
+    ],
+    "0x0041984C": [
+      "pica_composition"
+    ],
+    "0x00419850": [
+      "top_screen_source_port"
+    ],
+    "0x00419874": [
+      "top_screen_source_port"
+    ],
+    "0x0041988C": [
+      "top_screen_source_port"
+    ],
+    "0x00419890": [
+      "pica_composition"
+    ],
+    "0x004198B0": [
+      "top_screen_source_port"
+    ],
+    "0x0041AFAC": [
+      "pica_composition"
+    ],
+    "0x0041DDC8": [
+      "top_screen_source_port"
+    ],
+    "0x0041DEF0": [
+      "ui_lifecycle"
+    ],
+    "0x0041E968": [
+      "ui_lifecycle",
+      "top_screen",
+      "extended_diagnostics"
+    ],
+    "0x0041E984": [
+      "top_screen_source_port"
+    ],
+    "0x0041E988": [
+      "top_screen_input_boundary"
+    ],
+    "0x0041EAE0": [
+      "top_screen_source_port"
+    ],
+    "0x0041EB14": [
+      "pica_composition"
+    ],
+    "0x0041EB28": [
+      "top_screen_source_port"
+    ],
+    "0x0041EC50": [
+      "pica_composition",
+      "ui_lifecycle",
+      "top_screen",
+      "extended_diagnostics"
+    ],
+    "0x0041EE1C": [
+      "top_screen_source_port"
+    ],
+    "0x0041EE74": [
+      "top_screen_source_port"
+    ],
+    "0x0041F308": [
+      "pica_composition"
+    ],
+    "0x004228E4": [
+      "pica_composition"
+    ],
+    "0x0042401C": [
+      "ui_lifecycle"
+    ],
+    "0x00424324": [
+      "ui_lifecycle"
+    ],
+    "0x00424C20": [
+      "ui_lifecycle"
+    ],
+    "0x00424F20": [
+      "ui_lifecycle"
+    ],
+    "0x00425164": [
+      "ui_lifecycle"
+    ],
+    "0x004252BC": [
+      "ui_lifecycle"
+    ],
+    "0x00425930": [
+      "pica_composition"
+    ],
+    "0x00427A3C": [
+      "pica_composition",
+      "top_screen"
+    ],
+    "0x00427CE4": [
+      "ui_lifecycle"
+    ],
+    "0x0042A278": [
+      "pica_composition"
+    ],
+    "0x0042B86C": [
+      "top_screen"
+    ],
+    "0x0042B884": [
+      "top_screen"
+    ],
+    "0x0042B9F4": [
+      "pica_composition",
+      "ui_lifecycle",
+      "top_screen"
+    ],
+    "0x0042BF6C": [
+      "top_screen_control_flow_contracts"
+    ],
+    "0x0042CB54": [
+      "pica_composition"
+    ],
+    "0x0042CBCC": [
+      "pica_composition"
+    ],
+    "0x0042D0E4": [
+      "ui_lifecycle"
+    ],
+    "0x0042DA14": [
+      "ui_lifecycle"
+    ],
+    "0x0042DDA8": [
+      "ui_lifecycle"
+    ],
+    "0x0042DF3C": [
+      "ui_lifecycle"
+    ],
+    "0x0042E644": [
+      "top_screen_source_port"
+    ],
+    "0x0042EC2C": [
+      "top_screen_source_port"
+    ],
+    "0x0042F5A8": [
+      "ui_lifecycle"
+    ],
+    "0x0042F5CC": [
+      "top_screen_source_port"
+    ],
+    "0x0042F9A8": [
+      "ui_lifecycle",
+      "extended_diagnostics"
+    ],
+    "0x004338EC": [
+      "ui_lifecycle"
+    ],
+    "0x00433AB4": [
+      "ui_lifecycle"
+    ],
+    "0x00433B6C": [
+      "top_screen_item_dispatch"
+    ],
+    "0x00434C80": [
+      "ui_lifecycle"
+    ],
+    "0x00434CDC": [
+      "top_screen_source_port"
+    ],
+    "0x00434D48": [
+      "top_screen_source_port"
+    ],
+    "0x00438740": [
+      "ui_lifecycle"
+    ],
+    "0x004392C8": [
+      "ui_lifecycle"
+    ],
+    "0x004426B4": [
+      "top_screen_map_icons"
+    ],
+    "0x004426D4": [
+      "top_screen_map_icons"
+    ],
+    "0x00442704": [
+      "top_screen_map_icons"
+    ],
+    "0x00442730": [
+      "top_screen_map_icons"
+    ],
+    "0x00442760": [
+      "top_screen_map_icons"
+    ],
+    "0x0044278C": [
+      "top_screen_map_icons"
+    ],
+    "0x004456A8": [
+      "ui_lifecycle"
+    ],
+    "0x00449A38": [
+      "ui_lifecycle"
+    ],
+    "0x0044E0D4": [
+      "ui_lifecycle"
+    ],
+    "0x00450B60": [
+      "extended_diagnostics"
+    ],
+    "0x004527BC": [
+      "pica_composition"
+    ],
+    "0x0045554C": [
+      "ui_lifecycle"
+    ],
+    "0x0045598C": [
+      "ui_lifecycle"
+    ],
+    "0x00457318": [
+      "ui_lifecycle"
+    ],
+    "0x0045945C": [
+      "pica_composition"
+    ],
+    "0x004596D0": [
+      "ui_lifecycle"
+    ],
+    "0x0045ACCC": [
+      "ui_lifecycle"
+    ],
+    "0x0045C25C": [
+      "pica_composition"
+    ],
+    "0x0045D3E8": [
+      "pica_composition"
+    ],
+    "0x0045DC34": [
+      "actor_profile"
+    ],
+    "0x0045FE28": [
+      "pica_composition"
+    ],
+    "0x0045FEB0": [
+      "pica_composition"
+    ],
+    "0x00460548": [
+      "actor_profile"
+    ],
+    "0x00461344": [
+      "actor_profile"
+    ],
+    "0x00461460": [
+      "typed_gameplay_exits"
+    ],
+    "0x004615D8": [
+      "pica_composition",
+      "typed_gameplay_exits"
+    ],
+    "0x004615E8": [
+      "typed_gameplay_exits"
+    ],
+    "0x00461730": [
+      "typed_gameplay_exits"
+    ],
+    "0x00461784": [
+      "typed_gameplay_exits",
+      "actor_profile"
+    ],
+    "0x004617A4": [
+      "typed_gameplay_exits"
+    ],
+    "0x004617B4": [
+      "actor_profile"
+    ],
+    "0x00461904": [
+      "actor_visibility",
+      "actor_profile"
+    ],
+    "0x00461AC4": [
+      "actor_visibility"
+    ],
+    "0x00461BB8": [
+      "actor_profile"
+    ],
+    "0x00461BBC": [
+      "actor_visibility"
+    ],
+    "0x00461D2C": [
+      "actor_visibility",
+      "actor_profile"
+    ],
+    "0x00461EC8": [
+      "actor_visibility"
+    ],
+    "0x0046345C": [
+      "ui_lifecycle"
+    ],
+    "0x00463544": [
+      "pica_composition"
+    ],
+    "0x0046423C": [
+      "pica_composition"
+    ],
+    "0x00465304": [
+      "typed_gameplay_exits"
+    ],
+    "0x00465318": [
+      "typed_gameplay_exits"
+    ],
+    "0x00465348": [
+      "typed_gameplay_exits"
+    ],
+    "0x00465364": [
+      "typed_gameplay_exits"
+    ],
+    "0x004667B8": [
+      "extended_diagnostics"
+    ],
+    "0x00466E2C": [
+      "base",
+      "pica_composition"
+    ],
+    "0x004676A4": [
+      "ui_lifecycle"
+    ],
+    "0x004682A0": [
+      "ui_lifecycle"
+    ],
+    "0x00469AE8": [
+      "top_screen_float_load_contracts"
+    ],
+    "0x00469AEC": [
+      "top_screen_float_load_contracts"
+    ],
+    "0x00469B70": [
+      "ui_lifecycle"
+    ],
+    "0x0046ACB8": [
+      "ui_lifecycle"
+    ],
+    "0x0046B114": [
+      "ui_lifecycle",
+      "extended_diagnostics"
+    ],
+    "0x0046B554": [
+      "ui_lifecycle"
+    ],
+    "0x00470DF0": [
+      "ui_lifecycle"
+    ],
+    "0x004715C0": [
+      "ui_lifecycle"
+    ],
+    "0x00471F60": [
+      "pica_composition"
+    ],
+    "0x00475CA8": [
+      "ui_lifecycle"
+    ],
+    "0x00476E1C": [
+      "ui_lifecycle"
+    ],
+    "0x00477E30": [
+      "pica_composition"
+    ],
+    "0x004788DC": [
+      "typed_gameplay_exits"
+    ],
+    "0x00478EB8": [
+      "top_screen_source_port"
+    ],
+    "0x0047955C": [
+      "typed_gameplay_exits"
+    ],
+    "0x0047956C": [
+      "typed_gameplay_exits"
+    ],
+    "0x004795EC": [
+      "typed_gameplay_exits"
+    ],
+    "0x00479660": [
+      "typed_gameplay_exits"
+    ],
+    "0x0047A940": [
+      "ui_lifecycle"
+    ],
+    "0x0047AF24": [
+      "typed_gameplay_exits"
+    ],
+    "0x00480BD8": [
+      "ui_lifecycle"
+    ],
+    "0x004848F0": [
+      "top_screen_control_flow_contracts"
+    ],
+    "0x00484944": [
+      "top_screen_control_flow_contracts"
+    ],
+    "0x004849B0": [
+      "top_screen_control_flow_contracts"
+    ],
+    "0x00490D60": [
+      "extended_diagnostics"
+    ],
+    "0x004BC080": [
+      "base"
+    ],
+    "0x004BF6D8": [
+      "typed_gameplay_exits"
+    ],
+    "0x004C1044": [
+      "ui_lifecycle"
+    ]
+  }
+}

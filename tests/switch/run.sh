@@ -39,6 +39,7 @@ UNIT_TESTS=(
     oot3d_native_audio_interpolation_tests
     oot3d_native_audio_storage_tests
     oot3d_native_audio_tests
+    oot3d_native_block_entry_hooks_tests
     oot3d_native_cadence_governor_tests
     oot3d_native_dynamic_resolution_tests
     oot3d_native_guest_fault_report_tests
@@ -109,9 +110,9 @@ python3 "$repo/tools/switch/test_shrink_texture_pack.py" > /tmp/switch-shrink.$$
 grep -E '^(FAIL|ERROR)' /tmp/switch-shrink.$$ | sed 's/^/  /'; rm -f /tmp/switch-shrink.$$
 result test_shrink_texture_pack "$code"
 # PGO: session streams merged into .gcda, hot list from them (the gcov-tool
-# end-to-end case runs where devkitA64 is installed).
+# end-to-end case runs where devkitA64 is installed), indirect call censuses.
 (cd "$repo/tools/oot3d/native_a32_runtime" && python3 -m unittest test_whole_aot_pgo_merge \
-    test_whole_aot_hot_from_gcda) > /tmp/switch-pgo.$$ 2>&1; code=$?
+    test_whole_aot_hot_from_gcda test_whole_aot_indirect_census) > /tmp/switch-pgo.$$ 2>&1; code=$?
 grep -E '^(FAIL|ERROR)' /tmp/switch-pgo.$$ | sed 's/^/  /'; rm -f /tmp/switch-pgo.$$
 result test_whole_aot_pgo "$code"
 [[ "${1:-}" == "--quick" ]] && { echo "passed $pass, failed $fail"; exit $((fail > 0)); }
@@ -136,6 +137,18 @@ else
         result test_clear_draw_tev $?
     else
         result test_clear_draw_tev 1
+    fi
+    # N4 hook gates: whole_aot_hook_gates.json (the gate list of
+    # --sparse-block-entries) must be the census of the block-entry hook list.
+    nice -n 10 ninja -C "$HOST_BUILD" -j "$JOBS" oot3d_block_entry_hook_census \
+        > "$HOST_BUILD/hook-census-build.log" 2>&1
+    binary="$(find "$HOST_BUILD" -type f -executable -name oot3d_block_entry_hook_census -print -quit)"
+    if [[ -n "$binary" ]]; then
+        "$binary" --check "$repo/tools/oot3d/native_a32_runtime/whole_aot_hook_gates.json" \
+            > "$HOST_BUILD/whole_aot_hook_gates_census.log" 2>&1
+        result whole_aot_hook_gates_census $?
+    else
+        result whole_aot_hook_gates_census 1
     fi
 fi
 

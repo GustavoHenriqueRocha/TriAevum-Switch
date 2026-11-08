@@ -4,6 +4,8 @@
 #include "oot3d_native_a32_memory.h"
 #include "oot3d_whole_aot_generated.h"
 
+#include <cstdio>
+
 #if defined(_WIN32)
 #define TRIAEVUM_TITLE_AOT_EXPORT __declspec(dllexport)
 #else
@@ -36,6 +38,16 @@ triaevum_title_aot_query(uint32_t) noexcept {
 extern "C" TRIAEVUM_TITLE_AOT_EXPORT const Oot3dWholeAotProgramV2 *
 triaevum_title_whole_aot_query(uint32_t requestedAbi) noexcept {
   if (requestedAbi != kOot3dWholeAotPluginAbiV2) {
+    return nullptr;
+  }
+  // The plugin ABI cannot carry the gate list of --sparse-block-entries code
+  // (Oot3dWholeAotHookGates), and the host checks its hooks against "every
+  // block" (oot3d_native_direct_aot.cpp): such code would silently skip hooks.
+  if (!Oot3dWholeAotHookGates().EveryBlock) {
+    std::fprintf(stderr,
+                 "triaevum_title_whole_aot_query: this module was generated with "
+                 "--sparse-block-entries, which the plugin ABI cannot carry; "
+                 "regenerate it without that flag\n");
     return nullptr;
   }
   static const Oot3dWholeAotProgramV2 program = [] {
