@@ -643,6 +643,11 @@ NativeA32ProcessRunResult NativeA32Process::FaultThread(
     // The other core's registers are read below: stop it at its next dispatch
     // boundary first (nothing while the second core is off).
     const SecondCore::WorldStop stop;
+    // The fatal line's support context (b369d02a): the thread's registers and
+    // the last dispatch transitions, beside the guest report below.
+    if (mPrimaryThreadStatus != NativeA32ThreadStatus::Empty) {
+        if (const auto* state = ThreadState(threadId)) error += mFaultTrail.Describe(state->r, state->cpsr);
+    }
     if (threadId == 0U) {
         mPrimaryThreadStatus = NativeA32ThreadStatus::Faulted;
     } else if (threadId - 1U < mSecondaryThreads.size()) {
@@ -745,6 +750,7 @@ NativeA32ProcessRunResult NativeA32Process::Run(
         const bool timed = mTimingEnabled;
         const auto dispatchStart = timed ? TimingClock::now()
                                          : TimingClock::time_point{};
+        const uint32_t dispatchFrom = state.r[15];
         CpuPhaseProbe::Scope cpuDispatch(CpuPhaseProbe::Phase::Aot);
         if (concurrent) SecondCore::EnterGuest();
         oot3d::recomp::a32::ExecutionResult exit;
@@ -760,6 +766,7 @@ NativeA32ProcessRunResult NativeA32Process::Run(
                        concurrent ? ReadThreadProfileCounter() : guestEnd);
         if (concurrent) SecondCore::LeaveGuest();
         cpuDispatch.Stop();
+        mFaultTrail.Record(dispatchFrom, exit.pc, static_cast<uint8_t>(exit.kind));
         if (timed) {
             const uint64_t nanoseconds = ElapsedNanoseconds(dispatchStart);
             ++mTimingStats.DispatchCalls;
