@@ -349,6 +349,24 @@ GUARDS = [
     Guard("p6w: the menu and perf.txt read the performance status without waiting on clock IPC",
           "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
           r'PerformanceStatus CurrentPerformanceStatus\(\) \{(?:(?!state\.Mutex|AccessClock).)*?return state\.Published;'),
+    # --- 08/11 (test.14 logs22): kernel_fast: and TRIAEVUM_GPU_PERF never reached oot3d_native_game.log ---
+    # stderr is libnx's null device and kernel_fast: was logged before InitContextForDemo made the logger.
+    Guard("test.14: Performance mode lines went to stderr (lost) — they go to the game log",
+          "tools/oot3d/native_game_runtime/oot3d_switch_performance.cpp",
+          r'void Log\(const char\* format, \.\.\.\) \{.*?WriteGameLog\(line\);',
+          test="oot3d_game_log_tests",
+          forbid=r'fprintf\(stderr|std::cerr|SPDLOG_'),
+    Guard("test.14: kernel_fast: was logged before the logger existed — kept, then written once it exists",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'std::string\("kernel_fast: wake="\).*?#if defined\(__SWITCH__\)\s+//[^\n]*\n\s+'
+          r'Oot3dNativeGame::WriteGameLog\(line\);.*?'
+          r'InitContextForDemo\(hostArgs\);\s+#if defined\(__SWITCH__\)\s+(?://[^\n]*\n\s+)*'
+          r'Oot3dNativeGame::GameLog\(\)\.Attach\(',
+          test="oot3d_game_log_tests (KeptUntilAttached)"),
+    Guard("Performance mode: the exit restore is logged before the host context (and its logger) goes",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'RunOot3dNativeA32Window\(launch\);.*?Oot3dNativeGame::RestorePerformanceForExit\(\);.*?'
+          r'DestroyContextForDemo\(\);'),
     # --- 07/11: ZCULL on deko3d only with config/deko3d_zcull (decal tiles lost in Aurora's renderer) ---
     Guard("ZCULL: off unless config/deko3d_zcull exists (decal tiles lost with it on)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_device.cpp",

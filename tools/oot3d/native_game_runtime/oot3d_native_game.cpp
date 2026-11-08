@@ -36,6 +36,7 @@
 #include "oot3d_switch_rom_import.h"
 #include "oot3d_switch_topscreen_import.h"
 #include "oot3d_native_status_file.h"
+#include "oot3d_switch_performance.h"
 #include <switch.h>
 // libnx (applet.c, weak, default 0): 1 makes libnx's exit end the application
 // through AM instead of returning to the homebrew loader.
@@ -325,6 +326,11 @@ int main(int argc, char** argv) {
 #ifdef OOT3D_NATIVE_A32_WINDOW_AVAILABLE
         RunOot3dNativeA32Window(launch);
         ClearLaunchMarkerForDemo();
+#if defined(__SWITCH__)
+        // CPU High (L3+R3 > Video > Performance mode): the earlier rate back
+        // while the game log still exists (its logger goes with the context).
+        Oot3dNativeGame::RestorePerformanceForExit();
+#endif
         // The A32 window owns objects that refer back to the host context.
         // Destroy those locals on return before tearing the context down.
         DestroyContextForDemo();
@@ -351,6 +357,9 @@ int main(int argc, char** argv) {
         WriteSwitchBootStatus("failed", ex.what());
 #endif
         LogFatalErrorForDemo(ex.what());
+#if defined(__SWITCH__)
+        Oot3dNativeGame::RestorePerformanceForExit();
+#endif
         DestroyContextForDemo();
 #if defined(__SWITCH__)
         ShowSwitchFatalError(ex.what());

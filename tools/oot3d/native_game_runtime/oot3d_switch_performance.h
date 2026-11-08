@@ -351,6 +351,10 @@ PerformanceStatus CurrentPerformanceStatus();
 // reader then uses sys-clk or the configuration, as without CPU High.
 // Called on the clock reader thread only, never the game thread.
 PerformanceClockSample SamplePerformanceClocks(bool perfWindow);
+// Puts the earlier CPU rate back when the game ends normally (main, after
+// the window returns, before the host context and its logger go), so the
+// game log has the restore line; the atexit handler stays as a safety net.
+void RestorePerformanceForExit();
 #else
 inline PerformanceStatus ApplyPerformance(PerformanceChoice choice) {
   PerformanceStatus status;
@@ -358,6 +362,7 @@ inline PerformanceStatus ApplyPerformance(PerformanceChoice choice) {
   return status;
 }
 inline PerformanceStatus CurrentPerformanceStatus() { return {}; }
+inline void RestorePerformanceForExit() {}
 #endif
 
 } // namespace Oot3dNativeGame

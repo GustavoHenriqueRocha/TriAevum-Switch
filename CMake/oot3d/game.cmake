@@ -114,6 +114,13 @@ add_executable(oot3d_switch_performance_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_switch_performance_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_switch_performance_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Game log lines kept until the logger exists (oot3d_game_log.h; header-only).
+add_executable(oot3d_game_log_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_game_log_tests.cpp
+)
+target_compile_features(oot3d_game_log_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_game_log_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Landing roll (N64) at the fall action's landing (config/no_landing_roll; header-only).
 add_executable(oot3d_landing_roll_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_landing_roll_tests.cpp

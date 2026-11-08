@@ -27,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -34,6 +35,7 @@
 #include <mutex>
 #include <thread>
 
+#include "oot3d_game_log.h"
 #include "oot3d_hang_watchdog.h"
 #include "oot3d_switch_clocks.h"
 #include "oot3d_switch_performance.h"
@@ -45,6 +47,18 @@ using Keeper = CpuClockKeeper;
 
 uint64_t NowMs() {
     return armTicksToNs(armGetSystemTick()) / 1000000ULL;
+}
+
+// One line for logs/oot3d_native_game.log (oot3d_game_log.h: kept until the
+// logger exists, then queued for its thread; never an SD write here, so the
+// HOME/sleep hook may log).
+[[gnu::format(printf, 1, 2)]] void Log(const char* format, ...) {
+    char line[512];
+    va_list arguments;
+    va_start(arguments, format);
+    std::vsnprintf(line, sizeof(line), format, arguments);
+    va_end(arguments);
+    WriteGameLog(line);
 }
 
 // ---- One clock read or write, its sessions closed afterwards ------------------
@@ -215,12 +229,11 @@ bool ApplyApm(ApmState& apm, bool gpu, bool memory, PerformanceStatus& status) {
         }
     }
     const SwitchClockReading clocks = StockClockReading(status.ApmEffective);
-    std::fprintf(stderr,
-                 "TRIAEVUM_PERF_APM gpu_high=%d mem_high=%d available=%d rc=0x%X failed=%s requested=0x%08X "
-                 "standard=0x%08X effective=0x%08X gpu_mhz=%d mem_mhz=%d op_mode=%s\n",
-                 gpu ? 1 : 0, memory ? 1 : 0, status.ApmAvailable ? 1 : 0, status.ApmResult,
-                 status.ApmFailedStep[0] != '\0' ? status.ApmFailedStep : "-", status.ApmRequested,
-                 apm.Standard, status.ApmEffective, clocks.GpuMhz, clocks.MemMhz, OperationModeName());
+    Log("TRIAEVUM_PERF_APM gpu_high=%d mem_high=%d available=%d rc=0x%X failed=%s requested=0x%08X "
+        "standard=0x%08X effective=0x%08X gpu_mhz=%d mem_mhz=%d op_mode=%s",
+        gpu ? 1 : 0, memory ? 1 : 0, status.ApmAvailable ? 1 : 0, status.ApmResult,
+        status.ApmFailedStep[0] != '\0' ? status.ApmFailedStep : "-", status.ApmRequested,
+        apm.Standard, status.ApmEffective, clocks.GpuMhz, clocks.MemMhz, OperationModeName());
     apm.Last = status;
     return true;
 }
@@ -299,9 +312,9 @@ void SetFocusMode(CpuState& state, bool noSuspend) {
     if (state.NoSuspend == noSuspend || state.FocusModeRefused) return;
     if (appletGetAppletType() != AppletType_Application) {
         state.FocusModeRefused = true;
-        std::fprintf(stderr, "TRIAEVUM_PERF_CPU event=focus_mode result=skipped applet_type=%d "
-                             "(not an application: HOME and sleep keep the CPU rate until the game runs again)\n",
-                     static_cast<int>(appletGetAppletType()));
+        Log("TRIAEVUM_PERF_CPU event=focus_mode result=skipped applet_type=%d "
+            "(not an application: HOME and sleep keep the CPU rate until the game runs again)",
+            static_cast<int>(appletGetAppletType()));
         return;
     }
     Result rc;
@@ -311,18 +324,17 @@ void SetFocusMode(CpuState& state, bool noSuspend) {
                                                   : AppletFocusHandlingMode_SuspendHomeSleep);
     }
     if (R_SUCCEEDED(rc)) state.NoSuspend = noSuspend;
-    std::fprintf(stderr, "TRIAEVUM_PERF_CPU event=focus_mode mode=%s rc=0x%X\n",
-                 noSuspend ? "no_suspend" : "suspend_home_sleep", rc);
+    Log("TRIAEVUM_PERF_CPU event=focus_mode mode=%s rc=0x%X",
+        noSuspend ? "no_suspend" : "suspend_home_sleep", rc);
 }
 
 // Mutex held. Carries out the keeper's step and logs it.
 void Carry(CpuState& state, Keeper::Step step, const char* why, uint32_t hzBefore) {
     if (step.Do == Keeper::Action::None) return;
     if (step.Do == Keeper::Action::GiveUp) {
-        std::fprintf(stderr,
-                     "TRIAEVUM_PERF_CPU event=%s action=override foreign_mhz=%u reapply=%u "
-                     "(another tool keeps changing the CPU clock: left to it)\n",
-                     why, Mhz(step.Hz), static_cast<unsigned>(state.Cpu.Reapplies()));
+        Log("TRIAEVUM_PERF_CPU event=%s action=override foreign_mhz=%u reapply=%u "
+            "(another tool keeps changing the CPU clock: left to it)",
+            why, Mhz(step.Hz), static_cast<unsigned>(state.Cpu.Reapplies()));
         SetFocusMode(state, false);
         Publish(state);
         return;
@@ -335,12 +347,11 @@ void Carry(CpuState& state, Keeper::Step step, const char* why, uint32_t hzBefor
         state.LastFailedStep = access.FailedStep;
         if (state.Cpu.Unavailable()) SetFocusMode(state, false);
     }
-    std::fprintf(stderr,
-                 "TRIAEVUM_PERF_CPU event=%s action=%s mhz_before=%u requested_mhz=%u mhz_after=%u rc=0x%X "
-                 "failed=%s reapply=%u focus_mode=%s op_mode=%s\n",
-                 why, ActionName(step.Do), Mhz(hzBefore), Mhz(step.Hz), Mhz(access.Hz), access.Rc,
-                 ok ? "-" : access.FailedStep, static_cast<unsigned>(state.Cpu.Reapplies()),
-                 state.NoSuspend ? "no_suspend" : "default", OperationModeName());
+    Log("TRIAEVUM_PERF_CPU event=%s action=%s mhz_before=%u requested_mhz=%u mhz_after=%u rc=0x%X "
+        "failed=%s reapply=%u focus_mode=%s op_mode=%s",
+        why, ActionName(step.Do), Mhz(hzBefore), Mhz(step.Hz), Mhz(access.Hz), access.Rc,
+        ok ? "-" : access.FailedStep, static_cast<unsigned>(state.Cpu.Reapplies()),
+        state.NoSuspend ? "no_suspend" : "default", OperationModeName());
     Publish(state);
 }
 
@@ -443,8 +454,8 @@ void EnterBackground(CpuState& state) {
     const uint64_t now = NowMs();
     const std::lock_guard<std::mutex> lock(state.Mutex);
     if (R_SUCCEEDED(rc)) state.NoSuspend = false;
-    std::fprintf(stderr, "TRIAEVUM_PERF_CPU event=background focus_mode=suspend_home_sleep rc=0x%X waited_ms=%llu\n",
-                 rc, static_cast<unsigned long long>(now - start));
+    Log("TRIAEVUM_PERF_CPU event=background focus_mode=suspend_home_sleep rc=0x%X waited_ms=%llu",
+        rc, static_cast<unsigned long long>(now - start));
     // Running again after a long call: AM suspended the game in it and it is
     // in focus now. A quick return: AM suspends later, re-arm after that.
     state.RearmAtMs = now - start >= kSuspendedMs ? now : now + kRearmLateMs;
@@ -457,8 +468,10 @@ void RestoreForExit(const char* why) {
     Carry(state, state.Cpu.Exit(), why, 0U);
 }
 
+// The safety net (another exit path, or a second call: then nothing to do).
+// The game log may be gone by now: RestorePerformanceForExit logs it.
 void RestoreAtExit() {
-    RestoreForExit("exit");
+    RestoreForExit("atexit");
 }
 
 void OnAppletHook(AppletHookType hook, void* param) {
@@ -525,13 +538,13 @@ PerformanceStatus ApplyPerformance(PerformanceChoice choice) {
                     state.LastFailedStep = read.FailedStep;
                     state.Cpu.Choose(true, 0U, now);
                     state.Cpu.MarkUnavailable();
-                    std::fprintf(stderr, "TRIAEVUM_PERF_CPU event=choose_high action=none rc=0x%X failed=%s "
-                                         "(CPU High unavailable this run)\n",
-                                 read.Rc, read.FailedStep);
+                    Log("TRIAEVUM_PERF_CPU event=choose_high action=none rc=0x%X failed=%s "
+                        "(CPU High unavailable this run)",
+                        read.Rc, read.FailedStep);
                 } else {
                     Carry(state, state.Cpu.Choose(true, read.Hz, now), "choose_high", read.Hz);
-                    std::fprintf(stderr, "TRIAEVUM_PERF_CPU event=choose_high prior_mhz=%u\n",
-                                 Mhz(state.Cpu.PriorHz()));
+                    Log("TRIAEVUM_PERF_CPU event=choose_high prior_mhz=%u",
+                        Mhz(state.Cpu.PriorHz()));
                     if (!state.Cpu.Unavailable()) SetFocusMode(state, true);
                 }
             } else {
@@ -558,6 +571,10 @@ PerformanceStatus CurrentPerformanceStatus() {
     CpuState& state = State();
     const std::lock_guard<std::mutex> lock(state.PublishedMutex);
     return state.Published;
+}
+
+void RestorePerformanceForExit() {
+    if (State().Started.load(std::memory_order_acquire)) RestoreForExit("exit");
 }
 
 PerformanceClockSample SamplePerformanceClocks(bool perfWindow) {

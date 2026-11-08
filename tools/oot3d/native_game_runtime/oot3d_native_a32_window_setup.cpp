@@ -22,6 +22,7 @@
 #include "oot3d_update_panel.h"
 #include "oot3d_switch_code_pages.h"
 #include "oot3d_whole_aot_gcov.h"
+#include "oot3d_game_log.h"
 #include <spdlog/spdlog.h>
 #endif
 #include <cstdio>
@@ -294,7 +295,8 @@ void NativeA32WindowSession::Setup() {
                              " ui_lock=" + (kernelOptions.UiLock ? "1" : "0") +
                              " retake=" + (kernelOptions.Retake ? "1" : "0");
 #if defined(__SWITCH__)
-    SPDLOG_WARN("{}", line);
+    // Before InitContextForDemo: kept until the game log exists (oot3d_game_log.h).
+    Oot3dNativeGame::WriteGameLog(line);
 #else
     std::fprintf(stderr, "%s\n", line.c_str());
 #endif
@@ -1080,6 +1082,11 @@ void NativeA32WindowSession::Setup() {
       std::move(applicationSettingsTabs));
   InitContextForDemo(hostArgs);
 #if defined(__SWITCH__)
+  // The game log exists from here: the lines kept before it (kernel_fast:,
+  // the Video panel's TRIAEVUM_PERF_*), then every later WriteGameLog line,
+  // queued for the logger's thread at warning level (the release logger
+  // drops info).
+  Oot3dNativeGame::GameLog().Attach([](const std::string &line) { SPDLOG_WARN("{}", line); });
   WriteSwitchBootStage("host_context_initialized");
   // What the start-up constructor did with the code (oot3d_switch_code_pages.cpp):
   // remapped (size, time), off or why it stayed on 4 KB pages. Warning level:

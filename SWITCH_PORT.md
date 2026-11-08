@@ -2003,12 +2003,17 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   rate alone at HOME and exit and returns to the default focus handling. Choosing Standard, then High
   again, retries. 3 failed requests in a row (or clkrst refusing to open) stop it as unavailable (menu:
   "CPU High unavailable: … refused (0x…)").
-- **Logs.** Game log: `TRIAEVUM_PERF_APM gpu_high=1 mem_high=1 available=1 rc=0x0 failed=-
+- **Logs.** Game log (`logs/oot3d_native_game.log`, through `oot3d_game_log.h`; see "Start-up lines in
+  the game log" below): `TRIAEVUM_PERF_APM gpu_high=1 mem_high=1 available=1 rc=0x0 failed=-
   requested=0x92220007 standard=0x00020003 effective=0x92220007 gpu_mhz=461 mem_mhz=1600 op_mode=handheld`
   per apm change; `TRIAEVUM_PERF_CPU event=<choose_high|choose_standard|focus|resume|wake|dock_change|
-  perf_mode_change|apm_change|perf_window|background|exit_request|exit> action=<set_high|restore|override>
+  perf_mode_change|apm_change|perf_window|background|exit_request|exit|atexit> action=<set_high|restore|override>
   mhz_before= requested_mhz= mhz_after= rc= failed= reapply= focus_mode= op_mode=` per request (read-backs
   that find 1224 log nothing), plus `event=focus_mode` and `event=background ... waited_ms=` lines.
+  The lines of a start with the files present come from the Video panel, created before the logger:
+  they are kept and written right after it, behind `kernel_fast:`. A normal exit restores and logs
+  `event=exit` before the host context (and its logger) goes; `event=atexit` is the safety net and
+  is not in the file.
   `perf.txt`: with CPU High the `clocks:` MHz are the rates clkrst reports (`clk_src=clkrst`, also the
   overlay's `clkrst`); every window adds `req_cpu= req_gpu= req_mem=` (the settings), `cpu_reapply=` (CPU
   requests after the first), `cpu_override=` and `cpu_err=<step>:0x<Result>` (`-` when none failed).
@@ -2028,7 +2033,28 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   clk_src=clkrst req_cpu=1 req_gpu=1 req_mem=1`. Press HOME: the game log has `event=background
   action=restore`; back in the game, `event=resume action=set_high`. Sleep and wake once: the console
   wakes and the overlay reads 1224 again. Performance mode Off: `CPU 1020  GPU 307  MEM 1331  stock`
-  at once. Exit the game: the log's last `TRIAEVUM_PERF_CPU` line is `action=restore`.
+  at once. Exit the game: the log's last `TRIAEVUM_PERF_CPU` line is `event=exit action=restore`.
+
+### Start-up lines in the game log (`oot3d_game_log.h`, 08/11, after test.14)
+- **What was lost (test.14, logs22 and 22a).** On the Switch the game log is spdlog's async logger
+  made by `Ship::Context::InitLogging` inside `InitContextForDemo` (window setup), warning level, file
+  sink `logs/oot3d_native_game.log` written on the logger's own thread. Before it exists `SPDLOG_*`
+  goes to spdlog's default console logger, and stdout/stderr are libnx's null device (no nxlink): the
+  `kernel_fast:` start line (logged before `InitContextForDemo`) and every `fprintf(stderr)` line, such
+  as the GPU clock's `TRIAEVUM_GPU_PERF` that this section used to promise, reached no file.
+- **Now.** `WriteGameLog(line)` keeps lines written before the logger (at most 64, in order; more adds
+  one `game_log: N start-up lines dropped` line) and the window setup attaches the logger right after
+  `InitContextForDemo`: the kept lines are written first, later lines go straight to it. Writing only
+  queues the line for the logger's thread (no SD write on the caller's thread), under one small mutex,
+  so the HOME/sleep applet hook and the clock threads may log. Routed: `kernel_fast:`,
+  `TRIAEVUM_PERF_APM` and `TRIAEVUM_PERF_CPU`.
+- Other `fprintf(stderr)` lines of the window setup (`audio:`, `topscreen:`, `TRIAEVUM_DRS_60`,
+  `TRIAEVUM_SECOND_CORE`, the developer and profile lines) still go nowhere on the console; nothing
+  here promises them in the game log.
+- Tests: `oot3d_game_log_tests` (kept until attached, in order; bounded with the dropped count; four
+  threads writing while the logger is attached) and three guards ("08/11 (test.14 logs22)").
+- Console check: the game log's first lines after the start-up warnings include `kernel_fast: wake=…
+  svc=… ui_lock=… retake=…`.
 
 ### Draw distance: L3+R3 > Video (`config/draw_distance`, 11/08, Original by default)
 - **Cause of the pop-in (test.12 report, item 2).** The title culls each actor in Actor_DrawAll
