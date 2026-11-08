@@ -690,7 +690,9 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
-    const size_t lists = argc > 1 ? static_cast<size_t>(std::strtoul(argv[1], nullptr, 10)) : 400U;
+    // run.sh runs 100 lists per combination (a Debug run of 400 takes about
+    // 9 min, near run.sh's 10-minute limit); pass 400 for the full campaign.
+    const size_t lists = argc > 1 ? static_cast<size_t>(std::strtoul(argv[1], nullptr, 10)) : 100U;
     TestEveryRegister();
     TestDiagnosticHistory();
     for (uint64_t combination = 0; combination < 16U; ++combination) {
