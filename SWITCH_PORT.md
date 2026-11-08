@@ -4312,6 +4312,116 @@ place and clock: Kokiri Forest, room 8 with the Deku Babas, cutting bushes. Comp
 the `cap_*` stages, `list_ms`, `lut_ms`/`lut_hashes`, `game_pair_ms` and `guest`. With it on,
 `cap_state_kb` falls about fivefold and `cap_materialize_us` appears; the image must be identical.
 
+### Vertex snapshot hit path: `config/vertex_snapshot_fast` (11/08)
+Perf19 found that the index/vertex snapshot stage (`cap_vertex_us`) costs 10–18 µs per draw on core 0,
+55–69 % of the capture. That stage copies only 2.5–18 KiB per frame and makes 1–12 new snapshots
+per frame, so the time goes into the per-draw hit path. For the index buffer and every vertex loader
+the hit path does the following:
+- views the memory through three callbacks and two alias walks;
+- takes the range's write certificate (`RangeWriteGeneration`): one atomic and-fetch per page, with
+  acquire/release ordering on the A57;
+- looks the range up in an `unordered_map` and relinks the LRU;
+- runs a full `memcmp` whenever the certificate changed.
+
+**`perf.txt` `vsnap:` group** (same line, after `capture:`). Fields per host frame:
+- `vs_resources`: geometry resources looked up.
+- `vs_version_hits` / `vs_version_misses`: resources proven unchanged by their certificate, and the
+  rest (these are the queue's `GeometrySnapshotVersionHits/Misses`, now always counted).
+- `vs_uncertified`: resources with no certificate (an escaped write pointer, or an alias that cannot
+  be observed).
+- `vs_unproven_kb`: KiB of the resources that had to be compared.
+- `vs_compared_kb`: KiB actually compared.
+- `vs_pages`: pages of certified multi-page ranges.
+- `vs_dirty_pages`: pages whose certificate changed on a compared entry.
+- `vs_fallbacks`: resources left to the previous path (aliased ranges).
+
+Then µs per draw of `cap_vertex_us`:
+- `vs_view_us`: the view and the certificate;
+- `vs_compare_us`: page certificates and the comparison;
+- `vs_copy_us`: new snapshot bytes;
+- `vs_rest_us`: the rest (map lookup, LRU, index range, the snapshot list).
+
+`perf_report.py` prints the group under `offload`. The three steps are timed in both modes, with two
+system-counter reads per resource plus two per comparison or copy.
+
+**`config/vertex_snapshot_fast`** (no file = on, `0` = off): the four changes below, all switched
+together.
+- **Direct view and certificate** (`Oot3dPicaPhysicalMemoryView::ViewCertified`). When a range lies in
+  exactly one region, the view calls `NativeA32Memory::SynchronousReadView` and `RangeWriteGeneration`
+  directly. It skips the `std::function` callbacks, their `IsMapped` checks and the two alias walks;
+  the memory calls and their order are the same. An aliased range keeps the previous path
+  (`vs_fallbacks`).
+- **Page certificates.** When the certificate of a multi-page range changed, the certificate of each
+  page is taken too (`GuestPageGenerations`) and kept with the cache entry. They are taken after the
+  range's certificate and before any byte is compared or copied. On the next change, only the pages
+  whose own certificate changed are compared with the cached bytes, adjacent ones in one `memcmp`.
+  The other pages are proven unchanged by the same argument as a whole-range version hit: a new
+  certificate is larger than every earlier one.
+- **Front table of the cache.** A direct-mapped table of 1024 slots sits in front of the
+  `unordered_map` and holds the node where a key was last found. A hit skips the bucket walk (modulo,
+  bucket array, predecessor node and hash recomputation, each likely a cache miss). An eviction
+  clears its slot; a restore clears them all.
+- **Card peek** (`oot3d_native_a32_memory_peek.h`). `RangeWriteGeneration` reads each page's card
+  before taking its bit, and the atomic and-fetch runs only when the bit is set. A clean card is not
+  written, and a set bit is still taken by the same and-fetch. The setter is declared outside
+  `oot3d_native_a32_memory.h`, so the whole-AOT product hash and the generated code stay unchanged;
+  `oot3d_native_a32_memory.cpp` is runtime code with no profile.
+
+The switch gives the same version hits, misses, snapshot bytes, content versions, evictions and
+savestates. Only the bytes compared, and the time spent, differ.
+
+**Exactness proof:** `oot3d_native_vertex_snapshot_tests` (in `run.sh`).
+- *Runs:* three queues over three copies of the same guest-memory history: off, on, and the switch
+  (with the card peek) toggled at random between draws.
+- *Memory changes:* content changes, same-value rewrites, and same-value bytes in one page of many
+  ranges. Escaped write pointers write raw bytes the cards never see. Deferred device writes and an
+  aliased physical range (the fallback) are included too.
+- *Checks on every draw:* the same success or error, index range and snapshots (bytes, versions,
+  hashes) in all three runs. The bytes must also equal guest memory at the draw; a mirror kept by the
+  test provides it.
+- *Checks per frame:* the same counters. Savestates must be equal and are restored mid-stream. The
+  write observation is rebound, and the cache overflows its 4096 entries.
+- *Result:* 4 seeds × 400 frames, about 136,000 draws and 470,000 resources.
+- *Mutation check:* ignoring the last dirty page of a range fails the test at the first affected
+  draw.
+
+**Host bench** (`oot3d_native_vertex_snapshot_tests --bench 400`, Release, Ryzen, shared machine,
+4 runs). The scene has 90 indexed draws, each with an index buffer and 3 loaders of 0.5–32 KiB
+(9 pages per draw). Vertex stage in µs per draw, off → on:
+
+| Write pattern between frames | Vertex stage | of which view + certificate | compare | KiB compared per frame |
+|---|---|---|---|---|
+| none (steady) | 2.19–2.54 → 1.48–1.98 | 1.12–1.25 → 0.58–0.72 | 0 | 0 |
+| one same-value byte in every vertex range | 6.24–7.84 → 4.11–5.54 | 1.15–1.44 → 0.66–0.90 | 3.3–4.7 → 2.1–2.8 | 3013 → 932 |
+| every byte of every range rewritten (same values) | 6.40–7.83 → 5.90–8.29 | 1.11–1.47 → 0.65–0.95 | 3.3–4.5 → 3.6–5.3 | 3013 → 3013 |
+
+In the worst case, every page of every range rewritten, the page certificates cost about 0.3–0.8 µs
+per draw more in the compare. The other savings roughly cancel that. The card peek cannot be
+measured on x86: a `lock and` on a cached line is cheap there. On the A57 it removes an exclusive
+load/store pair per clean page.
+
+**Estimate for the console** [INFERENCE, not measured]. Perf19's Kokiri window: 17.7 µs per draw,
+about 109 draws per step, 1.93 ms per step in this stage.
+- If the console is in the steady regime (host 2.2–2.5 µs ↔ console 10–18 µs, a factor of 5–8):
+  −25 %, so −3 to −5 µs per draw, or −0.3 to −0.55 ms per step.
+- If ranges share pages with data the game writes every frame: −30–35 %, so −0.55 to −0.7 ms per
+  step.
+- Add the card peek, worth roughly 30–40 cycles per clean page (several pages per resource).
+- The kernel lock is held that much less in the GSP SVC, so core 1 waits less (`core1_lock_ms`).
+
+**Console A/B (one minute):** create `config/vertex_snapshot_fast` with `0`, then remove it, at the
+same place and clock (Kokiri Forest, near the shop and the bushes). Compare:
+- `cap_vertex_us`, `pica_capture_ms`, `list_ms`, `guest`, `game_pair_ms` and `core1_lock_ms`;
+- the `vsnap:` fields. With the switch off, `vs_compared_kb` equals `vs_unproven_kb`. With it on,
+  `vs_compared_kb` falls by the share of clean pages.
+
+`vs_version_misses`, `vs_uncertified` and `vs_unproven_kb` show which regime the game is in. The image
+must be identical.
+
+**Risks:**
+- If a range is rewritten whole every frame, the page certificates only add cost.
+- `vs_uncertified` shows ranges an escaped write pointer covers; those still compare every byte.
+
 ### Status as of 2026-10-17 (best version so far)
 - PGO (2nd collection) + lean mode + PICA plans on core 1 + render thread on core 2 + audio on its own thread.
 - Measured at 30 FPS, 2× scale: 29.9 FPS average, 93% of the time at 30, logic ~11 ms per step.

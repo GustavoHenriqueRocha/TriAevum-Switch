@@ -46,6 +46,7 @@ UNIT_TESTS=(
     oot3d_native_interpolation_pacing_tests
     oot3d_native_offload_tests
     oot3d_native_capture_delta_tests
+    oot3d_native_vertex_snapshot_tests
     oot3d_native_perf_diagnostics_tests
     oot3d_native_pica_deferred_plan_tests
     oot3d_native_pica_plan_build_tests

@@ -2150,6 +2150,51 @@ bool NativeA32WindowSession::RunFrame() {
           previousMaterialize = materialize;
           previousPlanSeconds = phaseTiming.PicaPlanSeconds;
         }
+        // Index/vertex snapshot steps (SWITCH_PORT.md "Vertex snapshot hit
+        // path", config/vertex_snapshot_fast): per host frame, the resources
+        // looked up, proven unchanged by their certificate or not, without
+        // a certificate, KiB of the unproven resources and KiB actually
+        // compared, certified and changed pages, resources left to the
+        // previous path; µs per draw of cap_vertex_us spent viewing and
+        // certifying, comparing, copying, and the rest (lookup, LRU, index
+        // range, the snapshot list).
+        {
+          const uint64_t draws = capture.Draws - previousCapture.Draws;
+          const auto usPerDraw = [draws](uint64_t now, uint64_t before) {
+            return draws != 0U
+                       ? Oot3dNativeGame::CaptureTicksToNanoseconds(now - before) /
+                             1.0e3 / static_cast<double>(draws)
+                       : 0.0;
+          };
+          const auto perFrame = [hostFrames](uint64_t now, uint64_t before) {
+            return static_cast<double>(now - before) / hostFrames;
+          };
+          const uint64_t steps = (capture.GeometryViewTicks - previousCapture.GeometryViewTicks) +
+                                 (capture.GeometryCompareTicks - previousCapture.GeometryCompareTicks) +
+                                 (capture.GeometryCopyTicks - previousCapture.GeometryCopyTicks);
+          const uint64_t vertex = capture.VertexTicks - previousCapture.VertexTicks;
+          perf << " vsnap: vertex_snapshot_fast=" << (submissionQueueStorage->VertexSnapshotFast() ? 1 : 0)
+               << " vs_resources=" << perFrame(capture.GeometryResources, previousCapture.GeometryResources)
+               << " vs_version_hits="
+               << perFrame(capture.GeometryVersionHits, previousCapture.GeometryVersionHits)
+               << " vs_version_misses="
+               << perFrame(capture.GeometryVersionMisses, previousCapture.GeometryVersionMisses)
+               << " vs_uncertified="
+               << perFrame(capture.GeometryUncertified, previousCapture.GeometryUncertified)
+               << " vs_unproven_kb="
+               << perFrame(capture.GeometryUnprovenBytes, previousCapture.GeometryUnprovenBytes) / 1024.0
+               << " vs_compared_kb="
+               << perFrame(capture.GeometryComparedBytes, previousCapture.GeometryComparedBytes) / 1024.0
+               << " vs_pages=" << perFrame(capture.GeometryPages, previousCapture.GeometryPages)
+               << " vs_dirty_pages="
+               << perFrame(capture.GeometryDirtyPages, previousCapture.GeometryDirtyPages)
+               << " vs_fallbacks=" << perFrame(capture.GeometryFallbacks, previousCapture.GeometryFallbacks)
+               << " vs_view_us=" << usPerDraw(capture.GeometryViewTicks, previousCapture.GeometryViewTicks)
+               << " vs_compare_us="
+               << usPerDraw(capture.GeometryCompareTicks, previousCapture.GeometryCompareTicks)
+               << " vs_copy_us=" << usPerDraw(capture.GeometryCopyTicks, previousCapture.GeometryCopyTicks)
+               << " vs_rest_us=" << usPerDraw(vertex >= steps ? vertex - steps : 0U, 0U);
+        }
         previousCapture = capture;
         previousGuestInPica = phaseTiming.GuestInsidePicaSubmitSeconds;
         previousPicaSubmit = picaSubmitSeconds;

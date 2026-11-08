@@ -4,6 +4,7 @@
 #include "oot3d_native_pica_transfer.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstring>
 #include <limits>
@@ -285,6 +286,20 @@ bool Oot3dNativePicaSubmissionQueue::SubmitHardwareRegisterWrite(
     return true;
 }
 
+size_t Oot3dNativePicaSubmissionQueue::GeometryFrontIndex(
+    const GeometrySnapshotKey& key) noexcept {
+  const uint32_t mixed =
+      (key.PhysicalAddress ^ static_cast<uint32_t>(key.Size) * 0x85EBCA6BU ^
+       (static_cast<uint32_t>(key.Slot) << 1U | static_cast<uint32_t>(key.Kind))) *
+      0x9E3779B1U;
+  static_assert((kGeometryFrontSlots & (kGeometryFrontSlots - 1U)) == 0U);
+  return mixed >> (32U - std::countr_zero(kGeometryFrontSlots));
+}
+
+void Oot3dNativePicaSubmissionQueue::ClearGeometryFront() noexcept {
+  for (auto& slot : mGeometryFront) slot.Node = nullptr;
+}
+
 void Oot3dNativePicaSubmissionQueue::LinkGeometryNewest(
     std::pair<const GeometrySnapshotKey, GeometrySnapshotCacheEntry>& node) {
   GeometrySnapshotCacheEntry& entry = node.second;
@@ -337,36 +352,143 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
     uint32_t firstElement, size_t byteCount,
     Oot3dPicaResourceSnapshot &resource, std::string *error,
     GeometrySnapshotCacheEntry **entryOut) {
-  const auto source = mMemory.View(physicalAddress, byteCount);
+  uint64_t ticks = CaptureTicks();
+  ++mCounters.GeometryResources;
+  // config/vertex_snapshot_fast: the view and the certificate as two direct
+  // memory calls; aliased ranges keep the previous path.
+  std::optional<std::span<const uint8_t>> source;
+  std::optional<uint64_t> sourceWriteGeneration;
+  uint32_t guestAddress = 0U;
+  bool direct = false;
+  bool unmapped = false;
+  if (mVertexSnapshotFast) {
+    std::span<const uint8_t> bytes;
+    switch (mMemory.ViewCertified(physicalAddress, byteCount, bytes,
+                                  guestAddress, sourceWriteGeneration)) {
+    case Oot3dPicaPhysicalMemoryView::DirectView::Viewed:
+      source = bytes;
+      direct = true;
+      break;
+    case Oot3dPicaPhysicalMemoryView::DirectView::Unmapped:
+      unmapped = true;
+      break;
+    case Oot3dPicaPhysicalMemoryView::DirectView::Fallback:
+      ++mCounters.GeometryFallbacks;
+      break;
+    }
+  }
+  if (!direct && !unmapped) {
+    source = mMemory.View(physicalAddress, byteCount);
+    if (source.has_value()) {
+      sourceWriteGeneration = SnapshotWriteGeneration(physicalAddress, byteCount);
+    }
+  }
   if (!source.has_value()) {
     SetError(error, kind == Oot3dPicaResourceKind::IndexBuffer
                         ? "PICA index buffer is outside mapped guest memory"
                         : "PICA vertex loader is outside mapped guest memory");
     return false;
   }
+  if (!sourceWriteGeneration.has_value()) ++mCounters.GeometryUncertified;
+  // A certified range over several pages: its entry keeps the certificate
+  // of each page, taken when the range's changed.
+  const size_t pageCount =
+      direct ? static_cast<size_t>(((uint64_t{guestAddress} + byteCount - 1U) >> 12U) -
+                                   (guestAddress >> 12U) + 1U)
+             : 0U;
+  const bool paged = sourceWriteGeneration.has_value() && pageCount > 1U;
+  if (paged) mCounters.GeometryPages += pageCount;
+  uint64_t now = CaptureTicks();
+  mCounters.GeometryViewTicks += now - ticks;
 
   const GeometrySnapshotKey key{kind, slot, physicalAddress, byteCount};
-  const auto sourceWriteGeneration =
-      SnapshotWriteGeneration(physicalAddress, byteCount);
-  auto cached = mGeometrySnapshotCache.find(key);
-  const bool cacheEntryAvailable = cached != mGeometrySnapshotCache.end();
+  GeometrySnapshotNode *cached = nullptr;
+  GeometryFrontSlot *front = nullptr;
+  if (mVertexSnapshotFast) {
+    front = &mGeometryFront[GeometryFrontIndex(key)];
+    if (front->Node != nullptr && front->Key == key) cached = front->Node;
+  }
+  if (cached == nullptr) {
+    const auto found = mGeometrySnapshotCache.find(key);
+    if (found != mGeometrySnapshotCache.end()) {
+      cached = &*found;
+      if (front != nullptr) *front = {key, cached};
+    }
+  }
+  const bool cacheEntryAvailable = cached != nullptr;
   const bool versionHit =
       cacheEntryAvailable && cached->second.Bytes != nullptr &&
       cached->second.Bytes->size() == source->size() &&
       sourceWriteGeneration.has_value() &&
       cached->second.SourceWriteGeneration == *sourceWriteGeneration;
+  // The page certificates: after the range's (which took the cards of every
+  // page), before any byte is compared or copied, so that a page whose
+  // certificate is kept unchanged was not written after its bytes were read
+  // (timed with the comparison).
+  bool pages = false;
+  if (paged && !versionHit) {
+    const uint64_t pagesStart = CaptureTicks();
+    pages = mMemory.GuestPageGenerations(guestAddress, byteCount, mPageStamps);
+    mCounters.GeometryCompareTicks += CaptureTicks() - pagesStart;
+  }
   const bool compared = cacheEntryAvailable && !versionHit;
-  const bool contentMatch =
-      compared &&
-      ((cached->second.Bytes != nullptr &&
-        cached->second.Bytes->size() == source->size() &&
-        std::memcmp(cached->second.Bytes->data(), source->data(),
-                    source->size()) == 0) ||
-       (cached->second.Bytes == nullptr &&
-        cached->second.ContentHash == HashTimed(*source)));
+  bool contentMatch = false;
+  if (compared) {
+    const uint64_t compareStart = CaptureTicks();
+    const auto &entry = cached->second;
+    mCounters.GeometryUnprovenBytes += source->size();
+    if (entry.Bytes != nullptr) {
+      if (entry.Bytes->size() == source->size()) {
+        if (pages && entry.PageStamps.size() == mPageStamps.size()) {
+          // Pages whose certificate did not change since the cached bytes
+          // were last proven equal to memory still hold them (the version
+          // hit's proof, page by page): compare the others, a run of
+          // adjacent ones in one call.
+          contentMatch = true;
+          const uint8_t *cachedBytes = entry.Bytes->data();
+          const uint8_t *guestBytes = source->data();
+          const uint64_t firstPage = guestAddress >> 12U;
+          size_t offset = 0U;
+          size_t run = 0U;
+          bool inRun = false;
+          for (size_t page = 0; page <= mPageStamps.size(); ++page) {
+            const bool dirty = page < mPageStamps.size() &&
+                               entry.PageStamps[page] != mPageStamps[page];
+            if (dirty && !inRun) {
+              run = offset;
+              inRun = true;
+            } else if (!dirty && inRun) {
+              inRun = false;
+              mCounters.GeometryComparedBytes += offset - run;
+              if (std::memcmp(cachedBytes + run, guestBytes + run, offset - run) != 0) {
+                contentMatch = false;
+                break;
+              }
+            }
+            if (page == mPageStamps.size()) break;
+            mCounters.GeometryDirtyPages += dirty ? 1U : 0U;
+            offset = static_cast<size_t>(std::min<uint64_t>(
+                source->size(), ((firstPage + page + 1U) << 12U) - guestAddress));
+          }
+        } else {
+          mCounters.GeometryComparedBytes += source->size();
+          contentMatch = std::memcmp(entry.Bytes->data(), source->data(),
+                                     source->size()) == 0;
+        }
+      }
+    } else {
+      contentMatch = entry.ContentHash == HashTimed(*source);
+    }
+    mCounters.GeometryCompareTicks += CaptureTicks() - compareStart;
+  }
   const bool cacheHit =
       versionHit || contentMatch;
   if (compared && cached->second.Bytes == nullptr) mCounters.HashedBytes += source->size();
+  if (versionHit) {
+    ++mCounters.GeometryVersionHits;
+  } else {
+    ++mCounters.GeometryVersionMisses;
+  }
   if (mRuntimeProfilingEnabled) {
     if (versionHit) {
       ++mRuntimeProfile.GeometrySnapshotVersionHits;
@@ -384,7 +506,8 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
     }
   }
   if (!cacheHit) {
-    if (cached == mGeometrySnapshotCache.end() &&
+    const uint64_t copyStart = CaptureTicks();
+    if (cached == nullptr &&
         mGeometrySnapshotCache.size() >= kGeometrySnapshotCacheLimit &&
         mGeometryLruOldest != nullptr) {
       // The least recently used entry (the smallest LastUsedSequence), as
@@ -392,6 +515,10 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
       GeometrySnapshotCacheEntry &oldest = *mGeometryLruOldest;
       const GeometrySnapshotKey oldestKey = *oldest.LruKey;
       UnlinkGeometry(oldest);
+      auto &oldestFront = mGeometryFront[GeometryFrontIndex(oldestKey)];
+      if (oldestFront.Node != nullptr && &oldestFront.Node->second == &oldest) {
+        oldestFront.Node = nullptr;
+      }
       mGeometrySnapshotCache.erase(oldestKey);
       ++mCounters.GeometryEvictions;
     }
@@ -412,25 +539,46 @@ bool Oot3dNativePicaSubmissionQueue::CaptureGeometryResource(
     if (mNextGeometryContentVersion == 0U) {
       mNextGeometryContentVersion = 1U;
     }
-    if (cached != mGeometrySnapshotCache.end()) {
-      // Replaced in place: the entry keeps its node and is relinked below.
+    if (cached != nullptr) {
+      // Replaced in place: the entry keeps its node (and the capacity of its
+      // page certificates) and is relinked below.
       UnlinkGeometry(cached->second);
+      entry.PageStamps = std::move(cached->second.PageStamps);
       cached->second = std::move(entry);
     } else {
-      cached = mGeometrySnapshotCache.emplace(key, std::move(entry)).first;
+      cached = &*mGeometrySnapshotCache.emplace(key, std::move(entry)).first;
+      if (front != nullptr) *front = {key, cached};
     }
+    if (pages) {
+      cached->second.PageStamps.assign(mPageStamps.begin(), mPageStamps.end());
+    } else {
+      cached->second.PageStamps.clear();
+    }
+    cached->second.LastUsedSequence = ++mGeometrySnapshotSequence;
+    LinkGeometryNewest(*cached);
+    mCounters.GeometryCopyTicks += CaptureTicks() - copyStart;
   } else {
-    if (cached->second.Bytes == nullptr) {
-      cached->second.Bytes =
+    auto &entry = cached->second;
+    if (entry.Bytes == nullptr) {
+      const uint64_t copyStart = CaptureTicks();
+      entry.Bytes =
           std::make_shared<const std::vector<uint8_t>>(source->begin(),
                                                        source->end());
       mCounters.CopiedBytes += source->size();
+      mCounters.GeometryCopyTicks += CaptureTicks() - copyStart;
     }
-    cached->second.SourceWriteGeneration = sourceWriteGeneration.value_or(0U);
-    UnlinkGeometry(cached->second);
+    entry.SourceWriteGeneration = sourceWriteGeneration.value_or(0U);
+    // On a version hit no page changed: the kept certificates stay valid.
+    // Otherwise the bytes were proven against these (or none).
+    if (pages) {
+      entry.PageStamps.assign(mPageStamps.begin(), mPageStamps.end());
+    } else if (!versionHit) {
+      entry.PageStamps.clear();
+    }
+    entry.LastUsedSequence = ++mGeometrySnapshotSequence;
+    UnlinkGeometry(entry);
+    LinkGeometryNewest(*cached);
   }
-  cached->second.LastUsedSequence = ++mGeometrySnapshotSequence;
-  LinkGeometryNewest(*cached);
   if (entryOut != nullptr) *entryOut = &cached->second;
 
   resource.Kind = kind;
@@ -617,7 +765,10 @@ bool Oot3dNativePicaSubmissionQueue::ObservePhysicalWriteSpan(
 }
 
 void Oot3dNativePicaSubmissionQueue::ResetSnapshotObservation() {
-    for (auto& [key, entry] : mGeometrySnapshotCache) entry.SourceWriteGeneration = 0;
+    for (auto& [key, entry] : mGeometrySnapshotCache) {
+        entry.SourceWriteGeneration = 0;
+        entry.PageStamps.clear();
+    }
     for (auto& [key, entry] : mTextureSnapshotCache) entry.SourceWriteGeneration = 0;
 }
 
@@ -980,6 +1131,11 @@ constexpr size_t kPacketStateBytes =
     sizeof(Oot3dPicaDrawPacket::DefaultAttributes);
 
 } // namespace
+
+void Oot3dNativePicaSubmissionQueue::SetVertexSnapshotFast(bool enabled) {
+    std::lock_guard guard(mQueueMutex);
+    mVertexSnapshotFast = enabled;
+}
 
 void Oot3dNativePicaSubmissionQueue::SetCaptureDelta(bool enabled) {
     std::lock_guard guard(mQueueMutex);
@@ -1883,6 +2039,7 @@ bool Oot3dNativePicaSubmissionQueue::RestoreState(
             std::move(restoredTransfers);
         mTextureSnapshotCache = std::move(textureSnapshotCache);
         mGeometrySnapshotCache = std::move(geometrySnapshotCache);
+        ClearGeometryFront();
         RebuildGeometryLru();
         ResetSnapshotObservation();
         mNextGeometryContentVersion = nextGeometryContentVersion;

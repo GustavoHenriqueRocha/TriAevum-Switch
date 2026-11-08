@@ -391,6 +391,17 @@ def summarize_offload(windows: list[Window]) -> None:
               f" ({fmt(mean('lut_hashes'), 1)} hashes, {fmt(mean('lut_reuses'), 1)} reused,"
               f" {fmt(mean('lut_copies'), 1)} copies); table copies {fmt(mean('table_copies'), 1)},"
               f" same-value writes skipped {fmt(mean('same_value_writes'), 0)} per frame")
+    if any("vs_resources" in m for m in marked):
+        # "vsnap:" block: the index/vertex snapshot steps inside cap_vertex_us
+        # (config/vertex_snapshot_fast; SWITCH_PORT.md "Vertex snapshot hit path").
+        print(f"    vertex snapshots (vertex_snapshot_fast={int(num(marked[-1], 'vertex_snapshot_fast'))}):"
+              f" {fmt(mean('vs_resources'), 0)} resources/frame, {fmt(mean('vs_version_hits'), 0)} proven"
+              f" unchanged, {fmt(mean('vs_version_misses'), 0)} not ({fmt(mean('vs_uncertified'), 0)} without"
+              f" certificate); unproven {fmt(mean('vs_unproven_kb'), 0)} KiB, compared"
+              f" {fmt(mean('vs_compared_kb'), 0)} KiB/frame; pages {fmt(mean('vs_pages'), 0)}, changed"
+              f" {fmt(mean('vs_dirty_pages'), 1)}, fallbacks {fmt(mean('vs_fallbacks'), 1)}")
+        print("    vertex stage per draw: " + ", ".join(
+            f"{key} {fmt(mean('vs_' + key + '_us'), 2)}" for key in ("view", "compare", "copy", "rest")) + " us")
 
 
 def summarize_cadence(windows: list[Window], seconds: float) -> None:

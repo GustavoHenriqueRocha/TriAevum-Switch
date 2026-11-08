@@ -4,6 +4,7 @@
 #include "oot3d_gameplay_settings_panel.h"
 #include "oot3d_landing_roll.h"
 #include "oot3d_native_guest_overrides.h"
+#include "oot3d_native_a32_memory_peek.h"
 #include "oot3d_native_kernel_options.h"
 #include "oot3d_switch_threads.h"
 #include "oot3d_switch_guest_window.h"
@@ -952,6 +953,14 @@ void NativeA32WindowSession::Setup() {
     const bool captureDelta = Oot3dNativeGame::ReadNativeCaptureDelta();
     submissionQueue.SetCaptureDelta(captureDelta);
     picaFrontend.SetCaptureDelta(captureDelta);
+  }
+  // config/vertex_snapshot_fast: index/vertex snapshots viewed and certified
+  // directly, compared page by page; certificates peek at clean cards
+  // (before the second core starts).
+  {
+    const bool vertexSnapshotFast = Oot3dNativeGame::ReadNativeVertexSnapshotFast();
+    submissionQueue.SetVertexSnapshotFast(vertexSnapshotFast);
+    Oot3dNativeGame::SetRangeWriteGenerationCardPeek(vertexSnapshotFast);
   }
   picaPresentationScheduler.SetMoveFreeFinish(offload.Plan);
 #if defined(__SWITCH__)

@@ -5,6 +5,7 @@
 
 #include "fast/renderer3ds/pica_native_state.h"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -80,12 +81,33 @@ class Oot3dPicaPhysicalMemoryView {
         const auto view = mReadView(address, size);
         return view.size() == size ? view : std::span<const uint8_t>{};
     }
+    // config/vertex_snapshot_fast: View followed by the certificate of
+    // SnapshotWriteGeneration for a range exactly one region covers, as two
+    // direct calls to the NativeA32Memory behind this view
+    // (SynchronousReadView, RangeWriteGeneration) instead of the callbacks,
+    // their mapping checks and the alias walks: the same calls into the
+    // memory, in the same order. Fallback: no such memory (callback views) or
+    // several covering regions (aliases need the write observation of
+    // SnapshotWriteGeneration); the caller takes View and the generation as
+    // before. Unmapped: View would fail.
+    enum class DirectView : uint8_t { Viewed, Unmapped, Fallback };
+    DirectView ViewCertified(uint32_t physicalAddress, size_t size,
+                             std::span<const uint8_t>& bytes,
+                             uint32_t& guestAddress,
+                             std::optional<uint64_t>& generation) const;
+    // The certificate of each guest page of [guestAddress, guestAddress +
+    // size) (NativeA32Memory::RangeWriteGeneration of the page's part of the
+    // range), in order; false (and `generations` emptied) when one has none.
+    // Only after ViewCertified returned Viewed for that range.
+    bool GuestPageGenerations(uint32_t guestAddress, size_t size,
+                              std::vector<uint64_t>& generations) const;
 
   private:
     std::vector<Oot3dPicaPhysicalMemoryRegion> mRegions;
     ReadView mReadView;
     WriteGeneration mWriteGeneration;
     MappingCheck mMappingCheck;
+    const NativeA32Memory* mDirectMemory = nullptr;
 };
 
 enum class Oot3dPicaResourceKind : uint8_t {
@@ -250,6 +272,18 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     // hands the log over (the plan builder replays it off this thread).
     void SetCaptureDelta(bool enabled);
     [[nodiscard]] bool CaptureDelta() const noexcept { return mCaptureDelta; }
+    // config/vertex_snapshot_fast (SWITCH_PORT.md "Vertex snapshot hit
+    // path"): an index buffer or vertex loader of one guest mapping is viewed
+    // and certified by direct calls into guest memory
+    // (Oot3dPicaPhysicalMemoryView::ViewCertified). When a multi-page range's
+    // certificate changed, the certificate of each page is taken too and
+    // kept with the cache entry; the next time only the pages whose own
+    // certificate changed are compared with the cached bytes (the others are
+    // proven unchanged as a whole range is on a version hit). The same hits,
+    // misses, snapshots, versions and savestates; false keeps the callback
+    // view, one certificate per range and a compare of every byte.
+    void SetVertexSnapshotFast(bool enabled);
+    [[nodiscard]] bool VertexSnapshotFast() const noexcept { return mVertexSnapshotFast; }
     // Always counted, cumulative (logs/perf.txt): time inside the draw
     // submissions (the guest's GX command, on the guest thread) and the bytes
     // copied into snapshots and hashed there.
@@ -283,6 +317,28 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
         uint64_t StateBytes = 0;
         uint64_t DeltaDraws = 0;
         uint64_t Keyframes = 0;
+        // Geometry snapshots (index buffers and vertex loaders, perf.txt
+        // "vsnap:"): resources looked up; proven unchanged by their
+        // certificate (version hits) or not (version misses: compared, or
+        // made anew); without a certificate (escaped pointer, unobservable
+        // alias); the bytes of the compared resources and the bytes actually
+        // compared; the pages of certified resources, those whose
+        // certificate changed on a compared entry (fast path), and resources
+        // the fast path left to the previous one (aliases).
+        uint64_t GeometryResources = 0;
+        uint64_t GeometryVersionHits = 0;
+        uint64_t GeometryVersionMisses = 0;
+        uint64_t GeometryUncertified = 0;
+        uint64_t GeometryUnprovenBytes = 0;
+        uint64_t GeometryComparedBytes = 0;
+        uint64_t GeometryPages = 0;
+        uint64_t GeometryDirtyPages = 0;
+        uint64_t GeometryFallbacks = 0;
+        // Parts of VertexTicks: the memory view with the certificate, the
+        // comparison with the cached bytes, and the copy of new bytes.
+        uint64_t GeometryViewTicks = 0;
+        uint64_t GeometryCompareTicks = 0;
+        uint64_t GeometryCopyTicks = 0;
     };
     [[nodiscard]] CaptureCounters Counters() const noexcept {
         std::lock_guard guard(mQueueMutex);
@@ -390,6 +446,10 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
       uint32_t IndexMaximum = 0;
       uint64_t ContentVersion = 0;
       uint64_t SourceWriteGeneration = 0;
+      // config/vertex_snapshot_fast: the certificate of every guest page of
+      // a multi-page range, taken after the range's and before Bytes were
+      // last compared with or copied from guest memory; empty otherwise.
+      std::vector<uint64_t> PageStamps;
       uint64_t LastUsedSequence = 0;
       // LRU order of the cache (oldest first, by LastUsedSequence), linked
       // through the map's own nodes, whose addresses survive rehashing: a
@@ -400,6 +460,22 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
       GeometrySnapshotCacheEntry* LruNewer = nullptr;
       const GeometrySnapshotKey* LruKey = nullptr;
     };
+    using GeometrySnapshotNode =
+        std::pair<const GeometrySnapshotKey, GeometrySnapshotCacheEntry>;
+    // config/vertex_snapshot_fast: a direct-mapped table in front of
+    // mGeometrySnapshotCache, the node a key was last found at (nodes keep
+    // their address until erased). A hit skips the map's bucket walk (its
+    // modulo, bucket array, predecessor node and hash recomputations, each a
+    // likely cache miss); a stale or other key falls back to the map. A slot
+    // is cleared when its node is erased and all of them when the map is
+    // replaced.
+    struct GeometryFrontSlot {
+      GeometrySnapshotKey Key;
+      GeometrySnapshotNode *Node = nullptr;
+    };
+    static constexpr size_t kGeometryFrontSlots = 1024U;
+    static size_t GeometryFrontIndex(const GeometrySnapshotKey &key) noexcept;
+    void ClearGeometryFront() noexcept;
 
     struct TextureSnapshotKey {
       uint32_t PhysicalAddress = 0;
@@ -510,6 +586,10 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     bool mRuntimeProfilingEnabled = false;
     bool mLeanCapture = false;
     bool mCaptureDelta = false;
+    bool mVertexSnapshotFast = false;
+    // The page certificates of the resource being captured
+    // (config/vertex_snapshot_fast), kept to reuse its capacity.
+    std::vector<uint64_t> mPageStamps;
     std::shared_ptr<Oot3dPicaCaptureDeltaLogPool> mDeltaPool =
         std::make_shared<Oot3dPicaCaptureDeltaLogPool>();
     // The log of mPendingDraws' entries (acquired at the first delta draw).
@@ -528,6 +608,7 @@ class Oot3dNativePicaSubmissionQueue final : public Oot3dPicaPacketSink {
     uint64_t mGeometrySnapshotSequence = 0;
     GeometrySnapshotCacheEntry* mGeometryLruOldest = nullptr;
     GeometrySnapshotCacheEntry* mGeometryLruNewest = nullptr;
+    std::array<GeometryFrontSlot, kGeometryFrontSlots> mGeometryFront{};
     uint64_t mNextSubmissionId = 1;
     uint64_t mNextCompletionId = 1;
 };
