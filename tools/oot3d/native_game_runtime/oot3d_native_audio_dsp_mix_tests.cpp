@@ -396,7 +396,9 @@ void GuestAuxEffect(std::mt19937& random, SharedMemory& region) {
     process(region.intermediate_mix_samples.mix2);
 }
 
-u64 RunTitle(u32 seed, unsigned frames, std::size_t* restoreCount) {
+// stepped: every other frame goes through BeginFrame/MixFrame/EndFrame (the second core's
+// config/kernel_retake path) instead of ProcessFrame; the digest must not change.
+u64 RunTitle(u32 seed, unsigned frames, std::size_t* restoreCount, bool stepped) {
     std::mt19937 random(seed);
     gRecentBuffers.clear();
     FakeGuest guest;
@@ -442,7 +444,14 @@ u64 RunTitle(u32 seed, unsigned frames, std::size_t* restoreCount) {
         pcm.clear();
         guest.accesses.clear();
         std::string error;
-        if (!hle->ProcessFrame(guest.access, pcm, &error)) {
+        if (stepped && frame % 2U == 1U) {
+            Oot3dNativeGame::NativeA32DspFrame steps;
+            const bool begun = hle->BeginFrame(guest.access, steps, &error);
+            Check(begun, "BeginFrame failed");
+            if (!begun) return 0;
+            hle->MixFrame(guest.access, steps, pcm);
+            Check(hle->EndFrame(guest.access, steps, &error), "EndFrame failed");
+        } else if (!hle->ProcessFrame(guest.access, pcm, &error)) {
             Check(false, "ProcessFrame failed");
             return 0;
         }
@@ -677,11 +686,13 @@ int main(int argc, char** argv) {
     const bool benchOnly = argc > 1 && std::string(argv[1]) == "--bench-only";
     for (const Expected& expected : kExpected) {
         if (benchOnly) break;
-        const u64 digest = RunTitle(expected.seed, expected.frames, &restores);
-        std::printf("seed %u frames %u digest %016llx\n", expected.seed, expected.frames,
-                    static_cast<unsigned long long>(digest));
-        const u64 reference = column == 1 ? expected.aarch64 : column == 0 ? expected.host : 0;
-        if (!digestOnly && reference != 0) Check(digest == reference, "digest differs from the original code");
+        for (const bool stepped : {false, true}) {
+            const u64 digest = RunTitle(expected.seed, expected.frames, &restores, stepped);
+            std::printf("seed %u frames %u%s digest %016llx\n", expected.seed, expected.frames,
+                        stepped ? " stepped" : "", static_cast<unsigned long long>(digest));
+            const u64 reference = column == 1 ? expected.aarch64 : column == 0 ? expected.host : 0;
+            if (!digestOnly && reference != 0) Check(digest == reference, "digest differs from the original code");
+        }
     }
     std::printf("savestate round trips: %zu\n", restores);
 #if !defined(__SWITCH__) && !defined(OOT3D_QEMU_AARCH64_TEST)

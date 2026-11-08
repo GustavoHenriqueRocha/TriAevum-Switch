@@ -165,6 +165,31 @@ GUARDS = [
           r'mSnapshot\.push_back\(\(\*candidate\)->Event\);\s+MaterializeSvcEventName\(mSnapshot\.back\(\)\);.*?'
           r'request=" << std::quoted\(NativeA32CtrSvcEventName\(\*event\)\)',
           test="oot3d_native_a32_ctr_host_tests (TestFastSvcEquivalence; every test with it off and on)"),
+    # --- 11/08 (Perf19 #6): the game thread's kernel-lock retakes (guest_kernel: lock= of thread 0,
+    # 0.5-1.4 ms per host frame in test.11) tracked the second core's DSP frames (~72 % of
+    # dsp_core1_ms, correlation 0.96), which held the lock through the mix. config/kernel_retake ---
+    Guard("kernel_retake: the DSP frame signals first and mixes released only if no game-thread thread woke and the interrupt was taken",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(!dspHle\.BeginFrame\(memory, frame, &mixError\)\) \{.*?'
+          r'const uint64_t core0Wakes = process\.Core0ThreadWakes\(\);.*?'
+          r'if \(!hostServices\.SignalDspAudioFrame\(\)\) deferredDspAudioFrames = 0U;\s+'
+          r'process\.RunSecondCoreIdleWorkAfterEffect\(\s+core0Wakes, hostServices\.DspAudioInterruptPending\(\), \[&\] \{\s+'
+          r'dspHle\.MixFrame\(memory, frame, samples\);.*?'
+          r'if \(!dspHle\.EndFrame\(memory, frame, &mixError\)\)',
+          test="oot3d_native_a32_second_core_tests (TestRetakeSchedule, TestReleasedIdleWork)"),
+    Guard("kernel_retake: released idle work is a kernel section (a world stop waits for it), else held",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'mCore0ThreadWakes != core0WakesBefore \|\| effectPending\) \{\s+work\(\);\s+return false;.*?'
+          r'\+\+SecondCore::gInKernel\[1\];\s+Process\.mSecondCoreIdleReleased = true;.*?'
+          r'Process\.mSecondCoreIdleReleased = false;\s+--SecondCore::gInKernel\[1\];\s+SecondCore::NotifyKernel\(\);',
+          test="oot3d_native_a32_second_core_tests (TestReleasedIdleWork)"),
+    Guard("kernel_retake: no thread above the main thread's priority is dispatched during a released DSP frame",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_process.cpp",
+          r'if \(concurrent\) WaitOutReleasedIdleWork\(\);\s+auto& state = CurrentThreadState\(\);',
+          test="oot3d_native_a32_second_core_tests (TestReleasedIdleWork)"),
+    Guard("kernel_retake: only config/kernel_retake (Switch: absent = on) releases the DSP mix",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'dspMixReleasesKernel = kernelOptions\.Retake;'),
     # --- 11/07 (logs18b): the guest profile's report (walk, sort, SD write) ran on the game
     # thread every 900 host frames: 0.41-0.47 s stalls, one of 3.36 s tripped the hang watchdog ---
     Guard("guest profile: the report is sorted and written by its writer thread, not the game thread",

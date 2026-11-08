@@ -74,6 +74,14 @@ NativeA32DspHle::PhysicalRegions() const {
 bool NativeA32DspHle::ProcessFrame(
     const NativeDspMemoryAccess& memory,
     std::vector<int16_t>& interleavedStereo, std::string* error) {
+    NativeA32DspFrame frame;
+    if (!BeginFrame(memory, frame, error)) return false;
+    MixFrame(memory, frame, interleavedStereo);
+    return EndFrame(memory, frame, error);
+}
+
+bool NativeA32DspHle::BeginFrame(const NativeDspMemoryAccess& memory,
+                                 NativeA32DspFrame& frame, std::string* error) {
     if (!memory.BeginUpdate || !memory.EndUpdate || !memory.ResolvePhysical) {
         SetError(error, "native DSP memory contract is incomplete");
         return false;
@@ -94,14 +102,24 @@ bool NativeA32DspHle::ProcessFrame(
         SetError(error, "native DSP shared memory is not mapped");
         return false;
     }
-    auto& region0 = *reinterpret_cast<AudioCore::HLE::SharedMemory*>(region0Bytes);
-    auto& region1 = *reinterpret_cast<AudioCore::HLE::SharedMemory*>(region1Bytes);
+    frame.Region0 = region0Bytes;
+    frame.Region1 = region1Bytes;
+    frame.ReadIndex = CurrentRegionIndex(
+        *reinterpret_cast<const AudioCore::HLE::SharedMemory*>(region0Bytes),
+        *reinterpret_cast<const AudioCore::HLE::SharedMemory*>(region1Bytes));
+    return true;
+}
+
+void NativeA32DspHle::MixFrame(const NativeDspMemoryAccess& memory,
+                               const NativeA32DspFrame& frame,
+                               std::vector<int16_t>& interleavedStereo) {
+    auto& region0 = *reinterpret_cast<AudioCore::HLE::SharedMemory*>(frame.Region0);
+    auto& region1 = *reinterpret_cast<AudioCore::HLE::SharedMemory*>(frame.Region1);
 
     mImpl->CurrentMemory = &memory;
 
-    const size_t readIndex = CurrentRegionIndex(region0, region1);
-    auto& read = readIndex == 0U ? region0 : region1;
-    auto& write = readIndex == 0U ? region1 : region0;
+    auto& read = frame.ReadIndex == 0U ? region0 : region1;
+    auto& write = frame.ReadIndex == 0U ? region1 : region0;
     std::array<AudioCore::QuadFrame32, 3> intermediateMixes{};
     for (size_t sourceIndex = 0; sourceIndex < mImpl->Sources.size();
          ++sourceIndex) {
@@ -125,11 +143,15 @@ bool NativeA32DspHle::ProcessFrame(
     const size_t first = interleavedStereo.size();
     interleavedStereo.resize(first + output.size() * 2U);
     std::memcpy(interleavedStereo.data() + first, output.data(), sizeof(output));
+}
 
+bool NativeA32DspHle::EndFrame(const NativeDspMemoryAccess& memory,
+                               const NativeA32DspFrame& frame, std::string* error) {
+    constexpr size_t regionBytes = sizeof(AudioCore::HLE::SharedMemory);
     const uint32_t readAddress =
-        readIndex == 0U ? kDspRegion0Address : kDspRegion1Address;
+        frame.ReadIndex == 0U ? kDspRegion0Address : kDspRegion1Address;
     const uint32_t writeAddress =
-        readIndex == 0U ? kDspRegion1Address : kDspRegion0Address;
+        frame.ReadIndex == 0U ? kDspRegion1Address : kDspRegion0Address;
     if (!memory.EndUpdate(readAddress, regionBytes) ||
         !memory.EndUpdate(writeAddress, regionBytes)) {
         SetError(error, "native DSP shared memory is not writable");

@@ -384,6 +384,7 @@ bool NativeA32Process::ResumeThread(
         state->r[15] = *resumePc;
     }
     *status = NativeA32ThreadStatus::Ready;
+    if (hostCore == 0U) ++mCore0ThreadWakes;
     // A signal, arbitration, timer or interrupt from either core (kernel
     // lock held) wakes the second core's host thread, or a game thread that
     // waits on the kernel condition for one of its own threads. The game
@@ -738,6 +739,7 @@ NativeA32ProcessRunResult NativeA32Process::Run(
     for (uint32_t transitions = 0; transitions < maxHostTransitions;
          ++transitions) {
         mPendingFallback = {};
+        if (concurrent) WaitOutReleasedIdleWork();
         auto& state = CurrentThreadState();
         const uint32_t dispatchBudget = DispatchBlockBudget(blockLimitPerDispatch);
         const bool timed = mTimingEnabled;
@@ -1141,6 +1143,14 @@ NativeA32GuestThreadProfile NativeA32Process::GuestThreadProfile() const noexcep
         SecondCore::gCore1LockWaitNanoseconds.load(std::memory_order_relaxed);
     profile.SecondCoreIdleWakes = mSecondCoreIdleWakes.load(std::memory_order_relaxed);
     profile.SecondCoreEmptyWakes = mSecondCoreEmptyWakes.load(std::memory_order_relaxed);
+    profile.SecondCoreIdleReleasedTicks =
+        mSecondCoreIdleReleasedTicks.load(std::memory_order_relaxed);
+    profile.SecondCoreIdleReleasedUnits =
+        mSecondCoreIdleReleasedUnits.load(std::memory_order_relaxed);
+    profile.Core0IdleGateWaits = mCore0IdleGateWaits.load(std::memory_order_relaxed);
+    const SecondCore::Core0LockSample core0Lock = SecondCore::SampleCore0Lock();
+    profile.Core0LockWaits = core0Lock.Waits;
+    profile.Core0LockWaitNanoseconds = core0Lock.WaitNanoseconds;
     return profile;
 }
 
@@ -1251,6 +1261,56 @@ void NativeA32Process::NoteCore0ThreadParked() noexcept {
     SecondCore::NotifyKernel();
 }
 
+bool NativeA32Process::RunSecondCoreIdleWorkAfterEffect(uint64_t core0WakesBefore,
+                                                        bool effectPending,
+                                                        const std::function<void()>& work) {
+    if (!SecondCore::Active() || SecondCore::Processor() != 1U || !SecondCore::KernelHeld() ||
+        mCore0ThreadWakes != core0WakesBefore || effectPending) {
+        work();
+        return false;
+    }
+    // Opened and closed under the kernel lock (closed also when `work`
+    // throws): while open the second core is inside a kernel section, and
+    // whoever waits for it to close (a world stop, a gated dispatch) re-tests.
+    struct Section {
+        explicit Section(NativeA32Process& process)
+            : Process(process), Start(ReadThreadProfileCounter()) {
+            ++SecondCore::gInKernel[1];
+            Process.mSecondCoreIdleReleased = true;
+        }
+        ~Section() {
+            Process.mSecondCoreIdleReleased = false;
+            --SecondCore::gInKernel[1];
+            SecondCore::NotifyKernel();
+            Process.mSecondCoreIdleReleasedTicks.fetch_add(ReadThreadProfileCounter() - Start,
+                                                           std::memory_order_relaxed);
+            Process.mSecondCoreIdleReleasedUnits.fetch_add(1U, std::memory_order_relaxed);
+        }
+        Section(const Section&) = delete;
+        Section& operator=(const Section&) = delete;
+        NativeA32Process& Process;
+        uint64_t Start;
+    } section{*this};
+    const SecondCore::KernelRelease release;
+    work();
+    return true;
+}
+
+void NativeA32Process::WaitOutReleasedIdleWork() {
+    while (mSecondCoreIdleReleased && mCurrentThreadId != 0U &&
+           mCurrentThreadId - 1U < mSecondaryThreads.size() &&
+           mSecondaryThreads[mCurrentThreadId - 1U].Priority < mPrimaryThreadPriority) {
+        // Such a thread never ran during a DSP frame (none starts while one
+        // is ready or running, and the frame held the kernel lock throughout).
+        mCore0IdleGateWaits.fetch_add(1U, std::memory_order_relaxed);
+        SecondCore::WaitKernel([this] { return !mSecondCoreIdleReleased; });
+        // What is ready may have changed meanwhile: choose again, as after a
+        // block-limit exit (the current thread is ready, so one is chosen).
+        CurrentThreadStatus() = NativeA32ThreadStatus::Ready;
+        SelectReadyThread();
+    }
+}
+
 NativeA32Process::SecondaryThread* NativeA32Process::SelectSecondCoreThread() {
     SecondaryThread* selected = nullptr;
     for (auto& thread : mSecondaryThreads) {
@@ -1341,8 +1401,9 @@ void NativeA32Process::RunSecondCore(uint32_t blockLimitPerDispatch) {
         if (mSecondCoreStopRequested) break;
         if (idleWork) {
             // Every thread of this core is parked in a wait: the DSP frame
-            // updates what they read without meeting them (the lock stays
-            // held, so a world stop waits for the whole unit).
+            // updates what they read without meeting them (a world stop waits
+            // for the whole unit: the lock stays held, or the released part is
+            // a kernel section, RunSecondCoreIdleWorkAfterEffect).
             const uint64_t idleStart = ReadThreadProfileCounter();
             try {
                 mSecondCoreIdleWork.Run();
@@ -1581,12 +1642,15 @@ std::string FormatNativeA32SecondCoreLine(const NativeA32GuestThreadProfile& now
     } else {
         std::snprintf(preempted, sizeof(preempted), "na");
     }
-    char line[448];
+    const uint64_t released =
+        ns(now.SecondCoreIdleReleasedTicks - windowStart.SecondCoreIdleReleasedTicks);
+    char line[640];
     std::snprintf(
         line, sizeof(line),
         "second_core: dsp_pumped=%.2f dsp_flushed=%.2f dsp_late=%llu dsp_wait_ms=%.3f "
         "dsp_core1=%.2f dsp_core1_ms=%.3f core1_lock_wait_ms=%.3f core1_preempted_ms=%s "
-        "core0_saved_ms=%.3f core1_wakes=%.1f core1_empty_wakes=%.1f",
+        "core0_saved_ms=%.3f core1_wakes=%.1f core1_empty_wakes=%.1f dsp_released=%.2f "
+        "dsp_held_ms=%.3f core0_gated=%.2f core0_lock_waits=%.1f core0_lock_wait_ms=%.3f",
         static_cast<double>(dsp.Pumped) / frames, static_cast<double>(dsp.Flushed) / frames,
         static_cast<unsigned long long>(dsp.Late), waitMs,
         static_cast<double>(now.SecondCoreIdleWorkUnits - windowStart.SecondCoreIdleWorkUnits) /
@@ -1595,7 +1659,14 @@ std::string FormatNativeA32SecondCoreLine(const NativeA32GuestThreadProfile& now
         nsToMs(cpuKnown ? cpu : running) - waitMs,
         static_cast<double>(now.SecondCoreIdleWakes - windowStart.SecondCoreIdleWakes) / frames,
         static_cast<double>(now.SecondCoreEmptyWakes - windowStart.SecondCoreEmptyWakes) /
-            frames);
+            frames,
+        static_cast<double>(now.SecondCoreIdleReleasedUnits -
+                            windowStart.SecondCoreIdleReleasedUnits) /
+            frames,
+        nsToMs(idleWork > released ? idleWork - released : 0U),
+        static_cast<double>(now.Core0IdleGateWaits - windowStart.Core0IdleGateWaits) / frames,
+        static_cast<double>(now.Core0LockWaits - windowStart.Core0LockWaits) / frames,
+        nsToMs(now.Core0LockWaitNanoseconds - windowStart.Core0LockWaitNanoseconds));
     return line;
 }
 

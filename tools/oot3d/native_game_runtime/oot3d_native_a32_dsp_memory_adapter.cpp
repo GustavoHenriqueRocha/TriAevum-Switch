@@ -20,9 +20,7 @@ BuildNativeA32DspPhysicalRegions(
     return regions;
 }
 
-bool NativeA32DspHle::ProcessFrame(
-    NativeA32Memory& memory, std::vector<int16_t>& interleavedStereo,
-    std::string* error) {
+NativeDspMemoryAccess NativeA32DspHle::MemoryAccess(NativeA32Memory& memory) {
     NativeDspMemoryAccess access;
     access.BeginUpdate = [&memory](uint32_t address, size_t size) {
         return memory.BeginHostUpdate(address, size);
@@ -41,7 +39,13 @@ bool NativeA32DspHle::ProcessFrame(
         }
         return static_cast<const uint8_t*>(nullptr);
     };
-    return ProcessFrame(access, interleavedStereo, error);
+    return access;
+}
+
+bool NativeA32DspHle::ProcessFrame(
+    NativeA32Memory& memory, std::vector<int16_t>& interleavedStereo,
+    std::string* error) {
+    return ProcessFrame(MemoryAccess(memory), interleavedStereo, error);
 }
 
 } // namespace Oot3dNativeGame

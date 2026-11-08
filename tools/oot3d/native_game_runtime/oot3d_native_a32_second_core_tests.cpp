@@ -27,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -56,6 +57,7 @@ struct Sizes {
     uint32_t PingPongRounds = 20'000U;
     uint32_t ArbitrationItems = 20'000U;
     uint32_t DspRefreshes = 10U;  // DSP frames on the second core: 3 each
+    uint32_t RetakeFrames = 100U;  // config/kernel_retake schedule
 };
 
 // --- A few ARM words ---------------------------------------------------------
@@ -1151,18 +1153,26 @@ void TestSecondCoreLine() {
     now.SecondCoreIdleWorkUnits = 7U;
     now.SecondCoreLockWaitNanoseconds = 2'000'000U;
     now.SecondCoreCpuTicks = 5'000'000U;
+    // config/kernel_retake: 5 of the 7 frames mixed released, 0.6 ms of the
+    // 1 ms; the game thread gated twice, waited for the lock 3 times.
+    now.SecondCoreIdleReleasedTicks = 600'000U;
+    now.SecondCoreIdleReleasedUnits = 5U;
+    now.Core0IdleGateWaits = 2U;
+    now.Core0LockWaits = 3U;
+    now.Core0LockWaitNanoseconds = 250'000U;
     const std::string line =
         FormatNativeA32SecondCoreLine(now, start, {0U, 0U, 0U, 0.0005}, 1U);
     Require(line ==
                 "second_core: dsp_pumped=0.00 dsp_flushed=0.00 dsp_late=0 dsp_wait_ms=0.500 "
                 "dsp_core1=7.00 dsp_core1_ms=1.000 core1_lock_wait_ms=2.000 "
                 "core1_preempted_ms=3.000 core0_saved_ms=4.500 core1_wakes=0.0 "
-                "core1_empty_wakes=0.0",
+                "core1_empty_wakes=0.0 dsp_released=5.00 dsp_held_ms=0.400 core0_gated=2.00 "
+                "core0_lock_waits=3.0 core0_lock_wait_ms=0.250",
             "second_core line: " + line);
     now.SecondCoreIdleWakes = 30U;
     now.SecondCoreEmptyWakes = 25U;
     Require(FormatNativeA32SecondCoreLine(now, start, {}, 10U)
-                .ends_with(" core1_wakes=3.0 core1_empty_wakes=2.5"),
+                    .find(" core1_wakes=3.0 core1_empty_wakes=2.5 ") != std::string::npos,
             "second_core line: idle wakes per frame");
     now.SecondCoreCpuKnown = false;
     Require(FormatNativeA32SecondCoreLine(now, start, {}, 1U).find("core1_preempted_ms=na") !=
@@ -1316,6 +1326,352 @@ void TestUiLockHandOff() {
               << " us waiting), kept " << held.Microseconds / kRounds << " us\n";
 }
 
+// --- config/kernel_retake ----------------------------------------------------
+
+// The second core's side of RunSecondCoreIdleWorkAfterEffect on its own host
+// thread (as the idle work calls it, kernel lock held); `work` runs inside.
+struct Core1IdleUnit {
+    Core1IdleUnit(NativeA32Process& process, uint64_t wakes, bool pending,
+                  std::function<void()> work)
+        : Thread([&process, wakes, pending, work = std::move(work), this] {
+              SecondCore::tProcessor = 1U;
+              SecondCore::LockKernel();
+              Released = process.RunSecondCoreIdleWorkAfterEffect(wakes, pending, [&] {
+                  HeldInside = SecondCore::KernelHeld();
+                  work();
+              });
+              HeldAfter = SecondCore::KernelHeld();
+              SecondCore::UnlockKernel();
+          }) {}
+    // Called by the game thread, kernel lock held.
+    void Join() {
+        const SecondCore::KernelRelease release;
+        Thread.join();
+    }
+    bool Released = false;
+    bool HeldInside = false;
+    bool HeldAfter = false;
+    std::thread Thread;
+};
+
+// RunSecondCoreIdleWorkAfterEffect: the work runs with the kernel lock
+// released only when the effect readied no game-thread thread and left
+// nothing pending (otherwise held, as config/kernel_retake 0); released, a
+// world stop waits for it, and the game thread dispatches the main thread
+// but not a thread above its priority until it ends.
+void TestReleasedIdleWork() {
+    constexpr auto kHold = std::chrono::milliseconds(200);
+    Program& program = Programs().emplace_back(kText);
+    const uint32_t mainEntry = program.Here();  // r9 = kData
+    program.Op(MovImm(5, 1));
+    program.Op(Str(5, 9, 0));
+    program.Svc(kSvcExitThread);
+    const uint32_t highEntry = program.Here();  // r0 = kData
+    program.Op(MovImm(5, 1));
+    program.Op(Str(5, 0, 4));
+    program.Svc(kSvcExitThread);
+    Guest guest(program.Seal());
+    guest.Boot(mainEntry, kData);
+    NativeA32Process& process = guest.process;
+    process.EnableSecondCore();
+    SecondCore::LockKernel();
+    // The decision.
+    for (const auto& [wakesOff, pending, released] :
+         {std::tuple{0U, false, true}, std::tuple{1U, false, false},
+          std::tuple{0U, true, false}}) {
+        bool ran = false;
+        Core1IdleUnit unit(process, process.Core0ThreadWakes() + wakesOff, pending,
+                           [&] { ran = true; });
+        unit.Join();
+        Require(ran && unit.Released == released && unit.HeldInside == !released &&
+                    unit.HeldAfter,
+                "released idle work: wrong decision or lock state");
+    }
+    // A world stop waits for the released work.
+    {
+        std::atomic<bool> inWork{false};
+        std::atomic<bool> stopAsked{false};
+        Core1IdleUnit unit(process, process.Core0ThreadWakes(), false, [&] {
+            inWork.store(true);
+            while (!stopAsked.load()) std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            inWork.store(false);
+        });
+        {
+            const SecondCore::KernelRelease release;
+            while (!inWork.load()) std::this_thread::yield();
+        }
+        stopAsked.store(true);
+        {
+            const SecondCore::WorldStop stop;
+            Require(!inWork.load(), "a world stop began during the released idle work");
+        }
+        unit.Join();
+        Require(unit.Released, "the world-stop unit did not run released");
+    }
+    // The main thread runs during the released work.
+    {
+        std::atomic<bool> inWork{false};
+        Core1IdleUnit unit(process, process.Core0ThreadWakes(), false, [&] {
+            inWork.store(true);
+            std::this_thread::sleep_for(kHold);
+            inWork.store(false);
+        });
+        {
+            const SecondCore::KernelRelease release;
+            while (!inWork.load()) std::this_thread::yield();
+        }
+        const auto result = process.Run(kBudget);
+        Require(result.Kind == NativeA32ProcessRunKind::Terminated,
+                "main thread did not run to its exit: " + result.Error);
+        Require(inWork.load(), "the main thread waited for the released idle work");
+        unit.Join();
+        Require(guest.Read32(kData) == 1U, "the main thread did not run");
+    }
+    // A thread above the main thread's priority waits for it.
+    {
+        GuestState state{};
+        state.r[0] = 0x20U;  // priority, above the main thread's 0x30
+        state.r[1] = highEntry;
+        state.r[2] = kData;
+        state.r[3] = kSecondStack;
+        state.r[4] = 0U;  // processor 0: the game thread
+        guest.Svc(0x08U, state);
+        std::atomic<bool> inWork{false};
+        Core1IdleUnit unit(process, process.Core0ThreadWakes(), false, [&] {
+            inWork.store(true);
+            std::this_thread::sleep_for(kHold);
+            inWork.store(false);
+        });
+        {
+            const SecondCore::KernelRelease release;
+            while (!inWork.load()) std::this_thread::yield();
+        }
+        const uint64_t gated = process.GuestThreadProfile().Core0IdleGateWaits;
+        process.Run(kBudget);
+        Require(!inWork.load(), "a thread above the main thread's priority ran during the "
+                                "released idle work");
+        Require(process.GuestThreadProfile().Core0IdleGateWaits == gated + 1U,
+                "the gated dispatch was not counted");
+        unit.Join();
+        Require(guest.Read32(kData + 4U) == 1U, "the high thread did not run after it");
+    }
+    process.DisableSecondCore();
+    SecondCore::UnlockKernel();
+}
+
+constexpr uint32_t EorReg(uint32_t rd, uint32_t rn, uint32_t rm, uint32_t lsl = 0U) {
+    return 0xE0200000U | rn << 16U | rd << 12U | lsl << 7U | rm;  // rn ^ (rm << lsl)
+}
+constexpr uint32_t OrrReg(uint32_t rd, uint32_t rn, uint32_t rm) {
+    return 0xE1800000U | rn << 16U | rd << 12U | rm;
+}
+
+void SpinFor(std::chrono::nanoseconds duration) {
+    const auto until = std::chrono::steady_clock::now() + duration;
+    while (std::chrono::steady_clock::now() < until) {
+    }
+}
+
+// The DSP audio pipe through dsp::DSP, from the primary thread's context (its
+// command buffer in the data page): `event` becomes the pipe's interrupt and
+// the audio starts, so SignalDspAudioFrame signals it (cleared again here).
+void StartDspAudio(Guest& guest, uint32_t event) {
+    constexpr uint32_t kThreadPointer = kData + 0x380U;
+    constexpr uint32_t kCommand = kThreadPointer + 0x80U;
+    constexpr uint32_t kScratch = kData + 0x500U;
+    GuestState state{};
+    state.thread_pointer = kThreadPointer;
+    const auto ipc = [&](uint32_t session, std::initializer_list<uint32_t> words) {
+        uint32_t offset = 0U;
+        for (const uint32_t word : words) {
+            guest.Write32(kCommand + offset, word);
+            offset += 4U;
+        }
+        state.r[0] = session;
+        state = guest.Svc(0x32U, state);
+    };
+    constexpr std::array<uint8_t, 5> port{'s', 'r', 'v', ':', 0};
+    Require(guest.process.Memory().WriteBytes(kScratch, port), "srv: port name");
+    state.r[1] = kScratch;
+    state = guest.Svc(0x2DU, state);
+    const uint32_t srv = state.r[1];
+    ipc(srv, {0x00010002U});
+    ipc(srv, {0x00050100U, 0x3A707364U, 0x5053443AU, 8U});  // GetServiceHandle dsp::DSP
+    const uint32_t dsp = guest.Read32(kCommand + 12U);
+    ipc(dsp, {0x00150082U, 2U, 2U, 0U, event});  // RegisterInterruptEvents, audio pipe
+    constexpr std::array<uint8_t, 4> initialize{0, 0, 0xA5, 0x5A};
+    Require(guest.process.Memory().WriteBytes(kScratch + 0x40U, initialize), "pipe command");
+    ipc(dsp, {0x000D0082U, 2U, 4U, 0x00010402U, kScratch + 0x40U});  // WriteProcessPipe
+    GuestState clear{};
+    clear.r[0] = event;
+    guest.Svc(0x19U, clear);  // ClearEvent
+    Require(!guest.host.DspAudioInterruptPending(), "the DSP interrupt stayed signaled");
+}
+
+struct RetakeRun {
+    uint32_t Consumed = 0U;
+    uint32_t Checksum = 0U;
+    uint32_t Torn = 0U;
+    uint64_t Released = 0U;
+    double RetakeUsPerFrame = 0.0;
+    double Core0LockWaitUsPerFrame = 0.0;
+    std::string Line;
+};
+
+// The window session's DSP frame, both shapes, against a game thread that
+// keeps making SVCs: the sound thread (second core) waits on the DSP audio
+// interrupt and reads the frame's words; the "mix" fills them in place
+// between BeginHostUpdate and EndHostUpdate, first word, `mix` of work with
+// a few memory-path reads (as sample reads), then the rest.
+// - retake off: claim, update, account, signal, all with the kernel lock;
+// - retake on: claim, resolve, signal, the update through
+//   RunSecondCoreIdleWorkAfterEffect, account.
+constexpr uint32_t kMixWords = 64U;
+RetakeRun RunRetakeSchedule(bool retake, uint32_t frames, uint32_t calls,
+                            std::chrono::microseconds mix) {
+    Program& program = Programs().emplace_back(kText);
+    // Main thread (r9 = kData, r8 = calls): an SVC every 200 spins.
+    const uint32_t mainLoop = program.Here();
+    program.Op(MovImm(7, 200));
+    const uint32_t spin = program.Here();
+    program.Op(SubsImm(7, 7, 1));
+    program.Branch(Condition::Ne, spin);
+    program.Svc(0x28U);  // GetSystemTick
+    program.Op(SubsImm(8, 8, 1));
+    program.Branch(Condition::Ne, mainLoop);
+    program.Svc(kSvcExitThread);
+    // Sound thread (r0 = kData): [16] frames consumed, [20] checksum of the
+    // frames' words in order, [24] nonzero when a frame's words differed.
+    const uint32_t soundEntry = program.Here();
+    program.Op(AddImm(9, 0, 0));
+    program.Op(MovImm(10, 0));
+    program.Op(MovImm(11, 0));
+    const uint32_t soundLoop = program.Here();
+    EmitWait(program, 0);
+    program.Op(Ldr(5, 9, 0x100));
+    program.Op(Ldr(6, 9, 0x100 + (kMixWords - 1U) * 4U));
+    program.Op(EorReg(12, 5, 6));
+    program.Op(OrrReg(11, 11, 12));
+    program.Op(EorReg(10, 5, 10, 1));
+    program.Op(Ldr(5, 9, 16));
+    program.Op(AddImm(5, 5, 1));
+    program.Op(Str(5, 9, 16));
+    program.Op(Str(10, 9, 20));
+    program.Op(Str(11, 9, 24));
+    program.Branch(Condition::Al, soundLoop);
+    Guest guest(program.Seal());
+    guest.Boot(mainLoop, kData);
+    guest.process.PrimaryThreadState().r[8] = calls;
+    NativeA32Process& process = guest.process;
+    NativeA32Memory& memory = process.Memory();
+    RetakeRun run;
+    uint32_t pending = 0U;  // kernel lock held
+    uint32_t delivered = 0U;
+    process.SetSecondCoreIdleWork(
+        {[&] { return pending != 0U; },
+         [&] {
+             --pending;
+             const uint32_t value = ++delivered;
+             const auto mixFrame = [&](uint8_t* bytes) {
+                 std::memcpy(bytes, &value, sizeof(value));
+                 for (uint32_t read = 0; read < 8U; ++read) {
+                     Require(!memory.SynchronousReadView(kData + 0x40U, 16U).empty(),
+                             "sample read");
+                     SpinFor(mix / 8);
+                 }
+                 for (uint32_t word = 1; word < kMixWords; ++word)
+                     std::memcpy(bytes + word * 4U, &value, sizeof(value));
+             };
+             uint8_t* bytes = memory.BeginHostUpdate(kData + 0x100U, kMixWords * 4U);
+             Require(bytes != nullptr, "mix region");
+             if (!retake) {
+                 mixFrame(bytes);
+                 Require(memory.EndHostUpdate(kData + 0x100U, kMixWords * 4U), "account");
+                 Require(guest.host.SignalDspAudioFrame(), "DSP interrupt");
+                 return;
+             }
+             const uint64_t wakes = process.Core0ThreadWakes();
+             Require(guest.host.SignalDspAudioFrame(), "DSP interrupt");
+             if (process.RunSecondCoreIdleWorkAfterEffect(
+                     wakes, guest.host.DspAudioInterruptPending(), [&] { mixFrame(bytes); })) {
+                 ++run.Released;
+             }
+             Require(memory.EndHostUpdate(kData + 0x100U, kMixWords * 4U), "account");
+         }});
+    TwoCores cores(process, kDspBudget);
+    const uint32_t event = guest.CreateEvent();
+    guest.Write32(kData, event);
+    StartDspAudio(guest, event);
+    const uint32_t sound = guest.CreateThread(soundEntry, 1, kData);
+    Require(SecondCore::WaitKernelFor(std::chrono::seconds(10), [&] {
+                return process.ThreadStatus(sound) == NativeA32ThreadStatus::Waiting;
+            }),
+            "the sound thread did not park");
+    NativeA32GuestThreadProfile start = process.GuestThreadProfile();
+    start.SecondCoreCpuKnown = true;
+    // One frame per millisecond while the main thread runs, the rest after.
+    constexpr auto kPeriod = std::chrono::milliseconds(1);
+    auto next = Clock::now();
+    uint32_t added = 0U;
+    while (!Terminated(process, 0)) {
+        if (added < frames && Clock::now() >= next) {
+            ++pending;
+            ++added;
+            next += kPeriod;
+            SecondCore::NotifyKernel();
+        }
+        const auto result = process.Run(kDspBudget, 4U);
+        Require(result.Kind != NativeA32ProcessRunKind::Faulted,
+                "unexpected fault: " + result.Error);
+    }
+    const NativeA32GuestThreadProfile end = process.GuestThreadProfile();
+    const uint32_t overlapped = delivered;
+    pending += frames - added;
+    SecondCore::NotifyKernel();
+    Require(SecondCore::WaitKernelFor(std::chrono::seconds(600), [&] {
+                return pending == 0U &&
+                       process.ThreadStatus(sound) == NativeA32ThreadStatus::Waiting &&
+                       guest.Read32(kData + 16U) == frames;
+            }),
+            "the second core did not deliver every frame");
+    run.Line = FormatNativeA32SecondCoreLine(process.GuestThreadProfile(), start, {}, frames);
+    cores.Stop();
+    run.Consumed = guest.Read32(kData + 16U);
+    run.Checksum = guest.Read32(kData + 20U);
+    run.Torn = guest.Read32(kData + 24U);
+    const double perFrame = overlapped != 0U ? static_cast<double>(overlapped) : 1.0;
+    run.RetakeUsPerFrame = static_cast<double>(NativeA32ProfileTicksToNanoseconds(
+                               end.LockTicks[0] - start.LockTicks[0])) /
+                           1000.0 / perFrame;
+    run.Core0LockWaitUsPerFrame =
+        static_cast<double>(end.Core0LockWaitNanoseconds - start.Core0LockWaitNanoseconds) /
+        1000.0 / perFrame;
+    Require(overlapped * 2U >= frames, "too few frames met the game thread's run");
+    return run;
+}
+
+// config/kernel_retake: the same guest results with the DSP frame's mix
+// released, and what the game thread no longer waits for.
+void TestRetakeSchedule(uint32_t frames) {
+    constexpr auto kMix = std::chrono::microseconds(300);  // the console's 0.23-0.28 ms
+    const uint32_t calls = frames * 400U;
+    const RetakeRun off = RunRetakeSchedule(false, frames, calls, kMix);
+    const RetakeRun on = RunRetakeSchedule(true, frames, calls, kMix);
+    Require(off.Consumed == frames && on.Consumed == frames, "a DSP frame was not consumed");
+    Require(off.Torn == 0U && on.Torn == 0U,
+            "the sound thread read a frame the mix had not finished");
+    Require(off.Checksum == on.Checksum, "the sound thread saw different frames");
+    Require(off.Released == 0U && on.Released == frames,
+            "released frames: off " + std::to_string(off.Released) + ", on " +
+                std::to_string(on.Released));
+    std::cout << "    kernel_retake: " << frames << " DSP frames of " << kMix.count()
+              << " us; game thread retaking the kernel lock " << off.RetakeUsPerFrame
+              << " -> " << on.RetakeUsPerFrame << " us per frame, all its lock waits "
+              << off.Core0LockWaitUsPerFrame << " -> " << on.Core0LockWaitUsPerFrame
+              << " us\n      off " << off.Line << "\n      on  " << on.Line << '\n';
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1328,6 +1684,7 @@ int main(int argc, char** argv) {
         sizes.PingPongRounds = 200'000U;
         sizes.ArbitrationItems = 200'000U;
         sizes.DspRefreshes = 100U;
+        sizes.RetakeFrames = 2000U;
     }
     TestMonitorInactive();
     TestMonitorSemantics();
@@ -1348,6 +1705,8 @@ int main(int argc, char** argv) {
         TestIdleWorkFault();
         TestDspOnSecondCore(sizes.DspRefreshes);
         TestQuietWakes(quiet);
+        TestReleasedIdleWork();
+        TestRetakeSchedule(sizes.RetakeFrames);
     }
     SecondCore::gQuietWakes = false;
     TestSecondCoreLine();

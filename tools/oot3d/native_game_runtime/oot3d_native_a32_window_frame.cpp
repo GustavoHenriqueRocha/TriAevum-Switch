@@ -3119,11 +3119,24 @@ void NativeA32WindowSession::AccountDspSamples(
 // parked in its wait and no thread above the main thread's priority is ready
 // on the game thread, so the in-place mix never meets the sound thread's
 // writes and each frame's interrupt is consumed before the next one. The
-// kernel lock stays held for the whole frame: the mix is ~0.1 ms, and its
-// memory paths (BeginHostUpdate, sample reads, EndHostUpdate) take the lock
-// anyway, so releasing it would make each of them wait for the game
-// thread's host work. The session state below is the game thread's under
-// the same lock. A mix failure becomes the game thread's next Run() fault.
+// session state below is the game thread's under the kernel lock. A mix
+// failure becomes the game thread's next Run() fault.
+// - config/kernel_retake 0: the kernel lock stays held for the whole frame
+//   (mix, interrupt, statistics, host audio submit). The game thread's next
+//   guest exit then waits for the rest of it (test.11: thread 0's retakes,
+//   guest_kernel: lock=, ran at ~72 % of dsp_core1_ms, 0.5-1.4 ms per host
+//   frame, while threads 4 and 7, which no frame overlaps, waited ~0.01 ms).
+// - On: under the lock the frame is claimed, its shared regions resolved
+//   (BeginFrame: the only failure, before anything the guest can see) and its
+//   interrupt signaled first; the mix and the submit then run with the lock
+//   released, unless the interrupt readied a game-thread thread or stayed
+//   signaled (RunSecondCoreIdleWorkAfterEffect keeps it then). Nothing could
+//   tell the interrupt's place in the held frame (no kernel operation ran
+//   between the mix and it), and the thread it wakes runs on this host thread,
+//   after the mix. The game thread's SVCs during the mix see the kernel as
+//   after the whole frame; its guest code overlapped the mix before as well.
+//   The mix's memory paths (sample reads) take the lock themselves; the
+//   regions are accounted (EndFrame) and the statistics updated under it.
 void NativeA32WindowSession::DeliverDspAudioFrameOnSecondCore() {
   auto &hostServices = *hostServicesStorage;
   auto &process = *processStorage;
@@ -3132,17 +3145,42 @@ void NativeA32WindowSession::DeliverDspAudioFrameOnSecondCore() {
   std::vector<int16_t> &samples = secondCoreDspSamples;
   samples.clear();
   std::string mixError;
-  if (!dspHle.ProcessFrame(process.Memory(), samples, &mixError)) {
+  if (!dspMixReleasesKernel) {
+    if (!dspHle.ProcessFrame(process.Memory(), samples, &mixError)) {
+      throw std::runtime_error("native DSP HLE mix failed: " + mixError);
+    }
+    pcmContinuityDiagnostics.ObserveFrame(dspStats.FramesMixed,
+                                          std::span<const int16_t>(samples));
+    ++dspStats.FramesMixed;
+    dspStats.FramesSuppressed += launch.DisableAudio ? 1U : 0U;
+    // As the game thread's batch: with the DSP stopped the rest is dropped.
+    if (!hostServices.SignalDspAudioFrame()) deferredDspAudioFrames = 0U;
+    AccountDspSamples(samples);
+    if (!samples.empty()) hostAudioStream->Submit(samples);
+    return;
+  }
+  const Oot3dNativeGame::NativeDspMemoryAccess memory =
+      dspHle.MemoryAccess(process.Memory());
+  Oot3dNativeGame::NativeA32DspFrame frame;
+  if (!dspHle.BeginFrame(memory, frame, &mixError)) {
+    throw std::runtime_error("native DSP HLE mix failed: " + mixError);
+  }
+  const uint64_t core0Wakes = process.Core0ThreadWakes();
+  // As the game thread's batch: with the DSP stopped the rest is dropped.
+  if (!hostServices.SignalDspAudioFrame()) deferredDspAudioFrames = 0U;
+  process.RunSecondCoreIdleWorkAfterEffect(
+      core0Wakes, hostServices.DspAudioInterruptPending(), [&] {
+        dspHle.MixFrame(memory, frame, samples);
+        if (!samples.empty()) hostAudioStream->Submit(samples);
+      });
+  if (!dspHle.EndFrame(memory, frame, &mixError)) {
     throw std::runtime_error("native DSP HLE mix failed: " + mixError);
   }
   pcmContinuityDiagnostics.ObserveFrame(dspStats.FramesMixed,
                                         std::span<const int16_t>(samples));
   ++dspStats.FramesMixed;
   dspStats.FramesSuppressed += launch.DisableAudio ? 1U : 0U;
-  // As the game thread's batch: with the DSP stopped the rest is dropped.
-  if (!hostServices.SignalDspAudioFrame()) deferredDspAudioFrames = 0U;
   AccountDspSamples(samples);
-  if (!samples.empty()) hostAudioStream->Submit(samples);
 }
 
 // Runs the guest until it waits and drains the PICA work it submitted during the refresh.
