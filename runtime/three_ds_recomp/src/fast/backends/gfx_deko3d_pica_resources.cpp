@@ -3,6 +3,7 @@
 #include "gfx_deko3d_pica_resources.h"
 
 #include "fast/backends/gfx_deko3d.h"
+#include "fast/oot3d/config_writer.h"
 #include "fast/oot3d/gl_widescreen_menu_policy.h"
 #include "fast/oot3d/pica_texture_predecode.h"
 #include "fast/oot3d/pica_uniform_layout.h"
@@ -335,6 +336,12 @@ void PicaResources::ApplyTexturePackSettings() {
     if (settings == mTexturePackSettings) {
         return;
     }
+    // Only "HD texture size", the pack on before and after: the runtime keeps
+    // its index and HUD images, and the pack images the new cap would draw at
+    // the same size stay (test.15: every size change released and decoded
+    // the whole view again).
+    const bool capOnly = mTexturePackSettings.Enabled && settings.Enabled;
+    const uint32_t previousCap = mTexturePackSettings.MaxScale;
     mTexturePackSettings = settings;
     mTexturePack = settings.Enabled;
     // Every cached entry is now of an earlier epoch: pack images are released
@@ -342,10 +349,31 @@ void PicaResources::ApplyTexturePackSettings() {
     ++mPackEpoch;
     mReleaseStalePack = true;
     mReplacementKeysUploaded.clear(); // every pack image uploads again by design
+    uint64_t keptImages = 0U, keptNatives = 0U;
+    if (capOnly) {
+        for (auto& [key, texture] : mTextures) {
+            if (texture.PackEpoch + 1U != mPackEpoch) {
+                continue;
+            }
+            const bool keep =
+                texture.Replacement
+                    ? texture.PackMenu || (texture.PackSource.Width != 0U &&
+                                           !::Oot3d::Renderer::TexturePackCapChangesImage(
+                                               {key.Width, key.Height}, texture.PackSource, previousCap,
+                                               settings.MaxScale))
+                    : !texture.PackPending && !texture.PackUnindexed; // no pack image: none at any cap
+            if (keep) {
+                texture.PackEpoch = mPackEpoch;
+                ++(texture.Replacement ? keptImages : keptNatives);
+            }
+        }
+    }
+    const auto capStatusBefore = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().CapChangeStatus();
     if (settings.Enabled || mPackConfigured) {
-        // Off: the runtime drops its decoded images and pending decodes. On or
-        // another cap: it indexes the pack again; textures drawn meanwhile get
-        // no hash and resolve again once it is ready (PackUnindexed).
+        // Off: the runtime drops its decoded images and pending decodes. On:
+        // it indexes the pack again; textures drawn meanwhile get no hash and
+        // resolve again once it is ready (PackUnindexed). Another cap only:
+        // it keeps its index (AzaharTexturePackRuntime::Configure).
         ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Configure(
             ::Oot3d::Renderer::MakeTexturePackConfiguration(settings, kConfigDirectory));
         mPackConfigured = true;
@@ -361,6 +389,10 @@ void PicaResources::ApplyTexturePackSettings() {
     mHoldLeftMicros = 0U;
     Log("resources: texture pack %s (cap %ux)", mTexturePack ? "on" : "off", settings.MaxScale);
     StartPackChange(false);
+    mPackChange.CapOnly = capOnly;
+    mPackChange.KeptImages = keptImages;
+    mPackChange.KeptNatives = keptNatives;
+    mPackChange.CapStatusBefore = capStatusBefore;
 }
 
 void PicaResources::BeginFrame(uint64_t frame) {
@@ -396,14 +428,29 @@ void PicaResources::BeginFrame(uint64_t frame) {
     // the image, shader (code, global data, uniforms), descriptor and L2
     // caches; GPU-written images (display copy, target copies) have their
     // own Full barriers. config/deko3d_barrier "frame" brings it back.
+    const auto micros = [](std::chrono::steady_clock::time_point since) {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - since).count());
+    };
+    auto partStart = std::chrono::steady_clock::now();
     ApplyTexturePackSettings();
     if (mTexturePack && !mPackIndexReady) {
         // Asked until it is (one lock per frame meanwhile), then known until the next change.
         mPackIndexReady = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().IndexReady();
     }
+    const uint64_t applyMicros = micros(partStart);
+    partStart = std::chrono::steady_clock::now();
     Evict();
+    const uint64_t evictMicros = micros(partStart);
     BeginScene();
+    partStart = std::chrono::steady_clock::now();
     UploadReadyReplacements();
+    const uint64_t uploadMicros = micros(partStart);
+    if (mPackChange.Active) {
+        mPackChange.LongestApplyMicros = std::max(mPackChange.LongestApplyMicros, applyMicros);
+        mPackChange.LongestEvictMicros = std::max(mPackChange.LongestEvictMicros, evictMicros);
+        mPackChange.LongestUploadMicros = std::max(mPackChange.LongestUploadMicros, uploadMicros);
+    }
     TrackPackChange();
     LogPackSizes();
     if (mPackChange.Active) {
@@ -595,6 +642,22 @@ void PicaResources::LogPackChange(const char* outcome, const PackOnScreen& onScr
         static_cast<double>(game.LongestPrepareMicros) / 1000.0, static_cast<unsigned long long>(game.PrepareOverBudget),
         static_cast<double>(::Oot3d::Renderer::kTexturePackChangeGamePrepareBudgetMicros) / 1000.0,
         static_cast<unsigned long long>(game.Resolves), static_cast<unsigned long long>(game.Decodes));
+    // The same change, what it cost and where (test.15: a size change cost
+    // the game thread 117-157 ms in one frame).
+    const auto capNow = ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().CapChangeStatus();
+    const auto writes = ::Fast::Oot3d::SettingsConfigWriter().GetStats();
+    Log("resources: texture pack change detail: %s (pack images kept %llu, natives kept %llu; scene images decoded "
+        "again %llu, left %llu); render frame start parts: apply %.1f ms, releases %.1f ms, uploads %.1f ms; settings "
+        "files written off the game thread so far: %llu (%llu failed), longest %.1f ms; audio conceal events during "
+        "the change %llu",
+        change.CapOnly ? "size only, index kept" : "HD textures on or off",
+        static_cast<unsigned long long>(change.KeptImages), static_cast<unsigned long long>(change.KeptNatives),
+        static_cast<unsigned long long>(capNow.Requeued - change.CapStatusBefore.Requeued),
+        static_cast<unsigned long long>(capNow.Left - change.CapStatusBefore.Left),
+        static_cast<double>(change.LongestApplyMicros) / 1000.0, static_cast<double>(change.LongestEvictMicros) / 1000.0,
+        static_cast<double>(change.LongestUploadMicros) / 1000.0, static_cast<unsigned long long>(writes.Writes),
+        static_cast<unsigned long long>(writes.Failures), static_cast<double>(writes.LongestMicros) / 1000.0,
+        static_cast<unsigned long long>(game.ConcealEvents));
     mPackChange.Active = false;
 }
 
@@ -644,10 +707,15 @@ void PicaResources::Evict() {
     const auto idle = [&](const Texture& texture) {
         return mFrame > texture.LastUsedFrame ? mFrame - texture.LastUsedFrame : 0U;
     };
+    // Releases of retired textures and pack images of earlier settings: at
+    // most kTextureReleasesPerFrame a frame (each destroys a memory block; a
+    // change released ~56 at once, test.15 frame starts of 41-54 ms).
+    uint32_t releases = 0U;
     std::erase_if(mRetired, [&](Texture& texture) {
-        if (idle(texture) < policy.MinIdleFrames) {
+        if (idle(texture) < policy.MinIdleFrames || releases >= kTextureReleasesPerFrame) {
             return false;
         }
+        ++releases;
         Forget(texture);
         return true;
     });
@@ -658,7 +726,8 @@ void PicaResources::Evict() {
             if (::Oot3d::Renderer::TexturePackEntryActionFor(texture.Replacement, texture.PackEpoch, mPackEpoch,
                                                              mTexturePack, texture.PackUnindexed, mPackIndexReady) ==
                 ::Oot3d::Renderer::TexturePackEntryAction::Release) {
-                if (idle(texture) >= policy.MinIdleFrames) {
+                if (idle(texture) >= policy.MinIdleFrames && releases < kTextureReleasesPerFrame) {
+                    ++releases;
                     mPackChange.Released += mPackChange.Active ? 1U : 0U;
                     Forget(texture);
                     entry = mTextures.erase(entry);
@@ -952,6 +1021,7 @@ DkResHandle PicaResources::UploadReplacement(const Renderer3ds::PicaTextureView&
     texture.Replacement = true;
     texture.PackEpoch = mPackEpoch;
     texture.PackHash = replacement.NativeHash;
+    texture.PackSource = {replacement.SourceWidth, replacement.SourceHeight};
     texture.PackMenu = menu;
     texture.SceneSerial = mSceneSerial;
     mTextureBytes += texture.Bytes;

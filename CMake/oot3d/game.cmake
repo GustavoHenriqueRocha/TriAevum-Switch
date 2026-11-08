@@ -136,6 +136,8 @@ add_executable(oot3d_texture_pack_scale_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_texture_pack_scale_tests PRIVATE cxx_std_20)
 target_include_directories(oot3d_texture_pack_scale_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime/three_ds_recomp/include)
+# ConfigWriter (fast/oot3d/config_writer.h) runs a thread.
+target_link_libraries(oot3d_texture_pack_scale_tests PRIVATE Threads::Threads)
 oot3d_target_defaults(oot3d_texture_pack_scale_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
 # Late-presentation log (logs/hitches.txt; header-only).

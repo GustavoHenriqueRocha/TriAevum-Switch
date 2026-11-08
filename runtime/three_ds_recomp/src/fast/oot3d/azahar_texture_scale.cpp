@@ -50,6 +50,10 @@ TextureSize CappedReplacementSize(TextureSize native, TextureSize replacement, u
             static_cast<uint32_t>(std::min<uint64_t>(replacement.Height, height))};
 }
 
+bool TexturePackCapChangesImage(TextureSize native, TextureSize source, uint32_t fromCap, uint32_t toCap) noexcept {
+    return CappedReplacementSize(native, source, fromCap) != CappedReplacementSize(native, source, toCap);
+}
+
 std::vector<uint8_t> DownscaleRgba8(std::span<const uint8_t> source, TextureSize from, TextureSize to) {
     if (from.Width == 0U || from.Height == 0U || to.Width == 0U || to.Height == 0U || to.Width > from.Width ||
         to.Height > from.Height || source.size() != static_cast<size_t>(from.Width) * from.Height * 4U) {

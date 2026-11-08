@@ -77,6 +77,10 @@ struct AzaharTextureRequest {
 struct AzaharTextureReplacement {
     uint32_t Width = 0;
     uint32_t Height = 0;
+    // The PNG's own size, before the size cap: a later cap that gives the
+    // same Width/Height draws the same image (TexturePackCapChangesImage).
+    uint32_t SourceWidth = 0;
+    uint32_t SourceHeight = 0;
     uint64_t NativeHash = 0;
     uint64_t PixelContentHash = 0;
     uint64_t Generation = 0;
@@ -210,6 +214,16 @@ struct AzaharScenePackStatus {
     size_t Dropped = 0;           // decodes of the scene before still queued at the change
 };
 
+// Changes of only "HD texture size" (the index, the HUD images and the HUD's
+// revision kept), and the current scene's listed images those changes queued
+// again (their decoded size differs) or left (the same size, or not decoded
+// yet: decoded when drawn). All since start.
+struct AzaharCapChangeStatus {
+    uint64_t Changes = 0;
+    uint64_t Requeued = 0;
+    uint64_t Left = 0;
+};
+
 // The pack's largest world and model image, as the smallest size cap that
 // keeps all of them whole (azahar_pack_scale.h): measured on the pack worker
 // after the index, only while no decode, dump or index is waiting.
@@ -287,6 +301,13 @@ class AzaharTexturePackRuntime final {
     [[nodiscard]] AzaharTexturePackStatus Snapshot() const;
     [[nodiscard]] AzaharHudPackStatus HudStatus() const;
     [[nodiscard]] uint64_t Generation() const;
+    // The HUD's revision: changes when its images may differ (HD textures on
+    // or off, another folder, the index rebuilt), not with only the size cap.
+    // Lock-free (the UI provider's Revision).
+    [[nodiscard]] uint64_t UiRevision() const;
+    // Changes of only the size cap (index kept), and the current scene's
+    // listed images they decoded again (their size differs) or left.
+    [[nodiscard]] AzaharCapChangeStatus CapChangeStatus() const;
     // The index of the configured pack is built (Configure starts a new one on
     // the pack worker). Until then a request answers Pending without a hash
     // (AzaharTextureResolveResult::NativeHashAvailable false): the caller has to

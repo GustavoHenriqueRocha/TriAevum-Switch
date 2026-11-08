@@ -6,11 +6,15 @@
 #include "oot3d_switch_performance.h"
 #include "fast/backends/gfx_deko3d.h"
 #include "fast/backends/gfx_deko3d_lighting.h"
+#include "fast/oot3d/config_writer.h"
 #include "fast/oot3d/graphics_settings_runtime.h"
 #include "oot3d/renderer/azahar_texture_pack_settings.h"
 #include "fast/oot3d/grass_switch_profile.h"
 #include <imgui.h>
 #include <array>
+#include <atomic>
+#include <fstream>
+#include <memory>
 #include <cstdio>
 #include <span>
 #include <string>
@@ -65,7 +69,7 @@ public:
     std::error_code error;
     PerfOverlayEnabled().store(std::filesystem::exists(mConfig / kPerfOverlayConfigName, error),
                                std::memory_order_relaxed);
-    mPackFound = PackFolderExists();
+    mPackFound->store(PackFolderExists(mPack.Folder), std::memory_order_relaxed);
     mGrassBoot = mGrass = Fast::Oot3d::ReadGrassSwitchMode(mConfig);
     mGrassDistance = Fast::Oot3d::ReadGrassSwitchDistance(mConfig);
     mGrassLod = Fast::Oot3d::ReadGrassSwitchLod(mConfig);
@@ -114,7 +118,9 @@ public:
       mSettings.Anisotropy = anisotropy == 1;
       changed = true;
     }
-    if (changed) mError = mSettings.Save(mConfig);
+    // Every file of this tab is written by the settings writer, off the game
+    // thread (fast/oot3d/config_writer.h); the values apply at once.
+    if (changed) Write("video", [settings = mSettings, config = mConfig] { return settings.Save(config).empty(); });
     // Both rates simulate at 30 Hz: the game applies the new one at its next
     // frame (oot3d_native_launch_frame_rate.h); config/fps60 keeps it.
     if (rateChanged) LiveFrameRate().Publish(mSettings.Fps60);
@@ -128,8 +134,8 @@ public:
     VideoSettings atStart = mSettings;
     atStart.Fps60 = mBoot.Fps60;
     atStart.FullResolution60 = mBoot.FullResolution60;
-    if (!mError.empty())
-      ImGui::TextWrapped("Could not write config/%s.", mError.c_str());
+    if (Writer().Failed("video"))
+      ImGui::TextWrapped("Could not write the video settings to config/.");
     else if (atStart != mBoot)
       ImGui::TextUnformatted("Saved. Close and reopen the game to apply the resolution, "
                              "upscaling and filter.");
@@ -146,10 +152,10 @@ public:
     bool overlay = PerfOverlayEnabled().load(std::memory_order_relaxed);
     if (ImGui::Checkbox("Performance overlay (FPS, speed, clocks)", &overlay)) {
       PerfOverlayEnabled().store(overlay, std::memory_order_relaxed);
-      mOverlayError = SaveOverlay(overlay) ? "" : kPerfOverlayConfigName;
+      Write(kPerfOverlayConfigName, [config = mConfig, overlay] { return SaveOverlay(config, overlay); });
     }
-    if (!mOverlayError.empty())
-      ImGui::TextWrapped("Could not write config/%s.", mOverlayError.c_str());
+    if (Writer().Failed(kPerfOverlayConfigName))
+      ImGui::TextWrapped("Could not write config/%s.", kPerfOverlayConfigName);
     DrawPerformance();
     DrawDrawDistance();
     DrawTexturePack();
@@ -159,15 +165,21 @@ public:
 
 private:
   // config/fps_counter: present = overlay on.
-  bool SaveOverlay(bool enabled) const {
+  static bool SaveOverlay(const std::filesystem::path &config, bool enabled) {
     std::error_code error;
     if (!enabled) {
-      std::filesystem::remove(mConfig / kPerfOverlayConfigName, error);
+      std::filesystem::remove(config / kPerfOverlayConfigName, error);
       return !error;
     }
-    std::filesystem::create_directories(mConfig, error);
-    std::ofstream file(mConfig / kPerfOverlayConfigName, std::ios::trunc);
+    std::filesystem::create_directories(config, error);
+    std::ofstream file(config / kPerfOverlayConfigName, std::ios::trunc);
     return static_cast<bool>(file);
+  }
+
+  static Fast::Oot3d::ConfigWriter &Writer() { return Fast::Oot3d::SettingsConfigWriter(); }
+  // A write of config file(s) `key`, on the settings writer's thread.
+  static void Write(std::string key, Fast::Oot3d::ConfigWriter::Write write) {
+    Writer().Submit(std::move(key), std::move(write));
   }
 
   // L3+R3 > Video > Performance mode (oot3d_switch_performance.h): the mode
@@ -193,10 +205,11 @@ private:
     if (ImGui::Combo("Memory clock", &value, memory, 2)) choice.Memory = value == 1;
     if (choice != mPerf) {
       mPerf = choice;
-      mPerfSaveError = SavePerformanceChoice(mConfig, mPerf);
+      Write("performance", [config = mConfig, choice = mPerf] { return SavePerformanceChoice(config, choice) == nullptr; });
       mPerfStatus = ApplyPerformance(mPerf);
     }
-    if (mPerfSaveError != nullptr) ImGui::TextWrapped("Could not write config/%s.", mPerfSaveError);
+    if (Writer().Failed("performance"))
+      ImGui::TextWrapped("Could not write the performance clocks to config/.");
     if (mPerfStatus.ApmAttempted && !mPerfStatus.ApmAvailable)
       ImGui::TextWrapped("GPU and memory unavailable: %s refused (0x%X); those clocks are unchanged.",
                          mPerfStatus.ApmFailedStep, mPerfStatus.ApmResult);
@@ -222,9 +235,10 @@ private:
     if (ImGui::Combo("Draw distance", &choice, choices, 4)) {
       mDrawDistance = static_cast<ActorDrawDistance>(choice);
       LiveActorDrawDistance().store(mDrawDistance, std::memory_order_relaxed);
-      mDrawDistanceError = !SaveActorDrawDistance(mConfig, mDrawDistance);
+      Write(kDrawDistanceConfigName,
+            [config = mConfig, choice = mDrawDistance] { return SaveActorDrawDistance(config, choice); });
     }
-    if (mDrawDistanceError)
+    if (Writer().Failed(kDrawDistanceConfigName))
       ImGui::TextWrapped("Could not write config/%s.", kDrawDistanceConfigName);
     ImGui::TextDisabled("Applies at once. How far away trees, signs, people and enemies are drawn. "
                         "Original: the game's own distance, so they appear as Link comes near. The "
@@ -235,8 +249,9 @@ private:
   }
 
   // HD textures (config/texture_pack) and their size cap
-  // (config/texture_pack_scale): saved, and applied by the deko3d renderer at
-  // the start of its next frame.
+  // (config/texture_pack_scale): applied by the deko3d renderer at the start
+  // of its next frame; the files are written, and the pack folder looked for,
+  // on the settings writer's thread (test.15: 117-157 ms game-thread frames).
   void DrawTexturePack() {
     ImGui::Separator();
     bool changed = ImGui::Checkbox("HD textures (texture pack)", &mPack.Enabled);
@@ -267,15 +282,19 @@ private:
       ImGui::EndCombo();
     }
     if (changed) {
-      mPackError = mPack.Save(mConfig);
       ::Oot3d::Renderer::LiveTexturePackSettings().Publish(mPack);
-      mPackFound = PackFolderExists();
+      Write(::Oot3d::Renderer::kTexturePackConfigName, [settings = mPack, config = mConfig, found = mPackFound] {
+        const bool written = settings.Save(config).empty();
+        found->store(PackFolderExists(settings.Folder), std::memory_order_relaxed);
+        return written;
+      });
     }
-    if (!mPackFound)
+    if (!mPackFound->load(std::memory_order_relaxed))
       ImGui::TextWrapped("No texture pack found in %s.",
                          ::Oot3d::Renderer::TexturePackDisplayFolder(mPack.Folder).c_str());
-    if (!mPackError.empty())
-      ImGui::TextWrapped("Could not write config/%s.", mPackError.c_str());
+    if (Writer().Failed(::Oot3d::Renderer::kTexturePackConfigName))
+      ImGui::TextWrapped("Could not write config/%s or %s.", ::Oot3d::Renderer::kTexturePackConfigName,
+                         ::Oot3d::Renderer::kTexturePackScaleConfigName);
     if (mScaleMenuLargest != 0U)
       ImGui::TextDisabled("Only the sizes this pack has: its world and character textures go up to %ux "
                           "(the HUD stays at most 3x).",
@@ -296,9 +315,9 @@ private:
     int mode = static_cast<int>(mGrass);
     if (ImGui::Combo("Grass", &mode, modes, 3)) {
       mGrass = static_cast<GrassSwitchMode>(mode);
-      mGrassError = !Fast::Oot3d::SaveGrassSwitchMode(mConfig, mGrass);
+      Write("grass", [config = mConfig, mode = mGrass] { return Fast::Oot3d::SaveGrassSwitchMode(config, mode); });
     }
-    if (mGrassError)
+    if (Writer().Failed("grass"))
       ImGui::TextWrapped("Could not write config/grass.");
     else if (mGrass != mGrassBoot)
       ImGui::TextUnformatted("Saved. Close and reopen the game to apply.");
@@ -310,10 +329,12 @@ private:
     int distance = static_cast<int>(mGrassDistance);
     if (ImGui::Combo("Grass distance", &distance, distances, 2)) {
       mGrassDistance = static_cast<Fast::Oot3d::GrassSwitchDistance>(distance);
-      mGrassDistanceError = !Fast::Oot3d::SaveGrassSwitchDistance(mConfig, mGrassDistance);
+      Write("grass_distance", [config = mConfig, distance = mGrassDistance] {
+        return Fast::Oot3d::SaveGrassSwitchDistance(config, distance);
+      });
       Fast::Oot3d::PublishGrassSwitchDistance(mGrassDistance);
     }
-    if (mGrassDistanceError)
+    if (Writer().Failed("grass_distance"))
       ImGui::TextWrapped("Could not write config/grass_distance.");
     ImGui::TextDisabled("Applies at once. Near: full density to 10 m (16 m at 30 FPS), thinner beyond. "
                         "Whole area adds distant grass in open places like Hyrule Field; in small areas "
@@ -326,10 +347,10 @@ private:
     int detail = mGrassLod ? 0 : 1;
     if (ImGui::Combo("Grass detail", &detail, details, 2)) {
       mGrassLod = detail == 0;
-      mGrassLodError = !Fast::Oot3d::SaveGrassSwitchLod(mConfig, mGrassLod);
+      Write("grass_lod", [config = mConfig, lod = mGrassLod] { return Fast::Oot3d::SaveGrassSwitchLod(config, lod); });
       Fast::Oot3d::PublishGrassSwitchLod(mGrassLod);
     }
-    if (mGrassLodError)
+    if (Writer().Failed("grass_lod"))
       ImGui::TextWrapped("Could not write config/grass_lod.");
     ImGui::TextDisabled("Applies at once. Levels: each tuft's wind, light and colour once per frame instead of "
                         "for every vertex, and far tufts drawn with 3, then 1 wider blade covering the same "
@@ -340,10 +361,10 @@ private:
     int fill = mGrassFill ? 0 : 1;
     if (ImGui::Combo("Grass near Link", &fill, fills, 2)) {
       mGrassFill = fill == 0;
-      mGrassFillError = !Fast::Oot3d::SaveGrassSwitchFill(mConfig, mGrassFill);
+      Write("grass_fill", [config = mConfig, fill = mGrassFill] { return Fast::Oot3d::SaveGrassSwitchFill(config, fill); });
       Fast::Oot3d::PublishGrassSwitchFill(mGrassFill);
     }
-    if (mGrassFillError)
+    if (Writer().Failed("grass_fill"))
       ImGui::TextWrapped("Could not write config/grass_fill.");
     ImGui::TextDisabled("Applies at once. Fixed: the same extra tufts around Link wherever he walks, at full "
                         "height; farther away they narrow out. Grows in: the grass of test.9, whose tufts "
@@ -366,12 +387,12 @@ private:
       const auto chosen = static_cast<Fast::Deko3d::LightingMode>(mode);
       const auto validation = graphics.Apply(Fast::Deko3d::WithLightingMode(current, chosen), false);
       const auto applied = Fast::Deko3d::LightingModeOf(graphics.Snapshot());
-      mLightingError = Fast::Deko3d::SaveLightingMode(mConfig, applied);
+      Write("lighting", [config = mConfig, applied] { return Fast::Deko3d::SaveLightingMode(config, applied).empty(); });
       if (applied != chosen && !validation.Issues.empty()) mLightingIssue = validation.Issues.front().Message;
       else mLightingIssue.clear();
     }
-    if (!mLightingError.empty())
-      ImGui::TextWrapped("Could not write config/%s.", mLightingError.c_str());
+    if (Writer().Failed("lighting"))
+      ImGui::TextWrapped("Could not write config/lighting.");
     if (!mLightingIssue.empty())
       ImGui::TextWrapped("Not applied: %s", mLightingIssue.c_str());
     else if (!modernAvailable)
@@ -381,38 +402,29 @@ private:
                         "busy rooms may drop frames.");
   }
 
-  bool PackFolderExists() const {
+  static bool PackFolderExists(const std::string &folder) {
     std::error_code error;
-    return std::filesystem::is_directory(mPack.Folder, error);
+    return std::filesystem::is_directory(folder, error);
   }
 
   std::filesystem::path mConfig;
   VideoSettings mBoot;
   VideoSettings mSettings;
-  std::string mError;
-  std::string mOverlayError;
   ::Oot3d::Renderer::TexturePackSettings mPack;
-  bool mPackFound = false;
-  std::string mPackError;
+  // Set by the writer's thread after each HD textures change.
+  std::shared_ptr<std::atomic<bool>> mPackFound = std::make_shared<std::atomic<bool>>(false);
   ::Oot3d::Renderer::TexturePackScaleMenu mScaleMenu;
   uint32_t mScaleMenuLargest = 0;
   uint32_t mScaleMenuCap = 0;
   Fast::Oot3d::GrassSwitchMode mGrassBoot = Fast::Oot3d::GrassSwitchMode::Off;
   Fast::Oot3d::GrassSwitchMode mGrass = Fast::Oot3d::GrassSwitchMode::Off;
-  bool mGrassError = false;
   Fast::Oot3d::GrassSwitchDistance mGrassDistance = Fast::Oot3d::GrassSwitchDistance::Near;
-  bool mGrassDistanceError = false;
   bool mGrassLod = true;
-  bool mGrassLodError = false;
   bool mGrassFill = true;
-  bool mGrassFillError = false;
-  std::string mLightingError;
   std::string mLightingIssue;
   PerformanceChoice mPerf;
-  const char *mPerfSaveError = nullptr;
   PerformanceStatus mPerfStatus;
   ActorDrawDistance mDrawDistance = kDefaultActorDrawDistance;
-  bool mDrawDistanceError = false;
 };
 } // namespace
 std::shared_ptr<Fast::Oot3d::GraphicsSettingsPanelTab>

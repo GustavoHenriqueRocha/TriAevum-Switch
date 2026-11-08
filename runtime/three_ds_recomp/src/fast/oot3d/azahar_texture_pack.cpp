@@ -481,6 +481,7 @@ std::shared_ptr<const AzaharTextureReplacement> DecodeReplacement(
     }
 
     TextureSize size{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
+    const TextureSize source = size;
     if (const TextureSize capped = CappedReplacementSize(options.Native, size, options.MaxScale); capped != size) {
         pixels = std::make_shared<std::vector<uint8_t>>(DownscaleRgba8(*pixels, size, capped));
         size = capped;
@@ -489,6 +490,8 @@ std::shared_ptr<const AzaharTextureReplacement> DecodeReplacement(
     auto replacement = std::make_shared<AzaharTextureReplacement>();
     replacement->Width = size.Width;
     replacement->Height = size.Height;
+    replacement->SourceWidth = source.Width;
+    replacement->SourceHeight = source.Height;
     replacement->NativeHash = hash;
     replacement->PixelContentHash = AzaharCityHash64(*pixels);
     replacement->Generation = generation;
@@ -661,9 +664,32 @@ class AzaharTexturePackRuntime::Impl {
         otherCap.MaxReplacementScale = mConfiguration.MaxReplacementScale;
         otherCap.GenerateMipmaps = mConfiguration.GenerateMipmaps;
         const bool keepHud = mConfigured && configuration.LoadCustomTextures && otherCap == mConfiguration;
+        // Only the cap: the index, the HUD images and the HUD's revision stay
+        // (test.15: every size change indexed the pack again, ~420 ms, bumped
+        // the HUD's revision twice and queued the scene's whole list, 75
+        // decodes). World images of the old cap go; of the scene's list only
+        // those the new cap draws otherwise are decoded again.
+        if (keepHud && mIndexReady && !mRebuildRequested && !mBuilding) {
+            const uint32_t previousCap = mConfiguration.MaxReplacementScale;
+            mConfiguration = std::move(configuration);
+            ++mGeneration; // queued and running world decodes of the old cap are dropped
+            mReplacementCache.clear();
+            mFailedLoadHashes.clear();
+            mPendingLoadGenerations.clear();
+            // HUD decodes in flight are of the old generation: queued again
+            // at their next poll (the HUD images done are kept).
+            mPendingUiLoadGenerations.clear();
+            ResetScenePreloadLocked();
+            ++mCapOnlyChanges;
+            QueueScenePreloadLocked(previousCap);
+            mIdle.notify_all();
+            return;
+        }
         mConfiguration = std::move(configuration);
         mConfigured = true;
         ++mGeneration;
+        ++mUiRevision;
+        mSourceSizes.clear();
         if (!keepHud) {
             mUiReplacementCache.clear();
             mUiValidFromGeneration = mGeneration;
@@ -845,6 +871,11 @@ class AzaharTexturePackRuntime::Impl {
         status.DumpDirectory = mDumpDirectory;
         status.LastError = mLastError;
         return status;
+    }
+    uint64_t UiRevision() const { return mUiRevision.load(std::memory_order_acquire); }
+    AzaharCapChangeStatus CapChangeStatus() const {
+        std::scoped_lock lock(mMutex);
+        return {mCapOnlyChanges, mCapOnlyRequeued, mCapOnlyKeptImages};
     }
     uint64_t Generation() const {
         std::scoped_lock lock(mMutex);
@@ -1145,7 +1176,10 @@ class AzaharTexturePackRuntime::Impl {
     }
     // The current scene's listed images on the world workers, behind any
     // image already on screen; not those decoded, failed or already queued.
-    void QueueScenePreloadLocked() {
+    // After a change of only the cap (`changedFromCap`): only the images
+    // whose decoded size differs at the new cap (their file's size known
+    // from an earlier decode); the others are decoded when drawn.
+    void QueueScenePreloadLocked(std::optional<uint32_t> changedFromCap = std::nullopt) {
         if (!mConfigured || !mIndexReady || !mConfiguration.LoadCustomTextures || mSceneId < 0) return;
         const auto list = mSceneLists.find(static_cast<uint16_t>(mSceneId));
         if (list == mSceneLists.end()) return;
@@ -1158,6 +1192,17 @@ class AzaharTexturePackRuntime::Impl {
             if (const auto cached = mReplacementCache.find(entry.Hash);
                 cached != mReplacementCache.end() && cached->second->Generation == mGeneration)
                 continue;
+            if (changedFromCap) {
+                const auto source = mSourceSizes.find(entry.Hash);
+                const TextureSize native{entry.Width, entry.Height};
+                if (source == mSourceSizes.end() ||
+                    !TexturePackCapChangesImage(native, source->second, *changedFromCap,
+                                                mConfiguration.MaxReplacementScale)) {
+                    ++mCapOnlyKeptImages;
+                    continue;
+                }
+                ++mCapOnlyRequeued;
+            }
             mPendingLoadGenerations.emplace(entry.Hash, mGeneration);
             LoadJob job;
             job.Hash = entry.Hash;
@@ -1458,6 +1503,7 @@ class AzaharTexturePackRuntime::Impl {
                 mUnsupportedFiles = unsupported;
                 mIndexReady = true;
                 ++mGeneration;
+                ++mUiRevision;
                 mPreviewSeamStatus.clear();
                 ++mMaterialRevision;
                 mFailedLoadHashes.clear();
@@ -1628,6 +1674,10 @@ class AzaharTexturePackRuntime::Impl {
                     if (material && material->ColorReplacement && job.Material->BaseColorTexture.empty())
                         mReplacementCache.insert_or_assign(job.Hash, material->ColorReplacement);
                     if (material) mMaterialCache.insert_or_assign(job.Hash, std::move(material));
+                    // A world image's file size: whether a later cap changes it.
+                    if (replacement && !job.UserInterface)
+                        mSourceSizes.insert_or_assign(job.Hash,
+                                                      TextureSize{replacement->SourceWidth, replacement->SourceHeight});
                     if (replacement && job.UserInterface &&
                         RecordHudImageLocked(job, *replacement, hudEntry))
                         hudList = mConfiguration.HudImageList;
@@ -1861,6 +1911,13 @@ class AzaharTexturePackRuntime::Impl {
     // HUD images decoded at this generation or later are current (kept
     // through a size cap change; Configure).
     uint64_t mUiValidFromGeneration = 0U;
+    // The HUD's revision (UiRevision): not bumped by a change of only the
+    // cap. Lock-free: the UI provider asks every frame.
+    std::atomic<uint64_t> mUiRevision{1U};
+    // World images' file sizes (TexturePackCapChangesImage), by hash; and
+    // changes of only the cap with the scene images they queued again or not.
+    std::unordered_map<uint64_t, TextureSize> mSourceSizes;
+    uint64_t mCapOnlyChanges = 0U, mCapOnlyRequeued = 0U, mCapOnlyKeptImages = 0U;
     uint64_t mMaterialRevision = 1U;
     std::optional<AzaharMaterialParameterPreview> mPreview;
     std::string mPreviewSeamStatus;
@@ -1977,6 +2034,14 @@ void AzaharTexturePackRuntime::ReportMaterialUploadFailure(
 
 AzaharTexturePackStatus AzaharTexturePackRuntime::Snapshot() const {
     return mImpl->Snapshot();
+}
+
+uint64_t AzaharTexturePackRuntime::UiRevision() const {
+    return mImpl->UiRevision();
+}
+
+AzaharCapChangeStatus AzaharTexturePackRuntime::CapChangeStatus() const {
+    return mImpl->CapChangeStatus();
 }
 
 uint64_t AzaharTexturePackRuntime::Generation() const {

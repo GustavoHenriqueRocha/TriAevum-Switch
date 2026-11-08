@@ -1273,7 +1273,9 @@ void NativeA32WindowSession::Setup() {
         custom.legacy_hash = identity.KnownLegacyHash;
         return custom;
       },
-      [] { return Oot3d::Renderer::AzaharTexturePackRuntime::Instance().Generation(); },
+      // Not bumped by a change of only "HD texture size" (HUD images are 3x
+      // whatever it says): the HUD does nothing then.
+      [] { return Oot3d::Renderer::AzaharTexturePackRuntime::Instance().UiRevision(); },
   });
   if (hdFontsLoaded) nativeUiTextureProvider.SetGeneratedTextureTransform(
       [&](const Oot3dNativeGame::Oot3dPicaTextureState& texture,

@@ -5,7 +5,9 @@
 #include "oot3d/renderer/azahar_texture_pack_settings.h"
 #include "oot3d/renderer/azahar_texture_scale.h"
 #include "fast/backends/gfx_deko3d_log_line.h"
+#include "fast/oot3d/config_writer.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -560,6 +562,65 @@ void LogLines() {
   Require(FormatLine("%s", over.c_str()) == over, "a line one longer than the stack buffer was cut");
 }
 
+// test.15: a size change wrote config/ files on the game thread (117-157 ms
+// frames). The settings writer does them on its thread, in order, the latest
+// per file; failures are kept per file until one succeeds.
+void SettingsWriter() {
+  std::atomic<bool> release{false};
+  std::atomic<int> firstRuns{0}, secondRuns{0}, lastValue{0};
+  {
+    Fast::Oot3d::ConfigWriter writer;
+    // A slow write keeps the thread busy; Submit returns at once meanwhile.
+    writer.Submit("slow", [&] {
+      while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      std::this_thread::sleep_for(std::chrono::milliseconds(2)); // an SD write's time
+      return true;
+    });
+    const auto start = std::chrono::steady_clock::now();
+    writer.Submit("texture_pack", [&] { ++firstRuns; lastValue = 1; return true; });
+    writer.Submit("texture_pack", [&] { ++secondRuns; lastValue = 2; return true; });
+    writer.Submit("grass", [] { return false; });
+    Require(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(50),
+            "Submit waited for the writer");
+    release = true;
+    writer.Flush();
+    Require(firstRuns == 0 && secondRuns == 1 && lastValue == 2,
+            "a newer write of the same file did not replace the queued one");
+    Require(writer.Failed("grass") && !writer.Failed("texture_pack"), "the failure of one file");
+    writer.Submit("grass", [] { return true; });
+    writer.Flush();
+    Require(!writer.Failed("grass"), "a failure kept after the file was written");
+    const auto stats = writer.GetStats();
+    Require(stats.Writes == 4U && stats.Failures == 1U && stats.LongestMicros > 0U, "writer statistics");
+    // Queued writes are done before the writer goes (the game closing).
+    writer.Submit("last", [&] { lastValue = 3; return true; });
+  }
+  Require(lastValue == 3, "a queued write was lost when the writer went");
+}
+
+// A change of only "HD texture size" keeps the images it draws at the same size.
+void CapChanges() {
+  const TextureSize native{8, 8};
+  Require(!TexturePackCapChangesImage(native, {16, 16}, 2U, 3U), "a 2x image at 2x and 3x");
+  Require(!TexturePackCapChangesImage(native, {16, 16}, 3U, 0U), "a 2x image at 3x and no limit");
+  Require(TexturePackCapChangesImage(native, {16, 16}, 2U, 1U), "a 2x image at 2x and 1x");
+  Require(TexturePackCapChangesImage(native, {24, 24}, 3U, 2U), "a 3x image at 3x and 2x");
+  Require(!TexturePackCapChangesImage(native, {8, 8}, 1U, 3U), "a 1x image at any cap");
+  Require(TexturePackCapChangesImage(native, {32, 16}, 0U, 3U), "a 4x-wide image at no limit and 3x");
+
+  // Audio concealments during a change, from its running total.
+  TexturePackChangeGameWatch watch;
+  watch.Begin();
+  Require(watch.Active(), "the watch runs from Begin");
+  watch.Observe(33000U, 100U, 0U, 0U, 45U);
+  watch.Observe(33000U, 100U, 0U, 0U, 46U);
+  watch.Observe(33000U, 100U, 0U, 0U, 49U);
+  Require(watch.End().ConcealEvents == 4U && !watch.Active(), "audio concealments during the change");
+  watch.Begin();
+  watch.Observe(33000U, 100U);
+  Require(watch.End().ConcealEvents == 0U, "no audio stream: no concealments");
+}
+
 } // namespace
 
 int main() {
@@ -576,6 +637,8 @@ int main() {
   ScaleMenu();
   PackChangeSpread();
   LogLines();
+  SettingsWriter();
+  CapChanges();
   std::puts("oot3d_texture_pack_scale_tests: ok");
   return 0;
 }

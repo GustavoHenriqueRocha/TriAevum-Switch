@@ -260,6 +260,9 @@ class TexturePackChangeGameWatch {
         uint64_t PrepareOverBudget = 0; // frames over kTexturePackChangeGamePrepareBudgetMicros
         uint64_t Resolves = 0;          // HUD textures resolved (the provider's resolve calls)
         uint64_t Decodes = 0;           // of those, decoded (not in its identity cache)
+        // Audio concealments (the output queue ran dry: repeated sound) from
+        // the change's first game-thread frame to its last.
+        uint64_t ConcealEvents = 0;
     };
 
     void Begin() noexcept {
@@ -269,12 +272,16 @@ class TexturePackChangeGameWatch {
         mOverBudget.store(0U, std::memory_order_relaxed);
         mResolves.store(0U, std::memory_order_relaxed);
         mDecodes.store(0U, std::memory_order_relaxed);
+        mFirstConceal.store(kUnknown, std::memory_order_relaxed);
+        mLastConceal.store(kUnknown, std::memory_order_relaxed);
         mActive.store(true, std::memory_order_release);
     }
+    [[nodiscard]] bool Active() const noexcept { return mActive.load(std::memory_order_acquire); }
     // One game-thread frame: from the previous one's UI submission, its HUD
-    // texture preparation, and the HUD textures it resolved and decoded.
-    void Observe(uint64_t frameMicros, uint64_t prepareMicros, uint64_t resolves = 0U,
-                 uint64_t decodes = 0U) noexcept {
+    // texture preparation, the HUD textures it resolved and decoded, and the
+    // audio stream's concealments so far (a running total).
+    void Observe(uint64_t frameMicros, uint64_t prepareMicros, uint64_t resolves = 0U, uint64_t decodes = 0U,
+                 uint64_t concealEventsTotal = kUnknown) noexcept {
         if (!mActive.load(std::memory_order_acquire)) return;
         mFrames.fetch_add(1U, std::memory_order_relaxed);
         Raise(mLongestFrame, frameMicros);
@@ -282,12 +289,20 @@ class TexturePackChangeGameWatch {
         if (prepareMicros > kTexturePackChangeGamePrepareBudgetMicros) mOverBudget.fetch_add(1U, std::memory_order_relaxed);
         mResolves.fetch_add(resolves, std::memory_order_relaxed);
         mDecodes.fetch_add(decodes, std::memory_order_relaxed);
+        if (concealEventsTotal != kUnknown) {
+            uint64_t expected = kUnknown;
+            mFirstConceal.compare_exchange_strong(expected, concealEventsTotal, std::memory_order_relaxed);
+            mLastConceal.store(concealEventsTotal, std::memory_order_relaxed);
+        }
     }
     Result End() noexcept {
         mActive.store(false, std::memory_order_release);
+        const uint64_t first = mFirstConceal.load(std::memory_order_relaxed);
+        const uint64_t last = mLastConceal.load(std::memory_order_relaxed);
         return {mFrames.load(std::memory_order_relaxed),    mLongestFrame.load(std::memory_order_relaxed),
                 mLongestPrepare.load(std::memory_order_relaxed), mOverBudget.load(std::memory_order_relaxed),
-                mResolves.load(std::memory_order_relaxed),  mDecodes.load(std::memory_order_relaxed)};
+                mResolves.load(std::memory_order_relaxed),  mDecodes.load(std::memory_order_relaxed),
+                first == kUnknown || last < first ? 0U : last - first};
     }
 
   private:
@@ -296,6 +311,7 @@ class TexturePackChangeGameWatch {
         while (value > current && !longest.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
         }
     }
+    static constexpr uint64_t kUnknown = ~0ULL;
     std::atomic<bool> mActive{false};
     std::atomic<uint64_t> mFrames{0U};
     std::atomic<uint64_t> mLongestFrame{0U};
@@ -303,6 +319,8 @@ class TexturePackChangeGameWatch {
     std::atomic<uint64_t> mOverBudget{0U};
     std::atomic<uint64_t> mResolves{0U};
     std::atomic<uint64_t> mDecodes{0U};
+    std::atomic<uint64_t> mFirstConceal{kUnknown};
+    std::atomic<uint64_t> mLastConceal{kUnknown};
 };
 
 inline TexturePackChangeGameWatch& LiveTexturePackChangeGameWatch() noexcept {
