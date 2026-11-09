@@ -67,7 +67,7 @@ float ObjMure2DistanceScalar(float nativeScalar, float projectedX,
     return scalar;
 }
 
-void SelectActorExtensions(std::span<ActorExtensionCandidate> candidates) {
+void SelectActorExtensions(std::span<ActorExtensionCandidate> candidates, uint32_t limit) {
     std::vector<ActorExtensionCandidate*> ordered;
     ordered.reserve(candidates.size());
     for (auto& candidate : candidates) {
@@ -80,8 +80,16 @@ void SelectActorExtensions(std::span<ActorExtensionCandidate> candidates) {
         if (a->DistanceSquared != b->DistanceSquared) return a->DistanceSquared < b->DistanceSquared;
         return a->Identity < b->Identity;
     });
-    for (size_t i = 0; i < std::min<size_t>(ordered.size(), kActorExtensionLimit); ++i)
+    for (size_t i = 0; i < std::min<size_t>(ordered.size(), limit); ++i)
         ordered[i]->Selected = true;
+}
+
+uint32_t ActorExtensionLimit(ActorDrawDistance choice) noexcept {
+    switch (choice) {
+    case ActorDrawDistance::Farther: return 48U;
+    case ActorDrawDistance::Maximum: return 64U;
+    default: return kActorExtensionLimit;
+    }
 }
 
 bool ActorLightBudgetAllows(uint32_t used, uint32_t remaining) noexcept {

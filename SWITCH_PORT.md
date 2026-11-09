@@ -2207,9 +2207,10 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   forward range under 500 gains 1000, then times the multiplier, plus the scale) decides, at the culling
   result (0x00461AC4), whether a natively culled actor is drawn. Unlike SoH it is **draw only**: the
   title's culling state, flag 0x40, fade and isDrawn are restored after the draw
-  (`RestoreNativeCulling`), so the drawn actor updates and despawns exactly as in Original. Limits
-  from #69/#74 kept: at most 32 extensions per frame (nearest first, incumbents first) and the light
-  arena budget (120 of 128 records). Excluded: En_Viewer and Gold Skulltulas (En_Sw types 1 and 2, whose
+  (`RestoreNativeCulling`), so the drawn actor updates and despawns exactly as in Original. Limits: at
+  most 32 extensions per culling walk at Original (F1's option) and Far, 48 at Farther and 64 at
+  Maximum (nearest first, incumbents first; "Limit per choice" below), and the light arena budget from
+  #69/#74 (120 of 128 records), unchanged. Excluded: En_Viewer and Gold Skulltulas (En_Sw types 1 and 2, whose
   draw places the hitbox; SoH's "exclude glitch-useful actors" also skips them).
 - **New: no fade dip at the old boundary.** When the title takes over an actor the extension already
   shows, it restarts its own fade from 0 (alpha 0.1 for one step, 10 steps back to full). For actors
@@ -2256,17 +2257,25 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   are drawn at any distance by the game itself. The placed Kokiri bushes (12 En_Kusa, flags 0x80800010,
   range 1200 + 100 [SoH]) are ordinary extension candidates; whether the 32 nearest or the light budget
   held them back is not in test.16's logs (the counts below are new).
+- **Limit per choice (0.2.1, from 0.2.0's logs25 at Maximum).** The 32 limit held back far objects in
+  Kokiri Forest: its busiest window had 2,854 candidates in 70 walks (about 41 a step) and 998 capped
+  (about 14 a step); its other windows lost 0.3 a step, the Lost Woods and Hyrule Field 0.1. The light
+  budget was not the limit there (`light_denied=0`, `peak_lights` up to 63 of 128).
+  `ActorExtensionLimit` now gives 32 at Original and Far, 48 at Farther and 64 at Maximum; the light
+  budget still refuses what would not fit. Cost [estimate: 0.06–0.10 ms of game thread per extra
+  object per step]: about +1.4 ms per step in that busiest Kokiri Forest view at Maximum, near 0
+  elsewhere.
   - Game log, at start and on each change of the effective settings (`UpdateScenePresentation`,
     `TakeNativeActorVisibilitySettingsLine`): `draw_distance: choice=farther multiplier=3 groups=extended
-    kokiri_fade=native (L3+R3 > Video > Draw distance, config/draw_distance)`. `groups=native` with
+    kokiri_fade=native limit=48 (L3+R3 > Video > Draw distance, config/draw_distance)`. `groups=native` with
     `config/draw_distance_native_groups`; `kokiri_fade=off` only with the PC's F1 option.
   - `perf.txt`, every window (`TakeNativeActorVisibilityPerfLine`): `actor_visibility: multiplier=3
     groups=1 walks=75 culled=.. extended=.. candidates=.. capped=.. light_denied=.. denied=..
-    limited_walks=.. invalid_walks=.. peak_lights=..`: culling walks, natively culled actors, culled
-    actors drawn anyway (the extension, or the presented width at Original), extension candidates,
-    candidates past the 32 nearest, selected ones the light budget refused, every refusal, walks with a
-    refusal, walks left native (custom-light draws, a bad arena), and the window's peak light records
-    (of 128).
+    limited_walks=.. invalid_walks=.. peak_lights=.. limit=..`: culling walks, natively culled actors,
+    culled actors drawn anyway (the extension, or the presented width at Original), extension
+    candidates, candidates past the `limit` nearest, selected ones the light budget refused, every
+    refusal, walks with a refusal, walks left native (custom-light draws, a bad arena), the window's
+    peak light records (of 128), and the choice's limit.
   - Removed: the stderr `[actor-visibility]` stats (`OOT3D_ACTOR_VISIBILITY_DIAGNOSTICS`) and
     `TRIAEVUM_ACTOR_VISIBILITY_BUDGET` lines, which reached no file on the Switch; the perf line carries
     their counts. The unknown Obj_Mure constant note goes to the game log.

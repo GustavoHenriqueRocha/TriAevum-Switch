@@ -2102,6 +2102,7 @@ void NativeA32WindowSession::UpdateScenePresentation() {
   visibility.ExtendGroups = choice != Oot3dNativeGame::ActorDrawDistance::Original &&
                             !Oot3dNativeGame::LiveDrawDistanceNativeGroups().load(std::memory_order_relaxed);
   visibility.NoKokiriFade = graphics.ExtendedDrawDistance;
+  visibility.ExtensionLimit = Oot3dNativeGame::ActorExtensionLimit(choice);
   // Game log: the effective draw distance at start and on each change.
   if (auto line = Oot3dNativeGame::TakeNativeActorVisibilitySettingsLine(visibility, choice))
     Oot3dNativeGame::WriteGameLog(std::move(*line));
