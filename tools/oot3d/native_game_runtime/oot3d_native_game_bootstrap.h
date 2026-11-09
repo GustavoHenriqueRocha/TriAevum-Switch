@@ -28,6 +28,10 @@ struct Oot3dNativeGameLaunch {
     // config/topscreen_hd/ (3x, built by the import).
     std::filesystem::path TopScreenHdTexturesPath;
     std::filesystem::path TopScreenConfigPath;
+    // The O3RO RomFS overlay of the user's RomFS mods over the user's own
+    // RomFS: built by Forge on the PC, by the start-up's composer on the
+    // Switch (oot3d_romfs_mods.h, mods/<name>/romfs/).
+    std::filesystem::path RomFsOverlayPath;
     std::filesystem::path ControlConfigPath;
     std::filesystem::path SaveDataDirectory;
     std::filesystem::path AudioPcmDumpPath;

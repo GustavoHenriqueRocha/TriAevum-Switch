@@ -6,6 +6,7 @@
 #include "oot3d_switch_guard_alloc.h"
 #include "oot3d_switch_threads.h"
 #include "fast/backends/gfx_deko3d.h"
+#include "oot3d_romfs_mods.h"
 #include <sstream>
 
 namespace Oot3dA32Window {
@@ -34,6 +35,7 @@ std::string FormatSwitchBootStage(const char* stage) {
          << "control_profile=" << gSwitchControlProfile << '\n'
          << "topscreen_211_assets=" << (gSwitchTopScreen211Assets ? 1 : 0)
          << '\n'
+         << "romfs_mods=" << Oot3dNativeGame::RomFsModsStartupState().BootStatus << '\n'
          << "whole_aot_block_budget=" << gSwitchWholeAotBlockBudget << '\n'
          << "whole_aot_block_limit_exits="
          << gSwitchWholeAotBlockLimitExits << '\n'

@@ -90,6 +90,7 @@ inline).
 | `_ctr_host_fs.cpp` | fs:USER and RomFS files. |
 | `_ctr_host_state.cpp` | Savestate capture and restore of the service state. |
 | `_ctr_host_internal.h` | Service constants, shared helpers, the RomFS backing file. |
+| `_romfs_overlay.{h,cpp}` | O3RO RomFS overlay (RomFS mods) composed over the RomFS service view. |
 
 ## TopScreen mod profile (`tools/oot3d/ui_topscreen/`)
 

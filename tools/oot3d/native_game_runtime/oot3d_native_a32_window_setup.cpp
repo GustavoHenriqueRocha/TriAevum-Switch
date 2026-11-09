@@ -5,6 +5,7 @@
 #include "oot3d_draw_distance_config.h"
 #include "oot3d_landing_roll.h"
 #include "oot3d_roll_dash.h"
+#include "oot3d_romfs_mods.h"
 #include "oot3d_native_block_entry_hooks.h"
 #include "oot3d_native_guest_overrides.h"
 #include "oot3d_native_a32_memory_peek.h"
@@ -248,6 +249,46 @@ void NativeA32WindowSession::Setup() {
   hostConfig.RomFsImagePath = manifest->RomFsImagePath;
   hostConfig.RomFsImageOffset = manifest->RomFsImageOffset;
   hostConfig.RomFsImageSize = manifest->RomFsImageSize;
+  if (!launch.RomFsOverlayPath.empty()) {
+    // User-enabled RomFS mods (upstream 9c90abb9): the overlay was built over
+    // this exact image (Forge on the PC, the start-up's composer on the
+    // Switch, oot3d_romfs_mods.h).
+    std::ifstream image(manifest->RomFsImagePath, std::ios::binary);
+    const uint64_t imageOffset = manifest->RomFsImageOffset;
+    std::string overlayError;
+    hostConfig.RomFsOverlay = Oot3dNativeGame::NativeA32RomFsOverlay::Load(
+        launch.RomFsOverlayPath, manifest->RomFsImageSize,
+        [&](uint64_t offset, std::span<uint8_t> bytes) {
+          image.clear();
+          image.seekg(static_cast<std::streamoff>(imageOffset + offset), std::ios::beg);
+          image.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+          return static_cast<bool>(image);
+        },
+        &overlayError);
+    if (!hostConfig.RomFsOverlay) {
+#if defined(__SWITCH__)
+      // Never fatal on the console: the game starts without mods.
+      Oot3dNativeGame::WriteGameLog("romfs mods: overlay rejected, starting without mods: " +
+                                    overlayError);
+      Oot3dNativeGame::RomFsModsStartupState().BootStatus = "rejected";
+      Oot3dNativeGame::RomFsModsStartupState().PanelLine =
+          "At this start: the overlay was rejected, the game runs without mods (see the log).";
+#else
+      throw std::runtime_error(overlayError);
+#endif
+    } else {
+      const std::string line =
+          "romfs mods: overlay active (" +
+          std::to_string(hostConfig.RomFsOverlay->PatchCount()) + " metadata patches, " +
+          std::to_string(hostConfig.RomFsOverlay->ViewSize() - manifest->RomFsImageSize) +
+          " appended bytes)";
+#if defined(__SWITCH__)
+      Oot3dNativeGame::WriteGameLog(line);
+#else
+      std::cout << "oot3d_native_game: " << line << '\n';
+#endif
+    }
+  }
   hostConfig.PicaFrontend = &picaFrontend;
   hostConfig.PicaCompositionDomain = &picaCompositionDomain;
   hostConfig.PicaRefreshCompositionDomain = &picaRefreshCompositionDomain;

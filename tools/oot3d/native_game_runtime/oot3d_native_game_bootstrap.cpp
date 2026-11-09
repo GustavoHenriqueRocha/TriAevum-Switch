@@ -57,6 +57,7 @@ void PrintOot3dNativeGameUsage() {
                  "[--topscreen-ui-atlas-hd <ui_atlas_hd.png>] "
                  "[--topscreen-hd-textures <directory>] "
                  "[--topscreen-config <topscreen_ui.json>] "
+                 "[--romfs-overlay <romfs_overlay.o3ro>] "
                  "[--controls-config <oot3d_controls.json>] "
                  "[--save-data <directory>] "
                  "[--output <summary.json>] [--screenshot "
@@ -143,6 +144,15 @@ bool ParseOot3dNativeGameArgs(int argc, char** argv, Oot3dNativeGameLaunch& laun
             launch.TopScreenHdTexturesPath = argv[++index];
         } else if (arg == "--topscreen-config" && index + 1 < argc) {
             launch.TopScreenConfigPath = argv[++index];
+        } else if (arg == "--romfs-overlay" && index + 1 < argc) {
+#if defined(__SWITCH__)
+            // sdmc:/ paths stay as they are, like --controls-config below.
+            launch.RomFsOverlayPath =
+                std::filesystem::path(argv[++index]).lexically_normal();
+#else
+            launch.RomFsOverlayPath =
+                std::filesystem::absolute(std::filesystem::u8path(argv[++index])).lexically_normal();
+#endif
         } else if (arg == "--controls-config" && index + 1 < argc) {
 #if defined(__SWITCH__)
             // devoptab paths (sdmc:/...) are absolute to Horizon even though
@@ -479,6 +489,16 @@ bool ParseOot3dNativeGameArgs(int argc, char** argv, Oot3dNativeGameLaunch& laun
             "--topscreen-hd-textures requires --ui-profile topscreen and "
             "--topscreen-texture-overrides");
     }
+
+#if !defined(__SWITCH__)
+    // On the Switch the start-up composes the overlay itself, and the window
+    // setup falls back to no mods when it cannot load it (never fatal there).
+    if (!launch.RomFsOverlayPath.empty() &&
+        !std::filesystem::is_regular_file(launch.RomFsOverlayPath)) {
+        throw std::runtime_error("RomFS overlay does not exist: " +
+                                 launch.RomFsOverlayPath.string());
+    }
+#endif
 
     if (!launch.TopScreenConfigPath.empty()) {
         if (launch.UiProfile != Oot3dNativeGame::Oot3dUiProfile::TopScreen) {
