@@ -522,6 +522,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         # Guard pages for one malloc size range (config/guard_alloc) and the
         # libnx exception handler that reports faults to logs/hang.txt.
         tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp)
+    # Importação, no primeiro início, do dump decriptado do jogador para o game/.
+    target_sources(oot3d_native_game PRIVATE
+        tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
+        tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp)
     target_link_options(oot3d_native_game PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=threadCreate
         -Wl,--wrap=SDL_SetThreadPriority
         -Wl,--wrap=_malloc_r -Wl,--wrap=_memalign_r -Wl,--wrap=_free_r -Wl,--wrap=_realloc_r

@@ -37,6 +37,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Oot3dNativeGame::RomImport {
@@ -89,6 +90,12 @@ struct Revision {
 [[nodiscard]] std::span<const Revision> SupportedRevisions();
 // Uma linha por revisão suportada, para as telas de erro.
 [[nodiscard]] std::string SupportedRevisionsText();
+
+// Texto para o console do libnx: o con_write desenha byte a byte com a fonte
+// padrão de 256 glifos, então um caractere UTF-8 acentuado viraria dois glifos
+// errados. Letras acentuadas do português (e do espanhol/francês dos nomes de
+// arquivo) perdem o acento; outro caractere fora do ASCII vira '?'.
+[[nodiscard]] std::string ConsoleAscii(std::string_view utf8);
 
 enum class SourceKind {
     Cartridge, // um arquivo .3ds/.cci (NCSD) ou um NCCH solto

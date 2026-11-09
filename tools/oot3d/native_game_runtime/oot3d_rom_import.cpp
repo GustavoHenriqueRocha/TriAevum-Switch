@@ -667,6 +667,37 @@ std::string SupportedRevisionsText() {
     return text;
 }
 
+std::string ConsoleAscii(std::string_view utf8) {
+    // U+00C0..U+00FF (o segundo byte de C3 xx menos 0x80) sem acento; '?'
+    // onde não há letra base (×, ÷, ß, Æ, Ð, Þ...).
+    static constexpr char kLatin1[] = "AAAAAA?CEEEEIIII?NOOOOO?OUUUUY??"
+                                      "aaaaaa?ceeeeiiii?nooooo?ouuuuy?y";
+    std::string out;
+    out.reserve(utf8.size());
+    for (std::size_t i = 0; i < utf8.size();) {
+        const auto lead = static_cast<unsigned char>(utf8[i]);
+        if (lead < 0x80) {
+            out += static_cast<char>(lead);
+            ++i;
+            continue;
+        }
+        const std::size_t length = lead >= 0xF0 && lead < 0xF8 ? 4
+                                   : lead >= 0xE0           ? 3
+                                   : lead >= 0xC2           ? 2
+                                                            : 0;
+        std::size_t valid = length != 0 && i + length <= utf8.size() ? length : 0;
+        for (std::size_t k = 1; k < valid; ++k)
+            if ((static_cast<unsigned char>(utf8[i + k]) & 0xC0) != 0x80)
+                valid = 0;
+        if (valid == 2 && lead == 0xC3)
+            out += kLatin1[static_cast<unsigned char>(utf8[i + 1]) - 0x80];
+        else
+            out += '?';
+        i += valid ? valid : 1;
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------- peças
 
 std::vector<std::uint8_t> DecompressExeFsCode(std::span<const std::uint8_t> compressed) {

@@ -514,6 +514,18 @@ void TestManifest() {
           Oot3dNativeGame::CtrTitleKind::Oot3d);
 }
 
+// O console do libnx não desenha UTF-8: o texto das telas passa por ConsoleAscii.
+void TestConsoleAscii() {
+    CHECK(ri::ConsoleAscii("Aperte + para sair.\n") == "Aperte + para sair.\n");
+    CHECK(ri::ConsoleAscii("importação não ÇÃO ÉÊÍÓÔÕÚ àâü ñ") == "importacao nao CAO EEIOOOU aau n");
+    CHECK(ri::ConsoleAscii("Zelda – 3D ★.3ds") == "Zelda ? 3D ?.3ds");
+    CHECK(ri::ConsoleAscii("\xC3") == "?");                // sequência cortada
+    CHECK(ri::ConsoleAscii("a\xFF" "b") == "a?b");          // byte inválido
+    for (const ri::Revision& revision : ri::SupportedRevisions())
+        for (const char c : ri::ConsoleAscii(revision.Name))
+            CHECK(static_cast<unsigned char>(c) < 0x80);
+}
+
 int RealImport(const fs::path& source, const fs::path& game) {
     const auto started = std::chrono::steady_clock::now();
     const ri::Source input{fs::is_directory(source) ? ri::SourceKind::Extracted : ri::SourceKind::Cartridge, source};
@@ -560,6 +572,7 @@ int main(int argc, char** argv) {
         TestQmRejectsPopulatedSlot();
         TestContainer(directory);
         TestManifest();
+        TestConsoleAscii();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL: exceção inesperada: %s\n", error.what());
         ++gFailures;
