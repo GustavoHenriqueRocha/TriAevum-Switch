@@ -2149,6 +2149,33 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - Console check: the game log's first lines after the start-up warnings include `kernel_fast: wake=…
   svc=… ui_lock=… retake=…`.
 
+### Free camera smoothing: L3+R3 > Controls > Camera (`config/free_camera_smoothing`, 11/09, on by default)
+- **Report (issue #7):** with the free camera, the view kept turning for a moment after the right
+  stick was released.
+- **Cause:** the free camera only gradually reaches where the stick and collision put it. Each 30 Hz
+  step, `CommitTopScreenFreeCameraCollision` (`oot3d_top_screen_camera_guest.cpp`) covers 30% of the
+  way to the orbit's look-at point and eye, and `BuildTopScreenFreeCameraOrbit` half the way to its
+  distance (`kTopScreenFreeCameraFollowStep`, `kTopScreenFreeCameraDistanceStep`). The angle stops on
+  the step the stick returns to the centre, but the camera keeps closing the gap: 0.7ⁿ, about 8 steps
+  (0.27 s) to come within 5% and 13 (0.43 s) within 1%. The C-stick aiming "Smoothing"
+  (`free_camera_smoothing` in `topscreen_ui.json`, despite its name) only filters aiming and plays no
+  part.
+- **Option:** "Smoothing" under Free camera: On (default, as before) or Off. Off covers the whole way
+  each step, so the camera stops on the step the stick is released; it also follows Link and collision
+  corrections without lag. Applied and saved at once, outside Save/Revert.
+- **Its own file:** `config/free_camera_smoothing` = `off`; no file = on. Not a `topscreen_ui.json`
+  field: builds up to 0.2.0 refuse to start on a `topscreen_ui.json` with a field they don't know
+  (`oot3d_native_game_bootstrap.cpp`), so a new field would break rolling back with
+  `oot3d_native_game.nro.old`.
+- **Code:** `oot3d_free_camera_smoothing_config.h` (file and live value), the row in the Controls
+  panel, and `oot3d_native_a32_candidate_dispatch.cpp`, which copies the live value into the camera
+  state before each update.
+- **Tests:** `oot3d_top_screen_mod_profile_tests` runs two staged camera updates, a turn and then the
+  stick released: the eye moves on with smoothing on and holds still with it off. It also checks the
+  file's parsing and round trip. Guards "11/09 (issue #7)".
+- **Console check:** Controls > Camera > Free camera > Smoothing Off, turn the camera with the right
+  stick and let go: the view stops at once. With On it eases to a stop, as before.
+
 ### Draw distance: L3+R3 > Video (`config/draw_distance`, 11/08, Original by default)
 - **Cause of the pop-in (test.12 report, item 2).** The title culls each actor in Actor_DrawAll
   (EUR 0x00461A18..0x00461AC0): visible only while its view depth z < `uncullZoneForward` (actor+0xFC) +

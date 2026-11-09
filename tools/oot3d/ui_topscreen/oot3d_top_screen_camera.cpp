@@ -292,7 +292,8 @@ TopScreenFreeCameraOrbit BuildTopScreenFreeCameraOrbit(
       50.0F * TopScreenBinarySine(pitch);
   const float targetDistance = nativeTargetDistance *
       static_cast<float>(state.ZoomPercent) * 0.01F;
-  state.Distance += (targetDistance - state.Distance) * 0.5F;
+  state.Distance += (targetDistance - state.Distance) *
+                    (state.Smoothing ? kTopScreenFreeCameraDistanceStep : 1.0F);
   result.IntendedEye.X -=
       state.Distance * TopScreenBinaryCosine(pitch) * TopScreenBinarySine(yaw);
   result.IntendedEye.Y -= state.Distance * TopScreenBinarySine(pitch);

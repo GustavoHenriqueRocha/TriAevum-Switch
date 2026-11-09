@@ -37,9 +37,16 @@ float ResolveTopScreenCameraFovDegrees(float nativeDegrees,
 float TopScreenBinarySine(std::uint16_t angle) noexcept;
 float TopScreenBinaryCosine(std::uint16_t angle) noexcept;
 
+// With Smoothing, each 30 Hz step covers this share of the way to the orbit's
+// position and distance; without it, all of the way, so the camera stops on
+// the step the stick is released.
+inline constexpr float kTopScreenFreeCameraFollowStep = 0.3F;
+inline constexpr float kTopScreenFreeCameraDistanceStep = 0.5F;
+
 struct TopScreenFreeCameraState {
   bool Enabled = false;
   bool Active = false;
+  bool Smoothing = true;
   bool N64StyleZoom = false;
   std::uint8_t ZoomPercent = 100U;
   std::uint8_t FovPercent = 100U;
