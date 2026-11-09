@@ -226,11 +226,16 @@ Findings from that review (first two addressed by the composition work below):
 
 `three_ds_motion_composition.{h,cpp}` is a title-neutral input component, not a
 renderer effect or title patch. Automatic controller aim composes physical gyro
-with stick pitch/yaw through a persistent sensor-to-virtual rotation. Both the
-body-space rates and acceleration vector use that rotation. Releasing the stick
-retains its orientation offset instead of restoring unrelated physical gravity.
-Local pitch and gravity-axis yaw are factored separately to preserve gravity
-under simultaneous yaw/pitch. Explicit mouse-only/stick-only/sensor-only choices
+with stick and mouse pitch/yaw. Uma rotação sensor->virtual persistente guarda
+só o offset preso ao corpo (pitch sintético em torno do próprio X do aparelho
+virtual, mais o alinhamento da troca de dono); as taxas no referencial do corpo
+e o vetor de aceleração passam por ela. Soltar o analógico mantém esse offset
+em vez de voltar a uma gravidade física sem relação. O yaw sintético gira o
+aparelho virtual em torno do "para cima" do mundo, o que não muda nem a
+gravidade nem as taxas no referencial do corpo: ele sai só como taxa e nunca é
+guardado, então o pitch e o yaw físicos mapeiam igual não importa quanto o
+analógico girou (guardado, ele invertia o pitch físico depois de 180 graus de
+yaw pelo analógico). Explicit mouse-only/stick-only/sensor-only choices
 retain their semantics. No sensor can enter the free-camera/C-stick route.
 
 Automatic aim ownership persists. Mouse movement selects mouse; controller

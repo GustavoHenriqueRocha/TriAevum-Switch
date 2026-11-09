@@ -85,6 +85,8 @@ Desempenho e usabilidade:
   console mira em primeira pessoa; `aim.invert_x`/`invert_y` e a sensibilidade do giroscópio valem como
   no PC, e "Calibrate controller motion" (menu L3+R3, Controls) remove o desvio. O sensor para fora de
   foco e reinicia na volta (HOME, sleep) ou quando os dados param de chegar.
+  Analógico e giroscópio somam na mesma mira; girar com o analógico nunca muda como o giroscópio
+  mapeia depois (antes o pitch se invertia depois de ~180° de giro pelo analógico).
 - **TopScreen 3.0**: a 2.1.1 saiu do GameBanana; o importador agora aceita o pacote 3.0.
 - **ROM USA** aceita no build (adaptador USA→EUR canônico do próprio projeto).
 - **Caminhos de entrada** configuráveis por `OOT3D_OPERATIONAL_<variável>` (antes fixos no Windows do autor).
