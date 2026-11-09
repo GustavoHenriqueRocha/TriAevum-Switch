@@ -3103,8 +3103,10 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   is on under deko3d (`SceneEnvironmentRuntime::SetDefaultsReader`). Nothing ties it to `config/fps60`:
   it runs at 30 or 60 fps. **Kept native for cost:** draws that write no depth (`PerPixelCostAdmits`;
   the blend flag alone does not exclude a draw: the game blends most solid geometry, and the first
-  version of this rule left per-pixel 0 lit draws in logs14), and, in both modes, draws whose base
-  fragment program spills (none in the pack now; their variants would spill too). The Scene lights tab says so. Every
+  version of this rule left per-pixel 0 lit draws in logs14), in both modes, draws whose base
+  fragment program spills (none in the pack now; their variants would spill too), and under per-pixel
+  the draws that fell back to the parametric (uber) program because the pack lacks their text
+  (`RefuseLightingBase`, logs26: see "Forest Temple and Phantom Ganon frame drops"). The Scene lights tab says so. Every
   optional term (native lights, points, directionals, rim) sits behind its own uniform branch, and the
   shipped profiles' blocks use a specialized path variant (see "Cheaper per-pixel lighting").
 - **Lighting > Scene lights under per-pixel (0.1.2-test.2 said "needs the Modern lighting model"):**
@@ -3140,7 +3142,7 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - **Log (`logs/deko3d.txt`):** `lighting: mode <off|toon|perpixel> (config/lighting)` at start and on
   each change, and with every `programs (frame)` line while a mode is on (or was):
   `lighting (frame): mode=… variants found=… missing=… unsupported=…; draws lit=… native=…
-  ineligible=… (spilling base=… no depth write=…)` (variants: distinct shaders resolved; draws: cumulative),
+  ineligible=… (spilling base=… parametric base=… no depth write=…)` (variants: distinct shaders resolved; draws: cumulative),
   then `per frame lit opaque=… translucent=… points 0/1/2/3/4=… rim=… paths g/e/b=… px=…M | avg of N …` (lit draws of the
   last frame, then the average since the previous line; points: per-pixel draws by scene point lights; paths:
   per-pixel draws and their pixels by fragment variant path, generic/environment/baked).
@@ -3690,6 +3692,89 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   (`SetNextCommandListPassSpans`, `SetPassSpanFallback`, notes), `oot3d_native_a32_ctr_host_gsp.cpp`,
   `oot3d_native_a32_window_{setup,frame}.cpp`. Tests: `oot3d_native_pica_composition_tests` (`TestPassSpans`),
   `oot3d_native_pica_frontend_tests`. Guards "flicker18".
+
+### Forest Temple and Phantom Ganon frame drops (logs26, 11/09)
+- **Report (0.2.0, Switch Lite handheld):** "the lava drops fps" in the Forest Temple, and "the lighting
+  effects in the boss battle". Settings in the logs: 60 FPS (`fps60_mode=legacy`), Lighting Per-pixel in 106
+  of 107 deko3d reports, draw distance Original, HD pack. **Resolution at 60 FPS was Full** (`drs_mode=full`,
+  3.00 held) from session 2 window 3450 to session 3 window 46350 (rooms 7 and 8, Sacred Forest Meadow, the
+  first seconds of room 14); Dynamic (floor 2.25) after that. Performance mode (461 MHz) at 103200-157650.
+  The CPU is not the limit anywhere here (`game_pair_ms` 16-25 of the 33.3 ms pair). `deko3d.txt` covers
+  only the last session (12:09-14:08, its frames = `perf.txt` `host_frames`); rooms 7 and 8 are from the
+  session before it (`perf.txt` only).
+- **Per room** (`perf.txt` windows of every session; `busy` = `dkperf busy_ms` median and the 90th
+  percentile of the windows' `busy_max_ms`; lit = `lighting (frame)` translucent per-pixel draws per frame,
+  px = their viewport-inside-scissor upper bound; parametric = `programs (frame)` draws per frame and
+  `depth (frame)` `fragdepth`, averages of the reports whose 1800 frames the room fills):
+
+  | scene / room | windows | new_fps (windows < 55) | busy ms | `fs_px` | DRS | lit / px | parametric (fragdepth) | cause |
+  |---|---|---|---|---|---|---|---|---|
+  | Forest Temple 14 | 145 | 43.6 (90) | 12.0 / 43.1 | 2.41 | Full 3.00 (4), then Dynamic, mostly 2.25 | 20 / 13.7M | 2.1 (4) | 3 missing texts → parametric |
+  | Forest Temple 7 | 150 | 46.4 (87) | 12.5 / 20.1 | 4.18 | Full 3.00: 44.4 FPS; Dynamic (21 windows, 2.61): 58.7 | 49 / 32.6M | 0 (3) | Full at 3.00 |
+  | Forest Temple 8 | 91 | 43.3 (66) | 11.7 / 21.0 | 3.64 | Full 3.00 | — | — | Full at 3.00 |
+  | Sacred Forest Meadow 0 | 139 | 43.5 (84) | 10.9 / 19.9 | 2.96 | Full 3.00 | 26 / 24.0M | 0 (2) | Full at 3.00 (+ grass 1.0-1.7 ms) |
+  | Phantom Ganon 1 | 104 | 54.4 (24) | 9.3 / 86.7 | 2.35 | Dynamic, mostly 2.25 | 64 / 38.1M (23 parametric) | 22.5 (24) | 10 missing texts → parametric, 23 per-pixel |
+  | Forest Temple 13 / 20 / 2 | 109 / 142 / 217 | 59.8 / 59.9 / 59.1 | 6.4 / 9.4 / 10.5 | 2.3-2.6 | mostly 3.00 | 28 / 30 / 47 | 0 (2-3) | — |
+
+- **"Lava" is room 14** [INFERENCE]: the worst room, the user's three visits there are where the settings
+  were tried (Full → Dynamic at 46350, Performance mode at 103200, 30 FPS at 103500, Lighting off, toon,
+  per-pixel at 154800-156600), and the only Forest Temple room with parametric draws: the console recorded
+  three fragment texts on entering it (`e51e6800eb7a9726`, `dc19e64021b4a337`, `77f1a18c5e1d256f`), blended
+  layers of two or three scrolling textures times the vertex colour (a glowing animated surface).
+- **Room 14's cost is the parametric fallback, not per-pixel:** room 2 lights more than twice the
+  per-pixel draws and pixels (47, 41.4M) and holds 59.1 FPS mostly at 3.00; room 14's step frames cost
+  36.7 ms at 307 MHz and 25.4 ms at 461 MHz at 2.25 (median `busy_max_ms` of its dropped windows), and
+  Lighting off (154800-156600) did not lower them (`busy_max` 28-29.6 ms, as with per-pixel). Its three
+  draws use the unlit parametric program instead of their specialized ones: 41216 bytes of code and 65
+  registers against 2048-2304 bytes and 14-16 (uam, the pack build below), and it always writes
+  `gl_FragDepth`, so nothing it draws is rejected before shading.
+- **Phantom Ganon:** ten texts missing (four at the intro, six at 179400-180000): the boss's models (a
+  tint stage `x * c.a + c.rgb`) and effects. 22-28 parametric draws a frame, 23 of them lit per-pixel (the
+  per-pixel variant of the parametric program: its environment path adds 4096 bytes of code to the 41-111
+  KB, the same registers), `fragdepth` 24-30 against 2-3 elsewhere. Frames of 80-182 ms GPU during the
+  attacks (`busy_max_ms`), and 77-100 ms a frame for the whole defeat (191400-191550, `fs_px` 4.3-5.7):
+  these are the "lighting effects".
+- **Rooms 7, 8 and the Meadow** have no parametric draws in the reports that cover them (room 7, the
+  Meadow; room 8 has no `deko3d.txt` report and may own the two earlier-session texts below) and held 3.00
+  by the Full setting: 16.4-16.9 ms step frames (`gpu_ms_step`), over the 16.7 ms of a 60 Hz frame, so the
+  governor dropped to 30. The same room 7 under Dynamic (session 3, 21 windows, mean scale 2.61) ran 58.7
+  FPS. Nothing in code: Full is the setting that holds 3.00 on purpose ("Resolution at 60 FPS"); use Dynamic.
+- **Missing texts (`deko3d_shaders/`, 22 files; `deko3d.txt` names 20, the other two come from the earlier
+  sessions, rooms 8, 9, 10 or 21: the only ones the last session did not visit):** Forest Temple room 14 (entry, 45599-46800): `e51e6800eb7a9726`,
+  `dc19e64021b4a337`, `77f1a18c5e1d256f`; room 15/16 (75000): `4ff575860e2f3e50`; room 16 (82800-83400):
+  `281548a59b9adfe2`, `926df6990bc2f53e`, `98936ee295fc5727`, `01da50bdf3ddefd3`; room 3 (89400):
+  `1abe55adbe205c3c`; room 2 (108000): `d0270dfbb73bf933`; Phantom Ganon intro (176011): `e3d45baa55b67ec4`,
+  `5b75bf512fff28e7`, `8e24edf0da3277d4`, `e03d7dba77d9d9ac`; fight (179400-180000): `99c5e3410572fc4f`,
+  `11fd783ad9dbc279`, `3b46fb5911cb510f`, `48ede4ee07076664`, `b2e6ca7ae08bf7b9`, `878f01211b4678fc`;
+  earlier sessions: `809b2476a1844bb3`, `d933e35830f58c70`. The six ~20 KB ones (rooms 16, 3, 2) are generic
+  per-pixel variants (`lighting ... missing=6`) of specialized texts the pack has as compiled stages only
+  [INFERENCE: from the reference pack, whose texts are not all in its shadercache]; their draws were drawn
+  natively (`native=134061`), and are lit per-pixel once packed (their path variants come from the same
+  text). All 22 are in `workshop-OOT/shaders/console-missing/` for the next build.
+- **Pack, offline (the build's step, `retuned-switch-prep:local`, perf26 tree):** `own.pack` 1545 stages
+  compiled, 0 failures, no stage uses scratch; merged with the reference `deko3d.pack`: 1604 stages (0.2.0:
+  1506), 14.4 MB. All 22 texts and their 82 lighting variants are in it (room 14's at 2048-2304 bytes,
+  14-16 registers; the boss's 1280-2304 bytes, 7-14).
+- **Code: per-pixel keeps the parametric fallback native** (`Deko3d::RefuseLightingBase`,
+  `gfx_deko3d_lighting.h`, used by `ResolvePicaProgram`): a draw whose specialized text the pack lacks
+  shades natively under Per-pixel, as one whose variant is missing already does, until the pack has the
+  text. Toon and Native are unchanged, as are specialized draws and 30 FPS. Counted:
+  `lighting (frame) ... ineligible=… (spilling base=… parametric base=… no depth write=…)`, and
+  `programs (frame)` `parametric=D/0` under Per-pixel (lit parametric draws 0).
+- **Expected [INFERENCE, not measured]:** room 14 with the pack: no parametric draw, its layers on
+  2.3 KB programs with early depth; step frames from 25-37 ms at 2.25 to the 6-12 ms of rooms 13/20/2,
+  60 FPS, DRS climbing to 2.75-3.00. Phantom Ganon: `parametric` 22-28 → 0, `fragdepth` 24 → 2-3, the
+  80-182 ms frames gone, `busy_ms` median 9.3 → 6-9 at 2.25-2.5. Rooms 16/3/2: the six variant draws lit
+  per-pixel (a few tenths of a ms more). Rooms 7, 8 and the Meadow change only with Dynamic. The code rule
+  changes nothing where the pack covers the scene; in a scene it does not cover, each lit fallback draw
+  loses its per-pixel body (about 4-10% of its program).
+- Tests: `oot3d_deko3d_lighting_tests` (`TestLightingBase`); guards "logs26".
+- **Console check (2 minutes, Per-pixel, 60 FPS, Resolution at 60 FPS = Dynamic, Performance mode off):**
+  Forest Temple room 14 30 s (look across the glowing surface), rooms 7 and 8 20 s each, Sacred Forest
+  Meadow 20 s, Phantom Ganon (a save before the boss door) 30 s of attacks. Then send `logs/`:
+  `deko3d.txt` has no `not in the pack` line for these places, `programs (frame)` `missing=0` and
+  `parametric=0/0`, `depth (frame)` `fragdepth` 2-3 in the boss; `perf.txt` room 14 and `moriboss` windows
+  at `level=full`, `new_fps` ~60, `busy_max_ms` under 16; rooms 7/8/Meadow at `drs_scale` 2.5-2.75 and ~60.
 
 ### Landing roll (N64): L3+R3 > Game > Gameplay (`config/no_landing_roll`, 07/11, on by default)
 - **Seen (OoT3D since 2011, GameFAQs "Link no longer rolls after jumping off a high cliff"):** after a run

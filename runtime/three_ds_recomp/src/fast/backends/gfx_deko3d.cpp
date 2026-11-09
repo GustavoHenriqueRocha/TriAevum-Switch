@@ -408,15 +408,26 @@ GfxRenderingAPIDeko3d::PicaProgram GfxRenderingAPIDeko3d::ResolvePicaProgram(con
     }
     mCounters.Programs.Count(program.Pick);
     if (mLightingMode != Deko3d::LightingMode::Off && program.Vertex != nullptr && program.Fragment != nullptr) {
-        if (program.Base == Deko3d::PicaBaseClass::Spilling) {
-            // Its variants spill too: native shading.
-            ++mLightingCounters.DrawsSpillingBase;
-            ++mLightingCounters.DrawsIneligible;
-        } else if (specialized != nullptr) {
-            // The variant of the text the native draw uses (specialized or uber).
-            ApplyPicaLighting(draw, draw.FragmentShaderSource, draw.FragmentShaderSourceIdentity, program);
-        } else {
-            ApplyPicaLighting(draw, draw.UberFragmentShaderSource, draw.UberFragmentShaderSourceIdentity, program);
+        // A spilling base, and under per-pixel the parametric fallback, keep
+        // native shading (Deko3d::RefuseLightingBase).
+        switch (Deko3d::RefuseLightingBase(mLightingMode, program.Base)) {
+            case Deko3d::LightingBaseRefusal::SpillingBase:
+                ++mLightingCounters.DrawsSpillingBase;
+                ++mLightingCounters.DrawsIneligible;
+                break;
+            case Deko3d::LightingBaseRefusal::ParametricBase:
+                ++mLightingCounters.DrawsParametricBase;
+                ++mLightingCounters.DrawsIneligible;
+                break;
+            case Deko3d::LightingBaseRefusal::None:
+                // The variant of the text the native draw uses (specialized or uber).
+                if (specialized != nullptr) {
+                    ApplyPicaLighting(draw, draw.FragmentShaderSource, draw.FragmentShaderSourceIdentity, program);
+                } else {
+                    ApplyPicaLighting(draw, draw.UberFragmentShaderSource, draw.UberFragmentShaderSourceIdentity,
+                                      program);
+                }
+                break;
         }
     }
     return program;
@@ -603,12 +614,15 @@ void GfxRenderingAPIDeko3d::LogLightingCounters(const char* when) {
     // the window's average (points: per-pixel draws by scene point lights).
     const auto& frames = mFrameDraws;
     Deko3d::Log("lighting (%s): mode=%s variants found=%llu missing=%llu unsupported=%llu; draws lit=%llu "
-                "native=%llu ineligible=%llu (spilling base=%llu no depth write=%llu); per frame lit %s | avg of %llu %s",
+                "native=%llu ineligible=%llu (spilling base=%llu parametric base=%llu no depth write=%llu); per frame "
+                "lit %s | avg of %llu %s",
                 when, Deko3d::LightingModeName(mLightingMode), static_cast<unsigned long long>(c.VariantsFound),
                 static_cast<unsigned long long>(c.VariantsMissing),
                 static_cast<unsigned long long>(c.VariantsUnsupported), static_cast<unsigned long long>(c.DrawsLit),
                 static_cast<unsigned long long>(c.DrawsNative), static_cast<unsigned long long>(c.DrawsIneligible),
-                static_cast<unsigned long long>(c.DrawsSpillingBase), static_cast<unsigned long long>(c.DrawsNoDepthWrite),
+                static_cast<unsigned long long>(c.DrawsSpillingBase),
+                static_cast<unsigned long long>(c.DrawsParametricBase),
+                static_cast<unsigned long long>(c.DrawsNoDepthWrite),
                 Deko3d::FormatPicaLitDraws(frames.Last, 1U).c_str(), static_cast<unsigned long long>(frames.Frames),
                 Deko3d::FormatPicaLitDraws(frames.Sum, frames.Frames).c_str());
     // Per-pixel draws by frame kind since the previous line, one line each
