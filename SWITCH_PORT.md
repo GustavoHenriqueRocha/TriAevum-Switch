@@ -3955,11 +3955,12 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
   colliders, and only with `draw` (`CollectNativeGrassColliders`: the player list head and the first 16
   background actors).
 - **Drawing** (`gfx_deko3d_grass.cpp`): instanced draws into the scene target, before its first
-  translucent world draw after this frame's grass sources were drawn into it (or before its display
-  transfer). In 0.1.2-test.2 any non-opaque scene draw (the sky, unknown layers) triggered it, often
-  before the ground was drawn: the placements of that frame were matched while still empty and the
-  frame drew nothing (`drawn 0/600` at 60 fps, 374/600 at 30). A placement is now also kept per render
-  target, so the same ground drawn into two targets keeps both cameras.
+  translucent world draw or overlay (HUD, minimap, title card) after this frame's grass sources were
+  drawn into it, or else before its display transfer (after test.16: see "Grass over the HUD, the
+  minimap and the title card"). In 0.1.2-test.2 any non-opaque scene draw (the sky, unknown layers)
+  triggered it, often before the ground was drawn: the placements of that frame were matched while
+  still empty and the frame drew nothing (`drawn 0/600` at 60 fps, 374/600 at 30). A placement is now
+  also kept per render target, so the same ground drawn into two targets keeps both cameras.
 - **Hand-off** (`grass_stream_handoff.h`): every draw point draws the newest finished cull; a late or
   skipped worker reuses the previous one (counted as `stale`), never an empty frame. The worker writes
   only a slot no frame in flight reads. They use the viewport, scissor
@@ -4137,6 +4138,9 @@ the game thread does not change). L3+R3 > Video > "Grass" writes the file; it ap
     `nothing drawn` counts draw points that had a cull result but drew none of it (should be 0);
     `no result` counts draw points before a scene's first cull and `gaps` draw points without a cull
     right after grass (should be 0).
+  - The third line ends with `draw points: before translucent T, before an overlay O, at the transfer
+    X; after an overlay A, sources after the grass S` (after test.16): where each frame's grass went;
+    `after an overlay` and `sources after the grass` should be 0.
   - The game thread's cost shows in `perf.txt` (`guest`/`game_pair_ms`) as before; the GPU's in
     `dkperf` `busy_ms`.
 - Budget estimates `[INF]`: GPU 0.6-1.2 ms per frame at the 2.25 floor at 60 fps, 1.5-3 ms at 30 fps
@@ -4444,6 +4448,65 @@ temple entry had `no shared placement 2` too.
 - Console check: with `far` in `config/grass_distance` (test.15), the Video menu shows Whole area and
   `deko3d.txt` has the line above. Pick Near, then Whole area again: the file now says `area`, and
   Hyrule Field's distant slopes have grass at Whole area only.
+
+### Grass over the HUD, the minimap and the title card: an overlay is a draw point (08/11, after test.16)
+- **Report (test.16):** "the grass would overlap the map and the location name popup sometimes."
+- **Seen:** video `2026110816393700` (logs23; the console clock runs ~22 min behind the log's: the
+  Lost Woods entry is `hitches.txt` frame 7986, 17:01:52), frames 338-440: the "Lost Woods" title
+  card and the TopScreen minimap with its markers lie under the grass blades in most frames. The
+  Hyrule Field (`2026110807131300`, logs20c) and Kokiri Forest (`2026110816443700`) videos show the
+  grass under the translucent minimap and title card, as it should be.
+- **Where each thing is drawn:** one top-screen target (`logs23/deko3d.txt`: `targets: 720x1280
+  (native 480x400, ns 2, colour 182447c0, depth 185447c0)`). The scene goes in first. Then the HUD
+  phase's lists go into the same target: hearts, the TopScreen minimap (the guest's TopScreen
+  layout), the title card and messages. The frontend tags these draws UI. They have no depth test.
+  The display transfer comes last.
+- **Cause:** the grass was drawn before the frame's first translucent world draw after its sources,
+  or else at the display transfer. A frame with no translucent world draw after its ground drew its
+  grass at the transfer, which is after the HUD. The grass depth-tests against the world's depth,
+  and the HUD leaves that depth unchanged. So every blade in front of the ground covered the HUD
+  pixels over it. `[INFERENCE: the logs do not say which point drew; the Lost Woods frames cover the
+  HUD in nearly every frame, Kokiri Forest and Hyrule Field in none of the frames checked]`. "Sometimes": it
+  depends on the area (and its effects), not on chance.
+  - Not the in-between frames: an fps60 in-between frame repeats its real frame's draws, so it has the
+    same draw point. The real frame's placements and an older (`stale`) cull change what is drawn,
+    not where it is drawn.
+  - Not test.10's late lists: a late scene list has the Scene domain, and `ui_world_draws` is 0 in
+    logs21-23.
+- **Upstream:** the PC's grass (coccofresco's interactive pass) draws at the end of the target's
+  first run of opaque world draws (`mPublishedGeometryAnchors`, `pica_composition_schedule.cpp`),
+  so it comes before any other draw, UI included. `git log english..upstream/main` (125 commits) does
+  not change that. `7541876c` makes the title logo an overlay for the PC's effects. Upstream has no
+  deko3d.
+- **Fix** (`grass_draw_point.h`, `GrassDrawPointGate`): a UI or screen draw into the target is also
+  a draw point (`GrassDrawPointOf`: Translucent, Overlay, then Transfer). The grass goes in once per
+  target and frame, at the first point after that frame's opaque world and sources. So it is drawn
+  before the first HUD draw that comes after the world. The domain is the one the frontend resolved,
+  so test.10's classification holds: a late scene list stays Scene. With `config/late_lists_as_ui`,
+  its first draw is the point. The sky and the atmosphere are still no point (test.2). Nothing else
+  changes: the sources, placements, culls, hold and in-between frames work as before.
+  - One case is counted rather than changed: a UI draw into the target after its first opaque draw
+    but before the ground (`after an overlay`; none is expected). The grass cannot go in before the
+    ground, so it is drawn at the next point.
+- **Log:** the third `grass:` line ends with `draw points: before translucent T, before an overlay O,
+  at the transfer X; after an overlay A, sources after the grass S`. `before an overlay` counts the
+  frames whose grass test.16 drew after the HUD. `sources after the grass` counts grounds drawn after
+  the frame's grass, which miss that frame's grass; it should stay 0.
+- Tests: `oot3d_grass_switch_tests` (`Oot3dGrassDrawPoint`):
+  - the points' classification;
+  - the Lost Woods frame: test.16's rule covers 3 overlays, the new one none;
+  - a translucent draw before the HUD keeps its point; one after the HUD moves the grass before it;
+  - UI before the world or in the bottom screen is not an overlay;
+  - an overlay before the ground is counted;
+  - 600 frames at 60 FPS draw once each;
+  - late lists, both ways.
+- Guards: two new (the overlay point, the gate), three updated (the draw hook, the sources check,
+  the transfer point). No shader change; `deko3d.pack` is unchanged.
+- Console check (Grass On, 60 FPS, TopScreen minimap on): enter the Lost Woods from Kokiri Forest
+  (the hollow log on the ledge) while the title card shows, then leave Kokiri Forest over the bridge
+  into Hyrule Field. Stand where the minimap lies over tall grass. The title card and the minimap
+  should stay over the blades in every frame. In `deko3d.txt`, the Lost Woods window's third `grass:`
+  line should have `before an overlay` close to its drawn frames, and `after an overlay 0`.
 
 ### Mirror natives for the render loops (Profile18 items 2 and 5, 11/07)
 Guest replacements for the hottest loops of the game's CPU renderer, in the existing mechanism

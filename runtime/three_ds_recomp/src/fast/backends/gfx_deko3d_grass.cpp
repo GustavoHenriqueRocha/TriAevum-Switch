@@ -311,6 +311,11 @@ struct GrassState {
     // The target grass was last drawn into (its camera feeds the cull).
     uint64_t DrawnNamespace = 0;
     uint32_t DrawnColorAddress = 0;
+    // The frame and target the grass was last drawn into at a draw point (a
+    // source drawn there after it counts in Points.SourcesAfter).
+    uint64_t PointFrame = ~0ULL;
+    uint64_t PointNamespace = 0;
+    uint32_t PointColorAddress = 0;
     DkGpuAddr FrameUniforms = DK_GPU_ADDR_INVALID; // both kinds (grass_vsh.glsl blends them by distance)
     bool Posted = false;
 
@@ -360,6 +365,10 @@ struct GrassState {
     Oot3d::GrassSceneHold Hold{0U};
     uint64_t SceneNoResult = 0;
     uint64_t HoldMicros = 0, HoldFrames = 0, HoldTimeouts = 0;
+    // Draw points that drew (translucent, overlay, transfer), those after an
+    // overlay drawn into the target before its sources, and sources drawn
+    // after the grass (grass_draw_point.h).
+    Oot3d::GrassDrawPointCounts Points;
 };
 
 // Set once before the first frame (Deko3dConfigureGrass), read by the render
@@ -658,6 +667,17 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
         CheckGrassArea(*state);
     }
     const auto begin = std::chrono::steady_clock::now();
+    const auto sourceDrawn = [&] {
+        // A ground drawn after this frame's grass in its target: not among
+        // the frame's placements, so its grass is missing from that frame.
+        if (state->PointFrame == frame && state->PointNamespace == draw.RenderTargetNamespace &&
+            state->PointColorAddress == draw.FramebufferColorPhysicalAddress) {
+            ++state->Points.SourcesAfter;
+        }
+        state->SourceFrame = frame;
+        state->SourceNamespace = draw.RenderTargetNamespace;
+        state->SourceColorAddress = draw.FramebufferColorPhysicalAddress;
+    };
     if (state->InBetweenFrame == frame) {
         // fps60 in-between frame: no sources of its own. A draw that was a
         // source of the last real frame gives its target's camera.
@@ -666,18 +686,14 @@ void GrassObserveDraw(const GfxNativePicaDrawView& draw, uint64_t frame) {
                                      draw.FramebufferColorPhysicalAddress),
                 TargetKey(draw.RenderTargetNamespace, draw.FramebufferColorPhysicalAddress), draw.VertexUniformBytes,
                 draw.FramebufferFlipped)) {
-            state->SourceFrame = frame;
-            state->SourceNamespace = draw.RenderTargetNamespace;
-            state->SourceColorAddress = draw.FramebufferColorPhysicalAddress;
+            sourceDrawn();
         }
     } else {
         try {
             if (Oot3d::PublishPicaGrassSource(draw, frame, state->Settings, *state->Sources, frame,
                                               state->DrawOrder++)) {
                 ++state->Published;
-                state->SourceFrame = frame;
-                state->SourceNamespace = draw.RenderTargetNamespace;
-                state->SourceColorAddress = draw.FramebufferColorPhysicalAddress;
+                sourceDrawn();
                 if (const auto clip = Oot3d::GrassRigidModelToClip(draw.VertexUniformBytes, draw.FramebufferFlipped))
                     state->InBetween.RealSource(SourceDrawKey(draw.GeometryIdentity, draw.RenderTargetNamespace,
                                                               draw.FramebufferColorPhysicalAddress),
@@ -993,7 +1009,9 @@ void GrassEndFrame(uint64_t frame) {
             "area %s scene %d room %d, changes %llu "
             "(scene %llu), foreign culls dropped %llu (other scene), without a shared placement %llu, gaps %llu, "
             "ranges drawn with another target's placement %llu | empty placements %u | in-between frames %llu "
-            "(without a camera %llu) | hold %llu ms over %llu frames (%llu timed out)",
+            "(without a camera %llu) | hold %llu ms over %llu frames (%llu timed out) | draw points: before "
+            "translucent %llu, before an overlay %llu, at the transfer %llu; after an overlay %llu, sources after "
+            "the grass %llu",
             static_cast<unsigned long long>(frame), static_cast<unsigned long long>(state->RasterDraws),
             static_cast<unsigned long long>(state->DepthDraws),
             static_cast<unsigned long long>(state->Slots.FreshFrames - state->FreshBase),
@@ -1018,7 +1036,12 @@ void GrassEndFrame(uint64_t frame) {
             static_cast<unsigned long long>(state->InBetweenWithoutCamera),
             static_cast<unsigned long long>(state->HoldMicros / 1000U),
             static_cast<unsigned long long>(state->HoldFrames),
-            static_cast<unsigned long long>(state->HoldTimeouts));
+            static_cast<unsigned long long>(state->HoldTimeouts),
+            static_cast<unsigned long long>(state->Points.At(Oot3d::GrassDrawPoint::Translucent)),
+            static_cast<unsigned long long>(state->Points.At(Oot3d::GrassDrawPoint::Overlay)),
+            static_cast<unsigned long long>(state->Points.At(Oot3d::GrassDrawPoint::Transfer)),
+            static_cast<unsigned long long>(state->Points.AfterOverlay),
+            static_cast<unsigned long long>(state->Points.SourcesAfter));
     }
     state->Frames = 0;
     state->Published = 0;
@@ -1042,6 +1065,7 @@ void GrassEndFrame(uint64_t frame) {
     state->GapsBase = state->Gaps.Gaps;
     state->InBetweenFrames = state->InBetweenWithoutCamera = 0;
     state->HoldMicros = state->HoldFrames = state->HoldTimeouts = 0;
+    state->Points = {};
     state->StaleBase = state->Slots.StaleFrames;
 }
 
@@ -1057,28 +1081,33 @@ bool GfxRenderingAPIDeko3d::PublishPicaFrameTemporalSample(const Renderer3ds::Pi
 
 void GfxRenderingAPIDeko3d::RememberGrassScene(const Deko3d::PicaTarget& target, const Deko3d::PicaRect& viewport,
                                                const DkScissor& scissor, uint8_t depthCompare) {
-    mGrassScene.Target = &target;
     mGrassScene.Viewport = viewport;
     mGrassScene.Scissor = scissor;
     mGrassScene.DepthCompare = depthCompare;
-    mGrassScene.Frame = mDevice.Frame();
+    mGrassPoints.Scene(&target, mDevice.Frame());
 }
 
-void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target) {
+void GfxRenderingAPIDeko3d::DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target,
+                                      Oot3d::GrassDrawPoint point) {
     using namespace Deko3d;
     GrassState* state = gGrass.load(std::memory_order_acquire);
     const uint64_t frame = mDevice.Frame();
+    if (state == nullptr || state->DrawFailed) return;
     // Once per target and frame, into the target the opaque world was just
     // drawn to (its viewport, scissor and depth test: dynamic resolution and
-    // widescreen included).
-    // Not before this target's grass sources were drawn this frame: the
-    // placements of this frame are matched at the first draw point.
-    if (state == nullptr || state->DrawFailed || mGrassScene.Target != &target || mGrassScene.Frame != frame ||
-        (mGrassDrawn.Frame == frame && mGrassDrawn.Target == &target) || state->SourceFrame != frame ||
-        state->SourceNamespace != key.Namespace || state->SourceColorAddress != key.ColorAddress) {
-        return;
-    }
-    mGrassDrawn = {&target, frame};
+    // widescreen included), at the first draw point after this target's grass
+    // sources were drawn this frame (the placements of this frame are matched
+    // there): before a translucent world draw, an overlay (HUD, minimap, title
+    // card: drawn without depth, grass after them covers them) or the display
+    // transfer (grass_draw_point.h).
+    const bool sources = state->SourceFrame == frame && state->SourceNamespace == key.Namespace &&
+                         state->SourceColorAddress == key.ColorAddress;
+    const auto reach = mGrassPoints.Reach(point, &target, frame, sources);
+    if (!reach.Draw) return;
+    state->Points.Count(point, reach);
+    state->PointFrame = frame;
+    state->PointNamespace = key.Namespace;
+    state->PointColorAddress = key.ColorAddress;
     const auto begin = std::chrono::steady_clock::now();
     if (!state->DrawReady) {
         state->Vertex = mShaders.Embedded(kGrassVertexKey, std::span<const uint8_t>(kGrassVertexDksh));

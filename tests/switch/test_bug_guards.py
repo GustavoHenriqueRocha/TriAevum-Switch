@@ -901,12 +901,29 @@ GUARDS = [
           test="oot3d_grass_switch_tests (ConfigFileMeaning)"),
     Guard("[decision] grass: the deko3d draw hooks run only with config/grass = draw (mGrassDraws)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
-          r'if \(mGrassDraws && draw\.CompositionDomain == Renderer3ds::PicaCompositionDomain::Scene &&\s+'
-          r'draw\.Composition\.Layer == Renderer3ds::PicaCompositionLayer::TransparentWorld\) \{.*?DrawGrass\(key, \*target\);'),
+          r'if \(mGrassDraws\) \{.*?'
+          r'if \(const auto point = Oot3d::GrassDrawPointOf\(draw\.CompositionDomain, draw\.Composition\.Layer\)\) \{\s+'
+          r'DrawGrass\(key, \*target, \*point\);'),
     Guard("grass popped (0/600 frames drawn at 60 fps): the draw point came before the ground's sources, at a sky draw",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
-          r'state->SourceFrame != frame \|\|\s+state->SourceNamespace != key\.Namespace \|\| state->SourceColorAddress != key\.ColorAddress\)',
-          test="oot3d_grass_switch_tests (Oot3dGrassHandoff)"),
+          r'const bool sources = state->SourceFrame == frame && state->SourceNamespace == key\.Namespace &&\s+'
+          r'state->SourceColorAddress == key\.ColorAddress;\s+'
+          r'const auto reach = mGrassPoints\.Reach\(point, &target, frame, sources\);\s+if \(!reach\.Draw\) return;',
+          test="oot3d_grass_switch_tests (Oot3dGrassHandoff, Oot3dGrassDrawPoint)"),
+    # --- 08/11: the grass covered the Lost Woods title card and the minimap (test.16, logs23) ---
+    Guard("grass over the HUD, minimap and title card: a UI or screen draw into the grass target is a draw point",
+          "runtime/three_ds_recomp/include/fast/oot3d/grass_draw_point.h",
+          r'return domain == Renderer3ds::PicaCompositionDomain::Ui \|\| domain == Renderer3ds::PicaCompositionDomain::Screen \|\|\s+'
+          r'layer == Renderer3ds::PicaCompositionLayer::Ui;.*?'
+          r'if \(GrassOverlayDraw\(domain, layer\)\) return GrassDrawPoint::Overlay;',
+          test="oot3d_grass_switch_tests (Oot3dGrassDrawPoint)"),
+    Guard("[decision] grass draw points: once per target and frame, after its opaque world and sources; sky and atmosphere are no point",
+          "runtime/three_ds_recomp/include/fast/oot3d/grass_draw_point.h",
+          r'if \(mScene == here && mDrawn != here && sources\) \{\s+mDrawn = here;\s+reach\.Draw = true;\s+'
+          r'reach\.AfterOverlay = mOverlay == here;\s+\}\s+'
+          r'if \(point == GrassDrawPoint::Overlay && mScene == here\) mOverlay = here;',
+          test="oot3d_grass_switch_tests (Oot3dGrassDrawPoint)",
+          forbid=r'PicaCompositionLayer::Atmosphere\) return GrassDrawPoint'),
     Guard("grass popped: a frame must draw the newest finished cull, a late worker never empties it",
           "runtime/three_ds_recomp/include/fast/oot3d/grass_stream_handoff.h",
           r'if \(fit != GrassCullFit::Draw\) return \{std::nullopt, fit\};\s+return \{slots\.Draw\(frame\), fit\};',
@@ -933,7 +950,8 @@ GUARDS = [
           forbid=r'index < pending\.size\(\) && anchors\.size\(\) < limit'),
     Guard("grass: the display copy must see the grass draw's Version (else a lean repeat skips the copy)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
-          r'DrawGrass\(\*key, \*source\);\s+\}\s+const PicaDisplayCopy copy\{source->Id, source->Version'),
+          r'DrawGrass\(\*key, \*source, Oot3d::GrassDrawPoint::Transfer\);\s+\}\s+'
+          r'const PicaDisplayCopy copy\{source->Id, source->Version'),
     Guard("grass of the title demo drawn in the temple entrance: a cull of another scene is dropped, never drawn",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_grass.cpp",
           r'const auto pick = Oot3d::GrassCullForDrawPoint\(state->Slots, frame, state->Current\.Area, state->Area,.*?'
