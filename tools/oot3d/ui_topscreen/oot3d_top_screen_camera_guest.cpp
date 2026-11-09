@@ -329,10 +329,12 @@ bool CommitTopScreenFreeCameraCollision(
                 &intendedEye) ||
       !ReadVec3(memory, camera + 0x80U, &currentAt) ||
       !ReadVec3(memory, camera + 0x8CU, &currentEye)) return false;
+  const float step =
+      runtime->Camera.Smoothing ? kTopScreenFreeCameraFollowStep : 1.0F;
   const auto at = InterpolateTopScreenFreeCameraPosition(
-      currentAt, intendedAt, 0.3F);
+      currentAt, intendedAt, step);
   const auto eye = InterpolateTopScreenFreeCameraPosition(
-      currentEye, intendedEye, 0.3F);
+      currentEye, intendedEye, step);
   if (!WriteVec3(memory, camera + 0x80U, at) ||
       !WriteVec3(memory, camera + 0x8CU, eye) ||
       !WriteVec3(memory, camera + 0xA4U, eye) ||

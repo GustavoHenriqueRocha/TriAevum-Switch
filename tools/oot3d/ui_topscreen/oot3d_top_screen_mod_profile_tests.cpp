@@ -1,3 +1,4 @@
+#include "oot3d_free_camera_smoothing_config.h"
 #include "oot3d_top_screen_camera.h"
 #include "oot3d_top_screen_camera_guest.h"
 #include "oot3d_top_screen_controls.h"
@@ -3945,6 +3946,83 @@ int main() {
               std::abs(std::bit_cast<float>(freeCameraFovBits) - 69.0F) <
                   0.001F,
           "TopScreen FOV control did not compose with free-camera ownership");
+
+  // Free camera smoothing: after a turn, with the stick released, the eye
+  // moves on with smoothing on and holds still with it off.
+  const auto stagedFreeCameraUpdate = [&](TopScreenFreeCameraGuestRuntime &runtime,
+                                          std::int16_t stickX) {
+    bool stagedActive = false;
+    return BeginTopScreenFreeCameraGuestUpdate(
+               cameraMemory, outAddress, cameraAddress, stackAddress, stickX, 0,
+               false, &runtime, &stagedActive, &error) &&
+           stagedActive &&
+           ApplyTopScreenFreeCameraEnvironment(cameraMemory, &runtime, &error) &&
+           PrepareTopScreenFreeCameraCollision(cameraMemory, &runtime, &error) &&
+           CommitTopScreenFreeCameraCollision(cameraMemory, &runtime, &error) &&
+           ApplyTopScreenFreeCameraQuake(cameraMemory, &runtime, false, &error) &&
+           ApplyTopScreenFreeCameraData(cameraMemory, &runtime, -1, &error);
+  };
+  const auto readCameraEye = [&](TopScreenCameraVec3 *eye) {
+    std::uint32_t x = 0U, y = 0U, z = 0U;
+    if (!cameraMemory.Read32(cameraAddress + 0x8CU, &x) ||
+        !cameraMemory.Read32(cameraAddress + 0x90U, &y) ||
+        !cameraMemory.Read32(cameraAddress + 0x94U, &z)) {
+      return false;
+    }
+    *eye = {std::bit_cast<float>(x), std::bit_cast<float>(y),
+            std::bit_cast<float>(z)};
+    return true;
+  };
+  const auto eyeMovementAfterRelease = [&](bool smoothing, float *moved) {
+    if (!writeFloat(cameraAddress + 0x80U, 0.0F) ||
+        !writeFloat(cameraAddress + 0x84U, 50.0F) ||
+        !writeFloat(cameraAddress + 0x88U, 0.0F) ||
+        !writeFloat(cameraAddress + 0x8CU, 0.0F) ||
+        !writeFloat(cameraAddress + 0x90U, 50.0F) ||
+        !writeFloat(cameraAddress + 0x94U, 150.0F)) {
+      return false;
+    }
+    TopScreenFreeCameraGuestRuntime runtime;
+    runtime.Camera.Enabled = true;
+    runtime.Camera.Smoothing = smoothing;
+    TopScreenCameraVec3 turned;
+    TopScreenCameraVec3 released;
+    if (!stagedFreeCameraUpdate(runtime, 31) || !readCameraEye(&turned) ||
+        !stagedFreeCameraUpdate(runtime, 0) || !readCameraEye(&released)) {
+      return false;
+    }
+    *moved = std::hypot(released.X - turned.X, released.Y - turned.Y,
+                        released.Z - turned.Z);
+    return true;
+  };
+  float smoothedMovement = 0.0F;
+  float directMovement = 0.0F;
+  Require(eyeMovementAfterRelease(true, &smoothedMovement) &&
+              eyeMovementAfterRelease(false, &directMovement),
+          "TopScreen free-camera smoothing fixture failed");
+  Require(smoothedMovement > 1.0F,
+          "TopScreen free-camera smoothing on no longer eases toward the orbit");
+  Require(directMovement < 0.001F,
+          "TopScreen free camera kept moving after the stick was released with "
+          "smoothing off");
+
+  Require(ParseFreeCameraSmoothing("") && ParseFreeCameraSmoothing("on") &&
+              !ParseFreeCameraSmoothing("off") &&
+              !ParseFreeCameraSmoothing("0") &&
+              !ParseFreeCameraSmoothing("false"),
+          "config/free_camera_smoothing parsing is incorrect");
+  const auto smoothingConfig =
+      std::filesystem::temp_directory_path() /
+      ("oot3d_free_camera_smoothing_" + std::to_string(std::rand()));
+  Require(ReadFreeCameraSmoothing(smoothingConfig) &&
+              SaveFreeCameraSmoothing(smoothingConfig, false) &&
+              !ReadFreeCameraSmoothing(smoothingConfig) &&
+              SaveFreeCameraSmoothing(smoothingConfig, true) &&
+              !std::filesystem::exists(smoothingConfig /
+                                       kFreeCameraSmoothingConfigName) &&
+              ReadFreeCameraSmoothing(smoothingConfig),
+          "config/free_camera_smoothing round trip is incorrect");
+  std::filesystem::remove_all(smoothingConfig);
 
   const auto zrSelection =
       ResolveTopScreenItemsSelectionBegin({true, false, 2U});

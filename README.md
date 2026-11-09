@@ -22,7 +22,8 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
 - **Menu:** press both sticks in (L3+R3) for settings, the performance overlay, updates and Exit game.
   Touch works in the menu too.
 - **Controls:** gyro aiming with the console, a Pro Controller or a pair of Joy-Cons; tap the on-screen
-  item, X/Y and D-pad icons; drag a finger on empty screen to aim.
+  item, X/Y and D-pad icons; drag a finger on empty screen to aim. L3+R3 → Controls → Camera → Free
+  camera → Smoothing Off makes the free camera stop as soon as you let go of the stick.
 - **Updates:** L3+R3 → Updates → Check for updates. Saves, settings and game files are kept.
 - **Performance:** at stock clocks lighter areas run at full speed and busy ones slow down (the CPU is
   the limit). L3+R3 → Video → **Performance mode** On raises the CPU to 1224 MHz, the GPU to 460.8 MHz

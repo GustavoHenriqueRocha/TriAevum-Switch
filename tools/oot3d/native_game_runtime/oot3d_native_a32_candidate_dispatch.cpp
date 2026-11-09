@@ -1,6 +1,7 @@
 // Per-block native candidates of the A32 window: TopScreen UI source-port blocks and product hooks.
 #include <cstring>
 #include "oot3d_native_a32_window_shared.h"
+#include "oot3d_free_camera_smoothing_config.h"
 
 namespace Oot3dA32Window {
 
@@ -550,6 +551,9 @@ bool ExecuteTopScreenUiSourcePortBlock(
       ++dispatch.TopScreenCameraUpdateCalls;
       bool active = false;
       const auto cameraInput = dispatch.TopScreenCameraInput.Consume();
+      dispatch.TopScreenCamera.Camera.Smoothing =
+          Oot3dNativeGame::LiveFreeCameraSmoothing().load(
+              std::memory_order_relaxed);
       if (!Oot3dNativeGame::BeginTopScreenFreeCameraGuestUpdate(
               memory, state.r[0], state.r[1], cameraStackAddress,
               cameraInput.X, cameraInput.Y,

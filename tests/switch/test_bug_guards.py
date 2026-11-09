@@ -28,6 +28,18 @@ class Guard:
 
 
 GUARDS = [
+    # --- 11/09 (issue #7): the free camera kept turning after the right stick was released ---
+    Guard("free camera kept moving ~0.3 s after the right stick was released, with no way to turn it off "
+          "(issue #7): the commit's step follows config/free_camera_smoothing",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_camera_guest.cpp",
+          r'runtime->Camera\.Smoothing \? kTopScreenFreeCameraFollowStep : 1\.0F;.*?'
+          r'InterpolateTopScreenFreeCameraPosition\(\s*currentEye, intendedEye, step\)',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("free camera smoothing choice not reaching the camera: the dispatch copies the live value before "
+          "each update (issue #7)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_candidate_dispatch.cpp",
+          r'TopScreenCamera\.Camera\.Smoothing =\s+Oot3dNativeGame::LiveFreeCameraSmoothing\(\)\.load\(',
+          "oot3d_top_screen_mod_profile_tests"),
     # --- 11/08: coccofresco's SingleScreen 3.0 HUD fixes (upstream 2026-10-17), ported for 0.2.0 ---
     Guard("D-pad cross stayed opaque where 3.0 greys it (fc5ddfa6: 0x005CCF6C, first visible ZR/ZL lane, "
           "else 0.3 with a nested owner)",
