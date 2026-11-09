@@ -355,6 +355,49 @@ void TestEnWood02Groups() {
     }
 }
 
+void TestLogging() {
+    const auto contains = [](const std::string& text, const char* part) {
+        return text.find(part) != std::string::npos;
+    };
+    Fixture f(2);
+    f.Visibility.DistanceMultiplier = 3.0F; f.Visibility.ExtendGroups = true;
+    f.Begin(); Expect(f.Step(0, false), "extended"); f.Step(1, true); f.End();
+    auto line = TakeNativeActorVisibilityPerfLine(f.Visibility);
+    // Both are candidates from their positions; the fixture makes actor 1's result native.
+    Expect(line.rfind("actor_visibility: multiplier=3 groups=1 walks=1 culled=1 extended=1 candidates=2 capped=0 "
+                      "light_denied=0 denied=0 limited_walks=0 invalid_walks=0 peak_lights=", 0) == 0 &&
+           line.back() == '\n',
+           "perf line counts the window");
+    f.Used(116); f.Begin(); Expect(!f.Step(0, false), "denied"); f.Step(1, true); f.End();
+    line = TakeNativeActorVisibilityPerfLine(f.Visibility);
+    Expect(contains(line, " walks=1 culled=1 extended=0 candidates=2 capped=0 light_denied=1 denied=1 "
+                          "limited_walks=1 invalid_walks=0 peak_lights=117"),
+           "perf line restarts each window and counts denials");
+    line = TakeNativeActorVisibilityPerfLine(f.Visibility);
+    Expect(contains(line, " walks=0 culled=0 extended=0 candidates=0 capped=0 light_denied=0 denied=0 "
+                          "limited_walks=0 invalid_walks=0 peak_lights=0"),
+           "empty window");
+    // Past the 32 nearest: capped, counted apart from the light budget.
+    Fixture many(40);
+    many.Begin(); for (uint32_t i = 0; i < many.Count; ++i) many.Step(i, false); many.End();
+    line = TakeNativeActorVisibilityPerfLine(many.Visibility);
+    Expect(contains(line, " extended=32 candidates=40 capped=8 light_denied=0 denied=8 "), "capped candidates");
+
+    NativeActorVisibilityState settings;
+    settings.DistanceMultiplier = 3.0F; settings.ExtendGroups = true;
+    auto first = TakeNativeActorVisibilitySettingsLine(settings, ActorDrawDistance::Farther);
+    Expect(first.has_value() && contains(*first, "draw_distance: choice=farther multiplier=3 groups=extended "
+                                                 "kokiri_fade=native"), "settings logged at start");
+    Expect(!TakeNativeActorVisibilitySettingsLine(settings, ActorDrawDistance::Farther), "unchanged: no line");
+    settings.DistanceMultiplier = 1.0F; settings.ExtendGroups = false;
+    auto changed = TakeNativeActorVisibilitySettingsLine(settings, ActorDrawDistance::Original);
+    Expect(changed.has_value() && contains(*changed, "choice=original multiplier=1 groups=native"),
+           "a change is logged");
+    settings.NoKokiriFade = true;
+    Expect(TakeNativeActorVisibilitySettingsLine(settings, ActorDrawDistance::Original).has_value(),
+           "the F1 Kokiri fade is part of the settings");
+}
+
 void TestHandoffFade() {
     for (bool fadeFlag : {true, false}) {
         Fixture f(1);
@@ -393,7 +436,7 @@ int main() {
         Expect(std::is_sorted(hooks.begin(), hooks.end()) &&
                std::adjacent_find(hooks.begin(), hooks.end()) == hooks.end(), "sorted unique hook filter");
         TestReservationsAndBurst(); TestExactCapacityWithUnexpectedNativeSuffix(); TestDeferredAndNativeFade(); TestIndependentExtensionFade(); TestMultipleWalksAndColdRestore(); TestSavestateLifecycle(); TestPlayerAndCustomConsumers(); TestInvalidAndOff(); TestSpawnHooksAndRateLimit();
-        TestMultipliers(); TestExclusions(); TestHandoffFade(); TestEnWood02Groups();
+        TestMultipliers(); TestExclusions(); TestHandoffFade(); TestEnWood02Groups(); TestLogging();
     } catch (const std::exception& error) {
         std::cerr << "oot3d_native_a32_actor_visibility_tests: " << error.what() << '\n'; return 1;
     }
