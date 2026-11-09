@@ -422,8 +422,6 @@ void NativeA32WindowSession::Setup() {
   }
   auto &blockTraceWriter = blockTraceWriterStorage.emplace(
       launch.A32BlockTracePath, widescreenProjection);
-  widescreenProjection.ActorVisibility.Diagnostics =
-      std::getenv("OOT3D_ACTOR_VISIBILITY_DIAGNOSTICS") != nullptr;
   picaCompositionHooks =
       Oot3dNativeGame::Oot3dNativePicaCompositionHookPcs();
   typedGameplayObservableExitHooks =
@@ -2104,6 +2102,9 @@ void NativeA32WindowSession::UpdateScenePresentation() {
   visibility.ExtendGroups = choice != Oot3dNativeGame::ActorDrawDistance::Original &&
                             !Oot3dNativeGame::LiveDrawDistanceNativeGroups().load(std::memory_order_relaxed);
   visibility.NoKokiriFade = graphics.ExtendedDrawDistance;
+  // Game log: the effective draw distance at start and on each change.
+  if (auto line = Oot3dNativeGame::TakeNativeActorVisibilitySettingsLine(visibility, choice))
+    Oot3dNativeGame::WriteGameLog(std::move(*line));
   visibility.Presentation = widescreenProjection.Projection.Presentation;
   visibility.FovMultiplier = graphics.FovMultiplier;
 }

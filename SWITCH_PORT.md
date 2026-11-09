@@ -2219,17 +2219,44 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   native draws only inside their own range, as when the title spawns them. Recommended setting: Farther
   (3x), where the Field cost stays small; the default stays Original until the console check below
   passes (the extension path, written for #69/#74, has not run on the Switch before).
+- **Logs (11/08, after test.16).** test.16's logs could not show the setting (logs24: Hyrule Field draws
+  per pass 15.4, the same as Original in logs20a-e, so the report most likely came from Original
+  [inference]; the user then confirmed Maximum looked right). logs24b (Maximum, new save, walking up
+  to Mido): Hyrule Field draws per pass up to 45 (Original 15-17), so the extension runs on the console.
+  Mido (En_Md) and the Kokiri (En_Ko) appear late by their own distance fade, which the option keeps:
+  `Actor_UpdateAlphaByDistance` sets or clears their targeting flag with the same distance (SoH
+  z_actor.c), so it is game logic, not drawing. Their fairies (En_Elf, flags 0x2000030: "always draw")
+  are drawn at any distance by the game itself. The placed Kokiri bushes (12 En_Kusa, flags 0x80800010,
+  range 1200 + 100 [SoH]) are ordinary extension candidates; whether the 32 nearest or the light budget
+  held them back is not in test.16's logs (the counts below are new).
+  - Game log, at start and on each change of the effective settings (`UpdateScenePresentation`,
+    `TakeNativeActorVisibilitySettingsLine`): `draw_distance: choice=farther multiplier=3 groups=extended
+    kokiri_fade=native (L3+R3 > Video > Draw distance, config/draw_distance)`. `groups=native` with
+    `config/draw_distance_native_groups`; `kokiri_fade=off` only with the PC's F1 option.
+  - `perf.txt`, every window (`TakeNativeActorVisibilityPerfLine`): `actor_visibility: multiplier=3
+    groups=1 walks=75 culled=.. extended=.. candidates=.. capped=.. light_denied=.. denied=..
+    limited_walks=.. invalid_walks=.. peak_lights=..`: culling walks, natively culled actors, culled
+    actors drawn anyway (the extension, or the presented width at Original), extension candidates,
+    candidates past the 32 nearest, selected ones the light budget refused, every refusal, walks with a
+    refusal, walks left native (custom-light draws, a bad arena), and the window's peak light records
+    (of 128).
+  - Removed: the stderr `[actor-visibility]` stats (`OOT3D_ACTOR_VISIBILITY_DIAGNOSTICS`) and
+    `TRIAEVUM_ACTOR_VISIBILITY_BUDGET` lines, which reached no file on the Switch; the perf line carries
+    their counts. The unknown Obj_Mure constant note goes to the game log.
 - Tests: `oot3d_actor_visibility_policy_tests` (multipliers, words, the config file, 2x/3x ranges,
   exclusions, handoff fade) and `oot3d_native_a32_actor_visibility_tests` (each choice's depth with the
   title's state restored, exclusions, the handoff with and without the fade flag, immediate and lens
   draws, no light record, the Kokiri fade only with `NoKokiriFade`, group children only with
-  `ExtendGroups` and inside the extended volume).
+  `ExtendGroups` and inside the extended volume, the perf line's window counts and the settings line
+  only on change).
 - Console check (1 minute): L3+R3 > Video > Draw distance > Farther (3x). Hyrule Field from the Kokiri
   bridge towards the castle: the trees far ahead, and the trees beside them, are drawn and do not appear
   as Link walks; no blink when he comes near them (rings of bushes and rocks still appear near him, as in
   Original). Kokiri Forest: the signs across the village are drawn. Walk into Kokiri Forest and back, save
   the game: no freeze. Back to Original: the old distances return at once. A/B for the tree groups:
-  create `config/draw_distance_native_groups` and restart.
+  create `config/draw_distance_native_groups` and restart. Logs: the game log has `draw_distance:
+  choice=farther multiplier=3`; in Hyrule Field `perf.txt` shows `actor_visibility:` lines with
+  `extended=` above 0 and `peak_lights=` within the arena's 128.
 
 ### FPS: L3+R3 > Video, applied at once (`config/fps60`, 06/11)
 - **Was a bug, not a limit.** "30 FPS" and "60 FPS (interpolated)" both run the game at 30 steps a

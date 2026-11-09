@@ -1,6 +1,7 @@
 #include "oot3d_native_a32_actor_visibility.h"
 
 #include "fast/oot3d/perspective_fov_policy.h"
+#include "oot3d_game_log.h"
 #include "oot3d_native_a32_memory.h"
 
 #include <algorithm>
@@ -226,6 +227,7 @@ void BeginBudgetWalk(GuestState& state, MemoryBus& memory, NativeActorVisibility
     if (!memory.Read32(state.r[0], &v.Arena) || !ReadLightUsage(memory, v.Arena, used)) return;
     v.LightAllocations = used;
     v.PeakLightAllocations = std::max(v.PeakLightAllocations, used);
+    v.WindowPeakLightAllocations = std::max(v.WindowPeakLightAllocations, used);
     std::array<float, 16> matrix{};
     for (uint32_t i = 0; i < matrix.size(); ++i)
         if (!ReadFloat(memory, state.r[0] + kPlayCullingViewProjection + i * 4U, matrix[i])) return;
@@ -268,10 +270,15 @@ void BeginBudgetWalk(GuestState& state, MemoryBus& memory, NativeActorVisibility
         }
     }
     SelectActorExtensions(candidates);
-    for (const auto& candidate : candidates)
-        if (candidate.Selected)
-            if (auto* entry = Reservation(v, static_cast<uint32_t>(candidate.Identity >> 16U)))
-                entry->Selected = true;
+    v.Candidates += candidates.size();
+    for (const auto& candidate : candidates) {
+        if (!candidate.Selected) {
+            ++v.Capped;
+            continue;
+        }
+        if (auto* entry = Reservation(v, static_cast<uint32_t>(candidate.Identity >> 16U)))
+            entry->Selected = true;
+    }
     v.BudgetValid = true;
 }
 
@@ -286,16 +293,7 @@ void EndBudgetWalk(MemoryBus& memory, NativeActorVisibilityState& v) {
             v.Retained.push_back({ActorIdentity(entry.Actor, entry.Id), entry.HandoffFade});
     }
     if (!v.BudgetValid) ++v.BudgetInvalidWalks;
-    if (v.WalkDenied != 0U || !v.BudgetValid) {
-        const auto count = ++v.BudgetLimitedWalks;
-        if ((count & (count - 1U)) == 0U)
-            std::fprintf(stderr, "TRIAEVUM_ACTOR_VISIBILITY_BUDGET walks=%llu epoch=%llu denied=%u "
-                         "valid=%u lights=%u previous=%u peak=%u budget=%u reserve=%u retained=%zu\n",
-                         static_cast<unsigned long long>(count), static_cast<unsigned long long>(v.LightEpoch),
-                         v.WalkDenied, v.BudgetValid ? 1U : 0U, v.LightAllocations,
-                         v.PreviousLightAllocations, v.PeakLightAllocations, kActorLightBudget,
-                         kActorLightAuxiliaryReserve, v.Retained.size());
-    }
+    if (v.WalkDenied != 0U || !v.BudgetValid) ++v.BudgetLimitedWalks;
     v.BudgetWalk = false;
     v.BudgetValid = false;
     v.RemainingLights = 0U;
@@ -305,8 +303,9 @@ bool ApplyBudgetedCulling(GuestState& state, MemoryBus& memory, NativeActorVisib
                          uint8_t nativeState) {
     auto* entry = Reservation(v, state.r[4]);
     uint32_t used = 0U;
-    if (!v.BudgetWalk || !v.BudgetValid || !entry || !entry->Reserved || !entry->Selected ||
-        !ReadLightUsage(memory, v.Arena, used) || !ActorLightBudgetAllows(used, v.RemainingLights)) {
+    const bool selected = v.BudgetWalk && v.BudgetValid && entry && entry->Reserved && entry->Selected;
+    if (!selected || !ReadLightUsage(memory, v.Arena, used) || !ActorLightBudgetAllows(used, v.RemainingLights)) {
+        if (selected) ++v.LightDenied;
         ++v.BudgetDenied;
         ++v.WalkDenied;
         return false;
@@ -354,16 +353,6 @@ void ApplyActorCulling(GuestState& state, MemoryBus& memory, NativeActorVisibili
     const auto volume = visibility.CullingVolumeValid
         ? visibility.CullingVolume
         : PresentedVolume(memory, state.r[7] - kPlayHighHalf, visibility);
-    if (visibility.Diagnostics && visibility.NativeCulled % 4096U == 1U)
-        std::fprintf(stderr, "[actor-visibility] presented=%.4f,%.4f visible=%llu culled=%llu extended=%llu budget_denied=%llu limited_walks=%llu invalid_walks=%llu lights=%u previous=%u peak=%u\n",
-                     volume.Horizontal, volume.Vertical,
-                     static_cast<unsigned long long>(visibility.NativeVisible),
-                     static_cast<unsigned long long>(visibility.NativeCulled),
-                     static_cast<unsigned long long>(visibility.Extended),
-                     static_cast<unsigned long long>(visibility.BudgetDenied),
-                     static_cast<unsigned long long>(visibility.BudgetLimitedWalks),
-                     static_cast<unsigned long long>(visibility.BudgetInvalidWalks),
-                     visibility.LightAllocations, visibility.PreviousLightAllocations, visibility.PeakLightAllocations);
     if (!Extends(volume)) return;
     uint16_t id = 0U;
     ActorCullingSample sample;
@@ -410,9 +399,12 @@ void AssertObjMureDistances(NativeActorVisibilityState& visibility) {
         if (bits == wanted) continue;
         if (bits != std::bit_cast<uint32_t>(native) &&
             bits != std::bit_cast<uint32_t>(native * kExtendedActorDistanceMultiplier)) {
-            if (!visibility.ReportedUnknownConstants)
-                std::fprintf(stderr, "[actor-visibility] Obj_Mure distance %08x at %08x is not the EUR value\n",
-                             bits, address(i));
+            if (!visibility.ReportedUnknownConstants) {
+                char line[96];
+                std::snprintf(line, sizeof(line), "actor_visibility: Obj_Mure distance %08x at %08x is not the EUR value",
+                              bits, address(i));
+                WriteGameLog(line);
+            }
             visibility.ReportedUnknownConstants = true;
             return;
         }
@@ -480,6 +472,43 @@ void ResetNativeActorVisibilityAfterStateLoad(NativeActorVisibilityState& visibi
     visibility.Retained.clear();
 }
 
+std::string TakeNativeActorVisibilityPerfLine(NativeActorVisibilityState& v) {
+    const auto& start = v.WindowStart;
+    char line[320];
+    const auto delta = [](uint64_t now, uint64_t then) { return static_cast<unsigned long long>(now - then); };
+    std::snprintf(line, sizeof(line),
+                  "actor_visibility: multiplier=%.0f groups=%u walks=%llu culled=%llu extended=%llu candidates=%llu "
+                  "capped=%llu light_denied=%llu denied=%llu limited_walks=%llu invalid_walks=%llu peak_lights=%u\n",
+                  static_cast<double>(v.DistanceMultiplier), v.ExtendGroups ? 1U : 0U, delta(v.Walks, start.Walks),
+                  delta(v.NativeCulled, start.NativeCulled), delta(v.Extended, start.Extended),
+                  delta(v.Candidates, start.Candidates), delta(v.Capped, start.Capped),
+                  delta(v.LightDenied, start.LightDenied), delta(v.BudgetDenied, start.BudgetDenied),
+                  delta(v.BudgetLimitedWalks, start.BudgetLimitedWalks),
+                  delta(v.BudgetInvalidWalks, start.BudgetInvalidWalks), v.WindowPeakLightAllocations);
+    v.WindowStart = {v.Walks,       v.NativeCulled, v.Extended,           v.Candidates,        v.Capped,
+                     v.LightDenied, v.BudgetDenied, v.BudgetLimitedWalks, v.BudgetInvalidWalks};
+    v.WindowPeakLightAllocations = 0U;
+    return line;
+}
+
+std::optional<std::string> TakeNativeActorVisibilitySettingsLine(NativeActorVisibilityState& v,
+                                                                 ActorDrawDistance choice) {
+    const NativeActorVisibilityState::LoggedSettings now{static_cast<uint8_t>(choice), v.DistanceMultiplier,
+                                                         v.ExtendGroups, v.NoKokiriFade};
+    const auto& logged = v.Logged;
+    if (logged.Choice == now.Choice && logged.DistanceMultiplier == now.DistanceMultiplier &&
+        logged.ExtendGroups == now.ExtendGroups && logged.NoKokiriFade == now.NoKokiriFade)
+        return std::nullopt;
+    v.Logged = now;
+    char line[160];
+    std::snprintf(line, sizeof(line),
+                  "draw_distance: choice=%s multiplier=%.0f groups=%s kokiri_fade=%s "
+                  "(L3+R3 > Video > Draw distance, config/draw_distance)",
+                  ActorDrawDistanceWord(choice), static_cast<double>(v.DistanceMultiplier),
+                  v.ExtendGroups ? "extended" : "native", v.NoKokiriFade ? "off" : "native");
+    return std::string(line);
+}
+
 std::span<const uint32_t> NativeActorVisibilityHookPcs() noexcept {
     return kHookPcs;
 }
@@ -498,6 +527,7 @@ bool ApplyNativeActorVisibilityHook(
         if (ReadLightUsage(memory, state.r[1], used)) {
             visibility.LightAllocations = used + 1U;
             visibility.PeakLightAllocations = std::max(visibility.PeakLightAllocations, used + 1U);
+            visibility.WindowPeakLightAllocations = std::max(visibility.WindowPeakLightAllocations, used + 1U);
         }
         return true;
     }
@@ -533,6 +563,7 @@ bool ApplyNativeActorVisibilityHook(
         return true;
     case kActorCullingEntry:
         // The culling matrix is fixed for the walk: resolve its view once.
+        ++visibility.Walks;
         visibility.CullingVolume = PresentedVolume(memory, state.r[0], visibility);
         visibility.CullingVolumeValid = true;
         BeginBudgetWalk(state, memory, visibility);
