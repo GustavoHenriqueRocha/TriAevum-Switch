@@ -81,6 +81,7 @@
 #include "oot3d_native_ui_lifecycle_bridge.h"
 #include "oot3d_native_ui_texture_provider.h"
 #include "oot3d_top_screen_ocarina_text_runtime.h"
+#include "oot3d_top_screen_menu_cadence.h"
 #include "oot3d_native_whole_aot_runtime.h"
 #ifdef OOT3D_NATIVE_DIRECT_AOT_PLUGIN
 #include "oot3d_native_direct_aot.h"
@@ -676,6 +677,9 @@ private:
     // full scale at 60 FPS. Changed live through LiveDynamicResolutionSixty.
     Oot3dNativeGame::DynamicResolutionSixtyMode DynamicResolutionSixty =
         Oot3dNativeGame::DynamicResolutionSixtyMode::Dynamic;
+    // config/interp_menu = 1: the TopScreen pause menu's in-between frames
+    // interpolated as before (oot3d_top_screen_menu_cadence.h; A/B).
+    bool MenuInterpolation = false;
   } interpolationPacingOptions;
   Oot3dNativeGame::InterpolationPacingGovernor interpolationPacing;
   // Dynamic resolution of the top-screen scene (render thread).
@@ -884,6 +888,9 @@ private:
     uint64_t NativeReplaysSkipped = 0;
     uint64_t ReducedRefused = 0;
     uint64_t RepeatFallbacks = 0;
+    // In-between frames of the TopScreen pause menu that showed the step
+    // image again (oot3d_top_screen_menu_cadence.h; counted as Other).
+    uint64_t MenuHeld = 0;
     uint64_t Probes = 0;
     // config/pacer_entry_recover (InterpolationPacingStats): failed and
     // entry probes, scene entries, in-between decisions below full in their

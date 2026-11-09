@@ -2663,6 +2663,84 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
   `TexturesOnScreenGoBeforeHudImagesAskedAhead`; standalone build as above), `oot3d_deko3d_backend_tests`
   (`TestMenuArt`). `deko3d.pack` unchanged (no shader change).
 
+### The pause menu at the game's own cadence at 60 FPS (`config/interp_menu`, 11/09, 0.2.1)
+- **Report (0.2.1 candidate, TopScreen, 60 FPS):** "single screen looks great but the menu animates a
+  little janky and doesn't look native".
+- **What a menu frame was (code):** the pause pages are the game's own lower-screen draws, moved onto the
+  upper screen (target and viewport rewrite, `oot3d_native_a32_projection_policy.cpp`), changed by the game
+  30 times a second over a still world. At 60 FPS the picture is one step behind: the step frame is the
+  previous guest frame (`config/interp_exact_step`), the in-between frame a blend at 1/2 of the last two
+  (`oot3d_native_pica_visual_frame.cpp`). Page draws are UI draws: no temporal identity, paired by structure
+  and order only. Blended: matched positions and uniform fades; held at the newer frame: the vertex alpha
+  (u8), the UVs, the pieces that appear; gone: the pieces only in the older frame. So in a page animation
+  the motion ran at 60 and the fades, atlas frames and appearing pieces at 30, and two alike pieces paired
+  by order could swap places for a frame.
+- **Drops at each opening (logs):** logs28 window 4650 (pause opened near frame 4506, a 65 ms render hitch):
+  `step_frames=75 interp_frames=44 interp_dropped=31 hold_2=31 stale_probes=1 level_changes=2`; logs27
+  session 2 window 1050 (23 drops), window 18750 (15). After the first sample with only lower-screen draws
+  the lower screen is drawn for 60 samples (`kept_menu`, `oot3d_native_bottom_screen_skip.h`), the pair
+  goes over, the governor drops, and the full-frame ratio it learnt in that spike holds it until the stale
+  probe (30 decisions, ~1 s; measured after it: 0.87-1.09). The menu opened at 30 and went to 60 inside;
+  each opening also had 2 resyncs (`discontinuities=2`).
+- **Not the cause:** menu textures (logs27/28: `menu pack (…) native first=0` all session; the
+  `native first=9` line is logs26, the build before); page redraw skips (their conditions do not change
+  while a page is up: no steady-state skip).
+- **Fix (`oot3d_top_screen_menu_cadence.h`):** TopScreen at 60 FPS with a pause page owner active (Gear,
+  Items, Map or System, the words that also hide the HUD and route touch to the page): the in-between frame
+  shows the step image again (the dropped frame's path, no replay) without asking the governor. The menu
+  changes 30 times a second, each picture held two refreshes, as the 3DS draws it. The step frames keep the
+  delayed presentation, so entering or leaving the menu neither skips nor repeats a picture. The governor
+  neither decides nor learns these frames (kind `other`): it leaves the menu with the costs it had.
+  Unchanged: 30 FPS, the other UI profiles, gameplay, the file select. One replay less per step in menus.
+- **A/B:** `config/interp_menu` = `1` (read at start; desktop `TRIAEVUM_INTERP_MENU`) interpolates the menu
+  as before.
+- **Log:** perf.txt `menu_held=` (part of `other_frames`): in-between frames of the menu shown as the step
+  image. Expected with a page up for the whole window: `menu_held` ~75, `interp_frames` and
+  `interp_dropped` ~0, `new_fps` ~30; gameplay windows as before (`menu_held=0`).
+- **Still open (no change in 0.2.1):** the host-drawn pieces (stone edges, L/R tab hints, SELECT hint, the
+  HUD's cut) follow the newest guest state at every refresh, while the page is drawn after the top
+  transfer (one step late) and presented one step behind at 60 FPS: at an opening the HUD goes and the
+  edges/hints appear ~2-3 steps (70-100 ms) before the page, at a close the HUD comes back before the page
+  leaves (1-2 steps at 30 FPS). Options: a per-step delay of those pieces matched to the picture's age
+  (game thread, the bridge's edge/hint/HUD state in a small ring; medium, the close and page changes need
+  care), or the page composed in its own step's frame as the frontend screens are
+  (`ComposeTopScreenFrontendFrame`; larger, capture and composition).
+- Tests: `oot3d_top_screen_menu_cadence_tests` (the hold needs TopScreen, 60 FPS, no `interp_menu` and a
+  page owner read from guest memory; each of the four owners, not the backdrop/touch words; the menu's step
+  image is `other`, the governor's and the locked cadence's stay `dropped`; a modelled opening with the
+  logs' cost spike: two cadences without the hold, one picture per step with it, the governor untouched and
+  60 right after), guard.
+- **To check on the console (60 FPS, TopScreen):** open and close the pause menu, switch pages with L/R,
+  move the cursor: the menu moves evenly, as at 30 FPS; perf.txt windows with the menu up show `menu_held`
+  ~75 and `interp_dropped=0`.
+
+### Save/Quit: nothing beside the System page (11/09, 0.2.1)
+- **Report:** "in the pause menu when I click Save or Quit I can still see the button from the last menu
+  to the left, a piece of it."
+- **Cause (code; the quads were not identified on a console):** System was the only pause page drawn in
+  the full (0, 0, 480, 400) viewport (2.1.1's wide predicate, projection 0.8: page X + 40) with nothing over
+  the 40 columns beside it: Gear and World Map use the centred (0, 40, 480, 320) and are clipped there,
+  Items has the stone edge over 0..40, the dungeon Map moves its own left column there. What the System
+  menu draws left of its 320 columns (page X -40..0) showed at top-screen X 0..40; on the 3DS it is off
+  screen. The System menu moves its button groups by per-quad offsets when Save or Quit opens its prompt
+  (its save/options flows) [inferred: which quads]. Not the host pieces: HUD, edges and tab hints are off
+  while System (0x0050A530) is set (`oot3d_native_ui_lifecycle_bridge_tests`).
+- **Fix:** `TopScreenSystemPageRuntime` draws System as the centred pages: viewport (0, 40, 480, 320)
+  before `PauseUi_Draw`, the page's own projection (the 0x0041EE1C upload is not widened during the System
+  draw, `oot3d_native_a32_candidate_dispatch.cpp`), (0, 0, 480, 400) back for the scene pass after. Same
+  placement (page X + 40; touch already used the centred layout), clipped to the page. Deviation from
+  2.1.1, which kept the full width for its Mod Options button (not drawn here;
+  `docs/OOT3D_TOPSCREEN_2_1_1_PORT.md`).
+- **Side effects:** System's draws are now partial-viewport menu draws on deko3d/GL, like the centred
+  pages: nearest sampling at integer scales; an untextured fill over the whole page would cover the whole
+  screen (as Gear's fades do).
+- Tests: `oot3d_top_screen_pause_transaction_tests` (the page viewport before the draw, the scene's after),
+  `oot3d_top_screen_wide_items_runtime_tests` (a page not on top is not widened, Items wrapper unused),
+  guards.
+- **To check on the console:** from the pause menu open the System page (B on a page, or SELECT) and
+  choose Save, then Quit: nothing at the left edge; the System page at the same place, its texts and
+  buttons whole.
+
 ### File select, world textures and grass without pop-in (07/11, after test.10)
 - **Reports (test.10):** the file-select texture still pops from plain to HD on later runs; right after
   loading into an area textures pop in; in Hyrule Field the grass pops in together with the textures.

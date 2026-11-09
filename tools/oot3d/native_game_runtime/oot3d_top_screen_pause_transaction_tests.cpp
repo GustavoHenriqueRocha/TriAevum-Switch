@@ -428,13 +428,19 @@ int main() {
   draw.cpsr = 0x60000010U;
   auto resumedDraw = draw;
   resumedDraw.r[14] = resumedDraw.r[15] = kTopScreenSystemPageBoundary + 4U;
-  const auto viewport = [&]() {
-    return result.pc == 0x002FEABCU && draw.r[0] == 0U && draw.r[1] == 0U &&
-           draw.r[2] == 480U && draw.r[3] == 400U &&
+  // Before the draw the centred page viewport (0, 40, 480, 320): System is
+  // clipped to the lower screen's 320 columns (what it draws beyond them,
+  // a piece of a button left of the Save/Quit prompt, stays off screen).
+  // After the draw the scene pass's full (0, 0, 480, 400) again.
+  const auto viewport = [&](std::uint32_t y, std::uint32_t height) {
+    return result.pc == 0x002FEABCU && draw.r[0] == 0U && draw.r[1] == y &&
+           draw.r[2] == 480U && draw.r[3] == height &&
            draw.r[13] == originalDraw.r[13] - 0x20U;
   };
-  Require(system.Execute(draw, &result, &blocks) && viewport() && !system.Drawing(),
-          "System did not install the full viewport before binding its writer");
+  const auto pageViewport = [&] { return viewport(40U, 320U); };
+  const auto sceneViewport = [&] { return viewport(0U, 400U); };
+  Require(system.Execute(draw, &result, &blocks) && pageViewport() && !system.Drawing(),
+          "System did not install the centred page viewport before binding its writer");
   Require(memory.Read32(0x005043F4U, &value) && value == 9U,
           "System changed the backdrop flag before its redraw");
   draw.r[15] = kTopScreenSystemPageBoundary;
@@ -445,7 +451,7 @@ int main() {
               memory.Read32(0x0050A530U, &value) && value == 2U,
           "System draw has the wrong backdrop/touch/page state");
   draw.r[15] = kTopScreenSystemPageBoundary;
-  Require(system.Execute(draw, &result, &blocks) && viewport() && !system.Drawing() &&
+  Require(system.Execute(draw, &result, &blocks) && sceneViewport() && !system.Drawing() &&
               memory.Read32(0x005043F4U, &value) && value == 9U &&
               memory.Read32(kControllerState, &value) && value == 7U,
           "System failed to restore its native draw state");

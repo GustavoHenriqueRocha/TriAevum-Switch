@@ -169,12 +169,19 @@ compositor sets viewport (0, 0, 480, 400), saves the pause root's
 backdrop skip (0x005043F4) and touch (0x0050AF68), writes 1 and 0, calls
 `PauseUi_Draw` on the gameplay target and restores both values and the
 viewport. `TopScreenSystemPageRuntime` (pause transaction unit) runs the same
-native calls and resumes at 0x00300560. System joins the shared wide
+native calls and resumes at 0x00300560. In 2.1.1 System joins the shared wide
 predicate, so 0x0041EE1C applies the same projection. The page keeps the
 native framebuffer plan rather than PageRedraw's lower-target swap, draws no
 pause edges or tab hints, and its later lower-tail draw uses the Tail
 suppression set. The payload's Mod Options affordance (0x005DCA80,
-0x005DF178) is not drawn; mod settings live in F1.
+0x005DF178) is not drawn; mod settings live in F1. Without it nothing needs
+the margins, so this port draws System as a centred page (deviation, 0.2.1):
+viewport (0, 40, 480, 320) before the draw and the page's own projection
+(0x0041EE1C is not widened while the System draw runs), the same placement
+clipped to the lower screen's 320 columns; the scene pass gets (0, 0, 480,
+400) back after the draw. With the full viewport, what the System menu draws
+left of its screen showed in the 40 columns beside the page (report: a piece
+of a button at the left edge after choosing Save or Quit).
 
 Exits that run guest continuations are conditional: 0x0041E988 leaves the
 graph only while the pause transaction or song text has work, and the page

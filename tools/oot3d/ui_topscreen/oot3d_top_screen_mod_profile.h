@@ -670,7 +670,9 @@ TopScreenPauseTargetPlan ResolveTopScreenPauseCompositionTargetCommand(
     bool pageRedrawActive, bool systemActive) noexcept;
 // 2.1.1 0x005D32A4: widened Items, dungeon Map and System use the full
 // 400-wide viewport; World Map and ordinary pages stay centred. The System
-// compositor sets its viewport explicitly while retaining native targets.
+// compositor (TopScreenSystemPageRuntime) sets its viewport explicitly while
+// retaining native targets: in this port the centred page viewport, clipped
+// to the page (OOT3D_TOPSCREEN_2_1_1_PORT.md).
 void WidenTopScreenPauseTargetForPage(TopScreenPauseTargetPlan &plan,
                                       bool widePage) noexcept;
 

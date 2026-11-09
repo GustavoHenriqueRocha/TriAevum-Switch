@@ -2038,6 +2038,11 @@ void NativeA32WindowSession::Setup() {
         transitionOptions.CarryUnmatched = trimmed(*text) != "0";
       preparedVisualTransition.SetOptions(transitionOptions);
     }
+    // config/interp_menu (TRIAEVUM_INTERP_MENU): "1" interpolates the
+    // TopScreen pause menu at 60 FPS as before; otherwise its in-between
+    // frames show the step image (oot3d_top_screen_menu_cadence.h).
+    if (const auto text = readText("interp_menu", "TRIAEVUM_INTERP_MENU"))
+      options.MenuInterpolation = trimmed(*text) == "1";
     // config/dynamic_resolution (TRIAEVUM_DYNAMIC_RESOLUTION): present = on;
     // optional text = lowest scale (oot3d_native_dynamic_resolution.h).
     if (const auto text =

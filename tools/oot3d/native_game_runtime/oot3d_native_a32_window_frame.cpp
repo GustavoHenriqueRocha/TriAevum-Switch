@@ -1771,6 +1771,9 @@ bool NativeA32WindowSession::RunFrame() {
              // refreshes, so a held image counts there twice).
              << " new_fps=" << ((frames(1) + frames(2) + frames(3)) / seconds)
              << " other_frames=" << frames(0)
+             // Of other_frames: in-between frames of the TopScreen pause
+             // menu that showed the step image (oot3d_top_screen_menu_cadence.h).
+             << " menu_held=" << (current.MenuHeld - previous.MenuHeld)
              << " reduced_refused=" << (current.ReducedRefused - previous.ReducedRefused)
              << " repeat_fallbacks=" << (current.RepeatFallbacks - previous.RepeatFallbacks)
              << " native_replay_skipped=" << (current.NativeReplaysSkipped - previous.NativeReplaysSkipped)
@@ -3993,6 +3996,15 @@ void NativeA32WindowSession::PresentVisualFrame(
             supersededFrames;
         std::vector<Fast::Oot3d::GrassInteractor> frameActors;
         bool suppressTopScreenBackdrop = false;
+        // The TopScreen pause menu at its own cadence: with a page up, this
+        // host frame's in-between frame shows the step image again
+        // (oot3d_top_screen_menu_cadence.h).
+        const bool topScreenMenuHold = Oot3dNativeGame::ResolveTopScreenMenuHold(
+            process.Memory(),
+            {.TopScreenProfile =
+                 launch.UiProfile == Oot3dNativeGame::Oot3dUiProfile::TopScreen,
+             .Interpolation = guestInterpolationEnabled,
+             .MenuInterpolation = interpolationPacingOptions.MenuInterpolation});
         if (topSelection.CompletionId !=
             lastSelectedTopTransferCompletionId) {
           lastSelectedTopTransferCompletionId =
@@ -4053,7 +4065,7 @@ void NativeA32WindowSession::PresentVisualFrame(
           }
         }
         renderStream.Submit([&, topSelection, completedFrame, supersededFrames,
-                             frameActors, suppressTopScreenBackdrop,
+                             frameActors, suppressTopScreenBackdrop, topScreenMenuHold,
                              presentationElapsedSeconds,
                              visualInterpolationAlpha, frameCount = frameCount,
                              guestReferences =
@@ -4089,6 +4101,7 @@ void NativeA32WindowSession::PresentVisualFrame(
         uint64_t nativeReplaysSkippedThisFrame = 0U;
         uint64_t reducedRefusedThisFrame = 0U;
         uint64_t repeatFallbacksThisFrame = 0U;
+        uint64_t menuHeldThisFrame = 0U;
         bool presentedVisualSample = false;
         bool selectedNewVisualFrame = false;
         {
@@ -4389,11 +4402,16 @@ void NativeA32WindowSession::PresentVisualFrame(
           // dropped (the step image again) when the pair would not fit.
           // config/fps60_mode: at the locked 30 every in-between frame is
           // dropped (the step image again); otherwise the per-frame
-          // governor (which drops single frames only in legacy).
+          // governor (which drops single frames only in legacy). With a
+          // TopScreen pause page up, the step image again without asking
+          // the governor: the menu at its own cadence
+          // (oot3d_top_screen_menu_cadence.h).
+          const auto inBetweenSource = Oot3dNativeGame::ResolveInBetweenSource(
+              cadenceGovernor.DropsInBetween(), topScreenMenuHold);
           auto level =
-              cadenceGovernor.DropsInBetween()
-                  ? Oot3dNativeGame::InterpolatedSampleLevel::Dropped
-                  : interpolationPacing.Decide();
+              inBetweenSource == Oot3dNativeGame::InBetweenSource::Governor
+                  ? interpolationPacing.Decide()
+                  : Oot3dNativeGame::InterpolatedSampleLevel::Dropped;
           if (level == Oot3dNativeGame::InterpolatedSampleLevel::Dropped) {
             if (lastPresentedVisual.has_value() &&
                 picaPresentationScheduler.HasSnapshot(
@@ -4409,7 +4427,11 @@ void NativeA32WindowSession::PresentVisualFrame(
               }
               rendererTiming->VisualReplaySeconds += SecondsSince(started);
               renderFrameKind = static_cast<uint8_t>(
-                  Oot3dNativeGame::RenderFrameKind::Dropped);
+                  Oot3dNativeGame::StepImageFrameKind(inBetweenSource));
+              menuHeldThisFrame +=
+                  inBetweenSource == Oot3dNativeGame::InBetweenSource::MenuStepImage
+                      ? 1U
+                      : 0U;
               presentedVisualSample = true;
             } else {
               level = Oot3dNativeGame::InterpolatedSampleLevel::Full;
@@ -4492,12 +4514,13 @@ void NativeA32WindowSession::PresentVisualFrame(
             supersededFrames != nullptr ? supersededFrames->size() : 0U;
         if (nativeReplaysSkippedThisFrame != 0U ||
             reducedRefusedThisFrame != 0U || repeatFallbacksThisFrame != 0U ||
-            supersededThisFrame != 0U) {
+            menuHeldThisFrame != 0U || supersededThisFrame != 0U) {
           std::lock_guard lock(interpolationPerfMutex);
           interpolationPerf.SupersededFrames += supersededThisFrame;
           interpolationPerf.NativeReplaysSkipped += nativeReplaysSkippedThisFrame;
           interpolationPerf.ReducedRefused += reducedRefusedThisFrame;
           interpolationPerf.RepeatFallbacks += repeatFallbacksThisFrame;
+          interpolationPerf.MenuHeld += menuHeldThisFrame;
         }
         {
           std::lock_guard lock(interpolationPerfMutex);

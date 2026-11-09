@@ -85,7 +85,8 @@ InterpolatedSampleLevelName(InterpolatedSampleLevel level) noexcept {
 
 // What a presented frame drew (perf.txt and the cost the governor learns).
 enum class RenderFrameKind : uint8_t {
-  Other = 0,   // no new sample (a reused snapshot, a menu without guest frame)
+  Other = 0,   // no new sample (a reused snapshot, a menu without guest frame,
+               // the TopScreen pause menu's in-between: oot3d_top_screen_menu_cadence.h)
   Step = 1,    // a new guest frame (its delayed sample, or the direct one)
   Full = 2,    // an in-between sample at full resolution
   Reduced = 3, // an in-between sample at the reduced scale

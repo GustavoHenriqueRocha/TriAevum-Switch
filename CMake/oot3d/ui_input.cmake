@@ -233,6 +233,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 set_property(TARGET oot3d_top_screen_pause_transaction_tests PROPERTY FOLDER Tests)
 
+# TopScreen pause menu at 60 FPS: in-between frames hold the step image while a
+# pause page is up (oot3d_top_screen_menu_cadence.h).
+add_executable(oot3d_top_screen_menu_cadence_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_top_screen_menu_cadence_tests.cpp)
+target_link_libraries(oot3d_top_screen_menu_cadence_tests PRIVATE
+    oot3d_ui_topscreen oot3d_native_a32_process)
+target_compile_options(oot3d_top_screen_menu_cadence_tests PRIVATE "${WARNING_OVERRIDE}")
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_compile_definitions(oot3d_top_screen_menu_cadence_tests PRIVATE NOMINMAX)
+    set_property(TARGET oot3d_top_screen_menu_cadence_tests PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+set_property(TARGET oot3d_top_screen_menu_cadence_tests PROPERTY FOLDER Tests)
+
 add_executable(oot3d_top_screen_item_description_runtime_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_top_screen_item_description_runtime.cpp
     tools/oot3d/native_game_runtime/oot3d_top_screen_item_description_runtime_tests.cpp)

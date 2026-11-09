@@ -348,8 +348,9 @@ inline constexpr std::int32_t kGlWidescreenCornerHeight = 40; // rows
 // The draw is a piece of the relocated bottom screen (GlRelocatedMenuDraw)
 // and the internal scale is an integer >= 2. Applies in both domains: the
 // name entry (keyboard and header, same seam) comes in the Ui domain, as do
-// the Game Over panels and the centered pause pages; HUD, Items, Map and
-// System cover the full width and stay linear.
+// the Game Over panels, the centered pause pages and System (drawn as a
+// centered page); HUD, Items and the dungeon Map cover the full width and
+// stay linear.
 [[nodiscard]] inline bool GlRelocatedMenuNearestSampling(
     const GlWidescreenDrawEvidence& evidence, float resolutionScale) noexcept {
     const bool integerScale = resolutionScale >= 2.0F - 1.0e-3F &&

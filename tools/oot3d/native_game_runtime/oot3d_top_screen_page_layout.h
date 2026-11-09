@@ -36,7 +36,9 @@ static_assert(kTopScreenCentredPageX * 2U + kTopScreenPageWidthPixels ==
 // Wide pages (2.1.1 0x005D32A4: Items, dungeon Map, System) take the whole
 // viewport (0, 0, 480, 400) and the payload's projection row
 // clip = kTopScreenWidePageScale * x + offset (0x005CACA0), which puts page
-// X on top-screen X 200 * (1 - offset) + x.
+// X on top-screen X 200 * (1 - offset) + x. The System redraw of this port
+// (TopScreenSystemPageRuntime) is drawn as a centred page instead: same
+// placement, clipped to the page's 320 columns.
 inline constexpr float kTopScreenWidePageScale = -0.005F;      // 0xBBA3D70A
 inline constexpr float kTopScreenWidePageOffset = 0.8F;        // 0x3F4CCCCD
 inline constexpr float kTopScreenWideItemsOffset = 0.6F;       // 0x3F19999A

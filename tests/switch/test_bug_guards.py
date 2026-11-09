@@ -28,6 +28,31 @@ class Guard:
 
 
 GUARDS = [
+    # --- 11/09 (0.2.1): the TopScreen pause menu at 60 FPS, and a button piece beside Save/Quit ---
+    Guard("the TopScreen pause menu animated janky at 60 FPS (interpolated positions with stepped alpha, "
+          "~1 s of governor drops after each opening): with a pause page up the in-between frame shows "
+          "the step image without asking the governor",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'const bool topScreenMenuHold = Oot3dNativeGame::ResolveTopScreenMenuHold\(.*?'
+          r'ResolveInBetweenSource\(\s*cadenceGovernor\.DropsInBetween\(\), topScreenMenuHold\);\s*'
+          r'auto level =\s*inBetweenSource == Oot3dNativeGame::InBetweenSource::Governor\s*'
+          r'\? interpolationPacing\.Decide\(\)',
+          "oot3d_top_screen_menu_cadence_tests",
+          forbid=r'cadenceGovernor\.DropsInBetween\(\)\s*\?\s*Oot3dNativeGame::InterpolatedSampleLevel::Dropped'
+                 r'\s*:\s*interpolationPacing\.Decide\(\)'),
+    Guard("a piece of a button showed left of the Save/Quit prompt: System is drawn in the centred page "
+          "viewport (0, 40, 480, 320), clipped to the lower screen's 320 columns",
+          "tools/oot3d/native_game_runtime/oot3d_top_screen_pause_transaction.cpp",
+          r'const bool beforeDraw = mPhase == 2U;\s*state\.r\[0\] = 0U;\s*'
+          r'state\.r\[1\] = beforeDraw \? kTopScreenCentredPageX : 0U;\s*state\.r\[2\] = 480U;\s*'
+          r'state\.r\[3\] = beforeDraw \? kTopScreenPageWidthPixels : kTopScreenPresentedWidthPixels;',
+          "oot3d_top_screen_pause_transaction_tests"),
+    Guard("a piece of a button showed left of the Save/Quit prompt: the System draw keeps the page's own "
+          "projection (the wide one would squeeze the page into the centred viewport)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_candidate_dispatch.cpp",
+          r'if \(dispatch\.SystemPage != nullptr && dispatch\.SystemPage->Drawing\(\)\)\s*'
+          r'return dispatch\.WideItems->ExecutePageProjection\(state, false\);',
+          "oot3d_top_screen_wide_items_runtime_tests"),
     # --- 11/09 (issue #5): a forwarder closed the game without a word, and nothing recorded how it started ---
     Guard("a launch that ended before the window left the previous run's boot-status: status=starting with "
           "the launch environment is written before anything else in main (issue #5)",

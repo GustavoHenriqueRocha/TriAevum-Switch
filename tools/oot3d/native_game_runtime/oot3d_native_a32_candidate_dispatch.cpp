@@ -39,14 +39,11 @@ bool ExecuteTopScreenUiSourcePortBlock(
   // (0x005D19F8, 0x005D1CBC, 0x005D1BE8).
   if (dispatch.WideItems != nullptr) {
     if (pc == Oot3dNativeGame::kTopScreenPageProjectionUploadCall) {
-      if (dispatch.SystemPage != nullptr && dispatch.SystemPage->Drawing()) {
-        try {
-          return dispatch.WideItems->ExecutePageProjection(state, true);
-        } catch (...) {
-          dispatch.SystemPage->Cancel();
-          throw;
-        }
-      }
+      // System draws in the centred page viewport with the page's own
+      // projection (TopScreenSystemPageRuntime::Execute): never widened,
+      // even with another page's word still set.
+      if (dispatch.SystemPage != nullptr && dispatch.SystemPage->Drawing())
+        return dispatch.WideItems->ExecutePageProjection(state, false);
       Oot3dNativeGame::TopScreenPauseDrawInputs inputs;
       if (!Oot3dNativeGame::ReadTopScreenPauseDrawInputs(memory, &inputs)) {
         return false;

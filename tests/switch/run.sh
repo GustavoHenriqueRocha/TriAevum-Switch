@@ -78,6 +78,7 @@ UNIT_TESTS=(
     oot3d_texture_pack_scale_tests
     oot3d_top_screen_hud_touch_tests
     oot3d_top_screen_mod_profile_tests
+    oot3d_top_screen_menu_cadence_tests
     oot3d_top_screen_pause_transaction_tests
     oot3d_top_screen_texture_overrides_tests
     oot3d_top_screen_wide_items_runtime_tests
