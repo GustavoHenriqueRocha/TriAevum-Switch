@@ -1010,6 +1010,9 @@ void NativeA32WindowSession::Setup() {
   submissionQueue.SetSubRectDisplayTransfers(titleProfile.SubRectDisplayTransfers);
   picaFrontend.SetInPlaceDrawPackets(offload.Capture);
   picaPresentationScheduler.SetMoveFreeFinish(offload.Plan);
+  // config/async_status_writes: heartbeat do boot-status.txt por uma thread
+  // de serviço (oot3d_native_status_file.h).
+  asyncStatusWrites = Oot3dNativeGame::ReadNativeAsyncStatusWrites();
 #if defined(__SWITCH__)
   if (offload.Perf) {
     perfWriter.emplace("sdmc:/switch/oot3dre/logs/perf.txt");

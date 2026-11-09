@@ -1859,6 +1859,30 @@ bool NativeA32WindowSession::RunFrame() {
                << " perf_dropped=" << perfWriter->Dropped();
           previousWriterNanoseconds = writer;
         }
+        // Heartbeat do boot-status.txt (config/async_status_writes): ms que
+        // esta thread gastou nele na janela (formatar + postar, ou a troca
+        // inteira no SD com a chave em 0), ms de escrita da thread de serviço
+        // e do escritor do hitches.txt (a thread de render só enfileira).
+        {
+          static uint64_t previousStatusGame = 0U, previousStatusWriter = 0U,
+                          previousHitchWriter = 0U;
+          const auto status = Oot3dNativeGame::SwitchBootStatusFile().Stats();
+          perf << " status_async=" << (asyncStatusWrites ? 1 : 0)
+               << " status_updates=" << statusUpdates
+               << " status_game_ms="
+               << static_cast<double>(statusGameNanoseconds - previousStatusGame) / 1.0e6
+               << " status_writer_ms="
+               << static_cast<double>(status.WriteNanoseconds - previousStatusWriter) / 1.0e6
+               << " status_superseded=" << status.Superseded;
+          previousStatusGame = statusGameNanoseconds;
+          previousStatusWriter = status.WriteNanoseconds;
+          if (hitchWriter.has_value()) {
+            const uint64_t hitch = hitchWriter->WriteNanoseconds();
+            perf << " hitch_writer_ms="
+                 << static_cast<double>(hitch - previousHitchWriter) / 1.0e6;
+            previousHitchWriter = hitch;
+          }
+        }
         previousCapture = capture;
         previousGuestInPica = phaseTiming.GuestInsidePicaSubmitSeconds;
         previousPicaSubmit = picaSubmitSeconds;
@@ -1934,10 +1958,22 @@ bool NativeA32WindowSession::RunFrame() {
         gSwitchPicaGeometryRegistryEntries != 0U;
     // Also every 600 host frames: without the geometry cache (deko3d) the
     // file stayed at host_frames=1/guest_frames=1, which read as a stalled
-    // guest (24/10, p5 on the console).
+    // guest (24/10, p5 on the console). config/async_status_writes: a troca
+    // do arquivo no SD (30-80 ms aqui, todo present 600k-3 no hitches.txt)
+    // roda numa thread de serviço; esta thread só formata o texto.
     if (runFrameCount == 1U || gSwitchPicaGeometryCacheObserved ||
         runFrameCount % 600U == 0U) {
-      WriteSwitchBootStage("runtime_running");
+      const auto statusStart = std::chrono::steady_clock::now();
+      if (asyncStatusWrites) {
+        PostSwitchBootStage("runtime_running");
+      } else {
+        WriteSwitchBootStage("runtime_running");
+      }
+      statusGameNanoseconds += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - statusStart)
+              .count());
+      ++statusUpdates;
     }
   }
 #endif

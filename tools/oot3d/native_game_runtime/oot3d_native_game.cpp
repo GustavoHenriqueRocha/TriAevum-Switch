@@ -30,27 +30,25 @@
 
 #if defined(__SWITCH__)
 #include "oot3d_whole_aot_gcov.h"
+#include "oot3d_native_status_file.h"
 void PlaceSwitchMainThread(); // oot3d_switch_threads.cpp
 #endif
 
 namespace {
 
 #if defined(__SWITCH__)
-constexpr const char* kSwitchBootStatusPath =
-    "sdmc:/switch/oot3dre/boot-status.txt";
-
+// Pelo escritor do boot-status.txt do processo (oot3d_native_status_file.h):
+// um heartbeat ainda na fila da thread de serviço é descartado, nunca escrito
+// por cima de completed/failed.
 void WriteSwitchBootStatus(const char* status, const std::string& detail = {}) {
-    std::ofstream stream(kSwitchBootStatusPath, std::ios::trunc);
-    if (!stream) {
-        return;
-    }
-    stream << "status=" << status << '\n'
-           << "whole_aot_functions=12419\n"
-           << "host_boundaries=3\n"
-           << "residual_a32=0\n";
+    std::string text = std::string("status=") + status + '\n' +
+                       "whole_aot_functions=12419\n"
+                       "host_boundaries=3\n"
+                       "residual_a32=0\n";
     if (!detail.empty()) {
-        stream << "detail=" << detail << '\n';
+        text += "detail=" + detail + '\n';
     }
+    (void)Oot3dNativeGame::SwitchBootStatusFile().WriteNow(text);
 }
 #endif
 
