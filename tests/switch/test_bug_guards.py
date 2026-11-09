@@ -1100,6 +1100,55 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
           r'ReadTopScreenWidePageState\(memory, &page\) &&\s+page\.ItemsActive\s+'
           r'\? NativeA32TouchPresentation::TopScreenWideItemsPage'),
+    # --- 04/11: tela de toque do Switch no deko3d (HUD, mira por arraste, menu L3+R3) ---
+    # Sem janela SDL (deko3d) o driver do SDL do Switch não reporta dedos: o toque
+    # vem do HID da libnx, cada dedo ganha dono quando encosta (página nativa,
+    # controle do HUD, mira, menu) e só o perfil TopScreen tem toque no HUD.
+    Guard("toque do Switch morto no deko3d: o SDL sem janela não reporta dedos (ler o HID da libnx)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'hidGetTouchScreenStates\(states\.data\(\), states\.size\(\)\)',
+          "oot3d_top_screen_hud_touch_tests (TestTracker)",
+          forbid=r'SDL_AddEventWatch\(&ObserveSwitchTouchEvent'),
+    Guard("o toque que abriu o app (histórico do HID anterior ao início) virava aperto",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'touch\.Started = true;\s+while \(const auto \*state = nextSample\(\)\)\s+'
+          r'touch\.LastSample = state->sampling_number;\s+return;'),
+    Guard("toque no HUD fora do perfil TopScreen (título genérico, SM3DL) ou com página/menu aberto",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'const bool hudTouchEligible =\s+topScreenUiProfile && !nativeFrontendTouchEnabled && !hostGuiVisible;'
+          r'.*?frame\.Hid\.Buttons \|= switchTouch\.HudButtons;'),
+    Guard("toque no HUD testado contra o HUD do quadro anterior (primitivas GameplayHud)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'lastTopScreenPrimitivesBySubsystem\[static_cast<\s+std::size_t>\(oot3d::ui::UiSubsystem::GameplayHud\)\],'
+          r'\s+WidescreenMenuCornersActive\(\),'),
+    Guard("dono do dedo decidido ao encostar: dedo fora de controle não aperta, dedo do HUD não mira, uma mira só",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch.cpp",
+          r'if \(!finger\.Active \|\| finger\.Owner != TopScreenTouchOwner::Unassigned\) \{\s+continue;\s+\}'
+          r'.*?if \(finger\.Control != TopScreenHudTouchControl::None\) \{\s+finger\.Owner = TopScreenTouchOwner::Hud;'
+          r'.*?\} else if \(context\.AimEnabled && !aimOwned\) \{',
+          "oot3d_top_screen_hud_touch_tests (TestAimOwnership, TestMenuOwnership)"),
+    Guard("mira por arraste tomando a posse da mira (no Automatic o giroscópio físico continua a base, o toque só soma)",
+          "tools/three_ds/input/three_ds_input.cpp",
+          r'const float pitch = result\.Gyroscope\[0\] \+ touch\.PitchDegreesPerSecond;\s+'
+          r'const float yaw = result\.Gyroscope\[1\] \+ touch\.YawDegreesPerSecond;',
+          "oot3d_top_screen_hud_touch_tests (TestAimThroughMotionSources)"),
+    Guard("oot3d_controls.json antigo (sem aim.touch_*) não carregava: as chaves novas são opcionais",
+          "tools/oot3d/native_game_runtime/oot3d_native_control_config.cpp",
+          r'aim\.value\("touch_enabled", parsed\.TouchAimEnabled\);.*?'
+          r'aim\.value\("touch_degrees_per_pixel", parsed\.TouchAimDegreesPerPixel\);',
+          "oot3d_native_a32_input_tests"),
+    Guard("menu L3+R3 sem toque no deko3d (ImGui sem backend de plataforma): o dedo do menu é mouse de toque",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'FeedHostMenuTouch\(touchScreen\.MenuGesture, switchTouch\);',
+          "oot3d_host_menu_touch_tests"),
+    Guard("X da barra de título (17 px) não fechava o menu por toque: folga de toque 16 px e ímã de 24 px em 720p",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'sample\.TapSlop = 16\.0F \* unit;.*?sample\.SnapRadius = 24\.0F \* unit;',
+          "oot3d_host_menu_touch_tests (TestQuickTap, TestTapOnCloseButton)"),
+    Guard("fechar o menu L3+R3 pelo X deixava a navegação do ImGui pelo controle ligada",
+          "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
+          r'Oot3d::DebugMenuOpenFlag\(\)\.store\(false, std::memory_order_relaxed\);\s+'
+          r'io\.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;'),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar
