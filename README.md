@@ -88,7 +88,17 @@ too. Get them yourself from the mod's page; the port includes and downloads none
 - Mods apply in folder name order; when two replace the same file, the later folder wins.
 - **Turn them off:** L3+R3 → Game → Gameplay → **Mods (RomFS)**. It applies at the next start.
 - Texture-only mods (e.g. Art-Accurate Link, PNG files for Citra/Azahar) are texture packs: copy
-  them into `switch/oot3dre/textures/` instead (see HD textures above).
+  them into `switch/oot3dre/textures/` instead (see HD textures above). With the HD pack installed
+  too, the first file in name order wins, so the pack's `LINK` folder beats a mod's loose files:
+  put the mod in a folder whose name starts with `0`, e.g. `textures/0-art-accurate-link/`.
+- **N64 models** (ModLoader64 `.pak`/`.zobj`, e.g. Skilar's TP Link): convert them with
+  [Ocarina ReTuned](https://github.com/OTPR26/Ocarina-ReTuned/blob/main/documentation/Player-models.md)
+  on a PC (Settings → Mods → PAK Importer, after preparing your dump there). It writes
+  `player-models/<id>/converted.zar` in its data folder (`%LOCALAPPDATA%\Ocarina ReTuned` on Windows,
+  `~/Library/Application Support/Ocarina ReTuned` on macOS, `~/.local/share/Ocarina ReTuned` on
+  Linux; the most recently modified `<id>` folder is your last import). Copy it as
+  `switch/oot3dre/mods/<name>/romfs/actor/zelda_link_boy_new.zar` for adult Link or
+  `zelda_link_child_new.zar` for child Link.
 - **What does not work:** code patches (`code.ips`, `exefs/`: the game's code is compiled ahead of
   time) and mods that add new files the game does not have. They are skipped and the log says why.
 - **Save states** made with other mods (or with none) do not load; in-game saves are not affected.

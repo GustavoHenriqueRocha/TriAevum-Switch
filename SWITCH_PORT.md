@@ -569,6 +569,18 @@ content (the Link mods on GameBanana are CC BY-NC-ND 4.0).
   for a moment; `logs/oot3d_native_game.log` has the summary line and `overlay active (26 metadata
   patches`; Link has the new model. Restart: `overlay reused`. Turn the option off, restart: no
   `romfs mods:` overlay line and `romfs_mods=off` in `boot-status.txt`.
+- **N64 models (ReTuned's PAK Importer, not ported):** Ocarina ReTuned converts ModLoader64
+  `.pak`/`.zobj` human-rig models by rewriting the body `.cmb` inside `actor/zelda_link_boy_new.zar`
+  or `zelda_link_child_new.zar` (`tools/native/player_models/`, Python + NumPy; no native hooks).
+  Its code has no licence (only its vendored F3DEX2/N64 texture readers are MIT), so the port ships
+  none of it; the README sends players to ReTuned's own importer and has them copy its
+  `player-models/<id>/converted.zar` into a mod folder under the archive's name. A replace-only
+  mod, so nothing else is needed here.
+- **Texture-only Link mods** (Art-Accurate Link, Most Faithful Link, Enhanced HD Link) are Citra
+  packs with no `pack.json`, whose defaults (legacy hash, flipped PNGs, no mips) equal the 4K pack's
+  `pack.json`. The index keeps the first file per hash in sorted path order (`IndexTexturePack`,
+  `try_emplace`), so the pack's `LINK/` beats loose files and lowercase folders; a folder starting
+  with `0` sorts first (checked with `std::sort` over `std::filesystem::path`).
 
 ## How to build (Linux)
 
