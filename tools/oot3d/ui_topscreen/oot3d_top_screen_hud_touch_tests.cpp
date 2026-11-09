@@ -392,6 +392,23 @@ void TestAimOwnership() {
   Require(Near(result.AimDeltaX, -10) && Near(result.AimDeltaY, 30),
           "the next finger on empty screen aims");
 
+  // Uma mira por vez: um segundo dedo que pousa em tela vazia enquanto o
+  // primeiro mira fica ignorado, mesmo se arrastar.
+  tracker.Reset();
+  tracker.ObserveSample(land);
+  (void)ResolveTopScreenTouchPoll(tracker, aim, true);
+  Require(HitTestTopScreenHudTouch(targets, 640, 600) ==
+              TopScreenHudTouchControl::None,
+          "the second finger lands on empty screen");
+  const std::array second{At(1, 640, 360), At(6, 640, 600)};
+  tracker.ObserveSample(second);
+  (void)ResolveTopScreenTouchPoll(tracker, aim, true);
+  const std::array secondMoved{At(1, 640, 360), At(6, 700, 640)};
+  tracker.ObserveSample(secondMoved);
+  result = ResolveTopScreenTouchPoll(tracker, aim, true);
+  Require(result.AimDeltaX == 0 && result.AimDeltaY == 0,
+          "a second finger on empty screen never aims");
+
   // Um dedo do HUD nunca mira.
   tracker.Reset();
   const std::array tapX{At(5, CenterX(x), CenterY(x))};
