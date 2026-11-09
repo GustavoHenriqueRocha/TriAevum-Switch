@@ -94,4 +94,31 @@ do `main` (5acf8138 … 4b88e124, 24 commits; 77 arquivos, +12266/−1032 desde 
   2. Eden no notebook com a mesma NRO e injeção de notas erradas (`lab/script.jsonl`);
   3. oráculo Azahar com o 3.0 original, para saber se o bug é do mod;
   4. build desktop com timeline.
-- Trazer para a deko3d as correções do 3.0 do main: decisão do Gustavo.
+- Trazer para a deko3d as correções do 3.0 do main: decisão do Gustavo. Cinco delas estão na
+  branch `pr/topscreen-30-hud-fixes` (ver abaixo).
+
+## Correções do 3.0 portadas sem a série 3.0 (08/11, JohnUzoka/TriAevum-Switch)
+
+As cinco foram adaptadas à mão para o HUD 2.1.1 desta árvore (autoria do coccofresco, `-x`), sem
+trazer a série 3.0 (5acf8138 … f181ec69):
+- fc5ddfa6: só o alfa da cruz do D-pad (0x005CCF6C); View Model e seletor do D-pad não existem aqui.
+- 5da8aa7c: anel do A a 32 px, texto a 0,68, texto escondido no modo de HUD alternativo 1/4; o alvo
+  continua (288, 24), sem a opção de grupo de botões.
+- d8ffc8f1: ícone e munição do B copiados no Quest draw e desenhados acima do círculo do B. A janela
+  de captura é (248, 24), o B do layout Normal; no Restoration (B em 358, 68) nada é capturado.
+- 6f478bcc: só o portão de HUD em cutscene (Gameplay_InCsMode). O salto do título em 0x0042B9F4 e o
+  desvio do escurecimento em 0x0041EB40 ficaram de fora: são saídas novas do whole-AOT no caminho da
+  pausa que o upstream não rodou no build de produto (o ac63eb21 conserta o primeiro no mesmo dia).
+- 94b293ea: ícones e marcas do D-pad sem faixa própria tomam o alfa do grupo.
+
+Leitura de código para o bug do Prelude (sem reprodução, sem suporte de console):
+- Nenhuma das cinco toca nos portões do START (`TopScreenPauseTransactionRuntime::ReadOpenGates` e
+  `Begin`, `oot3d_top_screen_pause_transaction.cpp`). O único commit do upstream nesse arquivo desde a
+  base comum é o cf84b46b (#80, SELECT abre Salvar/Sair), que a deko3d já tem como 06885227.
+- O 6f478bcc acrescenta um motivo para esconder o HUD (modo cutscene) e não tira nenhum. Se um estado
+  de cutscene continuar vivo depois da aula, o HUD continua escondido.
+- O 5da8aa7c só muda o tamanho do que o ramo x 330–398 / y>150 leva para (288, 24): um ícone do B
+  nessa região ainda cairia em cima do A, agora com 32 px.
+- O d8ffc8f1 só copia o B com o portão do HUD aberto, então não faz nada no estado relatado.
+
+Conclusão: o PR não corrige o bug do Prelude of Light; o gatilho segue em aberto.
