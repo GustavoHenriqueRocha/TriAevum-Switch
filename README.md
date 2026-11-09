@@ -72,6 +72,30 @@ HenrikoMagnifico's texture pack replaces the world, character and HUD textures w
 Higher resolution costs some GPU time and memory (about 10–50 MB of textures per area at 2x): if a busy
 area slows down, compare the same spot with HD textures off, using the performance overlay.
 
+### Mods: Link models and other game files (optional)
+
+Mods made for the 3DS that replace the game's files (Luma's `romfs` folder) work on the Switch
+too. Get them yourself from the mod's page; the port includes and downloads none.
+
+1. Make a folder per mod in `switch/oot3dre/mods/` and put the mod's `romfs` folder in it, e.g.
+   [Vanilla+ Link remodel](https://gamebanana.com/mods/705890) →
+   `switch/oot3dre/mods/vanilla_plus_link/romfs/actor/zelda_link_boy_new.zar` (its `actor` and `misc`
+   folders). For Better Link v3, use its romfs-only variant (without `code.ips`), the same way.
+2. Start the game. The first start with a new or changed mod takes a moment ("Applying the
+   mods..."); `switch/oot3dre/logs/oot3d_native_game.log` lists what was applied, e.g.
+   `romfs mods: 26 files from 1 mod (vanilla_plus_link), 0 ignored`.
+
+- Mods apply in folder name order; when two replace the same file, the later folder wins.
+- **Turn them off:** L3+R3 → Game → Gameplay → **Mods (RomFS)**. It applies at the next start.
+- Texture-only mods (e.g. Art-Accurate Link, PNG files for Citra/Azahar) are texture packs: copy
+  them into `switch/oot3dre/textures/` instead (see HD textures above).
+- **What does not work:** code patches (`code.ips`, `exefs/`: the game's code is compiled ahead of
+  time) and mods that add new files the game does not have. They are skipped and the log says why.
+- **Save states** made with other mods (or with none) do not load; in-game saves are not affected.
+- A mod's new materials may draw a little slower at first: the console cannot compile shaders, so
+  missing ones use a slower general shader (they are saved in `logs/deko3d_shaders/` for the next
+  shader pack).
+
 # TriAevum — Echoes of Time
 
 A native PC AOT recompilation of *The Legend of Zelda: Ocarina of Time 3D*,

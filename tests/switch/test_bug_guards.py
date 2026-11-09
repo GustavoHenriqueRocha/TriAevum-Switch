@@ -28,6 +28,43 @@ class Guard:
 
 
 GUARDS = [
+    # --- 11/09: RomFS mods (mods/<name>/romfs/, config/no_romfs_mods; upstream 9c90abb9 overlay) ---
+    # Absent a mods folder (or with the option off) the launch must stay 0.2.0's; a bad overlay
+    # starts the game without mods instead of the fatal error dialog.
+    Guard("RomFS mods: a rejected overlay closed the game (upstream throws; the Switch starts without mods)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'if \(!hostConfig\.RomFsOverlay\) \{\s*#if defined\(__SWITCH__\).*?'
+          r'WriteGameLog\("romfs mods: overlay rejected, starting without mods: "',
+          "oot3d_native_a32_romfs_overlay_tests"),
+    Guard("RomFS mods: --romfs-overlay must keep sdmc:/ paths (std::filesystem::absolute mangles them)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game_bootstrap.cpp",
+          r'arg == "--romfs-overlay" && index \+ 1 < argc\) \{\s*#if defined\(__SWITCH__\)\s*//[^\n]*\n\s*'
+          r'launch\.RomFsOverlayPath =\s*std::filesystem::path\(argv\[\+\+index\]\)\.lexically_normal\(\);.*?'
+          r'#if !defined\(__SWITCH__\)\s*//.*?"RomFS overlay does not exist: "'),
+    Guard("RomFS mods: --romfs-overlay only when the start-up composed an overlay, before argv is handed over",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'PrepareRomFsMods\(\{.*?if \(!romFsOverlayArgument\.empty\(\)\) \{\s*'
+          r'homebrewArgv\.push_back\(const_cast<char\*>\("--romfs-overlay"\)\);.*?if \(argc <= 1\) \{',
+          "oot3d_romfs_mods_tests (TestStartup)"),
+    Guard("RomFS mods: off or no mods folder must not scan, compose or pass an overlay",
+          "tools/oot3d/native_game_runtime/oot3d_romfs_mods.cpp",
+          r'if \(!ReadRomFsModsEnabled\(startup\.ConfigDirectory\)\) \{.*?return result;\s*\}.*?'
+          r'if \(!fs::is_directory\(startup\.ModsDirectory, error\)\) \{.*?return result;\s*\}',
+          "oot3d_romfs_mods_tests (TestStartup)"),
+    Guard("RomFS mods: rename over an existing overlay/receipt gives EEXIST on Horizon; no canonical paths with sdmc:/",
+          "tools/oot3d/native_game_runtime/oot3d_romfs_mods.cpp",
+          r'fs::remove\(to, error\);\s*error\.clear\(\);\s*fs::rename\(from, to, error\);.*?'
+          r'fs::remove\(request\.ReceiptPath, ignored\);\s*ReplaceFile\(partial, request\.OverlayPath\);',
+          "oot3d_romfs_mods_tests (TestReceipt)",
+          forbid=r'canonical\(|fs::relative\(|std::filesystem::relative\('),
+    Guard("RomFS mods: the guest's RomFS size and save-state check use the overlaid view",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'file->FileSize = RomFsServiceViewSize\(\);.*?'
+          r'std::make_shared<RomFsBackingFile>\(\s*file->FilePath, mConfig\.RomFsOverlay,',
+          "oot3d_native_a32_romfs_overlay_tests (TestHostServiceView)"),
+    Guard("RomFS mods: a save state made with other mods is refused (RomFS view size)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_state.cpp",
+          r'object->FileSize != RomFsServiceViewSize\(\)\)\) \{.*?made with different RomFS mods'),
     # --- 11/08: coccofresco's SingleScreen 3.0 HUD fixes (upstream 2026-10-17), ported for 0.2.0 ---
     Guard("D-pad cross stayed opaque where 3.0 greys it (fc5ddfa6: 0x005CCF6C, first visible ZR/ZL lane, "
           "else 0.3 with a nested owner)",
@@ -1669,9 +1706,11 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_switch_topscreen_import.cpp",
           r'SwitchConsoleScreen& screen = StartupScreen\("Ocarina of Time 3D - HUD textures"\);',
           forbid=r'SwitchConsoleScreen screen\('),
-    Guard("the start-up console is closed after the HUD step, before SDL/deko3d take the window",
+    Guard("the start-up console is closed after the HUD and RomFS mods steps, before SDL/deko3d take the window",
           "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
           r'if \(!Oot3dNativeGame::RunSwitchTopScreenImport\(\)\)\s+return 0;\s+(//[^\n]*\n\s+)*'
+          r'const Oot3dNativeGame::RomFsModsStartupResult romFsMods = Oot3dNativeGame::PrepareRomFsMods\(\{.*?'
+          r'std::string romFsOverlayArgument =[^\n]*\n\s+(//[^\n]*\n\s+)*'
           r'Oot3dNativeGame::CloseStartupScreen\(\);.*?FinishPendingUpdate'),
     # --- 04/11: TopScreen HUD textures downloaded and built on the console ---
     # The mod (CC BY-NC-ND) cannot ship with a release: the console downloads

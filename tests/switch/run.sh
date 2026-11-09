@@ -37,6 +37,7 @@ UNIT_TESTS=(
     oot3d_landing_roll_tests
     oot3d_native_a32_ctr_fs_tests
     oot3d_native_a32_ctr_host_tests
+    oot3d_native_a32_romfs_overlay_tests
     oot3d_native_a32_second_core_tests
     oot3d_native_a32_input_tests
     oot3d_native_audio_interpolation_tests
@@ -67,6 +68,7 @@ UNIT_TESTS=(
     oot3d_native_ui_lifecycle_bridge_tests
     oot3d_native_ui_texture_provider_tests
     oot3d_rom_import_tests
+    oot3d_romfs_mods_tests
     oot3d_switch_code_pages_tests
     oot3d_switch_guest_window_tests
     oot3d_switch_motion_tests

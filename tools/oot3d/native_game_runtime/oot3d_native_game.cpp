@@ -36,6 +36,9 @@
 #include "oot3d_switch_rom_import.h"
 #include "oot3d_switch_topscreen_import.h"
 #include "oot3d_native_status_file.h"
+#include "oot3d_game_log.h"
+#include "oot3d_native_a32_process_image.h"
+#include "oot3d_romfs_mods.h"
 #include "oot3d_switch_performance.h"
 #include <switch.h>
 // libnx (applet.c, weak, default 0): 1 makes libnx's exit end the application
@@ -54,7 +57,8 @@ void WriteSwitchBootStatus(const char* status, const std::string& detail = {}) {
     std::string text = std::string("status=") + status + '\n' +
                        "whole_aot_functions=12419\n"
                        "host_boundaries=3\n"
-                       "residual_a32=0\n";
+                       "residual_a32=0\n"
+                       "romfs_mods=" + Oot3dNativeGame::RomFsModsStartupState().BootStatus + '\n';
     if (!detail.empty()) {
         text += "detail=" + detail + '\n';
     }
@@ -205,6 +209,31 @@ int main(int argc, char** argv) {
         // the same console as the import.
         if (!Oot3dNativeGame::RunSwitchTopScreenImport())
             return 0;
+        // RomFS mods (oot3d_romfs_mods.h): files in mods/<name>/romfs/
+        // replace the game's own through an overlay over game/romfs.bin.
+        // No mods folder or config/no_romfs_mods: no scan, no argument.
+        const Oot3dNativeGame::RomFsModsStartupResult romFsMods = Oot3dNativeGame::PrepareRomFsMods({
+            "sdmc:/switch/oot3dre/config",
+            "sdmc:/switch/oot3dre/mods",
+            [](std::string* error) -> std::optional<Oot3dNativeGame::RomFsServiceView> {
+                const auto manifest = Oot3dNativeGame::LoadNativeA32ProcessImageManifest(
+                    "sdmc:/switch/oot3dre/game/oot3d_native_process_manifest.json", error);
+                if (!manifest)
+                    return std::nullopt;
+                return Oot3dNativeGame::RomFsServiceView{
+                    manifest->RomFsImagePath, manifest->RomFsImageOffset, manifest->RomFsImageSize};
+            },
+            "sdmc:/switch/oot3dre/game/romfs_mods.o3ro",
+            "sdmc:/switch/oot3dre/game/romfs_mods.json",
+            [] {
+                Oot3dNativeGame::StartupScreen("Ocarina of Time 3D - mods").Show(
+                    "Applying the mods in switch/oot3dre/mods/ to the game's files...\n"
+                    "This happens again only when a mod file changes.\n");
+            }});
+        for (const std::string& line : romFsMods.LogLines)
+            Oot3dNativeGame::WriteGameLog(line);
+        Oot3dNativeGame::RomFsModsStartupState() = {romFsMods.BootStatus, romFsMods.PanelLine};
+        std::string romFsOverlayArgument = romFsMods.Overlay ? romFsMods.Overlay->string() : std::string();
         // The start-up console gives the window back to SDL/deko3d.
         Oot3dNativeGame::CloseStartupScreen();
         // A Mesa built with its Horizon disk cache (see docs) stores compiled
@@ -279,6 +308,11 @@ int main(int argc, char** argv) {
                 homebrewArgv.push_back(const_cast<char*>("--topscreen-hd-textures"));
                 homebrewArgv.push_back(const_cast<char*>("sdmc:/switch/oot3dre/config/topscreen_hd"));
             }
+        }
+        // The overlay the RomFS mods step composed (absent: as before mods).
+        if (!romFsOverlayArgument.empty()) {
+            homebrewArgv.push_back(const_cast<char*>("--romfs-overlay"));
+            homebrewArgv.push_back(romFsOverlayArgument.data());
         }
         if (argc <= 1) {
             argc = static_cast<int>(homebrewArgv.size());

@@ -511,6 +511,65 @@ note is `docs/SAVE_SAFETY.pt-BR.md`; the code is `oot3d_native_a32_ctr_save_safe
   dated folder with the slot's previous `save0N.bin`. The game log has `TRIAEVUM_SAVE_BACKUP`.
   `savedata/` has no `*.triaevum-*` files. After an OTA update, both folders are unchanged.
 
+### RomFS mods: Link models and other asset mods (11/09)
+
+Files the player puts in `sdmc:/switch/oot3dre/mods/<name>/romfs/` replace the game's RomFS files
+of the same path, as Luma's LayeredFS does on a 3DS. Example: Vanilla+ (Link remodel 1.9 by
+HugAMuffin, GameBanana 705890) is `mods/vanilla_plus_link/romfs/actor/*.zar` and
+`mods/vanilla_plus_link/romfs/misc/menu_link.zar` (26 files). The port ships and downloads no mod
+content (the Link mods on GameBanana are CC BY-NC-ND 4.0).
+
+- **Runtime (upstream coccofresco/TriAevum `9c90abb9`):** `oot3d_native_a32_romfs_overlay.{h,cpp}`
+  and its tests, the CTR host hunks (`RomFsServiceViewSize`, `RomFsBackingFile` reads through the
+  overlay), `--romfs-overlay` and the window setup. An O3RO v1 overlay never moves the base bytes:
+  only each replaced file's 16-byte payload offset/size field in the Level-3 file table changes, and
+  the payloads are appended 16-byte aligned after the service view. Every patch carries the
+  original bytes, checked against `game/romfs.bin` when the overlay loads. Upstream's Forge half
+  (Python, downloads) is not taken; nothing under `tools/oot3d/native_a32_runtime` changes.
+- **Switch differences:** `--romfs-overlay` keeps `sdmc:/` paths (like `--controls-config`). An
+  overlay that does not load is not fatal: the game starts without mods and the log says
+  `romfs mods: overlay rejected, starting without mods: ...` (upstream stops with an error).
+- **Composer (`oot3d_romfs_mods.{h,cpp}`):** a start-up step after the HUD texture import. Mod
+  folders apply in name order; a later mod's file wins over an earlier one's (logged as
+  overridden). Paths match the view the import made: a EUR dump keeps its IVFC image (view at
+  0x1000), a USA dump became a converted view at 0 with `message/us`, `misc/us` renamed to `eu`
+  (`us.qm` → `eu.qm`, three hint movies renumbered). A mod path the view lacks is tried under those
+  names, so a mod made for either region works on both. Ignored, with a reason in the log: files the
+  game's RomFS does not have (adding files is not supported), `exefs/` and `*.ips` (the game's code
+  is compiled ahead of time, a code patch cannot apply), files outside `romfs/`, empty files and
+  files over 64 MiB. The output is `game/romfs_mods.o3ro` and its receipt `game/romfs_mods.json`
+  (every file under `mods/` with size and mtime, `romfs.bin`'s size and mtime, the view, and the
+  report): an unchanged start reuses the overlay. `game/romfs.bin` is never written, so the
+  import's start-up check (`ImportIsCurrent`, sizes and receipt) is unaffected.
+- **Option:** L3+R3 > Game > Gameplay > "Mods (RomFS)", `config/no_romfs_mods` (present = off; on
+  by default). It is read at start-up, so a change applies at the next start. Off, or without a
+  `mods/` folder, there is no scan, no overlay and no argument: the launch is 0.2.0's (a leftover
+  overlay is deleted when the folder is gone). Rolling back to 0.2.0's NRO ignores both files.
+- **Log and boot-status:** `romfs mods: 26 files from 1 mod (vanilla_plus_link), 0 ignored`, then
+  `romfs mods: overlay built in ... s (16.1 MB appended, ...)` or `overlay reused`, up to 12 notes
+  (renamed, overridden, ignored files), and the window setup's `romfs mods: overlay active (26
+  metadata patches, ... appended bytes)`. `boot-status.txt` has `romfs_mods=` `off`, `none`,
+  `active:<files>`, `failed` or `rejected`. The panel shows the same summary.
+- **Save states** made with other mods (or none) are refused: the guest-visible RomFS size includes
+  the appended payloads, and the restore checks it (and rolls back).
+- **Shaders:** a mod material whose fragment shader is not in `deko3d.pack` draws with the
+  parametric fallback (slower) and the shader is saved to `logs/deko3d_shaders/`; nothing compiles
+  on the console. Add those shaders to the pack after a console session with the mod.
+- **Memory:** the guest keeps the 3DS's 64 MiB linear heap; mods made for a real 3DS fit by
+  construction.
+- **Real data (host smoke, throwaway):** Vanilla+ 1.9's 26 files over the converted USA view
+  (`canonical-eur-exec/romfs.bin`, offset 0) and over the raw USA IVFC image (`usa-rev1/romfs.bin`,
+  offset 0x1000): 26 metadata patches, 16,857,572 bytes appended, 16,859,300-byte overlay file.
+  All 26 files read back byte-identical through the overlay, and the other 1918 of the 1944 files
+  read back unchanged. Built in 0.02 s and reused in 0.001 s on the PC (the SD card is slower).
+- **Tests:** `oot3d_native_a32_romfs_overlay_tests` (upstream's three), `oot3d_romfs_mods_tests`
+  (replace, two mods on one file, USA paths on both layouts, ignored files, receipt reuse and
+  rebuild, failure, the start-up step), guards `11/09` in `tests/switch/test_bug_guards.py`.
+- **Console check:** copy Vanilla+ as above and start. The first start shows "Applying the mods..."
+  for a moment; `logs/oot3d_native_game.log` has the summary line and `overlay active (26 metadata
+  patches`; Link has the new model. Restart: `overlay reused`. Turn the option off, restart: no
+  `romfs mods:` overlay line and `romfs_mods=off` in `boot-status.txt`.
+
 ## How to build (Linux)
 
 1. devkitPro (`switch-dev switch-sdl2 switch-mesa switch-glad switch-zlib`), `cmake`, Python 3 with `capstone`.
