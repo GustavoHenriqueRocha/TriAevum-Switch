@@ -34,6 +34,10 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
   precedence.
 - **Defaults:** 60 fps interpolation (delete `switch/oot3dre/config/fps60` for 30 fps) and Master Quest
   unlocked from the start (delete `switch/oot3dre/config/unlock_master_quest`).
+- **Gameplay (L3+R3 → Game → Gameplay):** *Landing roll (N64)* (on by default) rolls after a run jump off a
+  ledge as on N64; *Roll dash* (off by default) is Single Screen Experience's Roll Dash: keep A held after
+  a roll and Link dashes. Its dash animations come with the HUD art download below; a game set up with an
+  earlier version is offered the download again at the next start once Roll dash is on.
 - **HUD art, downloaded on the console:** the single-screen HUD's art comes from the TopScreen mod
   ([Single Screen Experience](https://gamebanana.com/mods/695893) by M-1, CC BY-NC-ND 4.0), whose license
   lets you download and install it but not share it. The first start offers to download it from

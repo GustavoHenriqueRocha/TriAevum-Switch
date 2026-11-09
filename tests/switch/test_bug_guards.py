@@ -1731,6 +1731,8 @@ GUARDS = [
           r'WriteFileVerified\(configDirectory / kFontPackName, outputs\.Fonts\);.*?'
           r'WriteFileVerified\(configDirectory / kUiAtlasHdName, outputs\.UiAtlasHd\);.*?'
           r'outputs\.HdTextures\[index\]\);\s+\}\s+'
+          r'if \(!outputs\.LinkAnimations\.empty\(\)\)\s+'
+          r'WriteFileVerified\(configDirectory / kRollDashAnimationsName, outputs\.LinkAnimations\);\s+'
           r'WriteFileVerified\(configDirectory / kPackName, outputs\.Pack\);\s+\}'),
     # --- 05/11: without the TopScreen pack (player chose "not now") ---
     Guard("no TopScreen pack: the Items hint/D-pad badges asked for menu_atlas and the frame threw (game closed, hbl crash)",
@@ -2104,6 +2106,60 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
           r'add\("base", std::array\{[^}]*kLandingRollHookPc,',
           "oot3d_landing_roll_tests, oot3d_native_block_entry_hooks_tests"),
+    # --- 11/09: Roll dash, L3+R3 > Game > Gameplay (config/roll_dash, off by default; issue #6) ---
+    # SingleScreen 3.0/3.1's Roll Dash from coccofresco's 5acf8138, 54fe8edf, 5b34bd61/3c2ed0f3 and
+    # a3eeb1e2. Off, no hook observes anything; the guest regions are mapped outside guest code; a
+    # 0.2.0 install is asked to download again only once the option is on without the animations.
+    Guard("Roll dash: on by default would change 0.2.0's game (the option is off until config/roll_dash)",
+          "tools/oot3d/native_game_runtime/oot3d_roll_dash.h",
+          r'RollDashEnabled\(\) noexcept \{\s+static std::atomic<bool> enabled\{false\};.*?'
+          r'return std::filesystem::exists\(config / kRollDashConfigName, error\);',
+          "oot3d_roll_dash_runtime_tests (ConfigFile)"),
+    Guard("Roll dash: a hook observed with the option off (speed sites only while dashing, Navi only in a dash)",
+          "tools/oot3d/native_game_runtime/oot3d_roll_dash_runtime.cpp",
+          r'case kRollDashTurnSpeedSite:\s+case kRollDashMoveSpeedSite:\s+return mEnabled && mRunScale != 1\.0F;.*?'
+          r'case kRollDashRollSite:.*?return mEnabled \|\| mRollStep != RollStep::None;\s+'
+          r'case kRollDashNaviSite:\s+return mEnabled && mInRoll;\s+case kRollDashCsabQuery:\s+return mAnswerDash;',
+          "oot3d_roll_dash_runtime_tests (OffObservesNothing)"),
+    Guard("Roll dash: the hook PCs are block-entry hooks in every configuration (whole_aot_hook_gates.json)",
+          "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
+          r'add\("roll_dash", kRollDashHookPcs\);',
+          "oot3d_native_block_entry_hooks_tests, whole_aot_hook_gates_census"),
+    Guard("Roll dash: the policy must leave the graph at the runtime's target with its registers",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'runtime\.RollDash != nullptr && wholeAotExecutionActive &&\s+runtime\.RollDash->ShouldObserve\(pc\)\) \{.*?'
+          r'if \(runtime\.RollDash->Execute\(pc, state, &exit, nullptr\)\) \{.*?'
+          r'Oot3dWholeAotExitAt\(exit\.pc, state\);',
+          "oot3d_roll_dash_runtime_tests"),
+    Guard("Roll dash: flat scene view while A is held (the dash query's return taken for Player_Update, a3eeb1e2)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'if \(pc == Oot3dNativeGame::kOot3dPlayerUpdateEntry &&\s+'
+          r'\(runtime\.RollDash == nullptr \|\| !runtime\.RollDash->DashQueryPending\(\)\)\) \{\s+'
+          r'if \(runtime\.PlayerTimingProbe != nullptr\)',
+          "oot3d_roll_dash_runtime_tests (Update: registers restored)"),
+    Guard("Roll dash: its guest regions are mapped at the host frame start (a page-table rebuild from a hook "
+          "would run under guest code)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'ApplyTopScreenConfigSnapshot\(\);\s+UpdateRollDash\(\);',
+          "oot3d_roll_dash_runtime_tests"),
+    Guard("Roll dash: savestates wait for its native calls; a load resets it and maps its regions again",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_savestate.cpp",
+          r'if \(rollDashStorage->Pending\(\)\) return SaveStateOutcome::Deferred;.*?'
+          r'rollDashStorage->Reset\(\);\s+UpdateRollDash\(\);',
+          "oot3d_roll_dash_runtime_tests (ResetAfterAStateLoad)"),
+    Guard("Roll dash: the import must extract and pin zelda_link_ext.zar beside the HUD outputs",
+          "tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp",
+          r'Sha256Hex\(data\) != kLinkAnimationsSha256\).*?'
+          r'outputs\.LinkAnimations = ExtractLinkAnimations\(archive, source, region\);.*?'
+          r'WriteFileVerified\(configDirectory / kRollDashAnimationsName, outputs\.LinkAnimations\);',
+          "oot3d_topscreen_import_tests (TestLinkAnimations, TestInstall, --link-animations)"),
+    Guard("Roll dash: a 0.2.0 install (pack and HD art) must not be offered the 56 MB download unless "
+          "Roll dash is on without the animations",
+          "tools/oot3d/native_game_runtime/oot3d_switch_topscreen_import.cpp",
+          r'const bool dashAnimationsMissing = ReadRollDashEnabled\(Config\(\)\) && '
+          r'!RollDashAnimationsInstalled\(Config\(\)\);\s+'
+          r'if \(\(packExists && hdArtExists && !dashAnimationsMissing\) \|\| !romfsExists\) return true;',
+          "oot3d_topscreen_import_tests (TestOffer)"),
     # --- 11/08: N4 hook gates (--sparse-block-entries) ---
     # Sparse whole-AOT code calls the block-entry callback only at the PCs of
     # whole_aot_hook_gates.json, the census of Oot3dNativeBlockEntryHookPcs: a

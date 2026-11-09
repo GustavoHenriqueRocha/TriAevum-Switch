@@ -4,6 +4,7 @@
 #include "oot3d_build_version.h"
 #include "oot3d_switch_updater.h"
 #include "oot3d_topscreen_import.h"
+#include "oot3d_roll_dash.h"
 #include "oot3d_update_release.h"
 
 #include <imgui.h>
@@ -51,6 +52,7 @@ public:
     std::error_code ignored;
     mHudInstalled = std::filesystem::is_regular_file(mConfig / TopScreenImport::kPackName, ignored);
     mHudArtInstalled = TopScreenImport::HdArtInstalled(mConfig);
+    mDashAnimationsInstalled = RollDashAnimationsInstalled(mConfig);
     mHudOffer = TopScreenImport::ParseOfferSetting(ReadTrimmed(mConfig / TopScreenImport::kOfferSettingName));
   }
 
@@ -189,11 +191,20 @@ private:
     ImGui::SeparatorText("HUD textures");
     ImGui::TextWrapped("Art from the mod \"%s\" by %s (%s, %s).", TopScreenImport::kModName,
                        TopScreenImport::kModAuthor, TopScreenImport::kModPage, TopScreenImport::kModLicense);
-    if (mHudInstalled && mHudArtInstalled) {
+    // Roll dash (oot3d_roll_dash.h) with the HUD built before the import
+    // extracted Link's dash animations: the start-up offer adds them.
+    const bool dashAnimationsMissing =
+        RollDashEnabled().load(std::memory_order_relaxed) && !mDashAnimationsInstalled;
+    if (mHudInstalled && mHudArtInstalled && !dashAnimationsMissing) {
       ImGui::TextUnformatted("Installed, with the HD HUD art.");
       return;
     }
-    if (mHudInstalled)
+    if (mHudInstalled && mHudArtInstalled)
+      ImGui::TextWrapped("Installed, with the HD HUD art, but without Link's dash animations for Roll dash "
+                         "(L3+R3 > Game > Gameplay). The console downloads the mod again from GameBanana (%s) "
+                         "at start-up to add them.",
+                         Megabytes(TopScreenImport::DownloadArchive().Bytes).c_str());
+    else if (mHudInstalled)
       ImGui::TextWrapped("Installed without all of the HD HUD art (built by an earlier version). The console downloads "
                          "the mod again from GameBanana (%s) at start-up to add it.",
                          Megabytes(TopScreenImport::DownloadArchive().Bytes).c_str());
@@ -226,6 +237,7 @@ private:
   bool mChannelError = false;
   bool mHudInstalled = false;
   bool mHudArtInstalled = false;
+  bool mDashAnimationsInstalled = false;
   TopScreenImport::OfferSetting mHudOffer = TopScreenImport::OfferSetting::Ask;
   bool mHudOfferRequested = false;
   bool mHudOfferError = false;

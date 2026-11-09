@@ -4,6 +4,7 @@
 #include "oot3d_native_block_entry_hooks.h"
 
 #include "oot3d_landing_roll.h"
+#include "oot3d_roll_dash.h"
 #include "oot3d_native_a32_actor_visibility.h"
 #include "oot3d_native_a32_timing_probe.h"
 #include "oot3d_native_a32_window_guest_pcs.h"
@@ -59,6 +60,9 @@ std::vector<uint32_t> PreviousInlineAssembly(const Oot3dBlockEntryHookOptions &o
       Oot3dNativeGame::kOot3dMeshCommandPacketSubmitEntry,
       Oot3dNativeGame::kLandingRollHookPc,
   };
+  // Roll dash (11/09): always hooked, inert while config/roll_dash is off.
+  blockEntryHooks.insert(blockEntryHooks.end(), Oot3dNativeGame::kRollDashHookPcs.begin(),
+                         Oot3dNativeGame::kRollDashHookPcs.end());
   const auto actorVisibilityHooks = Oot3dNativeGame::NativeActorVisibilityHookPcs();
   blockEntryHooks.insert(blockEntryHooks.end(), actorVisibilityHooks.begin(),
                          actorVisibilityHooks.end());
@@ -196,6 +200,13 @@ void TestEveryConfigurationMatchesThePreviousInlineAssembly() {
   Expect(std::binary_search(productList.begin(), productList.end(),
                             Oot3dNativeGame::kLandingRollHookPc),
          "the landing roll hook is in the product list");
+  for (const uint32_t pc : Oot3dNativeGame::kRollDashHookPcs)
+    Expect(std::binary_search(productList.begin(), productList.end(), pc),
+           "every Roll dash hook is in the product list");
+  const auto minimalList = Oot3dNativeGame::Oot3dNativeBlockEntryHookPcs({});
+  for (const uint32_t pc : Oot3dNativeGame::kRollDashHookPcs)
+    Expect(std::binary_search(minimalList.begin(), minimalList.end(), pc),
+           "the Roll dash hooks are in every configuration (the menu turns it on at once)");
   Expect(std::binary_search(productList.begin(), productList.end(),
                             Oot3dNativeGame::kTopScreenInputUpdateBoundary),
          "the TopScreen input boundary is in the product list");

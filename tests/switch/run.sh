@@ -79,6 +79,8 @@ UNIT_TESTS=(
     oot3d_top_screen_pause_transaction_tests
     oot3d_top_screen_texture_overrides_tests
     oot3d_top_screen_wide_items_runtime_tests
+    oot3d_top_screen_link_ext_tests
+    oot3d_roll_dash_runtime_tests
     oot3d_topscreen_import_tests
     oot3d_update_release_tests
     triaevum_audio_service_tests

@@ -412,6 +412,7 @@ if (ZLIB_FOUND)
     add_executable(oot3d_topscreen_import_tests EXCLUDE_FROM_ALL
         tools/oot3d/native_game_runtime/oot3d_topscreen_import_tests.cpp
         tools/oot3d/native_game_runtime/oot3d_topscreen_import.cpp
+        tools/oot3d/native_game_runtime/oot3d_top_screen_link_ext.cpp
         tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
         runtime/three_ds_recomp/src/fast/oot3d/azahar_texture_scale.cpp
     )

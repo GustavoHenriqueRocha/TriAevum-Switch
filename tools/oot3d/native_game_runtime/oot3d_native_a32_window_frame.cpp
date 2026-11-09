@@ -960,6 +960,7 @@ bool NativeA32WindowSession::RunFrame() {
   const auto headCadenceEnd = std::chrono::steady_clock::now();
   untimed.HeadCadence += std::chrono::duration<double>(headCadenceEnd - headAreaEnd).count();
   ApplyTopScreenConfigSnapshot();
+  UpdateRollDash();
   uiLifecycleBridge.BeginHostFrame(
       static_cast<uint32_t>(presentationFrameCount));
   if (topScreenTextureOverrideRuntime.has_value()) {
@@ -2566,6 +2567,8 @@ bool NativeA32WindowSession::RunFrame() {
       if (actorProfile.has_value()) perf << actorProfile->TakeLine(areaText);
       // Draw distance: extended and denied draws over the same window.
       perf << Oot3dNativeGame::TakeNativeActorVisibilityPerfLine(widescreenProjection.ActorVisibility);
+      // Roll dash (config/roll_dash): its hooks over the same window (empty when off).
+      if (rollDashStorage.has_value()) perf << rollDashStorage->TakePerfLine();
       // config/indirect_profile: hottest indirect call pairs (its own line).
       if (indirectProfile.has_value()) perf << indirectProfile->Profile().TakeLine();
       // config/gpu_timing: GPU/CPU per render-thread stage and GL call

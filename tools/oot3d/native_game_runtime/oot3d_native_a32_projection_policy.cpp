@@ -427,7 +427,14 @@ void ApplyNativeWidescreenProjectionPolicy(
       runtime.FrameRatePolicy != nullptr) {
     runtime.FrameRatePolicy->BeginFramePacing(state.r[0]);
   }
-  if (pc == Oot3dNativeGame::kOot3dPlayerUpdateEntry) {
+  // Player_Update is also the Roll dash entry. While A is held, the dash
+  // calls FUN_0037577c from this entry and the call returns to it: that
+  // second entry carries the query's registers (r0 its answer, r1
+  // player+0x1000), not the title's (player, PlayState). Only the title's
+  // call is observed; the probes would otherwise lose the scene view, its
+  // environment and camera for as long as A is held (upstream a3eeb1e2, #91).
+  if (pc == Oot3dNativeGame::kOot3dPlayerUpdateEntry &&
+      (runtime.RollDash == nullptr || !runtime.RollDash->DashQueryPending())) {
     if (runtime.PlayerTimingProbe != nullptr) {
       runtime.PlayerTimingProbe->ObserveUpdateEntry(state);
     }
@@ -538,6 +545,22 @@ void ApplyNativeWidescreenProjectionPolicy(
           Oot3dNativeGame::kLandingRollSetupPc, state);
 #else
       Oot3dNativeGame::Oot3dWholeAotExitAt(Oot3dNativeGame::kLandingRollSetupPc, state);
+#endif
+    }
+  }
+  // Roll dash (oot3d_roll_dash_runtime.h): a hook that issues a native call
+  // or redirects its block leaves the compiled graph at the target with the
+  // registers it set (a call returns to the hook pc, which finishes the
+  // step); otherwise the block runs natively with `state`. Off, it does
+  // nothing (ShouldObserve).
+  if (runtime.RollDash != nullptr && wholeAotExecutionActive &&
+      runtime.RollDash->ShouldObserve(pc)) {
+    oot3d::recomp::a32::ExecutionResult exit{};
+    if (runtime.RollDash->Execute(pc, state, &exit, nullptr)) {
+#if defined(OOT3D_NATIVE_DIRECT_AOT_PLUGIN)
+      Oot3dNativeGame::Oot3dWholeAotPluginObservableExit(exit.pc, state);
+#else
+      Oot3dNativeGame::Oot3dWholeAotExitAt(exit.pc, state);
 #endif
     }
   }
