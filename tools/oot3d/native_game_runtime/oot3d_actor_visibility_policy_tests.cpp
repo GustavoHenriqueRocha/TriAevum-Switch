@@ -122,6 +122,17 @@ int main() {
         SelectActorExtensions(candidates);
         Expect(!candidates[0].Selected, "NaN incumbent cannot monopolize the budget");
 
+        // The Draw distance choice's limit: Farther and Maximum select more.
+        Expect(ActorExtensionLimit(ActorDrawDistance::Original) == kActorExtensionLimit &&
+                   ActorExtensionLimit(ActorDrawDistance::Far) == kActorExtensionLimit &&
+                   ActorExtensionLimit(ActorDrawDistance::Farther) == 48U &&
+                   ActorExtensionLimit(ActorDrawDistance::Maximum) == 64U,
+               "draw distance limits");
+        candidates[0].DistanceSquared = 1.0F;
+        SelectActorExtensions(candidates, ActorExtensionLimit(ActorDrawDistance::Maximum));
+        Expect(std::all_of(candidates.begin(), candidates.end(), [](const auto& c) { return c.Selected; }),
+               "Maximum's limit selects all 40");
+
         // Obj_Mure2's radial scalar.
         Expect(ObjMure2DistanceScalar(1.0F, 300.0F, 400.0F, 1.0F, false) == 1.0F, "native scalar kept");
         Expect(ObjMure2DistanceScalar(4.0F, 0.0F, 0.0F, 1.0F, true) == 25.0F, "extended is at least 5x squared");

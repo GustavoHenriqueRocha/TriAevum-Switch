@@ -28,6 +28,20 @@ class Guard:
 
 
 GUARDS = [
+    # --- 11/09: far Kokiri Forest objects still popped in at Draw distance Maximum (logs25) ---
+    Guard("far objects held back at Draw distance Maximum: 32 extensions per walk for every choice (logs25: "
+          "up to 14 capped a step in Kokiri Forest); the limit follows the choice",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_actor_visibility.cpp",
+          r'SelectActorExtensions\(candidates, v\.ExtensionLimit\);',
+          "oot3d_native_a32_actor_visibility_tests"),
+    Guard("Draw distance limit not following the live choice: set every frame next to the multiplier",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'visibility\.ExtensionLimit = Oot3dNativeGame::ActorExtensionLimit\(choice\);',
+          "oot3d_native_a32_actor_visibility_tests"),
+    Guard("[#69/#74] the light budget stays 120 of 128 records whatever the Draw distance limit",
+          "tools/oot3d/native_game_runtime/oot3d_actor_visibility_policy.h",
+          r'kActorLightCapacity = 128U;\s+inline constexpr uint32_t kActorLightBudget = 120U;',
+          "oot3d_actor_visibility_policy_tests"),
     # --- 11/08: coccofresco's SingleScreen 3.0 HUD fixes (upstream 2026-10-17), ported for 0.2.0 ---
     Guard("D-pad cross stayed opaque where 3.0 greys it (fc5ddfa6: 0x005CCF6C, first visible ZR/ZL lane, "
           "else 0.3 with a nested owner)",

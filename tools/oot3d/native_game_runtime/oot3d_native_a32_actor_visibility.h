@@ -87,6 +87,9 @@ struct NativeActorVisibilityState {
     // config/draw_distance_native_groups: En_Wood02 groups (trees and bushes
     // around a parent tree) also spawn their offspring in the extended volume.
     bool ExtendGroups = false;
+    // Extension candidates drawn per walk at most, nearest first
+    // (ActorExtensionLimit of the Draw distance choice).
+    uint32_t ExtensionLimit = kActorExtensionLimit;
     // The presented view: the frustum hook widens every perspective the
     // GPU draws with, but the title builds its culling matrix separately.
     Fast::Oot3d::ScenePresentationPolicy Presentation{};
@@ -103,7 +106,7 @@ struct NativeActorVisibilityState {
     // Culling walks (Actor_DrawAll entries), for the perf.txt line.
     uint64_t Walks = 0U;
     // Extension candidates (culled, inside the extended volume), those past
-    // the 32 nearest, and selected ones the light budget refused.
+    // the ExtensionLimit nearest, and selected ones the light budget refused.
     uint64_t Candidates = 0U;
     uint64_t Capped = 0U;
     uint64_t LightDenied = 0U;
@@ -155,11 +158,11 @@ void ResetNativeActorVisibilityAfterStateLoad(NativeActorVisibilityState& visibi
 
 // perf.txt, once per window: "actor_visibility: multiplier=.. groups=..
 // walks=.. culled=.. extended=.. candidates=.. capped=.. light_denied=..
-// denied=.. limited_walks=.. invalid_walks=.. peak_lights=..\n", counts over
-// the window (extended: culled actors drawn anyway, by the extension or the
-// presented width; capped: candidates past the 32 nearest; light_denied:
-// selected ones the light budget refused; denied: every refusal), then starts
-// the next window.
+// denied=.. limited_walks=.. invalid_walks=.. peak_lights=.. limit=..\n",
+// counts over the window (extended: culled actors drawn anyway, by the
+// extension or the presented width; capped: candidates past the `limit`
+// nearest; light_denied: selected ones the light budget refused; denied: every
+// refusal), then starts the next window.
 [[nodiscard]] std::string TakeNativeActorVisibilityPerfLine(NativeActorVisibilityState& visibility);
 
 // The game log line for the effective settings ("draw_distance: choice=..

@@ -382,12 +382,21 @@ void TestLogging() {
     many.Begin(); for (uint32_t i = 0; i < many.Count; ++i) many.Step(i, false); many.End();
     line = TakeNativeActorVisibilityPerfLine(many.Visibility);
     Expect(contains(line, " extended=32 candidates=40 capped=8 light_denied=0 denied=8 "), "capped candidates");
+    // Maximum's limit draws all 40, still under the light budget.
+    Fixture more(40);
+    more.Visibility.ExtensionLimit = ActorExtensionLimit(ActorDrawDistance::Maximum);
+    more.Begin(); for (uint32_t i = 0; i < more.Count; ++i) more.Step(i, false); more.End();
+    line = TakeNativeActorVisibilityPerfLine(more.Visibility);
+    Expect(contains(line, " extended=40 candidates=40 capped=0 light_denied=0 denied=0 ") &&
+               contains(line, " limit=64\n"),
+           "Maximum's limit draws more candidates");
 
     NativeActorVisibilityState settings;
     settings.DistanceMultiplier = 3.0F; settings.ExtendGroups = true;
+    settings.ExtensionLimit = ActorExtensionLimit(ActorDrawDistance::Farther);
     auto first = TakeNativeActorVisibilitySettingsLine(settings, ActorDrawDistance::Farther);
     Expect(first.has_value() && contains(*first, "draw_distance: choice=farther multiplier=3 groups=extended "
-                                                 "kokiri_fade=native"), "settings logged at start");
+                                                 "kokiri_fade=native limit=48"), "settings logged at start");
     Expect(!TakeNativeActorVisibilitySettingsLine(settings, ActorDrawDistance::Farther), "unchanged: no line");
     settings.DistanceMultiplier = 1.0F; settings.ExtendGroups = false;
     auto changed = TakeNativeActorVisibilitySettingsLine(settings, ActorDrawDistance::Original);

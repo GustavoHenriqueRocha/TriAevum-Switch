@@ -269,7 +269,7 @@ void BeginBudgetWalk(GuestState& state, MemoryBus& memory, NativeActorVisibility
             actor = next;
         }
     }
-    SelectActorExtensions(candidates);
+    SelectActorExtensions(candidates, v.ExtensionLimit);
     v.Candidates += candidates.size();
     for (const auto& candidate : candidates) {
         if (!candidate.Selected) {
@@ -478,13 +478,15 @@ std::string TakeNativeActorVisibilityPerfLine(NativeActorVisibilityState& v) {
     const auto delta = [](uint64_t now, uint64_t then) { return static_cast<unsigned long long>(now - then); };
     std::snprintf(line, sizeof(line),
                   "actor_visibility: multiplier=%.0f groups=%u walks=%llu culled=%llu extended=%llu candidates=%llu "
-                  "capped=%llu light_denied=%llu denied=%llu limited_walks=%llu invalid_walks=%llu peak_lights=%u\n",
+                  "capped=%llu light_denied=%llu denied=%llu limited_walks=%llu invalid_walks=%llu peak_lights=%u "
+                  "limit=%u\n",
                   static_cast<double>(v.DistanceMultiplier), v.ExtendGroups ? 1U : 0U, delta(v.Walks, start.Walks),
                   delta(v.NativeCulled, start.NativeCulled), delta(v.Extended, start.Extended),
                   delta(v.Candidates, start.Candidates), delta(v.Capped, start.Capped),
                   delta(v.LightDenied, start.LightDenied), delta(v.BudgetDenied, start.BudgetDenied),
                   delta(v.BudgetLimitedWalks, start.BudgetLimitedWalks),
-                  delta(v.BudgetInvalidWalks, start.BudgetInvalidWalks), v.WindowPeakLightAllocations);
+                  delta(v.BudgetInvalidWalks, start.BudgetInvalidWalks), v.WindowPeakLightAllocations,
+                  v.ExtensionLimit);
     v.WindowStart = {v.Walks,       v.NativeCulled, v.Extended,           v.Candidates,        v.Capped,
                      v.LightDenied, v.BudgetDenied, v.BudgetLimitedWalks, v.BudgetInvalidWalks};
     v.WindowPeakLightAllocations = 0U;
@@ -502,10 +504,10 @@ std::optional<std::string> TakeNativeActorVisibilitySettingsLine(NativeActorVisi
     v.Logged = now;
     char line[160];
     std::snprintf(line, sizeof(line),
-                  "draw_distance: choice=%s multiplier=%.0f groups=%s kokiri_fade=%s "
+                  "draw_distance: choice=%s multiplier=%.0f groups=%s kokiri_fade=%s limit=%u "
                   "(L3+R3 > Video > Draw distance, config/draw_distance)",
                   ActorDrawDistanceWord(choice), static_cast<double>(v.DistanceMultiplier),
-                  v.ExtendGroups ? "extended" : "native", v.NoKokiriFade ? "off" : "native");
+                  v.ExtendGroups ? "extended" : "native", v.NoKokiriFade ? "off" : "native", v.ExtensionLimit);
     return std::string(line);
 }
 

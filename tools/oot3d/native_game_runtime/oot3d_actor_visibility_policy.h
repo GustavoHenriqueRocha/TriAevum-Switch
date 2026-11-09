@@ -84,7 +84,9 @@ struct ActorExtensionCandidate {
 };
 
 // Stable incumbents first, then distance, then identity; input order is kept.
-void SelectActorExtensions(std::span<ActorExtensionCandidate> candidates);
+// At most `limit` are selected.
+void SelectActorExtensions(std::span<ActorExtensionCandidate> candidates,
+                           uint32_t limit = kActorExtensionLimit);
 
 // remaining includes the current actor and every not-yet-resolved actor,
 // including deferred draws. used is measured in the CURRENT arena epoch.
@@ -106,6 +108,11 @@ enum class ActorDrawDistance : uint8_t { Original = 0, Far = 1, Farther = 2, Max
 // including no file, is Original.
 [[nodiscard]] ActorDrawDistance ParseActorDrawDistance(const char* word) noexcept;
 [[nodiscard]] const char* ActorDrawDistanceWord(ActorDrawDistance choice) noexcept;
+// The extension's ceiling per culling walk for the choice: kActorExtensionLimit
+// for Original (F1's option) and Far, more for Farther and Maximum, whose
+// farther volumes hold more candidates. The light budget still refuses any
+// that would not fit.
+[[nodiscard]] uint32_t ActorExtensionLimit(ActorDrawDistance choice) noexcept;
 
 // Actors the extension never draws: En_Viewer hides behind culling during
 // cutscene camera pans, and a Gold Skulltula's draw places its hitbox (SoH's
