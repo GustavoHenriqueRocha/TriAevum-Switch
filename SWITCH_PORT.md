@@ -6002,6 +6002,42 @@ All of this is still written. Only the thread that writes the heartbeat changes.
 - **To compare:** create `config/async_status_writes` containing `0`. The 600k−3 lines come back,
   and `status_game_ms` takes the size of the write.
 
+### Forwarders and the launch record in boot-status.txt (11/09, issue #5)
+- **Report:** an NSP forwarder made with the nsp-forwarder website (TooTallNate/switch-tools) opens the
+  game for a few seconds, then it closes with no error; the same website's forwarders for other NROs
+  work, and so does a forwarder made with Sphaira. Two players, no logs yet.
+- **What the two forwarders give the NRO (checked in their files, not on a console):**
+
+  | | Website (`apps/nsp-forwarder/public/template/exefs`) | Sphaira (`hbl/hbl.json`, `hbl/source/main.c`) | hbl under a title takeover |
+  |---|---|---|---|
+  | Loader | nx-hbloader "v2.4.5-v3.0.0-4-g1aa1175", NRO path and argv from its RomFS | nx-hbloader fork | Atmosphère's hbl |
+  | Allowed SVCs | all 192 | all 192 | all 192 |
+  | Threads | priority 28–59, cores 0–2 | same | same |
+  | Address space, system resource | 36-bit, 0 | same | same |
+  | Program type, pool | Application, application pool | Application | the game's (Atmosphère copies them) |
+  | Debug flags | force_debug_prod | force_debug_prod | force_debug (Atmosphère's fix-up) |
+  | Filesystem | all permissions | all, plus content owner 0x0100000000001000 | same as Sphaira |
+  | argv | the NRO path only (`generate.client.ts`: `nextArgv = nextNroPath`) | the NRO path | the NRO path |
+  | Applet type passed | SystemApplication + ApplicationOverride when it runs as an application (disassembly: `stp x3, x4, [x0, #56]`, 4 and 1) | SystemApplication + ApplicationOverride | same |
+  | Heap | everything left (96 MB less only with automatic video capture, off in its NACP) | everything left minus 96 MB | everything left (96 MB less if the borrowed game records automatically) |
+
+  Nothing here explains a silent close: the forwarder's process has the same rights as hbl's and is
+  started the same way. The NRO is large (114.5 MiB plus 5.2 MiB BSS) but fits the heap of both.
+- **What the game now records:** before anything else, `boot-status.txt` is `status=starting` with
+  `loader=` (the loader's notice text), `applet_type=`, `program_id=`, `heap_mib=`,
+  `memory_mib=used/total`, `argc=` and every `argvN=`; the game log gets the same on a `launch:` line.
+  Before, a launch that ended before the game window left the previous run's `status=completed` in
+  the file. A launch argument the game does not understand now ends with the error dialog
+  (`status=failed`, the arguments listed) instead of a silent exit, and arguments that only repeat the
+  NRO's path (quoted or not) or are empty are dropped, so the default launch applies.
+- **Code:** `oot3d_switch_launch_environment.h` (the record and the argument filter),
+  `oot3d_native_game.cpp` (reads the values with libnx: `envGetLoaderInfo`, `appletGetAppletType`,
+  `svcGetInfo` ProgramId/memory, `envGetHeapOverrideSize`).
+- **Tests:** `oot3d_switch_launch_environment_tests` (the argument filter, both formats); guards
+  "11/09 (issue #5)". The analysis files are not in the repository (`~/oot3d-work/forwarder/npdm`).
+- **Next report:** right after a forwarder closes the game, `switch/oot3dre/boot-status.txt`,
+  `switch/oot3dre/logs/oot3d_native_game.log` and any new file in `atmosphere/crash_reports/`.
+
 ### Status as of 2026-10-17 (best version so far)
 - PGO (2nd collection) + lean mode + PICA plans on core 1 + render thread on core 2 + audio on its own thread.
 - Measured at 30 FPS, 2× scale: 29.9 FPS average, 93% of the time at 30, logic ~11 ms per step.

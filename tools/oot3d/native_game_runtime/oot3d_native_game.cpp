@@ -37,6 +37,9 @@
 #include "oot3d_switch_topscreen_import.h"
 #include "oot3d_native_status_file.h"
 #include "oot3d_switch_performance.h"
+#include "oot3d_game_log.h"
+#include "oot3d_switch_launch_environment.h"
+#include <cstring>
 #include <switch.h>
 // libnx (applet.c, weak, default 0): 1 makes libnx's exit end the application
 // through AM instead of returning to the homebrew loader.
@@ -50,7 +53,8 @@ namespace {
 // Through the process's boot-status writer (oot3d_native_status_file.h): a
 // heartbeat still queued on its service thread is dropped, never written
 // over completed/failed.
-void WriteSwitchBootStatus(const char* status, const std::string& detail = {}) {
+void WriteSwitchBootStatus(const char* status, const std::string& detail = {},
+                           const std::string& extra = {}) {
     std::string text = std::string("status=") + status + '\n' +
                        "whole_aot_functions=12419\n"
                        "host_boundaries=3\n"
@@ -58,7 +62,29 @@ void WriteSwitchBootStatus(const char* status, const std::string& detail = {}) {
     if (!detail.empty()) {
         text += "detail=" + detail + '\n';
     }
+    text += extra;
     (void)Oot3dNativeGame::SwitchBootStatusFile().WriteNow(text);
+}
+
+Oot3dNativeGame::SwitchLaunchEnvironment ReadSwitchLaunchEnvironment(int argc, char** argv) {
+    Oot3dNativeGame::SwitchLaunchEnvironment environment;
+    if (const char* info = envGetLoaderInfo(); info != nullptr) {
+        environment.Loader = Oot3dNativeGame::FirstLine(
+            std::string_view(info, strnlen(info, static_cast<size_t>(envGetLoaderInfoSize()))));
+    }
+    environment.AppletType = static_cast<int>(appletGetAppletType());
+    u64 value = 0;
+    if (R_SUCCEEDED(svcGetInfo(&value, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0)))
+        environment.ProgramId = value;
+    if (envHasHeapOverride())
+        environment.HeapBytes = envGetHeapOverrideSize();
+    if (R_SUCCEEDED(svcGetInfo(&value, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0)))
+        environment.UsedMemory = value;
+    if (R_SUCCEEDED(svcGetInfo(&value, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0)))
+        environment.TotalMemory = value;
+    for (int index = 0; index < argc; ++index)
+        environment.Arguments.emplace_back(argv[index] != nullptr ? argv[index] : "");
+    return environment;
 }
 
 // A fatal error shows the system's error dialog before the game closes, so the
@@ -191,6 +217,12 @@ int main(int argc, char** argv) {
         Oot3dNativeGameLaunch launch;
         NativeGameArguments preparedArguments;
 #if defined(__SWITCH__)
+        // Before anything else, so a launch that ends before the game window
+        // leaves the stage it reached and how it was started.
+        const auto launchEnvironment = ReadSwitchLaunchEnvironment(argc, argv);
+        WriteSwitchBootStatus("starting", {},
+                              Oot3dNativeGame::FormatSwitchLaunchEnvironment(launchEnvironment));
+        Oot3dNativeGame::WriteGameLog(Oot3dNativeGame::FormatSwitchLaunchLine(launchEnvironment));
         PlaceSwitchMainThread();
         // Instrumented (PGO generate) build only: stream the counts to
         // sdmc:/switch/oot3dre/pgo (oot3d_whole_aot_gcov.h).
@@ -280,6 +312,10 @@ int main(int argc, char** argv) {
                 homebrewArgv.push_back(const_cast<char*>("sdmc:/switch/oot3dre/config/topscreen_hd"));
             }
         }
+        if (argc > 1 &&
+            Oot3dNativeGame::DropRedundantLaunchArguments(launchEnvironment.Arguments).size() == 1) {
+            argc = 1;
+        }
         if (argc <= 1) {
             argc = static_cast<int>(homebrewArgv.size());
             argv = homebrewArgv.data();
@@ -308,8 +344,18 @@ int main(int argc, char** argv) {
         argv = runtimeArguments.data();
 #endif
         if (!ParseOot3dNativeGameArgs(argc, argv, launch)) {
+#if defined(__SWITCH__)
+            // Returning here would close the game without a word.
+            std::string arguments;
+            for (int index = 1; index < argc; ++index)
+                arguments += std::string(index > 1 ? " " : "") + argv[index];
+            throw std::runtime_error("the launch arguments were not understood: " + arguments +
+                                     ". Start the game from the homebrew menu (hold R on a game) "
+                                     "or with a Sphaira forwarder.");
+#else
             PrintOot3dNativeGameUsage();
             return 2;
+#endif
         }
 
 #if defined(OOT3D_REQUIRE_WHOLE_AOT_PLUGIN_V2)

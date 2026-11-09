@@ -28,6 +28,20 @@ class Guard:
 
 
 GUARDS = [
+    # --- 11/09 (issue #5): a forwarder closed the game without a word, and nothing recorded how it started ---
+    Guard("a launch that ended before the window left the previous run's boot-status: status=starting with "
+          "the launch environment is written before anything else in main (issue #5)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'const auto launchEnvironment = ReadSwitchLaunchEnvironment\(argc, argv\);\s+'
+          r'WriteSwitchBootStatus\("starting", \{\},\s+Oot3dNativeGame::FormatSwitchLaunchEnvironment\(launchEnvironment\)\);'
+          r'.*?PlaceSwitchMainThread\(\);',
+          "oot3d_switch_launch_environment_tests"),
+    Guard("unexpected launch arguments closed the game silently (return 2): on the Switch they end with the "
+          "error dialog naming them (issue #5)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(!ParseOot3dNativeGameArgs\(argc, argv, launch\)\) \{\s+#if defined\(__SWITCH__\).*?'
+          r'throw std::runtime_error\("the launch arguments were not understood: "',
+          "oot3d_switch_launch_environment_tests"),
     # --- 11/08: coccofresco's SingleScreen 3.0 HUD fixes (upstream 2026-10-17), ported for 0.2.0 ---
     Guard("D-pad cross stayed opaque where 3.0 greys it (fc5ddfa6: 0x005CCF6C, first visible ZR/ZL lane, "
           "else 0.3 with a nested owner)",

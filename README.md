@@ -17,7 +17,9 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
 2. Copy your dump into `switch/oot3dre/`.
 3. Start the game with a game's memory: hold R while starting any game, then open it from the homebrew menu.
    The first start turns your dump into the game files (about a minute), then asks whether to keep (A) or
-   delete (Y) the dump.
+   delete (Y) the dump. A forwarder on the HOME menu made with [Sphaira](https://github.com/NaGaa95/sphaira)
+   works too; forwarders from the nsp-forwarder website have been reported to close the game, so if you try
+   one, please send `switch/oot3dre/boot-status.txt` and the `logs` folder.
 
 - **Menu:** press both sticks in (L3+R3) for settings, the performance overlay, updates and Exit game.
   Touch works in the menu too.

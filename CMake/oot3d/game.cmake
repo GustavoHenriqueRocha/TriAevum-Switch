@@ -140,6 +140,13 @@ target_include_directories(oot3d_texture_pack_scale_tests PRIVATE
 target_link_libraries(oot3d_texture_pack_scale_tests PRIVATE Threads::Threads)
 oot3d_target_defaults(oot3d_texture_pack_scale_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# What started the game: boot-status.txt's "starting" lines (header-only).
+add_executable(oot3d_switch_launch_environment_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_switch_launch_environment_tests.cpp
+)
+target_compile_features(oot3d_switch_launch_environment_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_switch_launch_environment_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Late-presentation log (logs/hitches.txt; header-only).
 add_executable(oot3d_hitch_recorder_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_hitch_recorder_tests.cpp

@@ -33,6 +33,7 @@ UNIT_TESTS=(
     oot3d_guest_spike_profile_tests
     oot3d_hang_watchdog_tests
     oot3d_hitch_recorder_tests
+    oot3d_switch_launch_environment_tests
     oot3d_input_bench_tests
     oot3d_landing_roll_tests
     oot3d_native_a32_ctr_fs_tests
