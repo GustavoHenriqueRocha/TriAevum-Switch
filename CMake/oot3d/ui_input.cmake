@@ -345,3 +345,12 @@ add_executable(oot3d_input_bench_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_input_bench_tests PRIVATE
     oot3d_native_a32_input)
 oot3d_target_defaults(oot3d_input_bench_tests FOLDER Tests)
+
+# Núcleo da importação do dump no primeiro início (oot3d_rom_import.h):
+# NCSD/NCCH sintético, LZSS, programa COPY, adaptação da RomFS e manifesto,
+# sem ROM. `--import <dump> <pasta>` faz uma importação real no PC.
+add_executable(oot3d_rom_import_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_rom_import_tests.cpp
+    tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
+)
+oot3d_target_defaults(oot3d_rom_import_tests FOLDER Tests)
