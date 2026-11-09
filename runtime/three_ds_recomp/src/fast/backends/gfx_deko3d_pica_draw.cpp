@@ -436,12 +436,15 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         // per frame), before grass.
         mDevice.MarkOpaqueEnd();
     }
-    if (mGrassDraws && draw.CompositionDomain == Renderer3ds::PicaCompositionDomain::Scene &&
-        draw.Composition.Layer == Renderer3ds::PicaCompositionLayer::TransparentWorld) {
-        // config/grass = draw: before the first translucent world draw into
-        // the target whose grass sources were drawn this frame (once per
-        // frame). Sky and unknown layers can come between opaque draws.
-        DrawGrass(key, *target);
+    if (mGrassDraws) {
+        // config/grass = draw: before the first translucent world draw or the
+        // first overlay (HUD, minimap, title card) into the target whose
+        // opaque world and grass sources were drawn this frame (once per
+        // frame; grass_draw_point.h). Sky and unknown layers can come between
+        // opaque draws.
+        if (const auto point = Oot3d::GrassDrawPointOf(draw.CompositionDomain, draw.Composition.Layer)) {
+            DrawGrass(key, *target, *point);
+        }
     }
 
     const uint64_t shadersLoadedBefore = mShaders.Stats().Loaded;
@@ -852,9 +855,10 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
         return reject("deko3d display image memory");
     }
     if (mGrassDraws) {
-        // config/grass = draw: a scene with no non-opaque draw gets its grass
-        // here, before the copy reads the target (and its Version).
-        DrawGrass(*key, *source);
+        // config/grass = draw: a scene with neither a translucent world draw
+        // nor an overlay after its grass sources gets its grass here, before
+        // the copy reads the target (and its Version).
+        DrawGrass(*key, *source, Oot3d::GrassDrawPoint::Transfer);
     }
     const PicaDisplayCopy copy{source->Id, source->Version, plan.SourceWidth, plan.SourceHeight, plan.Linear};
     DkCmdBuf cmd = mDevice.Cmd();

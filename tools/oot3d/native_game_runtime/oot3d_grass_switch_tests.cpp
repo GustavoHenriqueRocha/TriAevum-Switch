@@ -2,6 +2,7 @@
 // of the placements, the Switch profile's budgets and config/grass, and the
 // per-frame culling and instance stream of the deko3d draw.
 #include "fast/oot3d/grass_anchor_codec.h"
+#include "fast/oot3d/grass_draw_point.h"
 #include "fast/oot3d/grass_persistent_placement_cache.h"
 #include "fast/oot3d/grass_instance_stream.h"
 #include "fast/oot3d/grass_scene_hold.h"
@@ -2174,6 +2175,214 @@ TEST(Oot3dGrassAreaChange, ACullOfAnotherSceneIsNeverDrawnEvenWithASharedPlaceme
     pick = GrassCullForDrawPoint(slots, 5U, entrance, GrassArea(0x03, 1), cull, has);
     ASSERT_TRUE(pick.Slot.has_value());
     EXPECT_EQ(*pick.Slot, *next);
+}
+
+// ---- Where the grass goes in a frame (grass_draw_point.h) -------------------
+
+using Fast::Renderer3ds::PicaCompositionDomain;
+using Fast::Renderer3ds::PicaCompositionLayer;
+
+// One PICA draw of a frame, or a target's display transfer, in the order
+// gfx_deko3d_pica_draw.cpp sees them.
+struct GrassFrameDraw {
+    PicaCompositionDomain Domain = PicaCompositionDomain::Scene;
+    PicaCompositionLayer Layer = PicaCompositionLayer::OpaqueWorld;
+    bool Source = false;   // a grass source (a ground)
+    bool Transfer = false; // the display transfer of the target
+    int Target = 0;        // 0: the top screen (TopScreen HUD included); 1: the bottom screen
+};
+
+constexpr GrassFrameDraw kSky{PicaCompositionDomain::Scene, PicaCompositionLayer::Atmosphere};
+constexpr GrassFrameDraw kGround{PicaCompositionDomain::Scene, PicaCompositionLayer::OpaqueWorld, true};
+constexpr GrassFrameDraw kActor{PicaCompositionDomain::Scene, PicaCompositionLayer::OpaqueWorld};
+constexpr GrassFrameDraw kTranslucent{PicaCompositionDomain::Scene, PicaCompositionLayer::TransparentWorld};
+constexpr GrassFrameDraw kFog{PicaCompositionDomain::Scene, PicaCompositionLayer::Atmosphere};
+// The HUD phase's lists (the frontend's UI attribution): hearts, the
+// TopScreen minimap, the area title card.
+constexpr GrassFrameDraw kHud{PicaCompositionDomain::Ui, PicaCompositionLayer::Ui};
+constexpr GrassFrameDraw kTransfer{PicaCompositionDomain::Unknown, PicaCompositionLayer::Unknown, false, true};
+
+struct GrassFrameOutcome {
+    std::optional<GrassDrawPoint> Point; // where the grass was drawn
+    size_t Before = 0;                   // the index of the draw (or transfer) it went before
+    uint32_t OverlaysCovered = 0;        // overlays over the world drawn before it: the grass covers them
+};
+
+// The backend for one device frame: GrassObserveDraw marks the sources, the
+// draw point comes before the draw, an opaque world draw then gives the
+// target (RememberGrassScene). `overlayPoints` false is 0.1.2-test.16:
+// before a translucent world draw or at the transfer only.
+GrassFrameOutcome RunGrassFrame(GrassDrawPointGate<int>& gate, GrassDrawPointCounts& counts, uint64_t frame,
+                                std::span<const GrassFrameDraw> draws, bool overlayPoints = true) {
+    GrassFrameOutcome outcome;
+    std::optional<int> sourceTarget;
+    std::optional<int> worldTarget;
+    uint32_t overlaysOverWorld = 0;
+    for (size_t index = 0; index < draws.size(); ++index) {
+        const auto& draw = draws[index];
+        if (draw.Source) sourceTarget = draw.Target;
+        std::optional<GrassDrawPoint> point =
+            draw.Transfer ? std::optional{GrassDrawPoint::Transfer} : GrassDrawPointOf(draw.Domain, draw.Layer);
+        if (point == GrassDrawPoint::Overlay && !overlayPoints) point.reset();
+        if (point) {
+            const auto reach = gate.Reach(*point, draw.Target, frame, sourceTarget == draw.Target);
+            if (reach.Draw) {
+                counts.Count(*point, reach);
+                outcome.Point = point;
+                outcome.Before = index;
+                if (draw.Target == 0) outcome.OverlaysCovered = overlaysOverWorld;
+            }
+        }
+        if (!draw.Transfer && GrassOverlayDraw(draw.Domain, draw.Layer) && worldTarget == draw.Target &&
+            draw.Target == 0 && !outcome.Point)
+            ++overlaysOverWorld;
+        if (!draw.Transfer && draw.Domain == PicaCompositionDomain::Scene &&
+            draw.Layer == PicaCompositionLayer::OpaqueWorld) {
+            gate.Scene(draw.Target, frame);
+            worldTarget = draw.Target;
+        }
+    }
+    return outcome;
+}
+
+TEST(Oot3dGrassDrawPoint, TranslucentWorldOverlaysAndNothingElseArePoints) {
+    using D = PicaCompositionDomain;
+    using L = PicaCompositionLayer;
+    EXPECT_TRUE(GrassDrawPointOf(D::Scene, L::TransparentWorld) == GrassDrawPoint::Translucent);
+    // The HUD, minimap and title card: the HUD phase's lists and UI spans.
+    EXPECT_TRUE(GrassDrawPointOf(D::Ui, L::Ui) == GrassDrawPoint::Overlay);
+    EXPECT_TRUE(GrassDrawPointOf(D::Ui, L::Unknown) == GrassDrawPoint::Overlay);
+    EXPECT_TRUE(GrassDrawPointOf(D::Screen, L::Unknown) == GrassDrawPoint::Overlay);
+    EXPECT_TRUE(GrassDrawPointOf(D::Scene, L::Ui) == GrassDrawPoint::Overlay);
+    // Not points: the opaque world (sources come from it), the sky and
+    // atmosphere (test.2: before the ground), unknown draws.
+    EXPECT_FALSE(GrassDrawPointOf(D::Scene, L::OpaqueWorld).has_value());
+    EXPECT_FALSE(GrassDrawPointOf(D::Scene, L::Atmosphere).has_value());
+    EXPECT_FALSE(GrassDrawPointOf(D::Scene, L::Unknown).has_value());
+    EXPECT_FALSE(GrassDrawPointOf(D::Unknown, L::Unknown).has_value());
+    EXPECT_FALSE(GrassOverlayDraw(D::Scene, L::TransparentWorld));
+}
+
+// logs23 / video 2026110816393700 frames 338-440: entering the Lost Woods,
+// the title card and the minimap were under the blades. Its frames have no
+// translucent world draw after the ground: test.16 drew the grass at the
+// transfer, after the HUD.
+TEST(Oot3dGrassDrawPoint, TheLostWoodsTitleCardAndMinimapStayOverTheGrass) {
+    const std::array lostWoods{kSky, kGround, kActor, kActor, kFog, kHud, kHud, kHud, kTransfer};
+    {
+        GrassDrawPointGate<int> gate;
+        GrassDrawPointCounts counts;
+        const auto before = RunGrassFrame(gate, counts, 1U, lostWoods, false);
+        EXPECT_TRUE(before.Point == GrassDrawPoint::Transfer);
+        EXPECT_EQ(before.OverlaysCovered, 3U); // hearts, minimap, title card
+    }
+    GrassDrawPointGate<int> gate;
+    GrassDrawPointCounts counts;
+    const auto now = RunGrassFrame(gate, counts, 1U, lostWoods);
+    EXPECT_TRUE(now.Point == GrassDrawPoint::Overlay);
+    EXPECT_EQ(now.Before, 5U); // the first HUD draw, after the whole world
+    EXPECT_EQ(now.OverlaysCovered, 0U);
+    EXPECT_EQ(counts.At(GrassDrawPoint::Overlay), 1U);
+    EXPECT_EQ(counts.At(GrassDrawPoint::Transfer), 0U);
+    EXPECT_EQ(counts.AfterOverlay, 0U);
+}
+
+// A frame with a translucent world draw before its HUD draws where test.16 did.
+TEST(Oot3dGrassDrawPoint, ATranslucentDrawBeforeTheHudKeepsItsPoint) {
+    const std::array field{kSky, kGround, kActor, kTranslucent, kTranslucent, kFog, kHud, kHud, kTransfer};
+    for (const bool overlayPoints : {false, true}) {
+        GrassDrawPointGate<int> gate;
+        GrassDrawPointCounts counts;
+        const auto outcome = RunGrassFrame(gate, counts, 1U, field, overlayPoints);
+        EXPECT_TRUE(outcome.Point == GrassDrawPoint::Translucent);
+        EXPECT_EQ(outcome.Before, 3U);
+        EXPECT_EQ(outcome.OverlaysCovered, 0U);
+    }
+    // A translucent world draw after the HUD (a scene list kicked after it):
+    // the grass goes before the HUD.
+    const std::array lateTranslucent{kSky, kGround, kActor, kHud, kTranslucent, kTransfer};
+    GrassDrawPointGate<int> before;
+    GrassDrawPointCounts counts;
+    EXPECT_EQ(RunGrassFrame(before, counts, 1U, lateTranslucent, false).OverlaysCovered, 1U);
+    GrassDrawPointGate<int> gate;
+    const auto now = RunGrassFrame(gate, counts, 1U, lateTranslucent);
+    EXPECT_TRUE(now.Point == GrassDrawPoint::Overlay);
+    EXPECT_EQ(now.Before, 3U);
+    EXPECT_EQ(now.OverlaysCovered, 0U);
+}
+
+// UI drawn before the frame's world (a clear, the bottom screen) is no
+// overlay of that world: the grass keeps its translucent point, and the
+// bottom screen's HUD never draws grass anywhere.
+TEST(Oot3dGrassDrawPoint, UiBeforeTheWorldOrInAnotherTargetIsNoOverlay) {
+    GrassFrameDraw bottomHud = kHud;
+    bottomHud.Target = 1;
+    GrassFrameDraw bottomTransfer = kTransfer;
+    bottomTransfer.Target = 1;
+    const std::array frame{bottomHud, kHud, kSky, kGround, kActor, kTranslucent, kHud, kTransfer, bottomHud,
+                           bottomTransfer};
+    GrassDrawPointGate<int> gate;
+    GrassDrawPointCounts counts;
+    const auto outcome = RunGrassFrame(gate, counts, 1U, frame);
+    EXPECT_TRUE(outcome.Point == GrassDrawPoint::Translucent);
+    EXPECT_EQ(outcome.Before, 5U);
+    EXPECT_EQ(counts.At(GrassDrawPoint::Translucent) + counts.At(GrassDrawPoint::Overlay) +
+                  counts.At(GrassDrawPoint::Transfer),
+              1U);
+    EXPECT_EQ(counts.AfterOverlay, 0U);
+}
+
+// A UI draw between the world's first opaque draw and its ground (not seen
+// in the logs: ui_world_draws 0) cannot have the grass before it, the ground
+// is not drawn yet. The grass goes at the next point and is counted.
+TEST(Oot3dGrassDrawPoint, AnOverlayBeforeTheGroundIsCounted) {
+    const std::array frame{kSky, kActor, kHud, kGround, kFog, kTransfer};
+    GrassDrawPointGate<int> gate;
+    GrassDrawPointCounts counts;
+    const auto outcome = RunGrassFrame(gate, counts, 1U, frame);
+    EXPECT_TRUE(outcome.Point == GrassDrawPoint::Transfer);
+    EXPECT_EQ(counts.AfterOverlay, 1U);
+}
+
+// 60 FPS: a real frame and its in-between frame repeat the same draws (the
+// in-between one with the real frame's sources' cameras): each draws its
+// grass once, before the HUD; no frame draws twice or skips.
+TEST(Oot3dGrassDrawPoint, EveryFrameAt60FpsDrawsOnceBeforeTheHud) {
+    const std::array lostWoods{kSky, kGround, kActor, kFog, kHud, kHud, kTransfer};
+    GrassDrawPointGate<int> gate;
+    GrassDrawPointCounts counts;
+    for (uint64_t frame = 1U; frame <= 600U; ++frame) {
+        const auto outcome = RunGrassFrame(gate, counts, frame, lostWoods);
+        EXPECT_TRUE(outcome.Point == GrassDrawPoint::Overlay);
+        EXPECT_EQ(outcome.OverlaysCovered, 0U);
+    }
+    EXPECT_EQ(counts.At(GrassDrawPoint::Overlay), 600U);
+    EXPECT_EQ(counts.At(GrassDrawPoint::Translucent) + counts.At(GrassDrawPoint::Transfer), 0U);
+    // A frame whose sources are missing (in-between frame without a camera)
+    // draws nothing, and the next frame draws again.
+    const std::array noGround{kSky, kActor, kFog, kHud, kTransfer};
+    EXPECT_FALSE(RunGrassFrame(gate, counts, 601U, noGround).Point.has_value());
+    EXPECT_TRUE(RunGrassFrame(gate, counts, 602U, lostWoods).Point == GrassDrawPoint::Overlay);
+}
+
+// test.10's late command lists: a scene list kicked after the next
+// Gameplay_Draw keeps the Scene domain (IsLateCompositionCommandList), so its
+// translucent draw is the point. With config/late_lists_as_ui its draws are
+// tagged UI (UI lifecycle, spans ignored): the point comes at its first draw,
+// still before the frame's HUD.
+TEST(Oot3dGrassDrawPoint, LateSceneListsKeepTheWorldClassificationOfTest10) {
+    const std::array onTime{kSky, kGround, kActor, kTranslucent, kHud, kHud, kTransfer};
+    const GrassFrameDraw lateWorldAsUi = kHud;
+    const std::array lateAsUi{kSky, kGround, lateWorldAsUi, lateWorldAsUi, kHud, kHud, kTransfer};
+    GrassDrawPointGate<int> gate;
+    GrassDrawPointCounts counts;
+    const auto scene = RunGrassFrame(gate, counts, 1U, onTime);
+    EXPECT_TRUE(scene.Point == GrassDrawPoint::Translucent);
+    EXPECT_EQ(scene.Before, 3U);
+    const auto ui = RunGrassFrame(gate, counts, 2U, lateAsUi);
+    EXPECT_TRUE(ui.Point == GrassDrawPoint::Overlay);
+    EXPECT_EQ(ui.Before, 2U);
+    EXPECT_EQ(counts.AfterOverlay, 0U);
 }
 
 // The preset's rules as Deko3dConfigureGrass reads them (target, channel,

@@ -20,6 +20,7 @@
 #include "gfx_deko3d_pica_targets.h"
 #include "gfx_deko3d_shaders.h"
 #include "fast/backends/gfx_deko3d_ui_plan.h"
+#include "fast/oot3d/grass_draw_point.h"
 
 #include <array>
 #include <cstdint>
@@ -392,27 +393,25 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     // config/grass = draw (gfx_deko3d_grass.cpp). mGrassDraws is false in
     // every other case, and then nothing below is touched.
     bool mGrassDraws = false;
-    // The opaque world draw of the frame that last reached a target: where
-    // and how the grass draws (viewport and scissor with dynamic resolution
-    // and widescreen applied, the scene's depth compare).
+    // The opaque world draw of the frame that last reached a target: how the
+    // grass draws (viewport and scissor with dynamic resolution and
+    // widescreen applied, the scene's depth compare). Its target and frame are
+    // mGrassPoints' Scene.
     struct GrassScene {
-        const Deko3d::PicaTarget* Target = nullptr;
         Deko3d::PicaRect Viewport;
         DkScissor Scissor{};
         uint8_t DepthCompare = 0;
-        uint64_t Frame = ~0ULL;
     };
     GrassScene mGrassScene;
-    struct GrassDrawn {
-        const Deko3d::PicaTarget* Target = nullptr;
-        uint64_t Frame = ~0ULL;
-    };
-    GrassDrawn mGrassDrawn;
+    // Where the grass goes in the frame: before a translucent world draw, an
+    // overlay (HUD, minimap, title card) or the display transfer, whichever
+    // comes first (grass_draw_point.h).
+    Oot3d::GrassDrawPointGate<const Deko3d::PicaTarget*> mGrassPoints;
     void RememberGrassScene(const Deko3d::PicaTarget& target, const Deko3d::PicaRect& viewport,
                             const DkScissor& scissor, uint8_t depthCompare);
     // Draws the culled tufts of this frame's sources into `target`, once per
-    // target and frame, if its opaque world was drawn this frame.
-    void DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target);
+    // target and frame, if its opaque world and sources were drawn this frame.
+    void DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target, Oot3d::GrassDrawPoint point);
 };
 
 namespace Deko3d {
