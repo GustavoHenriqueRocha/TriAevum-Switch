@@ -1,4 +1,5 @@
 #include "oot3d_topscreen_import.h"
+#include "oot3d_roll_dash.h"
 
 #include "oot3d/renderer/azahar_texture_scale.h"
 
@@ -41,10 +42,13 @@ constexpr Archive kArchives[] = {
     {"3.2.1", "SingleScreen_3.2.1", "singlescreen_321.zip", 56'466'735,
      "737807fdefe59d21870c0b3270375698dcc796aa89b98ee4d75524d224c77aa0", nullptr, 7'007'958,
      "082582da95930114a149db8fa3c14e8be546d7df1b003c71c81bbbc2d4fde71e"},
+    // 3.2.2 also carries Link's Roll dash animations (zelda_link_ext.zar,
+    // byte-identical in its EUR, USA and JPN folders and to 3.0's); 3.0's
+    // and 3.2.1's layout of that file is not pinned.
     {"3.2.2", "SingleScreen_3.2.2", "singlescreen_322.zip", 56'493'832,
      "d07f5ae7a77b83951836d80a000a9625a5e2da52ae0fa262d9b44409fda31aa0",
      "https://gamebanana.com/dl/1879915", 7'007'958,
-     "082582da95930114a149db8fa3c14e8be546d7df1b003c71c81bbbc2d4fde71e", kHdTextures32},
+     "082582da95930114a149db8fa3c14e8be546d7df1b003c71c81bbbc2d4fde71e", kHdTextures32, true},
 };
 // The download is the newest release.
 constexpr const Archive& kDownloadArchive = kArchives[std::size(kArchives) - 1];
@@ -624,12 +628,15 @@ OfferSetting ParseOfferSetting(std::string_view text) {
 
 const char* OfferSettingText(OfferSetting setting) { return setting == OfferSetting::Never ? "never" : "ask"; }
 
-bool ShouldOffer(bool packExists, bool hdArtExists, bool romfsExists, OfferSetting setting) {
-    return (!packExists || !hdArtExists) && romfsExists && setting == OfferSetting::Ask;
+bool ShouldOffer(bool packExists, bool hdArtExists, bool dashAnimationsMissing, bool romfsExists,
+                 OfferSetting setting) {
+    return (!packExists || !hdArtExists || dashAnimationsMissing) && romfsExists && setting == OfferSetting::Ask;
 }
 
-bool ShouldBuildFromLocalArchive(bool packExists, bool hdArtExists, const Archive& archive) {
-    return !packExists || (!hdArtExists && archive.UiAtlasHdSha256 != nullptr && !archive.HdTextures.empty());
+bool ShouldBuildFromLocalArchive(bool packExists, bool hdArtExists, bool dashAnimationsMissing,
+                                 const Archive& archive) {
+    return !packExists || (!hdArtExists && archive.UiAtlasHdSha256 != nullptr && !archive.HdTextures.empty()) ||
+           (dashAnimationsMissing && archive.LinkAnimations);
 }
 
 bool HdArtInstalled(const fs::path& configDirectory) {
@@ -1242,6 +1249,25 @@ std::vector<Bytes> ExtractHdTextures(const ZipReader& archive, const Archive& ro
     return images;
 }
 
+Bytes ExtractLinkAnimations(const ZipReader& archive, const Archive& root, std::string_view region) {
+    if (!root.LinkAnimations) return {};
+    const char* titleId = TitleIdFor(region);
+    if (!titleId) throw ImportError("unsupported TopScreen region: " + std::string(region));
+    std::string name;
+    const ZipReader::Entry* entry = nullptr;
+    for (const char* target : kTargetRomFs) {
+        name = std::string(root.Root) + "/" + std::string(region) + "/" + target + titleId + "/romfs/actor/" +
+               kRollDashAnimationsName;
+        if ((entry = archive.Find(name)) != nullptr) break;
+    }
+    if (!entry) throw ImportError("archive has no " + std::string(region) + " " + kRollDashAnimationsName);
+    if (entry->Size != kLinkAnimationsBytes)
+        throw ImportError("unexpected Link animations size " + std::to_string(entry->Size) + ": " + name);
+    Bytes data = archive.Read(*entry, kMaxEntryBytes);
+    if (Sha256Hex(data) != kLinkAnimationsSha256) throw ImportError("unexpected Link animations " + name);
+    return data;
+}
+
 const Archive* IdentifyArchiveFile(const fs::path& path, std::string* error,
                                    const std::function<void(std::uint64_t, std::uint64_t)>& progress) {
     auto file = Open(path, "rb");
@@ -1297,6 +1323,7 @@ Outputs Build(const fs::path& archivePath, const Archive& source, const fs::path
         outputs.HdTextures.push_back(BuildHdImage(images[index], texture.NativeWidth, texture.NativeHeight));
         images[index] = Bytes();
     }
+    outputs.LinkAnimations = ExtractLinkAnimations(archive, source, region);
     return outputs;
 }
 
@@ -1358,6 +1385,11 @@ void Install(const Outputs& outputs, const fs::path& configDirectory) {
         }
         receipt.Members["hd_textures"] = Json::Array(std::move(images));
     }
+    if (!outputs.LinkAnimations.empty()) {
+        // Link's Roll dash animations, as the mod ships them.
+        receipt.Members["link_animations"] = Json::Of(std::string(kRollDashAnimationsName));
+        receipt.Members["link_animations_sha256"] = Json::Of(Sha256Hex(outputs.LinkAnimations));
+    }
     std::string text;
     receipt.Write(text, 0);
     text += '\n';
@@ -1369,6 +1401,8 @@ void Install(const Outputs& outputs, const fs::path& configDirectory) {
             WriteFileVerified(configDirectory / kHdTexturesDirectoryName / outputs.Source->HdTextures[index].FileName,
                               outputs.HdTextures[index]);
     }
+    if (!outputs.LinkAnimations.empty())
+        WriteFileVerified(configDirectory / kRollDashAnimationsName, outputs.LinkAnimations);
     WriteFileVerified(configDirectory / kPackName, outputs.Pack);
 }
 

@@ -4,6 +4,7 @@
 #include "oot3d_gameplay_settings_panel.h"
 #include "oot3d_draw_distance_config.h"
 #include "oot3d_landing_roll.h"
+#include "oot3d_roll_dash.h"
 #include "oot3d_native_block_entry_hooks.h"
 #include "oot3d_native_guest_overrides.h"
 #include "oot3d_native_a32_memory_peek.h"
@@ -1294,6 +1295,17 @@ void NativeA32WindowSession::Setup() {
   widescreenProjection.ItemDescription = &itemDescription;
   auto &wideItems = wideItemsStorage.emplace(process.Memory());
   nativeCandidateDispatch.WideItems = &wideItems;
+  // Roll dash (L3+R3 > Game > Gameplay, config/roll_dash; oot3d_roll_dash.h):
+  // its block-entry hooks are always in the list, inert while it is off.
+#if defined(__SWITCH__)
+  const std::filesystem::path rollDashConfig = "sdmc:/switch/oot3dre/config";
+#else
+  const std::filesystem::path rollDashConfig =
+      std::filesystem::path(launch.Host.ConfigurationPath).parent_path() / "config";
+#endif
+  auto &rollDash = rollDashStorage.emplace(
+      process.Memory(), rollDashConfig / Oot3dNativeGame::kRollDashAnimationsName);
+  widescreenProjection.RollDash = &rollDash;
   auto &uiRenderBackend = uiRenderBackendStorage.emplace(api);
   auto &n64UiRenderer = n64UiRendererStorage.emplace(uiRenderBackend,
                                                &ocarinaText);
@@ -2107,6 +2119,16 @@ void NativeA32WindowSession::UpdateScenePresentation() {
     Oot3dNativeGame::WriteGameLog(std::move(*line));
   visibility.Presentation = widescreenProjection.Projection.Presentation;
   visibility.FovMultiplier = graphics.FovMultiplier;
+}
+
+void NativeA32WindowSession::UpdateRollDash() {
+  if (!rollDashStorage.has_value()) return;
+  auto &rollDash = *rollDashStorage;
+  rollDash.Prepare(Oot3dNativeGame::RollDashEnabled().load(std::memory_order_relaxed));
+  // Game log: the Gameplay settings at start and on each change.
+  if (auto line = rollDash.TakeSettingsLine(
+          Oot3dNativeGame::LandingRollEnabled().load(std::memory_order_relaxed)))
+    Oot3dNativeGame::WriteGameLog(std::move(*line));
 }
 
 bool NativeA32WindowSession::WidescreenMenuCornersActive() {

@@ -283,6 +283,8 @@ NativeA32WindowSession::SaveState(const std::filesystem::path &path, bool withSe
   if (itemDescriptionStorage->Pending()) return SaveStateOutcome::Deferred;
   if (Oot3dNativeGame::NativeActorVisibilityHasPendingRestore(widescreenProjection.ActorVisibility))
     return SaveStateOutcome::Deferred;
+  // Roll dash: a native call's caller is host-held until it returns.
+  if (rollDashStorage->Pending()) return SaveStateOutcome::Deferred;
   const auto started = std::chrono::steady_clock::now();
   Oot3dNativeGame::NativeA32SavestateRuntimeState runtime;
   runtime.FrameCount = frameCount;
@@ -493,6 +495,10 @@ bool NativeA32WindowSession::LoadState(const std::filesystem::path &path,
   systemPageStorage->Reset();
   itemDescriptionStorage->Reset();
   wideItemsStorage->Reset();
+  // Roll dash: host state goes; the loaded memory may lack (or hold other
+  // bytes in) its regions, mapped or refreshed again before guest code runs.
+  rollDashStorage->Reset();
+  UpdateRollDash();
   uiLifecycleBridge.SetTopScreenConfig(activeTopScreenConfig);
   widescreenProjection.TopScreenPauseDrawRouting = {};
   widescreenProjection.TopScreenPausePageRedraw = {};

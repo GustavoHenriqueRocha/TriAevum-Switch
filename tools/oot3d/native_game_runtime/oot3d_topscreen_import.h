@@ -71,6 +71,9 @@ struct Archive {
     // The HD images of the game's textures it is known to carry (empty: none
     // pinned).
     std::span<const HdTexture> HdTextures = {};
+    // It is known to carry romfs/actor/zelda_link_ext.zar, Link's Roll dash
+    // animations (kLinkAnimationsSha256, the same in every region folder).
+    bool LinkAnimations = false;
 };
 
 // The release the console downloads (3.2.2, GameBanana file 1879915).
@@ -96,25 +99,36 @@ inline constexpr std::uint32_t kUiAtlasHdScale = 3;
 // (--topscreen-hd-textures): the HUD draws them when the player's texture
 // pack has no image of that texture.
 inline constexpr const char* kHdTexturesDirectoryName = "topscreen_hd";
+// Link's Roll dash animations (oot3d_roll_dash.h), the mod's
+// romfs/actor/zelda_link_ext.zar as it is, installed as
+// config/zelda_link_ext.zar (kRollDashAnimationsName). Byte-identical to the
+// 3.0 file coccofresco/TriAevum pins (topscreen_assets.py).
+inline constexpr std::uint64_t kLinkAnimationsBytes = 186'404;
+inline constexpr const char* kLinkAnimationsSha256 =
+    "06d60e05c493e86677497eb935b49951d613249c43f896816ae898bb8b005902";
 // Whether everything the download builds for the HUD art is installed in
 // `configDirectory`: the HD UI atlas and the downloaded release's HD images.
 [[nodiscard]] bool HdArtInstalled(const std::filesystem::path& configDirectory);
 // The player's answer to the start-up offer: "never" stops it; anything else
-// (or no file) offers the download at the next start when the pack or the HD
-// art is missing.
+// (or no file) offers the download at the next start when the pack, the HD
+// art or (with Roll dash on) Link's dash animations are missing.
 inline constexpr const char* kOfferSettingName = "topscreen_offer";
 
 enum class OfferSetting { Ask, Never };
 [[nodiscard]] OfferSetting ParseOfferSetting(std::string_view text);
 [[nodiscard]] const char* OfferSettingText(OfferSetting setting);
-// Whether the start-up screen offers the download: no pack yet, or a pack
+// Whether the start-up screen offers the download: no pack yet, a pack
 // without all of the HD art (HdArtInstalled: an install from before it was
-// imported).
-[[nodiscard]] bool ShouldOffer(bool packExists, bool hdArtExists, bool romfsExists, OfferSetting setting);
+// imported), or `dashAnimationsMissing`: Roll dash is on and Link's dash
+// animations are not installed (an install from before 0.2.1).
+[[nodiscard]] bool ShouldOffer(bool packExists, bool hdArtExists, bool dashAnimationsMissing,
+                               bool romfsExists, OfferSetting setting);
 // Whether a verified archive the player copied to switch/oot3dre/ is built
 // at start-up without asking: always without a pack; with a pack, only when
-// HD art is missing and that archive carries all of it.
-[[nodiscard]] bool ShouldBuildFromLocalArchive(bool packExists, bool hdArtExists, const Archive& archive);
+// the HD art or the wanted dash animations are missing and that archive
+// carries them.
+[[nodiscard]] bool ShouldBuildFromLocalArchive(bool packExists, bool hdArtExists, bool dashAnimationsMissing,
+                                               const Archive& archive);
 
 // ---- ZIP (stored or deflated entries, no ZIP64, no encryption) ----
 
@@ -233,6 +247,11 @@ struct Rgba8Image {
 [[nodiscard]] std::vector<Bytes> ExtractHdTextures(const ZipReader& archive, const Archive& root,
                                                    std::string_view region);
 
+// The archive's zelda_link_ext.zar for `region` (size and SHA-256 checked);
+// empty when the release is not known to carry it (Archive::LinkAnimations).
+[[nodiscard]] Bytes ExtractLinkAnimations(const ZipReader& archive, const Archive& root,
+                                          std::string_view region);
+
 // Size and SHA-256 of a file against a known release; nullptr and a reason
 // when it is none of them. `progress(done, total)` may be empty.
 [[nodiscard]] const Archive* IdentifyArchiveFile(
@@ -247,6 +266,8 @@ struct Outputs {
     // Source->HdTextures reduced by BuildHdImage, in the same order (empty
     // when the release has none).
     std::vector<Bytes> HdTextures;
+    // ExtractLinkAnimations (empty when the release has none).
+    Bytes LinkAnimations;
 };
 // The outputs from a verified archive (`source`, see IdentifyArchiveFile).
 [[nodiscard]] Outputs Build(const std::filesystem::path& archive, const Archive& source,
@@ -256,8 +277,9 @@ struct Outputs {
 // (removed first: Horizon cannot rename over a file). Throws ImportError.
 void WriteFileVerified(const std::filesystem::path& path, std::span<const std::uint8_t> bytes);
 
-// Writes the font pack, the receipt, the HD atlas and HD images (when built)
-// and the pack (last: it is what the game looks for) into `configDirectory`.
+// Writes the font pack, the receipt, the HD atlas, HD images and Link's dash
+// animations (when built) and the pack (last: it is what the game looks for)
+// into `configDirectory`.
 void Install(const Outputs& outputs, const std::filesystem::path& configDirectory);
 
 } // namespace Oot3dNativeGame::TopScreenImport

@@ -1,15 +1,20 @@
 // Host tests for oot3d_topscreen_import (ZIP reader, RomFS reader, texture
 // codecs, QBF pairing, font pack, PNG codec, HD UI atlas extraction and 3x
-// reduction, offer rules, verified writes). Plain main(); exits non-zero on
-// failure.
+// reduction, Link's dash animations, offer rules, verified writes). Plain
+// main(); exits non-zero on failure.
 //
 //   oot3d_topscreen_import_tests                      run the tests
 //   oot3d_topscreen_import_tests --build <archive> <romfs.bin> <pack.o3tu> <font_coverage.zip> [<ui_atlas_hd.png>]
 //       build the outputs from the real mod archive and RomFS (compare the
 //       first two with build_topscreen_texture_override_pack.py /
 //       prepare_qbf_font_pack.py)
+//   oot3d_topscreen_import_tests --link-animations <singlescreen_322.zip>
+//       extract zelda_link_ext.zar from every region folder of the real
+//       archive and build the Roll dash image from it
 
 #include "oot3d_topscreen_import.h"
+#include "oot3d_roll_dash.h"
+#include "oot3d_top_screen_link_ext.h"
 
 #include <zlib.h>
 
@@ -533,28 +538,69 @@ void TestOffer() {
     CHECK(ts::ParseOfferSetting("garbage") == OfferSetting::Ask);
     CHECK(ts::ParseOfferSetting(ts::OfferSettingText(OfferSetting::Never)) == OfferSetting::Never);
     // No pack: offer the download.
-    CHECK(ts::ShouldOffer(false, false, true, OfferSetting::Ask));
-    CHECK(ts::ShouldOffer(false, true, true, OfferSetting::Ask));
+    CHECK(ts::ShouldOffer(false, false, false, true, OfferSetting::Ask));
+    CHECK(ts::ShouldOffer(false, true, false, true, OfferSetting::Ask));
     // A pack from before the HD atlas: offer it again.
-    CHECK(ts::ShouldOffer(true, false, true, OfferSetting::Ask));
-    CHECK(!ts::ShouldOffer(true, true, true, OfferSetting::Ask));
-    CHECK(!ts::ShouldOffer(false, false, false, OfferSetting::Ask));
-    CHECK(!ts::ShouldOffer(true, false, false, OfferSetting::Ask));
-    CHECK(!ts::ShouldOffer(false, false, true, OfferSetting::Never));
-    CHECK(!ts::ShouldOffer(true, false, true, OfferSetting::Never));
+    CHECK(ts::ShouldOffer(true, false, false, true, OfferSetting::Ask));
+    CHECK(!ts::ShouldOffer(true, true, false, true, OfferSetting::Ask));
+    CHECK(!ts::ShouldOffer(false, false, false, false, OfferSetting::Ask));
+    CHECK(!ts::ShouldOffer(true, false, false, false, OfferSetting::Ask));
+    CHECK(!ts::ShouldOffer(false, false, false, true, OfferSetting::Never));
+    CHECK(!ts::ShouldOffer(true, false, false, true, OfferSetting::Never));
+    // A 0.2.0 install (pack and HD art) is offered the download again only
+    // when Roll dash is on without Link's dash animations, and never after
+    // "never".
+    CHECK(ts::ShouldOffer(true, true, true, true, OfferSetting::Ask));
+    CHECK(!ts::ShouldOffer(true, true, true, true, OfferSetting::Never));
+    CHECK(!ts::ShouldOffer(true, true, true, false, OfferSetting::Ask));
     // A local archive: always without a pack; with one, only to add missing
-    // HD art, and only from a release that carries all of it (3.2.2; 3.2.1's
-    // HD images are not pinned, 3.0 has no HD atlas).
+    // HD art or the wanted dash animations, and only from a release that
+    // carries them (3.2.2; 3.2.1's HD images and 3.0's/3.2.1's animations are
+    // not pinned, 3.0 has no HD atlas).
     const ts::Archive& v30 = ts::KnownArchives()[0];
     const ts::Archive& v321 = ts::KnownArchives()[1];
-    CHECK(ts::ShouldBuildFromLocalArchive(true, false, ts::DownloadArchive()));
+    CHECK(ts::ShouldBuildFromLocalArchive(true, false, false, ts::DownloadArchive()));
     CHECK(std::string_view(v30.Version) == "3.0" && v30.UiAtlasHdSha256 == nullptr);
     CHECK(v321.HdTextures.empty() && ts::DownloadArchive().HdTextures.size() == 2);
-    CHECK(ts::ShouldBuildFromLocalArchive(false, false, v30));
-    CHECK(ts::ShouldBuildFromLocalArchive(false, false, v321));
-    CHECK(!ts::ShouldBuildFromLocalArchive(true, false, v321));
-    CHECK(!ts::ShouldBuildFromLocalArchive(true, false, v30));
-    CHECK(!ts::ShouldBuildFromLocalArchive(true, true, ts::DownloadArchive()));
+    CHECK(!v30.LinkAnimations && !v321.LinkAnimations && ts::DownloadArchive().LinkAnimations);
+    CHECK(ts::ShouldBuildFromLocalArchive(false, false, false, v30));
+    CHECK(ts::ShouldBuildFromLocalArchive(false, false, false, v321));
+    CHECK(!ts::ShouldBuildFromLocalArchive(true, false, false, v321));
+    CHECK(!ts::ShouldBuildFromLocalArchive(true, false, false, v30));
+    CHECK(!ts::ShouldBuildFromLocalArchive(true, true, false, ts::DownloadArchive()));
+    CHECK(ts::ShouldBuildFromLocalArchive(true, true, true, ts::DownloadArchive()));
+    CHECK(!ts::ShouldBuildFromLocalArchive(true, true, true, v321));
+    CHECK(!ts::ShouldBuildFromLocalArchive(true, true, true, v30));
+}
+
+void TestLinkAnimations(const fs::path& directory) {
+    const ts::Archive& v322 = ts::DownloadArchive();
+    const auto zip = [&](const char* name, std::vector<ZipFixtureEntry> entries) {
+        WriteFile(directory / name, MakeZip(entries));
+        return directory / name;
+    };
+    const std::string eur = std::string(v322.Root) +
+                            "/EUR/Emulator/load/mods/0004000000033600/romfs/actor/zelda_link_ext.zar";
+    const std::string usaHardware = std::string(v322.Root) +
+                                    "/USA/3DS Hardware/luma/titles/0004000000033500/romfs/actor/zelda_link_ext.zar";
+    {
+        const ts::ZipReader archive(zip("link_missing.zip", {{std::string(v322.Root) + "/EUR/readme.txt", Text("x")}}));
+        CHECK_THROWS(ts::ExtractLinkAnimations(archive, v322, "EUR"), "has no EUR zelda_link_ext.zar");
+        // Releases without the pin: nothing, whatever the archive holds.
+        CHECK(ts::ExtractLinkAnimations(archive, ts::KnownArchives()[0], "EUR").empty());
+        CHECK(ts::ExtractLinkAnimations(archive, ts::KnownArchives()[1], "EUR").empty());
+        CHECK_THROWS(ts::ExtractLinkAnimations(archive, v322, "KOR"), "unsupported TopScreen region");
+    }
+    {
+        const ts::ZipReader archive(zip("link_small.zip", {{eur, Text("ZAR")}}));
+        CHECK_THROWS(ts::ExtractLinkAnimations(archive, v322, "EUR"), "unexpected Link animations size");
+    }
+    {
+        // The pinned size with other content, in the 3DS-hardware folder.
+        const ts::ZipReader archive(
+            zip("link_other.zip", {{usaHardware, Bytes(ts::kLinkAnimationsBytes, 0x5A), true}}));
+        CHECK_THROWS(ts::ExtractLinkAnimations(archive, v322, "USA"), "unexpected Link animations");
+    }
 }
 
 // 8-bit RGBA PNG rows with the given filter types (raw zlib stream), for the
@@ -754,6 +800,18 @@ void TestInstall(const fs::path& directory) {
     CHECK(!ts::HdArtInstalled(config));
     fs::remove(config / ts::kUiAtlasHdName);
     CHECK(!ts::HdArtInstalled(config));
+    // Link's dash animations: as config/zelda_link_ext.zar, in the receipt;
+    // a build without them leaves an installed file alone.
+    CHECK(!Oot3dNativeGame::RollDashAnimationsInstalled(config));
+    outputs.LinkAnimations = Text("ZAR animations");
+    ts::Install(outputs, config);
+    CHECK(AsString(ReadFile(config / "zelda_link_ext.zar")) == "ZAR animations");
+    CHECK(Oot3dNativeGame::RollDashAnimationsInstalled(config));
+    CHECK(AsString(ReadFile(config / ts::kReceiptName)).find("\"link_animations_sha256\"") != std::string::npos);
+    outputs.LinkAnimations.clear();
+    ts::Install(outputs, config);
+    CHECK(AsString(ReadFile(config / "zelda_link_ext.zar")) == "ZAR animations");
+    CHECK(AsString(ReadFile(config / ts::kReceiptName)).find("link_animations") == std::string::npos);
 }
 
 void TestWriteAndIdentify(const fs::path& directory) {
@@ -876,6 +934,32 @@ int RealBuild(const fs::path& archive, const fs::path& romfs, const fs::path& pa
     return ok ? 0 : 1;
 }
 
+// Link's dash animations from the real 3.2.2 archive, every region folder:
+// pinned bytes, and the Roll dash image (oot3d_top_screen_link_ext.h) holds
+// every animation of 3.0's table for both ages.
+int RealLinkAnimations(const fs::path& path) {
+    std::string error;
+    if (ts::IdentifyArchiveFile(path, &error) != &ts::DownloadArchive()) {
+        std::fprintf(stderr, "%s\n", error.empty() ? "not the 3.2.2 archive" : error.c_str());
+        return 1;
+    }
+    const ts::ZipReader zip(path);
+    bool ok = true;
+    for (const char* region : {"EUR", "USA", "JPN"}) {
+        const Bytes zar = ts::ExtractLinkAnimations(zip, ts::DownloadArchive(), region);
+        Oot3dNativeGame::TopScreenLinkExtImage image;
+        const bool built = Oot3dNativeGame::BuildTopScreenLinkExtImage(zar, 0x06000000U, &image, &error);
+        std::size_t present = 0;
+        for (const auto& age : image.Present)
+            for (const bool animation : age) present += animation ? 1U : 0U;
+        std::printf("%s zelda_link_ext.zar %zu bytes sha256 %s; image %s, %zu bytes, %zu/%zu animations\n", region,
+                    zar.size(), Sha256Of(zar).c_str(), built ? "built" : error.c_str(), image.Bytes.size(), present,
+                    2 * Oot3dNativeGame::kTopScreenLinkExtAnimations.size());
+        ok = ok && built && present == 2 * Oot3dNativeGame::kTopScreenLinkExtAnimations.size();
+    }
+    return ok ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -884,6 +968,14 @@ int main(int argc, char** argv) {
             return RealBuild(argv[2], argv[3], argv[4], argv[5], argc == 7 ? fs::path(argv[6]) : fs::path());
         } catch (const std::exception& error) {
             std::fprintf(stderr, "build failed: %s\n", error.what());
+            return 1;
+        }
+    }
+    if (argc == 3 && std::string_view(argv[1]) == "--link-animations") {
+        try {
+            return RealLinkAnimations(argv[2]);
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "link animations failed: %s\n", error.what());
             return 1;
         }
     }
@@ -902,6 +994,7 @@ int main(int argc, char** argv) {
         TestOffer();
         TestPng();
         TestUiAtlasHd(directory);
+        TestLinkAnimations(directory);
         TestInstall(directory);
         TestWriteAndIdentify(directory);
     } catch (const std::exception& error) {

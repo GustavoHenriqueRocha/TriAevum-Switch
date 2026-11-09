@@ -1,6 +1,7 @@
 #include "oot3d_native_block_entry_hooks.h"
 
 #include "oot3d_landing_roll.h"
+#include "oot3d_roll_dash.h"
 #include "oot3d_native_a32_actor_visibility.h"
 #include "oot3d_native_a32_timing_probe.h"
 #include "oot3d_native_a32_window_guest_pcs.h"
@@ -41,6 +42,9 @@ std::vector<Oot3dBlockEntryHookSource> Oot3dNativeBlockEntryHookSources(
                   // Landing roll (N64): the policy diverts to the game's roll setup.
                   kLandingRollHookPc,
               });
+  // Roll dash (config/roll_dash, oot3d_roll_dash.h): always hooked, so the
+  // menu turns it on at once; inert while it is off.
+  add("roll_dash", kRollDashHookPcs);
   add("actor_visibility", NativeActorVisibilityHookPcs());
   add("pica_composition", Oot3dNativePicaCompositionHookPcs());
   if (options.PlayerTemporal)

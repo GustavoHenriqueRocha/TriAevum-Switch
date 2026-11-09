@@ -128,6 +128,22 @@ add_executable(oot3d_landing_roll_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_landing_roll_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_landing_roll_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Roll dash (config/roll_dash): the zelda_link_ext.zar image and the runtime
+# at its block entries (oot3d_roll_dash_runtime.h; upstream 5acf8138, 54fe8edf).
+add_executable(oot3d_top_screen_link_ext_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_top_screen_link_ext.cpp
+    tools/oot3d/native_game_runtime/oot3d_top_screen_link_ext_tests.cpp
+)
+target_compile_features(oot3d_top_screen_link_ext_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_top_screen_link_ext_tests FOLDER Tests)
+add_executable(oot3d_roll_dash_runtime_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_roll_dash_runtime.cpp
+    tools/oot3d/native_game_runtime/oot3d_top_screen_link_ext.cpp
+    tools/oot3d/native_game_runtime/oot3d_roll_dash_runtime_tests.cpp
+)
+target_link_libraries(oot3d_roll_dash_runtime_tests PRIVATE oot3d_native_a32_process)
+oot3d_target_defaults(oot3d_roll_dash_runtime_tests FOLDER Tests)
+
 # Texture pack size cap, mipmaps and the HD textures setting (pure parts).
 add_executable(oot3d_texture_pack_scale_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_texture_pack_scale_tests.cpp
@@ -523,6 +539,8 @@ if (TARGET oot3d_native_a32_aot OR TARGET oot3d_native_whole_aot OR
         tools/oot3d/native_game_runtime/oot3d_top_screen_pause_transaction.cpp
         tools/oot3d/native_game_runtime/oot3d_top_screen_item_description_runtime.cpp
         tools/oot3d/native_game_runtime/oot3d_top_screen_wide_items_runtime.cpp
+        tools/oot3d/native_game_runtime/oot3d_roll_dash_runtime.cpp
+        tools/oot3d/native_game_runtime/oot3d_top_screen_link_ext.cpp
         tools/oot3d/native_game_runtime/oot3d_native_actor_interactions.cpp
         tools/oot3d/native_game_runtime/oot3d_actor_visibility_policy.cpp
         tools/oot3d/native_game_runtime/oot3d_native_a32_actor_visibility.cpp

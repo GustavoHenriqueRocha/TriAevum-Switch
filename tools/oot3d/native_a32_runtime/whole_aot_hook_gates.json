@@ -3,6 +3,7 @@
   "generated_by": "oot3d_block_entry_hook_census",
   "pcs": [
     "0x00111CB0",
+    "0x0012966C",
     "0x001344F0",
     "0x00144EE8",
     "0x00150CFC",
@@ -50,6 +51,8 @@
     "0x00251374",
     "0x00251708",
     "0x002518B4",
+    "0x00251B40",
+    "0x00251D34",
     "0x00251DDC",
     "0x00252038",
     "0x0025205C",
@@ -60,6 +63,7 @@
     "0x0025CB84",
     "0x00275F28",
     "0x00297508",
+    "0x002BE8B0",
     "0x002C3950",
     "0x002C3960",
     "0x002C3970",
@@ -166,6 +170,7 @@
     "0x0033D174",
     "0x00340F44",
     "0x00341CD8",
+    "0x0034807C",
     "0x003494F4",
     "0x00349504",
     "0x0034BE04",
@@ -337,6 +342,9 @@
     "0x00111CB0": [
       "typed_gameplay_exits"
     ],
+    "0x0012966C": [
+      "roll_dash"
+    ],
     "0x001344F0": [
       "typed_gameplay_exits"
     ],
@@ -380,7 +388,8 @@
       "typed_gameplay_exits"
     ],
     "0x001E1B54": [
-      "base"
+      "base",
+      "roll_dash"
     ],
     "0x002029C4": [
       "typed_gameplay_exits"
@@ -478,6 +487,12 @@
     "0x002518B4": [
       "typed_gameplay_exits"
     ],
+    "0x00251B40": [
+      "roll_dash"
+    ],
+    "0x00251D34": [
+      "roll_dash"
+    ],
     "0x00251DDC": [
       "player_temporal"
     ],
@@ -507,6 +522,9 @@
     ],
     "0x00297508": [
       "pica_composition"
+    ],
+    "0x002BE8B0": [
+      "roll_dash"
     ],
     "0x002C3950": [
       "top_screen_item_dispatch"
@@ -831,6 +849,9 @@
     ],
     "0x00341CD8": [
       "actor_visibility"
+    ],
+    "0x0034807C": [
+      "roll_dash"
     ],
     "0x003494F4": [
       "top_screen_item_dispatch"

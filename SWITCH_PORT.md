@@ -3620,6 +3620,81 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   lock-on, run-jump end, walked off; the same cases through guest reads at each stick-ring slot; the
   config file). Guards "Landing roll".
 
+### Roll Dash (11/09, issue #6)
+- **What:** L3+R3 > Game > Gameplay > "Roll dash" (`config/roll_dash`, present = on; **off by default**, so
+  0.2.0's behaviour is unchanged until the player turns it on). Keep A held after a roll and Link dashes
+  out of it, faster than his run (adult 1.425x, child 1.35x, heavy boots 1.25x, airborne after two
+  updates 1.18x), until A is released, one of 3.0's cancel bits is set in stateFlags1 (`0x08A02000`) or
+  `FUN_0037577c` (Gameplay_InCsMode) says no. With the mod's animations Link plays the dash run
+  (`nml_dash`, `ft_dash_long`, ... answered for his archive) and the roll is slowed to 0.8/1.0/0.685 to
+  match them; without them the roll and the run are sped up on the native animations (roll 1.425x).
+  Applied at once (the hooks read the flag at each host frame).
+- **Where from:** "OoT3D: Single Screen Experience" 3.0/3.1 by M-1, as coccofresco ported it to typed host
+  code in upstream TriAevum (GPL-3.0-or-later): `5acf8138` (the dash state at `Player_Update`, the speed
+  sites, the roll animation site, the CSAB answer from `zelda_link_ext.zar` in a host-reserved guest
+  region), `54fe8edf` (3.1's cross-fade between the dash and the run: the pose fades over six 30 Hz
+  updates through `AnimationContext_AddEntry` / `AnimationEntry_DecodeFrame` /
+  `AnimationEntry_InitInterpAll` into a joint page, the speed eases between the two rates), `5b34bd61` +
+  `3c2ed0f3` (Navi's follow action `FUN_00129474`: her reach-timer expiry during a dash sends her into the
+  hat, block `0x00129680`, instead of the native give-up that leaves her out; upstream #91 #95 #99) and
+  `a3eeb1e2` (while A is held the dash calls `FUN_0037577c` from the `Player_Update` entry and the call
+  returns there with the query's registers: the PlayState/player probes must observe only the title's
+  call, or the scene view loses its scene, camera and environment for as long as A is held). The fork
+  keeps only the dash: `oot3d_roll_dash_runtime.{h,cpp}` is upstream's `TopScreenGameplayRuntime` without
+  its other options; `oot3d_top_screen_link_ext.{h,cpp}` (the ZAR v1 image builder) is upstream's file.
+- **Hooks (block-entry hooks, `oot3d_roll_dash.h` `kRollDashHookPcs`, source `roll_dash` of
+  `oot3d_native_block_entry_hooks.cpp`):** `0x001E1B54` Player_Update (dash state; already gated as `base`),
+  `0x0012966C` Navi's reach-timer expiry, `0x00251B40` / `0x00251D34` the run's turn and move speed loads,
+  `0x002BE8B0` FUN_002be660's roll animation call (scale + cross-fade), `0x0034807C` ZAR_GetCSABByIndex.
+  Upstream ran them from its candidate dispatch; here the window's block-entry policy
+  (`oot3d_native_a32_projection_policy.cpp`, after the landing roll) calls `RollDashRuntime::Execute` and,
+  when it redirects, leaves the whole-AOT graph at the target with the registers it set
+  (`Oot3dWholeAotExitAt`, as the landing roll does). A native call sets r14 to the hook PC, so its return
+  re-enters the hook, which restores the caller (dash query) or issues the next call (cross-fade). Off,
+  `ShouldObserve` is false at every PC: the hooks are always in the list (the menu turns the option on at
+  once), so the block-entry callback runs at them, but nothing is read, written or redirected. Outside a
+  dash the roll site keeps the native block (no exit). The window refuses a hook its linked whole-AOT code
+  does not gate (`Oot3dWholeAotHookGatesError`): **0.2.1 needs whole-AOT code generated with
+  `--sparse-block-entries` and this `whole_aot_hook_gates.json` (335 PCs, five new).**
+- **Guest regions:** the image of `zelda_link_ext.zar` at `0x06000000` (slots `[age][16]` whose address
+  stands for a native archive entry; Link's archive table stays native, its destructor frees every entry)
+  and the cross-fade joint page at `0x06210000`, both outside every CTR mapping. A mapping rebuilds the page
+  table, which guest code must not be running for: `UpdateRollDash` maps them at the host frame start
+  (`oot3d_native_a32_window_frame.cpp`, after the TopScreen config) and after a state load, never from a
+  hook. Savestates defer while a dash native call is in flight; a load resets the host state
+  (`RollDashRuntime::Reset`, `oot3d_native_a32_window_savestate.cpp`) and the next `Prepare` maps the
+  regions again or refreshes a foreign image (magic + content hash). Upstream's `RestoreLinkArchive` (archive
+  entries patched by its builds before `5acf8138`) is not ported: this fork never patched them.
+- **Animations on the console:** the TopScreen import (`oot3d_topscreen_import.cpp`) now also extracts
+  `SingleScreen_3.2.2/<EUR|USA>/Emulator/load/mods/<title id>/romfs/actor/zelda_link_ext.zar` (the RomFS's
+  region; the 3DS-hardware folder as fallback), checks it (186,404 bytes, SHA-256 `06d60e05...5902`, the
+  file upstream pins from 3.0, identical in all three region folders of 3.2.2) and installs it as
+  `config/zelda_link_ext.zar` beside the HUD outputs (receipt `link_animations_sha256`). 3.0's and 3.2.1's
+  copies are not pinned (no extraction from those archives).
+- **0.2.0 installs** (pack and HD art present, archive deleted) are not asked anything at start while Roll
+  dash is off. Turned on without the animations, the dash works on the native run, the option's help text
+  says the animations are missing and how to get them, L3+R3 > Updates says so too, and the **next start**
+  offers the 56 MB download with its own text (A download, B not now, X never; a "never" given before also
+  stops it, and Updates > "Offer the download at the next start" turns it back on). A
+  `singlescreen_322.zip` copied to `switch/oot3dre/` is used without asking. The rebuild is the usual one
+  (pack, fonts, HD art and the animations), from the player's own RomFS.
+- **Log:** game log line `gameplay: landing_roll=.. roll_dash=.. animations=ready|unavailable (reason)|-` at
+  start and on each change; perf line `roll_dash: queries frames answers speed blends poses navi` per
+  window while it is on.
+- **Not ported:** quick put-away, aiming reticle, 3D rain, upstream's 3.0 landing-roll fix and floor-web
+  fix (this fork keeps its own N64 landing roll at `0x004BC080`, independent of the dash), the standard
+  TopScreen profile (`10366406`), the `TRIAEVUM_DASH_TRACE` / `TRIAEVUM_SCENE_VIEW_TRACE` diagnostics.
+- **Check [not done on the console]:** Kokiri Forest, roll with A and keep A held → Link dashes (dash
+  animation with the animations installed); release A → the pose fades back to the run; dash past Navi
+  while she returns → she goes into the hat. With the option off, nothing changes.
+- Tests: `oot3d_roll_dash_runtime_tests` (off observes nothing; the query and its register restore; the
+  roll/run/airborne scales at the three speed sites; the idle word; a blocked query; Navi; the CSAB answer
+  from a mapped image; the cross-fade's four native calls and a refused re-entry; a state load without the
+  regions; the log lines; the config file), `oot3d_top_screen_link_ext_tests` (upstream's),
+  `oot3d_topscreen_import_tests` (extraction pins, install, offer rules; `--link-animations
+  singlescreen_322.zip` checks the real archive), `oot3d_native_block_entry_hooks_tests`, the census
+  check. Guards "Roll dash".
+
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP
   field; default `0.1.0-dev`) and `OOT3D_RELEASE_BUILD` (monotonic integer; default 0). Both go

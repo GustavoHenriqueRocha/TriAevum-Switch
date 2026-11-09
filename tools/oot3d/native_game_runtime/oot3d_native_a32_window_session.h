@@ -332,6 +332,10 @@ private:
   void SetTopScreenSessionMinimapVisible(bool visible);
   void ApplySelectedUiProfile();
   void UpdateScenePresentation();
+  // Roll dash (oot3d_roll_dash_runtime.h), outside guest code at each host
+  // frame and after a state load: the option of the frame, its guest
+  // regions, and the game log line of the Gameplay settings on a change.
+  void UpdateRollDash();
   // The OpenGL widescreen moves the relocated lower menu's bottom corners to
   // the window's corners (TopScreen frontend menus); touch follows.
   bool WidescreenMenuCornersActive();
@@ -513,6 +517,7 @@ private:
   std::optional<Oot3dNativeGame::TopScreenSystemPageRuntime> systemPageStorage;
   std::optional<Oot3dNativeGame::TopScreenItemDescriptionRuntime> itemDescriptionStorage;
   std::optional<Oot3dNativeGame::TopScreenWideItemsRuntime> wideItemsStorage;
+  std::optional<Oot3dNativeGame::RollDashRuntime> rollDashStorage;
   std::optional<oot3d::ui::Fast3dUiRenderBackend> uiRenderBackendStorage;
   std::optional<oot3d::ui::N64UiFast3dRenderer> n64UiRendererStorage;
   // The UI texture revision at which every HUD texture was asked for ahead

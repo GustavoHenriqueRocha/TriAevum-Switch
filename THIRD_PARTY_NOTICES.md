@@ -343,9 +343,11 @@ The Nintendo Switch port also reimplements behaviour of the mod's 3.x releases,
 published on the same page as "OoT3D: Single Screen Experience" (CC BY-NC-ND
 4.0): the HUD drawn from its `custom_ui01` art, the Ocarina arrows and the
 Restoration HUD's lanes and Item I/II rules, decoded from the 3.0 to 3.2.2
-`code.ips`. No code or data of the mod is copied; source comments name the
+`code.ips`, and its Roll Dash (through coccofresco's typed port in upstream
+TriAevum). No code or data of the mod is copied; source comments name the
 payload addresses and the constants a matching layout needs. The mod's archive
-is downloaded by the player's console and its art and font are rebuilt there
+is downloaded by the player's console, its art and font are rebuilt there and
+its Link dash animations (`zelda_link_ext.zar`) installed there
 (`oot3d_topscreen_import.h`); nothing of it is in the Switch release.
 
 ## Forge and runtime binary dependencies
