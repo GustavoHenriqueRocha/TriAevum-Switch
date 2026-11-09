@@ -28,6 +28,50 @@ class Guard:
 
 
 GUARDS = [
+    # --- 11/08: coccofresco's SingleScreen 3.0 HUD fixes (upstream 2026-10-17), ported for 0.2.0 ---
+    Guard("D-pad cross stayed opaque where 3.0 greys it (fc5ddfa6: 0x005CCF6C, first visible ZR/ZL lane, "
+          "else 0.3 with a nested owner)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'ResolveTopScreenDpadGroupAlpha\(.*?lanes\.ItemZr > 0\.0F \? lanes\.ItemZr : lanes\.ItemZl;.*?'
+          r'std::min\(lane, 1\.0F\);\s+return nestedOwner \? 0\.3F : 1\.0F;',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("D-pad cross and its icons/marks not dimmed by the group alpha (fc5ddfa6, 94b293ea)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
+          r'const std::size_t clusterStart = output\.size\(\);.*?'
+          r'ReadTopScreenPlayerNestedOwner\(mMemory, &nestedOwner\).*?'
+          r'source_quad == 5U\) output\[index\]\.color\.alpha \*= dpadAlpha;.*?'
+          r'dpadState\.GroupAlpha = dpadAlpha;',
+          "oot3d_top_screen_mod_profile_tests (D-pad presentation)"),
+    Guard("D-pad boots/marks stayed opaque on Epona while 3.0 halves them (94b293ea, loop 0x005DD78C)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_presentation.cpp",
+          r'p\.color\.alpha \*= state\.ItemOpacity\.Ocarina;\s+else\s+p\.color\.alpha \*= state\.GroupAlpha;.*?'
+          r'std::clamp\(alpha, 0\.0F, 1\.0F\) \* state\.GroupAlpha',
+          "oot3d_top_screen_mod_profile_tests (D-pad presentation)"),
+    Guard("A ring 13% and its label 40% larger than 3.0 (5da8aa7c: ring 32 px, label 0.68, label hidden "
+          "in alternate HUD mode 1/4)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
+          r'constexpr float targetX = 288\.0F;\s+constexpr float targetY = 24\.0F;.*?'
+          r'if \(!square && context\.ActionLabelHidden\).*?'
+          r'const float size = square \? 32\.0F / width : 0\.68F;.*?'
+          r'ActionLabelHidden = alternateHudMode == 1U \|\| alternateHudMode == 4U;',
+          "oot3d_top_screen_mod_profile_tests",
+          forbid=r'\(vertex\.X - centerX\) \* 0\.95F'),
+    Guard("B circle's translucent fill washed out the B item icon and ammo digits (d8ffc8f1)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
+          r'gate\.Draw && !CaptureTopScreenQuestBButtonCopies\(mMemory, mTopScreenConfig,.*?'
+          r'ApplyTopScreenHudScale\(output, mTopScreenConfig\);.*?'
+          r'AppendTopScreenQuestBButtonCopiesPresentation\(.*?ApplyTopScreenGameplayCanvas\(output\);',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("B icon copies: captured around (248, 24) after the HUD transform, native quads moved off screen",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
+          r'400\.0F \+ \(248\.0F - 400\.0F\) \* scale - static_cast<float>\(config\.HudMarginX\);.*?'
+          r'vertex\.X \+= 500\.0F - quadX;',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("lower-screen controls (circles, rupees, D-pad) stayed on screen in cutscenes (6f478bcc: "
+          "Gameplay_InCsMode hides the HUD)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'if \(gate->Draw && player != 0U\) \{.*?ReadTopScreenGameplayInCutsceneMode\(.*?gate->Draw = !cutscene;',
+          "oot3d_top_screen_mod_profile_tests"),
     # --- 11/08: test.12 "Cannot replace topscreen UI config: File exists" when saving a setting ---
     # Horizon's FS refuses rename() over an existing file (EEXIST); the TopScreen writer (and the
     # cache writer) only had the POSIX rename. One replace for every writer: old file to <file>.bak,

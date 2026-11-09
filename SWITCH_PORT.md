@@ -353,12 +353,13 @@ Both fixes have guards in `tests/switch/test_bug_guards.py`.
 **Not ported**
 
 - SingleScreen 3.0/3.1 source port and its follow-ups (`5acf8138`, `14edc1eb`, `1c4e9f06`, `ecda6605`,
-  `898dfd11`, `379276ac`, `b0ca70f9`, `be6bf208`, `f181ec69`, `fc5ddfa6`, `5da8aa7c`, `d8ffc8f1`, `6f478bcc`,
-  `ac63eb21`, `94b293ea`, `54fe8edf`, `10366406`, `46ce35d4`), Roll Dash (`4b88e124`, `a3eeb1e2`), the Navi
+  `898dfd11`, `379276ac`, `b0ca70f9`, `be6bf208`, `f181ec69`, `ac63eb21`, `54fe8edf`, `10366406`,
+  `46ce35d4`), Roll Dash (`4b88e124`, `a3eeb1e2`), the Navi
   hat redirect (`5b34bd61`, `3c2ed0f3`), the vision lists on the upper screen (`0046239c`) and Ocarina
   Reframed (`f7b5637f`, `96fb3438`, `98a1f30a`, `669e7f98`): large features on code this branch does not
   have (its TopScreen is the 2.1.1 port with 3.x art). The fixes in the list only repair that code. A
-  port of the 3.x profile would be its own project.
+  port of the 3.x profile would be its own project. Five of the 3.0 HUD fixes were ported on 08/11
+  (see "SingleScreen 3.0 HUD fixes from coccofresco").
 - Grass default rules 26 and 27 (`186b1a00`): the Switch grass reads the same rules
   (`triaevum_product_graphics.inc`), but this adds grass on two more surfaces, so it costs GPU time on the
   console. Worth a measured round of its own.
@@ -383,6 +384,39 @@ Both fixes have guards in `tests/switch/test_bug_guards.py`.
   `32855408`, `a4b881da`, `1ec489b8`, `c291e707`, `17218b0c`, `0d1c5637`, `a56f9649`, `f3524220`,
   `13a95dcc`, `16befec8`, `e53ac808`, `a741eda6`, `6fed40ae`, `48590372`, `8f69a26f`) and the merge
   `b9f248bb`.
+
+### SingleScreen 3.0 HUD fixes from coccofresco (08/11, 0.2.0)
+
+coccofresco compared upstream's SingleScreen 3.0 port with the original 3.0 mod running in Azahar on
+17/10 and fixed what differed (upstream `main`, GPL-3.0-or-later). These are his findings and his code;
+the commits keep his authorship (`git cherry-pick -x`). Each message says what was adapted here, because
+this branch has the 2.1.1 HUD with 3.x art, not upstream's 3.0 profile.
+
+| Upstream | Here | What the player sees |
+|---|---|---|
+| `fc5ddfa6` | `58d2b998` | The D-pad cross takes 3.0's group alpha (0x005CCF6C): the first visible R/L item lane, else 0.3 while Link has a nested owner, else 1. Ported: the cross only. Not applicable here: the View Model and picker parts. |
+| `5da8aa7c` | `d8fde56a` | The A ring is 32 px like the B circle, not about 36 px; the action text ("Check", "Faster"…) takes 0.68 instead of 0.95; in alternate HUD mode 1/4 the text is hidden. It is still centred on (288, 24). Not ported: button-group size/offset (no such option here) and the developer entrance warp. |
+| `d8ffc8f1` | `be368d28` | The B item icon and its ammo digits are drawn above the B circle; before, the circle's translucent fill washed them out (most visible on Epona against the sky). At the Quest draw the native quads near (248, 24) are copied for the host HUD and moved off screen. |
+| `6f478bcc` | `374ca6ef` | No lower-screen controls (circles, rupees, D-pad) during cutscenes or while Link takes out the ocarina: the HUD gate adds Gameplay_InCsMode (0x0037577C), as 3.0's 0x005DA570 does. Not ported: the pause-title skip at 0x0042B9F4 and the scene-dim branch at 0x0041EB40. |
+| `94b293ea` | `4ab3b31f` | D-pad icons without a lane alpha of their own (boots, tunic, sword…) and their cycle marks take the same group alpha; on Epona the boots are half transparent as in 3.0. |
+
+- **Not ported: `ac63eb21`** only corrects the Quest-draw exit from `6f478bcc`, which is not ported.
+  That exit and the dim branch add whole-AOT control-flow exits on the pause path. Upstream had not run
+  them in the product build, and the window setup here differs. For a release they are cosmetic: the
+  "ITEMS"/"GEAR" title during the pause opening, and an undimmed Save page.
+- **Later upstream commits:** none of them reverts or changes these fixes. `0046239c` only adds to the
+  list of the dim branch, which is not ported.
+- **Prelude of Light report (Gustavo's notes, 06/11):**
+  - None of the five fixes touches the START open gates (`TopScreenPauseTransactionRuntime::ReadOpenGates`
+    and `Begin`, `native_game_runtime/oot3d_top_screen_pause_transaction.cpp`). The only upstream commit
+    on that file since the merge base is `cf84b46b` (#80, SELECT opens Save/Quit), already here.
+  - `6f478bcc` adds one more reason to hide the HUD, the cutscene mode; it does not remove any.
+  - `5da8aa7c` changes only the size of what the 330–398 / y>150 branch moves to (288, 24); a B icon in
+    that region would still land on the A.
+  - `d8ffc8f1` copies the B icon only while the HUD gate is open, so it does nothing in the reported state.
+  - These are code readings, not a reproduction.
+- **Tests:** `oot3d_top_screen_mod_profile_tests` (cross alpha, A normalization and hidden label, B copies,
+  cutscene gate, D-pad group alpha). Guards: the seven under "coccofresco's SingleScreen 3.0 HUD fixes".
 
 ### Saving a file again on the SD card (08/11, test.12 report)
 
