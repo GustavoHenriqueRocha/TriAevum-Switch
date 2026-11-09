@@ -327,8 +327,8 @@ class Oot3dDebugMenuWindow final : public Ship::GuiWindow {
                                  ImGuiCond_Appearing);
         ImGui::SetNextWindowBgAlpha(0.92F);
         GuiWindow::Draw();
-        // Closed with the window's X (touch): the same state as L3+R3 leaves,
-        // and the game takes the input back.
+        // Fechado pelo X da janela (toque): o mesmo estado que L3+R3 deixa,
+        // e o jogo retoma a entrada.
         if (!IsVisible()) {
             Oot3d::DebugMenuOpenFlag().store(false, std::memory_order_relaxed);
             io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;

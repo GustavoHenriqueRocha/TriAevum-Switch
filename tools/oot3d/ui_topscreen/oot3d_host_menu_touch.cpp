@@ -34,7 +34,7 @@ HostMenuTouchGesture::Update(const HostMenuTouchSample &sample) noexcept {
     events.PointerX = x;
     events.PointerY = y;
   };
-  // A tap: press and release where the finger landed.
+  // Um toque: pressionar e soltar onde o dedo pousou.
   const auto click = [&] {
     movePointer(mPointX, mPointY);
     events.Press = true;
@@ -44,8 +44,8 @@ HostMenuTouchGesture::Update(const HostMenuTouchSample &sample) noexcept {
     events.ClearPointer = true;
     mPhase = Phase::Idle;
   };
-  // Past the slop, empty space scrolls with the finger (the motion made
-  // inside the slop included) and the pointer follows it.
+  // Além da folga, o espaço vazio rola com o dedo (incluindo o movimento feito
+  // dentro da folga) e o ponteiro o segue.
   const auto pan = [&] {
     if (!mMoved) {
       return;
@@ -80,7 +80,7 @@ HostMenuTouchGesture::Update(const HostMenuTouchSample &sample) noexcept {
     break;
   case Phase::Settling:
     if (!sample.Pressed) {
-      // Lifted before ImGui's hover was read: still a tap.
+      // Levantou antes de o hover do ImGui ser lido: ainda é um toque.
       click();
       lift();
       break;
@@ -89,7 +89,7 @@ HostMenuTouchGesture::Update(const HostMenuTouchSample &sample) noexcept {
       break;
     }
     if (sample.ItemHovered) {
-      // Pressed where ImGui saw the item; a drag follows from the next poll.
+      // Pressionado onde o ImGui viu o item; um arrasto segue a partir do próximo poll.
       events.Press = true;
       mPhase = Phase::Pressing;
     } else {
@@ -99,7 +99,7 @@ HostMenuTouchGesture::Update(const HostMenuTouchSample &sample) noexcept {
     break;
   case Phase::Pressing:
     if (!sample.Pressed) {
-      // Inside the slop the pointer never left the press point: a click.
+      // Dentro da folga o ponteiro nunca saiu do ponto de pressão: um clique.
       events.Release = true;
       lift();
     } else if (mMoved &&
@@ -113,7 +113,7 @@ HostMenuTouchGesture::Update(const HostMenuTouchSample &sample) noexcept {
     if (sample.Pressed) {
       pan();
     } else {
-      // A tap on empty space is still a click (it closes a popup).
+      // Um toque em espaço vazio ainda é um clique (fecha um popup).
       if (!mMoved) {
         click();
       }

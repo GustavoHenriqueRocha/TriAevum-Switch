@@ -611,8 +611,8 @@ class NativeControlsSettingsPanel final
           0.1F, 4.0F, "%.2fx");
     }
 #if defined(__SWITCH__)
-    // Console build: a finger that lands outside the HUD controls in
-    // gameplay aims (Automatic, Mouse, Right stick and Digital look sources).
+    // Build de console: um dedo que pousa fora dos controles do HUD durante o
+    // jogo mira (fontes de visão Automatic, Mouse, Right stick e Digital look).
     changed |= ImGui::Checkbox("Touchscreen drag aim",
                                &mControlDraft.TouchAimEnabled);
     if (mControlDraft.TouchAimEnabled) {

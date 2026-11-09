@@ -116,17 +116,17 @@ void EmitMouseAimTimeline(const std::filesystem::path& path, std::string_view ax
         {"frame_origin", "run"}, {"segments", segments}}.dump(2));
 }
 
-// Where the Switch shows native page X, Y: the deko3d top target (scale 3,
-// widened by GlWidescreenFactor), the widescreen placement of a pause-page
-// draw on it, the page's projection row inside that viewport, and the
-// scanout of the 720x1280 display image on the 1280x720 screen.
+// Onde o Switch mostra o X, Y de página nativo: o alvo de cima do deko3d (escala 3,
+// alargado por GlWidescreenFactor), o posicionamento widescreen de um desenho de
+// página de pausa nele, a linha de projeção da página dentro desse viewport, e o
+// scanout da imagem de exibição 720x1280 na tela de 1280x720.
 struct ScreenPoint {
     int32_t X = 0;
     int32_t Y = 0;
 };
 
 struct PageDraw {
-    float ViewportY = 0.0F;     // native, presented axis
+    float ViewportY = 0.0F;     // nativo, eixo apresentado
     float ViewportHeight = 0.0F;
     float ProjectionScale = 0.0F; // clip = scale * x + offset
     float ProjectionOffset = 0.0F;
@@ -143,7 +143,7 @@ ScreenPoint SwitchScreenPoint(const PageDraw& page, float pageX, float pageY) {
         Fast::Deko3d::kTopScreenPhysicalWidth, Fast::Deko3d::kTopScreenPhysicalHeight);
     Require(extent.Wide && extent.Width == 1440U && extent.Height == 1280U,
             "Switch top target is not 1440x1280 wide");
-    // A pause-page element: Ui domain, a quad that does not cover the
+    // Um elemento de página de pausa: domínio Ui, um quad que não cobre o
     // viewport (gfx_deko3d_pica_draw.cpp ResolveWidescreenPlacement).
     Fast::Oot3d::GlWidescreenDrawEvidence evidence;
     evidence.UiDomain = true;
@@ -174,16 +174,16 @@ ScreenPoint SwitchScreenPoint(const PageDraw& page, float pageX, float pageY) {
     return {static_cast<int32_t>(std::lround(screenX)), static_cast<int32_t>(std::lround(screenY))};
 }
 
-// 05/11 console bug: on the TopScreen Items page a tap on an item selected
-// the one to its right (left side of the page). The touch mapping scaled
-// the 400-wide top screen down to the 320-wide touch screen, but the page is
-// drawn one pixel per pixel: centred at X + 40, the widened Items grid at
-// X + 63 and its sixth column at X + 80.
+// Bug no console em 05/11: na página Items do TopScreen um toque num item selecionava
+// o da direita (lado esquerdo da página). O mapeamento de toque escalava
+// a tela de cima de 400 de largura para a tela de toque de 320, mas a página é
+// desenhada um pixel por pixel: centralizada em X + 40, a grade de Items alargada
+// em X + 63 e sua sexta coluna em X + 80.
 void TestSwitchPageTouchLandsOnTheTappedElement() {
-    // PauseItemsSlot_GetPosition (0x002EB304): slot n at X 11 + 48 * (n % 6),
-    // Y 7 + 48 * (n / 6); the sixth column's slots are fixed (slot 11 at
-    // 275, 73). PauseItemsPage_UpdateTouchGrid (0x002EBA9C) hit-tests each
-    // as a 42x42 rectangle in touch coordinates.
+    // PauseItemsSlot_GetPosition (0x002EB304): slot n em X 11 + 48 * (n % 6),
+    // Y 7 + 48 * (n / 6); os slots da sexta coluna são fixos (slot 11 em
+    // 275, 73). PauseItemsPage_UpdateTouchGrid (0x002EBA9C) testa cada um
+    // como um retângulo 42x42 em coordenadas de toque.
     struct Slot {
         const char* Name;
         float X, Y;
@@ -194,7 +194,7 @@ void TestSwitchPageTouchLandsOnTheTappedElement() {
                             Slot{"right (slot 11)", 275.0F, 73.0F}}) {
         const float centreX = slot.X + kSlotSize * 0.5F;
         const float centreY = slot.Y + kSlotSize * 0.5F;
-        // The grid's quads left of X 256 move by -17 before the 0.6 draw.
+        // Os quads da grade à esquerda de X 256 se movem -17 antes do desenho em 0.6.
         const float drawnX = centreX < kTopScreenWideItemsLeftRegionEnd
                                  ? centreX + kTopScreenWideItemsGridShift
                                  : centreX;
@@ -209,8 +209,8 @@ void TestSwitchPageTouchLandsOnTheTappedElement() {
             Fail("a tap on an Items slot's on-screen centre did not land on that slot");
         }
     }
-    // Centred pages (Gear, World Map, file select, name entry): viewport
-    // (0, 40, 480, 320) and the page's own 320-wide orthographic.
+    // Páginas centralizadas (Gear, World Map, seleção de arquivo, entrada de nome):
+    // viewport (0, 40, 480, 320) e a ortográfica de 320 de largura da própria página.
     const PageDraw centred{40.0F, 320.0F, -1.0F / 160.0F, 1.0F};
     for (const float pageX : {20.0F, 160.0F, 300.0F}) {
         const auto screen = SwitchScreenPoint(centred, pageX, 120.0F);
@@ -222,7 +222,7 @@ void TestSwitchPageTouchLandsOnTheTappedElement() {
             Fail("a tap on a centred page did not land where it is drawn");
         }
     }
-    // The wide dungeon Map and System use the page offset 0.8: centred.
+    // O Map de dungeon e System largos usam o offset de página 0.8: centralizados.
     const PageDraw widePage{0.0F, 400.0F, kTopScreenWidePageScale, kTopScreenWidePageOffset};
     for (const float pageX : {20.0F, 160.0F, 300.0F}) {
         const auto screen = SwitchScreenPoint(widePage, pageX, 120.0F);
@@ -231,8 +231,8 @@ void TestSwitchPageTouchLandsOnTheTappedElement() {
         Require(touch.Inside && std::abs(touch.X - pageX) <= 1.0F,
                 "a tap on the wide dungeon Map or System did not land where it is drawn");
     }
-    // Forward and inverse layouts agree, and the gap between the Items
-    // grid's region and its sixth column maps between them.
+    // Layouts direto e inverso concordam, e o vão entre a região da grade de
+    // Items e sua sexta coluna mapeia entre elas.
     for (const auto layout : {TopScreenPageLayout::Centred, TopScreenPageLayout::WideItems}) {
         for (float pageX = 0.0F; pageX < 320.0F; pageX += 1.0F) {
             Require(std::abs(TopScreenPresentedToPageX(TopScreenPageToPresentedX(pageX, layout), layout) - pageX) <
@@ -550,8 +550,8 @@ int main(int argc, char** argv) {
                     parsedControls == config,
                 "control persistence changed combined defaults or an explicit keyboard-only preference");
     }
-    // Touch drag aim: files from before it get the defaults (on, 0.14
-    // deg/px); a changed setting round-trips; out-of-range is rejected.
+    // Mira por arrasto de toque: arquivos de antes dela recebem os padrões (ativa,
+    // 0.14 graus/px); uma configuração alterada faz ida e volta; fora da faixa é rejeitado.
     Require(ParseNativeControlConfigText(
                 R"({"schema":"oot3d_native_controls_v1","profile":"controller","aim":{"source":"automatic","invert_x":true}})",
                 &parsedControls, &controlsError) &&
@@ -654,8 +654,8 @@ int main(int argc, char** argv) {
     RequireTouch(MapHostPointerToNativeA32Touch(0, 0, 0, 1080, true), false,
                  false, 0, 0,
                  "invalid host extent accepted a native touch");
-    // The lower-screen tab centres, where a centred page draws them
-    // (top-screen X + 40, three pixels per native pixel at 720p).
+    // Os centros das abas da tela de baixo, onde uma página centralizada os desenha
+    // (X da tela de cima + 40, três pixels por pixel nativo em 720p).
     const auto topScreenPresentation =
         NativeA32TouchPresentation::TopScreenCentredPage;
     RequireTouch(MapHostPointerToNativeA32Touch(

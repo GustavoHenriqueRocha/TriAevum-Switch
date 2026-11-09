@@ -1,21 +1,21 @@
 #pragma once
 
-// Touchscreen taps on the TopScreen gameplay HUD (Switch handheld).
+// Toques na tela sensível no HUD de jogo do TopScreen (Switch portátil).
 //
-// The 3DS lets the player tap the lower-screen item buttons; TopScreen moves
-// those controls into the top-screen HUD, which the host redraws on a
-// 400x240 canvas. A tap on one of the pictured controls produces exactly what
-// the physical control it stands for produces (X, Y, Item I = ZR,
-// Item II = ZL, B, or a D-pad direction for the action icons around the
-// cross), so every existing consumer decides what happens.
+// O 3DS deixa o jogador tocar nos botões de item da tela de baixo; o TopScreen
+// leva esses controles para o HUD da tela de cima, que o host redesenha numa
+// tela de 400x240. Um toque num dos controles desenhados produz exatamente o
+// que o controle físico que ele representa produz (X, Y, Item I = ZR,
+// Item II = ZL, B, ou uma direção do D-pad para os ícones de ação em volta da
+// cruz), então cada consumidor existente decide o que acontece.
 //
-// Each finger gets an owner when it lands and keeps it until it lifts: the
-// native page touch (title, file select, pause pages), one HUD control, the
-// aim (drag aiming, when enabled: the first finger that lands outside every
-// control), the host menu (L3+R3 or another ImGui window: the first finger
-// that lands while it is open), or nothing. A finger that lands outside a
-// control never presses one, even if it slides onto it, a HUD finger never
-// aims, and a menu finger never reaches the game.
+// Cada dedo ganha um dono quando pousa e o mantém até levantar: o toque
+// nativo de página (título, seleção de arquivo, páginas de pausa), um controle
+// do HUD, a mira (mira por arrasto, quando ativada: o primeiro dedo que pousa
+// fora de todos os controles), o menu do host (L3+R3 ou outra janela ImGui: o
+// primeiro dedo que pousa enquanto ele está aberto), ou nada. Um dedo que pousa
+// fora de um controle nunca o pressiona, mesmo que deslize sobre ele, um dedo
+// do HUD nunca mira, e um dedo do menu nunca chega ao jogo.
 
 #include "oot3d_ui/ui_primitives.h"
 
@@ -39,42 +39,42 @@ enum class TopScreenHudTouchControl : std::uint8_t {
   DpadRight,
 };
 
-// The 3DS pad bits (ThreeDsRecomp::Input::Button) of the physical control a
-// HUD control pictures. ZR and ZL are the extra bits that TopScreen reads as
-// Item I and Item II.
+// Os bits de pad do 3DS (ThreeDsRecomp::Input::Button) do controle físico que
+// um controle do HUD representa. ZR e ZL são os bits extras que o TopScreen lê
+// como Item I e Item II.
 [[nodiscard]] std::uint32_t
 TopScreenHudTouchButtons(TopScreenHudTouchControl control) noexcept;
 
-// A rectangle of the 400x240 TopScreen canvas in window pixels, through the
-// viewport the N64 UI renderer fits the canvas into
+// Um retângulo da tela de 400x240 do TopScreen em pixels da janela, pelo
+// viewport em que o renderizador de UI do N64 encaixa a tela
 // (FitUiPresentationViewport).
 [[nodiscard]] oot3d::ui::UiRect
 MapTopScreenCanvasRectToWindow(const oot3d::ui::UiRect &canvas,
                                std::uint32_t windowWidth,
                                std::uint32_t windowHeight) noexcept;
 
-// Hit areas of the drawn HUD controls, in window pixels.
+// Áreas de acerto dos controles do HUD desenhados, em pixels da janela.
 struct TopScreenHudTouchTargets {
-  // X, Y, Item I, Item II and B: the touch-cluster circles (source quads 0-4).
+  // X, Y, Item I, Item II e B: os círculos do touch cluster (quads de origem 0-4).
   std::array<oot3d::ui::UiRect, 5> Buttons{};
   std::array<bool, 5> ButtonVisible{};
-  // The cross together with the action icons around it.
+  // A cruz junto com os ícones de ação em volta dela.
   oot3d::ui::UiRect Dpad{};
   float DpadCenterX = 0.0F;
   float DpadCenterY = 0.0F;
-  // Taps nearer the centre than this pick no direction.
+  // Toques mais perto do centro que isto não escolhem direção.
   float DpadDeadZone = 0.0F;
   bool DpadVisible = false;
 };
 
-// Reads the controls out of the gameplay HUD primitives the host drew last
-// (lastTopScreenPrimitivesBySubsystem[GameplayHud], after HUD scale, margins
-// and clipping). Controls that are hidden or faded out are left out.
+// Lê os controles das primitivas do HUD de jogo que o host desenhou por último
+// (lastTopScreenPrimitivesBySubsystem[GameplayHud], após escala do HUD, margens
+// e recorte). Controles ocultos ou esmaecidos ficam de fora.
 [[nodiscard]] TopScreenHudTouchTargets ResolveTopScreenHudTouchTargets(
     std::span<const oot3d::ui::UiPrimitive> hud, std::uint32_t windowWidth,
     std::uint32_t windowHeight) noexcept;
 
-// The control under a window point, or None.
+// O controle sob um ponto da janela, ou None.
 [[nodiscard]] TopScreenHudTouchControl
 HitTestTopScreenHudTouch(const TopScreenHudTouchTargets &targets, float windowX,
                          float windowY) noexcept;
@@ -88,8 +88,8 @@ enum class TopScreenTouchOwner : std::uint8_t {
   Ignored,
 };
 
-// One contact of one touchscreen sample. X and Y are normalised to the panel
-// (0..1). `End` marks the last sample of a contact.
+// Um contato de uma amostra da tela sensível. X e Y são normalizados ao painel
+// (0..1). `End` marca a última amostra de um contato.
 struct TopScreenTouchContact {
   std::uint32_t FingerId = 0;
   float X = 0.0F;
@@ -101,28 +101,28 @@ struct TopScreenTouchFinger {
   bool Active = false;
   bool Held = false;
   std::uint32_t Id = 0;
-  // Consuming polls the press still owes the guest after the finger lifted,
-  // so a tap shorter than one poll is still seen.
+  // Polls consumidores que o pressionamento ainda deve ao guest depois que o
+  // dedo levantou, para que um toque mais curto que um poll ainda seja visto.
   std::uint8_t PendingPolls = 0;
   float DownX = 0.0F;
   float DownY = 0.0F;
   float X = 0.0F;
   float Y = 0.0F;
-  // Aim fingers: the position already delivered as aim motion.
+  // Dedos de mira: a posição já entregue como movimento de mira.
   float AimX = 0.0F;
   float AimY = 0.0F;
   TopScreenTouchOwner Owner = TopScreenTouchOwner::Unassigned;
   TopScreenHudTouchControl Control = TopScreenHudTouchControl::None;
 };
 
-// Fingers tracked across touchscreen samples. Fed every new sample in order,
-// so a tap that lands and lifts between two polls is latched, not missed.
+// Dedos rastreados entre amostras da tela sensível. Recebe cada nova amostra em
+// ordem, então um toque que pousa e levanta entre dois polls é retido, não perdido.
 class TopScreenTouchTracker {
 public:
   static constexpr std::size_t kMaxFingers = 16;
 
-  // One sample: every contact on the panel at that time. A held finger
-  // absent from the sample has lifted.
+  // Uma amostra: todos os contatos no painel naquele instante. Um dedo pressionado
+  // ausente da amostra levantou.
   void ObserveSample(std::span<const TopScreenTouchContact> contacts) noexcept;
   void Reset() noexcept { mFingers = {}; }
   [[nodiscard]] std::span<TopScreenTouchFinger> Fingers() noexcept {
@@ -134,46 +134,46 @@ private:
 };
 
 struct TopScreenTouchPollContext {
-  // A native touch page is open (title, file select, a pause page).
+  // Uma página de toque nativa está aberta (título, seleção de arquivo, pausa).
   bool PageTouchEnabled = false;
-  // Host UI (ImGui, the debug menu) owns input.
+  // A UI do host (ImGui, o menu de debug) é dona da entrada.
   bool HostUiVisible = false;
-  // Empty outside TopScreen gameplay.
+  // Vazio fora do jogo no TopScreen.
   const TopScreenHudTouchTargets *Targets = nullptr;
   std::uint32_t WindowWidth = 0;
   std::uint32_t WindowHeight = 0;
-  // Drag aiming (aim.touch_enabled).
+  // Mira por arrasto (aim.touch_enabled).
   bool AimEnabled = false;
 };
 
-// The touch panel in pixels, the unit of aim motion (and of
-// aim.touch_degrees_per_pixel), whatever the window size.
+// O painel de toque em pixels, a unidade do movimento de mira (e de
+// aim.touch_degrees_per_pixel), qualquer que seja o tamanho da janela.
 inline constexpr float kTopScreenTouchPanelWidth = 1280.0F;
 inline constexpr float kTopScreenTouchPanelHeight = 720.0F;
 
 struct TopScreenTouchPollResult {
-  // The page pointer: the first page-owned finger, as before (one pointer).
+  // O ponteiro da página: o primeiro dedo da página, como antes (um ponteiro).
   bool PagePressed = false;
   float PageX = 0.0F;
   float PageY = 0.0F;
-  // Pad bits of every HUD control held by a finger, outside pages and host UI.
+  // Bits de pad de cada controle do HUD segurado por um dedo, fora de páginas e UI do host.
   std::uint32_t HudButtons = 0;
-  // Aim finger motion since the last consuming poll, in panel pixels; only
-  // on consuming polls, outside pages and host UI.
+  // Movimento do dedo de mira desde o último poll consumidor, em pixels do
+  // painel; só em polls consumidores, fora de páginas e UI do host.
   float AimDeltaX = 0.0F;
   float AimDeltaY = 0.0F;
-  // The host menu pointer (normalised), while host UI is visible.
+  // O ponteiro do menu do host (normalizado), enquanto a UI do host está visível.
   bool MenuPressed = false;
   float MenuX = 0.0F;
   float MenuY = 0.0F;
 };
 
-// A HUD press lasts at least this many consuming polls (guest refreshes):
-// the game reads some buttons at 30 Hz.
+// Um pressionamento do HUD dura pelo menos esta quantidade de polls consumidores
+// (atualizações do guest): o jogo lê alguns botões a 30 Hz.
 inline constexpr std::uint8_t kTopScreenHudMinimumPressPolls = 2;
 
-// Gives new fingers their owner, reports what the fingers hold this poll and,
-// on a poll a guest refresh consumes, retires presses already delivered.
+// Dá aos dedos novos seu dono, informa o que os dedos seguram neste poll e,
+// num poll que uma atualização do guest consome, retira pressionamentos já entregues.
 [[nodiscard]] TopScreenTouchPollResult
 ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
                           const TopScreenTouchPollContext &context,

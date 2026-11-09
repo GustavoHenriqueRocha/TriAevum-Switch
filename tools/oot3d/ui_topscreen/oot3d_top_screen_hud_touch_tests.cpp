@@ -1,5 +1,5 @@
-// Gameplay HUD taps (oot3d_top_screen_hud_touch.h): the controls are read
-// from the primitives the real HUD emitters produce at the Switch settings.
+// Toques no HUD de jogo (oot3d_top_screen_hud_touch.h): os controles são lidos
+// das primitivas que os emissores reais do HUD produzem com as configurações do Switch.
 #include "oot3d_top_screen_hud_touch.h"
 
 #include "oot3d_top_screen_dpad_presentation.h"
@@ -30,8 +30,8 @@ void Require(bool value, const char *message) {
 
 bool Near(float a, float b) { return std::abs(a - b) < 0.01F; }
 
-// config/topscreen_ui.switch.json: normal layout, scale 0.9, margins 4/1,
-// D-pad icons on (adult: view, ocarina, iron boots, hover boots).
+// config/topscreen_ui.switch.json: layout normal, escala 0.9, margens 4/1,
+// ícones do D-pad ativos (adulto: view, ocarina, iron boots, hover boots).
 TopScreenUiConfig SwitchConfig() {
   TopScreenUiConfig config;
   config.HudLayout = TopScreenHudLayout::Normal;
@@ -65,7 +65,7 @@ float CenterX(const oot3d::ui::UiRect &rect) { return rect.x + rect.width / 2; }
 float CenterY(const oot3d::ui::UiRect &rect) { return rect.y + rect.height / 2; }
 
 void TestCanvasMapping() {
-  // Handheld: the 5:3 canvas is fitted at x3 between 40 px side bars.
+  // Portátil: a tela 5:3 é encaixada em x3 entre barras laterais de 40 px.
   const auto handheld =
       MapTopScreenCanvasRectToWindow({0, 0, 400, 240}, kWidth, kHeight);
   Require(Near(handheld.x, 40) && Near(handheld.y, 0) &&
@@ -96,12 +96,12 @@ void TestButtonsUnderTheirCircles() {
     Require(HitTestTopScreenHudTouch(targets, CenterX(rect), CenterY(rect)) ==
                 kOrder[index],
             "a circle's centre hits its control");
-    // Just outside the drawn edge, toward the screen edge, still counts.
+    // Logo fora da borda desenhada, em direção à borda da tela, ainda conta.
     Require(HitTestTopScreenHudTouch(targets, CenterX(rect),
                                      rect.y + rect.height + 4) != Control::None,
             "a near miss below a circle still hits a control");
   }
-  // X: canvas centre (358,20) scaled 0.9 about (400,0), margins -4/+1.
+  // X: centro na tela (358,20) escalado 0.9 em torno de (400,0), margens -4/+1.
   const auto &x = targets.Buttons[0];
   Require(Near(CenterX(x), 40 + 3 * 358.2F) && Near(CenterY(x), 3 * 19.0F),
           "X sits where the renderer draws it");
@@ -130,13 +130,13 @@ void TestDpadIcons() {
   for (const auto &primitive : hud) {
     if (primitive.owner_address != 0x005D4A8CU || primitive.layer != 13U)
       continue;
-    // Icon slots: 0..3 by direction; View uses 38.. in direction order.
+    // Slots de ícone: 0..3 por direção; View usa 38.. na ordem das direções.
     const auto rect =
         MapTopScreenCanvasRectToWindow(primitive.destination, kWidth, kHeight);
     const auto hit = HitTestTopScreenHudTouch(targets, CenterX(rect),
                                               CenterY(rect));
     const auto direction = primitive.source_quad >= 38U
-                               ? 0U // View is the first adult lane: Up
+                               ? 0U // View é a primeira faixa adulta: Up
                                : primitive.source_quad;
     constexpr std::array<Control, 4> kDirections{
         Control::DpadUp, Control::DpadDown, Control::DpadLeft,
@@ -153,8 +153,8 @@ void TestDpadIcons() {
               ButtonMask(Button::DpadDown),
           "the ocarina lane is D-pad down");
 
-  // With render_dpad_icons off the bridge gives the cross alpha 0, so the
-  // emitter drops it: no D-pad zone, even where an eye is still drawn.
+  // Com render_dpad_icons desativado a ponte dá alpha 0 à cruz, então o
+  // emissor a descarta: sem zona de D-pad, mesmo onde um olho ainda é desenhado.
   auto noCross = hud;
   std::erase_if(noCross, [](const oot3d::ui::UiPrimitive &primitive) {
     return primitive.owner_address == 0x005C9940U && primitive.layer == 12U &&
@@ -212,8 +212,8 @@ void TestTracker() {
   const float downX = targets.DpadCenterX;
   const float downY = targets.DpadCenterY + targets.DpadDeadZone * 3;
 
-  // A tap that lands and lifts between two polls is still delivered, for
-  // at least two consuming polls.
+  // Um toque que pousa e levanta entre dois polls ainda é entregue, por
+  // pelo menos dois polls consumidores.
   TopScreenTouchTracker tracker;
   const std::array tap{At(0, CenterX(x), CenterY(x))};
   tracker.ObserveSample(tap);
@@ -230,7 +230,7 @@ void TestTracker() {
   Require(ResolveTopScreenTouchPoll(tracker, gameplay, true).HudButtons == 0U,
           "a delivered tap is released");
 
-  // Two fingers hit-test independently; each holds until it lifts.
+  // Dois dedos fazem hit-test independentemente; cada um segura até levantar.
   tracker.Reset();
   const std::array both{At(3, CenterX(itemI), CenterY(itemI)),
                         At(4, downX, downY)};
@@ -250,7 +250,7 @@ void TestTracker() {
   Require(ResolveTopScreenTouchPoll(tracker, gameplay, true).HudButtons == 0U,
           "an ended contact is released and not reborn");
 
-  // A finger keeps the owner it landed with.
+  // Um dedo mantém o dono com que pousou.
   tracker.Reset();
   const std::array empty{At(5, 640, 360)};
   tracker.ObserveSample(empty);
@@ -263,7 +263,7 @@ void TestTracker() {
   tracker.ObserveSample({});
   (void)ResolveTopScreenTouchPoll(tracker, gameplay, true);
 
-  // Pages keep the single pointer of before.
+  // As páginas mantêm o ponteiro único de antes.
   const TopScreenTouchPollContext page{true, false, &targets, kWidth, kHeight};
   tracker.Reset();
   const std::array first{At(6, 640, 360)};
@@ -278,7 +278,7 @@ void TestTracker() {
   Require(result.PagePressed && Near(result.PageX, 0.5F) &&
               result.HudButtons == 0U,
           "a second finger does not move the pointer");
-  // A quick page tap is delivered once, as the old SDL latch did.
+  // Um toque rápido na página é entregue uma vez, como o antigo latch do SDL fazia.
   tracker.Reset();
   tracker.ObserveSample(first);
   tracker.ObserveSample({});
@@ -289,8 +289,8 @@ void TestTracker() {
   Require(!ResolveTopScreenTouchPoll(tracker, page, true).PagePressed,
           "a page tap is delivered once");
 
-  // A page-owned finger never becomes a HUD press when the page closes, and
-  // a HUD press stops while a page is open.
+  // Um dedo da página nunca vira um pressionamento do HUD quando a página fecha,
+  // e um pressionamento do HUD para enquanto uma página está aberta.
   tracker.Reset();
   tracker.ObserveSample(slid);
   Require(ResolveTopScreenTouchPoll(tracker, page, true).PagePressed,
@@ -308,7 +308,7 @@ void TestTracker() {
   Require(!result.PagePressed && result.HudButtons == 0U,
           "a HUD finger does nothing on a page");
 
-  // Host UI owns every finger that lands while it is open.
+  // A UI do host é dona de todo dedo que pousa enquanto ela está aberta.
   const TopScreenTouchPollContext hostUi{false, true, &targets, kWidth,
                                          kHeight};
   tracker.Reset();
@@ -318,7 +318,7 @@ void TestTracker() {
   Require(ResolveTopScreenTouchPoll(tracker, gameplay, true).HudButtons == 0U,
           "a finger that landed on host UI stays ignored");
 
-  // A finger id reused by a new touch right after a tap is a new finger.
+  // Um id de dedo reutilizado por um toque novo logo após um toque é um dedo novo.
   tracker.Reset();
   tracker.ObserveSample(tap);
   tracker.ObserveSample({});
@@ -338,8 +338,8 @@ void TestAimOwnership() {
   const auto &itemI = targets.Buttons[2];
   TopScreenTouchTracker tracker;
 
-  // A finger landing on empty screen aims; its motion is reported in panel
-  // pixels on consuming polls only, accumulated across the others.
+  // Um dedo que pousa em tela vazia mira; seu movimento é informado em pixels
+  // do painel só em polls consumidores, acumulado ao longo dos outros.
   const std::array land{At(1, 640, 360)};
   tracker.ObserveSample(land);
   auto result = ResolveTopScreenTouchPoll(tracker, aim, true);
@@ -359,8 +359,8 @@ void TestAimOwnership() {
   Require(Near(ResolveTopScreenTouchPoll(tracker, aim, true).AimDeltaX, 0),
           "a still finger does not aim");
 
-  // The aim finger never presses a control it slides over; a second finger
-  // on a control still taps, one on empty screen does not aim.
+  // O dedo de mira nunca pressiona um controle sobre o qual desliza; um segundo
+  // dedo num controle ainda toca, um em tela vazia não mira.
   const std::array overX{At(1, CenterX(x), CenterY(x)),
                          At(2, CenterX(itemI), CenterY(itemI)),
                          At(3, 640, 600)};
@@ -372,14 +372,14 @@ void TestAimOwnership() {
               Near(result.AimDeltaY, CenterY(x) - 350),
           "only the first aim finger moves the aim");
 
-  // A lifted aim finger delivers its last motion, then a new finger aims.
+  // Um dedo de mira levantado entrega seu último movimento, depois um dedo novo mira.
   const std::array lastMove{At(1, CenterX(x) + 20, CenterY(x))};
   tracker.ObserveSample(lastMove);
   tracker.ObserveSample({});
   result = ResolveTopScreenTouchPoll(tracker, aim, false);
   Require(result.AimDeltaX == 0, "the last motion waits for a refresh");
   result = ResolveTopScreenTouchPoll(tracker, aim, true);
-  // (Item I, lifted in the same sample, still owes its second refresh.)
+  // (Item I, levantado na mesma amostra, ainda deve sua segunda atualização.)
   Require(Near(result.AimDeltaX, 20) &&
               result.HudButtons == ButtonMask(Button::Zr),
           "a lifted aim finger delivers its last motion");
@@ -392,7 +392,7 @@ void TestAimOwnership() {
   Require(Near(result.AimDeltaX, -10) && Near(result.AimDeltaY, 30),
           "the next finger on empty screen aims");
 
-  // A HUD finger never aims.
+  // Um dedo do HUD nunca mira.
   tracker.Reset();
   const std::array tapX{At(5, CenterX(x), CenterY(x))};
   tracker.ObserveSample(tapX);
@@ -404,7 +404,7 @@ void TestAimOwnership() {
               result.HudButtons == ButtonMask(Button::X),
           "a finger that landed on X keeps pressing X and never aims");
 
-  // Drag aim off, pages and host UI: no aim finger.
+  // Mira por arrasto desligada, páginas e UI do host: nenhum dedo de mira.
   for (const auto &context :
        {TopScreenTouchPollContext{false, false, &targets, kWidth, kHeight,
                                   false},
@@ -419,15 +419,15 @@ void TestAimOwnership() {
     result = ResolveTopScreenTouchPoll(tracker, context, true);
     Require(result.AimDeltaX == 0 && result.AimDeltaY == 0,
             "no aim without drag aim, or under a page or host UI");
-    // The finger keeps its owner after the page or host UI closes.
+    // O dedo mantém seu dono depois que a página ou a UI do host fecha.
     tracker.ObserveSample(land);
     result = ResolveTopScreenTouchPoll(tracker, aim, true);
     Require(result.AimDeltaX == 0 && result.AimDeltaY == 0,
             "a finger that landed elsewhere never starts aiming");
   }
 
-  // An aim finger under a page that opens mid-drag: the motion made under
-  // the page is dropped, not replayed when it closes.
+  // Um dedo de mira sob uma página que abre no meio do arrasto: o movimento
+  // feito sob a página é descartado, não repetido quando ela fecha.
   const TopScreenTouchPollContext page{true, false, &targets, kWidth, kHeight,
                                        true};
   tracker.Reset();
@@ -445,8 +445,8 @@ void TestAimRates() {
   MappingConfig config;
   Require(config.TouchMotionDegreesPerPixel == 0.14F,
           "default touch sensitivity");
-  // Integrated over the sample period, half the 1280-pixel screen turns
-  // about 90 degrees.
+  // Integrado no período da amostra, metade da tela de 1280 pixels gira
+  // cerca de 90 graus.
   constexpr double kSeconds = 1.0 / 30.0;
   auto rates = ResolveTouchAimRates(config, 640.0F, 0.0F, kSeconds);
   Require(std::abs(rates.YawDegreesPerSecond * kSeconds + 89.6) < 0.01 &&
@@ -481,7 +481,7 @@ void TestAimThroughMotionSources() {
   PhysicalInputState physical;
   physical.SamplePeriodSeconds = 1.0 / 30.0;
 
-  // Without a sensor, a touch drag aims exactly like the same mouse motion.
+  // Sem sensor, um arrasto de toque mira exatamente como o mesmo movimento do mouse.
   auto touch = physical;
   touch.TouchAimDeltaX = 50.0F;
   touch.TouchAimDeltaY = -20.0F;
@@ -503,7 +503,7 @@ void TestAimThroughMotionSources() {
   Require(byTouch.CStick.X == 0 && byTouch.CStick.Y == 0,
           "touch aim never moves the camera stick");
 
-  // With the gyro owning the aim, touch adds to it and does not take over.
+  // Com o giroscópio dono da mira, o toque soma a ela e não assume o controle.
   auto gyro = physical;
   gyro.ControllerMotion.GyroscopeValid = true;
   gyro.ControllerMotion.AccelerometerValid = true;
@@ -522,14 +522,14 @@ void TestAimThroughMotionSources() {
   Require(gyroState.AutomaticOwner == VirtualMotionState::Owner::Controller,
           "a touch drag leaves the controller (gyro) as owner");
 
-  // A physical-sensor-only source ignores touch.
+  // Uma fonte só de sensor físico ignora o toque.
   config.NativeMotionSource = MotionSource::ControllerGyroscope;
   const auto sensor = ResolveInput(config, gyro, digital);
   const auto sensorTouch = ResolveInput(config, gyroTouch, digital);
   Require(sensor.Hid.GyroscopeDegreesPerSecond ==
               sensorTouch.Hid.GyroscopeDegreesPerSecond,
           "controller_gyroscope ignores touch");
-  // A virtual source adds it.
+  // Uma fonte virtual o soma.
   config.NativeMotionSource = MotionSource::RightStick;
   const auto stick = ResolveInput(config, gyroTouch, digital);
   Require(std::abs(stick.Hid.GyroscopeDegreesPerSecond[1] + 210.0F) < 0.1F,
@@ -546,15 +546,15 @@ void TestMenuOwnership() {
   const auto &x = targets.Buttons[0];
   TopScreenTouchTracker tracker;
 
-  // A finger that lands while the menu is open is the menu's: it is the
-  // pointer, even over a HUD control, and never presses or aims.
+  // Um dedo que pousa com o menu aberto é do menu: é o ponteiro, mesmo
+  // sobre um controle do HUD, e nunca pressiona nem mira.
   const std::array onX{At(1, CenterX(x), CenterY(x))};
   tracker.ObserveSample(onX);
   auto result = ResolveTopScreenTouchPoll(tracker, menu, false);
   Require(result.MenuPressed && Near(result.MenuX, CenterX(x) / kWidth) &&
               result.HudButtons == 0U && result.AimDeltaX == 0,
           "a finger landing on the open menu is its pointer");
-  // Still the menu's after it closes: no HUD press, no aim.
+  // Ainda do menu depois que ele fecha: nenhum pressionamento do HUD, nenhuma mira.
   const std::array dragged{At(1, CenterX(x) - 300, CenterY(x) + 100)};
   tracker.ObserveSample(dragged);
   result = ResolveTopScreenTouchPoll(tracker, gameplay, true);
@@ -562,8 +562,8 @@ void TestMenuOwnership() {
               result.AimDeltaX == 0 && result.AimDeltaY == 0,
           "a menu finger never reaches the game");
 
-  // One menu pointer; a quick tap reaches the menu once even when no guest
-  // refresh consumes input (the game may be stopped behind the menu).
+  // Um ponteiro de menu; um toque rápido chega ao menu uma vez mesmo quando
+  // nenhuma atualização do guest consome entrada (o jogo pode estar parado atrás do menu).
   tracker.Reset();
   const std::array two{At(2, 100, 100), At(3, 900, 500)};
   tracker.ObserveSample(two);
@@ -579,7 +579,7 @@ void TestMenuOwnership() {
   Require(!ResolveTopScreenTouchPoll(tracker, menu, false).MenuPressed,
           "a quick tap is released without a guest refresh");
 
-  // A finger that landed before the menu opened stays out of it.
+  // Um dedo que pousou antes de o menu abrir fica fora dele.
   tracker.Reset();
   tracker.ObserveSample(tap);
   (void)ResolveTopScreenTouchPoll(tracker, gameplay, true);

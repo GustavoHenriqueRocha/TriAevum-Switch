@@ -17,19 +17,19 @@ using oot3d::ui::UiRect;
 
 constexpr float kCanvasWidth = 400.0F;
 constexpr float kCanvasHeight = 240.0F;
-// Touch cluster of payload 0x005C9940 (BuildTopScreenTouchClusterGeometry):
-// layer 12, source quads 0-3 X, Y, Item I, Item II; 4 B; 5 the D-pad cross.
-// Its labels and auxiliary quads share the owner on layer 13.
+// Touch cluster do payload 0x005C9940 (BuildTopScreenTouchClusterGeometry):
+// camada 12, quads de origem 0-3 X, Y, Item I, Item II; 4 B; 5 a cruz do D-pad.
+// Seus rótulos e quads auxiliares compartilham o dono na camada 13.
 constexpr std::uint32_t kTouchClusterOwner = 0x005C9940U;
 constexpr std::uint32_t kTouchClusterLayer = 12U;
 constexpr std::uint32_t kDpadCrossQuad = 5U;
-// D-pad action icons, View/Navi eyes and cycle marks
+// Ícones de ação do D-pad, olhos de View/Navi e marcas de ciclo
 // (AppendTopScreenDpadPresentation).
 constexpr std::uint32_t kDpadIconOwner = 0x005D4A8CU;
-// Below this the HUD is fading out (cutscenes, menus) and takes no taps.
+// Abaixo disto o HUD está esmaecendo (cutscenes, menus) e não aceita toques.
 constexpr float kMinimumAlpha = 0.5F;
-// Hit areas grow past the drawn circle by this share of its size on each
-// side: a 28.8-unit circle at the default 0.9 scale is 86 pixels wide.
+// As áreas de acerto crescem além do círculo desenhado nesta fração do tamanho
+// em cada lado: um círculo de 28.8 unidades na escala padrão 0.9 tem 86 pixels.
 constexpr float kButtonPadding = 0.2F;
 constexpr float kDpadPadding = 0.1F;
 constexpr float kDpadDeadZone = 0.2F;
@@ -132,7 +132,7 @@ ResolveTopScreenHudTouchTargets(std::span<const UiPrimitive> hud,
   if (!crossVisible) {
     return targets;
   }
-  // The icons sit around the cross, outside it; the zone covers them all.
+  // Os ícones ficam em volta da cruz, fora dela; a zona cobre todos eles.
   UiRect zone = cross;
   for (const auto &primitive : hud) {
     if (primitive.subsystem == oot3d::ui::UiSubsystem::GameplayHud &&
@@ -165,7 +165,7 @@ HitTestTopScreenHudTouch(const TopScreenHudTouchTargets &targets,
   if (!std::isfinite(windowX) || !std::isfinite(windowY)) {
     return TopScreenHudTouchControl::None;
   }
-  // The padded circles of the diamond overlap; the nearest centre wins.
+  // Os círculos ampliados do losango se sobrepõem; o centro mais próximo vence.
   auto hit = TopScreenHudTouchControl::None;
   float nearest = std::numeric_limits<float>::max();
   for (std::size_t index = 0; index < kButtons.size(); ++index) {
@@ -211,7 +211,7 @@ void TopScreenTouchTracker::ObserveSample(
                                         candidate.Id == contact.FingerId;
                                });
     if (finger == mFingers.end()) {
-      // The closing sample of a contact already lifted is not a new touch.
+      // A amostra de fechamento de um contato já levantado não é um toque novo.
       if (contact.End) {
         continue;
       }
@@ -263,7 +263,7 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
     }
     finger.Owner = TopScreenTouchOwner::Ignored;
     if (context.HostUiVisible) {
-      // One menu pointer; it stays the menu's until it lifts.
+      // Um ponteiro de menu; ele continua do menu até levantar.
       if (!menuOwned) {
         finger.Owner = TopScreenTouchOwner::Menu;
         menuOwned = true;
@@ -271,7 +271,7 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
       continue;
     }
     if (context.PageTouchEnabled) {
-      // One pointer, as the 3DS touchscreen has: later fingers are ignored.
+      // Um ponteiro, como a tela sensível do 3DS: dedos posteriores são ignorados.
       if (!pageOwned) {
         finger.Owner = TopScreenTouchOwner::Page;
         pageOwned = true;
@@ -289,7 +289,7 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
       finger.PendingPolls =
           std::max(finger.PendingPolls, kTopScreenHudMinimumPressPolls);
     } else if (context.AimEnabled && !aimOwned) {
-      // One aim finger at a time; its motion counts from where it landed.
+      // Um dedo de mira por vez; seu movimento conta a partir de onde pousou.
       finger.Owner = TopScreenTouchOwner::Aim;
       finger.AimX = finger.DownX;
       finger.AimY = finger.DownY;
@@ -299,8 +299,8 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
 
   TopScreenTouchPollResult result;
   for (auto &finger : fingers) {
-    // A lifted aim finger still delivers its last motion; pages and host UI
-    // drop the motion made while they own the screen.
+    // Um dedo de mira levantado ainda entrega seu último movimento; páginas e UI
+    // do host descartam o movimento feito enquanto são donas da tela.
     if (!finger.Active || finger.Owner != TopScreenTouchOwner::Aim ||
         !guestRefreshWillConsume) {
       continue;
@@ -337,7 +337,7 @@ ResolveTopScreenTouchPoll(TopScreenTouchTracker &tracker,
     if (!finger.Active) {
       continue;
     }
-    // The menu keeps running while the game (and its refreshes) may not.
+    // O menu continua rodando enquanto o jogo (e suas atualizações) pode não rodar.
     if ((guestRefreshWillConsume ||
          finger.Owner == TopScreenTouchOwner::Menu) &&
         finger.PendingPolls != 0U) {

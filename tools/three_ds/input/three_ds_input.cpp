@@ -630,8 +630,8 @@ ResolvedMotion ResolveMotion(const MappingConfig& config,
 
             const bool controller = owner == VirtualMotionState::Owner::Controller;
             if (controller) useCStick(); else useMouse();
-            // A touch drag adds to either owner's virtual rates and never
-            // takes ownership: the physical gyro stays the base.
+            // Um arrasto de toque soma às taxas virtuais de qualquer dono e nunca
+            // assume a posse: o giroscópio físico continua sendo a base.
             const float pitch = result.Gyroscope[0] + touch.PitchDegreesPerSecond;
             const float yaw = result.Gyroscope[1] + touch.YawDegreesPerSecond;
             result = {};
@@ -1046,8 +1046,8 @@ AimRates ResolveTouchAimRates(const MappingConfig& config, float deltaX,
         !std::isfinite(config.TouchMotionDegreesPerPixel)) {
         return {};
     }
-    // The same period ResolveMotion integrates over, so a drag of N pixels
-    // turns N * TouchMotionDegreesPerPixel degrees.
+    // O mesmo período sobre o qual ResolveMotion integra, então um arrasto de N pixels
+    // gira N * TouchMotionDegreesPerPixel graus.
     const float seconds = static_cast<float>(
         std::clamp(samplePeriodSeconds, 1.0 / 1000.0, 0.25));
     const float invertX = config.NativeMotionInvertX ? -1.0F : 1.0F;

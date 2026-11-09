@@ -77,9 +77,9 @@ struct NativeControlConfig {
   float ControllerAccelerometerSensitivity = 1.0F;
   bool NativeAimInvertX = false;
   bool NativeAimInvertY = false;
-  // Touchscreen drag aiming (Switch handheld): a finger that lands outside
-  // the HUD controls in gameplay aims. 0.14 deg per panel pixel turns about
-  // 90 degrees for a drag across half the 1280-pixel screen.
+  // Mira por arrasto na tela sensível (Switch portátil): um dedo que pousa fora
+  // dos controles do HUD durante o jogo mira. 0.14 graus por pixel do painel gira
+  // cerca de 90 graus num arrasto por metade da tela de 1280 pixels.
   bool TouchAimEnabled = true;
   float TouchAimDegreesPerPixel = 0.14F;
   std::string PreferredControllerGuid;

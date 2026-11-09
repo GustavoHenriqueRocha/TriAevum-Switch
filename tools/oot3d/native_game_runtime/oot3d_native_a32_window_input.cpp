@@ -17,16 +17,16 @@ namespace Oot3dA32Window {
 #if defined(__SWITCH__)
 namespace {
 
-// The console's touch screen, read from HID shared memory (libnx). With the
-// deko3d renderer SDL has no window, and its Switch driver reports no finger
-// events without one, so SDL cannot be the source. The panel is 1280x720 in
-// handheld; docked there are no touches. SDL's synthetic touch->mouse events
-// stay disabled so a touch never reaches mouse-bound actions or mouse aim.
+// A tela sensível do console, lida da memória compartilhada do HID (libnx). Com o
+// renderizador deko3d o SDL não tem janela, e seu driver de Switch não informa
+// eventos de dedo sem uma, então o SDL não pode ser a fonte. O painel é 1280x720
+// no portátil; no dock não há toques. Os eventos sintéticos toque->mouse do SDL
+// ficam desativados para que um toque nunca chegue a ações de mouse ou à mira do mouse.
 //
-// Polling the current state alone would miss a tap that lands and lifts
-// between two polls, so every sample of the HID history (17 entries) newer
-// than the last poll is fed to the tracker, which latches each press until a
-// guest refresh has consumed it.
+// Consultar só o estado atual perderia um toque que pousa e levanta
+// entre dois polls, então cada amostra do histórico do HID (17 entradas) mais
+// nova que o último poll vai para o rastreador, que retém cada pressionamento até
+// uma atualização do guest consumi-lo.
 struct SwitchTouchScreen {
   Oot3dNativeGame::TopScreenTouchTracker Tracker;
   Oot3dNativeGame::HostMenuTouchGesture MenuGesture;
@@ -50,7 +50,7 @@ void ObserveSwitchTouchScreen(SwitchTouchScreen &touch) {
   auto &states = touch.States;
   const std::size_t count = std::min(
       hidGetTouchScreenStates(states.data(), states.size()), states.size());
-  // The oldest sample newer than the last one fed, or null.
+  // A amostra mais antiga mais nova que a última enviada, ou null.
   const auto nextSample = [&]() -> const HidTouchScreenState * {
     const HidTouchScreenState *next = nullptr;
     for (std::size_t index = 0; index < count; ++index) {
@@ -62,7 +62,7 @@ void ObserveSwitchTouchScreen(SwitchTouchScreen &touch) {
     return next;
   };
   if (!touch.Started) {
-    // History from before launch (the tap that started the app) is not a press.
+    // Histórico de antes do lançamento (o toque que abriu o app) não é pressionamento.
     touch.Started = true;
     while (const auto *state = nextSample())
       touch.LastSample = state->sampling_number;
@@ -84,8 +84,8 @@ void ObserveSwitchTouchScreen(SwitchTouchScreen &touch) {
   }
 }
 
-// Scrolls the window under the pointer (or the nearest scrollable parent, as
-// ImGui's mouse wheel picks it) so its content follows the finger.
+// Rola a janela sob o ponteiro (ou o pai rolável mais próximo, como a
+// roda do mouse do ImGui escolhe) para que seu conteúdo siga o dedo.
 void ScrollHostMenuUnderPointer(float scrollY) {
   ImGuiWindow *target = ImGui::GetCurrentContext()->HoveredWindow;
   const auto scrollable = [](const ImGuiWindow *window) {
@@ -102,11 +102,12 @@ void ScrollHostMenuUnderPointer(float scrollY) {
   }
 }
 
-// The title-bar close buttons of the ImGui windows drawn this frame, where a
-// landing finger snaps (oot3d_host_menu_touch.h): ImGui draws the X a font
-// height wide (17 px at 720p, under 2 mm on a Switch Lite), so a finger
-// mostly lands beside it. A button under a window in front (a popup) within
-// the snap radius is left out. Docked windows close from their tab instead.
+// Os botões de fechar da barra de título das janelas ImGui desenhadas neste
+// quadro, onde um dedo que pousa se encaixa (oot3d_host_menu_touch.h): o ImGui
+// desenha o X com a largura de uma altura de fonte (17 px em 720p, menos de 2 mm
+// num Switch Lite), então um dedo quase sempre pousa ao lado dele. Um botão sob
+// uma janela à frente (um popup) dentro do raio de encaixe fica de fora.
+// Janelas dockadas fecham pela aba.
 std::size_t CollectHostMenuCloseButtons(
     std::span<Oot3dNativeGame::HostMenuTouchRect> out, float radius) {
   const ImGuiContext &g = *ImGui::GetCurrentContext();
@@ -123,7 +124,7 @@ std::size_t CollectHostMenuCloseButtons(
                           ImGuiWindowFlags_ChildWindow)) != 0) {
       continue;
     }
-    // RenderWindowTitleBarContents' layout.
+    // Layout de RenderWindowTitleBarContents.
     const ImRect title = window->TitleBarRect();
     const float size = window->FontRefSize;
     const ImVec2 min(title.Max.x - style.FramePadding.x - size,
@@ -132,7 +133,7 @@ std::size_t CollectHostMenuCloseButtons(
     ImRect zone = button;
     zone.Expand(radius);
     bool covered = false;
-    // g.Windows runs back to front.
+    // g.Windows vai de trás para a frente.
     for (int front = index + 1; front < g.Windows.Size && !covered; ++front) {
       const ImGuiWindow *other = g.Windows[front];
       covered = shown(other) && other->RootWindow != window &&
@@ -145,11 +146,11 @@ std::size_t CollectHostMenuCloseButtons(
   return count;
 }
 
-// The host menu finger as a touch-screen mouse for ImGui (no platform
-// backend on deko3d). Runs on the game thread inside the ImGui frame, after
-// the windows were drawn; the events apply at the next ImGui::NewFrame, and
-// ImGui's input trickling spreads a press and its release over separate
-// frames.
+// O dedo do menu do host como mouse de tela sensível para o ImGui (sem backend
+// de plataforma no deko3d). Roda na thread do jogo dentro do quadro ImGui, depois
+// que as janelas foram desenhadas; os eventos se aplicam no próximo ImGui::NewFrame,
+// e o input trickling do ImGui espalha um pressionamento e sua soltura em
+// quadros separados.
 void FeedHostMenuTouch(Oot3dNativeGame::HostMenuTouchGesture &gesture,
                        const Oot3dNativeGame::TopScreenTouchPollResult &touch) {
   if (ImGui::GetCurrentContext() == nullptr ||
@@ -157,14 +158,14 @@ void FeedHostMenuTouch(Oot3dNativeGame::HostMenuTouchGesture &gesture,
     return;
   }
   ImGuiIO &io = ImGui::GetIO();
-  // Distances in 720p pixels (the handheld panel), scaled to the display.
+  // Distâncias em pixels de 720p (o painel portátil), escaladas para a exibição.
   const float unit = io.DisplaySize.y / 720.0F;
   Oot3dNativeGame::HostMenuTouchSample sample{
       touch.MenuPressed, touch.MenuX * io.DisplaySize.x,
       touch.MenuY * io.DisplaySize.y, ImGui::IsAnyItemHovered()};
   sample.TapSlop = 16.0F * unit;
   std::array<Oot3dNativeGame::HostMenuTouchRect, 8> closeButtons{};
-  // Snap targets are only read when the finger lands.
+  // Alvos de encaixe só são lidos quando o dedo pousa.
   if (gesture.Idle()) {
     sample.SnapRadius = 24.0F * unit;
     sample.SnapTargets = std::span(closeButtons.data(),
@@ -179,8 +180,8 @@ void FeedHostMenuTouch(Oot3dNativeGame::HostMenuTouchGesture &gesture,
   if (events.MovePointer) io.AddMousePosEvent(events.PointerX, events.PointerY);
   if (events.Press) io.AddMouseButtonEvent(ImGuiMouseButton_Left, true);
   if (events.Release) io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
-  // Off-screen after a lift: no hover or held item is left to block the
-  // controller's navigation.
+  // Fora da tela após levantar: nenhum item em hover ou pressionado fica
+  // bloqueando a navegação do controle.
   if (events.ClearPointer) io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
   if (events.ScrollY != 0.0F) ScrollHostMenuUnderPointer(events.ScrollY);
 }
@@ -444,10 +445,10 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
   }
 
 #if defined(__SWITCH__)
-  // Sampled every poll: each finger gets its owner when it lands (the native
-  // page touch, a gameplay HUD control, the aim, the host menu, or nothing),
-  // so a press that landed outside a touch-enabled page is never replayed
-  // when one opens.
+  // Amostrado a cada poll: cada dedo ganha seu dono quando pousa (o toque nativo
+  // de página, um controle do HUD de jogo, a mira, o menu do host, ou nada),
+  // então um pressionamento que pousou fora de uma página com toque nunca é
+  // repetido quando uma abre.
   const bool hudTouchEligible =
       topScreenUiProfile && !nativeFrontendTouchEnabled && !hostGuiVisible;
   const auto hudTargets =
@@ -464,8 +465,8 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
        window.GetWidth(), window.GetHeight(), config.TouchAimEnabled},
       guestRefreshWillConsume);
   FeedHostMenuTouch(touchScreen.MenuGesture, switchTouch);
-  // A drag aims through the native aim sources, next to the right stick and
-  // the gyro (aim.touch_degrees_per_pixel; nonzero only on consuming polls).
+  // Um arrasto mira pelas fontes de mira nativas, junto com o analógico direito e
+  // o giroscópio (aim.touch_degrees_per_pixel; não zero só em polls consumidores).
   host.TouchAimDeltaX = switchTouch.AimDeltaX;
   host.TouchAimDeltaY = switchTouch.AimDeltaY;
 #endif
@@ -474,7 +475,7 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                                      guestRefreshWillConsume,
                                      &pollingState.VirtualMotion);
 #if defined(__SWITCH__)
-  // A tapped HUD control presses the physical control it pictures.
+  // Um controle do HUD tocado pressiona o controle físico que ele representa.
   frame.Hid.Buttons |= switchTouch.HudButtons;
 #endif
   if (nativeFrontendTouchEnabled && !hostGuiVisible) {

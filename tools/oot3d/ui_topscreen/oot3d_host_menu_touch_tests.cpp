@@ -1,4 +1,4 @@
-// Host menu touch gesture (oot3d_host_menu_touch.h): taps, drags and scrolls.
+// Gesto de toque do menu do host (oot3d_host_menu_touch.h): toques, arrastos e rolagens.
 #include "oot3d_host_menu_touch.h"
 
 #include <array>
@@ -29,7 +29,7 @@ bool NoEvents(const HostMenuTouchEvents &events) {
          !events.ClearPointer && events.ScrollY == 0.0F;
 }
 
-// Holds the finger still until ImGui's hover is read; returns that poll.
+// Segura o dedo parado até o hover do ImGui ser lido; retorna esse poll.
 HostMenuTouchEvents Settle(Gesture &gesture, float x, float y, bool hovered) {
   for (std::uint8_t poll = 1; poll < Gesture::kHoverSettlePolls; ++poll) {
     Require(NoEvents(gesture.Update(Sample(true, x, y, false))),
@@ -39,8 +39,8 @@ HostMenuTouchEvents Settle(Gesture &gesture, float x, float y, bool hovered) {
 }
 
 void TestQuickTap() {
-  // Lifts on the poll after landing, before the hover check: a click where
-  // it landed, then the pointer leaves.
+  // Levanta no poll seguinte ao pouso, antes da checagem de hover: um clique onde
+  // pousou, depois o ponteiro sai.
   Gesture gesture;
   auto events = gesture.Update(Sample(true, 50, 60, false));
   Require(events.MovePointer && Near(events.PointerX, 50) &&
@@ -57,9 +57,9 @@ void TestQuickTap() {
 }
 
 void TestTapOnItem() {
-  // A checkbox: pressed once hovered; the finger rolls a little and lifts
-  // off its edge, but the pointer stayed at the press point, so ImGui sees
-  // a click.
+  // Uma checkbox: pressionada assim que em hover; o dedo rola um pouco e levanta
+  // fora da borda dela, mas o ponteiro ficou no ponto de pressão, então o ImGui vê
+  // um clique.
   Gesture gesture;
   (void)gesture.Update(Sample(true, 100, 200, false));
   auto events = Settle(gesture, 104, 197, true);
@@ -76,8 +76,8 @@ void TestTapOnItem() {
 }
 
 void TestTapOnCloseButton() {
-  // The debug menu's title-bar X at 720p: 17 px. A finger lands 9 px to
-  // its left and below it, rolls on the way, and lifts.
+  // O X da barra de título do menu de debug em 720p: 17 px. Um dedo pousa 9 px
+  // à esquerda e abaixo dele, rola no caminho, e levanta.
   const std::array<HostMenuTouchRect, 1> close{{{1191, 42, 1208, 59}}};
   const auto sample = [&](bool pressed, float x, float y, bool hovered) {
     HostMenuTouchSample s{pressed, x, y, hovered};
@@ -97,14 +97,14 @@ void TestTapOnCloseButton() {
   Require(events.Release && !events.MovePointer,
           "released on the close button: it closes the window");
 
-  // A quick tap near it clicks it too.
+  // Um toque rápido perto dele também o clica.
   events = gesture.Update(sample(true, 1212, 40, false));
   events = gesture.Update(sample(false, 1212, 40, false));
   Require(events.Press && events.Release && Near(events.PointerX, 1199.5F) &&
               Near(events.PointerY, 50.5F),
           "a quick tap near the close button clicks it");
 
-  // Farther than the radius, or a target away from the finger: no snap.
+  // Mais longe que o raio, ou um alvo longe do dedo: sem encaixe.
   events = gesture.Update(sample(true, 1150, 50, false));
   Require(Near(events.PointerX, 1150) && Near(events.PointerY, 50),
           "a finger away from the close button stays where it landed");
@@ -119,9 +119,9 @@ void TestTapOnCloseButton() {
 }
 
 void TestScrollDrag() {
-  // Empty space: nothing until the finger leaves the slop, then the content
-  // follows it 1:1 (including the motion made inside the slop), even over
-  // items, and the lift clicks nothing.
+  // Espaço vazio: nada até o dedo sair da folga, depois o conteúdo o segue
+  // 1:1 (incluindo o movimento feito dentro da folga), mesmo sobre itens,
+  // e o levantar não clica em nada.
   Gesture gesture;
   (void)gesture.Update(Sample(true, 300, 400, false));
   auto events = Settle(gesture, 300, 392, false);
@@ -139,13 +139,13 @@ void TestScrollDrag() {
   Require(!events.Press && !events.Release && events.ClearPointer,
           "a scroll ends without a click");
 
-  // Already past the slop when the hover is read: it scrolls right away.
+  // Já além da folga quando o hover é lido: rola imediatamente.
   (void)gesture.Update(Sample(true, 300, 400, false));
   events = Settle(gesture, 300, 440, false);
   Require(Near(events.ScrollY, 40), "a fast drag scrolls at once");
   (void)gesture.Update(Sample(false, 300, 440, false));
 
-  // A tap on empty space is still a click (it closes a popup).
+  // Um toque em espaço vazio ainda é um clique (fecha um popup).
   (void)gesture.Update(Sample(true, 500, 500, false));
   (void)Settle(gesture, 503, 498, false);
   events = gesture.Update(Sample(false, 506, 495, false));
@@ -155,7 +155,7 @@ void TestScrollDrag() {
 }
 
 void TestItemDrag() {
-  // A slider: pressed, then the pointer follows once past the slop.
+  // Um slider: pressionado, depois o ponteiro segue assim que passa da folga.
   Gesture gesture;
   (void)gesture.Update(Sample(true, 100, 200, false));
   auto events = Settle(gesture, 100, 200, true);

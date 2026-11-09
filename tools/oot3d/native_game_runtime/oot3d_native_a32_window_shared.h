@@ -696,7 +696,7 @@ void ApplyNativeWidescreenProjectionPolicy(
 Oot3dNativeGame::NativeA32InputFrame
 PollNativeA32Input(Fast::Fast3dWindow &window,
                    bool nativeFrontendTouchEnabled,
-                   // Where the page that owns the touch is drawn.
+                   // Onde a página dona do toque é desenhada.
                    Oot3dNativeGame::NativeA32TouchPresentation
                        nativeTouchPresentation,
                    bool hostGuiVisible,
@@ -709,8 +709,8 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                    bool guestRefreshWillConsume,
                    NativeControlPollingState &pollingState,
                    bool switchConsoleMotion,
-                   // The gameplay HUD drawn last frame (400x240 canvas):
-                   // on Switch, taps on its controls press them.
+                   // O HUD de jogo desenhado no último quadro (tela de 400x240):
+                   // no Switch, toques nos seus controles os pressionam.
                    std::span<const oot3d::ui::UiPrimitive>
                        topScreenHudPrimitives,
                    bool widescreenMenuCorners = false,
@@ -730,9 +730,9 @@ bool ResolveNativeA32TouchInputEnabled(
     const Oot3dNativeGame::Oot3dNativeUiLifecycleBridge &uiLifecycleBridge,
     bool topScreenUiProfile);
 
-// The default profile's lower screen, or the TopScreen page on the top
-// screen: the widened Items page while Items is open (the predicate the
-// wide-page draw uses, ReadTopScreenWidePageState), else a centred page.
+// A tela de baixo do perfil padrão, ou a página do TopScreen na tela de
+// cima: a página Items alargada enquanto Items está aberta (o predicado que o
+// desenho de página larga usa, ReadTopScreenWidePageState), senão uma página centralizada.
 // O PiP de um título genérico tem precedência em PollNativeA32Input.
 Oot3dNativeGame::NativeA32TouchPresentation ResolveNativeA32TouchPresentation(
     Oot3dNativeGame::NativeA32Memory &memory, bool topScreenUiProfile);

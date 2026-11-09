@@ -388,8 +388,8 @@ struct PhysicalInputState {
     double SamplePeriodSeconds = 1.0 / 60.0;
     MotionObservation ControllerMotion;
     NormalizedTouch ControllerTouch;
-    // Touchscreen drag aiming: the aim finger's motion since the last
-    // consumed poll, in touch-panel pixels (1280x720 on the Switch).
+    // Mira por arrasto na tela sensível: o movimento do dedo de mira desde o último
+    // poll consumido, em pixels do painel de toque (1280x720 no Switch).
     float TouchAimDeltaX = 0.0F;
     float TouchAimDeltaY = 0.0F;
 };
@@ -518,11 +518,11 @@ struct AimRates {
     float YawDegreesPerSecond = 0.0F;
 };
 
-// A touch drag as virtual pitch/yaw rates over the sample period, with the
-// mouse's convention (drag right turns right, drag down looks down) and the
-// aim inversion. The native aim sources add it to their own virtual rates
-// (Automatic, Mouse, RightStick, DigitalLook); a source of physical sensors
-// only ignores it.
+// Um arrasto de toque como taxas virtuais de pitch/yaw no período da amostra, com
+// a convenção do mouse (arrastar para a direita vira à direita, arrastar para baixo
+// olha para baixo) e a inversão de mira. As fontes de mira nativas o somam às suas
+// próprias taxas virtuais (Automatic, Mouse, RightStick, DigitalLook); uma fonte
+// só de sensores físicos o ignora.
 [[nodiscard]] AimRates ResolveTouchAimRates(const MappingConfig& config,
                                             float deltaX, float deltaY,
                                             double samplePeriodSeconds) noexcept;

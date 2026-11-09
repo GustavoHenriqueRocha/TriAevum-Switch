@@ -26,8 +26,8 @@ constexpr std::uint32_t kUploadUniformBlock4 = 0x003246BCU;
 constexpr std::uint32_t kAccumulateWriter = 0x002F9C74U;
 constexpr std::uint32_t kItemsPageDraw = 0x00434C80U;
 constexpr std::uint32_t kQuadGroupDraw = 0x002FB934U;
-// Payload literals: -0.005, and the offsets 0.8 (0x005E219C), 0.6, 0.685
-// (oot3d_top_screen_page_layout.h, which the touch mapping inverts).
+// Literais do payload: -0.005, e os offsets 0.8 (0x005E219C), 0.6, 0.685
+// (oot3d_top_screen_page_layout.h, que o mapeamento de toque inverte).
 constexpr std::uint32_t kWideScale = std::bit_cast<std::uint32_t>(kTopScreenWidePageScale);
 constexpr std::uint32_t kPageOffset = std::bit_cast<std::uint32_t>(kTopScreenWidePageOffset);
 constexpr std::uint32_t kItemsOffset = std::bit_cast<std::uint32_t>(kTopScreenWideItemsOffset);

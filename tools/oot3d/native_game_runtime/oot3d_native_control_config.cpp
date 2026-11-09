@@ -342,7 +342,7 @@ bool DecodeNativeControlConfig(const nlohmann::json& document,
         aim.value("invert_x", parsed.NativeAimInvertX);
     parsed.NativeAimInvertY =
         aim.value("invert_y", parsed.NativeAimInvertY);
-    // Absent in files written before touch aim: the defaults apply.
+    // Ausente em arquivos gravados antes da mira por toque: valem os padrões.
     parsed.TouchAimEnabled =
         aim.value("touch_enabled", parsed.TouchAimEnabled);
     parsed.TouchAimDegreesPerPixel =
