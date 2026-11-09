@@ -2923,6 +2923,13 @@ but `off`/`0`, turns it on; `verify` adds the flag-table checks.
 - **Console check:** L3+R3 > Video with HD textures on: "HD texture size" offers 1x, 2x, 3x on the SD
   above (3x labelled the largest), and `deko3d.txt` has `texture pack sizes: … up to 3x` once; the next
   start says `remembered`.
+- **With HD textures off (user, 11/09, before 0.2.1):** the menu still offered 3x and 4x for a 2x pack,
+  and dropped them once HD textures were on and the pack worker had measured. The Video tab now reads
+  `config/texture_pack_sizes` once when it starts (`ReadPackScaleRecord`) and offers the sizes of this
+  start's measure, else the remembered one, else all of them (`TexturePackMenuLargest`,
+  `azahar_pack_scale.h`). The remembered record is not checked against the pack's fingerprint there (that
+  needs the listing the worker does): a pack swapped while HD textures are off shows the old sizes until
+  HD textures are on and the worker measures it. Test `RememberedSizes`; guards "size menu".
 
 ### HD texture changes without a freeze (08/11, test.13 logs21)
 - **Report (Perf21 §3):** each change of HD textures in L3+R3 > Video (on, off, another size; off at another

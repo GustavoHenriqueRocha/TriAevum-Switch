@@ -489,6 +489,41 @@ void ScaleMenu() {
   Require(selected(MakeTexturePackScaleMenu(6U, 5U)) == 0U, "cap 6 above a 5x pack: No limit");
 }
 
+// The menu with HD textures off (user report, 11/09: a 2x pack still offered
+// 3x and 4x until HD textures were turned on): the last measure remembered in
+// config/texture_pack_sizes names the sizes until this start measures.
+void RememberedSizes() {
+  PackFingerprint fingerprint;
+  fingerprint.Add("LINK/a.png", 100);
+  const PackScaleRecord twoX{fingerprint, 2U, 77U};
+  Require(TexturePackMenuLargest(0U, std::nullopt) == 0U, "nothing measured or remembered: every size");
+  Require(TexturePackMenuLargest(0U, twoX) == 2U, "not measured yet: the remembered largest");
+  Require(TexturePackMenuLargest(3U, twoX) == 3U, "this start's measure wins over the remembered one");
+  const auto menu = MakeTexturePackScaleMenu(4U, TexturePackMenuLargest(0U, twoX));
+  Require(menu.Choices.size() == 2U && menu.Choices[1].Scale == 2U && menu.Selected == 1,
+          "HD textures off, a remembered 2x pack: 1x and 2x, 2x shown for a saved 4x");
+
+  const auto dir = std::filesystem::temp_directory_path() / "oot3d_texture_pack_sizes_test";
+  std::error_code error;
+  std::filesystem::remove_all(dir, error);
+  std::filesystem::create_directories(dir);
+  const auto file = dir / kTexturePackSizesName;
+  Require(!ReadPackScaleRecord(file), "no file: none");
+  {
+    std::ofstream(file, std::ios::binary) << FormatPackScaleRecord(twoX);
+  }
+  Require(ReadPackScaleRecord(file) == twoX, "the file the pack worker writes reads back");
+  {
+    std::ofstream(file, std::ios::binary) << "not a record\n";
+  }
+  Require(!ReadPackScaleRecord(file), "damaged file: none");
+  {
+    std::ofstream(file, std::ios::binary) << FormatPackScaleRecord(twoX) << std::string(200, ' ');
+  }
+  Require(!ReadPackScaleRecord(file), "overlong file: none");
+  std::filesystem::remove_all(dir, error);
+}
+
 // A live pack change never freezes the game (test.13, logs21): the render
 // thread resolves a view again a few textures per frame, a settings change
 // never arms the scene hold, and the game thread's longest frame and HUD
@@ -635,6 +670,7 @@ int main() {
   PreloadAndHoldSettings();
   PackImageScales();
   ScaleMenu();
+  RememberedSizes();
   PackChangeSpread();
   LogLines();
   SettingsWriter();

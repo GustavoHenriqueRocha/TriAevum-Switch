@@ -2039,11 +2039,24 @@ GUARDS = [
           "oot3d_azahar_texture_pack_tests (MeasuresThePacksLargestImageScaleAndRemembersIt)"),
     Guard("the Video tab offers the sizes the pack has, and keeps a saved cap above them unwritten",
           "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
-          r'mPack\.Enabled \? ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.LargestImageScale\(\) : 0U;.*?'
+          r'TexturePackMenuLargest\(\s*::Oot3d::Renderer::AzaharTexturePackRuntime::Instance\(\)\.LargestImageScale\(\), '
+          r'mRememberedSizes\);.*?'
           r'MakeTexturePackScaleMenu\(mPack\.MaxScale, largest\).*?'
           r'if \(ImGui::Selectable\(choice\.Label\.c_str\(\), selected\) && !selected\) \{',
-          "oot3d_texture_pack_scale_tests (ScaleMenu)",
-          forbid=r'kPackScales'),
+          "oot3d_texture_pack_scale_tests (ScaleMenu, RememberedSizes)",
+          forbid=r'kPackScales|mPack\.Enabled \? ::Oot3d::Renderer::AzaharTexturePackRuntime'),
+    # --- 11/09 (user, before 0.2.1): with HD textures off the size menu still offered 3x and 4x for a 2x
+    # pack and dropped them once HD textures were on. The last measure remembered in
+    # config/texture_pack_sizes names the sizes until this start measures.
+    Guard("the size menu uses this start's measure, else the remembered one, else every size",
+          "runtime/three_ds_recomp/include/oot3d/renderer/azahar_pack_scale.h",
+          r'if \(measured != 0U\) return measured;\s+return remembered \? remembered->Largest : 0U;',
+          "oot3d_texture_pack_scale_tests (RememberedSizes)"),
+    Guard("the Video tab reads config/texture_pack_sizes once, at its start",
+          "tools/oot3d/native_game_runtime/oot3d_video_settings_panel.cpp",
+          r'std::optional<::Oot3d::Renderer::PackScaleRecord> mRememberedSizes =\s+'
+          r'::Oot3d::Renderer::ReadPackScaleRecord\(mConfig / ::Oot3d::Renderer::kTexturePackSizesName\);',
+          "oot3d_texture_pack_scale_tests (RememberedSizes)"),
     Guard("a saved cap at or above the pack's largest image shows the largest (No limit only above 4x)",
           "runtime/three_ds_recomp/include/oot3d/renderer/azahar_pack_scale.h",
           r'if \(largest == 0U \|\| largest > kTexturePackLargestNamedScale\) \{.*?'

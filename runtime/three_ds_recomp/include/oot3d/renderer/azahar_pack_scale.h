@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <optional>
 #include <span>
@@ -220,8 +221,8 @@ struct PackScaleRecord {
 }
 
 // The "HD texture size" choices for a cap (config/texture_pack_scale, 0 = no
-// cap) and the pack's largest world/model image (0 = not known: HD textures
-// off, the measure not done yet, or nothing measurable), and the one shown as
+// cap) and the pack's largest world/model image (0 = not known: nothing
+// measured or remembered, or nothing measurable), and the one shown as
 // selected (-1: a cap the menu does not name, "Custom"). Known: 1x up to the
 // largest (labelled as such), and No limit only above 4x; a cap at or above
 // the largest selects it without the setting being written.
@@ -259,6 +260,31 @@ struct TexturePackScaleMenu {
     for (size_t index = 0; index < menu.Choices.size(); ++index)
         if (menu.Choices[index].Scale == shown) menu.Selected = static_cast<int>(index);
     return menu;
+}
+
+// The last measure remembered in config/texture_pack_sizes (absent, too long
+// or damaged: none). Read by the Video tab, which has no pack worker of its own.
+[[nodiscard]] inline std::optional<PackScaleRecord> ReadPackScaleRecord(const std::filesystem::path& file) {
+    std::ifstream input(file, std::ios::binary);
+    if (!input) return std::nullopt;
+    std::string text;
+    char buffer[129];
+    input.read(buffer, sizeof(buffer));
+    text.assign(buffer, static_cast<size_t>(input.gcount()));
+    if (text.size() >= sizeof(buffer)) return std::nullopt;
+    return ParsePackScaleRecord(text);
+}
+
+// The largest size the menu offers: this start's measure when the pack worker
+// has one, else the one remembered from the last measure (HD textures off, or
+// on and not measured yet), else 0 (every size). Without the remembered one the
+// menu offered 3x and 4x with HD textures off and dropped them once they were
+// turned on (user report, 11/09). A pack changed since the last measure is
+// measured again when HD textures are on; until then the remembered sizes show.
+[[nodiscard]] inline uint32_t TexturePackMenuLargest(uint32_t measured,
+                                                     const std::optional<PackScaleRecord>& remembered) noexcept {
+    if (measured != 0U) return measured;
+    return remembered ? remembered->Largest : 0U;
 }
 
 } // namespace Oot3d::Renderer

@@ -255,10 +255,11 @@ private:
   void DrawTexturePack() {
     ImGui::Separator();
     bool changed = ImGui::Checkbox("HD textures (texture pack)", &mPack.Enabled);
-    // The sizes this pack has (azahar_pack_scale.h): known once the pack
-    // worker measured it; until then, and with HD textures off, all of them.
-    const uint32_t largest =
-        mPack.Enabled ? ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().LargestImageScale() : 0U;
+    // The sizes this pack has (azahar_pack_scale.h): this start's measure once
+    // the pack worker has one, else the last measure remembered in
+    // config/texture_pack_sizes (with HD textures off too), else all of them.
+    const uint32_t largest = ::Oot3d::Renderer::TexturePackMenuLargest(
+        ::Oot3d::Renderer::AzaharTexturePackRuntime::Instance().LargestImageScale(), mRememberedSizes);
     if (largest != mScaleMenuLargest || mPack.MaxScale != mScaleMenuCap || mScaleMenu.Choices.empty()) {
       mScaleMenu = ::Oot3d::Renderer::MakeTexturePackScaleMenu(mPack.MaxScale, largest);
       mScaleMenuLargest = largest;
@@ -416,6 +417,10 @@ private:
   ::Oot3d::Renderer::TexturePackScaleMenu mScaleMenu;
   uint32_t mScaleMenuLargest = 0;
   uint32_t mScaleMenuCap = 0;
+  // config/texture_pack_sizes as this start found it (read once: the pack
+  // worker's measure takes over when it has one).
+  std::optional<::Oot3d::Renderer::PackScaleRecord> mRememberedSizes =
+      ::Oot3d::Renderer::ReadPackScaleRecord(mConfig / ::Oot3d::Renderer::kTexturePackSizesName);
   Fast::Oot3d::GrassSwitchMode mGrassBoot = Fast::Oot3d::GrassSwitchMode::Off;
   Fast::Oot3d::GrassSwitchMode mGrass = Fast::Oot3d::GrassSwitchMode::Off;
   Fast::Oot3d::GrassSwitchDistance mGrassDistance = Fast::Oot3d::GrassSwitchDistance::Near;
