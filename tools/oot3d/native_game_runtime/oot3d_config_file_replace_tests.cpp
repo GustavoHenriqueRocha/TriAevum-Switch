@@ -12,6 +12,7 @@
 
 #include "fast/renderer/cache_file.h"
 #include "ship/config/ConfigPersistence.h"
+#include "ship/config/FileReplace.h"
 
 #include <cerrno>
 #include <cstdio>
@@ -73,12 +74,7 @@ std::string Read(const fs::path &path) {
   return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
 }
 
-// O arquivo antigo enquanto o novo entra no lugar: "<arquivo>.bak".
-fs::path Bak(const fs::path &path) {
-  fs::path backup = path;
-  backup += ".bak";
-  return backup;
-}
+fs::path Bak(const fs::path &path) { return Ship::ReplaceBackupPath(path); }
 
 fs::path Fresh(const fs::path &root, const char *name) {
   fs::remove_all(root / name);
@@ -101,6 +97,82 @@ void TestHorizonRenameRefusesExistingFile(const fs::path &root) {
   Reset(false);
   fs::rename(dir / "a.json.tmp", dir / "a.json", error);
   Require(!error && Read(dir / "a.json") == "new", "modo POSIX: rename substitui");
+}
+
+void TestReplace(const fs::path &root, bool horizon) {
+  const auto dir = Fresh(root, horizon ? "replace-horizon" : "replace-posix");
+  const auto target = dir / "c.json", temporary = dir / "c.json.tmp";
+
+  Reset(horizon);
+  Write(temporary, "first");
+  Require(!Ship::ReplaceFileWithTemporary(temporary, target), "a troca cria um destino que não existe");
+  Require(Read(target) == "first" && !fs::exists(temporary) && !fs::exists(Bak(target)),
+          "criado: destino gravado, sem temporário, sem backup");
+  Require(gRenameCalls == 1, "destino inexistente leva um rename");
+
+  Reset(horizon);
+  Write(temporary, "second");
+  Require(!Ship::ReplaceFileWithTemporary(temporary, target), "troca por cima de um destino existente");
+  Require(Read(target) == "second" && !fs::exists(temporary) && !fs::exists(Bak(target)),
+          "trocado: conteúdo novo, sem temporário, sem backup");
+  Require(gRenameCalls == (horizon ? 3 : 1), "Horizon: recusado, de lado, no lugar; POSIX: um rename");
+
+  // Um backup deixado por uma troca anterior concluída (o destino existe) está velho.
+  Reset(horizon);
+  Write(Bak(target), "stale");
+  Write(temporary, "third");
+  Require(!Ship::ReplaceFileWithTemporary(temporary, target), "troca com backup velho");
+  Require(Read(target) == "third", "backup velho: conteúdo novo");
+  Require(fs::exists(Bak(target)) == !horizon, "Horizon apaga o backup velho; POSIX nunca o toca");
+  fs::remove(Bak(target));
+}
+
+void TestReplaceFailures(const fs::path &root) {
+  const auto dir = Fresh(root, "failures");
+  const auto target = dir / "c.json", temporary = dir / "c.json.tmp";
+  Write(target, "old");
+
+  // Tirar o arquivo antigo do lugar falha: nada muda, o temporário fica.
+  Reset(true, 2);
+  Write(temporary, "new");
+  Require(static_cast<bool>(Ship::ReplaceFileWithTemporary(temporary, target)), "falha ao tirar do lugar é relatada");
+  Require(Read(target) == "old" && Read(temporary) == "new" && !fs::exists(Bak(target)),
+          "falha ao tirar do lugar: destino intacto, temporário mantido");
+
+  // Pôr o temporário no lugar falha: o arquivo antigo volta.
+  Reset(true, 3);
+  Require(static_cast<bool>(Ship::ReplaceFileWithTemporary(temporary, target)), "falha ao pôr no lugar é relatada");
+  Require(Read(target) == "old" && Read(temporary) == "new" && !fs::exists(Bak(target)),
+          "falha ao pôr no lugar: destino restaurado, sem backup");
+
+  // Outros erros não são confundidos com a recusa do Horizon.
+  Reset(true, 1);
+  Require(static_cast<bool>(Ship::ReplaceFileWithTemporary(temporary, target)) && gRenameCalls == 1,
+          "falha que não é EEXIST é relatada sem o fallback");
+  Require(Read(target) == "old", "falha que não é EEXIST: destino intacto");
+  Reset(false);
+}
+
+// O estado que uma queda de energia ou o jogo fechado deixa entre as duas
+// trocas: o destino sumiu, o backup guarda o último arquivo completo.
+void TestRecovery(const fs::path &root) {
+  const auto dir = Fresh(root, "recovery");
+  const auto target = dir / "c.json";
+  Reset(true);
+  Write(Bak(target), "last");
+  Write(dir / "c.json.tmp", "unsaved");
+  Require(Ship::RestoreInterruptedReplace(target), "a recuperação funciona");
+  Require(Read(target) == "last" && !fs::exists(Bak(target)), "a recuperação traz o backup de volta");
+  Require(Ship::RestoreInterruptedReplace(target) && Read(target) == "last", "recuperar de novo não faz nada");
+
+  Write(Bak(target), "stale");
+  Require(Ship::RestoreInterruptedReplace(target) && Read(target) == "last",
+          "um destino com backup ao lado é mantido");
+  fs::remove(Bak(target));
+  Require(Ship::RestoreInterruptedReplace(dir / "missing.json") && !fs::exists(dir / "missing.json"),
+          "nada para recuperar: nenhum arquivo aparece");
+  Require(Ship::RestoreInterruptedReplace({}), "caminho vazio não faz nada");
+  Reset(false);
 }
 
 // O relato: as opções do TopScreen salvas uma vez e de novo por cima do arquivo.
@@ -182,6 +254,10 @@ int main() {
   const auto root = fs::temp_directory_path() / ("oot3d_config_file_replace_tests." + std::to_string(getpid()));
   fs::create_directories(root);
   TestHorizonRenameRefusesExistingFile(root);
+  TestReplace(root, false);
+  TestReplace(root, true);
+  TestReplaceFailures(root);
+  TestRecovery(root);
   TestTopScreenConfig(root);
   TestControlConfig(root);
   TestShipConfigWriter(root);

@@ -27,6 +27,10 @@ target_include_directories(oot3d_ui_topscreen PUBLIC
     tools/oot3d/native_game_runtime
     tools/oot3d/ui_topscreen
 )
+# A troca no save (ship/config/FileReplace.h, só cabeçalho).
+target_include_directories(oot3d_ui_topscreen PRIVATE
+    runtime/three_ds_recomp/include
+)
 target_link_libraries(oot3d_ui_topscreen PUBLIC
     three_ds_recomp_input
     oot3d_native_a32_process
@@ -302,6 +306,10 @@ add_library(oot3d_native_control_config STATIC EXCLUDE_FROM_ALL
 )
 target_include_directories(oot3d_native_control_config PUBLIC
     tools/oot3d/native_game_runtime
+)
+# A troca no save (ship/config/FileReplace.h, só cabeçalho).
+target_include_directories(oot3d_native_control_config PRIVATE
+    runtime/three_ds_recomp/include
 )
 target_link_libraries(oot3d_native_control_config PUBLIC
     nlohmann_json::nlohmann_json

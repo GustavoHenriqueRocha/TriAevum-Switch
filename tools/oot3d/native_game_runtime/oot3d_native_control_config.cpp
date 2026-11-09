@@ -1,5 +1,7 @@
 #include "oot3d_native_control_config.h"
 
+#include "ship/config/FileReplace.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -630,6 +632,7 @@ bool ParseNativeControlConfigText(std::string_view text,
 bool LoadNativeControlConfig(const std::filesystem::path& path,
                              NativeControlConfig* config,
                              std::string* error) {
+  Ship::RestoreInterruptedReplace(path);
   std::ifstream stream(path, std::ios::binary);
   if (!stream) {
     SetError(error, "cannot open native control config: " + path.string());
@@ -758,17 +761,10 @@ bool SaveNativeControlConfig(const std::filesystem::path& path,
     return false;
   }
 #else
-  std::error_code replaceError;
-  std::filesystem::rename(temporary, path, replaceError);
-#if defined(__SWITCH__)
-  // Horizon's FS cannot rename over an existing file (EEXIST).
-  if (replaceError == std::errc::file_exists) {
-    std::error_code removeError;
-    std::filesystem::remove(path, removeError);
-    replaceError.clear();
-    std::filesystem::rename(temporary, path, replaceError);
-  }
-#endif
+  // O FS do Horizon não renomeia por cima de arquivo existente (EEXIST): a
+  // troca e a recuperação estão em ship/config/FileReplace.h.
+  const std::error_code replaceError =
+      Ship::ReplaceFileWithTemporary(temporary, path);
   if (replaceError) {
     std::error_code ignored;
     std::filesystem::remove(temporary, ignored);
