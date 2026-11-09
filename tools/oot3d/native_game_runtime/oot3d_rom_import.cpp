@@ -5,6 +5,7 @@
 // (GPL-2.0-or-later; procedência do Azahar em oot3d_rom_import.h).
 
 #include "oot3d_rom_import.h"
+#include "ctr_title_profile.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -568,6 +569,20 @@ void ExpectIdentity(const char* what, const FileIdentity& expected, std::uint64_
     }
 }
 
+// O game/ de sdmc:/switch/oot3dre é só do OoT3D: o importador conhece só as
+// receitas dele, e um outro título ali dividiria a pasta do save do Zelda.
+// O program id passa pelo perfil de título (ctr_title_profile.h) antes de
+// qualquer hash; outros jogos de 3DS vão pelo conversor do PC.
+void RequireOot3dTitle(std::uint64_t programId) {
+    if (Oot3dNativeGame::IsOot3dTitleId(programId))
+        return;
+    char text[17];
+    std::snprintf(text, sizeof text, "%016llX", static_cast<unsigned long long>(programId));
+    throw ImportError(std::string("este dump não é o Ocarina of Time 3D (program ID ") + text +
+                      "); outros jogos de 3DS não são importados no console: use "
+                      "tools/ctr/ctr_convert.py no PC");
+}
+
 } // namespace
 
 // ---------------------------------------------------------------- SHA-256 API
@@ -1048,6 +1063,9 @@ std::string BuildProcessManifest(std::span<const std::uint8_t> exheader,
         {"process",
          Json::Object({
              {"name", name},
+             // Program id do ExHeader, como no build_process_manifest.py: o
+             // runtime escolhe o perfil de título por ele (ctr_title_profile.h).
+             {"title_id", U64(x + 0x200)},
              {"entrypoint", text.Address},
              {"page_size", kPage},
              {"bss_declared_size", bssSize},
@@ -1127,6 +1145,7 @@ Plan Identify(const Source& source) {
         const std::uint64_t fileSize = FileSize(source.Path);
         const Layout layout = FindTitleLayout(file.get(), fileSize);
         plan.ProgramId = layout.ProgramId;
+        RequireOot3dTitle(plan.ProgramId);
         plan.Exheader = ReadAt(file.get(), layout.ExheaderOffset, kExheaderSize, "ExHeader");
         if (layout.CodeSize > kMaxCodeFile)
             throw ImportError("o .code do ExeFS é grande demais");
@@ -1156,6 +1175,7 @@ Plan Identify(const Source& source) {
         File exheaderFile = OpenFile(exheader, "rb");
         plan.Exheader = ReadAt(exheaderFile.get(), 0, kExheaderSize, "exheader.bin");
         plan.ProgramId = U64(plan.Exheader.data() + 0x200);
+        RequireOot3dTitle(plan.ProgramId);
         plan.RomFsPath = romfs;
         plan.RomFsSize = FileSize(romfs);
         File romfsFile = OpenFile(romfs, "rb");

@@ -6,6 +6,9 @@
 //                                                  ou pasta extraída) para <game>
 
 #include "oot3d_rom_import.h"
+#include "ctr_title_profile.h"
+
+#include <nlohmann/json.hpp>
 
 #include <chrono>
 #include <cstdio>
@@ -19,6 +22,10 @@
 namespace ri = Oot3dNativeGame::RomImport;
 namespace fs = std::filesystem;
 using Bytes = std::vector<std::uint8_t>;
+
+// Program ids: OoT3D USA (ctr_title_profile.h) e um título qualquer (o SM3DL).
+constexpr std::uint64_t kOot3dUsa = 0x0004000000033500ULL;
+constexpr std::uint64_t kOtherTitle = 0x0004000000053F00ULL;
 
 namespace {
 
@@ -351,7 +358,7 @@ void TestQmRejectsPopulatedSlot() {
 
 // ------------------------------------------------------------ NCSD/NCCH + manifesto
 
-Bytes Exheader(bool compressed) {
+Bytes Exheader(bool compressed, std::uint64_t titleId = kOot3dUsa) {
     Bytes x(0x800, 0);
     std::memcpy(x.data(), "CtrApp", 6);
     x[0x0D] = compressed ? 1 : 0;
@@ -363,21 +370,22 @@ Bytes Exheader(bool compressed) {
     Put32(x, 0x3C, 0x1800);     // bss
     x[0x20D] = 0;               // modo de memória 0 (aplicativo de 64 MB)
     x[0x20F] = 48;
-    Put64(x, 0x200, 0x0004000000099900ULL);
+    Put64(x, 0x200, titleId);
     return x;
 }
 
 // NCSD com uma partição NCCH em 0x4000: ExHeader, ExeFS com .code, RomFS.
-Bytes BuildNcsd(const Bytes& code, bool compressed, bool encrypted) {
+Bytes BuildNcsd(const Bytes& code, bool compressed, bool encrypted,
+                std::uint64_t titleId = kOot3dUsa) {
     constexpr std::size_t base = 0x4000;
     Bytes image(base, 0);
     std::memcpy(image.data() + 0x100, "NCSD", 4);
     Bytes ncch(0x200, 0);
     std::memcpy(ncch.data() + 0x100, "NCCH", 4);
-    Put64(ncch, 0x118, 0x0004000000099900ULL);
+    Put64(ncch, 0x118, titleId);
     ncch[0x18D] = 0x02;
     Put32(ncch, 0x180, 0x400);
-    const Bytes exheader = Exheader(compressed);
+    const Bytes exheader = Exheader(compressed, titleId);
     ncch.insert(ncch.end(), exheader.begin(), exheader.end()); // 0x200..0xA00
     ncch.resize(0xA00, 0);
     Bytes exefs(0x200, 0);
@@ -421,7 +429,7 @@ void TestContainer(const fs::path& directory) {
     WriteFile(rom, BuildNcsd(CompressedCode(), true, false));
     std::string message = IdentifyError(rom);
     CHECK(message.find("jogo ou revisão não suportada") != std::string::npos);
-    CHECK(message.find("0004000000099900") != std::string::npos);
+    CHECK(message.find("0004000000033500") != std::string::npos);
     CHECK(message.find(ri::Hex(ri::Sha256Of(ExpectedCode())).substr(0, 16)) != std::string::npos);
 
     WriteFile(rom, BuildNcsd(ExpectedCode(), false, false));
@@ -434,6 +442,27 @@ void TestContainer(const fs::path& directory) {
 
     WriteFile(rom, Bytes(0x400, 0x5A));
     CHECK(IdentifyError(rom).find("não é uma imagem NCSD/NCCH") != std::string::npos);
+
+    // Outro jogo de 3DS (perfil genérico em ctr_title_profile.h): recusado pelo
+    // program id antes de qualquer hash, apontando o conversor do PC. O game/
+    // do OoT3D nunca recebe outro título.
+    WriteFile(rom, BuildNcsd(CompressedCode(), true, false, kOtherTitle));
+    message = IdentifyError(rom);
+    CHECK(message.find("não é o Ocarina of Time 3D") != std::string::npos);
+    CHECK(message.find("0004000000053F00") != std::string::npos);
+    CHECK(message.find("tools/ctr/ctr_convert.py") != std::string::npos);
+    fs::create_directories(directory / "other");
+    WriteFile(directory / "other" / "code.bin", ExpectedCode());
+    WriteFile(directory / "other" / "exheader.bin", Exheader(false, kOtherTitle));
+    Bytes ivfc(0x2000, 0);
+    std::memcpy(ivfc.data(), "IVFC", 4);
+    WriteFile(directory / "other" / "romfs.bin", ivfc);
+    message.clear();
+    try { (void)ri::Identify({ri::SourceKind::Extracted, directory / "other"}); }
+    catch (const ri::ImportError& error) { message = error.what(); }
+    CHECK(message.find("não é o Ocarina of Time 3D") != std::string::npos);
+    fs::remove_all(directory / "other");
+    WriteFile(rom, BuildNcsd(CompressedCode(), true, false));
 
     // Busca de origens: dumps ordenados pelo nome, depois import/.
     WriteFile(directory / "b.3DS", Bytes(16));
@@ -472,6 +501,17 @@ void TestManifest() {
     bool threw = false;
     try { (void)ri::BuildProcessManifest(Exheader(false), Bytes(10), 0x3000, 0); } catch (const ri::ImportError&) { threw = true; }
     CHECK(threw);
+
+    // process.title_id = program id do ExHeader, como no build_process_manifest.py:
+    // o runtime escolhe o perfil de título por ele (oot3d_native_a32_process_image.cpp
+    // lê o campo como inteiro sem sinal). Último campo de "process" (chaves ordenadas).
+    CHECK(manifest.find("\"title_id\": 1125899907052800\n") != std::string::npos);
+    const auto document = nlohmann::json::parse(manifest);
+    const auto& titleId = document.at("process").at("title_id");
+    CHECK(titleId.is_number_unsigned());
+    CHECK(titleId.get<std::uint64_t>() == kOot3dUsa);
+    CHECK(Oot3dNativeGame::SelectCtrTitleProfile(titleId.get<std::uint64_t>()).Kind ==
+          Oot3dNativeGame::CtrTitleKind::Oot3d);
 }
 
 int RealImport(const fs::path& source, const fs::path& game) {

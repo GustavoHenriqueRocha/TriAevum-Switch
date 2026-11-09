@@ -348,9 +348,14 @@ oot3d_target_defaults(oot3d_input_bench_tests FOLDER Tests)
 
 # Núcleo da importação do dump no primeiro início (oot3d_rom_import.h):
 # NCSD/NCCH sintético, LZSS, programa COPY, adaptação da RomFS e manifesto,
-# sem ROM. `--import <dump> <pasta>` faz uma importação real no PC.
+# sem ROM. `--import <dump> <pasta>` faz uma importação real no PC. O
+# nlohmann_json lê o manifesto gerado como o runtime lê (process.title_id).
+if (NOT TARGET nlohmann_json::nlohmann_json)
+    find_package(nlohmann_json REQUIRED)
+endif()
 add_executable(oot3d_rom_import_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_rom_import_tests.cpp
     tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
 )
+target_link_libraries(oot3d_rom_import_tests PRIVATE nlohmann_json::nlohmann_json)
 oot3d_target_defaults(oot3d_rom_import_tests FOLDER Tests)
