@@ -569,6 +569,43 @@ void TestPerPixelPaths() {
           "path names");
 }
 
+// logs26 (Phantom Ganon, 0.2.0): which base programs a mode relights. Every
+// mode refuses a spilling base; per-pixel also refuses the parametric (uber)
+// fallback; toon keeps it; specialized bases are relit by both; the class
+// comes from the same ClassifyPicaBase the backend uses.
+void TestLightingBase() {
+  using Fast::Deko3d::LightingBaseRefusal;
+  using Fast::Deko3d::LightingMode;
+  using Fast::Deko3d::PicaBaseClass;
+  using Fast::Deko3d::RefuseLightingBase;
+  for (const LightingMode mode : {LightingMode::Off, LightingMode::Toon, LightingMode::PerPixel}) {
+    Require(RefuseLightingBase(mode, PicaBaseClass::Spilling) == LightingBaseRefusal::SpillingBase,
+            "a spilling base keeps native shading in every mode");
+    Require(RefuseLightingBase(mode, PicaBaseClass::Normal) == LightingBaseRefusal::None,
+            "a specialized base takes the mode's variant");
+  }
+  Require(RefuseLightingBase(LightingMode::PerPixel, PicaBaseClass::Parametric) ==
+              LightingBaseRefusal::ParametricBase,
+          "per-pixel: the parametric fallback keeps native shading");
+  Require(RefuseLightingBase(LightingMode::Toon, PicaBaseClass::Parametric) == LightingBaseRefusal::None,
+          "toon: the parametric fallback takes the toon variant");
+  Require(RefuseLightingBase(LightingMode::Off, PicaBaseClass::Parametric) == LightingBaseRefusal::None,
+          "off: no refusal (nothing is relit anyway)");
+  // The backend's classes: an uber draw without scratch is parametric, one
+  // with scratch spills (refused for that first), a specialized one is normal.
+  Require(RefuseLightingBase(LightingMode::PerPixel, Fast::Deko3d::ClassifyPicaBase(true, 0U)) ==
+              LightingBaseRefusal::ParametricBase,
+          "uber without scratch: parametric, refused under per-pixel");
+  Require(RefuseLightingBase(LightingMode::PerPixel, Fast::Deko3d::ClassifyPicaBase(true, 4096U)) ==
+              LightingBaseRefusal::SpillingBase,
+          "uber with scratch: spilling first");
+  Require(RefuseLightingBase(LightingMode::PerPixel, Fast::Deko3d::ClassifyPicaBase(false, 0U)) ==
+              LightingBaseRefusal::None,
+          "specialized: per-pixel");
+  Fast::Deko3d::LightingCounters counters;
+  Require(counters.DrawsParametricBase == 0U && counters.DrawsSpillingBase == 0U, "counters start at 0");
+}
+
 } // namespace
 
 int main() {
@@ -582,6 +619,7 @@ int main() {
   TestBlockLayoutAndBinding();
   TestLookupAndFallback();
   TestVertexVariantNeedsHooks();
+  TestLightingBase();
   std::puts("oot3d_deko3d_lighting_tests: ok");
   return 0;
 }

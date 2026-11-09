@@ -575,8 +575,23 @@ GUARDS = [
           r'\{true, false, false\}, \{true, true, false\}'),
     Guard("lighting3: a draw whose base fragment program spills keeps native shading (its variants spill too)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
-          r'if \(program\.Base == Deko3d::PicaBaseClass::Spilling\) \{.*?\+\+mLightingCounters\.DrawsSpillingBase;',
-          test="oot3d_deko3d_backend_tests (TestFrameBreakdown)"),
+          r'switch \(Deko3d::RefuseLightingBase\(mLightingMode, program\.Base\)\) \{\s*'
+          r'case Deko3d::LightingBaseRefusal::SpillingBase:\s*\+\+mLightingCounters\.DrawsSpillingBase;',
+          test="oot3d_deko3d_backend_tests (TestFrameBreakdown), oot3d_deko3d_lighting_tests (TestLightingBase)"),
+    # --- logs26 (0.2.0): Phantom Ganon drew 22-28 parametric (uber) draws a frame, 23 per-pixel lit, while ten texts were missing ---
+    Guard("logs26: per-pixel keeps the parametric (uber) fallback native; toon and specialized bases are unchanged",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_deko3d_lighting.h",
+          r'if \(base == PicaBaseClass::Spilling\) return LightingBaseRefusal::SpillingBase;\s*'
+          r'if \(mode == LightingMode::PerPixel && base == PicaBaseClass::Parametric\) return LightingBaseRefusal::ParametricBase;\s*'
+          r'return LightingBaseRefusal::None;',
+          test="oot3d_deko3d_lighting_tests (TestLightingBase)"),
+    Guard("logs26: the backend counts the parametric refusals and logs them in the lighting line",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d.cpp",
+          r'case Deko3d::LightingBaseRefusal::ParametricBase:\s*\+\+mLightingCounters\.DrawsParametricBase;\s*'
+          r'\+\+mLightingCounters\.DrawsIneligible;.*?'
+          r'\(spilling base=%llu parametric base=%llu no depth write=%llu\).*?'
+          r'static_cast<unsigned long long>\(c\.DrawsParametricBase\)',
+          test="oot3d_deko3d_lighting_tests (TestLightingBase)"),
     Guard("lighting3: per-pixel on every draw that writes depth; the blend flag must not exclude it (logs14: 0 lit draws, 81% blended)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_lighting_draw.cpp",
           r'if \(!PerPixelCostAdmits\(draw\.DepthWriteEnabled\)\) return PerPixelRefusal::NoDepthWrite;',

@@ -26,6 +26,7 @@
 //
 // Pure code, tested on the host (oot3d_deko3d_lighting_tests).
 
+#include "fast/backends/gfx_deko3d_programs.h"
 #include "fast/backends/gfx_deko3d_shader_pack.h"
 #include "fast/oot3d/graphics_settings.h"
 #include "fast/renderer3ds/pica_shader_hooks.h"
@@ -205,11 +206,34 @@ struct LightingCounters {
     uint64_t DrawsNative = 0;         // eligible, drawn native (missing/unsupported variant)
     uint64_t DrawsIneligible = 0;     // not a draw the mode changes
     // Kept native for cost (also counted as ineligible): the base fragment
-    // program spills (its variants would too), and per-pixel on a draw that
+    // program spills (its variants would too), per-pixel on the parametric
+    // (uber) fallback (RefuseLightingBase), and per-pixel on a draw that
     // writes no depth (shaded again under what covers it).
     uint64_t DrawsSpillingBase = 0;
+    uint64_t DrawsParametricBase = 0;
     uint64_t DrawsNoDepthWrite = 0;
 };
+
+// Which draws a mode may relight, by the class of their base fragment program
+// (ResolvePicaProgram, before any variant is resolved):
+// - a spilling base never (its variants spill too);
+// - under per-pixel, not the parametric (uber) program a draw falls back to
+//   while the pack lacks its specialized text. That program evaluates the
+//   whole TEV and fragment pipeline from uniforms and always writes
+//   gl_FragDepth (no early depth test); its per-pixel variant adds the surface
+//   body and its registers on top. logs26 (0.2.0, Phantom Ganon): 22-28
+//   parametric draws a frame, 23 of them per-pixel lit, while ten of the
+//   boss's texts were missing. The fallback lasts until the pack holds the
+//   texts (logs/deko3d_shaders/); meanwhile those draws shade natively, as a
+//   draw whose variant the pack lacks already does. Toon keeps it (its
+//   mutation is a few instructions).
+enum class LightingBaseRefusal : uint8_t { None, SpillingBase, ParametricBase };
+
+[[nodiscard]] constexpr LightingBaseRefusal RefuseLightingBase(LightingMode mode, PicaBaseClass base) noexcept {
+    if (base == PicaBaseClass::Spilling) return LightingBaseRefusal::SpillingBase;
+    if (mode == LightingMode::PerPixel && base == PicaBaseClass::Parametric) return LightingBaseRefusal::ParametricBase;
+    return LightingBaseRefusal::None;
+}
 
 // Why a draw keeps its native shading under per-pixel lighting (the first
 // rule it fails, in the order the backend checks them).
