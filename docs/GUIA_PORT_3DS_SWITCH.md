@@ -51,6 +51,7 @@ documento) estão marcados como *(notas de sessão)*.
 | Serviços CTR (fs, gsp, dsp, hid, ptm) | `oot3d_native_a32_ctr_*`, DSP HLE do Azahar (`third_party/azahar_audio`) | Master Quest (`oot3d_native_master_quest_unlock.h`), relógio lido por `nn::fnd::DateTime::GetNow` |
 | GPU (PICA → GL) | `runtime/three_ds_recomp/src/fast/backends/gfx_opengl_pica*` (cache de estado, residência, economias exatas, perfil) | widescreen de menus (`gl_widescreen_menu_policy.h`), hook de projeção, TopScreen |
 | Threads, áudio, pacing, perf | `oot3d_switch_threads.*`, `oot3d_switch_thread_layout.h`, `oot3d_host_audio_stream.*`, `oot3d_native_interpolation_pacing.h`, `perf.txt` | — |
+| Giroscópio (mira por movimento) | `oot3d_switch_motion.*`: seis eixos da libnx → referencial do 3DS (acelerômetro `(-x, z, y)` G, giroscópio `360*(-x, z, y)` graus/s), o SDL do devkitPro não informa sensores | ligado só no perfil do OoT3D (`CtrTitleProfile::SwitchConsoleMotion`) até ser testado em outro título |
 | Substituições nativas | mecanismo inteiro (prólogo, recusa, harness, contadores) | as 23 funções da lista |
 | Infra | build na Ryzen/WSL, ccache, PGO, deploy FTP/MTP | caminho `sdmc:/switch/oot3dre/` (vira `sdmc:/switch/<jogo>/`) |
 

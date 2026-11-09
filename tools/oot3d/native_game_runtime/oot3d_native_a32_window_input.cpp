@@ -100,6 +100,7 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                    double samplePeriodSeconds,
                    bool guestRefreshWillConsume,
                    NativeControlPollingState &pollingState,
+                   [[maybe_unused]] bool switchConsoleMotion,
                    bool widescreenMenuCorners,
                    bool lowerScreenPictureInPicture) {
   using namespace Oot3dNativeGame;
@@ -148,8 +149,9 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
 
 #if defined(__SWITCH__)
   // O pad 0 do SDL é o jogador 1 mais o handheld. Os sensores dele vêm do
-  // oot3d_switch_motion.h, que o SDL do devkitPro não informa.
-  if (SwitchMotionSensorConnected()) {
+  // oot3d_switch_motion.h, que o SDL do devkitPro não informa (só nos títulos
+  // cujo perfil liga o sensor: CtrTitleProfile::SwitchConsoleMotion).
+  if (switchConsoleMotion && SwitchMotionSensorConnected()) {
     for (auto &device : selectedController.Devices) {
       if (device.InstanceId == 0) device.HasGyroscope = device.HasAccelerometer = true;
     }
@@ -250,7 +252,8 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
   // console (oot3d_switch_motion.h) preenche a mesma observação para o pad 0
   // do SDL. Roda também com a UI do host visível, para a calibração do menu
   // L3+R3 receber amostras; o movimento é zerado abaixo para o jogo.
-  if (!host.ControllerMotion.GyroscopeValid && !host.ControllerMotion.AccelerometerValid) {
+  if (switchConsoleMotion && !host.ControllerMotion.GyroscopeValid &&
+      !host.ControllerMotion.AccelerometerValid) {
     const bool motionAim = config.NativeAimSource == NativeMotionSource::Automatic ||
         config.NativeAimSource == NativeMotionSource::ControllerGyroscope ||
         config.NativeAimSource == NativeMotionSource::ControllerAccelerometer ||

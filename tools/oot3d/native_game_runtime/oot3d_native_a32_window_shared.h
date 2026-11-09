@@ -705,6 +705,7 @@ PollNativeA32Input(Fast::Fast3dWindow &window,
                    double samplePeriodSeconds,
                    bool guestRefreshWillConsume,
                    NativeControlPollingState &pollingState,
+                   bool switchConsoleMotion,
                    bool widescreenMenuCorners = false,
                    bool lowerScreenPictureInPicture = false);
 

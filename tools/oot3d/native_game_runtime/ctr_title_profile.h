@@ -73,6 +73,11 @@ struct CtrTitleProfile {
     // GPU: o SM3DL desenha a tela de baixo nas linhas de baixo do alvo de cima.
     // O OoT3D não faz isso; fica no caminho de CPU de sempre.
     bool SubRectDisplayTransfers = false;
+    // Mira por giroscópio no Switch: o sensor de seis eixos do console
+    // (oot3d_switch_motion.h) vira o movimento de controle que o SDL do
+    // devkitPro não informa. Só testado no OoT3D; em outro título o sensor
+    // fica desligado e o movimento segue só o que o SDL informar.
+    bool SwitchConsoleMotion = true;
     // Fronteira de quadro: no OoT3D, pelos PCs de sempre (Zelda não muda).
     CtrFrameBoundarySource FrameBoundary =
         CtrFrameBoundarySource::Oot3dGuestPcs;
@@ -115,6 +120,7 @@ inline CtrTitleProfile GenericTitleProfile(std::optional<uint64_t> titleId) {
     profile.TopScreenUi = false;
     profile.BottomScreenPictureInPicture = true;
     profile.SubRectDisplayTransfers = true;
+    profile.SwitchConsoleMotion = false;
     return profile;
 }
 
