@@ -8,6 +8,7 @@
 
 #include "fast/backends/descriptor_pool_chain.h"
 #include "fast/backends/gfx_native_pica_layout.h"
+#include "fast/backends/native_pica_pass_end.h"
 #include "fast/backends/gfx_rendering_api.h"
 #include "fast/renderer/spirv_cache.h"
 #include "fast/renderer3ds/pica_shader_module_identity.h"
@@ -932,7 +933,8 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
         std::span<const float> depthValues,
         std::span<const uint8_t> stencilValues);
     void BeginNativePicaRenderPass(NativePicaRenderTarget& target);
-    void EndNativePicaRenderPass();
+    // Shutdown passes true: an open pass is forgotten, nothing is recorded.
+    void EndNativePicaRenderPass(bool shuttingDown = false);
     void ExecuteNativePicaBeforeDrawAnchors(
         NativePicaRenderTarget& target, const GfxNativePicaDrawView& draw,
         double& shadowMilliseconds, double& grassMilliseconds);

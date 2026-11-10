@@ -887,6 +887,11 @@ GUARDS = [
           r'const auto selected = Oot3dNativeGame::SelectPresentedDisplayTransfer\(\s+'
           r'displayTransfersByOutput, topFramebuffer->AddressLeft,',
           "oot3d_native_display_transfer_selection_tests"),
+    Guard("SIGSEGV no desligamento depois de erro fatal: o Shutdown gravava vkCmdEndRenderPass no command buffer abandonado",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_vulkan_pica.cpp",
+          r'DestroyNativePicaShaderResources\(\) \{\s+EndNativePicaRenderPass\(/\*shuttingDown=\*/true\);.*?'
+          r'if \(end == NativePicaPassEnd::Abandon\) \{\s+mNativePicaRenderPassActive = false;',
+          "native_pica_pass_end_tests"),
     Guard("MK7 caía ao entrar na corrida: display transfer com block_32 (0x12200) era 'mode is unsupported'; o Azahar ignora o bit",
           "runtime/three_ds_recomp/include/fast/oot3d/pica_display_transfer.h",
           r'inline bool PicaDisplayTransferModeSupported\(uint32_t flags\) \{\s+'

@@ -103,7 +103,7 @@ void GfxRenderingAPIVulkan::CreateNativePicaShaderResources() {
 }
 
 void GfxRenderingAPIVulkan::DestroyNativePicaShaderResources() {
-    EndNativePicaRenderPass();
+    EndNativePicaRenderPass(/*shuttingDown=*/true);
     for (auto& [key, texture] : mNativePicaTextures) {
         DestroyTexture(texture);
     }
@@ -1683,11 +1683,19 @@ void GfxRenderingAPIVulkan::BeginNativePicaRenderPass(
     mActiveNativePicaAttachments = attachments;
 }
 
-void GfxRenderingAPIVulkan::EndNativePicaRenderPass() {
-    if (!mNativePicaRenderPassActive) {
+void GfxRenderingAPIVulkan::EndNativePicaRenderPass(bool shuttingDown) {
+    const auto end = ResolveNativePicaPassEnd(
+        mNativePicaRenderPassActive, mPicaDynamicRenderingScope.Active(),
+        shuttingDown);
+    if (end == NativePicaPassEnd::None) {
         return;
     }
-    if (mPicaDynamicRenderingScope.Active()) {
+    if (end == NativePicaPassEnd::Abandon) {
+        mNativePicaRenderPassActive = false;
+        mActiveNativePicaRenderTarget = nullptr;
+        return;
+    }
+    if (end == NativePicaPassEnd::EndDynamicRendering) {
         mPicaDynamicRenderingScope.End(
             mCurrentFrame, mCommandBuffers[mCurrentFrame]);
         mDiagnostics.RecordNriPicaGlobalBarriers(

@@ -24,6 +24,11 @@ target_compile_features(descriptor_pool_chain_tests PRIVATE cxx_std_20)
 target_include_directories(descriptor_pool_chain_tests PRIVATE ../include)
 add_test(NAME descriptor_pool_chain_tests COMMAND descriptor_pool_chain_tests)
 
+add_executable(native_pica_pass_end_tests native_pica_pass_end_tests.cpp)
+target_compile_features(native_pica_pass_end_tests PRIVATE cxx_std_20)
+target_include_directories(native_pica_pass_end_tests PRIVATE ../include)
+add_test(NAME native_pica_pass_end_tests COMMAND native_pica_pass_end_tests)
+
 add_executable(pica_display_transfer_mode_tests pica_display_transfer_mode_tests.cpp
     ../src/fast/oot3d/pica_display_transfer.cpp)
 target_compile_features(pica_display_transfer_mode_tests PRIVATE cxx_std_20)
