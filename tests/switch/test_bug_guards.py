@@ -76,6 +76,53 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_scene_environment_codec.cpp",
           r'Ship::RestoreInterruptedReplace\(path\);\s+std::error_code error;\s+'
           r'file\.Exists = std::filesystem::exists\(path, error\);'),
+    # --- 08/11: correções do HUD do SingleScreen 3.0 do coccofresco (upstream main, 17/10) ---
+    # Ele comparou o port do 3.0 com o mod original no Azahar e corrigiu o que divergia.
+    # Portadas de JohnUzoka/TriAevum-Switch; ac63eb21 e as partes de pausa do 6f478bcc ficaram de fora.
+    Guard("cruz do D-pad ficava opaca onde o 3.0 a deixa cinza (fc5ddfa6: 0x005CCF6C, primeira "
+          "faixa ZR/ZL visível, senão 0,3 com dono aninhado)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'ResolveTopScreenDpadGroupAlpha\(.*?lanes\.ItemZr > 0\.0F \? lanes\.ItemZr : lanes\.ItemZl;.*?'
+          r'std::min\(lane, 1\.0F\);\s+return nestedOwner \? 0\.3F : 1\.0F;',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("cruz do D-pad, ícones e marcas sem o alfa do grupo (fc5ddfa6, 94b293ea)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
+          r'const std::size_t clusterStart = output\.size\(\);.*?'
+          r'ReadTopScreenPlayerNestedOwner\(mMemory, &nestedOwner\).*?'
+          r'source_quad == 5U\) output\[index\]\.color\.alpha \*= dpadAlpha;.*?'
+          r'dpadState\.GroupAlpha = dpadAlpha;',
+          "oot3d_top_screen_mod_profile_tests (apresentação do D-pad)"),
+    Guard("botas/marcas do D-pad opacas na Epona, o 3.0 desenha pela metade (94b293ea, laço 0x005DD78C)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_presentation.cpp",
+          r'p\.color\.alpha \*= state\.ItemOpacity\.Ocarina;\s+else\s+p\.color\.alpha \*= state\.GroupAlpha;.*?'
+          r'std::clamp\(alpha, 0\.0F, 1\.0F\) \* state\.GroupAlpha',
+          "oot3d_top_screen_mod_profile_tests (apresentação do D-pad)"),
+    Guard("anel do A 13% e texto 40% maiores que no 3.0 (5da8aa7c: anel 32 px, texto 0,68, texto "
+          "escondido no modo de HUD alternativo 1/4)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
+          r'if \(!square && context\.ActionLabelHidden\).*?'
+          r'const float size = square \? 32\.0F / width : 0\.68F;\s+for \(auto &vertex : quad\) \{\s+'
+          r'vertex\.X = 288\.0F \+ \(vertex\.X - centerX\) \* size;.*?'
+          r'ActionLabelHidden = alternateHudMode == 1U \|\| alternateHudMode == 4U;',
+          "oot3d_top_screen_mod_profile_tests",
+          forbid=r'\(vertex\.X - centerX\) \* 0\.95F'),
+    Guard("preenchimento translúcido do círculo do B apagava o ícone do B e a munição (d8ffc8f1)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
+          r'gate\.Draw && !CaptureTopScreenQuestBButtonCopies\(mMemory, mTopScreenConfig,.*?'
+          r'ApplyTopScreenHudScale\(output, mTopScreenConfig\);.*?'
+          r'AppendTopScreenQuestBButtonCopiesPresentation\(.*?ApplyTopScreenGameplayCanvas\(output\);',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("cópias do B: capturadas em torno de (248, 24) depois da transformação do HUD, quads nativos "
+          "tirados da tela",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
+          r'400\.0F \+ \(248\.0F - 400\.0F\) \* scale - static_cast<float>\(config\.HudMarginX\);.*?'
+          r'vertex\.X \+= 500\.0F - quadX;',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("controles da tela de baixo (círculos, rupias, D-pad) ficavam na tela em cutscene (6f478bcc: "
+          "Gameplay_InCsMode esconde o HUD)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'if \(gate->Draw && player != 0U\) \{.*?ReadTopScreenGameplayInCutsceneMode\(.*?gate->Draw = !cutscene;',
+          "oot3d_top_screen_mod_profile_tests"),
     # --- 04/11: mapa da dungeon (pausa, TopScreen) preso no andar em que abre ---
     # 0x00442F38 (PauseDungeonMap_HandleCursorInput) é o cursor de andares por
     # D-pad/analógico (Cima/Baixo mudam o andar via SetSelectedFloor); o toque é

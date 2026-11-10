@@ -228,6 +228,11 @@ bool ReadTopScreenHudCompositorGate(NativeA32Memory &memory,
                                     TopScreenHudCompositorGate *gate,
                                     std::string *error = nullptr);
 
+// Native Gameplay_InCsMode (0x0037577C) for a live play state and player.
+bool ReadTopScreenGameplayInCutsceneMode(NativeA32Memory &memory, std::uint32_t playState,
+                                         std::uint32_t player, bool *cutscene,
+                                         std::string *error = nullptr);
+
 struct TopScreenNativeTouchQuad28LayoutStats {
   bool Eligible = false;
   bool Transformed = false;
@@ -376,6 +381,14 @@ struct TopScreenNativeItemOpacity {
   float Ocarina = 1.0F;
 };
 
+// SingleScreen 3.0 0x005CCF6C, the D-pad cross alpha: the first visible of
+// the ZR / ZL item lanes (0x0060D224 / 0x0060D228, stored by 0x005DC868 from
+// the native item colours), clamped to 1; with both hidden, 0.3 in gameplay
+// while the player has a nested owner (+0x12B8), otherwise 1.
+float ResolveTopScreenDpadGroupAlpha(const TopScreenNativeItemOpacity &lanes,
+                                     bool nestedOwner) noexcept;
+bool ReadTopScreenPlayerNestedOwner(NativeA32Memory &memory, bool *nestedOwner);
+
 bool AppendTopScreenNativeItemIconCopies(
     NativeA32Memory &memory, const std::array<float, 4> &nativeVerticalOffsets,
     float nativeAlpha, const oot3d::ui::UiTextureIdentity &itemIcons,
@@ -510,6 +523,8 @@ struct TopScreenQuestGeometryContext {
   float HudScale = 1.0F;
   float HudMarginX = 0.0F;
   float HudMarginY = 0.0F;
+  // 0x005DA3D4: alternate HUD mode 1 or 4 (0x004FC648+0x48) hides the A label.
+  bool ActionLabelHidden = false;
 };
 
 struct TopScreenSystemMenuLayerStats {
@@ -577,6 +592,30 @@ bool ApplyTopScreenQuestDrawModelTransform(
     const TopScreenUiConfig &config, TopScreenPauseProjectionState &state,
     TopScreenQuestModelTransformStats *stats = nullptr,
     std::string *error = nullptr);
+
+// SingleScreen 3.0 draws its button circles (hub 0x005DCAD0, from the
+// Gameplay_Draw hook 0x002E27C0) before the native Quest page, so the native
+// B item icon (Quest main renderer, ItemIcons) and its ammo digits (first
+// child, NumberGlyphs) cover the B circle. The host HUD is composed after the
+// native UI: at the Quest draw (0x0042B9F4) the quads around the B button are
+// copied for the host, drawn above its circle, and moved off screen for the
+// native draw (the submit rebuilds them every frame).
+struct TopScreenQuestCopiedQuad {
+  std::array<TopScreenVec2, 4> Positions{};
+  std::array<float, 8> Uvs{};
+  oot3d::ui::UiColor Color;
+  bool NumberGlyphs = false;
+};
+bool CaptureTopScreenQuestBButtonCopies(NativeA32Memory &memory,
+                                        const TopScreenUiConfig &config,
+                                        std::vector<TopScreenQuestCopiedQuad> *copies,
+                                        std::string *error = nullptr);
+// Final native coordinates: append after the HUD scale.
+std::size_t AppendTopScreenQuestBButtonCopiesPresentation(
+    std::span<const TopScreenQuestCopiedQuad> copies,
+    const oot3d::ui::UiTextureIdentity &itemIcons,
+    const oot3d::ui::UiTextureIdentity &numberGlyphs,
+    std::vector<oot3d::ui::UiPrimitive> &output);
 
 bool ReadTopScreenQuestGeometryContext(
     NativeA32Memory &memory, TopScreenQuestGeometryContext *context,

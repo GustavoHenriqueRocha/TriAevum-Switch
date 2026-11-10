@@ -1407,6 +1407,19 @@ int main() {
                                              &compositorGate, &error) &&
               compositorGate.Draw,
           "TopScreen compositor did not restore HUD after player suppression");
+  // 3.0 0x005CC87C: Gameplay_InCsMode hides the HUD (play cutscene state, or
+  // a Player_InCsMode blocking flag).
+  Require(compositorGateMemory.Write8(kGatePlayState + 0x22A0U, 1U) &&
+              ReadTopScreenHudCompositorGate(compositorGateMemory, &compositorGate, &error) &&
+              !compositorGate.Draw &&
+              compositorGateMemory.Write8(kGatePlayState + 0x22A0U, 0U) &&
+              compositorGateMemory.Write32(kGateSceneOwner + 0x1710U, 0x20000000U) &&
+              ReadTopScreenHudCompositorGate(compositorGateMemory, &compositorGate, &error) &&
+              !compositorGate.Draw &&
+              compositorGateMemory.Write32(kGateSceneOwner + 0x1710U, 0U) &&
+              ReadTopScreenHudCompositorGate(compositorGateMemory, &compositorGate, &error) &&
+              compositorGate.Draw,
+          "TopScreen compositor ignored the native cutscene mode");
   Require(compositorGateMemory.Write32(0x005066F8U + 0x34U, 1U) &&
               ReadTopScreenHudCompositorGate(compositorGateMemory,
                                              &compositorGate, &error) &&
@@ -1524,6 +1537,12 @@ int main() {
                                        std::bit_cast<std::uint32_t>(0.25F)) &&
               touchStateMemory.Write32(kItemColors + 4U * 0x40U + 0xCU, 0U),
           "could not seed native item opacity lanes");
+  // 3.0 0x005CCF6C: the D-pad cross follows the first visible ZR/ZL lane.
+  Require(ResolveTopScreenDpadGroupAlpha({0.4F, 1.0F, 1.0F}, true) == 0.4F &&
+              ResolveTopScreenDpadGroupAlpha({0.0F, 2.0F, 1.0F}, true) == 1.0F &&
+              ResolveTopScreenDpadGroupAlpha({0.0F, 0.0F, 1.0F}, true) == 0.3F &&
+              ResolveTopScreenDpadGroupAlpha({0.0F, 0.0F, 1.0F}, false) == 1.0F,
+          "D-pad cross alpha differs from 3.0 0x005CCF6C");
   TopScreenNativeItemOpacity opacity;
   std::vector<oot3d::ui::UiPrimitive> opacityCopies;
   Require(AppendTopScreenNativeItemIconCopies(
@@ -2014,12 +2033,103 @@ int main() {
   }};
   const auto questStats = TransformTopScreenQuestGeometry(
       questQuads, {0U, false, false, 0.0F, 0.0F});
+  // 3.0 0x005C89D0: the square A quad is normalized to 32 px about (288, 24).
   Require(questStats.QuadsVisited == 3U && questStats.QuadsTranslated == 2U &&
               questStats.QuadsScaled == 1U && questStats.QuadsHidden == 1U &&
               questQuads[0][0].X == 490.0F && questQuads[0][0].Y == 290.0F &&
-              questQuads[1][0].X == 278.5F && questQuads[1][0].Y == 14.5F &&
+              questQuads[1][0].X == 272.0F && questQuads[1][0].Y == 8.0F &&
+              questQuads[1][3].X == 304.0F && questQuads[1][3].Y == 40.0F &&
               questQuads[1][0].Z == 2.0F && questQuads[2][0].X == 200.0F,
           "TopScreen quest geometry transform is incorrect");
+
+  // The native A ring (38 px) and its label (64x18, the native riding pose
+  // dumped from the Epona fence-jump spawn): the label is not square and
+  // takes 0.68; both centre on (288, 24) (no button group option here).
+  const auto nativeQuad = [](float x0, float y0, float x1, float y1) {
+    return std::array<TopScreenVec3, 4>{
+        {{x0, y0, 0.0F}, {x1, y0, 0.0F}, {x0, y1, 0.0F}, {x1, y1, 0.0F}}};
+  };
+  std::array<std::array<TopScreenVec3, 4>, 2> actionQuads{
+      {nativeQuad(349.0F, 160.0F, 387.0F, 198.0F),
+       nativeQuad(336.0F, 172.0F, 400.0F, 190.0F)}};
+  TopScreenQuestGeometryContext actionContext;
+  actionContext.PlayerSpecialState = true;
+  const auto actionStats = TransformTopScreenQuestGeometry(actionQuads, actionContext);
+  const auto nearAction = [](float actual, float expected) {
+    return std::abs(actual - expected) < 0.001F;
+  };
+  Require(actionStats.QuadsScaled == 2U && actionStats.QuadsHidden == 0U &&
+              nearAction(actionQuads[0][0].X, 272.0F) &&
+              nearAction(actionQuads[0][3].X, 304.0F) &&
+              nearAction(actionQuads[0][0].Y, 8.0F) && nearAction(actionQuads[0][3].Y, 40.0F) &&
+              nearAction(actionQuads[1][3].X - actionQuads[1][0].X, 43.52F) &&
+              nearAction(actionQuads[1][3].Y - actionQuads[1][0].Y, 12.24F) &&
+              nearAction((actionQuads[1][0].X + actionQuads[1][3].X) * 0.5F, 288.0F) &&
+              nearAction((actionQuads[1][0].Y + actionQuads[1][3].Y) * 0.5F, 24.0F),
+          "3.0 A group normalization diverged");
+  actionQuads = {nativeQuad(349.0F, 160.0F, 387.0F, 198.0F),
+                 nativeQuad(336.0F, 172.0F, 400.0F, 190.0F)};
+  actionContext.ActionLabelHidden = true;
+  const auto hiddenLabelStats = TransformTopScreenQuestGeometry(actionQuads, actionContext);
+  Require(hiddenLabelStats.QuadsHidden == 1U && nearAction(actionQuads[0][0].X, 272.0F) &&
+              nearAction(actionQuads[1][0].X, 468.0F) &&
+              nearAction(actionQuads[1][0].Y, 291.0F),
+          "3.0 0x005DA3D4 did not hide only the A label");
+
+  // B icon (Quest main renderer, ItemIcons 512x512) and digits (first child,
+  // NumberGlyphs 256x128) are copied above the host B circle and hidden.
+  NativeA32Memory bMemory;
+  Require(bMemory.MapRegion({"b-roots", 0x004F0000U, 0x10000U, true, false, {}}, &error) &&
+              bMemory.MapRegion({"b-heap", 0x08000000U, 0x10000U, true, false, {}}, &error),
+          "cannot map Quest B fixture");
+  constexpr std::uint32_t bOwner = 0x08000000U, bMain = 0x08001000U, bChild = 0x08002000U,
+                          bChildRenderer = 0x08003000U;
+  const auto seedRenderer = [&](std::uint32_t renderer, float width, float height,
+                                std::vector<std::array<float, 4>> boxes) {
+    const std::uint32_t streams = renderer + 0x100U;
+    bool ok = bMemory.Write32(renderer, static_cast<std::uint32_t>(boxes.size())) &&
+              bMemory.Write32(renderer + 4U, std::bit_cast<std::uint32_t>(width)) &&
+              bMemory.Write32(renderer + 8U, std::bit_cast<std::uint32_t>(height)) &&
+              bMemory.Write32(renderer + 0x0CU, streams) && bMemory.Write32(renderer + 0x14U, streams + 0x200U) &&
+              bMemory.Write32(renderer + 0x18U, streams + 0x400U) && bMemory.Write32(renderer + 0x1CU, streams + 0x600U);
+    for (std::uint32_t q = 0U; q < boxes.size(); ++q) {
+      const auto quad = nativeQuad(boxes[q][0], boxes[q][1], boxes[q][2], boxes[q][3]);
+      ok = ok && bMemory.WriteBytes(streams + q * 0x30U, std::span<const std::uint8_t>(
+                                                            reinterpret_cast<const std::uint8_t *>(quad.data()), 48U));
+      for (std::uint32_t c = 0U; c < 4U; ++c)
+        ok = ok && bMemory.Write32(streams + 0x400U + q * 0x40U + c * 16U + 12U, std::bit_cast<std::uint32_t>(0.5F));
+    }
+    return ok;
+  };
+  TopScreenUiConfig bConfig;
+  bConfig.HudScale = 0.9F;
+  bConfig.HudMarginX = 4;
+  bConfig.HudMarginY = 1;
+  Require(bMemory.Write32(0x004FC688U, bOwner) && bMemory.Write32(bOwner + 0x10CU, bMain) &&
+              bMemory.Write32(bOwner + 0x224U, 1U) && bMemory.Write32(bOwner + 0x0CU, bChild) &&
+              bMemory.Write32(bChild + 8U, bChildRenderer) &&
+              seedRenderer(bMain, 512.0F, 512.0F, {{247.0F, 10.0F, 272.0F, 35.0F}, {150.0F, 8.0F, 250.0F, 40.0F}}) &&
+              seedRenderer(bChildRenderer, 256.0F, 128.0F, {{266.0F, 28.0F, 273.0F, 35.0F}}),
+          "cannot seed Quest B fixture");
+  std::vector<TopScreenQuestCopiedQuad> bCopies;
+  std::array<TopScreenVec3, 4> hiddenB{}, keptTitle{};
+  Require(CaptureTopScreenQuestBButtonCopies(bMemory, bConfig, &bCopies, &error) && bCopies.size() == 2U &&
+              !bCopies[0].NumberGlyphs && bCopies[1].NumberGlyphs && bCopies[0].Positions[0].X == 247.0F &&
+              bCopies[0].Color.alpha == 0.5F &&
+              bMemory.ReadBytes(bMain + 0x100U, std::span<std::uint8_t>(
+                                                    reinterpret_cast<std::uint8_t *>(hiddenB.data()), 48U)) &&
+              bMemory.ReadBytes(bMain + 0x130U, std::span<std::uint8_t>(
+                                                    reinterpret_cast<std::uint8_t *>(keptTitle.data()), 48U)) &&
+              hiddenB[0].X == 487.5F && hiddenB[0].Y == 287.5F && keptTitle[0].X == 150.0F,
+          "Quest B icon/digits were not copied and hidden, or the title was taken");
+  oot3d::ui::UiTextureIdentity bIcons, bDigits;
+  bIcons.semantic_name = "icons";
+  bDigits.semantic_name = "digits";
+  std::vector<oot3d::ui::UiPrimitive> bPrimitives;
+  Require(AppendTopScreenQuestBButtonCopiesPresentation(bCopies, bIcons, bDigits, bPrimitives) == 2U &&
+              bPrimitives[0].texture.semantic_name == "icons" && bPrimitives[1].texture.semantic_name == "digits" &&
+              bPrimitives[0].layer == 12U && bPrimitives[0].destination.width == 25.0F,
+          "Quest B copies were not presented above the circle");
 
   std::array<std::array<TopScreenVec3, 4>, 1> offsetQuest{
       {{{{80.0F, 140.0F, 0.0F},
@@ -2399,6 +2509,17 @@ int main() {
                 mapQuad[0][1].X - mapQuad[0][0].X == 8,
             "map marker was rescaled or inset independently of its native map");
   }
+  Require(!decodedContext.ActionLabelHidden &&
+              questStateMemory.Write32(0x004FC648U + 0x48U, 4U) &&
+              ReadTopScreenQuestGeometryContext(questStateMemory, &decodedContext,
+                                                &projectionState, &error) &&
+              decodedContext.ActionLabelHidden &&
+              questStateMemory.Write32(0x004FC648U + 0x48U, 2U) &&
+              ReadTopScreenQuestGeometryContext(questStateMemory, &decodedContext,
+                                                &projectionState, &error) &&
+              !decodedContext.ActionLabelHidden &&
+              questStateMemory.Write32(0x004FC648U + 0x48U, 0U),
+          "Quest alternate HUD mode 1/4 did not hide the A label");
   projectionState.NativeQuestGate = false;
   Require(questStateMemory.Write32(0x00504484U, 1U) &&
               ReadTopScreenQuestGeometryContext(questStateMemory,
