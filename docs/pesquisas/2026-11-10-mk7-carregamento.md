@@ -72,17 +72,51 @@ InitialDrawer. A imagem continua preta, mas agora por causa da apresentação (f
 
 Captura: `~/oot3d-work/mk7/shots-input5/quadro_000600.png`.
 
+## Recorte do LCD (commit c4dfb9de)
+- **Pergunta:** a cópia apresentada tinha 416 colunas de 256 pixels, mas o LCD mostra
+  400×240 a partir do endereço da tela. Como mostrar só isso?
+- **Faixas pretas medidas na captura antes do recorte (`shots-input5`):**
+  - 16 colunas à esquerda: a imagem começava em x=129, e não em 84, na janela 1352×728;
+  - cerca de 44 px no topo, que são os pixels 240..255 de cada coluna, contados de baixo
+    para cima.
+- **Caminhos até a tela:** PresentExisting, sample interpolado, snapshot repetido e PiP.
+  - Todos terminam em `SubmitPicaDisplayTransfer` com `Present` e passam pelo mesmo scanout
+    (`gfx_vulkan_pica_display.cpp`).
+  - A imagem é achada pelo endereço de saída, então esse é o ponto mais estreito.
+- **Correção:** `PlaceNativePicaScanout` (`gfx_native_pica_layout.h`).
+  - Encaixa a parte visível na janela e estende o viewport para a cópia inteira, com o
+    scissor na parte visível. O efeito é um retângulo de origem, como o
+    `GetSurfaceSubRect`/`display_texcoords` do Azahar, sem mexer no shader.
+  - O recorte fica no backend, guardado pelo endereço de saída (`SetPicaScreenCrop`; fora
+    do Vulkan não faz nada).
+  - A janela registra 400 colunas (cima) e 320 (baixo), de 240 pixels, a partir do
+    `LineOffset`. Isso só acontece no perfil genérico (`LcdScreenCrop`); o OoT3D nunca
+    chama.
+- **Teste sem ROM `native_pica_screen_crop_tests`:** com a colocação antiga falham 9
+  checagens; com a nova passa. Sem recorte, ou com recorte da saída inteira, o resultado é
+  idêntico ao de antes.
+- **Janela, 150 s com A e toque (`shots-input6`):**
+  - tela de cima em 1213×728, proporção 1,666 (400/240 = 1,667), começando em x=69, sem
+    faixa à esquerda nem no topo;
+  - PiP com 322×242;
+  - selected_top_transfers 1578; PiP em 1577 quadros.
+  - Captura: `~/oot3d-work/mk7/shots-input6/quadro_000600.png`.
+
+## Snapshots perdidos da tela de baixo (diagnóstico, sem correção)
+- **Números:**
+  - 150 s: 298 perdidos de 1876.
+  - Rodada de 12 s com o mesmo input: 168 acertos de transfer de baixo, 167 perdidos e
+    `selected_top_transfers` = 0. A tela de cima ainda era o framebuffer de CPU do
+    InitialDrawer.
+- **Leitura:** nenhum sample é executado enquanto a tela de cima não vem de uma display
+  transfer, então o PiP não tem snapshot para mostrar. Os perdidos se concentram no boot,
+  antes do jogo sair do InitialDrawer.
+- **Grau de certeza:** parcial. Os 167 do começo estão confirmados. Que os outros cerca de
+  130 também sejam do boot é inferência; não medi por quadro.
+- **Por que não corrigi:** mostrar a tela de baixo nesse período exigiria apresentá-la sem
+  depender de um sample do topo, e isso não é simples.
+
 ## Em aberto
-- **Recorte das 16 colunas.** A janela apresenta a cópia inteira, com 416 colunas em vez de
-  400, então aparecem 16 colunas a mais à esquerda e a imagem fica cerca de 4% mais larga.
-  - O `LineOffset` já sai da seleção.
-  - Aplicar o recorte exige levá-lo até o scanout, por exemplo estendendo o viewport à
-    esquerda e cortando no scissor.
-  - O problema é que a transfer apresentada vem de vários caminhos (sample.TopTransfer,
-    PresentExisting, interpolação). Levar o deslocamento pela submissão mexe em todos eles,
-    nos três backends.
-- Ficaram 307 snapshots perdidos na tela de baixo. Não investiguei; provavelmente são
-  quadros em que o PiP chega antes da cópia executada.
 - **SIGSEGV no desligamento depois de um erro fatal do renderizador.**
   - Caminho: `Shutdown` → `DestroyNativePicaShaderResources` → `EndNativePicaRenderPass`
     grava o End num command buffer que ficou no meio da gravação. Diagnóstico de outra
