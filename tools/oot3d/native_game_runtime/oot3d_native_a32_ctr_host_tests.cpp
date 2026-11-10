@@ -1073,6 +1073,9 @@ void TestWindowProfileGatesOot3dHooks() {
                 "the OoT3D window must not show the lower screen as picture-in-picture");
         Require(!profile.SubRectDisplayTransfers,
                 "the OoT3D window must keep transfers from inside a target on the CPU path");
+        // Mira por giroscópio no Switch: o sensor de seis eixos do console.
+        Require(profile.SwitchConsoleMotion,
+                "the OoT3D window lost the Switch six-axis sensor (gyro aiming)");
     }
     // Super Mario 3D Land (EUR) e um title id qualquer.
     for (const uint64_t titleId : {0x0004000000053F00ULL, 0x0004000000123400ULL}) {
@@ -1085,6 +1088,9 @@ void TestWindowProfileGatesOot3dHooks() {
                 "a generic title window must show its lower screen (picture-in-picture)");
         Require(profile.SubRectDisplayTransfers,
                 "a generic title window must transfer from inside a target on the GPU (SM3DL's lower screen)");
+        // Não testado nos outros títulos: o sensor do console fica desligado.
+        Require(!profile.SwitchConsoleMotion,
+                "a generic title window must not start the Switch six-axis sensor");
     }
 }
 

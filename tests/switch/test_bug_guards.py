@@ -888,6 +888,41 @@ GUARDS = [
           r'PicaDisplayTransferSourceRowsFor\(.*?const bool nriDisplayCopy = sourceFirstRow == 0U &&.*?'
           r'blit\.srcOffsets\[0\] = \{\s*0, static_cast<int32_t>\(sourceFirstRow\), 0\};',
           "oot3d_native_pica_vulkan_bridge_tests (TestDisplayTransferSourceRows)"),
+    # --- 04/11 (fork JohnUzoka, 0.1.0): mira por giroscópio no Switch ---
+    # O SDL2 do devkitPro não informa sensores: sem o provedor da libnx o
+    # host.ControllerMotion vinha sempre vazio e a mira por giroscópio nunca
+    # funcionava no console (ee13d420).
+    Guard("mira por giroscópio nunca funcionava no Switch (SDL do devkitPro sem sensores): seis eixos da libnx",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'if \(switchConsoleMotion && !host\.ControllerMotion\.GyroscopeValid &&\s*'
+          r'!host\.ControllerMotion\.AccelerometerValid\) \{.*?PollSwitchMotion\(.*?'
+          r'if \(switchMotion\.SourceChanged\) pollingState\.VirtualMotion\.ResetController\(\);\s*'
+          r'host\.ControllerMotion = switchMotion\.Motion;.*?controls\.ObserveMotion\(host\.ControllerMotion\);',
+          "oot3d_switch_motion_tests"),
+    Guard("seis eixos do Switch -> referencial do 3DS: acelerômetro (-x, z, y), giroscópio 360*(-x, z, y)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_motion.cpp",
+          r'result\.Accelerometer = \{-a\[0\], a\[2\], a\[1\]\};.*?'
+          r'result\.GyroscopeDegreesPerSecond = \{-w\[0\] \* kDegreesPerRevolution, w\[2\] \* kDegreesPerRevolution,\s*'
+          r'w\[1\] \* kDegreesPerRevolution\};',
+          "oot3d_switch_motion_tests (TestMatchesSdlPath, TestRotationIsCoherent)"),
+    Guard("o provedor de seis eixos entra no .nro do Switch",
+          "CMake/oot3d/game.cmake",
+          r'NintendoSwitch.*?tools/oot3d/native_game_runtime/oot3d_switch_motion\.cpp'),
+    Guard("sensor de seis eixos do console só no OoT3D (perfil de título); genérico desligado",
+          "tools/oot3d/native_game_runtime/ctr_title_profile.h",
+          r'bool SwitchConsoleMotion = true;.*?GenericTitleProfile.*?profile\.SwitchConsoleMotion = false;',
+          "oot3d_native_a32_ctr_host_tests (TestWindowProfileGatesOot3dHooks)"),
+    Guard("sensor de seis eixos: a janela passa o perfil de título para o PollNativeA32Input",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'nativeControlPollingState,\s*titleProfile\.SwitchConsoleMotion,'),
+    # Mira Automatic guardava o yaw sintético (analógico, mouse) na rotação
+    # sensor->virtual: depois de ~180 graus de giro pelo analógico o pitch do
+    # giroscópio saía invertido (fb26eb4f).
+    Guard("pitch do giroscópio invertia depois de ~180 graus de giro pelo analógico (mira Automatic)",
+          "tools/three_ds/input/three_ds_motion_composition.cpp",
+          r'return Normalize\(Multiply\(Delta\(\{pitchRate,0,0\}, t\), next\.SensorToVirtual\)\);',
+          "three_ds_recomp_input_tests (TestPhysicalGyroAfterSyntheticAim)",
+          forbid=r'Delta\(yawAxis'),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

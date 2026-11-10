@@ -46,11 +46,13 @@ UNIT_TESTS=(
     oot3d_native_status_file_tests
     oot3d_pica_etc1_transcode_tests
     oot3d_pica_texture_predecode_tests
+    oot3d_switch_motion_tests
     oot3d_switch_thread_layout_tests
     oot3d_top_screen_mod_profile_tests
     oot3d_top_screen_pause_transaction_tests
     oot3d_top_screen_texture_overrides_tests
     triaevum_audio_service_tests
+    three_ds_recomp_input_tests
 )
 
 pass=0; fail=0; skip=0; failed=()

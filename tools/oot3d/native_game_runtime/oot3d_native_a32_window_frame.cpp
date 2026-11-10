@@ -911,6 +911,7 @@ bool NativeA32WindowSession::RunFrame() {
                          presentationElapsedSeconds,
                          guestRefreshesDue != 0U,
                          nativeControlPollingState,
+                         titleProfile.SwitchConsoleMotion,
                          WidescreenMenuCornersActive(),
                          lowerScreenPictureInPicture);
   if (physicalInputFrame.Exit || devLabQuit) {

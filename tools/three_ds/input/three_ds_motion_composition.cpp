@@ -77,15 +77,22 @@ ComposedMotion MotionCompositionState::Sample(const std::array<float, 3>& gravit
         next.PhysicalBase = physicalBase;
     }
     const double dt = std::clamp(seconds, 0.001, 0.25);
-    const auto baseDown = Unit(base);
-    const Vector yawAxis{-baseDown[0]*yawRate, -baseDown[1]*yawRate, -baseDown[2]*yawRate};
-    // Local pitch acts on the left, world-up yaw on the right. This factorization
-    // preserves gravity under yaw even when both controls move in the same step.
+    // Modelo: virtual = Yaw_mundo(yaw sintético) * físico * Offset_corpo.
+    // O SensorToVirtual guarda só o offset preso ao corpo (pitch sintético em
+    // torno do próprio X do aparelho virtual, mais o alinhamento da troca de
+    // dono). A gravidade e as taxas físicas do corpo passam por ele, então a
+    // fusão do guest vê um aparelho rígido. O yaw sintético gira o aparelho
+    // inteiro em torno do "para cima" do mundo: isso não muda nem a gravidade
+    // nem as taxas no referencial do corpo, então ele só sai como taxa e nunca
+    // é guardado. Guardado do lado do sensor, ele girava as taxas físicas
+    // seguintes em torno do "para cima": passando de 90 graus o pitch físico
+    // virava roll, e passando de 180 trocava de sinal.
     const auto step = [&](double t) {
-        return Normalize(Multiply(Multiply(Delta({pitchRate,0,0}, t), next.SensorToVirtual), Delta(yawAxis, t)));
+        return Normalize(Multiply(Delta({pitchRate,0,0}, t), next.SensorToVirtual));
     };
     const auto midpoint = step(dt*0.5), endpoint = step(dt);
     const auto down = Unit(Rotate(midpoint, base));
+    // Yaw em torno do "para cima" do mundo, no corpo virtual (projetado em Y/Z quando inclinado).
     const Vector synthetic{pitchRate - down[0]*yawRate, -down[1]*yawRate, -down[2]*yawRate};
     auto rate = Rotate(midpoint, Wide(bodyRate));
     for (int i = 0; i < 3; ++i) rate[i] += synthetic[i];
