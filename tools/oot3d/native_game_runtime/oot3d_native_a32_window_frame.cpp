@@ -1,6 +1,7 @@
 // Native A32 window session: one frame of the loop and the renderer-side work it schedules.
 // First: on the Switch it brings in glad, which must precede any GL header.
 #include "oot3d_native_gpu_frame_timer.h"
+#include "oot3d_native_display_transfer_selection.h"
 #include "oot3d_native_a32_window_session.h"
 #include "ctr_dsp_audio_frames.h"
 #include "oot3d_whole_aot_gcov.h"
@@ -3182,16 +3183,11 @@ void NativeA32WindowSession::PresentVisualFrame(
   const Oot3dNativeGame::Oot3dPicaDisplayTransferSubmission
       *traceSelectedTopTransfer = nullptr;
   if (topFramebuffer.has_value()) {
-    auto traceSelected =
-        displayTransfersByOutput.find(topFramebuffer->AddressLeft);
-    if (traceSelected == displayTransfersByOutput.end() &&
-        topFramebuffer->AddressRight != topFramebuffer->AddressLeft) {
-      traceSelected =
-          displayTransfersByOutput.find(topFramebuffer->AddressRight);
-    }
-    if (traceSelected != displayTransfersByOutput.end()) {
-      traceSelectedTopTransfer = &traceSelected->second;
-    }
+    traceSelectedTopTransfer =
+        Oot3dNativeGame::SelectPresentedDisplayTransfer(
+            displayTransfersByOutput, topFramebuffer->AddressLeft,
+            topFramebuffer->AddressRight, topFramebuffer->Stride)
+            .Selected;
   }
   picaSemanticTrace.RecordPresentationSelection(
       presentationFrameCount, frameCount, lcdForceBlack,
@@ -3204,18 +3200,16 @@ void NativeA32WindowSession::PresentVisualFrame(
       traceSelectedTopTransfer);
   if (!lcdForceBlack) {
     if (topFramebuffer.has_value()) {
-      auto selected =
-          displayTransfersByOutput.find(topFramebuffer->AddressLeft);
-      if (selected == displayTransfersByOutput.end() &&
-          topFramebuffer->AddressRight != topFramebuffer->AddressLeft) {
-        selected =
-            displayTransfersByOutput.find(topFramebuffer->AddressRight);
-      }
-      if (selected != displayTransfersByOutput.end()) {
+      // The copy that starts at the screen, or one that contains it
+      // (oot3d_native_display_transfer_selection.h).
+      const auto selected = Oot3dNativeGame::SelectPresentedDisplayTransfer(
+          displayTransfersByOutput, topFramebuffer->AddressLeft,
+          topFramebuffer->AddressRight, topFramebuffer->Stride);
+      if (selected.Selected != nullptr) {
         // Guest side: transfer selection, frame completion and the
         // guest-memory reads the renderer needs. The rest runs as one
         // render command, in renderer order.
-        const auto topSelection = selected->second;
+        const auto topSelection = *selected.Selected;
         std::shared_ptr<Oot3dNativeGame::Oot3dPicaVisualFrame>
             completedFrame;
         // Guest frames completed before the selected one while the host
@@ -3739,16 +3733,10 @@ void NativeA32WindowSession::PresentVisualFrame(
             uiLifecycleBridge.NativeFrontendPresentationActive());
     const auto bottomFramebuffer = hostServices.BottomFramebuffer();
     const auto findBottomTransfer = [&] {
-      auto selected =
-          displayTransfersByOutput.find(bottomFramebuffer->AddressLeft);
-      if (selected == displayTransfersByOutput.end() &&
-          bottomFramebuffer->AddressRight != 0U &&
-          bottomFramebuffer->AddressRight !=
-              bottomFramebuffer->AddressLeft) {
-        selected = displayTransfersByOutput.find(
-            bottomFramebuffer->AddressRight);
-      }
-      return selected;
+      return Oot3dNativeGame::SelectPresentedDisplayTransfer(
+                 displayTransfersByOutput, bottomFramebuffer->AddressLeft,
+                 bottomFramebuffer->AddressRight, bottomFramebuffer->Stride)
+          .Selected;
     };
     // A generic title's lower screen goes over the top one, in a corner
     // (ctr_title_profile.h); OoT3D presents its own through the native
@@ -3758,10 +3746,10 @@ void NativeA32WindowSession::PresentVisualFrame(
         bottomFramebuffer.has_value()) {
       const auto selectedBottom = findBottomTransfer();
       picaStats.BottomScreenTransferHitCount +=
-          selectedBottom != displayTransfersByOutput.end() ? 1U : 0U;
-      if (selectedBottom != displayTransfersByOutput.end()) {
+          selectedBottom != nullptr ? 1U : 0U;
+      if (selectedBottom != nullptr) {
         renderStream.Submit(
-            [&, bottomSelection = selectedBottom->second]() mutable {
+            [&, bottomSelection = *selectedBottom]() mutable {
               // The executed visual sample is a guest frame behind the
               // latest transfer: show what it executed into this output.
               const auto executed =
@@ -3790,10 +3778,10 @@ void NativeA32WindowSession::PresentVisualFrame(
       ++picaStats.NativeFrontendPresentationActiveCount;
       auto selectedBottom = findBottomTransfer();
       picaStats.NativeFrontendBottomTransferHitCount +=
-          selectedBottom != displayTransfersByOutput.end() ? 1U : 0U;
-      if (selectedBottom != displayTransfersByOutput.end()) {
+          selectedBottom != nullptr ? 1U : 0U;
+      if (selectedBottom != nullptr) {
         renderStream.Submit(
-            [&, bottomSelection = selectedBottom->second] {
+            [&, bottomSelection = *selectedBottom] {
               if (rendererFrameSkipped ||
                   !picaPresentationScheduler.HasSnapshot(
                       bottomSelection,

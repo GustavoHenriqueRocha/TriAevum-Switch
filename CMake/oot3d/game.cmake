@@ -132,6 +132,13 @@ add_executable(oot3d_native_gpu_frame_timer_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_native_gpu_frame_timer_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_native_gpu_frame_timer_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Display transfer the window presents for a screen (header-only).
+add_executable(oot3d_native_display_transfer_selection_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_display_transfer_selection_tests.cpp
+)
+target_compile_features(oot3d_native_display_transfer_selection_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_native_display_transfer_selection_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # config/skip_bottom_screen policy (header-only).
 add_executable(oot3d_native_bottom_screen_skip_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_bottom_screen_skip_tests.cpp

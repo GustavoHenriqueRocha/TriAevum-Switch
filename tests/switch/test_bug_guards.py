@@ -876,6 +876,17 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/backends/gfx_vulkan_pica.cpp",
           r'CheckNativeVk\(AllocateFrameDescriptorSet\(mNativePicaDescriptorSetLayout, &descriptor\),',
           "descriptor_pool_chain_tests"),
+    Guard("MK7 na janela: tela de cima 16 linhas dentro da cópia (0x1f092000 em 0x1f090000) nunca era escolhida",
+          "tools/oot3d/native_game_runtime/oot3d_native_display_transfer_selection.h",
+          r'if \(exact != byOutput\.end\(\)\) return \{&exact->second, 0U\};.*?'
+          r'auto containing = byOutput\.upper_bound\(address\);.*?'
+          r'if \(rowBytes == 0U \|\| rowBytes != stride\) continue;',
+          "oot3d_native_display_transfer_selection_tests"),
+    Guard("MK7 na janela: topo, trace e tela de baixo usam a seleção que aceita cópia que contém a tela",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'const auto selected = Oot3dNativeGame::SelectPresentedDisplayTransfer\(\s+'
+          r'displayTransfersByOutput, topFramebuffer->AddressLeft,',
+          "oot3d_native_display_transfer_selection_tests"),
     Guard("MK7: fs:USER CreateDirectory sem HLE (err:f ao criar o save no primeiro A)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
           r'if \(event\.Detail == kFsCreateDirectoryRequest\) \{\s+return CreateFsDirectory\(',
