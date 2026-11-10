@@ -55,8 +55,11 @@ interrupções P3D/PPF não chegam e o jogo segura a próxima lista.
 - Teste sem ROM desde 346be52f: a entrega virou `DeliverPendingDspAudioFrames`
   (`ctr_dsp_audio_frames.h`) e o `TestDspAudioFrameDeliveryWakesSoundThread`
   acorda uma thread que espera a pipe de áudio (falhou com a função sem entregar).
-- Ainda não se sabe o que a tela mostra. A janela compila no Ryzen
-  (`build_title_window.sh --work /root/agentes/conv/mk7 --jobs 12`, 163 s), mas
-  a trava recusou rodar: o C: ficou com 19,8 GB livres (mínimo 20). O WSL tem
-  WSLg (DISPLAY=:0) e o Vulkan lavapipe; `--complete-gpu-work` é só do probe.
+- Ainda não se sabe o que a tela mostra: a janela não roda no WSLg do Ryzen.
+  O executável compila (`build_title_window.sh --work /root/agentes/conv/mk7
+  --jobs 12`), mas `--no-build --run` cai antes do primeiro quadro. Com o driver
+  padrão (Wayland) dá SIGSEGV em `wl_proxy_get_version`, dentro do
+  `SDL_CreateWindow`, chamado por `Fast::GfxWindowBackendSDL2::Init` (stdout.log
+  do CrashHandler + addr2line). Com `SDL_VIDEODRIVER=x11` sai com "X connection
+  to :0 broken". `--complete-gpu-work` é só do probe.
 - Seguem como stub: frd:u, boss:U, nim:aoc e ndm:u. Nenhum deles bloqueia hoje.
