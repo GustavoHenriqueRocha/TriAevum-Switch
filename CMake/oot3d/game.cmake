@@ -89,6 +89,16 @@ add_executable(oot3d_hitch_recorder_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_hitch_recorder_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_hitch_recorder_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Heartbeat do boot-status.txt por uma thread de serviço
+# (config/async_status_writes; só cabeçalho).
+find_package(Threads REQUIRED)
+add_executable(oot3d_native_status_file_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_status_file_tests.cpp
+)
+target_compile_features(oot3d_native_status_file_tests PRIVATE cxx_std_20)
+target_link_libraries(oot3d_native_status_file_tests PRIVATE Threads::Threads)
+oot3d_target_defaults(oot3d_native_status_file_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Guest spike profile (config/guest_spike_ms, logs/guest_spikes.txt;
 # header-only).
 add_executable(oot3d_guest_spike_profile_tests EXCLUDE_FROM_ALL

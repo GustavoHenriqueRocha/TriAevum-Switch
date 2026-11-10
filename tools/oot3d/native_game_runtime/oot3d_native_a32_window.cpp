@@ -5,16 +5,14 @@
 #include "oot3d_hang_watchdog.h"
 #include "oot3d_switch_guard_alloc.h"
 #include "fast/backends/gfx_deko3d.h"
+#include <sstream>
 
 namespace Oot3dA32Window {
 
 #if defined(__SWITCH__)
-void WriteSwitchBootStage(const char* stage) {
-  std::ofstream stream("sdmc:/switch/oot3dre/boot-status.txt",
-                       std::ios::trunc);
-  if (!stream) {
-    return;
-  }
+namespace {
+std::string FormatSwitchBootStage(const char* stage) {
+  std::ostringstream stream;
   stream << "status=launching\n"
          << "stage=" << stage << '\n'
          << "whole_aot_functions=12419\n"
@@ -46,6 +44,21 @@ void WriteSwitchBootStage(const char* stage) {
          << gSwitchPicaGeometryPersistentUploads << '\n'
          << "pica_geometry_registry_entries="
          << gSwitchPicaGeometryRegistryEntries << '\n';
+  return std::move(stream).str();
+}
+} // namespace
+
+// Etapas do boot e o fim da janela: síncronas, pelo escritor único do
+// boot-status.txt (oot3d_native_status_file.h), que descarta um heartbeat
+// ainda na fila em vez de deixá-lo sobrescrever esta etapa.
+void WriteSwitchBootStage(const char* stage) {
+  (void)Oot3dNativeGame::SwitchBootStatusFile().WriteNow(FormatSwitchBootStage(stage));
+}
+
+// Heartbeat (config/async_status_writes): formatado aqui, escrito pela
+// thread de serviço.
+void PostSwitchBootStage(const char* stage) {
+  Oot3dNativeGame::SwitchBootStatusFile().Post(FormatSwitchBootStage(stage));
 }
 #endif
 

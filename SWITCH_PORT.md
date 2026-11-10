@@ -112,7 +112,9 @@ Desempenho e usabilidade:
 
 ## Diagnóstico no console
 
-- `sdmc:/switch/oot3dre/boot-status.txt` — etapa da inicialização e erro legível.
+- `sdmc:/switch/oot3dre/boot-status.txt` — etapa da inicialização e erro legível; no jogo, um heartbeat
+  (`host_frames`/`guest_frames`) a cada 600 quadros, escrito por uma thread de serviço
+  (`config/async_status_writes`, "Heartbeat do boot-status.txt fora da thread do jogo").
 - `logs/perf.txt` — FPS e ms por fase; `logs/oot3d_native_game.log`; `logs/glthread.txt`.
 - Crashes: `atmosphere/crash_reports/` (o `.nro` é carregado pelo hbloader; a base pode ser
   achada alinhando os endereços de retorno com instruções `bl/blr` do ELF).
@@ -1297,6 +1299,70 @@ A/B no console: criar `config/offload_plan`, `config/offload_capture`, `config/o
 `visual_present`, `pica_submit_host_ms`, `pica_capture_ms` e `game_cpu` na mesma cena e clock.
 Com `offload_perf` ligado, a linha do perf.txt é escrita inteira de uma vez (não fica mais cortada no
 meio); para achar onde a thread do jogo parou, use o `logs/hang.txt` do watchdog.
+
+### Heartbeat do boot-status.txt fora da thread do jogo: `config/async_status_writes` (2026-11-08)
+**Sintoma:** travada de 30–100 ms mais ou menos a cada 10 s. A thread do jogo está ocupada, mas não
+no código do jogo.
+
+**Causa (confirmada nos logs do console):** no deko3d a thread do jogo reescrevia o `boot-status.txt`
+a cada 600 quadros do host (`oot3d_native_a32_window_frame.cpp`, o heartbeat `runtime_running` do p5).
+É um open, truncate, write e close no SD dentro do quadro.
+- **As travadas batem com ele.** No `hitches.txt`, das linhas com `game_ms` mais de 8 ms acima do
+  `guest_ms`, 187 de 201 caem no present 600k−3 (o contador de presents anda 3 atrás do
+  `runFrameCount`), e toda linha em 600k−3 é uma delas. O excesso médio é 43–51 ms por sessão, máximo
+  77 ms.
+- **A escrita no SD custa isso.** O `perf_writer_ms` mostra 10–60 ms por append no `perf.txt` na thread
+  de serviço.
+- **As duas escritas colidem no quadro 600k.** A linha do `perf.txt` escrita nessa hora leva umas 3
+  vezes mais: média 41,8–46,2 ms nas janelas que terminam em 600k+150, contra 14,3–32,4 ms nas outras.
+- **Nada mais nessas threads roda nessa cadência.** As outras escritas periódicas no SD já passam por
+  fila e thread de serviço (`perf.txt` com `offload_perf`, `hitches.txt`, `deko3d.txt`, log do jogo).
+
+**Quem lê o `boot-status.txt`:**
+- **Gente depois de crash ou travamento:** a última etapa, `host_frames`/`guest_frames` (o jogo ainda
+  anda?) e `status=failed detail=...`.
+- **`tests/switch/eden_smoke.sh`, `eden_smoke.ps1`, `eden_deko3d.sh`:** `status=failed` e o `detail=`.
+- **`scripts/switch/run-product-eden.sh`:** `stage=runtime_running` no recibo depois do kill por timeout.
+
+Tudo isso continua escrito; só muda a thread que escreve o heartbeat.
+
+**Mudança** (`oot3d_native_status_file.h`):
+- **O escritor.** `StatusFileWriter` guarda o texto mais novo e uma thread de serviço troca o arquivo.
+  `Post` entrega o texto e nunca espera o SD; um texto que ainda espera é substituído pelo mais novo.
+  `WriteNow` escreve na thread que chama, depois da escrita em andamento, e descarta um texto postado
+  ainda não escrito. O texto só sai da fila com o lock do arquivo, então um `WriteNow` posterior sempre
+  vence.
+- **Um escritor para o arquivo todo.** Toda escrita do `boot-status.txt` passa por
+  `SwitchBootStatusFile()`: as etapas do boot (`WriteSwitchBootStage`, síncronas como antes), o
+  heartbeat (`PostSwitchBootStage`), `runtime_window_closed`/`runtime_guest_terminated` e
+  `launching`/`completed`/`failed` (`oot3d_native_game.cpp`). Um heartbeat na fila nunca substitui o
+  estado final.
+- **Mesmo texto, mesmos quadros.** O heartbeat continua formatado na thread do jogo, com os mesmos
+  contadores nos mesmos quadros. Se a thread do jogo para, o arquivo para de andar, como antes.
+- **A chave.** `config/async_status_writes`: ausente = ligada; `0` escreve o heartbeat na thread do
+  jogo, como antes. Vale para qualquer título (o heartbeat é do runtime, não do OoT3D).
+
+**Log** (`perf.txt`, bloco `offload:`, depois de `perf_writer_ms`): `status_async` (a chave),
+`status_updates` (heartbeats até agora), `status_game_ms` (tempo da thread do jogo no heartbeat na
+janela: formatar e postar, ou a troca inteira no SD com a chave em `0`), `status_writer_ms` (escrita
+da thread de serviço), `status_superseded` (heartbeats substituídos antes de escritos) e
+`hitch_writer_ms` (escritor do `hitches.txt`). `tools/oot3d/perf_report.py` resume os campos.
+
+**Testes e guardas:** `oot3d_native_status_file_tests` (TestLatestWins, TestWriteNowWins em 300
+rodadas, TestPostNeverWaits com o escritor preso no `open` de um FIFO, TestStop, TestSwitch); guardas
+08/11 do boot-status em `tests/switch/test_bug_guards.py`.
+
+**Riscos:** um arquivo cortado passa a ser possível se o processo cair nos ~30–60 ms de uma escrita a
+cada 10 s (antes a thread do jogo estava dentro da escrita); as etapas do boot e o estado final
+continuam síncronos. Uma thread de serviço a mais, parada entre heartbeats.
+
+**Conferência no console (1 minuto):** jogar um minuto num lugar calmo a 60 FPS. No `hitches.txt`,
+nada mais de linhas em 600k−3 com `game_ms` ~45 ms acima do `guest_ms`; no `perf.txt`,
+`status_async=1`, `status_game_ms` abaixo de 0,1 e `status_writer_ms` em 10–80 numa janela de cada
+quatro; no `boot-status.txt`, `host_frames` continua andando. Para comparar, criar
+`config/async_status_writes` com `0`: as linhas em 600k−3 voltam.
+
+Portado de JohnUzoka/TriAevum-Switch a85cb85d, ad09b095, 214c79d2.
 
 ### Estado em 2026-10-17 (melhor versão até agora)
 - PGO (2ª coleta) + modo enxuto + planos PICA no núcleo 1 + render thread no núcleo 2 + áudio em thread própria.
