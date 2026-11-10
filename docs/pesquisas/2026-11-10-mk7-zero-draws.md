@@ -1,6 +1,6 @@
 # MK7 no boot probe: 600 quadros apresentados e nenhum draw
 
-Data: 2026-11-10 · Título(s): Mario Kart 7 (genérico) · Commits: 36f8cbf2
+Data: 2026-11-10 · Título(s): Mario Kart 7 (genérico) · Commits: 36f8cbf2, 346be52f
 
 ## Pergunta
 Depois do 56d1be46 o probe do MK7 chegava a 600/600 vblanks, mas com 0 draw
@@ -52,7 +52,11 @@ interrupções P3D/PPF não chegam e o jogo segura a próxima lista.
   o caminho conhecido.
 
 ## Em aberto
-- O probe ainda não tem um teste de comportamento sem ROM, só a guarda.
-- Ainda não se sabe o que a tela mostra (falta rodar na janela,
-  `tools/ctr/build_title_window.sh`).
+- Teste sem ROM desde 346be52f: a entrega virou `DeliverPendingDspAudioFrames`
+  (`ctr_dsp_audio_frames.h`) e o `TestDspAudioFrameDeliveryWakesSoundThread`
+  acorda uma thread que espera a pipe de áudio (falhou com a função sem entregar).
+- Ainda não se sabe o que a tela mostra. A janela compila no Ryzen
+  (`build_title_window.sh --work /root/agentes/conv/mk7 --jobs 12`, 163 s), mas
+  a trava recusou rodar: o C: ficou com 19,8 GB livres (mínimo 20). O WSL tem
+  WSLg (DISPLAY=:0) e o Vulkan lavapipe; `--complete-gpu-work` é só do probe.
 - Seguem como stub: frd:u, boss:U, nim:aoc e ndm:u. Nenhum deles bloqueia hoje.
