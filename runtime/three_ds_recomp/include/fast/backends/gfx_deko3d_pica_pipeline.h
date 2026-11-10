@@ -12,6 +12,7 @@
 // returned here are the deko3d ones (DkCompareOp, DkStencilOp, DkLogicOp,
 // DkBlendOp, DkBlendFactor, DkPrimitive); gfx_deko3d.cpp static_asserts them.
 
+#include "fast/oot3d/pica_display_transfer.h"
 #include "fast/renderer3ds/pica_native_state.h"
 #include "fast/renderer3ds/pica_render_backend.h"
 
@@ -402,7 +403,7 @@ struct PicaTransferPlan {
         return fail("PICA display transfer is incomplete");
     }
     const uint32_t scaling = (transfer.Flags >> 24U) & 3U;
-    if ((transfer.Flags & 8U) != 0U || (transfer.Flags & 0x10000U) != 0U || scaling > 2U) {
+    if (!Oot3d::PicaDisplayTransferModeSupported(transfer.Flags)) {
         return fail("PICA display transfer mode is unsupported");
     }
     if (transfer.InputWidth > sourceNativeWidth || transfer.InputHeight > sourceNativeHeight) {

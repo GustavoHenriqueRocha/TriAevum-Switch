@@ -76,9 +76,7 @@ bool GfxRenderingAPIVulkan::SubmitPicaDisplayTransfer(
             throw std::runtime_error(
                 "native PICA display transfer is incomplete");
         }
-        if ((transfer.Flags & 8U) != 0U ||
-            (transfer.Flags & 0x10000U) != 0U ||
-            ((transfer.Flags >> 24U) & 3U) > 2U) {
+        if (!Oot3d::PicaDisplayTransferModeSupported(transfer.Flags)) {
             throw std::runtime_error(
                 "native PICA display transfer mode is unsupported");
         }

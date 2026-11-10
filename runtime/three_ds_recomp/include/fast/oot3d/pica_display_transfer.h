@@ -7,6 +7,16 @@
 
 namespace Fast::Oot3d {
 
+// Display transfer flags a GPU path can execute (Azahar regs_external.h,
+// sw_blitter.cpp, AccelerateDisplayTransfer): not the TextureCopy bit (3;
+// that is SubmitPicaTextureCopy's job) and no scaling mode past ScaleXY.
+// block_32 (bit 16, 32x32 tiling of guest memory) is ignored, as in Azahar
+// ("TODO(yuriks): unimplemented"): a GPU source is a host image. MK7 sets it
+// on its upper-screen copy when a race starts.
+[[nodiscard]] inline bool PicaDisplayTransferModeSupported(uint32_t flags) {
+    return (flags & 8U) == 0U && ((flags >> 24U) & 3U) <= 2U;
+}
+
 struct PicaDisplayTransferPlanInput {
     uint32_t NativeInputWidth = 0;
     uint32_t NativeInputHeight = 0;

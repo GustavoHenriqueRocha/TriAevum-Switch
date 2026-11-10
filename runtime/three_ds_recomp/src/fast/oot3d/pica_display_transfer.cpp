@@ -36,8 +36,7 @@ std::optional<PicaDisplayTransferPlan> BuildPicaDisplayTransferPlan(
     }
 
     const uint32_t scaling = (input.Flags >> 24U) & 3U;
-    if ((input.Flags & 8U) != 0U ||
-        (input.Flags & 0x10000U) != 0U || scaling > 2U) {
+    if (!PicaDisplayTransferModeSupported(input.Flags)) {
         SetError(error, "PICA display transfer mode is unsupported");
         return std::nullopt;
     }

@@ -887,6 +887,15 @@ GUARDS = [
           r'const auto selected = Oot3dNativeGame::SelectPresentedDisplayTransfer\(\s+'
           r'displayTransfersByOutput, topFramebuffer->AddressLeft,',
           "oot3d_native_display_transfer_selection_tests"),
+    Guard("MK7 caía ao entrar na corrida: display transfer com block_32 (0x12200) era 'mode is unsupported'; o Azahar ignora o bit",
+          "runtime/three_ds_recomp/include/fast/oot3d/pica_display_transfer.h",
+          r'inline bool PicaDisplayTransferModeSupported\(uint32_t flags\) \{\s+'
+          r'return \(flags & 8U\) == 0U && \(\(flags >> 24U\) & 3U\) <= 2U;',
+          "pica_display_transfer_mode_tests"),
+    Guard("block_32: Vulkan, GL, deko3d e o plano usam a mesma regra de modo da display transfer",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_vulkan_pica_display.cpp",
+          r'if \(!Oot3d::PicaDisplayTransferModeSupported\(transfer\.Flags\)\) \{',
+          "pica_display_transfer_mode_tests"),
     Guard("MK7 na janela: a cópia inteira (416x256) era apresentada; o LCD mostra 400x240 a partir do endereço da tela",
           "runtime/three_ds_recomp/src/fast/backends/gfx_vulkan_pica_display.cpp",
           r'mNativePicaScreenCrops\.find\(transfer\.OutputPhysicalAddress\);.*?'

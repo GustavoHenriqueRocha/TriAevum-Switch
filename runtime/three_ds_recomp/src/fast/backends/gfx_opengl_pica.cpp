@@ -1,6 +1,7 @@
 #ifdef ENABLE_OPENGL
 
 #include "fast/backends/gfx_opengl.h"
+#include "fast/oot3d/pica_display_transfer.h"
 #if defined(__SWITCH__)
 #include "fast/backends/gfx_sdl.h"
 #endif
@@ -4280,8 +4281,7 @@ bool GfxRenderingAPIOGL::SubmitPicaDisplayTransfer(
             throw std::runtime_error("PICA display transfer is incomplete");
         }
         const uint32_t scaling = (transfer.Flags >> 24U) & 3U;
-        if ((transfer.Flags & 8U) != 0U ||
-            (transfer.Flags & 0x10000U) != 0U || scaling > 2U) {
+        if (!Oot3d::PicaDisplayTransferModeSupported(transfer.Flags)) {
             throw std::runtime_error("PICA display transfer mode is unsupported");
         }
         GlPerf::Mark(GlPerf::Stage::Transfer);
