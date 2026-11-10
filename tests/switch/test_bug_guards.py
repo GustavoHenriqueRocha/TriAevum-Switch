@@ -608,6 +608,11 @@ GUARDS = [
           r'if \(event\.Detail == kFsSetPriorityRequest &&.*?mFsPriority = priority;.*?'
           r'if \(event\.Detail == kFsGetPriorityRequest &&.*?Write32\(commandBuffer \+ 8U, mFsPriority\)',
           "oot3d_native_a32_ctr_fs_tests (TestFsSdkInitializeAndPriority)"),
+    Guard("MK7 parava esperando num handle 0xFFFFFFFF: espera em handle inválido devolve InvalidHandle",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
+          r'if \(record == nullptr && mConfig\.KernelWaitTimeouts\) \{.*?'
+          r'state\.r\[0\] = kResultInvalidHandle;.*?return \{NativeA32HostAction::Resume\};',
+          "oot3d_native_a32_ctr_host_tests (TestWaitOnInvalidHandle)"),
     Guard("rotinas nativas da biblioteca do RVCT ligadas no OoT3D (só no título genérico)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'std::vector<Oot3dNativeGame::CtrLibraryNativeEntry> libraryNatives;\s+if \(genericTitle\) \{'),

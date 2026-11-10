@@ -612,6 +612,33 @@ void MakeGuestThreads(NativeA32Process& process) {
             "cannot create guest test threads: " + error);
 }
 
+// Espera num handle inválido devolve 0xD8E007F7 (InvalidHandle), como o
+// svc.cpp do Azahar; o MK7 esperava num 0xFFFFFFFF e o host parava. O
+// OoT3D (sem KernelWaitTimeouts) continua com a falha nomeada (UNSERVED).
+void TestWaitOnInvalidHandle() {
+    constexpr uint32_t kResultInvalidHandle = 0xD8E007F7U;
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.KernelWaitTimeouts = true;
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    Require(guest.Wait1(0, 0xFFFFFFFFU, -1) == NativeA32HostAction::Resume &&
+                guest.State(0).r[0] == kResultInvalidHandle,
+            "WaitSynchronization1 on an invalid handle did not fail");
+    Require(guest.WaitN(1, 0xFFFFFFFFU, -1) == NativeA32HostAction::Resume &&
+                guest.State(1).r[0] == kResultInvalidHandle,
+            "WaitSynchronizationN on an invalid handle did not fail");
+
+    NativeA32CtrHostServices oot(MakeConfig());
+    NativeA32Process ootProcess(registry, oot);
+    MakeGuestThreads(ootProcess);
+    GuestThreads ootGuest{oot, ootProcess};
+    Require(ootGuest.WaitN(0, 0xFFFFFFFFU, -1) == NativeA32HostAction::Fault,
+            "the OoT3D profile changed the invalid-handle wait");
+}
+
 void TestGuestMutexSemaphoreAndTimeouts() {
     NativeA32CtrHostConfig config = MakeConfig();
     config.KernelWaitTimeouts = true;
@@ -2082,6 +2109,7 @@ int main() {
     TestHostReportsGspFrameBoundaries();
     TestSharedPageDateTime();
     TestGuestMutexSemaphoreAndTimeouts();
+    TestWaitOnInvalidHandle();
     TestGuestKernelTimers();
     TestOot3dProfileWaitsStayInfinite();
     TestUnknownServicesAreLoggedStubs();

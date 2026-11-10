@@ -1425,6 +1425,16 @@ NativeA32HostResult NativeA32CtrHostServices::HandleWaitSynchronization(
         detail += "=";
         detail += type.value_or("invalid");
         const auto* record = LookupHandle(handle);
+        if (record == nullptr && mConfig.KernelWaitTimeouts) {
+            // Azahar (svc.cpp): handle inválido devolve InvalidHandle sem
+            // esperar. O MK7 espera num 0xFFFFFFFF depois do ExtSaveData
+            // NotFound; o OoT3D (sem KernelWaitTimeouts) segue com a falha nomeada.
+            state.r[0] = kResultInvalidHandle;
+            event.Name += detail + ":invalid";
+            event.Handled = true;
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Resume};
+        }
         if (record == nullptr) {
             mSvcEvents.push_back(std::move(event));
             return {NativeA32HostAction::Wait};

@@ -80,6 +80,7 @@ constexpr size_t kResourceMutex = 4;
 constexpr size_t kResourceTimer = 6;
 // Resultados do kernel (Azahar svc.cpp / errors.h).
 constexpr uint32_t kResultTimeout = 0x09401BFEU;
+constexpr uint32_t kResultInvalidHandle = 0xD8E007F7U;
 // GetProcessId / GetThreadId: um processo de aplicação só.
 constexpr uint32_t kApplicationProcessId = 0x28U;
 constexpr uint32_t kFirstThreadId = 0x100U;
