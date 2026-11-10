@@ -621,10 +621,11 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   `01_US_ENGLISH` files read back unchanged.
 - **Test:** `oot3d_romfs_mods_tests` `TestUsaPaths`: the text each EU language finds, the menu
   folder, EU over US, a broken table. It fails 13 checks on 0.2.1's composer.
-- **Console check:** USA dump, `mods/portugues/romfs/` without `menu/01_US_ENGLISH/menu_top_parts00.ctxb`,
-  game language English. The log has `romfs mods: 111 files from 1 mod (portugues), 85 ignored`
-  and `overlay built` (not reused, also where 0.2.1 built one); talking to anyone shows Portuguese
-  text; the pause menu's pages are translated.
+- **Console check:** USA dump, `mods/portugues/romfs/` without `menu/01_US_ENGLISH/menu_top_parts00.ctxb`
+  and `scene/fazer/`, game language English. The log has `romfs mods: 111 files from 1 mod
+  (portugues), 0 ignored` and `overlay built` (not reused, also where 0.2.1 built one); talking to
+  anyone shows Portuguese text; the menus are translated. Seen on the user's console with
+  0.2.2-test.1 (11/10): the game runs, the file select's Start button reads "Iniciar".
 
 ## How to build (Linux)
 
