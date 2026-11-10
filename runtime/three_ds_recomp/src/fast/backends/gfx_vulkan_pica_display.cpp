@@ -403,6 +403,17 @@ bool GfxRenderingAPIVulkan::SubmitPicaDisplayTransfer(
     }
 }
 
+bool GfxRenderingAPIVulkan::SetPicaScreenCrop(
+    uint32_t outputPhysicalAddress, uint32_t firstRow, uint32_t rows,
+    uint32_t pixels) {
+    if (rows == 0U) {
+        mNativePicaScreenCrops.erase(outputPhysicalAddress);
+    } else {
+        mNativePicaScreenCrops[outputPhysicalAddress] = {firstRow, rows, pixels};
+    }
+    return true;
+}
+
 bool GfxRenderingAPIVulkan::ExecuteNativePicaDisplayGraph(
     const GfxNativePicaDisplayTransferView& transfer,
     const NativePicaDisplayImage& display,
@@ -3792,18 +3803,29 @@ bool GfxRenderingAPIVulkan::ExecuteNativePicaDisplayGraph(
                                static_cast<uint32_t>(descriptorWrites.size()),
                                descriptorWrites.data(), 0, nullptr);
 
-        const auto presentation = pictureInPicture
-            ? ::Oot3d::Renderer::PlaceUiPictureInPicture(
-                  mSwapchainExtent.width, mSwapchainExtent.height,
-                  static_cast<float>(display.Height),
-                  static_cast<float>(display.Width))
-            : FitNativePicaPresentation(
-                  mSwapchainExtent.width, mSwapchainExtent.height,
-                  static_cast<float>(display.Height),
-                  static_cast<float>(display.Width));
+        // A screen that shows part of its output draws the whole display
+        // and scissors the shown part (SetPicaScreenCrop).
+        const auto screenCrop =
+            mNativePicaScreenCrops.find(transfer.OutputPhysicalAddress);
+        const auto placement = PlaceNativePicaScanout(
+            [&](float width, float height) {
+                return pictureInPicture
+                    ? ::Oot3d::Renderer::PlaceUiPictureInPicture(
+                          mSwapchainExtent.width, mSwapchainExtent.height,
+                          width, height)
+                    : FitNativePicaPresentation(
+                          mSwapchainExtent.width, mSwapchainExtent.height,
+                          width, height);
+            },
+            static_cast<float>(display.Height),
+            static_cast<float>(display.Width), display.GuestHeight,
+            display.GuestWidth,
+            screenCrop != mNativePicaScreenCrops.end() ? &screenCrop->second
+                                                       : nullptr);
+        const auto& presentation = placement.Visible;
         const VkViewport viewport{
-            presentation.X, presentation.Y, presentation.Width,
-            presentation.Height, 0.0F, 1.0F};
+            placement.Viewport.X, placement.Viewport.Y,
+            placement.Viewport.Width, placement.Viewport.Height, 0.0F, 1.0F};
         const int32_t scissorLeft =
             static_cast<int32_t>(std::floor(presentation.X));
         const int32_t scissorTop =

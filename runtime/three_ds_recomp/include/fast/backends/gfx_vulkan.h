@@ -7,6 +7,7 @@
 #endif
 
 #include "fast/backends/descriptor_pool_chain.h"
+#include "fast/backends/gfx_native_pica_layout.h"
 #include "fast/backends/gfx_rendering_api.h"
 #include "fast/renderer/spirv_cache.h"
 #include "fast/renderer3ds/pica_shader_module_identity.h"
@@ -257,6 +258,8 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
     bool SubmitPicaDisplayTransfer(
         const GfxNativePicaDisplayTransferView& transfer,
         std::string* error = nullptr) override;
+    bool SetPicaScreenCrop(uint32_t outputPhysicalAddress, uint32_t firstRow,
+                           uint32_t rows, uint32_t pixels) override;
     // Declares the producers referenced by the frontend ledger and captured
     // plans. Reclamation also waits for deferred guest ownership and the last
     // GPU frame that sampled the producer; dropping a plan pin alone is unsafe.
@@ -1632,6 +1635,8 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
         mNativePicaSceneBeforeUiDisplays;
     std::map<std::pair<uint64_t, uint32_t>, NativePicaRenderTargetKey>
         mNativePicaDisplayDepthTargets;
+    // SetPicaScreenCrop, by display output address (every namespace).
+    std::map<uint32_t, GfxNativePicaScreenCrop> mNativePicaScreenCrops;
     std::set<uint32_t> mInvalidatedNativePicaRenderTargetAddresses;
     NativePicaRenderTarget* mActiveNativePicaRenderTarget = nullptr;
     // The layout the active native PICA pass began with.

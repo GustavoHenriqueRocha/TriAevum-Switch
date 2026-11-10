@@ -73,6 +73,11 @@ struct CtrTitleProfile {
     // GPU: o SM3DL desenha a tela de baixo nas linhas de baixo do alvo de cima.
     // O OoT3D não faz isso; fica no caminho de CPU de sempre.
     bool SubRectDisplayTransfers = false;
+    // A tela mostra só a parte da cópia que o LCD vê (400 ou 320 colunas de
+    // 240 pixels a partir do endereço da tela): o MK7 aponta a de cima 16
+    // linhas dentro de uma cópia de 416 com linhas de 256 pixels. O OoT3D
+    // apresenta a cópia inteira (TopScreen 16:9); fica como sempre.
+    bool LcdScreenCrop = false;
     // Mira por giroscópio no Switch: o sensor de seis eixos do console
     // (oot3d_switch_motion.h) vira o movimento de controle que o SDL do
     // devkitPro não informa. Só testado no OoT3D; em outro título o sensor
@@ -120,6 +125,7 @@ inline CtrTitleProfile GenericTitleProfile(std::optional<uint64_t> titleId) {
     profile.TopScreenUi = false;
     profile.BottomScreenPictureInPicture = true;
     profile.SubRectDisplayTransfers = true;
+    profile.LcdScreenCrop = true;
     profile.SwitchConsoleMotion = false;
     return profile;
 }

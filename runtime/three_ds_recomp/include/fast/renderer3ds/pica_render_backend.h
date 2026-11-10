@@ -487,6 +487,15 @@ class PicaRenderBackend {
     virtual bool SetPicaNamespaceResolutionScale(uint64_t, float) {
         return false;
     }
+    // The part of the display output at outputPhysicalAddress that its 3DS
+    // screen shows (GfxNativePicaScreenCrop): rows [firstRow, firstRow + rows)
+    // and the first `pixels` of each. rows == 0 clears it. Without one the
+    // whole output is presented. False: not supported.
+    virtual bool SetPicaScreenCrop(uint32_t /*outputPhysicalAddress*/,
+                                   uint32_t /*firstRow*/, uint32_t /*rows*/,
+                                   uint32_t /*pixels*/) {
+        return false;
+    }
   protected:
     PhysicalMemoryRead mPhysicalMemoryRead;
     PhysicalMemoryCommit mPhysicalMemoryCommit;

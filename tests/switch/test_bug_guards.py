@@ -887,6 +887,21 @@ GUARDS = [
           r'const auto selected = Oot3dNativeGame::SelectPresentedDisplayTransfer\(\s+'
           r'displayTransfersByOutput, topFramebuffer->AddressLeft,',
           "oot3d_native_display_transfer_selection_tests"),
+    Guard("MK7 na janela: a cópia inteira (416x256) era apresentada; o LCD mostra 400x240 a partir do endereço da tela",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_vulkan_pica_display.cpp",
+          r'mNativePicaScreenCrops\.find\(transfer\.OutputPhysicalAddress\);.*?'
+          r'const auto placement = PlaceNativePicaScanout\(.*?'
+          r'const auto& presentation = placement\.Visible;\s+const VkViewport viewport\{\s+placement\.Viewport\.X',
+          "native_pica_screen_crop_tests"),
+    Guard("recorte do LCD: sem recorte (OoT3D) ou recorte da saída inteira, viewport e scissor ficam como antes",
+          "runtime/three_ds_recomp/include/fast/backends/gfx_native_pica_layout.h",
+          r'\(crop->FirstRow == 0U && crop->Rows == guestRows &&\s+crop->Pixels == guestPixels\)\) \{\s+'
+          r'const auto whole = place\(displayRows, displayPixels\);\s+return \{whole, whole\};',
+          "native_pica_screen_crop_tests (TestNoCropKeepsThePlacement)"),
+    Guard("recorte do LCD só no perfil genérico: o OoT3D nunca chama SetPicaScreenCrop",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'if \(titleProfile\.LcdScreenCrop\) \{\s+renderStream\.Submit\(\[&, output = topSelection\.OutputPhysicalAddress,',
+          "oot3d_native_a32_ctr_host_tests (perfil)"),
     Guard("MK7: fs:USER CreateDirectory sem HLE (err:f ao criar o save no primeiro A)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
           r'if \(event\.Detail == kFsCreateDirectoryRequest\) \{\s+return CreateFsDirectory\(',
@@ -943,7 +958,9 @@ GUARDS = [
     Guard("PiP da tela de baixo: o Vulkan desenha no canto (PlaceUiPictureInPicture) sobre o quadro",
           "runtime/three_ds_recomp/src/fast/backends/gfx_vulkan_pica_display.cpp",
           r'GfxNativePicaPresentationMode::AlphaOverlay \|\|\s*pictureInPicture\);.*?'
-          r'const auto presentation = pictureInPicture\s*\? ::Oot3d::Renderer::PlaceUiPictureInPicture\(',
+          # O recorte do LCD (PlaceNativePicaScanout) recebe a colocação como função.
+          r'PlaceNativePicaScanout\(\s*\[&\]\(float width, float height\) \{\s*'
+          r'return pictureInPicture\s*\? ::Oot3d::Renderer::PlaceUiPictureInPicture\(',
           "oot3d_native_pica_vulkan_bridge_tests (TestBottomScreenPictureInPictureLayout)"),
     Guard("PiP da tela de baixo: a janela apresenta o transfer de baixo depois do de cima",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",

@@ -3210,6 +3210,15 @@ void NativeA32WindowSession::PresentVisualFrame(
         // guest-memory reads the renderer needs. The rest runs as one
         // render command, in renderer order.
         const auto topSelection = *selected.Selected;
+        // Only the part of the copy the upper LCD shows is presented.
+        if (titleProfile.LcdScreenCrop) {
+          renderStream.Submit([&, output = topSelection.OutputPhysicalAddress,
+                               firstRow = selected.LineOffset] {
+            (void)api.SetPicaScreenCrop(
+                output, firstRow, Oot3dNativeGame::kCtrTopScreenColumns,
+                Oot3dNativeGame::kCtrScreenColumnPixels);
+          });
+        }
         std::shared_ptr<Oot3dNativeGame::Oot3dPicaVisualFrame>
             completedFrame;
         // Guest frames completed before the selected one while the host
@@ -3735,8 +3744,7 @@ void NativeA32WindowSession::PresentVisualFrame(
     const auto findBottomTransfer = [&] {
       return Oot3dNativeGame::SelectPresentedDisplayTransfer(
                  displayTransfersByOutput, bottomFramebuffer->AddressLeft,
-                 bottomFramebuffer->AddressRight, bottomFramebuffer->Stride)
-          .Selected;
+                 bottomFramebuffer->AddressRight, bottomFramebuffer->Stride);
     };
     // A generic title's lower screen goes over the top one, in a corner
     // (ctr_title_profile.h); OoT3D presents its own through the native
@@ -3746,10 +3754,19 @@ void NativeA32WindowSession::PresentVisualFrame(
         bottomFramebuffer.has_value()) {
       const auto selectedBottom = findBottomTransfer();
       picaStats.BottomScreenTransferHitCount +=
-          selectedBottom != nullptr ? 1U : 0U;
-      if (selectedBottom != nullptr) {
+          selectedBottom.Selected != nullptr ? 1U : 0U;
+      if (selectedBottom.Selected != nullptr) {
+        if (titleProfile.LcdScreenCrop) {
+          renderStream.Submit(
+              [&, output = selectedBottom.Selected->OutputPhysicalAddress,
+               firstRow = selectedBottom.LineOffset] {
+                (void)api.SetPicaScreenCrop(
+                    output, firstRow, Oot3dNativeGame::kCtrBottomScreenColumns,
+                    Oot3dNativeGame::kCtrScreenColumnPixels);
+              });
+        }
         renderStream.Submit(
-            [&, bottomSelection = *selectedBottom]() mutable {
+            [&, bottomSelection = *selectedBottom.Selected]() mutable {
               // The executed visual sample is a guest frame behind the
               // latest transfer: show what it executed into this output.
               const auto executed =
@@ -3776,12 +3793,12 @@ void NativeA32WindowSession::PresentVisualFrame(
     if (presentNativeBottomFrontend &&
         bottomFramebuffer.has_value()) {
       ++picaStats.NativeFrontendPresentationActiveCount;
-      auto selectedBottom = findBottomTransfer();
+      const auto selectedBottom = findBottomTransfer();
       picaStats.NativeFrontendBottomTransferHitCount +=
-          selectedBottom != nullptr ? 1U : 0U;
-      if (selectedBottom != nullptr) {
+          selectedBottom.Selected != nullptr ? 1U : 0U;
+      if (selectedBottom.Selected != nullptr) {
         renderStream.Submit(
-            [&, bottomSelection = *selectedBottom] {
+            [&, bottomSelection = *selectedBottom.Selected] {
               if (rendererFrameSkipped ||
                   !picaPresentationScheduler.HasSnapshot(
                       bottomSelection,

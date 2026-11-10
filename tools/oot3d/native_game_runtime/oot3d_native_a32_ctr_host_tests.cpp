@@ -1212,6 +1212,8 @@ void TestWindowProfileGatesOot3dHooks() {
                 "the OoT3D window must not show the lower screen as picture-in-picture");
         Require(!profile.SubRectDisplayTransfers,
                 "the OoT3D window must keep transfers from inside a target on the CPU path");
+        Require(!profile.LcdScreenCrop,
+                "the OoT3D window must present its whole display output (TopScreen 16:9)");
         // Mira por giroscópio no Switch: o sensor de seis eixos do console.
         Require(profile.SwitchConsoleMotion,
                 "the OoT3D window lost the Switch six-axis sensor (gyro aiming)");
@@ -1227,6 +1229,8 @@ void TestWindowProfileGatesOot3dHooks() {
                 "a generic title window must show its lower screen (picture-in-picture)");
         Require(profile.SubRectDisplayTransfers,
                 "a generic title window must transfer from inside a target on the GPU (SM3DL's lower screen)");
+        Require(profile.LcdScreenCrop,
+                "a generic title window must show only what the LCD shows (MK7: 400 of 416 columns, 240 of 256 pixels)");
         // Não testado nos outros títulos: o sensor do console fica desligado.
         Require(!profile.SwitchConsoleMotion,
                 "a generic title window must not start the Switch six-axis sensor");

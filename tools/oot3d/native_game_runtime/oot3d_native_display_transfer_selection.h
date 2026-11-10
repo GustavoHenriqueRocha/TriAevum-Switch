@@ -22,6 +22,11 @@
 
 namespace Oot3dNativeGame {
 
+// What a 3DS LCD shows from its address: columns (memory rows) of 240 pixels.
+inline constexpr uint32_t kCtrTopScreenColumns = 400U;
+inline constexpr uint32_t kCtrBottomScreenColumns = 320U;
+inline constexpr uint32_t kCtrScreenColumnPixels = 240U;
+
 template <typename Submission>
 struct PresentedDisplayTransfer {
   const Submission* Selected = nullptr;
