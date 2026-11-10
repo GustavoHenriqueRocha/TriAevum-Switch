@@ -1075,22 +1075,26 @@ void TestDspAudioFrameDeliveryWakesSoundThread() {
 
     host.AdvanceSystemTicks(NativeA32CtrHostServices::DspAudioFrameTicks);
     NativeA32DspHle dspHle({});
+    std::vector<int16_t> samples;
     uint32_t guestRuns = 0;
-    const auto delivered = DeliverPendingDspAudioFrames(
-        host, dspHle, memory,
-        [&guestRuns] {
+    const auto mix = [&] {
+        Require(dspHle.ProcessFrame(memory, samples, &error),
+                "DSP HLE mix failed");
+    };
+    const uint32_t delivered = DeliverPendingDspAudioFrames(
+        host, host.TakePendingDspAudioFrames(), mix, [&guestRuns] {
             ++guestRuns;
             return true;
-        },
-        &error);
-    Require(delivered == std::optional<uint32_t>(1U) && guestRuns == 1U,
-            "the pending DSP audio frame was not delivered: " + error);
+        });
+    Require(delivered == 1U && guestRuns == 1U &&
+                samples.size() == NativeA32DspHle::SamplesPerFrame * 2U,
+            "the pending DSP audio frame was not mixed and delivered");
     Require(process.ThreadStatus(1) != NativeA32ThreadStatus::Waiting &&
                 guest.State(1).r[0] == 0,
             "the DSP audio frame did not wake the sound thread");
-    Require(DeliverPendingDspAudioFrames(host, dspHle, memory,
-                                         [] { return true; }, &error) ==
-                std::optional<uint32_t>(0U),
+    Require(DeliverPendingDspAudioFrames(host,
+                                         host.TakePendingDspAudioFrames(),
+                                         mix, [] { return true; }) == 0U,
             "a DSP audio frame was delivered twice");
 }
 

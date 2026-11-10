@@ -544,27 +544,30 @@ int main(int argc, char** argv) {
         // sem eles o MK7 parava sem nenhum draw.
         Oot3dNativeGame::NativeA32DspHle dspHle(
             Oot3dNativeGame::BuildNativeA32DspPhysicalRegions(*manifest));
+        std::vector<int16_t> dspAudioSamples;
         uint64_t dspAudioFramesDelivered = 0;
         const auto deliverDspAudioFrames = [&]() {
             if (result.Kind !=
                 Oot3dNativeGame::NativeA32ProcessRunKind::Waiting) {
                 return;
             }
-            const auto delivered =
+            dspAudioFramesDelivered +=
                 Oot3dNativeGame::DeliverPendingDspAudioFrames(
-                    hostServices, dspHle, process.Memory(),
+                    hostServices, hostServices.TakePendingDspAudioFrames(),
+                    [&]() {
+                        dspAudioSamples.clear();
+                        if (!dspHle.ProcessFrame(process.Memory(),
+                                                 dspAudioSamples, &error)) {
+                            throw std::runtime_error(
+                                "native DSP HLE mix failed: " + error);
+                        }
+                    },
                     [&]() {
                         result = RunUntilGuestWait(process);
                         return result.Kind == Oot3dNativeGame::
                                                   NativeA32ProcessRunKind::
                                                       Waiting;
-                    },
-                    &error);
-            if (!delivered.has_value()) {
-                throw std::runtime_error("native DSP HLE mix failed: " +
-                                         error);
-            }
-            dspAudioFramesDelivered += *delivered;
+                    });
         };
         std::vector<Oot3dNativeGame::Oot3dPicaDrawSubmission> retainedDraws;
         GpuWorkCompletionStats gpuWork;

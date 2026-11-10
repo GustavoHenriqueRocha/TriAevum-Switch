@@ -2,6 +2,7 @@
 // First: on the Switch it brings in glad, which must precede any GL header.
 #include "oot3d_native_gpu_frame_timer.h"
 #include "oot3d_native_a32_window_session.h"
+#include "ctr_dsp_audio_frames.h"
 #include "oot3d_whole_aot_gcov.h"
 #include <fstream>
 #include <sstream>
@@ -2522,30 +2523,31 @@ void NativeA32WindowSession::DeliverDspAudioFrames(uint32_t dspAudioFrames) {
   std::vector<int16_t> &audioSamples = refreshAudioSamples;
   audioSamples.clear();
   audioSamples.reserve(static_cast<size_t>(dspAudioFrames) * 320U);
-  for (uint32_t audioFrame = 0; audioFrame < dspAudioFrames;
-       ++audioFrame) {
-    const size_t frameSampleOffset = audioSamples.size();
-    const auto dspMixStart = std::chrono::steady_clock::now();
-    CpuProbe::Scope cpuDsp(CpuProbe::Phase::Dsp);
-    if (!dspHle.ProcessFrame(process.Memory(), audioSamples, &error)) {
-      throw std::runtime_error("native DSP HLE mix failed: " + error);
-    }
-    phaseTiming.DspMixSeconds += SecondsSince(dspMixStart);
-    cpuDsp.Stop();
-    pcmContinuityDiagnostics.ObserveFrame(
-        dspStats.FramesMixed, std::span<const int16_t>(audioSamples)
-                            .subspan(frameSampleOffset));
-    ++dspStats.FramesMixed;
-    dspStats.FramesSuppressed += launch.DisableAudio ? 1U : 0U;
-    if (!hostServices.SignalDspAudioFrame()) {
-      break;
-    }
-    phaseStart = std::chrono::steady_clock::now();
-    processResult =
-        RunUntilGuestWait(process, launch.WholeAotBlockBudget);
-    phaseTiming.GuestSeconds += SecondsSince(phaseStart);
-    RequireRunnableGuest(processResult);
-  }
+  Oot3dNativeGame::DeliverPendingDspAudioFrames(
+      hostServices, dspAudioFrames,
+      [&]() {
+        const size_t frameSampleOffset = audioSamples.size();
+        const auto dspMixStart = std::chrono::steady_clock::now();
+        CpuProbe::Scope cpuDsp(CpuProbe::Phase::Dsp);
+        if (!dspHle.ProcessFrame(process.Memory(), audioSamples, &error)) {
+          throw std::runtime_error("native DSP HLE mix failed: " + error);
+        }
+        phaseTiming.DspMixSeconds += SecondsSince(dspMixStart);
+        cpuDsp.Stop();
+        pcmContinuityDiagnostics.ObserveFrame(
+            dspStats.FramesMixed, std::span<const int16_t>(audioSamples)
+                                .subspan(frameSampleOffset));
+        ++dspStats.FramesMixed;
+        dspStats.FramesSuppressed += launch.DisableAudio ? 1U : 0U;
+      },
+      [&]() {
+        phaseStart = std::chrono::steady_clock::now();
+        processResult =
+            RunUntilGuestWait(process, launch.WholeAotBlockBudget);
+        phaseTiming.GuestSeconds += SecondsSince(phaseStart);
+        RequireRunnableGuest(processResult);
+        return true;
+      });
   for (const int16_t sample : audioSamples) {
     const int32_t magnitude = std::abs(static_cast<int32_t>(sample));
     dspStats.PeakMagnitude = std::max(dspStats.PeakMagnitude, magnitude);
