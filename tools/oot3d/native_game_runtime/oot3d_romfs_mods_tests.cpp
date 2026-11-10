@@ -75,6 +75,39 @@ Bytes ReadFile(const fs::path &path) {
   return Bytes(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
 
+// A QM message table like the game's us.qm: a 16-byte header, then per record
+// a 16-byte head and nine (offset, size) language slots in 96 bytes, the texts
+// after the table. Each slot in `texts` holds its text plus the record number.
+Bytes MakeQm(const std::map<int, std::string> &texts, std::uint32_t records) {
+  const std::size_t tableEnd = 16U + records * 96U;
+  Bytes table = Text(std::string_view("QM\0\0", 4)), payload;
+  Put32(table, 4U);
+  Put32(table, records);
+  Put32(table, 0U);
+  for (std::uint32_t record = 0; record < records; ++record) {
+    Put32(table, 0x1000U + record); // message id
+    table.resize(table.size() + 12U, 0U);
+    for (int slot = 0; slot < 9; ++slot) {
+      const auto text = texts.find(slot);
+      const std::string bytes = text == texts.end() ? std::string() : text->second + std::to_string(record);
+      Put32(table, bytes.empty() ? 0U : static_cast<std::uint32_t>(tableEnd + payload.size()));
+      Put32(table, static_cast<std::uint32_t>(bytes.size()));
+      payload.insert(payload.end(), bytes.begin(), bytes.end());
+    }
+    table.resize(table.size() + 8U, 0U);
+  }
+  table.insert(table.end(), payload.begin(), payload.end());
+  return table;
+}
+
+// The text a message table gives `record` in language `slot`; empty for none.
+std::string QmText(const Bytes &qm, std::uint32_t record, int slot) {
+  const std::size_t field = 16U + record * 96U + 16U + static_cast<std::size_t>(slot) * 8U;
+  const std::uint32_t offset = Get32(qm, field), size = Get32(qm, field + 4U);
+  if (offset == 0U || std::size_t{offset} + size > qm.size()) return {};
+  return std::string(qm.begin() + offset, qm.begin() + offset + size);
+}
+
 // A Level-3 RomFS image holding `files` (path -> data); child lists only
 // (as oot3d_topscreen_import_tests' MakeRomFs).
 Bytes MakeRomFs(const std::map<std::string, Bytes> &files) {
@@ -321,20 +354,53 @@ void TestTwoModsSameFile(const fs::path &root) {
   CHECK(view && ReadPath(*view, "actor/zelda_keep.zar") == later);
 }
 
-// USA paths: mapped on the converted view, exact on a USA IVFC image.
+// USA paths: on the converted view, the names the EUR game reads; exact on a
+// USA IVFC image.
 void TestUsaPaths(const fs::path &root) {
   {
-    const Fixture fixture = MakeFixture(root, GameFiles(), false);
-    const Bytes qm = Text("modded messages"), title = Filled(64, 50), hint = Filled(17, 60);
+    // 11/10: the Portuguese 3DS translation's raw us.qm left every message
+    // without text in the EU slot the game opens, and its US menu folder was
+    // never read. An EU file in the same mod wins over its US twin; a table
+    // the game cannot read is ignored and keeps the earlier mod's.
+    std::map<std::string, Bytes> game = GameFiles();
+    game["menu/01_US_ENGLISH/hud_all00.ctxb"] = Filled(48, 6);
+    game["menu/02_EU_ENGLISH/hud_all00.ctxb"] = Filled(48, 6);
+    game["menu/02_EU_ENGLISH/menu_top_parts00.ctxb"] = Filled(32, 7);
+    const Fixture fixture = MakeFixture(root, game, false);
+    const Bytes qm = MakeQm({{1, "en"}, {5, "fr"}, {7, "es"}}, 2U), title = Filled(64, 50), hint = Filled(17, 60),
+                hud = Filled(48, 61), topUs = Filled(32, 62), topEu = Filled(32, 63);
     WriteFile(fixture.Mods / "usa_mod/romfs/message/us/us.qm", qm);
     WriteFile(fixture.Mods / "usa_mod/romfs/misc/us/title.bch", title);
     WriteFile(fixture.Mods / "usa_mod/romfs/misc/hint/movie/hint182.moflex", hint);
+    WriteFile(fixture.Mods / "usa_mod/romfs/menu/01_US_ENGLISH/hud_all00.ctxb", hud);
+    WriteFile(fixture.Mods / "usa_mod/romfs/menu/01_US_ENGLISH/menu_top_parts00.ctxb", topUs);
+    WriteFile(fixture.Mods / "usa_mod/romfs/menu/02_EU_ENGLISH/menu_top_parts00.ctxb", topEu);
+    WriteFile(fixture.Mods / "z_broken/romfs/message/us/us.qm", Text("not a message table"));
     const RomFsModsReport report = ComposeRomFsMods(fixture.Request());
-    CHECK(report.Outcome == RomFsModsOutcome::Built && report.Applied.size() == 3U && report.Ignored.empty());
+    CHECK(report.Outcome == RomFsModsOutcome::Built);
+    CHECK(report.Summary() == "romfs mods: 5 files from 1 mod (usa_mod), 1 ignored, 1 overridden");
+    CHECK(HasNote(report.Ignored, "romfs/message/us/us.qm", "USA message table the game cannot read"));
+    CHECK(HasNote(report.Overridden, "romfs/menu/01_US_ENGLISH/menu_top_parts00.ctxb",
+                  "replaced by usa_mod/romfs/menu/02_EU_ENGLISH/menu_top_parts00.ctxb"));
     const auto view = ComposedView(fixture);
-    CHECK(view && ReadPath(*view, "message/eu/eu.qm") == qm);
-    CHECK(view && ReadPath(*view, "misc/eu/title.bch") == title);
-    CHECK(view && ReadPath(*view, "misc/hint/movie/hint183.moflex") == hint);
+    CHECK(view.has_value());
+    if (!view) return;
+    // Every language the EUR game opens (English 2, German 3, French 4,
+    // Spanish 6, Italian 8) finds text; the texts themselves are unchanged.
+    const auto eu = ReadPath(*view, "message/eu/eu.qm");
+    CHECK(eu && eu->size() == qm.size() && std::equal(qm.begin() + 16 + 2 * 96, qm.end(), eu->begin() + 16 + 2 * 96));
+    for (std::uint32_t record = 0; eu && eu->size() == qm.size() && record < 2U; ++record) {
+      const std::string n = std::to_string(record);
+      CHECK(QmText(*eu, record, 2) == "en" + n && QmText(*eu, record, 3) == "en" + n &&
+            QmText(*eu, record, 8) == "en" + n);
+      CHECK(QmText(*eu, record, 4) == "fr" + n && QmText(*eu, record, 6) == "es" + n);
+      CHECK(QmText(*eu, record, 1) == "en" + n && QmText(*eu, record, 0).empty());
+    }
+    CHECK(ReadPath(*view, "misc/eu/title.bch") == title);
+    CHECK(ReadPath(*view, "misc/hint/movie/hint183.moflex") == hint);
+    CHECK(ReadPath(*view, "menu/02_EU_ENGLISH/hud_all00.ctxb") == hud);
+    CHECK(ReadPath(*view, "menu/01_US_ENGLISH/hud_all00.ctxb") == game.at("menu/01_US_ENGLISH/hud_all00.ctxb"));
+    CHECK(ReadPath(*view, "menu/02_EU_ENGLISH/menu_top_parts00.ctxb") == topEu);
     const auto lines = report.LogLines();
     CHECK(std::any_of(lines.begin(), lines.end(), [](const std::string &line) {
       return line.find("usa_mod/romfs/message/us/us.qm replaces message/eu/eu.qm") != std::string::npos;

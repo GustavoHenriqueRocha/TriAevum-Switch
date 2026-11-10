@@ -533,8 +533,8 @@ content (the Link mods on GameBanana are CC BY-NC-ND 4.0).
   folders apply in name order; a later mod's file wins over an earlier one's (logged as
   overridden). Paths match the view the import made: a EUR dump keeps its IVFC image (view at
   0x1000), a USA dump became a converted view at 0 with `message/us`, `misc/us` renamed to `eu`
-  (`us.qm` → `eu.qm`, three hint movies renumbered). A mod path the view lacks is tried under those
-  names, so a mod made for either region works on both. Ignored, with a reason in the log: files the
+  (`us.qm` → `eu.qm`, three hint movies renumbered). A USA mod's path goes to the name the EUR
+  game reads (11/10, below). Ignored, with a reason in the log: files the
   game's RomFS does not have (adding files is not supported), `exefs/` and `*.ips` (the game's code
   is compiled ahead of time, a code patch cannot apply), files outside `romfs/`, empty files and
   files over 64 MiB. The output is `game/romfs_mods.o3ro` and its receipt `game/romfs_mods.json`
@@ -581,6 +581,50 @@ content (the Link mods on GameBanana are CC BY-NC-ND 4.0).
   `pack.json`. The index keeps the first file per hash in sorted path order (`IndexTexturePack`,
   `try_emplace`), so the pack's `LINK/` beats loose files and lowercase folders; a folder starting
   with `0` sorts first (checked with `std::sort` over `std::filesystem::path`).
+
+### RomFS mods: USA language mods (11/10)
+
+The public Portuguese 3DS translation (v1.2 by E4T and others, a USA mod: `message/us/us.qm` and
+`ltn16.qbf`, `menu/01_US_ENGLISH/*`, `misc/us/english/*`, area-name and boss-title textures)
+stopped 0.2.1 right after "Applying the mods...": `native A32 dispatch exited unexpectedly: kind=4
+pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct`.
+
+- **Cause:** both dumps run the EUR executable. It opens a message's text in the EU language slot
+  of `eu.qm` (English 2, German 3, French 4, Spanish 6, Italian 8; picked in
+  `oot3d_load_message_resources` 0x00419E18; the lookup at 0x002CD388 tries message 0x600 when
+  the slot is empty, then gives up) and the EU menu folder of that language (folder tables such as
+  0x004D3D10 are indexed by the slot). A USA `us.qm` fills the US slots 1, 5 and 7 only. The import
+  copies them for the game's own file (`AdaptQmTable`), but the composer put the mod's table raw at
+  `eu.qm`, so no message had text. Of the three callers of `RendererResourceRecord_BindAttachment`
+  (which hands a missing record + 4 to the constructor), the textbox's
+  (`MessageContext_PreparePage` → `RendererGlyphMesh_BindResourceAttachments`) matches
+  [INFERENCE: the player's log has the backtrace]. The translated `menu/01_US_ENGLISH` files did
+  nothing either: a USA RomFS has all nine menu folders (US and EU English identical), and the
+  game reads `02_EU_ENGLISH`.
+- **Fix (`oot3d_romfs_mods.cpp`):** a mod's `message/us/us.qm` that lands on `message/eu/eu.qm`
+  gets the import's copy (1 → 2, 5 → 4, 7 → 6), then German and Italian (a EUR dump offers them)
+  take the English text; a table `AdaptQmTable` rejects is ignored ("USA message table the game
+  cannot read: ..."). A USA path goes to its EU name whenever the view has it, even when the US
+  name exists too: besides the import's renames, `menu/01_US_ENGLISH` → `02_EU_ENGLISH`,
+  `05_US_FRENCH` → `04_EU_FRENCH`, `07_US_SPANISH` → `06_EU_SPANISH`; an EU file in the same mod
+  wins (overridden note). The log note says "(the name the EUR game reads)". Receipt format 2: a
+  0.2.1 overlay is rebuilt at the first start.
+- **The translation in game:** it replaces US English only (French and Spanish are the original
+  texts), so the player keeps English and gets Portuguese text and menus. Its
+  `menu_top_parts00.ctxb` must still be deleted: it now reaches the game's English pause page,
+  whose TopScreen HUD art matches the game's own file by hash.
+- **Real data (host smoke, throwaway):** the translation over `canonical-eur-exec/romfs.bin`: 112
+  files applied, 85 ignored (`scene/fazer/`), 35.9 MB built in 0.05 s, then reused. `eu.qm` equals
+  the expected adaptation byte for byte: 2508 of 2510 messages have text in every EU slot (the
+  other two have none in any slot), English slot 2 starts "Obrigado por salvar meus filhos". The
+  other 111 files are byte-exact at their EU names; the 1832 other files and the 23
+  `01_US_ENGLISH` files read back unchanged.
+- **Test:** `oot3d_romfs_mods_tests` `TestUsaPaths`: the text each EU language finds, the menu
+  folder, EU over US, a broken table. It fails 13 checks on 0.2.1's composer.
+- **Console check:** USA dump, `mods/portugues/romfs/` without `menu/01_US_ENGLISH/menu_top_parts00.ctxb`,
+  game language English. The log has `romfs mods: 111 files from 1 mod (portugues), 85 ignored`
+  and `overlay built` (not reused, also where 0.2.1 built one); talking to anyone shows Portuguese
+  text; the pause menu's pages are translated.
 
 ## How to build (Linux)
 

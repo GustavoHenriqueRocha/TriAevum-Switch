@@ -15,11 +15,13 @@
 //
 // - Mods apply in folder name order; a later mod's file wins over an earlier
 //   one's (reported as overridden).
-// - Paths match the view the import made: a EUR dump keeps its IVFC image
-//   (view at 0x1000), a USA dump became a converted view at 0 where
-//   message/us and misc/us are message/eu and misc/eu (us.qm is eu.qm, and
-//   three hint movies moved, oot3d_rom_import.cpp). A mod path missing from
-//   the view is tried under those names.
+// - Paths match what the EUR game reads (both dumps run the EUR executable): a
+//   EUR dump keeps its IVFC image (view at 0x1000), a USA dump became a
+//   converted view at 0 where message/us and misc/us are message/eu and
+//   misc/eu (us.qm is eu.qm, and three hint movies moved,
+//   oot3d_rom_import.cpp). A USA mod's path goes to its EU name when the view
+//   has it, the US menu folders included (they stay in the RomFS, unread), and
+//   a USA message table gets the import's language-slot copy.
 // - Replace only: files the game's RomFS lacks, exefs/ and code.ips (the code
 //   is compiled ahead of time), files outside romfs/, empty files and files
 //   over 64 MiB are ignored, with a reason.
@@ -116,8 +118,9 @@ struct RomFsModsReport {
 // Never throws; Failed leaves no overlay behind.
 RomFsModsReport ComposeRomFsMods(const RomFsModsRequest &request);
 
-// The RomFS path a mod's path (relative to romfs/) has in a USA dump's
-// converted view, or nullopt when the import keeps it as it is.
+// The name the EUR game reads for a USA mod's path (relative to romfs/): the
+// import's renames (message/us, misc/us, us.qm, three hint movies) and the EU
+// menu folder of the same language; nullopt for any other path.
 std::optional<std::string> UsaConvertedRomFsPath(std::string_view path);
 
 // The start-up step around the composer, shared by the Switch's main().

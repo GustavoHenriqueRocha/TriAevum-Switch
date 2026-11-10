@@ -144,10 +144,12 @@ add_executable(oot3d_roll_dash_runtime_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_roll_dash_runtime_tests PRIVATE oot3d_native_a32_process)
 oot3d_target_defaults(oot3d_roll_dash_runtime_tests FOLDER Tests)
 # RomFS mods (sdmc:/switch/oot3dre/mods/<name>/romfs/, config/no_romfs_mods):
-# the composer's O3RO overlay read back through the runtime's overlay.
+# the composer's O3RO overlay read back through the runtime's overlay (and the
+# import's message-table slot copy, applied to a USA mod's us.qm).
 add_executable(oot3d_romfs_mods_tests EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_romfs_mods_tests.cpp
     tools/oot3d/native_game_runtime/oot3d_romfs_mods.cpp
+    tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_romfs_overlay.cpp
 )
 target_compile_features(oot3d_romfs_mods_tests PRIVATE cxx_std_20)

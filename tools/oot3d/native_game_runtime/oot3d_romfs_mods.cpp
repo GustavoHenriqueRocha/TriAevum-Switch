@@ -3,6 +3,7 @@
 // coccofresco/TriAevum 9c90abb9 (tools/triaevum_release/romfs_mods.py,
 // build_romfs_overlay), GPL-3.0-or-later like this file.
 #include "oot3d_romfs_mods.h"
+#include "oot3d_rom_import.h"
 
 #include <nlohmann/json.hpp>
 
@@ -23,7 +24,9 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr int kReceiptFormat = 1;
+// 2 (11/10): a USA mod's message table and menu folders go where the EUR game
+// reads them; a format-1 overlay (0.2.1) left them where it never looks.
+constexpr int kReceiptFormat = 2;
 constexpr std::uint32_t kOverlayVersion = 1U;
 constexpr std::uint64_t kPayloadAlignment = 16U;
 constexpr std::uint32_t kInvalidOffset = 0xFFFFFFFFU;
@@ -244,8 +247,42 @@ nlohmann::json Fingerprint(const RomFsServiceView &view, const std::vector<Scann
 constexpr const char *kCodeReason =
     "code patch: the game's code is compiled ahead of time, exefs/ and code.ips cannot apply";
 
+// A USA mod's message table (message/us/us.qm) as the EUR game reads it. The
+// game opens a message's text in its EU language slot (English 2, German 3,
+// French 4, Spanish 6, Italian 8) and a USA table fills only the US ones (1, 5,
+// 7), so a raw one leaves every message without text (0.2.1 with the
+// Portuguese 3DS translation: guest fault at 0x002C5074, address 4). The
+// import's copy for the game's own us.qm (RomImport::AdaptQmTable: 1 -> 2,
+// 5 -> 4, 7 -> 6), then German and Italian, which a EUR dump offers, take the
+// English text. The result replaces the file's first bytes.
+std::vector<std::uint8_t> UsaMessageTableForEurGame(const fs::path &path, std::uint64_t size) {
+  std::ifstream file(path, std::ios::binary);
+  std::array<std::uint8_t, 16> header{};
+  if (!file.read(reinterpret_cast<char *>(header.data()), header.size())) throw Failure("truncated QM header");
+  // At most the file: a record count past its end fails AdaptQmTable's checks.
+  const std::uint64_t tableEnd = 16U + std::uint64_t{Le32(header.data() + 8U)} * 96U;
+  std::vector<std::uint8_t> table(static_cast<std::size_t>(std::min(tableEnd, size)));
+  file.seekg(0, std::ios::beg);
+  if (!file.read(reinterpret_cast<char *>(table.data()), static_cast<std::streamsize>(table.size())))
+    throw Failure("cannot read the message table");
+  std::vector<std::uint8_t> adapted = RomImport::AdaptQmTable(table, size);
+  for (std::size_t record = 16U; record < adapted.size(); record += 96U) {
+    std::uint8_t *slots = adapted.data() + record + 16U;
+    for (const std::size_t slot : {3U, 8U})
+      if (std::all_of(slots + slot * 8U, slots + slot * 8U + 8U, [](std::uint8_t byte) { return byte == 0U; }))
+        std::memcpy(slots + slot * 8U, slots + 2U * 8U, 8U);
+  }
+  return adapted;
+}
+
+struct Target {
+  RomFsModFile File;
+  fs::path Source;
+  std::vector<std::uint8_t> Prefix; // replaces Source's first bytes (a USA message table)
+};
+
 struct Plan {
-  std::map<std::string, std::pair<RomFsModFile, fs::path>> Targets; // by RomFS path
+  std::map<std::string, Target> Targets; // by RomFS path
   std::vector<RomFsModNote> Ignored;
   std::vector<RomFsModNote> Overridden;
 };
@@ -279,20 +316,29 @@ Plan Classify(const std::vector<ScannedFile> &files, const RomFsTable &table) {
       ignore("larger than 64 MiB");
       continue;
     }
-    std::string target = file.Path.substr(slash + 1U);
+    // The EU name the EUR game reads when the view has it (UsaConvertedRomFsPath),
+    // else the path itself.
+    const std::string path = file.Path.substr(slash + 1U);
+    const auto converted = UsaConvertedRomFsPath(path);
+    const std::string target = converted && table.Records.count(*converted) ? *converted : path;
     if (!table.Records.count(target)) {
-      const auto converted = UsaConvertedRomFsPath(target);
-      if (!converted || !table.Records.count(*converted)) {
-        ignore("not in the game's RomFS (mods can replace files, not add them)");
+      ignore("not in the game's RomFS (mods can replace files, not add them)");
+      continue;
+    }
+    std::vector<std::uint8_t> prefix;
+    if (path == "message/us/us.qm" && target == "message/eu/eu.qm") {
+      try {
+        prefix = UsaMessageTableForEurGame(file.Full, file.Size);
+      } catch (const std::exception &error) {
+        ignore(std::string("USA message table the game cannot read: ") + error.what());
         continue;
       }
-      target = *converted;
     }
     auto [entry, inserted] = plan.Targets.try_emplace(target);
     if (!inserted)
-      plan.Overridden.push_back({entry->second.first.Mod, entry->second.first.Path,
+      plan.Overridden.push_back({entry->second.File.Mod, entry->second.File.Path,
                                  "replaced by " + file.Mod + "/" + file.Path});
-    entry->second = {RomFsModFile{file.Mod, file.Path, target, file.Size}, file.Full};
+    entry->second = {RomFsModFile{file.Mod, file.Path, target, file.Size}, file.Full, std::move(prefix)};
   }
   return plan;
 }
@@ -327,6 +373,7 @@ Built WriteOverlay(const RomFsModsRequest &request, const RomFsTable &table, con
   struct Payload {
     std::uint64_t ViewOffset;
     const fs::path *Source;
+    const std::vector<std::uint8_t> *Prefix;
     std::uint64_t Size;
   };
   std::vector<Patch> patches;
@@ -340,10 +387,10 @@ Built WriteOverlay(const RomFsModsRequest &request, const RomFsTable &table, con
                                           table.Files.begin() + static_cast<std::ptrdiff_t>(record + 8U + kFieldBytes)),
                 {}};
     Put64(patch.Replacement, cursor - table.FileDataOffset);
-    Put64(patch.Replacement, entry.first.Size);
+    Put64(patch.Replacement, entry.File.Size);
     patches.push_back(std::move(patch));
-    payloads.push_back({cursor, &entry.second, entry.first.Size});
-    cursor += entry.first.Size;
+    payloads.push_back({cursor, &entry.Source, &entry.Prefix, entry.File.Size});
+    cursor += entry.File.Size;
   }
   std::sort(patches.begin(), patches.end(), [](const Patch &a, const Patch &b) { return a.Field < b.Field; });
   const std::uint64_t viewSize = cursor;
@@ -385,7 +432,10 @@ Built WriteOverlay(const RomFsModsRequest &request, const RomFsTable &table, con
       static constexpr std::array<char, kPayloadAlignment> kZeros{};
       output.write(kZeros.data(), static_cast<std::streamsize>(payload.ViewOffset - position));
       std::ifstream source(*payload.Source, std::ios::binary);
-      std::uint64_t left = payload.Size;
+      output.write(reinterpret_cast<const char *>(payload.Prefix->data()),
+                   static_cast<std::streamsize>(payload.Prefix->size()));
+      source.seekg(static_cast<std::streamoff>(payload.Prefix->size()), std::ios::beg);
+      std::uint64_t left = payload.Size - payload.Prefix->size();
       while (source && left != 0U) {
         const std::size_t chunk = static_cast<std::size_t>(std::min<std::uint64_t>(left, buffer.size()));
         source.read(buffer.data(), static_cast<std::streamsize>(chunk));
@@ -492,21 +542,28 @@ std::string Megabytes(std::uint64_t bytes) {
 } // namespace
 
 std::optional<std::string> UsaConvertedRomFsPath(std::string_view path) {
-  // oot3d_rom_import.cpp (PlanUsaToEurRomFs): the directory renames, us.qm,
-  // and the hint movies the EUR executable opens under other numbers.
+  // The import's renames (oot3d_rom_import.cpp, PlanUsaToEurRomFs): us.qm, the
+  // hint movies the EUR executable opens under other numbers, message/us and
+  // misc/us. The US menu folders stay in the RomFS, but the EUR executable
+  // opens the EU folder of the same language (folder tables such as
+  // 0x004D3D10 are indexed by the EU language slot).
   static constexpr std::pair<std::string_view, std::string_view> kFiles[] = {
       {"message/us/us.qm", "message/eu/eu.qm"},
       {"misc/hint/movie/hint182.moflex", "misc/hint/movie/hint183.moflex"},
       {"misc/hint/movie/hint186.moflex", "misc/hint/movie/hint185.moflex"},
       {"misc/hint/movie/hint188.moflex", "misc/hint/movie/hint187.moflex"},
   };
+  static constexpr std::pair<std::string_view, std::string_view> kDirectories[] = {
+      {"message/us/", "message/eu/"},
+      {"misc/us/", "misc/eu/"},
+      {"menu/01_US_ENGLISH/", "menu/02_EU_ENGLISH/"},
+      {"menu/05_US_FRENCH/", "menu/04_EU_FRENCH/"},
+      {"menu/07_US_SPANISH/", "menu/06_EU_SPANISH/"},
+  };
   for (const auto &[from, to] : kFiles)
     if (path == from) return std::string(to);
-  for (const std::string_view directory : {std::string_view("message/"), std::string_view("misc/")}) {
-    const std::string us = std::string(directory) + "us/";
-    if (path.substr(0, us.size()) == us)
-      return std::string(directory) + "eu/" + std::string(path.substr(us.size()));
-  }
+  for (const auto &[from, to] : kDirectories)
+    if (path.starts_with(from)) return std::string(to) + std::string(path.substr(from.size()));
   return std::nullopt;
 }
 
@@ -537,8 +594,8 @@ RomFsModsReport ComposeRomFsMods(const RomFsModsRequest &request) {
     }
     std::set<std::string> mods;
     for (const auto &[target, entry] : plan.Targets) {
-      report.Applied.push_back(entry.first);
-      mods.insert(entry.first.Mod);
+      report.Applied.push_back(entry.File);
+      mods.insert(entry.File.Mod);
     }
     report.Mods.assign(mods.begin(), mods.end());
     if (request.BeforeBuild) request.BeforeBuild();
@@ -583,7 +640,7 @@ std::vector<std::string> RomFsModsReport::LogLines(std::size_t maxNotes) const {
   for (const auto &file : Applied)
     if (file.Path.substr(file.Path.find('/') + 1U) != file.Target)
       notes.push_back("romfs mods: " + file.Mod + "/" + file.Path + " replaces " + file.Target +
-                      " (the import's USA-to-EUR name)");
+                      " (the name the EUR game reads)");
   for (const auto &note : Overridden)
     notes.push_back("romfs mods: " + note.Mod + "/" + note.Path + " overridden: " + note.Reason);
   for (const auto &note : Ignored)
