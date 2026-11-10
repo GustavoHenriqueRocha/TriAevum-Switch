@@ -1,6 +1,7 @@
 #include "oot3d_update_panel.h"
 
 #include "fast/oot3d/debug_menu.h"
+#include "fast/oot3d/graphics_settings_window.h"
 #include "oot3d_build_version.h"
 #include "oot3d_switch_updater.h"
 #include "oot3d_topscreen_import.h"
@@ -10,6 +11,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
@@ -21,6 +23,8 @@ using namespace Update;
 
 constexpr const char *kChannelFile = "update_channel";
 constexpr const char *kRepositoryFile = "update_repo";
+// Present = no check at launch (on by default).
+constexpr const char *kNoLaunchCheckFile = "no_update_check";
 
 std::string ReadTrimmed(const std::filesystem::path &path) {
   std::ifstream file(path);
@@ -54,6 +58,16 @@ public:
     mHudArtInstalled = TopScreenImport::HdArtInstalled(mConfig);
     mDashAnimationsInstalled = RollDashAnimationsInstalled(mConfig);
     mHudOffer = TopScreenImport::ParseOfferSetting(ReadTrimmed(mConfig / TopScreenImport::kOfferSettingName));
+    // At launch (this tab is made once the game starts): a notice when a
+    // newer version is out. Nothing downloads until the player chooses to.
+    mLaunchCheck = !std::filesystem::exists(mConfig / kNoLaunchCheckFile, ignored);
+    if (mLaunchCheck)
+      mUpdater.Check(mChannel, [](const SwitchUpdater::Status &status) {
+        if (status.Offer && status.Kind == OfferKind::Update)
+          Fast::Oot3d::PostHostNotice("Version " + status.Offer->Manifest.Version +
+                                          " is available: L3+R3 > Updates",
+                                      false, std::chrono::seconds(10));
+      });
   }
 
   const char *Label() const noexcept override { return "Updates"; }
@@ -61,6 +75,7 @@ public:
   void Draw() override {
     ImGui::Text("Installed: %s", BuildVersion());
     DrawChannel();
+    DrawLaunchCheck();
     ImGui::TextDisabled("Releases from github.com/%s", mUpdater.Repository().c_str());
     ImGui::Separator();
     const auto status = mUpdater.Snapshot();
@@ -107,6 +122,24 @@ private:
     }
     ImGui::EndDisabled();
     if (mChannelError) ImGui::TextWrapped("Could not write config/%s.", kChannelFile);
+  }
+
+  // config/no_update_check: read at launch, so a change applies at the next one.
+  void DrawLaunchCheck() {
+    if (ImGui::Checkbox("Check at launch", &mLaunchCheck)) {
+      std::error_code error;
+      if (mLaunchCheck) {
+        std::filesystem::remove(mConfig / kNoLaunchCheckFile, error);
+      } else {
+        std::filesystem::create_directories(mConfig, error);
+        if (!std::ofstream(mConfig / kNoLaunchCheckFile, std::ios::trunc))
+          error = std::make_error_code(std::errc::io_error);
+      }
+      mLaunchCheckError = static_cast<bool>(error);
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(a notice when a newer version is out)");
+    if (mLaunchCheckError) ImGui::TextWrapped("Could not write config/%s.", kNoLaunchCheckFile);
   }
 
   void DrawChecked(const SwitchUpdater::Status &status) {
@@ -235,6 +268,8 @@ private:
   SwitchUpdater mUpdater;
   Channel mChannel = Channel::Stable;
   bool mChannelError = false;
+  bool mLaunchCheck = true;
+  bool mLaunchCheckError = false;
   bool mHudInstalled = false;
   bool mHudArtInstalled = false;
   bool mDashAnimationsInstalled = false;

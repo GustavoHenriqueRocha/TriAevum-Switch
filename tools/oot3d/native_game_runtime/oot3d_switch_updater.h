@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -39,8 +40,9 @@ public:
   SwitchUpdater(const SwitchUpdater &) = delete;
   SwitchUpdater &operator=(const SwitchUpdater &) = delete;
 
-  // Start a check / install of the checked offer; false while busy.
-  bool Check(Update::Channel channel);
+  // Start a check / install of the checked offer; false while busy. `done`
+  // runs on the worker thread with the final status when the check ends.
+  bool Check(Update::Channel channel, std::function<void(const Status &)> done = {});
   bool Install();
   void Cancel();
   // Back to Idle (e.g. the channel changed); false while busy.
@@ -52,6 +54,7 @@ public:
 private:
   bool Start(Phase phase, void (SwitchUpdater::*job)());
   void RunCheck();
+  void RunCheckSteps();
   void RunInstall();
   void Finish(Phase phase, std::string message);
   void Log(const std::string &line) const;
@@ -60,6 +63,7 @@ private:
   std::string mRepository;
   std::uint64_t mInstalledBuild;
   Update::Channel mChannel = Update::Channel::Stable;
+  std::function<void(const Status &)> mCheckDone; // set by Check while no worker runs
   mutable std::mutex mMutex;
   Status mStatus;
   std::atomic<bool> mCancel{false};

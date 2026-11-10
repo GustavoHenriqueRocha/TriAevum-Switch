@@ -97,14 +97,14 @@ HostNotice& CurrentHostNotice() {
 }
 } // namespace
 
-void PostHostNotice(std::string text, bool failure) {
+void PostHostNotice(std::string text, bool failure, std::chrono::seconds duration) {
     std::scoped_lock lock(HostNoticeMutex());
     auto& notice = CurrentHostNotice();
     notice.Text = std::move(text);
     notice.Failure = failure;
     // Failures stay longer: they point the player at F1.
-    notice.Until = std::chrono::steady_clock::now() +
-                   std::chrono::seconds(failure ? 8 : 3);
+    if (duration <= std::chrono::seconds::zero()) duration = std::chrono::seconds(failure ? 8 : 3);
+    notice.Until = std::chrono::steady_clock::now() + duration;
 }
 
 bool HostNoticeActive() {

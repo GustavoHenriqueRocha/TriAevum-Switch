@@ -26,7 +26,9 @@ dump and decrypt it. eShop copies (`.cia`) and other versions are not supported.
 - **Controls:** gyro aiming with the console, a Pro Controller or a pair of Joy-Cons; tap the on-screen
   item, X/Y and D-pad icons; drag a finger on empty screen to aim. L3+R3 → Controls → Camera → Free
   camera → Smoothing Off makes the free camera stop as soon as you let go of the stick.
-- **Updates:** L3+R3 → Updates → Check for updates. Saves, settings and game files are kept.
+- **Updates:** L3+R3 → Updates → Check for updates. Saves, settings and game files are kept. The game
+  also checks when it starts and shows a notice for a few seconds when a newer version is out; L3+R3 →
+  Updates → Check at launch turns that off.
 - **Performance:** at stock clocks lighter areas run at full speed and busy ones slow down (the CPU is
   the limit). L3+R3 → Video → **Performance mode** On raises the CPU to 1224 MHz, the GPU to 460.8 MHz
   and the memory to 1600 MHz (each also on its own row; off by default, more battery use); the clocks

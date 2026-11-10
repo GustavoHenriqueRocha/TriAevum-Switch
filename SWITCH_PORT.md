@@ -627,6 +627,23 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   anyone shows Portuguese text; the menus are translated. Seen on the user's console with
   0.2.2-test.1 (11/10): the game runs, the file select's Start button reads "Iniciar".
 
+### Chamber of Sages slowdown (logs29, 11/10)
+- **Report (Switch Lite handheld):** "more slowdowns in the sages realm place". Last session
+  (23:09-23:30, Better Link v3 mod): Lighting Per-pixel, **Resolution at 60 FPS Full** for most of
+  it (Dynamic in the earlier sessions), Performance mode switched on and off in the scene.
+- **`kenjyanoma` (0x44, 25 windows, host frames 52350-56100):** 46.7 FPS on average, 23-34 in the
+  worst windows. GPU-bound: `busy_ms` 28-44 against 9-16 in its good windows, `fs_px` 4.5-6.6
+  against 3-4, at 3.00 held by Full. The five windows under Dynamic (53550-54150, 2.25) ran 59-60
+  FPS with the effects on screen (frame 54000: 3 parametric draws, 1.56M px). Performance mode
+  (461 MHz) at Full still fell to 25-27 FPS.
+- **Missing texts:** `562dcee0cdaf903f` and `f130a86f197d43a0` on entering (frame ~52400),
+  `52aadb8e186857ff` at ~55200: 2-4 parametric draws a frame over 1.4-3.7M px, `fragdepth` 5-10
+  (2-3 elsewhere), the logs26 room-14 pattern. `8b0c5080fdbe9298` comes from an earlier session
+  (no `deko3d.txt` covers it). All four are in `workshop-OOT/shaders/console-missing/` (43 files)
+  for the next pack.
+- **Expected [INFERENCE]:** with them packed, the scene holds 60 at Dynamic; at Full 3.00 its
+  heaviest moments may still drop (32 translucent draws lit per-pixel over 16-30M px a frame).
+
 ## How to build (Linux)
 
 1. devkitPro (`switch-dev switch-sdl2 switch-mesa switch-glad switch-zlib`), `cmake`, Python 3 with `capstone`.
@@ -4039,6 +4056,13 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   whose files are all assets of the listed size (and of GitHub's `digest`, when listed). A newer
   build is "Download and install", the same build "Reinstall (repair)", an older one "Install this
   older version". Release notes are the release body.
+- **Check at launch** (11/10; on by default, tab checkbox "Check at launch", `config/no_update_check`
+  present = off, read at launch): the tab is made once the game starts and runs the same check on
+  the saved channel in the background (`SwitchUpdater::Check` with a completion callback on the
+  worker). A newer build posts a host notice for 10 s, top left: "Version X is available: L3+R3 >
+  Updates"; nothing downloads, and the tab shows the offer. The same or an older build, no
+  network or a failed check: no notice (the tab and `logs/update.txt` say why). Cost: the listing
+  and one `release.json` per launch.
 - `release.json`: `{"format": "oot3dre_switch_release_v1", "version", "build" (> 0), "channel"
   ("stable" for a full release, "test" for a pre-release), "files": [{"path", "size", "sha256"}]}`.
   Paths are relative to `sdmc:/switch/oot3dre/`, `[A-Za-z0-9._-]` components, never under

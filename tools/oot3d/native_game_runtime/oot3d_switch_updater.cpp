@@ -110,11 +110,13 @@ bool SwitchUpdater::Start(Phase phase, void (SwitchUpdater::*job)()) {
   return true;
 }
 
-bool SwitchUpdater::Check(Channel channel) {
-  // The worker reads mChannel: only change it while none runs (the menu
-  // calls Check from one thread).
+bool SwitchUpdater::Check(Channel channel, std::function<void(const Status &)> done) {
+  // The worker reads mChannel and mCheckDone: only change them while none
+  // runs, after the last one ended (the menu calls Check from one thread).
   if (mRunning.load()) return false;
+  if (mWorker.joinable()) mWorker.join();
   mChannel = channel;
+  mCheckDone = std::move(done);
   return Start(Phase::Checking, &SwitchUpdater::RunCheck);
 }
 
@@ -167,6 +169,11 @@ void SwitchUpdater::Log(const std::string &line) const {
 }
 
 void SwitchUpdater::RunCheck() {
+  RunCheckSteps();
+  if (mCheckDone) mCheckDone(Snapshot());
+}
+
+void SwitchUpdater::RunCheckSteps() {
   NetworkSession network;
   if (!network.Ready()) {
     Finish(Phase::Failed, "No network: connect the console to the internet and try again.");
