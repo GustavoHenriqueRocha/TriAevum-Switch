@@ -61,6 +61,7 @@ SavestateLibrary::SavestateLibrary(std::filesystem::path preferencesPath,
 
 void SavestateLibrary::LoadPreferencesLocked() {
   if (mPreferencesPath.empty()) return;
+  Ship::RestoreInterruptedReplace(mPreferencesPath);
   std::ifstream input(mPreferencesPath, std::ios::binary);
   if (!input) return;  // First run: defaults.
   const auto document = nlohmann::json::parse(input, nullptr, false);

@@ -32,7 +32,7 @@ Bugs que impediam o Switch de rodar (só apareciam no console; o Eden escondia v
 | Crash ao iniciar | `pthread_detach` do newlib do devkitA64 retorna `ENOSYS` | sem `detach()` no Switch |
 | Tela preta / shader falhando | apresentação paralela rodava GL numa thread sem contexto | contexto GL movido para a thread de render (`Submit`+`Drain`) |
 | Jogo em câmera lenta (½ velocidade) | 60 refreshes/s esperados, mas 1 por apresentação a 30 Hz | até 4 refreshes por apresentação |
-| Configurações não salvavam | FS do Horizon não renomeia por cima de arquivo | remove e renomeia |
+| Configurações não salvavam | FS do Horizon não renomeia por cima de arquivo | arquivo antigo de lado, novo no lugar, recuperação ao carregar (veja "Regravar um arquivo no cartão SD") |
 | Crash com warm-up em thread | contextos nvc0 compartilham push buffer sem lock | warm-up na thread de render |
 
 Desempenho e usabilidade:
@@ -1008,6 +1008,50 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
   `oot3d_top_screen_frontend_composition_tests` (compilar junto com `oot3d_native_pica_visual_frame.cpp`).
   Capturas no host conferidas: escolha de versões, seleção, arquivo 1, criação de nome, cópia, fade até
   entrar no jogo, aba BACK no canto.
+
+### Regravar um arquivo no cartão SD (2026-11-08)
+
+- **Sintoma:** salvar uma opção mostrava "cannot replace TopScreen UI config: File exists", em
+  L3+R3 > HUD > Save TopScreen e em L3+R3 > Controls > Save controls depois de mudar a câmera ou o
+  C-stick. As opções de HUD, câmera e C-stick não ficavam salvas.
+- **Causa:** todo gravador escreve um temporário e o renomeia por cima do arquivo real. POSIX e
+  Windows substituem o antigo nesse rename; o FS do Horizon (cartão SD) recusa com `EEXIST` ("File
+  exists"). `ed3e6418` (04/11) ensinou o controle, o warp de dev e o savestate a apagar o antigo e
+  renomear de novo, e `8e68d030` fez o mesmo no `Ship::WriteConfigFileAtomically`, mas o gravador da
+  UI do TopScreen (`SaveTopScreenUiConfig`, `config/topscreen_ui.json`) ficou de fora. "Save controls"
+  grava o controle e depois o arquivo do TopScreen, então o controle salvava e câmera/HUD não. O
+  gravador do cache do renderer (`WriteCacheFileAtomically`) tinha o mesmo buraco.
+- **Correção:** uma troca só para todos os gravadores, `ship/config/FileReplace.h` (só cabeçalho,
+  para as bibliotecas pequenas do controle e do TopScreen usarem sem o runtime do ship).
+  `ReplaceFileWithTemporary` renomeia primeiro. Se der `EEXIST`, move o arquivo antigo para
+  `<arquivo>.bak`, põe o temporário no lugar e apaga o backup; se a segunda troca falhar, o antigo
+  volta. Usada por `SaveTopScreenUiConfig`, `SaveNativeControlConfig`,
+  `Ship::WriteConfigFileAtomically` (configurações, warps de dev, idioma, preferências de savestate,
+  perfis de ambiente, descritores PBR) e `WriteCacheFileAtomically`. O "apaga e renomeia" de
+  `ed3e6418`/`8e68d030` no controle e no Ship sai: ele perdia o arquivo se o console desligasse entre
+  as duas chamadas, e só rodava com `__SWITCH__` (não dava para testar no host). No Windows os
+  caminhos com `MoveFileExW` ficam como estavam.
+- **Save interrompido:** se o console desligar ou o jogo for fechado entre as duas trocas, o arquivo
+  some e o `.bak` guarda a última versão completa. Antes de ler, cada leitor chama
+  `RestoreInterruptedReplace`, que traz o `.bak` de volta quando o arquivo não existe: a inicialização
+  (TopScreen e controle, antes das checagens de existência), `LoadTopScreenUiConfig`,
+  `LoadNativeControlConfig`, `Ship::Config::Reload`, warp de dev, idioma, preferências de savestate e
+  `LoadSceneEnvironmentFile`. Perde-se só a opção que estava sendo salva naquela hora. Descritores PBR
+  são achados pela varredura do pacote de texturas, que não os restaura: depois de um save PBR
+  interrompido o `.json.bak` fica ao lado, para renomear à mão.
+- **Sem mudança:** os saves do jogo (`oot3d_native_a32_ctr_save_safety`, journal próprio), os
+  savestates (`ReplaceStateFile`), os caches de grama e da PICA e os dumps de textura já apagam o
+  antigo e renomeiam, ou o tiram do lugar por conta própria.
+- **Teste:** `oot3d_config_file_replace_tests` (host Linux) define o próprio `rename()`, que o
+  `std::filesystem::rename` da libstdc++ chama; no modo Horizon ele usa `renameat2` com
+  `RENAME_NOREPLACE`, então renomear por cima de um arquivo dá `EEXIST` como no console. Confere que
+  o rename único antigo falha com "File exists", salva duas vezes pelos gravadores do TopScreen,
+  controle, Ship e cache, faz falhar a troca de lado e a troca para o lugar, e carrega depois de um
+  save interrompido. Guardas `08/11` em `tests/switch/test_bug_guards.py`.
+- **Conferir no console:** em L3+R3 > HUD, mude a escala do HUD e aperte Save TopScreen duas vezes;
+  em L3+R3 > Controls, mude uma opção da câmera livre e aperte Save controls. Nenhum erro deve
+  aparecer, as duas mudanças continuam depois de reiniciar, e `sdmc:/switch/oot3dre/config/` não
+  tem `topscreen_ui.json.bak`, `topscreen_ui.json.tmp` nem `oot3d_controls.json.bak`.
 
 ## Próximos passos
 

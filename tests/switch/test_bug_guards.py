@@ -28,6 +28,54 @@ class Guard:
 
 
 GUARDS = [
+    # --- 08/11: "cannot replace TopScreen UI config: File exists" ao salvar uma opção ---
+    # O FS do Horizon recusa rename() por cima de arquivo existente (EEXIST); o gravador do
+    # TopScreen (e o do cache) só tinham o rename POSIX. Uma troca para todos os gravadores
+    # (ship/config/FileReplace.h): arquivo antigo para <arquivo>.bak, novo no lugar, backup
+    # apagado; um save interrompido é recuperado do .bak ao carregar.
+    Guard("salvar uma opção do TopScreen falhava no Switch: 'cannot replace TopScreen UI config: File exists'",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_config.cpp",
+          r'Ship::RestoreInterruptedReplace\(path\);\s+std::ifstream stream\(path.*?'
+          r'#else\s+.*?Ship::ReplaceFileWithTemporary\(temporary, path\);',
+          "oot3d_config_file_replace_tests (TestTopScreenConfig)",
+          forbid=r'std::filesystem::rename\('),
+    Guard("troca de arquivo no Switch: EEXIST sobre arquivo existente tira o antigo do lugar, põe o novo, "
+          "devolve o antigo se isso falhar; um arquivo que sumiu volta do backup",
+          "runtime/three_ds_recomp/include/ship/config/FileReplace.h",
+          r'std::filesystem::rename\(temporary, target, error\);\s+if \(error != std::errc::file_exists\).*?'
+          r'std::filesystem::rename\(target, backup, error\);.*?'
+          r'std::filesystem::rename\(temporary, target, error\);\s+if \(error\) \{.*?'
+          r'std::filesystem::rename\(backup, target, restore\);.*?'
+          r'RestoreInterruptedReplace\(.*?if \(std::filesystem::exists\(target, error\) \|\| error\)\s+\{\s+return true;'
+          r'\s+\}\s+std::filesystem::rename\(backup, target, error\);',
+          "oot3d_config_file_replace_tests (TestReplace, TestReplaceFailures, TestRecovery)"),
+    Guard("troca de arquivo no Switch: arquivos de cache do renderer são substituídos, não recusados com EEXIST",
+          "runtime/three_ds_recomp/src/fast/renderer/cache_file.cpp",
+          r'#else\s+.*?Ship::ReplaceFileWithTemporary\(temporary, path\)',
+          "oot3d_config_file_replace_tests (TestCacheFileWriter)",
+          forbid=r'std::filesystem::rename\('),
+    Guard("troca de arquivo no Switch: a inicialização recupera um save interrompido do TopScreen/controle antes de checar os arquivos",
+          "tools/oot3d/native_game_runtime/oot3d_native_game_bootstrap.cpp",
+          r'Ship::RestoreInterruptedReplace\(launch\.TopScreenConfigPath\);\s+'
+          r'if \(!std::filesystem::is_regular_file\(launch\.TopScreenConfigPath\)\).*?'
+          r'Ship::RestoreInterruptedReplace\(launch\.ControlConfigPath\);\s+'
+          r'if \(std::filesystem::is_regular_file\(launch\.ControlConfigPath\)\)'),
+    Guard("troca de arquivo no Switch: o arquivo de configurações volta do backup antes de ser lido",
+          "runtime/three_ds_recomp/src/ship/config/Config.cpp",
+          r'void Config::Reload\(\) \{\s+if \(mPath != "None"\) \{\s+RestoreInterruptedReplace\(mPath\);'),
+    Guard("troca de arquivo no Switch: developer-tools.json volta do backup antes de ser lido",
+          "tools/oot3d/native_game_runtime/oot3d_dev_warp.cpp",
+          r'Ship::RestoreInterruptedReplace\(mStorage\);\s+std::error_code exists;'),
+    Guard("troca de arquivo no Switch: o arquivo de idioma volta do backup antes de ser lido",
+          "tools/oot3d/native_game_runtime/oot3d_game_language.cpp",
+          r'Ship::RestoreInterruptedReplace\(mPath\);\s+if \(std::filesystem::exists\(mPath\)\)'),
+    Guard("troca de arquivo no Switch: as preferências de savestate voltam do backup antes de serem lidas",
+          "tools/oot3d/native_game_runtime/oot3d_savestate_library.cpp",
+          r'Ship::RestoreInterruptedReplace\(mPreferencesPath\);\s+std::ifstream input\(mPreferencesPath'),
+    Guard("troca de arquivo no Switch: perfis de ambiente voltam do backup antes de serem lidos",
+          "tools/oot3d/native_game_runtime/oot3d_scene_environment_codec.cpp",
+          r'Ship::RestoreInterruptedReplace\(path\);\s+std::error_code error;\s+'
+          r'file\.Exists = std::filesystem::exists\(path, error\);'),
     # --- 04/11: mapa da dungeon (pausa, TopScreen) preso no andar em que abre ---
     # 0x00442F38 (PauseDungeonMap_HandleCursorInput) é o cursor de andares por
     # D-pad/analógico (Cima/Baixo mudam o andar via SetSelectedFloor); o toque é
@@ -41,11 +89,13 @@ GUARDS = [
           r'kPauseLowerScreenBlock,\s+kPauseUiNativeUpdateCall,',
           forbid=r'kPauseDungeonMapCursorInput|0x00442F38'),
     # --- 04/11: "cannot replace native control config" ao salvar controle no menu de dev ---
-    # O FS do Horizon não renomeia por cima de arquivo existente (EEXIST): apaga o
-    # destino e renomeia de novo (como o Ship::WriteConfigFileAtomically já fazia).
+    # O FS do Horizon não renomeia por cima de arquivo existente (EEXIST). Desde 08/11 a
+    # troca é a de ship/config/FileReplace.h (backup + recuperação), testada no host.
     Guard("salvar controle no menu de dev falhava no Switch (rename por cima de oot3d_controls.json dá EEXIST)",
           "tools/oot3d/native_game_runtime/oot3d_native_control_config.cpp",
-          r'#if defined\(__SWITCH__\).*?replaceError == std::errc::file_exists.*?std::filesystem::remove\(path'),
+          r'Ship::RestoreInterruptedReplace\(path\);.*?#else\s+.*?Ship::ReplaceFileWithTemporary\(temporary, path\);',
+          "oot3d_config_file_replace_tests (TestControlConfig)",
+          forbid=r'std::filesystem::rename\('),
     Guard("warp de dev não salvava developer-tools.json no Switch (sobrava o .tmp)",
           "tools/oot3d/native_game_runtime/oot3d_dev_warp.cpp",
           r'Ship::WriteConfigFileAtomically\(mStorage,',
@@ -376,8 +426,9 @@ GUARDS = [
           "oot3d_hang_watchdog_tests"),
     Guard("Config.cpp 'unable to atomically save' (rename sobre arquivo existente)",
           "runtime/three_ds_recomp/src/ship/config/ConfigPersistence.cpp",
-          r'__SWITCH__.*?errc::file_exists.*?filesystem::remove\(target',
-          "config_atomic_save_tests"),
+          r'#else\s+.*?ReplaceFileWithTemporary\(temporary, target\);',
+          "config_atomic_save_tests, oot3d_config_file_replace_tests (TestShipConfigWriter)",
+          forbid=r'std::filesystem::rename\('),
     Guard("Pacing adaptive travava em 30 FPS (padrão precisa ser legacy)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'config/fps60_mode: legacy \(default\)',
