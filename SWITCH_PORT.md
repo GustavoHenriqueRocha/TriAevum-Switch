@@ -94,6 +94,50 @@ Desempenho e usabilidade:
 - **Caminhos de entrada** configuráveis por `OOT3D_OPERATIONAL_<variável>` (antes fixos no Windows do autor).
 - Ícone original para o `.nro` (`res/switch/icon.jpg`).
 
+### Dados do jogo a partir do dump do próprio jogador (primeiro início)
+
+O `game/` pode ser montado no console, sem ferramenta no PC: copie o dump **decriptado** do seu
+cartucho (`.3ds` ou `.cci`) para `sdmc:/switch/oot3dre/`, ou `code.bin` (descomprimido),
+`exheader.bin` e `romfs.bin` (IVFC, como o `ctr_rom.py` extrai) para `sdmc:/switch/oot3dre/import/`,
+e abra o jogo. No lançamento padrão do NRO (sem argumentos, o do OoT3D), antes de qualquer coisa ler
+o `game/`, o `main()` chama `RunSwitchRomImport()` (`oot3d_switch_rom_import.cpp`, tela no console
+do libnx), que:
+
+- identifica a revisão pelos hashes do `.code` descomprimido, do ExHeader e da RomFS, como as
+  receitas do TriAevum. Aceitas: USA Rev 1 (En,Fr,Es), convertida para o layout EUR pelo adaptador
+  do projeto, e EUR (original e Rev 1, mais o dump de referência do projeto). Dump de outro jogo de
+  3DS é recusado pelo program id (`IsOot3dTitleId`, `ctr_title_profile.h`) antes de qualquer hash,
+  com a indicação do `tools/ctr/ctr_convert.py`: o `game/` de `switch/oot3dre` é só do OoT3D. Outra
+  revisão, dump encriptado ou `.cia` também é recusado, com a lista do que é aceito;
+- grava `game/code.bin`, `exheader.bin`, `romfs.bin` e `oot3d_native_process_manifest.json` por
+  arquivos `*.partial`, confere os hashes da origem e da saída enquanto lê a RomFS (pedaços de 4 MB,
+  nunca a imagem inteira na memória), relê o que gravou e confere de novo, e só então substitui os
+  arquivos anteriores (o manifesto antigo sai primeiro: commit interrompido importa de novo no
+  próximo boot). O manifesto é o mesmo, byte a byte, que o `build_process_manifest.py` gera, com
+  `process.title_id`. `game/rom_import.json` registra a origem (nome, tamanho, data): os boots
+  seguintes pulam a importação, e outro dump (ou o mesmo copiado de novo) importa de novo;
+- pergunta no fim se mantém o dump (A, o padrão) ou apaga (Y). Log em `logs/rom_import.txt`.
+
+O console do libnx desenha byte a byte com a fonte padrão (sem UTF-8): o texto da tela passa por
+`RomImport::ConsoleAscii` e aparece sem acentos. A tela devolve stdout/stderr depois do
+`consoleExit` (sem isso a primeira linha de log do jogo travava no console liberado).
+**Desligar:** `config/no_rom_import` (arquivo presente) pula tudo e o boot lê o `game/` como antes.
+
+O núcleo (`oot3d_rom_import.cpp`, só C++ padrão) é um port de `ctr_rom.py`,
+`input_copy_adapter.py`, `oot3d_region_assets.py` (`oot3d_usa_resources_to_eur_v2`) e
+`build_process_manifest.py`. A receita do code da USA entra compilada só como offsets
+(`oot3d_rom_import_usa_copies.inc`, refeito por `generate_rom_import_copies.py` a partir de
+`input_coverage/recipes/adapters/oot3d-usa-ef210566-copies.json`). Por que a RomFS da USA muda: a
+saída é a visão Level-3 sem o superbloco IVFC de 4 KB, `message/us` e `misc/us` viram `eu`,
+`us.qm` vira `eu.qm`, os vídeos de dica `hint182/186/188` viram `hint183/185/187`, as cadeias de
+hash são refeitas e os slots de idioma 2/4/6 do QM apontam para os conteúdos em inglês, francês e
+espanhol da USA; nenhum conteúdo muda. No PC, `oot3d_rom_import_tests --import <dump> <pasta>` gerou
+arquivos byte a byte iguais aos do pipeline do PC para o cartucho USA Rev 1 em cerca de 9 s; no
+console leva cerca de um minuto (Switch Lite), limitado pelo cartão SD. Testes:
+`oot3d_rom_import_tests` (dados sintéticos, sem ROM) e as guardas "importação do dump" de
+`tests/switch/test_bug_guards.py`. Origem: fork JohnUzoka/TriAevum-Switch (a8695b96, 1b2af4ad,
+19a8ea64); decisões em `docs/pesquisas/2026-11-08-importacao-do-dump-no-console.md`.
+
 ## Como compilar (Linux)
 
 1. devkitPro (`switch-dev switch-sdl2 switch-mesa switch-glad switch-zlib`), `cmake`, Python 3 com `capstone`.

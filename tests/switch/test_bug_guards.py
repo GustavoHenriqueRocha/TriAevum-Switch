@@ -970,6 +970,47 @@ GUARDS = [
           r'return Normalize\(Multiply\(Delta\(\{pitchRate,0,0\}, t\), next\.SensorToVirtual\)\);',
           "three_ds_recomp_input_tests (TestPhysicalGyroAfterSyntheticAim)",
           forbid=r'Delta\(yawAxis'),
+    # --- 08/11: importação do dump do jogador no primeiro início (port do fork JohnUzoka) ---
+    # Portado de JohnUzoka/TriAevum-Switch a8695b96, 1b2af4ad, 19a8ea64. O game/
+    # do OoT3D é montado no console a partir do .3ds/.cci decriptado do jogador.
+    Guard("importação do dump roda antes de os argumentos lerem o game/ (manifesto), só no lançamento padrão do NRO (OoT3D)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(argc <= 1\) \{\s+if \(!Oot3dNativeGame::RunSwitchRomImport\(\)\)\s+return 0;\s+\}'
+          r'.*?oot3d_native_process_manifest\.json'),
+    Guard("[decisão] config/no_rom_import desliga a importação do dump (o boot lê o game/ como antes)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
+          r'kDisabled = "sdmc:/switch/oot3dre/config/no_rom_import";.*?bool RunSwitchRomImport\(\) \{\s+'
+          r'std::error_code error;\s+if \(fs::exists\(kDisabled, error\)\)\s+return true;'),
+    Guard("importação do dump: o FS do Horizon não renomeia por cima de arquivo existente (apaga antes)",
+          "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
+          r'void Replace\(const fs::path& from, const fs::path& to\) \{\s+std::error_code error;\s+fs::remove\(to, error\);',
+          "oot3d_rom_import_tests"),
+    Guard("importação do dump: commit interrompido não deixa manifesto (o manifesto antigo sai antes dos renames)",
+          "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
+          r'for \(const char\* name : \{kManifestName, kReceiptName\}\) \{\s+fs::remove\(gameDirectory / name, error\);'
+          r'.*?Replace\(codePartial, gameDirectory / "code\.bin"\);.*?Replace\(receiptPartial, gameDirectory / kReceiptName\);'),
+    Guard("importação do dump: outro jogo de 3DS é recusado pelo program id (perfil de título) antes de qualquer hash",
+          "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
+          r'if \(Oot3dNativeGame::IsOot3dTitleId\(programId\)\)\s+return;'
+          r'.*?plan\.ProgramId = layout\.ProgramId;\s+RequireOot3dTitle\(plan\.ProgramId\);'
+          r'.*?plan\.ProgramId = U64\(plan\.Exheader\.data\(\) \+ 0x200\);\s+RequireOot3dTitle\(plan\.ProgramId\);',
+          "oot3d_rom_import_tests (TestContainer)"),
+    Guard("importação do dump: manifesto com process.title_id, igual ao build_process_manifest.py",
+          "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
+          r'\{"title_id", U64\(x \+ 0x200\)\},',
+          "oot3d_rom_import_tests (TestManifest)"),
+    Guard("tela da importação: stdout/stderr voltam depois do consoleExit (a primeira linha de log travava o jogo)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
+          r'consoleExit\(nullptr\);\s+devoptab_list\[STD_OUT\] = mStdout;\s+devoptab_list\[STD_ERR\] = mStderr;'),
+    Guard("tela da importação: texto pt-BR sem acento no console do libnx (fonte de 256 glifos, sem UTF-8)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
+          r'std::printf\("\\x1b\[1;1H\\x1b\[36m%s\\x1b\[0m\\n\\n%s", RomImport::ConsoleAscii\(mTitle\)\.c_str\(\),\s+'
+          r'RomImport::ConsoleAscii\(body\)\.c_str\(\)\);',
+          "oot3d_rom_import_tests (TestConsoleAscii)"),
+    Guard("[decisão] manter o dump é o padrão: ele só é apagado com Y, depois de uma importação conferida",
+          "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
+          r'if \(!failure\.empty\(\)\) \{.*?return false;\s+\}.*?if \(\*button & HidNpadButton_Y\) \{\s+try \{\s+ri::RemoveSource\(plan->Input\);',
+          forbid=r'RemoveSource\((?!plan->Input\);)'),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

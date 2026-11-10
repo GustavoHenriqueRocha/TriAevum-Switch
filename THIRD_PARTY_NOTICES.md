@@ -73,6 +73,13 @@ or was adapted against [Azahar Emulator](https://github.com/azahar-emu/azahar).
   semantics of Azahar's NCSD/NCCH loader at the same revision for Forge's
   decrypted cartridge-image importer. It is GPL-2.0-or-later and retains an
   explicit source-file notice.
+- The Switch port's `tools/oot3d/native_game_runtime/oot3d_rom_import.cpp` is
+  a C++ port of `ctr_rom.py` and `oot3d_region_assets.py` for the on-console
+  import of the player's dump. It is GPL-2.0-or-later and carries their
+  notices: the backwards-LZSS decode and container bounds follow Azahar's
+  `src/core/file_sys/ncch_container.cpp` (`LZSS_Decompress`) and the RomFS
+  name hash its `src/core/file_sys/layered_fs.cpp` (`CalcHash`, from 3dbrew),
+  at the same revision.
 - `tools/three_ds/input/three_ds_input.cpp`, `three_ds_sdl_controller.h` and
   `runtime/three_ds_recomp/include/ship/controller/physicaldevice/SDLControllerSetup.h`
   adapt the SDL motion coordinate/unit mapping, normalized touchpad input and
