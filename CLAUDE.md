@@ -61,6 +61,15 @@ Relatório de agente/workflow também vai para lá, depois de verificado.
   (`git diff <início>..HEAD`) antes do push.
 - **Relatório de agente usa três estados:** confirmado, parcial ou sem suporte,
   cada um com a evidência.
+- **Teste de jogo na janela entra na pista.** Chegar ao menu não basta: a rodada tem de entrar
+  em jogo de verdade (no MK7, uma corrida) e ficar alguns segundos lá, com captura. O MK7 caiu
+  ao entrar na corrida (block_32, 10/11) depois de várias rodadas "verdes" que paravam no menu.
+  Timeline do MK7: `tools/oot3d/native_game_runtime/input_timelines/mk7_title_to_race.json`
+  (A por 40 quadros, solto por 20, até o quadro 7200; com o save já criado chega à pista em uns
+  1500 quadros). Prefira pulsos contínuos a quadros fixos: a velocidade da janela varia.
+- **Rodada de teste da janela vai sem som:** `--disable-audio` (depois do `--` do
+  `build_title_window.sh`). Só ligue o som quando o teste for do áudio. O flag só corta a saída
+  para o host; o DSP continua mixando e o guest recebe os quadros, então o jogo não muda.
 - **Comportamento do OoT3D não muda por acidente.** Tudo que for genérico passa
   pelo perfil de título (`ctr_title_profile.h`) e ganha guarda em
   `tests/switch/test_bug_guards.py`.
