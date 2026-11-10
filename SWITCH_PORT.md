@@ -644,6 +644,38 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
 - **Expected [INFERENCE]:** with them packed, the scene holds 60 at Dynamic; at Full 3.00 its
   heaviest moments may still drop (32 translucent draws lit per-pixel over 16-30M px a frame).
 
+### Raw texture copies out of a GPU target on deko3d (player report, 0.2.2, 11/10)
+- **Seen:** a cutscene late in the game closed it every time, 18-22 s after loading the save
+  (USA, handheld, no mods, sys-clk): `[critical] oot3d_native_game: native PICA copy retention
+  failed: rendering backend does not pin native PICA texture copies`, four sessions in a row.
+  `hang.txt` holds only earlier stalls that recovered (game thread at `frame_end` for 3-15 s).
+- **Cause:** the scene copies a region of a GPU render target into a texture with a raw GSP
+  TextureCopy. GPU-backed transfers are on (`deferGpuBackedDisplayTransfers`), so the frontend
+  defers the copy to the backend, skips the guest-memory copy, registers a raw copy producer and
+  gives every texture over the destination zeros there plus a `PicaTextureCopyReference`
+  (`CaptureTextureResources`). Each frame `PinGpuCopyResources` hands the references to
+  `SetPinnedPicaTextureCopies`, which only Vulkan implements: the base refuses a non-empty set
+  and the session throws. Next in line, deko3d's `PlanPicaTransfer` rejects TextureCopy mode
+  (flag bit 3), and nothing raised the copy's PPF (the frame code leaves raw copies to the
+  backend's `mPhysicalMemoryComplete`), so the guest would have waited for ever.
+- **Fix (`gfx_deko3d_pica_copies.h`, `SubmitPicaTextureCopy`):** a TextureCopy no longer goes
+  through the display transfer path. deko3d walks its spans (Vulkan's walk), picks FindColor's
+  target among those holding the whole input, reads it back (`PicaTargets::ReadTarget` after
+  `WaitPresentIdle`, one GPU wait), encodes it with `EncodePicaFramebuffer` and keeps the
+  destination bytes per `CompletionId`. The real execution (`MaterializeGuest`, a dependency
+  flush) writes them into guest memory (`mPhysicalMemoryCommit`) and raises PPF; replays reuse
+  the version. `Prepare` fills a texture's copy references from it (`PicaCopyStore::Fill`), so
+  the effect samples what the GPU drew. The pin set keeps the versions it names and releases
+  the rest. A copy that cannot be captured still completes (logged as `texture copy not
+  captured: ...`), leaving the guest's bytes and the textures' zeros: the game never stops on it.
+- **Log:** `pica: first texture copy (... bytes in ... spans, ..., ... ms)`, and in `pica (...)`
+  `texture_copies=N (reused, failed, sampled)`.
+- **Not covered:** a destination overlapping a live render target (the GPU target is not
+  updated), and copy versions across a savestate restore (textures keep zeros until the next
+  copy).
+- **Test:** `oot3d_deko3d_backend_tests` `TestRawTextureCopy` (walk, source choice, encoded
+  bytes, texture fill, pin release). Console check: the player's save at that cutscene.
+
 ## How to build (Linux)
 
 1. devkitPro (`switch-dev switch-sdl2 switch-mesa switch-glad switch-zlib`), `cmake`, Python 3 with `capstone`.

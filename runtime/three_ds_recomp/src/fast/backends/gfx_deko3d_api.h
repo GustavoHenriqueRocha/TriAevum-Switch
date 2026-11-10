@@ -72,6 +72,9 @@ struct Deko3dBackendCounters {
     uint64_t PicaTransfers = 0;
     uint64_t PicaTransfersRepeated = 0; // identical copy of an unchanged source (GL lean)
     uint64_t PicaTransfersRejected = 0;
+    uint64_t PicaTextureCopies = 0;       // raw copies out of a GPU target, captured (gfx_deko3d_pica_copies.h)
+    uint64_t PicaTextureCopiesReused = 0; // a replay of a captured copy
+    uint64_t PicaTextureCopiesFailed = 0; // completed without bytes (logged)
     uint64_t PicaScanouts = 0;
     uint64_t PicaFills = 0;
     uint64_t PicaClears = 0;
@@ -137,6 +140,10 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     bool SubmitPicaDraw(const GfxNativePicaDrawView& draw, std::string* error = nullptr) override;
     bool SubmitPicaDisplayTransfer(const GfxNativePicaDisplayTransferView& transfer,
                                    std::string* error = nullptr) override;
+    // deko3d keeps no GPU image per raw copy, only each version's bytes
+    // (gfx_deko3d_pica_copies.h): the set says which versions draws may still sample.
+    bool SetPinnedPicaTextureCopies(std::span<const Renderer3ds::PicaTextureCopyReference> copies,
+                                    std::string* error = nullptr) override;
     bool ClearPicaRenderTarget(uint64_t renderTargetNamespace, uint32_t colorPhysicalAddress,
                                std::string* error = nullptr) override;
     bool SubmitPicaMemoryFill(const GfxNativePicaMemoryFillView& fill, std::string* error = nullptr) override;
@@ -412,6 +419,13 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     // Draws the culled tufts of this frame's sources into `target`, once per
     // target and frame, if its opaque world and sources were drawn this frame.
     void DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target, Oot3d::GrassDrawPoint point);
+    // SubmitPicaDisplayTransfer of a raw TextureCopy (TextureCopyBytes != 0).
+    bool SubmitPicaTextureCopy(const GfxNativePicaDisplayTransferView& transfer, std::string* error);
+    // The copy's destination bytes, or why it has none.
+    const char* CapturePicaTextureCopy(const GfxNativePicaDisplayTransferView& transfer,
+                                       Deko3d::PicaCopyStore::Version& version);
+    std::vector<uint8_t> mCopyRgba;    // a raw copy's source target read back
+    std::vector<uint32_t> mCopyDepth;
 };
 
 namespace Deko3d {

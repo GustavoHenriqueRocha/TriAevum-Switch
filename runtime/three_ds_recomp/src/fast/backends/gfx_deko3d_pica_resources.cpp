@@ -1108,7 +1108,14 @@ bool PicaResources::Prepare(const GfxNativePicaDrawView& draw, PicaDrawResources
                 ++mStats.ShadowFallbacks;
                 out.Textures[texture.Slot] = dkMakeTextureHandle(kFallbackIntegerImage, kNearestSampler);
                 break;
-            case PicaTextureUse::Color: out.Textures[texture.Slot] = TextureHandle(texture, menuDraw); break;
+            case PicaTextureUse::Color:
+                if (!texture.CopyReferences.empty() && mCopies.Fill(texture, mCopyScratch, mCopyView)) {
+                    ++mStats.CopiedTextures;
+                    out.Textures[texture.Slot] = TextureHandle(mCopyView, menuDraw);
+                } else {
+                    out.Textures[texture.Slot] = TextureHandle(texture, menuDraw);
+                }
+                break;
         }
     }
     out.LightingLut = draw.LightingLut.PackedEntries.empty()

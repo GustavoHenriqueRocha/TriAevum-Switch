@@ -1,6 +1,7 @@
 // Pure parts of the deko3d backend (docs/DEKO3D_PROGRESS.md): what runs
 // without a GPU is tested here on the host.
 #include "fast/backends/gfx_deko3d.h"
+#include "fast/backends/gfx_deko3d_pica_copies.h"
 #include "fast/backends/gfx_deko3d_pica_pipeline.h"
 #include "fast/backends/gfx_deko3d_pica_snapshot.h"
 #include "fast/backends/gfx_deko3d_pica_plan.h"
@@ -916,8 +917,99 @@ void TestUiPlan() {
   Require(ClipYSwizzleNegates(true) && !ClipYSwizzleNegates(false), "NegativeY swizzle only with deko3d_flip_y");
 }
 
+// A raw TextureCopy out of a GPU target (11/10, 0.2.2 player log: "native PICA
+// copy retention failed: rendering backend does not pin native PICA texture
+// copies" at a cutscene): its walk, its source, its bytes, and what a texture
+// over its destination samples.
+void TestRawTextureCopy() {
+  using namespace Fast::Deko3d;
+  Fast::Renderer3ds::PicaDisplayTransferView copy;
+  copy.InputPhysicalAddress = 0x18000000U;
+  copy.OutputPhysicalAddress = 0x18100000U;
+  copy.TextureCopyBytes = 192U;
+  copy.InputWidth = 4U;  // 64-byte input lines
+  copy.InputHeight = 2U; // with 32 bytes between them
+  copy.OutputWidth = 4U;
+  copy.OutputHeight = 0U; // one output line
+  PicaRawCopyWalk walk;
+  Require(WalkPicaRawCopy(copy, walk) == nullptr, "copy walk");
+  Require(walk.Spans.size() == 3U && walk.Spans[0].SourceAddress == 0x18000000U &&
+              walk.Spans[0].DestinationAddress == 0x18100000U && walk.Spans[0].ByteCount == 64U &&
+              walk.Spans[1].SourceAddress == 0x18000060U && walk.Spans[1].DestinationAddress == 0x18100040U &&
+              walk.Spans[2].SourceAddress == 0x180000C0U && walk.Spans[2].DestinationAddress == 0x18100080U,
+          "input lines skip their gap, the output is contiguous");
+  Require(walk.InputEnd == 0x18000100U && walk.OutputEnd == 0x181000C0U, "copy extents");
+  copy.TextureCopyBytes = 15U;
+  Require(WalkPicaRawCopy(copy, walk) != nullptr, "under 16 bytes copies nothing");
+
+  PicaTargetKey key;
+  key.Namespace = 7U;
+  key.ColorAddress = 0x18000000U;
+  key.Width = 8U;
+  key.Height = 8U;
+  key.ColorFormat = 0U; // RGBA8: 256 bytes
+  Require(PicaTargetHoldsCopyInput(key, 7U, 0x18000040U, 0x18000100U), "input inside the target");
+  Require(!PicaTargetHoldsCopyInput(key, 7U, 0x18000040U, 0x18000101U), "input past the target");
+  Require(!PicaTargetHoldsCopyInput(key, 8U, 0x18000040U, 0x18000100U), "another namespace");
+
+  // An 8x8 target read back at 2x: its bytes are what EncodePicaFramebuffer
+  // makes of the read-back, span by span.
+  std::vector<uint8_t> rgba(16U * 16U * 4U);
+  for (size_t i = 0; i < rgba.size(); ++i) rgba[i] = static_cast<uint8_t>(i * 7U + 3U);
+  const auto native = Fast::Renderer3ds::EncodePicaFramebuffer(rgba, 16U, 16U, 8U, 8U, 0U);
+  const std::vector<Fast::Renderer3ds::PicaRawCopySpan> spans = {{0x18000010U, 0x18100000U, 32U},
+                                                                 {0x180000F0U, 0x18100020U, 16U}};
+  std::vector<uint8_t> bytes;
+  Require(EncodePicaRawCopy(rgba, 16U, 16U, key, spans, bytes) == nullptr && bytes.size() == 48U &&
+              std::equal(bytes.begin(), bytes.begin() + 32, native.begin() + 0x10) &&
+              std::equal(bytes.begin() + 32, bytes.end(), native.begin() + 0xF0),
+          "copy bytes are the encoded target's");
+  const std::vector<Fast::Renderer3ds::PicaRawCopySpan> outside = {{0x180000F8U, 0x18100000U, 16U}};
+  Require(EncodePicaRawCopy(rgba, 16U, 16U, key, outside, bytes) != nullptr, "a span past the target");
+
+  // A 32-byte texture at 0x2000: CPU-owned bytes there (0xAA), zeros where
+  // copy 5 owns 0x2008..0x2018; copy 5 wrote 0x2004..0x200C and 0x200C..0x201C.
+  PicaCopyStore store;
+  PicaCopyStore::Version version;
+  version.Spans = {{0U, 0x2004U, 8U}, {0U, 0x200CU, 16U}};
+  for (uint8_t i = 0; i < 24U; ++i) version.Bytes.push_back(static_cast<uint8_t>(0x10U + i));
+  store.Put(5U, version);
+  std::vector<uint8_t> base(32U, 0U);
+  for (size_t i = 0; i < 8U; ++i) base[i] = 0xAAU;
+  const Fast::Renderer3ds::PicaTextureCopyReference reference{5U, 0U, 0x2008U, 16U};
+  Fast::Renderer3ds::PicaTextureView view;
+  view.PhysicalAddress = 0x2000U;
+  view.NativeBytes = base;
+  view.NativeContentHashAvailable = true;
+  view.CopyReferences = std::span(&reference, 1U);
+  std::vector<uint8_t> scratch;
+  Fast::Renderer3ds::PicaTextureView filled;
+  Require(store.Fill(view, scratch, filled), "a captured copy fills the texture");
+  bool expected = filled.NativeBytes.size() == 32U && !filled.NativeContentHashAvailable;
+  for (size_t i = 0; i < 32U && expected; ++i) {
+    const uint8_t want = i < 8U ? 0xAAU : i < 12U ? static_cast<uint8_t>(0x10U + i - 4U)
+                         : i < 24U ? static_cast<uint8_t>(0x18U + i - 12U)
+                                   : 0U;
+    expected = filled.NativeBytes[i] == want;
+  }
+  Require(expected, "only the referenced bytes change, from the version's spans");
+  const Fast::Renderer3ds::PicaTextureCopyReference uncaptured{6U, 0U, 0x2008U, 16U};
+  view.CopyReferences = std::span(&uncaptured, 1U);
+  Require(!store.Fill(view, scratch, filled), "an uncaptured copy keeps the zeros");
+
+  store.Put(6U, version);
+  store.MarkMaterialized(5U);
+  Require(store.Find(5U)->Materialized && !store.Find(6U)->Materialized, "materialized per version");
+  store.Retain(std::span(&reference, 1U));
+  Require(store.Count() == 1U && store.Find(5U) != nullptr && store.Find(6U) == nullptr,
+          "versions no pinned reference names go");
+  store.Retain({});
+  Require(store.Count() == 0U, "an empty pin set releases every version");
+}
+
 int main() {
   TestRendererConfigSelection();
+  TestRawTextureCopy();
   TestShaderPack();
   TestDkshScratch();
   TestCommandGuard();

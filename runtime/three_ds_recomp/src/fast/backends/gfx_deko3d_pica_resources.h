@@ -13,6 +13,7 @@
 // for the slot, so no in-flight frame can still read an evicted image.
 
 #if defined(__SWITCH__)
+#include "fast/backends/gfx_deko3d_pica_copies.h"
 #include "fast/backends/gfx_deko3d_pica_plan.h"
 #include "fast/backends/gfx_rendering_api.h"
 #include "gfx_deko3d_device.h"
@@ -38,6 +39,7 @@ struct PicaResourceStats {
     uint64_t TexturesPredecoded = 0; // mips from the plan worker
     uint64_t TextureFailures = 0;    // decode/allocation failures (fallback used)
     uint64_t ShadowFallbacks = 0;    // Shadow2D textures (not in the first version)
+    uint64_t CopiedTextures = 0;     // textures over a raw copy, with its captured bytes (gfx_deko3d_pica_copies.h)
     uint64_t UnsupportedWraps = 0;   // clamp-to-border/asymmetric (clamp to edge used)
     uint64_t LutsCreated = 0;
     uint64_t Samplers = 0;
@@ -174,6 +176,8 @@ class PicaResources {
     void RequestInvalidate() noexcept { mInvalidate = true; }
 
     [[nodiscard]] const PicaResourceStats& Stats() const noexcept { return mStats; }
+    // Raw copy versions a texture over a copy destination takes its bytes from.
+    [[nodiscard]] PicaCopyStore& Copies() noexcept { return mCopies; }
     // The current scene's `world pack` line (frame statistics); nothing
     // without the pack or before the first scene.
     void LogSceneProgress() {
@@ -283,6 +287,9 @@ class PicaResources {
     ::Oot3d::Renderer::TexturePackRebuildBudget mPackRebuilds{};
 
     Device* mDevice = nullptr;
+    PicaCopyStore mCopies;
+    std::vector<uint8_t> mCopyScratch; // a copied texture's bytes while TextureHandle uploads them
+    Renderer3ds::PicaTextureView mCopyView;
     DkMemBlock mDescriptors = nullptr; // image descriptors, then sampler descriptors
     DkImageDescriptor* mImageDescriptors = nullptr;
     DkSamplerDescriptor* mSamplerDescriptors = nullptr;
