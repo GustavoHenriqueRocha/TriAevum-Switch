@@ -13,6 +13,7 @@
 // principal; o provedor GSP roda sempre (como sombra quando o perfil usa os
 // PCs do OoT3D) para comparar contagem e ritmo. Sai em report.json
 // ("frame_boundary") e no resumo do stderr.
+#include "ctr_dsp_audio_frames.h"
 #include "ctr_frame_boundary.h"
 #include "ctr_title_profile.h"
 #include "ctr_library_natives.h"
@@ -539,34 +540,31 @@ int main(int argc, char** argv) {
                 commandBufferView));
 
         auto result = RunUntilGuestWait(process);
-        // Quadros de áudio do DSP (um a cada 160 amostras), como a janela faz
-        // em DeliverDspAudioFrames: mix HLE, interrupção do DSP e as threads
-        // que ela acorda. Sem isto a thread de som nunca roda e o MK7 parava
-        // com a thread principal esperando a resposta da fila de comandos do
-        // som (0x3d9abc -> 0x2750b0), sem nenhum draw.
+        // Quadros de áudio do DSP, como a janela (ctr_dsp_audio_frames.h):
+        // sem eles o MK7 parava sem nenhum draw.
         Oot3dNativeGame::NativeA32DspHle dspHle(
             Oot3dNativeGame::BuildNativeA32DspPhysicalRegions(*manifest));
-        std::vector<int16_t> dspAudioSamples;
         uint64_t dspAudioFramesDelivered = 0;
         const auto deliverDspAudioFrames = [&]() {
-            const uint32_t frames = hostServices.TakePendingDspAudioFrames();
-            for (uint32_t frame = 0;
-                 frame < frames &&
-                 result.Kind ==
-                     Oot3dNativeGame::NativeA32ProcessRunKind::Waiting;
-                 ++frame) {
-                dspAudioSamples.clear();
-                if (!dspHle.ProcessFrame(process.Memory(), dspAudioSamples,
-                                         &error)) {
-                    throw std::runtime_error("native DSP HLE mix failed: " +
-                                             error);
-                }
-                if (!hostServices.SignalDspAudioFrame()) {
-                    break;
-                }
-                ++dspAudioFramesDelivered;
-                result = RunUntilGuestWait(process);
+            if (result.Kind !=
+                Oot3dNativeGame::NativeA32ProcessRunKind::Waiting) {
+                return;
             }
+            const auto delivered =
+                Oot3dNativeGame::DeliverPendingDspAudioFrames(
+                    hostServices, dspHle, process.Memory(),
+                    [&]() {
+                        result = RunUntilGuestWait(process);
+                        return result.Kind == Oot3dNativeGame::
+                                                  NativeA32ProcessRunKind::
+                                                      Waiting;
+                    },
+                    &error);
+            if (!delivered.has_value()) {
+                throw std::runtime_error("native DSP HLE mix failed: " +
+                                         error);
+            }
+            dspAudioFramesDelivered += *delivered;
         };
         std::vector<Oot3dNativeGame::Oot3dPicaDrawSubmission> retainedDraws;
         GpuWorkCompletionStats gpuWork;

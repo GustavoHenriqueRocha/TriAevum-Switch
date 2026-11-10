@@ -745,11 +745,15 @@ GUARDS = [
           r'CreateHandle\(.*?"event:cecd_info".*?Write32\(commandBuffer \+ 12U, handle\)',
           "oot3d_native_a32_ctr_host_tests (TestCecdEventHandles)"),
     Guard("MK7 no probe: thread principal parada na fila de comandos do som (o probe nunca entregava quadros de áudio do DSP)",
+          "tools/oot3d/native_game_runtime/ctr_dsp_audio_frames.cpp",
+          r'host\.TakePendingDspAudioFrames\(\);.*?'
+          r'dspHle\.ProcessFrame\(memory, samples, error\).*?'
+          r'host\.SignalDspAudioFrame\(\).*?\+\+delivered;.*?runGuest\(\)',
+          "oot3d_native_a32_ctr_host_tests (TestDspAudioFrameDeliveryWakesSoundThread)"),
+    Guard("boot probe deixou de entregar os quadros de áudio do DSP antes do VBlank (MK7 sem draws)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_boot_probe.cpp",
-          r'hostServices\.TakePendingDspAudioFrames\(\).*?'
-          r'dspHle\.ProcessFrame\(process\.Memory\(\).*?'
-          r'hostServices\.SignalDspAudioFrame\(\).*?RunUntilGuestWait\(process\)',
-          "probe do MK7: dsp_audio_frames no report.json"),
+          r'Oot3dNativeGame::DeliverPendingDspAudioFrames\(.*?'
+          r'deliverDspAudioFrames\(\);.*?hostServices\.SignalVBlank'),
     Guard("rotinas nativas da biblioteca do RVCT ligadas no OoT3D (só no título genérico)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'std::vector<Oot3dNativeGame::CtrLibraryNativeEntry> libraryNatives;\s+if \(genericTitle\) \{'),

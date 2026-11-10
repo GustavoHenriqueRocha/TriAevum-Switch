@@ -49,6 +49,7 @@ set(_oot3d_native_a32_ctr_host_sources
     tools/oot3d/native_game_runtime/oot3d_native_a32_guest_state_dump.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_dsp_hle.cpp
     tools/oot3d/native_game_runtime/oot3d_native_a32_dsp_memory_adapter.cpp
+    tools/oot3d/native_game_runtime/ctr_dsp_audio_frames.cpp
     tools/oot3d/third_party/azahar_audio/audio_core/codec.cpp
     tools/oot3d/third_party/azahar_audio/audio_core/interpolate.cpp
     tools/oot3d/third_party/azahar_audio/audio_core/hle/filter.cpp

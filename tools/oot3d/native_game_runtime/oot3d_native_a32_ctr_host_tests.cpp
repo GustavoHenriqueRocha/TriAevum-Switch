@@ -1,3 +1,4 @@
+#include "ctr_dsp_audio_frames.h"
 #include "ctr_frame_boundary.h"
 #include "ctr_title_profile.h"
 #include "ctr_library_natives.h"
@@ -1023,6 +1024,74 @@ void TestCecdEventHandles() {
                     guest.State(1).r[0] == kTestResultTimeout,
                 "the cecd:u event is not a valid, unsignaled event");
     }
+}
+
+// O boot probe não entregava os quadros de áudio do DSP: a thread de som do
+// MK7 esperava a interrupção do DSP para sempre (36f8cbf2). Uma thread espera
+// o evento da pipe de áudio; passado um quadro, a entrega faz o mix, sinaliza
+// o DSP e roda o guest, e a thread acorda.
+void TestDspAudioFrameDeliveryWakesSoundThread() {
+    NativeA32CtrHostServices host(MakeConfig());
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    std::string error;
+    // As duas regiões de memória compartilhada do DSP (0x1FF50000/0x1FF70000);
+    // regiões só antes de criar as threads.
+    Require(process.MapRegion(
+                {"dsp", 0x1FF50000, 0x30000, true, false, {}}, &error),
+            "cannot map DSP shared memory");
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    auto& memory = process.Memory();
+    const uint32_t srv = OpenSrv(guest);
+    uint32_t dsp = 0;
+    Require(GetServiceHandle(guest, srv, "dsp::DSP", &dsp) ==
+                    NativeA32HostAction::Resume && dsp != 0,
+            "dsp::DSP was not opened");
+    guest.State(0).r[1] = 0; // one-shot
+    Require(guest.Svc(0, 0x17) == NativeA32HostAction::Resume,
+            "cannot create the DSP pipe event");
+    const uint32_t pipeEvent = guest.State(0).r[1];
+    const auto dspRequest = [&](std::initializer_list<uint32_t> words) {
+        uint32_t address = 0x1FF82080;
+        for (const uint32_t word : words) {
+            Require(memory.Write32(address, word), "cannot write DSP request");
+            address += 4;
+        }
+        guest.State(0).r[0] = dsp;
+        Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume,
+                "DSP request did not resume");
+    };
+    dspRequest({0x00150082, 2, 2, 0, pipeEvent}); // RegisterInterruptEvents
+    constexpr std::array<uint8_t, 4> initialize{0, 0, 0xA5, 0x5A};
+    Require(memory.WriteBytes(0x0FF00200, initialize),
+            "cannot write DSP initialize command");
+    dspRequest({0x000D0082, 2, 4, 0x00010402, 0x0FF00200}); // WriteProcessPipe
+    Require(guest.Wait1(1, pipeEvent, 0) == NativeA32HostAction::Resume &&
+                guest.State(1).r[0] == 0,
+            "DSP initialization did not signal the pipe event");
+    Require(guest.Wait1(1, pipeEvent, -1) == NativeA32HostAction::Wait,
+            "the sound thread did not wait for the next DSP frame");
+
+    host.AdvanceSystemTicks(NativeA32CtrHostServices::DspAudioFrameTicks);
+    NativeA32DspHle dspHle({});
+    uint32_t guestRuns = 0;
+    const auto delivered = DeliverPendingDspAudioFrames(
+        host, dspHle, memory,
+        [&guestRuns] {
+            ++guestRuns;
+            return true;
+        },
+        &error);
+    Require(delivered == std::optional<uint32_t>(1U) && guestRuns == 1U,
+            "the pending DSP audio frame was not delivered: " + error);
+    Require(process.ThreadStatus(1) != NativeA32ThreadStatus::Waiting &&
+                guest.State(1).r[0] == 0,
+            "the DSP audio frame did not wake the sound thread");
+    Require(DeliverPendingDspAudioFrames(host, dspHle, memory,
+                                         [] { return true; }, &error) ==
+                std::optional<uint32_t>(0U),
+            "a DSP audio frame was delivered twice");
 }
 
 // --- Rotinas da biblioteca do RVCT pelos bytes (ctr_library_natives.h) -------
@@ -2159,6 +2228,7 @@ int main() {
     TestOot3dProfileWaitsStayInfinite();
     TestUnknownServicesAreLoggedStubs();
     TestCecdEventHandles();
+    TestDspAudioFrameDeliveryWakesSoundThread();
     TestThreadQueries();
     TestCreateMemoryBlockOfGuestMemory();
     TestAptGetSharedFont();
