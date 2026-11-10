@@ -1779,6 +1779,26 @@ NativeA32HostResult NativeA32CtrHostServices::HandleStubServiceRequest(
         line << "] -> stub: sucesso";
         std::fprintf(stderr, "%s\n", line.str().c_str());
     }
+    if ((service == "stub:cecd:u" || service == "stub:cecd:s") &&
+        (command == 0x000FU || command == 0x0010U)) {
+        // GetCecInfoEventHandle / GetChangeStateEventHandle devolvem um evento
+        // (Azahar cecd.cpp). Zerado, o handle era 0 e o MK7 esperava nele.
+        const uint32_t handle = CreateHandle(
+            command == 0x000FU ? "event:cecd_info" : "event:cecd_change_state");
+        if (memory.Write32(commandBuffer, (command << 16U) | 0x42U) &&
+            memory.Write32(commandBuffer + 4U, kResultSuccess) &&
+            memory.Write32(commandBuffer + 8U, kCopyHandleDescriptor) &&
+            memory.Write32(commandBuffer + 12U, handle)) {
+            event.Name += ":stub:cmd=0x";
+            AppendHex8(event.Name, command);
+            event.Name += ":event";
+            state.r[0] = kResultSuccess;
+            event.Handled = true;
+            mSvcEvents.push_back(std::move(event));
+            return {NativeA32HostAction::Resume};
+        }
+        CloseHandle(handle);
+    }
     bool written = memory.Write32(commandBuffer, (command << 16U) | 0x40U) &&
                    memory.Write32(commandBuffer + 4U, kResultSuccess);
     for (uint32_t word = 2U; written && word < 16U; ++word) {

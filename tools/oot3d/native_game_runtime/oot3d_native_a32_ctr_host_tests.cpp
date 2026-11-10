@@ -986,6 +986,45 @@ void TestUnknownServicesAreLoggedStubs() {
             "the OoT3D profile stubbed an unknown service");
 }
 
+// cecd:u 0x000F (GetCecInfoEventHandle) e 0x0010 (GetChangeStateEventHandle)
+// devolvem um evento (Azahar cecd.cpp). O stub zerado dava handle 0 e o MK7
+// esperava nele junto com outro evento: WaitSynchronizationN parava o boot.
+void TestCecdEventHandles() {
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.StubUnknownServices = true;
+    config.KernelWaitTimeouts = true;
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    auto& memory = process.Memory();
+    const uint32_t srv = OpenSrv(guest);
+    uint32_t cecd = 0;
+    Require(GetServiceHandle(guest, srv, "cecd:u", &cecd) ==
+                    NativeA32HostAction::Resume && cecd != 0,
+            "cecd:u was not opened");
+    for (const uint32_t command : {0x000FU, 0x0010U}) {
+        Require(memory.Write32(0x1FF82080, command << 16U),
+                "cannot write cecd:u request");
+        guest.State(0).r[0] = cecd;
+        uint32_t header = 0;
+        uint32_t result = 1;
+        uint32_t descriptor = 1;
+        uint32_t handle = 0;
+        Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume &&
+                    memory.Read32(0x1FF82080, &header) &&
+                    header == ((command << 16U) | 0x42U) &&
+                    memory.Read32(0x1FF82084, &result) && result == 0 &&
+                    memory.Read32(0x1FF82088, &descriptor) && descriptor == 0 &&
+                    memory.Read32(0x1FF8208C, &handle) && handle != 0,
+                "cecd:u did not return an event handle");
+        Require(guest.Wait1(1, handle, 0) == NativeA32HostAction::Resume &&
+                    guest.State(1).r[0] == kTestResultTimeout,
+                "the cecd:u event is not a valid, unsignaled event");
+    }
+}
+
 // --- Rotinas da biblioteca do RVCT pelos bytes (ctr_library_natives.h) -------
 // O Mario parava no boot da janela em MissingBlock 0x003A0D38: __aeabi_f2ulz
 // chama o helper __fpl_* com uma palavra literal depois do BL, a descoberta
@@ -2113,6 +2152,7 @@ int main() {
     TestGuestKernelTimers();
     TestOot3dProfileWaitsStayInfinite();
     TestUnknownServicesAreLoggedStubs();
+    TestCecdEventHandles();
     TestThreadQueries();
     TestCreateMemoryBlockOfGuestMemory();
     TestAptGetSharedFont();

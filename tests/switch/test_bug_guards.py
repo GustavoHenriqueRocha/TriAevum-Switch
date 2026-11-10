@@ -613,6 +613,11 @@ GUARDS = [
           r'if \(record == nullptr && mConfig\.KernelWaitTimeouts\) \{.*?'
           r'state\.r\[0\] = kResultInvalidHandle;.*?return \{NativeA32HostAction::Resume\};',
           "oot3d_native_a32_ctr_host_tests (TestWaitOnInvalidHandle)"),
+    Guard("MK7 esperava num handle 0 do stub cecd:u: GetCecInfoEventHandle/GetChangeStateEventHandle devolvem evento",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host.cpp",
+          r'service == "stub:cecd:u".*?command == 0x000FU \|\| command == 0x0010U.*?'
+          r'CreateHandle\(.*?"event:cecd_info".*?Write32\(commandBuffer \+ 12U, handle\)',
+          "oot3d_native_a32_ctr_host_tests (TestCecdEventHandles)"),
     Guard("rotinas nativas da biblioteca do RVCT ligadas no OoT3D (só no título genérico)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'std::vector<Oot3dNativeGame::CtrLibraryNativeEntry> libraryNatives;\s+if \(genericTitle\) \{'),
