@@ -17,6 +17,8 @@
 #include "ctr_title_profile.h"
 #include "ctr_library_natives.h"
 #include "oot3d_native_a32_ctr_host.h"
+#include "oot3d_native_a32_dsp_hle.h"
+#include "oot3d_native_a32_dsp_memory_adapter.h"
 #include "oot3d_native_a32_process_image.h"
 #include "oot3d_native_pica_fragment_shader_gen.h"
 #include "oot3d_native_pica_frontend.h"
@@ -537,6 +539,35 @@ int main(int argc, char** argv) {
                 commandBufferView));
 
         auto result = RunUntilGuestWait(process);
+        // Quadros de áudio do DSP (um a cada 160 amostras), como a janela faz
+        // em DeliverDspAudioFrames: mix HLE, interrupção do DSP e as threads
+        // que ela acorda. Sem isto a thread de som nunca roda e o MK7 parava
+        // com a thread principal esperando a resposta da fila de comandos do
+        // som (0x3d9abc -> 0x2750b0), sem nenhum draw.
+        Oot3dNativeGame::NativeA32DspHle dspHle(
+            Oot3dNativeGame::BuildNativeA32DspPhysicalRegions(*manifest));
+        std::vector<int16_t> dspAudioSamples;
+        uint64_t dspAudioFramesDelivered = 0;
+        const auto deliverDspAudioFrames = [&]() {
+            const uint32_t frames = hostServices.TakePendingDspAudioFrames();
+            for (uint32_t frame = 0;
+                 frame < frames &&
+                 result.Kind ==
+                     Oot3dNativeGame::NativeA32ProcessRunKind::Waiting;
+                 ++frame) {
+                dspAudioSamples.clear();
+                if (!dspHle.ProcessFrame(process.Memory(), dspAudioSamples,
+                                         &error)) {
+                    throw std::runtime_error("native DSP HLE mix failed: " +
+                                             error);
+                }
+                if (!hostServices.SignalDspAudioFrame()) {
+                    break;
+                }
+                ++dspAudioFramesDelivered;
+                result = RunUntilGuestWait(process);
+            }
+        };
         std::vector<Oot3dNativeGame::Oot3dPicaDrawSubmission> retainedDraws;
         GpuWorkCompletionStats gpuWork;
         const auto completeGpuWork = [&]() {
@@ -567,6 +598,11 @@ int main(int argc, char** argv) {
             refreshTickRemainder %= kDisplayRefreshRate;
             AdvanceGuestClockTo(process, hostServices, result,
                                 nextVblankTick);
+            if (result.Kind ==
+                Oot3dNativeGame::NativeA32ProcessRunKind::Faulted) {
+                break;
+            }
+            deliverDspAudioFrames();
             if (result.Kind ==
                 Oot3dNativeGame::NativeA32ProcessRunKind::Faulted) {
                 break;
@@ -976,6 +1012,7 @@ int main(int argc, char** argv) {
               {"kernel_wait_timeouts", profile.KernelWaitTimeouts}}},
             {"whole_aot", wholeAot},
             {"frame_boundary", std::move(frameBoundaryReport)},
+            {"dsp_audio_frames", dspAudioFramesDelivered},
             {"gpu_work_completion",
              arguments->CompleteGpuWork
                  ? nlohmann::json{{"rounds", gpuWork.Rounds},

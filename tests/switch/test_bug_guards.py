@@ -744,6 +744,12 @@ GUARDS = [
           r'service == "stub:cecd:u".*?command == 0x000FU \|\| command == 0x0010U.*?'
           r'CreateHandle\(.*?"event:cecd_info".*?Write32\(commandBuffer \+ 12U, handle\)',
           "oot3d_native_a32_ctr_host_tests (TestCecdEventHandles)"),
+    Guard("MK7 no probe: thread principal parada na fila de comandos do som (o probe nunca entregava quadros de áudio do DSP)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_boot_probe.cpp",
+          r'hostServices\.TakePendingDspAudioFrames\(\).*?'
+          r'dspHle\.ProcessFrame\(process\.Memory\(\).*?'
+          r'hostServices\.SignalDspAudioFrame\(\).*?RunUntilGuestWait\(process\)',
+          "probe do MK7: dsp_audio_frames no report.json"),
     Guard("rotinas nativas da biblioteca do RVCT ligadas no OoT3D (só no título genérico)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'std::vector<Oot3dNativeGame::CtrLibraryNativeEntry> libraryNatives;\s+if \(genericTitle\) \{'),
