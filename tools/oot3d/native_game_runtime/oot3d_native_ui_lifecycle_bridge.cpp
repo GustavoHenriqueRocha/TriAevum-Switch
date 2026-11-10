@@ -190,6 +190,7 @@ bool Oot3dNativeUiLifecycleBridge::ApplyTopScreenGuestHook(uint32_t guestPc,
     // Native submit refreshes counter geometry before the next draw.
     // TopScreen 2.1.1 resets its guard (005E3D1C) in update 005D4A8C.
     mTopScreenPauseProjection.QuestDrawModelAdjusted = false;
+    mTopScreenQuestBCopies.clear();
     ++mStats.topscreen_quest_hook_calls;
     TopScreenQuestModelTransformStats stats;
     std::string error;
@@ -213,6 +214,13 @@ bool Oot3dNativeUiLifecycleBridge::ApplyTopScreenGuestHook(uint32_t guestPc,
       return true;
     }
     mStats.topscreen_quest_transforms += stats.DrawModelsTransformed;
+    // The host HUD draws the B icon and digits above its B circle, as 3.0's
+    // native order does; only while that HUD is composed.
+    TopScreenHudCompositorGate gate;
+    if (mTopScreenConfig.RenderHud && ReadTopScreenHudCompositorGate(mMemory, &gate, &error) &&
+        gate.Draw && !CaptureTopScreenQuestBButtonCopies(mMemory, mTopScreenConfig,
+                                                         &mTopScreenQuestBCopies, &error))
+      ++mStats.topscreen_quest_hook_failures;
     return true;
   }
   if (guestPc != kTopScreenQuestMaterializedHook)
@@ -360,8 +368,10 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
       if (!mTopScreenConfig.RenderDpadIcons) {
         touchGeometry.Alpha[5] = 0.0F;
       }
+      const std::size_t clusterStart = output.size();
       (void)AppendTopScreenTouchClusterPresentation(touchGeometry, *texture,
                                                     output);
+      const std::size_t clusterEnd = output.size();
       TopScreenAuxiliaryTouchInputs auxiliaryInputs;
       std::string auxiliaryInputError;
       if (ReadTopScreenAuxiliaryTouchInputs(mMemory, &auxiliaryInputs,
@@ -388,9 +398,18 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
             mMemory, touchState.VerticalOffsets, touchState.Alpha, *itemIcons,
             output, &itemCopyError, false, &itemOpacity);
       }
+      // 3.0 0x005DCC90: the cross takes 0x005CCF6C on top of the HUD alpha.
+      bool nestedOwner = false;
+      float dpadAlpha = 1.0F;
+      if (ReadTopScreenPlayerNestedOwner(mMemory, &nestedOwner)) {
+        dpadAlpha = ResolveTopScreenDpadGroupAlpha(itemOpacity, nestedOwner);
+        for (std::size_t index = clusterStart; index < clusterEnd; ++index)
+          if (output[index].source_quad == 5U) output[index].color.alpha *= dpadAlpha;
+      }
       TopScreenDpadPresentationState dpadState;
       if (ReadTopScreenDpadPresentationState(mMemory, &dpadState)) {
         dpadState.ItemOpacity = itemOpacity;
+        dpadState.GroupAlpha = dpadAlpha;
         (void)AppendTopScreenDpadPresentation(
             mTopScreenConfig, dpadState, auxiliaryInputs, mTopScreenViewAlpha,
             itemIcons.value_or(oot3d::ui::UiTextureIdentity{}), *texture, output);
@@ -423,6 +442,14 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
       (void)AppendTopScreenMagicMeterPresentation(magic, *texture, output);
     }
     ApplyTopScreenHudScale(output, mTopScreenConfig);
+    if (const auto itemIcons = NativePauseSharedTextureIdentity(
+            oot3d::ui::UiPauseSharedTextureSlot::ItemIcons)) {
+      const auto numberGlyphs = NativePauseSharedTextureIdentity(
+          oot3d::ui::UiPauseSharedTextureSlot::NumberGlyphs);
+      (void)AppendTopScreenQuestBButtonCopiesPresentation(
+          mTopScreenQuestBCopies, *itemIcons,
+          numberGlyphs.value_or(oot3d::ui::UiTextureIdentity{}), output);
+    }
     ApplyTopScreenGameplayCanvas(output);
     std::uint64_t visibleNativeTouchCopies = 0U;
     std::uint64_t visibleHorseStamina = 0U;

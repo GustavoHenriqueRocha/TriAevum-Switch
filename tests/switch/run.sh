@@ -16,6 +16,7 @@ JOBS="${JOBS:-3}"
 
 # Testes de unidade do runtime do Switch (alvos do CMake de host).
 UNIT_TESTS=(
+    oot3d_config_file_replace_tests
     oot3d_deko3d_backend_tests
     oot3d_graphics_settings_schedule_tests
     oot3d_debug_menu_tests
@@ -42,13 +43,17 @@ UNIT_TESTS=(
     oot3d_native_pica_visual_frame_equivalence_tests
     oot3d_native_render_command_stream_tests
     oot3d_native_render_shutdown_tests
+    oot3d_native_status_file_tests
     oot3d_pica_etc1_transcode_tests
     oot3d_pica_texture_predecode_tests
+    oot3d_switch_motion_tests
+    oot3d_rom_import_tests
     oot3d_switch_thread_layout_tests
     oot3d_top_screen_mod_profile_tests
     oot3d_top_screen_pause_transaction_tests
     oot3d_top_screen_texture_overrides_tests
     triaevum_audio_service_tests
+    three_ds_recomp_input_tests
 )
 
 pass=0; fail=0; skip=0; failed=()

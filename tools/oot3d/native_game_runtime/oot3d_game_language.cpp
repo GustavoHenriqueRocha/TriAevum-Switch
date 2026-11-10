@@ -164,6 +164,7 @@ GameLanguageSettings::GameLanguageSettings(std::filesystem::path path,
     throw std::runtime_error("Empty game language list");
   mSelected = mAvailable.front().Code;
   try {
+    Ship::RestoreInterruptedReplace(mPath);
     if (std::filesystem::exists(mPath)) {
       std::ifstream file(mPath);
       const auto doc = nlohmann::json::parse(file);

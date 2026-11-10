@@ -28,6 +28,101 @@ class Guard:
 
 
 GUARDS = [
+    # --- 08/11: "cannot replace TopScreen UI config: File exists" ao salvar uma opção ---
+    # O FS do Horizon recusa rename() por cima de arquivo existente (EEXIST); o gravador do
+    # TopScreen (e o do cache) só tinham o rename POSIX. Uma troca para todos os gravadores
+    # (ship/config/FileReplace.h): arquivo antigo para <arquivo>.bak, novo no lugar, backup
+    # apagado; um save interrompido é recuperado do .bak ao carregar.
+    Guard("salvar uma opção do TopScreen falhava no Switch: 'cannot replace TopScreen UI config: File exists'",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_config.cpp",
+          r'Ship::RestoreInterruptedReplace\(path\);\s+std::ifstream stream\(path.*?'
+          r'#else\s+.*?Ship::ReplaceFileWithTemporary\(temporary, path\);',
+          "oot3d_config_file_replace_tests (TestTopScreenConfig)",
+          forbid=r'std::filesystem::rename\('),
+    Guard("troca de arquivo no Switch: EEXIST sobre arquivo existente tira o antigo do lugar, põe o novo, "
+          "devolve o antigo se isso falhar; um arquivo que sumiu volta do backup",
+          "runtime/three_ds_recomp/include/ship/config/FileReplace.h",
+          r'std::filesystem::rename\(temporary, target, error\);\s+if \(error != std::errc::file_exists\).*?'
+          r'std::filesystem::rename\(target, backup, error\);.*?'
+          r'std::filesystem::rename\(temporary, target, error\);\s+if \(error\) \{.*?'
+          r'std::filesystem::rename\(backup, target, restore\);.*?'
+          r'RestoreInterruptedReplace\(.*?if \(std::filesystem::exists\(target, error\) \|\| error\)\s+\{\s+return true;'
+          r'\s+\}\s+std::filesystem::rename\(backup, target, error\);',
+          "oot3d_config_file_replace_tests (TestReplace, TestReplaceFailures, TestRecovery)"),
+    Guard("troca de arquivo no Switch: arquivos de cache do renderer são substituídos, não recusados com EEXIST",
+          "runtime/three_ds_recomp/src/fast/renderer/cache_file.cpp",
+          r'#else\s+.*?Ship::ReplaceFileWithTemporary\(temporary, path\)',
+          "oot3d_config_file_replace_tests (TestCacheFileWriter)",
+          forbid=r'std::filesystem::rename\('),
+    Guard("troca de arquivo no Switch: a inicialização recupera um save interrompido do TopScreen/controle antes de checar os arquivos",
+          "tools/oot3d/native_game_runtime/oot3d_native_game_bootstrap.cpp",
+          r'Ship::RestoreInterruptedReplace\(launch\.TopScreenConfigPath\);\s+'
+          r'if \(!std::filesystem::is_regular_file\(launch\.TopScreenConfigPath\)\).*?'
+          r'Ship::RestoreInterruptedReplace\(launch\.ControlConfigPath\);\s+'
+          r'if \(std::filesystem::is_regular_file\(launch\.ControlConfigPath\)\)'),
+    Guard("troca de arquivo no Switch: o arquivo de configurações volta do backup antes de ser lido",
+          "runtime/three_ds_recomp/src/ship/config/Config.cpp",
+          r'void Config::Reload\(\) \{\s+if \(mPath != "None"\) \{\s+RestoreInterruptedReplace\(mPath\);'),
+    Guard("troca de arquivo no Switch: developer-tools.json volta do backup antes de ser lido",
+          "tools/oot3d/native_game_runtime/oot3d_dev_warp.cpp",
+          r'Ship::RestoreInterruptedReplace\(mStorage\);\s+std::error_code exists;'),
+    Guard("troca de arquivo no Switch: o arquivo de idioma volta do backup antes de ser lido",
+          "tools/oot3d/native_game_runtime/oot3d_game_language.cpp",
+          r'Ship::RestoreInterruptedReplace\(mPath\);\s+if \(std::filesystem::exists\(mPath\)\)'),
+    Guard("troca de arquivo no Switch: as preferências de savestate voltam do backup antes de serem lidas",
+          "tools/oot3d/native_game_runtime/oot3d_savestate_library.cpp",
+          r'Ship::RestoreInterruptedReplace\(mPreferencesPath\);\s+std::ifstream input\(mPreferencesPath'),
+    Guard("troca de arquivo no Switch: perfis de ambiente voltam do backup antes de serem lidos",
+          "tools/oot3d/native_game_runtime/oot3d_scene_environment_codec.cpp",
+          r'Ship::RestoreInterruptedReplace\(path\);\s+std::error_code error;\s+'
+          r'file\.Exists = std::filesystem::exists\(path, error\);'),
+    # --- 08/11: correções do HUD do SingleScreen 3.0 do coccofresco (upstream main, 17/10) ---
+    # Ele comparou o port do 3.0 com o mod original no Azahar e corrigiu o que divergia.
+    # Portadas de JohnUzoka/TriAevum-Switch; ac63eb21 e as partes de pausa do 6f478bcc ficaram de fora.
+    Guard("cruz do D-pad ficava opaca onde o 3.0 a deixa cinza (fc5ddfa6: 0x005CCF6C, primeira "
+          "faixa ZR/ZL visível, senão 0,3 com dono aninhado)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'ResolveTopScreenDpadGroupAlpha\(.*?lanes\.ItemZr > 0\.0F \? lanes\.ItemZr : lanes\.ItemZl;.*?'
+          r'std::min\(lane, 1\.0F\);\s+return nestedOwner \? 0\.3F : 1\.0F;',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("cruz do D-pad, ícones e marcas sem o alfa do grupo (fc5ddfa6, 94b293ea)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
+          r'const std::size_t clusterStart = output\.size\(\);.*?'
+          r'ReadTopScreenPlayerNestedOwner\(mMemory, &nestedOwner\).*?'
+          r'source_quad == 5U\) output\[index\]\.color\.alpha \*= dpadAlpha;.*?'
+          r'dpadState\.GroupAlpha = dpadAlpha;',
+          "oot3d_top_screen_mod_profile_tests (apresentação do D-pad)"),
+    Guard("botas/marcas do D-pad opacas na Epona, o 3.0 desenha pela metade (94b293ea, laço 0x005DD78C)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_presentation.cpp",
+          r'p\.color\.alpha \*= state\.ItemOpacity\.Ocarina;\s+else\s+p\.color\.alpha \*= state\.GroupAlpha;.*?'
+          r'std::clamp\(alpha, 0\.0F, 1\.0F\) \* state\.GroupAlpha',
+          "oot3d_top_screen_mod_profile_tests (apresentação do D-pad)"),
+    Guard("anel do A 13% e texto 40% maiores que no 3.0 (5da8aa7c: anel 32 px, texto 0,68, texto "
+          "escondido no modo de HUD alternativo 1/4)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
+          r'if \(!square && context\.ActionLabelHidden\).*?'
+          r'const float size = square \? 32\.0F / width : 0\.68F;\s+for \(auto &vertex : quad\) \{\s+'
+          r'vertex\.X = 288\.0F \+ \(vertex\.X - centerX\) \* size;.*?'
+          r'ActionLabelHidden = alternateHudMode == 1U \|\| alternateHudMode == 4U;',
+          "oot3d_top_screen_mod_profile_tests",
+          forbid=r'\(vertex\.X - centerX\) \* 0\.95F'),
+    Guard("preenchimento translúcido do círculo do B apagava o ícone do B e a munição (d8ffc8f1)",
+          "tools/oot3d/native_game_runtime/oot3d_native_ui_lifecycle_bridge.cpp",
+          r'gate\.Draw && !CaptureTopScreenQuestBButtonCopies\(mMemory, mTopScreenConfig,.*?'
+          r'ApplyTopScreenHudScale\(output, mTopScreenConfig\);.*?'
+          r'AppendTopScreenQuestBButtonCopiesPresentation\(.*?ApplyTopScreenGameplayCanvas\(output\);',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("cópias do B: capturadas em torno de (248, 24) depois da transformação do HUD, quads nativos "
+          "tirados da tela",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
+          r'400\.0F \+ \(248\.0F - 400\.0F\) \* scale - static_cast<float>\(config\.HudMarginX\);.*?'
+          r'vertex\.X \+= 500\.0F - quadX;',
+          "oot3d_top_screen_mod_profile_tests"),
+    Guard("controles da tela de baixo (círculos, rupias, D-pad) ficavam na tela em cutscene (6f478bcc: "
+          "Gameplay_InCsMode esconde o HUD)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_hud.cpp",
+          r'if \(gate->Draw && player != 0U\) \{.*?ReadTopScreenGameplayInCutsceneMode\(.*?gate->Draw = !cutscene;',
+          "oot3d_top_screen_mod_profile_tests"),
     # --- 04/11: mapa da dungeon (pausa, TopScreen) preso no andar em que abre ---
     # 0x00442F38 (PauseDungeonMap_HandleCursorInput) é o cursor de andares por
     # D-pad/analógico (Cima/Baixo mudam o andar via SetSelectedFloor); o toque é
@@ -41,11 +136,13 @@ GUARDS = [
           r'kPauseLowerScreenBlock,\s+kPauseUiNativeUpdateCall,',
           forbid=r'kPauseDungeonMapCursorInput|0x00442F38'),
     # --- 04/11: "cannot replace native control config" ao salvar controle no menu de dev ---
-    # O FS do Horizon não renomeia por cima de arquivo existente (EEXIST): apaga o
-    # destino e renomeia de novo (como o Ship::WriteConfigFileAtomically já fazia).
+    # O FS do Horizon não renomeia por cima de arquivo existente (EEXIST). Desde 08/11 a
+    # troca é a de ship/config/FileReplace.h (backup + recuperação), testada no host.
     Guard("salvar controle no menu de dev falhava no Switch (rename por cima de oot3d_controls.json dá EEXIST)",
           "tools/oot3d/native_game_runtime/oot3d_native_control_config.cpp",
-          r'#if defined\(__SWITCH__\).*?replaceError == std::errc::file_exists.*?std::filesystem::remove\(path'),
+          r'Ship::RestoreInterruptedReplace\(path\);.*?#else\s+.*?Ship::ReplaceFileWithTemporary\(temporary, path\);',
+          "oot3d_config_file_replace_tests (TestControlConfig)",
+          forbid=r'std::filesystem::rename\('),
     Guard("warp de dev não salvava developer-tools.json no Switch (sobrava o .tmp)",
           "tools/oot3d/native_game_runtime/oot3d_dev_warp.cpp",
           r'Ship::WriteConfigFileAtomically\(mStorage,',
@@ -131,6 +228,34 @@ GUARDS = [
     Guard("boot-status ficava em host_frames=1/guest_frames=1 sem cache de geometria (deko3d): parecia guest travado",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
           r'runFrameCount == 1U \|\| gSwitchPicaGeometryCacheObserved \|\|\s*runFrameCount % 600U == 0U'),
+    # --- 08/11: travada de 30-100 ms na thread do jogo a cada 600 quadros (hitches.txt: presents
+    # 600k-3, game_ms bem acima de guest_ms): o heartbeat do boot-status.txt reescrevia o arquivo no SD
+    # dentro do quadro. Vai por uma thread de serviço (config/async_status_writes, 0 = a escrita aqui).
+    Guard("heartbeat do boot-status: postado à thread de serviço, não escrito na thread do jogo (chave ligada)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'runFrameCount % 600U == 0U\) \{.*?if \(asyncStatusWrites\) \{\s+'
+          r'PostSwitchBootStage\("runtime_running"\);\s+\} else \{\s+WriteSwitchBootStage\("runtime_running"\);',
+          test="oot3d_native_status_file_tests (TestPostNeverWaits)"),
+    Guard("boot-status: config/async_status_writes fica ligada quando o arquivo não existe",
+          "tools/oot3d/native_game_runtime/oot3d_native_status_file.h",
+          r'"sdmc:/switch/oot3dre/config/async_status_writes"\);\s+if \(!input\) return true;',
+          test="oot3d_native_status_file_tests (TestSwitch)"),
+    Guard("boot-status: toda escrita passa pelo escritor único, então um heartbeat na fila nunca "
+          "sobrescreve uma etapa do boot nem completed/failed",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window.cpp",
+          r'void WriteSwitchBootStage\(const char\* stage\) \{\s+'
+          r'\(void\)Oot3dNativeGame::SwitchBootStatusFile\(\)\.WriteNow\(FormatSwitchBootStage\(stage\)\);',
+          test="oot3d_native_status_file_tests (TestWriteNowWins)",
+          forbid=r'std::ofstream stream\("sdmc:/switch/oot3dre/boot-status\.txt"'),
+    Guard("boot-status: completed/failed passam pelo mesmo escritor do heartbeat",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'void WriteSwitchBootStatus\(.*?Oot3dNativeGame::SwitchBootStatusFile\(\)\.WriteNow\(text\);',
+          forbid=r'std::ofstream stream\(kSwitchBootStatusPath'),
+    Guard("escritor do boot-status: o texto só sai da fila com o lock do arquivo (um WriteNow posterior sempre vence)",
+          "tools/oot3d/native_game_runtime/oot3d_native_status_file.h",
+          r'std::lock_guard file\(mFileMutex\);\s+std::optional<std::string> text;\s+\{\s+'
+          r'std::lock_guard again\(mMutex\);\s+text\.swap\(mPending\);',
+          test="oot3d_native_status_file_tests (TestWriteNowWins)"),
     Guard("deko3d.txt não dizia de qual NRO vinha nem se o PICA chegava ao backend (log do p5 parecia o do p3)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
           r'pica: first draw.*?pica: first %s.*?pica: first render-target clear.*?pica: first memory fill',
@@ -348,8 +473,9 @@ GUARDS = [
           "oot3d_hang_watchdog_tests"),
     Guard("Config.cpp 'unable to atomically save' (rename sobre arquivo existente)",
           "runtime/three_ds_recomp/src/ship/config/ConfigPersistence.cpp",
-          r'__SWITCH__.*?errc::file_exists.*?filesystem::remove\(target',
-          "config_atomic_save_tests"),
+          r'#else\s+.*?ReplaceFileWithTemporary\(temporary, target\);',
+          "config_atomic_save_tests, oot3d_config_file_replace_tests (TestShipConfigWriter)",
+          forbid=r'std::filesystem::rename\('),
     Guard("Pacing adaptive travava em 30 FPS (padrão precisa ser legacy)",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
           r'config/fps60_mode: legacy \(default\)',
@@ -820,6 +946,82 @@ GUARDS = [
           r'PicaDisplayTransferSourceRowsFor\(.*?const bool nriDisplayCopy = sourceFirstRow == 0U &&.*?'
           r'blit\.srcOffsets\[0\] = \{\s*0, static_cast<int32_t>\(sourceFirstRow\), 0\};',
           "oot3d_native_pica_vulkan_bridge_tests (TestDisplayTransferSourceRows)"),
+    # --- 04/11 (fork JohnUzoka, 0.1.0): mira por giroscópio no Switch ---
+    # O SDL2 do devkitPro não informa sensores: sem o provedor da libnx o
+    # host.ControllerMotion vinha sempre vazio e a mira por giroscópio nunca
+    # funcionava no console (ee13d420).
+    Guard("mira por giroscópio nunca funcionava no Switch (SDL do devkitPro sem sensores): seis eixos da libnx",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_input.cpp",
+          r'if \(switchConsoleMotion && !host\.ControllerMotion\.GyroscopeValid &&\s*'
+          r'!host\.ControllerMotion\.AccelerometerValid\) \{.*?PollSwitchMotion\(.*?'
+          r'if \(switchMotion\.SourceChanged\) pollingState\.VirtualMotion\.ResetController\(\);\s*'
+          r'host\.ControllerMotion = switchMotion\.Motion;.*?controls\.ObserveMotion\(host\.ControllerMotion\);',
+          "oot3d_switch_motion_tests"),
+    Guard("seis eixos do Switch -> referencial do 3DS: acelerômetro (-x, z, y), giroscópio 360*(-x, z, y)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_motion.cpp",
+          r'result\.Accelerometer = \{-a\[0\], a\[2\], a\[1\]\};.*?'
+          r'result\.GyroscopeDegreesPerSecond = \{-w\[0\] \* kDegreesPerRevolution, w\[2\] \* kDegreesPerRevolution,\s*'
+          r'w\[1\] \* kDegreesPerRevolution\};',
+          "oot3d_switch_motion_tests (TestMatchesSdlPath, TestRotationIsCoherent)"),
+    Guard("o provedor de seis eixos entra no .nro do Switch",
+          "CMake/oot3d/game.cmake",
+          r'NintendoSwitch.*?tools/oot3d/native_game_runtime/oot3d_switch_motion\.cpp'),
+    Guard("sensor de seis eixos do console só no OoT3D (perfil de título); genérico desligado",
+          "tools/oot3d/native_game_runtime/ctr_title_profile.h",
+          r'bool SwitchConsoleMotion = true;.*?GenericTitleProfile.*?profile\.SwitchConsoleMotion = false;',
+          "oot3d_native_a32_ctr_host_tests (TestWindowProfileGatesOot3dHooks)"),
+    Guard("sensor de seis eixos: a janela passa o perfil de título para o PollNativeA32Input",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'nativeControlPollingState,\s*titleProfile\.SwitchConsoleMotion,'),
+    # Mira Automatic guardava o yaw sintético (analógico, mouse) na rotação
+    # sensor->virtual: depois de ~180 graus de giro pelo analógico o pitch do
+    # giroscópio saía invertido (fb26eb4f).
+    Guard("pitch do giroscópio invertia depois de ~180 graus de giro pelo analógico (mira Automatic)",
+          "tools/three_ds/input/three_ds_motion_composition.cpp",
+          r'return Normalize\(Multiply\(Delta\(\{pitchRate,0,0\}, t\), next\.SensorToVirtual\)\);',
+          "three_ds_recomp_input_tests (TestPhysicalGyroAfterSyntheticAim)",
+          forbid=r'Delta\(yawAxis'),
+    # --- 08/11: importação do dump do jogador no primeiro início (port do fork JohnUzoka) ---
+    # Portado de JohnUzoka/TriAevum-Switch a8695b96, 1b2af4ad, 19a8ea64. O game/
+    # do OoT3D é montado no console a partir do .3ds/.cci decriptado do jogador.
+    Guard("importação do dump roda antes de os argumentos lerem o game/ (manifesto), só no lançamento padrão do NRO (OoT3D)",
+          "tools/oot3d/native_game_runtime/oot3d_native_game.cpp",
+          r'if \(argc <= 1\) \{\s+if \(!Oot3dNativeGame::RunSwitchRomImport\(\)\)\s+return 0;\s+\}'
+          r'.*?oot3d_native_process_manifest\.json'),
+    Guard("[decisão] config/no_rom_import desliga a importação do dump (o boot lê o game/ como antes)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
+          r'kDisabled = "sdmc:/switch/oot3dre/config/no_rom_import";.*?bool RunSwitchRomImport\(\) \{\s+'
+          r'std::error_code error;\s+if \(fs::exists\(kDisabled, error\)\)\s+return true;'),
+    Guard("importação do dump: o FS do Horizon não renomeia por cima de arquivo existente (apaga antes)",
+          "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
+          r'void Replace\(const fs::path& from, const fs::path& to\) \{\s+std::error_code error;\s+fs::remove\(to, error\);',
+          "oot3d_rom_import_tests"),
+    Guard("importação do dump: commit interrompido não deixa manifesto (o manifesto antigo sai antes dos renames)",
+          "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
+          r'for \(const char\* name : \{kManifestName, kReceiptName\}\) \{\s+fs::remove\(gameDirectory / name, error\);'
+          r'.*?Replace\(codePartial, gameDirectory / "code\.bin"\);.*?Replace\(receiptPartial, gameDirectory / kReceiptName\);'),
+    Guard("importação do dump: outro jogo de 3DS é recusado pelo program id (perfil de título) antes de qualquer hash",
+          "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
+          r'if \(Oot3dNativeGame::IsOot3dTitleId\(programId\)\)\s+return;'
+          r'.*?plan\.ProgramId = layout\.ProgramId;\s+RequireOot3dTitle\(plan\.ProgramId\);'
+          r'.*?plan\.ProgramId = U64\(plan\.Exheader\.data\(\) \+ 0x200\);\s+RequireOot3dTitle\(plan\.ProgramId\);',
+          "oot3d_rom_import_tests (TestContainer)"),
+    Guard("importação do dump: manifesto com process.title_id, igual ao build_process_manifest.py",
+          "tools/oot3d/native_game_runtime/oot3d_rom_import.cpp",
+          r'\{"title_id", U64\(x \+ 0x200\)\},',
+          "oot3d_rom_import_tests (TestManifest)"),
+    Guard("tela da importação: stdout/stderr voltam depois do consoleExit (a primeira linha de log travava o jogo)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
+          r'consoleExit\(nullptr\);\s+devoptab_list\[STD_OUT\] = mStdout;\s+devoptab_list\[STD_ERR\] = mStderr;'),
+    Guard("tela da importação: texto pt-BR sem acento no console do libnx (fonte de 256 glifos, sem UTF-8)",
+          "tools/oot3d/native_game_runtime/oot3d_switch_console_screen.h",
+          r'std::printf\("\\x1b\[1;1H\\x1b\[36m%s\\x1b\[0m\\n\\n%s", RomImport::ConsoleAscii\(mTitle\)\.c_str\(\),\s+'
+          r'RomImport::ConsoleAscii\(body\)\.c_str\(\)\);',
+          "oot3d_rom_import_tests (TestConsoleAscii)"),
+    Guard("[decisão] manter o dump é o padrão: ele só é apagado com Y, depois de uma importação conferida",
+          "tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp",
+          r'if \(!failure\.empty\(\)\) \{.*?return false;\s+\}.*?if \(\*button & HidNpadButton_Y\) \{\s+try \{\s+ri::RemoveSource\(plan->Input\);',
+          forbid=r'RemoveSource\((?!plan->Input\);)'),
 ]
 
 # Substituições nativas com VFP que custam mais que a tradução: precisam continuar

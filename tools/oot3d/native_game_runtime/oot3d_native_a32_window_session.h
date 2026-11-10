@@ -69,6 +69,7 @@
 #include "oot3d_native_pica_vulkan_plan.h"
 #include "oot3d_native_pica_deferred_plan.h"
 #include "oot3d_native_offload.h"
+#include "oot3d_native_status_file.h"
 #include "oot3d_hitch_recorder.h"
 #include "oot3d_frame_spike_log.h"
 #include "oot3d_vsync_clock.h"
@@ -181,7 +182,10 @@ inline uint64_t gSwitchPicaGeometryPersistentUploads = 0U;
 inline uint64_t gSwitchPicaGeometryRegistryEntries = 0U;
 inline bool gSwitchPicaGeometryCacheObserved = false;
 
+// boot-status.txt (oot3d_native_status_file.h): Write escreve nesta thread,
+// Post pela thread de serviço (config/async_status_writes).
 void WriteSwitchBootStage(const char* stage);
+void PostSwitchBootStage(const char* stage);
 #endif
 
 inline double SecondsSince(std::chrono::steady_clock::time_point start) {
@@ -710,6 +714,13 @@ private:
   // or enqueue), ms, and of the PICA capture inside the guest's GX
   // commands (SubmitDrawPacket), cumulative.
   double perfLineGameMs = 0.0;
+  // Heartbeat do boot-status.txt a cada 600 quadros do host: postado a uma
+  // thread de serviço (config/async_status_writes, padrão) ou escrito aqui,
+  // como antes. Tempo da thread do jogo gasto nele e as atualizações,
+  // acumulados (campos status_* do perf.txt).
+  bool asyncStatusWrites = true;
+  uint64_t statusUpdates = 0U;
+  uint64_t statusGameNanoseconds = 0U;
   // DSP HLE frames of one refresh: storage reused across refreshes.
   std::vector<int16_t> refreshAudioSamples;
   // config/audio_deferred (Switch, absent = on, "0" = off): DSP frames of

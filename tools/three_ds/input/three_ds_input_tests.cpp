@@ -5,6 +5,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -243,10 +244,104 @@ void TestAutomaticMotionComposition() {
             "opposite gravity handoff is singular");
 }
 
+void RequireNear(const std::array<float, 3>& actual, const std::array<float, 3>& expected,
+                 const std::string& what, float tolerance = 1e-3F) {
+    if (NearVector(actual, expected, tolerance)) return;
+    const auto format = [](const std::array<float, 3>& v) {
+        return "{" + std::to_string(v[0]) + ", " + std::to_string(v[1]) + ", " + std::to_string(v[2]) + "}";
+    };
+    throw std::runtime_error(what + ": got " + format(actual) + ", expected " + format(expected));
+}
+
+// Regressão (Switch, mira Automatic): um jogador mirou o estilingue com o
+// giroscópio do console e também com o analógico direito; depois o pitch
+// físico saía invertido. O yaw sintético se acumulava na rotação
+// sensor->virtual: passando de 90 graus o pitch físico virava roll e passando
+// de 180 trocava de sinal. As taxas físicas têm de mapear igual, qualquer que
+// tenha sido a mira sintética antes, sozinha ou misturada.
+void TestPhysicalGyroAfterSyntheticAim() {
+    using namespace ThreeDsRecomp::Input;
+    MappingConfig config;  // Automatic, analógico 180 graus/s.
+    VirtualMotionState state;
+    PhysicalInputState still;
+    still.SamplePeriodSeconds = 1.0 / 30.0;
+    still.ControllerMotion.GyroscopeValid = still.ControllerMotion.AccelerometerValid = true;
+    still.ControllerMotion.Accelerometer = {0, -1, 0};
+    const auto step = [&](const PhysicalInputState& input) {
+        return ResolveInput(config, input, {}, {}, nullptr, true, &state).Hid;
+    };
+    // O que a mesma entrada dá a partir do estado atual, sem avançá-lo.
+    const auto probe = [&](const PhysicalInputState& input) {
+        auto copy = state;
+        return ResolveInput(config, input, {}, {}, nullptr, true, &copy).Hid;
+    };
+    auto pitchUp = still;
+    pitchUp.ControllerMotion.GyroscopeDegreesPerSecond = {-36, 0, 0};
+    auto turnLeft = still;
+    turnLeft.ControllerMotion.GyroscopeDegreesPerSecond = {0, 36, 0};
+    auto stickRight = still;
+    stickRight.RightStickX = 32767;
+
+    const auto pitchBefore = step(pitchUp).GyroscopeDegreesPerSecond;
+    const auto yawBefore = step(turnLeft).GyroscopeDegreesPerSecond;
+    RequireNear(pitchBefore, {-36, 0, 0}, "pitch físico para cima não é o X do sensor antes da mira sintética");
+    RequireNear(yawBefore, {0, 36, 0}, "giro físico não é o Y do sensor antes da mira sintética");
+
+    // 180 graus de yaw pelo analógico direito (1 s a 180 graus/s).
+    for (int i = 0; i < 30; ++i) step(stickRight);
+    RequireNear(probe(pitchUp).GyroscopeDegreesPerSecond, pitchBefore,
+                "pitch físico mudou depois de 180 graus de yaw pelo analógico");
+    RequireNear(probe(turnLeft).GyroscopeDegreesPerSecond, yawBefore,
+                "giro físico mudou depois de 180 graus de yaw pelo analógico");
+
+    // Mais 108 graus de yaw pelo analógico (18 quadros), depois 60 graus de
+    // pitch para cima pelo analógico, desfeitos pelo analógico para baixo.
+    for (int i = 0; i < 18; ++i) step(stickRight);
+    auto stickUp = still;
+    stickUp.RightStickY = 32767;
+    for (int i = 0; i < 10; ++i) step(stickUp);
+    auto stickDown = still;
+    stickDown.RightStickY = -32767;
+    for (int i = 0; i < 10; ++i) step(stickDown);
+    const auto settled = step(still);
+    RequireNear(settled.Accelerometer, {0, -1, 0}, "pitch sintético de soma zero deixou o aparelho virtual inclinado");
+    RequireNear(settled.GyroscopeDegreesPerSecond, {}, "quadro parado depois da mira sintética informou rotação");
+    RequireNear(probe(pitchUp).GyroscopeDegreesPerSecond, pitchBefore,
+                "pitch físico mudou depois de mira pelo analógico além de 180 graus");
+    RequireNear(probe(turnLeft).GyroscopeDegreesPerSecond, yawBefore,
+                "giro físico mudou depois de mira pelo analógico além de 180 graus");
+
+    // Entrada física e sintética ao mesmo tempo: ao longo de mais 360 graus
+    // de yaw pelo analógico, a parte do giroscópio em cada quadro fica fixa.
+    auto stickAndPitch = stickRight;
+    stickAndPitch.ControllerMotion.GyroscopeDegreesPerSecond = {-36, 0, 0};
+    for (int i = 0; i < 60; ++i) {
+        const auto stickOnly = probe(stickRight).GyroscopeDegreesPerSecond;
+        const auto mixed = step(stickAndPitch).GyroscopeDegreesPerSecond;
+        RequireNear({mixed[0] - stickOnly[0], mixed[1] - stickOnly[1], mixed[2] - stickOnly[2]}, pitchBefore,
+                    "pitch físico misturado com yaw pelo analógico, quadro " + std::to_string(i));
+    }
+    auto stickLeft = still;
+    stickLeft.RightStickX = -32767;
+    auto stickLeftAndTurn = stickLeft;
+    stickLeftAndTurn.ControllerMotion.GyroscopeDegreesPerSecond = {0, 36, 0};
+    for (int i = 0; i < 30; ++i) {
+        const auto synthetic = probe(stickLeft).GyroscopeDegreesPerSecond;
+        const auto mixed = step(stickLeftAndTurn).GyroscopeDegreesPerSecond;
+        RequireNear({mixed[0] - synthetic[0], mixed[1] - synthetic[1], mixed[2] - synthetic[2]}, yawBefore,
+                    "giro físico misturado com yaw pelo analógico para a esquerda, quadro " + std::to_string(i));
+    }
+    RequireNear(probe(pitchUp).GyroscopeDegreesPerSecond, pitchBefore,
+                "pitch físico mudou depois da mira misturada");
+    RequireNear(probe(turnLeft).GyroscopeDegreesPerSecond, yawBefore,
+                "giro físico mudou depois da mira misturada");
+}
+
 } // namespace
 
 int main() try {
     TestAutomaticMotionComposition();
+    TestPhysicalGyroAfterSyntheticAim();
     {
         using namespace ThreeDsRecomp::Input;
         const auto motion = ConvertSdlMotion({9.80665F, 9.80665F, -9.80665F}, true,

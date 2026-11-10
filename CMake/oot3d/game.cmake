@@ -89,6 +89,16 @@ add_executable(oot3d_hitch_recorder_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_hitch_recorder_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_hitch_recorder_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Heartbeat do boot-status.txt por uma thread de serviço
+# (config/async_status_writes; só cabeçalho).
+find_package(Threads REQUIRED)
+add_executable(oot3d_native_status_file_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_native_status_file_tests.cpp
+)
+target_compile_features(oot3d_native_status_file_tests PRIVATE cxx_std_20)
+target_link_libraries(oot3d_native_status_file_tests PRIVATE Threads::Threads)
+oot3d_target_defaults(oot3d_native_status_file_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Guest spike profile (config/guest_spike_ms, logs/guest_spikes.txt;
 # header-only).
 add_executable(oot3d_guest_spike_profile_tests EXCLUDE_FROM_ALL
@@ -519,9 +529,15 @@ if (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
         tools/oot3d/native_game_runtime/oot3d_switch_clocks.cpp
         # Display vsync clock (config/pacer_vsync, config/frame_spikes).
         tools/oot3d/native_game_runtime/oot3d_switch_vsync_clock.cpp
+        # Os sensores de seis eixos do console como movimento de controle (mira por giroscópio).
+        tools/oot3d/native_game_runtime/oot3d_switch_motion.cpp
         # Guard pages for one malloc size range (config/guard_alloc) and the
         # libnx exception handler that reports faults to logs/hang.txt.
         tools/oot3d/native_game_runtime/oot3d_switch_guard_alloc.cpp)
+    # Importação, no primeiro início, do dump decriptado do jogador para o game/.
+    target_sources(oot3d_native_game PRIVATE
+        tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
+        tools/oot3d/native_game_runtime/oot3d_switch_rom_import.cpp)
     target_link_options(oot3d_native_game PRIVATE -Wl,--wrap=pthread_create -Wl,--wrap=threadCreate
         -Wl,--wrap=SDL_SetThreadPriority
         -Wl,--wrap=_malloc_r -Wl,--wrap=_memalign_r -Wl,--wrap=_free_r -Wl,--wrap=_realloc_r

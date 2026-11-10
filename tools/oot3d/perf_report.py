@@ -362,6 +362,15 @@ def summarize_offload(windows: list[Window]) -> None:
           f" linha do perf.txt na thread do jogo {fmt(mean('perf_line_ms'), 3)} ms/janela"
           + (f"; escritor {fmt(mean('perf_writer_ms'), 2)} ms/janela,"
              f" descartadas {int(num(marked[-1], 'perf_dropped'))}" if "perf_writer_ms" in marked[-1] else ""))
+    if any("status_async" in m for m in marked):
+        # Heartbeat do boot-status.txt (config/async_status_writes; SWITCH_PORT.md
+        # "Heartbeat do boot-status.txt fora da thread do jogo").
+        print(f"    heartbeat do boot-status (status_async={int(num(marked[-1], 'status_async'))}):"
+              f" thread do jogo {fmt(mean('status_game_ms'), 3)} ms/janela,"
+              f" escritor {fmt(mean('status_writer_ms'), 2)} ms/janela,"
+              f" substituídos {int(num(marked[-1], 'status_superseded'))}"
+              + (f"; escritor do hitches.txt {fmt(mean('hitch_writer_ms'), 2)} ms/janela"
+                 if "hitch_writer_ms" in marked[-1] else ""))
     # pica_plan está dentro de pica_submit; frame_start contém input e
     # host_frame_start.
     host = sum(mean(key) for key in ("pica_submit_host_ms", "visual_present",

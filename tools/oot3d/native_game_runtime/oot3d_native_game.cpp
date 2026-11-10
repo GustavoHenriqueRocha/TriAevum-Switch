@@ -30,27 +30,26 @@
 
 #if defined(__SWITCH__)
 #include "oot3d_whole_aot_gcov.h"
+#include "oot3d_native_status_file.h"
+#include "oot3d_switch_rom_import.h"
 void PlaceSwitchMainThread(); // oot3d_switch_threads.cpp
 #endif
 
 namespace {
 
 #if defined(__SWITCH__)
-constexpr const char* kSwitchBootStatusPath =
-    "sdmc:/switch/oot3dre/boot-status.txt";
-
+// Pelo escritor do boot-status.txt do processo (oot3d_native_status_file.h):
+// um heartbeat ainda na fila da thread de serviço é descartado, nunca escrito
+// por cima de completed/failed.
 void WriteSwitchBootStatus(const char* status, const std::string& detail = {}) {
-    std::ofstream stream(kSwitchBootStatusPath, std::ios::trunc);
-    if (!stream) {
-        return;
-    }
-    stream << "status=" << status << '\n'
-           << "whole_aot_functions=12419\n"
-           << "host_boundaries=3\n"
-           << "residual_a32=0\n";
+    std::string text = std::string("status=") + status + '\n' +
+                       "whole_aot_functions=12419\n"
+                       "host_boundaries=3\n"
+                       "residual_a32=0\n";
     if (!detail.empty()) {
-        stream << "detail=" << detail << '\n';
+        text += "detail=" + detail + '\n';
     }
+    (void)Oot3dNativeGame::SwitchBootStatusFile().WriteNow(text);
 }
 #endif
 
@@ -174,6 +173,15 @@ int main(int argc, char** argv) {
 #if defined(__SWITCH__)
         PlaceSwitchMainThread();
         Oot3dNativeGame::Oot3dWholeAotGcovInitialize();
+        // Primeiro início: monta o game/ a partir do dump decriptado do
+        // jogador antes que qualquer coisa leia o manifesto ou a RomFS. Só
+        // no lançamento padrão (sem argumentos), que é o do OoT3D em
+        // sdmc:/switch/oot3dre; um lançamento com argumentos próprios (outro
+        // título, testes) não passa por aqui.
+        if (argc <= 1) {
+            if (!Oot3dNativeGame::RunSwitchRomImport())
+                return 0;
+        }
         // A Mesa built with its Horizon disk cache (see docs) stores compiled
         // GLSL and nvc0 code here; the stock devkitPro Mesa ignores these.
         setenv("MESA_SHADER_CACHE_DIR", "sdmc:/switch/oot3dre/mesacache", 0);

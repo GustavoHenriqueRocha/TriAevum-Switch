@@ -32,7 +32,7 @@ Bugs que impediam o Switch de rodar (só apareciam no console; o Eden escondia v
 | Crash ao iniciar | `pthread_detach` do newlib do devkitA64 retorna `ENOSYS` | sem `detach()` no Switch |
 | Tela preta / shader falhando | apresentação paralela rodava GL numa thread sem contexto | contexto GL movido para a thread de render (`Submit`+`Drain`) |
 | Jogo em câmera lenta (½ velocidade) | 60 refreshes/s esperados, mas 1 por apresentação a 30 Hz | até 4 refreshes por apresentação |
-| Configurações não salvavam | FS do Horizon não renomeia por cima de arquivo | remove e renomeia |
+| Configurações não salvavam | FS do Horizon não renomeia por cima de arquivo | arquivo antigo de lado, novo no lugar, recuperação ao carregar (veja "Regravar um arquivo no cartão SD") |
 | Crash com warm-up em thread | contextos nvc0 compartilham push buffer sem lock | warm-up na thread de render |
 
 Desempenho e usabilidade:
@@ -78,10 +78,65 @@ Desempenho e usabilidade:
   literais PC-relativos dobrados; shards sem `-ffast-math` (exatidão do VFP).
 - **Orçamento de blocos** 2048 (era 128) no Switch.
 - **Perfil no console**: `logs/perf.txt` a cada 150 quadros (ms por fase + contadores do Mesa).
+- **Mira por giroscópio**: o sensor de seis eixos do próprio console alimenta o movimento de controle
+  que o SDL do devkitPro não informa (`oot3d_switch_motion.cpp`): Pro Controller do jogador 1, senão
+  o Joy-Con direito de um par (o esquerdo se só ele estiver conectado), senão Handheld (o Switch Lite).
+  Joy-Con sozinho na horizontal não é suportado. Com `aim.source` `automatic` (o padrão), inclinar o
+  console mira em primeira pessoa; `aim.invert_x`/`invert_y` e a sensibilidade do giroscópio valem como
+  no PC, e "Calibrate controller motion" (menu L3+R3, Controls) remove o desvio. O sensor para fora de
+  foco e reinicia na volta (HOME, sleep) ou quando os dados param de chegar.
+  Analógico e giroscópio somam na mesma mira; girar com o analógico nunca muda como o giroscópio
+  mapeia depois (antes o pitch se invertia depois de ~180° de giro pelo analógico). Só no OoT3D: o
+  perfil de título (`CtrTitleProfile::SwitchConsoleMotion`) deixa o sensor desligado nos títulos
+  genéricos. Decisões e fontes: `docs/pesquisas/2026-11-08-mira-giroscopio-switch.md`.
 - **TopScreen 3.0**: a 2.1.1 saiu do GameBanana; o importador agora aceita o pacote 3.0.
 - **ROM USA** aceita no build (adaptador USA→EUR canônico do próprio projeto).
 - **Caminhos de entrada** configuráveis por `OOT3D_OPERATIONAL_<variável>` (antes fixos no Windows do autor).
 - Ícone original para o `.nro` (`res/switch/icon.jpg`).
+
+### Dados do jogo a partir do dump do próprio jogador (primeiro início)
+
+O `game/` pode ser montado no console, sem ferramenta no PC: copie o dump **decriptado** do seu
+cartucho (`.3ds` ou `.cci`) para `sdmc:/switch/oot3dre/`, ou `code.bin` (descomprimido),
+`exheader.bin` e `romfs.bin` (IVFC, como o `ctr_rom.py` extrai) para `sdmc:/switch/oot3dre/import/`,
+e abra o jogo. No lançamento padrão do NRO (sem argumentos, o do OoT3D), antes de qualquer coisa ler
+o `game/`, o `main()` chama `RunSwitchRomImport()` (`oot3d_switch_rom_import.cpp`, tela no console
+do libnx), que:
+
+- identifica a revisão pelos hashes do `.code` descomprimido, do ExHeader e da RomFS, como as
+  receitas do TriAevum. Aceitas: USA Rev 1 (En,Fr,Es), convertida para o layout EUR pelo adaptador
+  do projeto, e EUR (original e Rev 1, mais o dump de referência do projeto). Dump de outro jogo de
+  3DS é recusado pelo program id (`IsOot3dTitleId`, `ctr_title_profile.h`) antes de qualquer hash,
+  com a indicação do `tools/ctr/ctr_convert.py`: o `game/` de `switch/oot3dre` é só do OoT3D. Outra
+  revisão, dump encriptado ou `.cia` também é recusado, com a lista do que é aceito;
+- grava `game/code.bin`, `exheader.bin`, `romfs.bin` e `oot3d_native_process_manifest.json` por
+  arquivos `*.partial`, confere os hashes da origem e da saída enquanto lê a RomFS (pedaços de 4 MB,
+  nunca a imagem inteira na memória), relê o que gravou e confere de novo, e só então substitui os
+  arquivos anteriores (o manifesto antigo sai primeiro: commit interrompido importa de novo no
+  próximo boot). O manifesto é o mesmo, byte a byte, que o `build_process_manifest.py` gera, com
+  `process.title_id`. `game/rom_import.json` registra a origem (nome, tamanho, data): os boots
+  seguintes pulam a importação, e outro dump (ou o mesmo copiado de novo) importa de novo;
+- pergunta no fim se mantém o dump (A, o padrão) ou apaga (Y). Log em `logs/rom_import.txt`.
+
+O console do libnx desenha byte a byte com a fonte padrão (sem UTF-8): o texto da tela passa por
+`RomImport::ConsoleAscii` e aparece sem acentos. A tela devolve stdout/stderr depois do
+`consoleExit` (sem isso a primeira linha de log do jogo travava no console liberado).
+**Desligar:** `config/no_rom_import` (arquivo presente) pula tudo e o boot lê o `game/` como antes.
+
+O núcleo (`oot3d_rom_import.cpp`, só C++ padrão) é um port de `ctr_rom.py`,
+`input_copy_adapter.py`, `oot3d_region_assets.py` (`oot3d_usa_resources_to_eur_v2`) e
+`build_process_manifest.py`. A receita do code da USA entra compilada só como offsets
+(`oot3d_rom_import_usa_copies.inc`, refeito por `generate_rom_import_copies.py` a partir de
+`input_coverage/recipes/adapters/oot3d-usa-ef210566-copies.json`). Por que a RomFS da USA muda: a
+saída é a visão Level-3 sem o superbloco IVFC de 4 KB, `message/us` e `misc/us` viram `eu`,
+`us.qm` vira `eu.qm`, os vídeos de dica `hint182/186/188` viram `hint183/185/187`, as cadeias de
+hash são refeitas e os slots de idioma 2/4/6 do QM apontam para os conteúdos em inglês, francês e
+espanhol da USA; nenhum conteúdo muda. No PC, `oot3d_rom_import_tests --import <dump> <pasta>` gerou
+arquivos byte a byte iguais aos do pipeline do PC para o cartucho USA Rev 1 em cerca de 9 s; no
+console leva cerca de um minuto (Switch Lite), limitado pelo cartão SD. Testes:
+`oot3d_rom_import_tests` (dados sintéticos, sem ROM) e as guardas "importação do dump" de
+`tests/switch/test_bug_guards.py`. Origem: fork JohnUzoka/TriAevum-Switch (a8695b96, 1b2af4ad,
+19a8ea64); decisões em `docs/pesquisas/2026-11-08-importacao-do-dump-no-console.md`.
 
 ## Como compilar (Linux)
 
@@ -112,7 +167,9 @@ Desempenho e usabilidade:
 
 ## Diagnóstico no console
 
-- `sdmc:/switch/oot3dre/boot-status.txt` — etapa da inicialização e erro legível.
+- `sdmc:/switch/oot3dre/boot-status.txt` — etapa da inicialização e erro legível; no jogo, um heartbeat
+  (`host_frames`/`guest_frames`) a cada 600 quadros, escrito por uma thread de serviço
+  (`config/async_status_writes`, "Heartbeat do boot-status.txt fora da thread do jogo").
 - `logs/perf.txt` — FPS e ms por fase; `logs/oot3d_native_game.log`; `logs/glthread.txt`.
 - Crashes: `atmosphere/crash_reports/` (o `.nro` é carregado pelo hbloader; a base pode ser
   achada alinhando os endereços de retorno com instruções `bl/blr` do ELF).
@@ -1007,6 +1064,50 @@ amostra anda um quadro a cada bloco de N (um por bloco, alternando a paridade).
   Capturas no host conferidas: escolha de versões, seleção, arquivo 1, criação de nome, cópia, fade até
   entrar no jogo, aba BACK no canto.
 
+### Regravar um arquivo no cartão SD (2026-11-08)
+
+- **Sintoma:** salvar uma opção mostrava "cannot replace TopScreen UI config: File exists", em
+  L3+R3 > HUD > Save TopScreen e em L3+R3 > Controls > Save controls depois de mudar a câmera ou o
+  C-stick. As opções de HUD, câmera e C-stick não ficavam salvas.
+- **Causa:** todo gravador escreve um temporário e o renomeia por cima do arquivo real. POSIX e
+  Windows substituem o antigo nesse rename; o FS do Horizon (cartão SD) recusa com `EEXIST` ("File
+  exists"). `ed3e6418` (04/11) ensinou o controle, o warp de dev e o savestate a apagar o antigo e
+  renomear de novo, e `8e68d030` fez o mesmo no `Ship::WriteConfigFileAtomically`, mas o gravador da
+  UI do TopScreen (`SaveTopScreenUiConfig`, `config/topscreen_ui.json`) ficou de fora. "Save controls"
+  grava o controle e depois o arquivo do TopScreen, então o controle salvava e câmera/HUD não. O
+  gravador do cache do renderer (`WriteCacheFileAtomically`) tinha o mesmo buraco.
+- **Correção:** uma troca só para todos os gravadores, `ship/config/FileReplace.h` (só cabeçalho,
+  para as bibliotecas pequenas do controle e do TopScreen usarem sem o runtime do ship).
+  `ReplaceFileWithTemporary` renomeia primeiro. Se der `EEXIST`, move o arquivo antigo para
+  `<arquivo>.bak`, põe o temporário no lugar e apaga o backup; se a segunda troca falhar, o antigo
+  volta. Usada por `SaveTopScreenUiConfig`, `SaveNativeControlConfig`,
+  `Ship::WriteConfigFileAtomically` (configurações, warps de dev, idioma, preferências de savestate,
+  perfis de ambiente, descritores PBR) e `WriteCacheFileAtomically`. O "apaga e renomeia" de
+  `ed3e6418`/`8e68d030` no controle e no Ship sai: ele perdia o arquivo se o console desligasse entre
+  as duas chamadas, e só rodava com `__SWITCH__` (não dava para testar no host). No Windows os
+  caminhos com `MoveFileExW` ficam como estavam.
+- **Save interrompido:** se o console desligar ou o jogo for fechado entre as duas trocas, o arquivo
+  some e o `.bak` guarda a última versão completa. Antes de ler, cada leitor chama
+  `RestoreInterruptedReplace`, que traz o `.bak` de volta quando o arquivo não existe: a inicialização
+  (TopScreen e controle, antes das checagens de existência), `LoadTopScreenUiConfig`,
+  `LoadNativeControlConfig`, `Ship::Config::Reload`, warp de dev, idioma, preferências de savestate e
+  `LoadSceneEnvironmentFile`. Perde-se só a opção que estava sendo salva naquela hora. Descritores PBR
+  são achados pela varredura do pacote de texturas, que não os restaura: depois de um save PBR
+  interrompido o `.json.bak` fica ao lado, para renomear à mão.
+- **Sem mudança:** os saves do jogo (`oot3d_native_a32_ctr_save_safety`, journal próprio), os
+  savestates (`ReplaceStateFile`), os caches de grama e da PICA e os dumps de textura já apagam o
+  antigo e renomeiam, ou o tiram do lugar por conta própria.
+- **Teste:** `oot3d_config_file_replace_tests` (host Linux) define o próprio `rename()`, que o
+  `std::filesystem::rename` da libstdc++ chama; no modo Horizon ele usa `renameat2` com
+  `RENAME_NOREPLACE`, então renomear por cima de um arquivo dá `EEXIST` como no console. Confere que
+  o rename único antigo falha com "File exists", salva duas vezes pelos gravadores do TopScreen,
+  controle, Ship e cache, faz falhar a troca de lado e a troca para o lugar, e carrega depois de um
+  save interrompido. Guardas `08/11` em `tests/switch/test_bug_guards.py`.
+- **Conferir no console:** em L3+R3 > HUD, mude a escala do HUD e aperte Save TopScreen duas vezes;
+  em L3+R3 > Controls, mude uma opção da câmera livre e aperte Save controls. Nenhum erro deve
+  aparecer, as duas mudanças continuam depois de reiniciar, e `sdmc:/switch/oot3dre/config/` não
+  tem `topscreen_ui.json.bak`, `topscreen_ui.json.tmp` nem `oot3d_controls.json.bak`.
+
 ## Próximos passos
 
 - Ideias futuras (pedido do usuário, 2026-10-17):
@@ -1297,6 +1398,70 @@ A/B no console: criar `config/offload_plan`, `config/offload_capture`, `config/o
 `visual_present`, `pica_submit_host_ms`, `pica_capture_ms` e `game_cpu` na mesma cena e clock.
 Com `offload_perf` ligado, a linha do perf.txt é escrita inteira de uma vez (não fica mais cortada no
 meio); para achar onde a thread do jogo parou, use o `logs/hang.txt` do watchdog.
+
+### Heartbeat do boot-status.txt fora da thread do jogo: `config/async_status_writes` (2026-11-08)
+**Sintoma:** travada de 30–100 ms mais ou menos a cada 10 s. A thread do jogo está ocupada, mas não
+no código do jogo.
+
+**Causa (confirmada nos logs do console):** no deko3d a thread do jogo reescrevia o `boot-status.txt`
+a cada 600 quadros do host (`oot3d_native_a32_window_frame.cpp`, o heartbeat `runtime_running` do p5).
+É um open, truncate, write e close no SD dentro do quadro.
+- **As travadas batem com ele.** No `hitches.txt`, das linhas com `game_ms` mais de 8 ms acima do
+  `guest_ms`, 187 de 201 caem no present 600k−3 (o contador de presents anda 3 atrás do
+  `runFrameCount`), e toda linha em 600k−3 é uma delas. O excesso médio é 43–51 ms por sessão, máximo
+  77 ms.
+- **A escrita no SD custa isso.** O `perf_writer_ms` mostra 10–60 ms por append no `perf.txt` na thread
+  de serviço.
+- **As duas escritas colidem no quadro 600k.** A linha do `perf.txt` escrita nessa hora leva umas 3
+  vezes mais: média 41,8–46,2 ms nas janelas que terminam em 600k+150, contra 14,3–32,4 ms nas outras.
+- **Nada mais nessas threads roda nessa cadência.** As outras escritas periódicas no SD já passam por
+  fila e thread de serviço (`perf.txt` com `offload_perf`, `hitches.txt`, `deko3d.txt`, log do jogo).
+
+**Quem lê o `boot-status.txt`:**
+- **Gente depois de crash ou travamento:** a última etapa, `host_frames`/`guest_frames` (o jogo ainda
+  anda?) e `status=failed detail=...`.
+- **`tests/switch/eden_smoke.sh`, `eden_smoke.ps1`, `eden_deko3d.sh`:** `status=failed` e o `detail=`.
+- **`scripts/switch/run-product-eden.sh`:** `stage=runtime_running` no recibo depois do kill por timeout.
+
+Tudo isso continua escrito; só muda a thread que escreve o heartbeat.
+
+**Mudança** (`oot3d_native_status_file.h`):
+- **O escritor.** `StatusFileWriter` guarda o texto mais novo e uma thread de serviço troca o arquivo.
+  `Post` entrega o texto e nunca espera o SD; um texto que ainda espera é substituído pelo mais novo.
+  `WriteNow` escreve na thread que chama, depois da escrita em andamento, e descarta um texto postado
+  ainda não escrito. O texto só sai da fila com o lock do arquivo, então um `WriteNow` posterior sempre
+  vence.
+- **Um escritor para o arquivo todo.** Toda escrita do `boot-status.txt` passa por
+  `SwitchBootStatusFile()`: as etapas do boot (`WriteSwitchBootStage`, síncronas como antes), o
+  heartbeat (`PostSwitchBootStage`), `runtime_window_closed`/`runtime_guest_terminated` e
+  `launching`/`completed`/`failed` (`oot3d_native_game.cpp`). Um heartbeat na fila nunca substitui o
+  estado final.
+- **Mesmo texto, mesmos quadros.** O heartbeat continua formatado na thread do jogo, com os mesmos
+  contadores nos mesmos quadros. Se a thread do jogo para, o arquivo para de andar, como antes.
+- **A chave.** `config/async_status_writes`: ausente = ligada; `0` escreve o heartbeat na thread do
+  jogo, como antes. Vale para qualquer título (o heartbeat é do runtime, não do OoT3D).
+
+**Log** (`perf.txt`, bloco `offload:`, depois de `perf_writer_ms`): `status_async` (a chave),
+`status_updates` (heartbeats até agora), `status_game_ms` (tempo da thread do jogo no heartbeat na
+janela: formatar e postar, ou a troca inteira no SD com a chave em `0`), `status_writer_ms` (escrita
+da thread de serviço), `status_superseded` (heartbeats substituídos antes de escritos) e
+`hitch_writer_ms` (escritor do `hitches.txt`). `tools/oot3d/perf_report.py` resume os campos.
+
+**Testes e guardas:** `oot3d_native_status_file_tests` (TestLatestWins, TestWriteNowWins em 300
+rodadas, TestPostNeverWaits com o escritor preso no `open` de um FIFO, TestStop, TestSwitch); guardas
+08/11 do boot-status em `tests/switch/test_bug_guards.py`.
+
+**Riscos:** um arquivo cortado passa a ser possível se o processo cair nos ~30–60 ms de uma escrita a
+cada 10 s (antes a thread do jogo estava dentro da escrita); as etapas do boot e o estado final
+continuam síncronos. Uma thread de serviço a mais, parada entre heartbeats.
+
+**Conferência no console (1 minuto):** jogar um minuto num lugar calmo a 60 FPS. No `hitches.txt`,
+nada mais de linhas em 600k−3 com `game_ms` ~45 ms acima do `guest_ms`; no `perf.txt`,
+`status_async=1`, `status_game_ms` abaixo de 0,1 e `status_writer_ms` em 10–80 numa janela de cada
+quatro; no `boot-status.txt`, `host_frames` continua andando. Para comparar, criar
+`config/async_status_writes` com `0`: as linhas em 600k−3 voltam.
+
+Portado de JohnUzoka/TriAevum-Switch a85cb85d, ad09b095, 214c79d2.
 
 ### Estado em 2026-10-17 (melhor versão até agora)
 - PGO (2ª coleta) + modo enxuto + planos PICA no núcleo 1 + render thread no núcleo 2 + áudio em thread própria.

@@ -27,10 +27,15 @@ target_include_directories(oot3d_ui_topscreen PUBLIC
     tools/oot3d/native_game_runtime
     tools/oot3d/ui_topscreen
 )
+# A troca no save (ship/config/FileReplace.h, só cabeçalho).
+target_include_directories(oot3d_ui_topscreen PRIVATE
+    runtime/three_ds_recomp/include
+)
 target_link_libraries(oot3d_ui_topscreen PUBLIC
     three_ds_recomp_input
     oot3d_native_a32_process
-    oot3d_native_ui_contract)
+    oot3d_native_ui_contract
+    oot3d_typed_gameplay)
 oot3d_target_defaults(oot3d_ui_topscreen FOLDER Tools)
 
 add_executable(oot3d_native_font_coverage_tests EXCLUDE_FROM_ALL
@@ -303,12 +308,35 @@ add_library(oot3d_native_control_config STATIC EXCLUDE_FROM_ALL
 target_include_directories(oot3d_native_control_config PUBLIC
     tools/oot3d/native_game_runtime
 )
+# A troca no save (ship/config/FileReplace.h, só cabeçalho).
+target_include_directories(oot3d_native_control_config PRIVATE
+    runtime/three_ds_recomp/include
+)
 target_link_libraries(oot3d_native_control_config PUBLIC
     nlohmann_json::nlohmann_json
     three_ds_recomp_input)
 target_compile_options(oot3d_native_control_config PRIVATE
     "${WARNING_OVERRIDE}")
 oot3d_target_defaults(oot3d_native_control_config NO_WARNING_OVERRIDE FOLDER Tools)
+
+# Regravar um arquivo no Switch: os gravadores de config e de cache contra a
+# semântica de rename do Horizon (EEXIST sobre arquivo existente), simulada
+# pelo rename() do próprio teste. Hosts Linux (renameat2).
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(oot3d_config_file_replace_tests EXCLUDE_FROM_ALL
+        tools/oot3d/native_game_runtime/oot3d_config_file_replace_tests.cpp
+        tools/oot3d/ui_topscreen/oot3d_top_screen_config.cpp
+        runtime/three_ds_recomp/src/ship/config/ConfigPersistence.cpp
+        runtime/three_ds_recomp/src/fast/renderer/cache_file.cpp
+    )
+    target_include_directories(oot3d_config_file_replace_tests PRIVATE
+        tools/oot3d/ui_topscreen
+        runtime/three_ds_recomp/include
+    )
+    target_link_libraries(oot3d_config_file_replace_tests PRIVATE
+        oot3d_native_control_config)
+    oot3d_target_defaults(oot3d_config_file_replace_tests FOLDER Tests)
+endif()
 
 add_library(oot3d_native_a32_input STATIC EXCLUDE_FROM_ALL
     tools/oot3d/native_game_runtime/oot3d_native_a32_input.cpp
@@ -337,6 +365,15 @@ target_link_libraries(oot3d_native_a32_input_tests PRIVATE
     oot3d_native_a32_input)
 oot3d_target_defaults(oot3d_native_a32_input_tests FOLDER Tests)
 
+# Seis eixos do Switch -> movimento do 3DS: conversão e média (oot3d_switch_motion.h).
+add_executable(oot3d_switch_motion_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_switch_motion_tests.cpp
+    tools/oot3d/native_game_runtime/oot3d_switch_motion.cpp
+)
+target_link_libraries(oot3d_switch_motion_tests PRIVATE
+    three_ds_recomp_input)
+oot3d_target_defaults(oot3d_switch_motion_tests FOLDER Tests)
+
 # Input bench: a walk recorded after the boot warp replays frame for frame
 # (oot3d_input_bench.h; config/bench_record, config/bench_replay).
 add_executable(oot3d_input_bench_tests EXCLUDE_FROM_ALL
@@ -345,3 +382,17 @@ add_executable(oot3d_input_bench_tests EXCLUDE_FROM_ALL
 target_link_libraries(oot3d_input_bench_tests PRIVATE
     oot3d_native_a32_input)
 oot3d_target_defaults(oot3d_input_bench_tests FOLDER Tests)
+
+# Núcleo da importação do dump no primeiro início (oot3d_rom_import.h):
+# NCSD/NCCH sintético, LZSS, programa COPY, adaptação da RomFS e manifesto,
+# sem ROM. `--import <dump> <pasta>` faz uma importação real no PC. O
+# nlohmann_json lê o manifesto gerado como o runtime lê (process.title_id).
+if (NOT TARGET nlohmann_json::nlohmann_json)
+    find_package(nlohmann_json REQUIRED)
+endif()
+add_executable(oot3d_rom_import_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_rom_import_tests.cpp
+    tools/oot3d/native_game_runtime/oot3d_rom_import.cpp
+)
+target_link_libraries(oot3d_rom_import_tests PRIVATE nlohmann_json::nlohmann_json)
+oot3d_target_defaults(oot3d_rom_import_tests FOLDER Tests)
