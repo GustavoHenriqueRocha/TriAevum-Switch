@@ -47,19 +47,6 @@ void GfxRenderingAPIVulkan::CreateFrameResources() {
                                                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                          true);
-        const std::array<VkDescriptorPoolSize, 5> poolSizes = {
-            VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * 9 },
-            VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 4096 },
-            VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096 * 7 },
-            VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096 },
-            VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096 },
-        };
-        VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-        poolInfo.maxSets = 4096;
-        poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-        poolInfo.pPoolSizes = poolSizes.data();
-        CheckVk(vkCreateDescriptorPool(mDevice, &poolInfo, nullptr, &frame.DescriptorPool),
-                "vkCreateDescriptorPool");
     }
 }
 
@@ -759,16 +746,50 @@ void GfxRenderingAPIVulkan::DestroyTexture(TextureRecord& texture) {
 }
 
 VkDescriptorSet GfxRenderingAPIVulkan::AllocateTextureDescriptorSet() {
-    VkDescriptorSetAllocateInfo allocationInfo{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO
-    };
-    allocationInfo.descriptorPool = mFrameResources[mCurrentFrame].DescriptorPool;
-    allocationInfo.descriptorSetCount = 1;
-    allocationInfo.pSetLayouts = &mTextureDescriptorSetLayout;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
-    CheckVk(vkAllocateDescriptorSets(mDevice, &allocationInfo, &descriptorSet),
+    CheckVk(AllocateFrameDescriptorSet(mTextureDescriptorSetLayout, &descriptorSet),
             "vkAllocateDescriptorSets");
     return descriptorSet;
+}
+
+VkResult GfxRenderingAPIVulkan::CreateFrameDescriptorPool(VkDescriptorPool* pool) {
+    const std::array<VkDescriptorPoolSize, 5> poolSizes = {
+        VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4096 * 9 },
+        VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 4096 },
+        VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4096 * 7 },
+        VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096 },
+        VkDescriptorPoolSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096 },
+    };
+    VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    poolInfo.maxSets = 4096;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
+    return vkCreateDescriptorPool(mDevice, &poolInfo, nullptr, pool);
+}
+
+// Um quadro do host que junta vários quadros do guest passava dos 4096 sets
+// (MK7 na janela, notebook lento): pool cheio passa para o próximo.
+VkResult GfxRenderingAPIVulkan::AllocateFrameDescriptorSet(VkDescriptorSetLayout layout,
+                                                           VkDescriptorSet* descriptor) {
+    using Attempt = DescriptorPoolChain<VkDescriptorPool>::Attempt;
+    VkResult result = VK_SUCCESS;
+    const bool allocated = mFrameResources[mCurrentFrame].DescriptorPools.Allocate(
+        [&](VkDescriptorPool* pool) {
+            result = CreateFrameDescriptorPool(pool);
+            return result == VK_SUCCESS;
+        },
+        [&](VkDescriptorPool pool) {
+            VkDescriptorSetAllocateInfo allocation{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            allocation.descriptorPool = pool;
+            allocation.descriptorSetCount = 1;
+            allocation.pSetLayouts = &layout;
+            result = vkAllocateDescriptorSets(mDevice, &allocation, descriptor);
+            if (result == VK_SUCCESS) return Attempt::Allocated;
+            if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL)
+                return Attempt::PoolFull;
+            return Attempt::Failed;
+        });
+    return allocated ? VK_SUCCESS : result;
 }
 
 GfxRenderingAPIVulkan::PipelineKey GfxRenderingAPIVulkan::BuildPipelineKey(

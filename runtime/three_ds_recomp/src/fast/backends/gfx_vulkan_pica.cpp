@@ -1900,26 +1900,16 @@ void GfxRenderingAPIVulkan::PaintNativePicaPictureBars(
 }
 
 VkDescriptorSet GfxRenderingAPIVulkan::AllocateNativePicaDescriptorSet() {
-    VkDescriptorSetAllocateInfo allocation{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    allocation.descriptorPool = mFrameResources[mCurrentFrame].DescriptorPool;
-    allocation.descriptorSetCount = 1;
-    allocation.pSetLayouts = &mNativePicaDescriptorSetLayout;
     VkDescriptorSet descriptor = VK_NULL_HANDLE;
-    CheckNativeVk(vkAllocateDescriptorSets(mDevice, &allocation, &descriptor),
+    CheckNativeVk(AllocateFrameDescriptorSet(mNativePicaDescriptorSetLayout, &descriptor),
                   "vkAllocateDescriptorSets(native PICA)");
     return descriptor;
 }
 
 VkDescriptorSet
 GfxRenderingAPIVulkan::AllocateNativePicaScanoutDescriptorSet() {
-    VkDescriptorSetAllocateInfo allocation{
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    allocation.descriptorPool = mFrameResources[mCurrentFrame].DescriptorPool;
-    allocation.descriptorSetCount = 1;
-    allocation.pSetLayouts = &mNativePicaScanoutDescriptorSetLayout;
     VkDescriptorSet descriptor = VK_NULL_HANDLE;
-    CheckNativeVk(vkAllocateDescriptorSets(mDevice, &allocation, &descriptor),
+    CheckNativeVk(AllocateFrameDescriptorSet(mNativePicaScanoutDescriptorSetLayout, &descriptor),
                   "vkAllocateDescriptorSets(native PICA scanout)");
     return descriptor;
 }

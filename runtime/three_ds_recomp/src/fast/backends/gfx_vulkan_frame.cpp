@@ -754,7 +754,9 @@ void GfxRenderingAPIVulkan::StartFrame() {
     frame.VertexBytesUsed = 0;
     frame.UniformBytesUsed = 0;
     frame.SurfaceLightingUniformOffset.reset();
-    CheckVk(vkResetDescriptorPool(mDevice, frame.DescriptorPool, 0), "vkResetDescriptorPool");
+    frame.DescriptorPools.Reset([&](VkDescriptorPool pool) {
+        CheckVk(vkResetDescriptorPool(mDevice, pool, 0), "vkResetDescriptorPool");
+    });
     frame.TextureDescriptorSets.clear();
     CheckVk(vkResetFences(mDevice, 1, &mInFlightFences[mCurrentFrame]), "vkResetFences");
     CheckVk(vkResetCommandBuffer(mCommandBuffers[mCurrentFrame], 0), "vkResetCommandBuffer");

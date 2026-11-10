@@ -725,10 +725,9 @@ void GfxRenderingAPIVulkan::Shutdown() {
         }
         mRetiredSamplers.clear();
         for (auto& frame : mFrameResources) {
-            if (frame.DescriptorPool != VK_NULL_HANDLE) {
-                vkDestroyDescriptorPool(mDevice, frame.DescriptorPool, nullptr);
-                frame.DescriptorPool = VK_NULL_HANDLE;
-            }
+            frame.DescriptorPools.Destroy([&](VkDescriptorPool pool) {
+                vkDestroyDescriptorPool(mDevice, pool, nullptr);
+            });
             DestroyBuffer(frame.VertexBuffer);
             DestroyBuffer(frame.UniformBuffer);
             for (auto& buffer : frame.RetiredUniformBuffers) DestroyBuffer(buffer);

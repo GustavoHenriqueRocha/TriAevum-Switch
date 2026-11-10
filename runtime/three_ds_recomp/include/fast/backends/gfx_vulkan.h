@@ -6,6 +6,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
 
+#include "fast/backends/descriptor_pool_chain.h"
 #include "fast/backends/gfx_rendering_api.h"
 #include "fast/renderer/spirv_cache.h"
 #include "fast/renderer3ds/pica_shader_module_identity.h"
@@ -476,7 +477,8 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
         VkDeviceSize UniformBytesUsed = 0;
         std::optional<VkDeviceSize> SurfaceLightingUniformOffset;
         Renderer3ds::PicaSurfaceLightingUniforms SurfaceLightingUniforms;
-        VkDescriptorPool DescriptorPool = VK_NULL_HANDLE;
+        // Cresce sob demanda (descriptor_pool_chain.h); zerada no início do quadro.
+        DescriptorPoolChain<VkDescriptorPool> DescriptorPools;
         std::map<TextureDescriptorKey, VkDescriptorSet> TextureDescriptorSets;
         std::vector<uint64_t> NativePicaCompletionIds;
         std::vector<TextureRecord> RetiredTextures;
@@ -1000,6 +1002,8 @@ class GfxRenderingAPIVulkan final : public GfxRenderingAPI,
                             uint32_t width, uint32_t height);
     void RecreateSampler(TextureRecord& texture);
     VkDescriptorSet AllocateTextureDescriptorSet();
+    VkResult CreateFrameDescriptorPool(VkDescriptorPool* pool);
+    VkResult AllocateFrameDescriptorSet(VkDescriptorSetLayout layout, VkDescriptorSet* descriptor);
     VkPipeline GetOrCreatePipeline(const VulkanShaderProgram& shader);
     PipelineKey BuildPipelineKey(const VulkanShaderProgram& shader) const;
     VkShaderModule CompileShaderModule(

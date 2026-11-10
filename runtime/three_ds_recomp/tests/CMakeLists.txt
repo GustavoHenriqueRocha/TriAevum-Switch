@@ -19,6 +19,11 @@ target_compile_features(framebuffer_readback_tests PRIVATE cxx_std_20)
 target_include_directories(framebuffer_readback_tests PRIVATE ../include)
 add_test(NAME framebuffer_readback_tests COMMAND framebuffer_readback_tests)
 
+add_executable(descriptor_pool_chain_tests descriptor_pool_chain_tests.cpp)
+target_compile_features(descriptor_pool_chain_tests PRIVATE cxx_std_20)
+target_include_directories(descriptor_pool_chain_tests PRIVATE ../include)
+add_test(NAME descriptor_pool_chain_tests COMMAND descriptor_pool_chain_tests)
+
 add_executable(native_presentation_policy_tests native_presentation_policy_tests.cpp)
 target_compile_features(native_presentation_policy_tests PRIVATE cxx_std_20)
 target_include_directories(native_presentation_policy_tests PRIVATE ../include)
