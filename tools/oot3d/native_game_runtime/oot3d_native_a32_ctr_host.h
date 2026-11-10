@@ -576,6 +576,11 @@ class NativeA32CtrHostServices final : public NativeA32HostServices {
         oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
         const std::optional<std::string>& sessionType, uint32_t commandBuffer,
         NativeA32CtrSvcEvent event);
+    // fs:USER CreateDirectory, também só no backend de pasta.
+    NativeA32HostResult CreateFsDirectory(
+        oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
+        const std::optional<std::string>& sessionType, uint32_t commandBuffer,
+        NativeA32CtrSvcEvent event);
     NativeA32HostResult HandleDirectoryRequest(
         oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
         const std::optional<std::string>& sessionType, uint32_t commandBuffer,

@@ -1893,6 +1893,81 @@ void TestFsOpenDirectory() {
     std::filesystem::remove_all(directory, ignored);
 }
 
+// fs:USER CreateDirectory (0x0809) no save: o MK7 cria as pastas do save no
+// primeiro A depois do boot e caía no err:f com o pedido sem HLE. Códigos do
+// Azahar (SaveDataArchive::CreateDirectory).
+void TestFsCreateDirectory() {
+    const auto directory = std::filesystem::temp_directory_path() /
+                           "oot3d_native_a32_ctr_host_test_create_directory";
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+    const auto save = directory / "save";
+    std::filesystem::create_directories(save);
+    {
+        std::ofstream out(save / "f.bin", std::ios::binary);
+        out << "x";
+        Require(out.good(), "cannot write the file fixture");
+    }
+    NativeA32CtrHostConfig config = MakeConfig();
+    config.SaveDataDirectory = save;
+    NativeA32CtrHostServices host(std::move(config));
+    const oot3d::recomp::a32::Registry registry{};
+    NativeA32Process process(registry, host);
+    MakeGuestThreads(process);
+    GuestThreads guest{host, process};
+    auto& memory = process.Memory();
+    const uint32_t srv = OpenSrv(guest);
+    uint32_t fs = 0;
+    Require(GetServiceHandle(guest, srv, "fs:USER", &fs) == NativeA32HostAction::Resume && fs != 0,
+            "fs:USER was not opened");
+    constexpr uint32_t command = 0x1FF82080;
+    const auto call = [&](std::vector<uint32_t> words) {
+        for (size_t i = 0; i < words.size(); ++i) {
+            Require(memory.Write32(command + static_cast<uint32_t>(i * 4U), words[i]),
+                    "cannot write FS command");
+        }
+        guest.State(0).r[0] = fs;
+        Require(guest.Svc(0, 0x32) == NativeA32HostAction::Resume, "an FS request did not resume");
+    };
+    const auto word = [&](uint32_t index) {
+        uint32_t value = 0;
+        Require(memory.Read32(command + index * 4U, &value), "cannot read FS reply");
+        return value;
+    };
+    call({0x08010002U, 0x20U, 0U});
+    Require(word(1) == 0U, "FS:Initialize failed");
+    constexpr uint32_t pathAddress = 0x0FF00200;
+    Require(memory.Write32(pathAddress, 0), "cannot write the empty path");
+    call({0x080C00C2U, 4U, 1U, 1U, (1U << 14U) | 2U, pathAddress});
+    Require(word(1) == 0U, "OpenArchive(SaveData) failed");
+    const uint32_t archiveLow = word(2), archiveHigh = word(3);
+    const auto createDirectory = [&](std::string_view path) {
+        std::vector<uint8_t> bytes(path.begin(), path.end());
+        bytes.push_back(0);
+        Require(memory.WriteBytes(pathAddress, bytes), "cannot write an FS path");
+        const auto size = static_cast<uint32_t>(bytes.size());
+        call({0x08090182U, 0U, archiveLow, archiveHigh, 3U, size, 0U, (size << 14U) | 2U,
+              pathAddress});
+        Require(word(0) == 0x08090040U, "CreateDirectory reply header is wrong");
+        return word(1);
+    };
+    Require(createDirectory("/d") == 0U && std::filesystem::is_directory(save / "d"),
+            "CreateDirectory(/d) did not create the directory");
+    Require(createDirectory("/d/e") == 0U && std::filesystem::is_directory(save / "d" / "e"),
+            "CreateDirectory(/d/e) did not create the nested directory");
+    Require(createDirectory("/d") == 0xC82044B9U,
+            "CreateDirectory of an existing directory is not DirectoryAlreadyExists");
+    Require(createDirectory("/f.bin") == 0xC82044B9U,
+            "CreateDirectory over a file is not DirectoryAlreadyExists");
+    Require(createDirectory("/nope/x") == 0xC8804471U && !std::filesystem::exists(save / "nope"),
+            "CreateDirectory under a missing parent is not PathNotFound");
+    Require(createDirectory("/f.bin/x") == 0xE0C04702U,
+            "CreateDirectory under a file is not UnexpectedFileOrDirectory");
+    Require(createDirectory("/../fora") == 0xE0E046BEU && !std::filesystem::exists(directory / "fora"),
+            "CreateDirectory escaped the save archive");
+    std::filesystem::remove_all(directory, ignored);
+}
+
 // --- Despejo periódico do estado do guest (TRIAEVUM_GUEST_STATE_DUMP) -------
 // O Mario parava no logo sem erro; para saber em que cada thread espera, o
 // despejo mostra PC/LR, o último SVC de cada thread e os IPC que mudaram.
@@ -2238,6 +2313,7 @@ int main() {
     TestAptGetSharedFont();
     TestAptLibraryAppletMiiSelector();
     TestFsOpenDirectory();
+    TestFsCreateDirectory();
     TestDeferredDeviceMemory();
     TestDeferredDeviceFailureAndOverwrite();
     TestGpuMemoryWriteOwnership();

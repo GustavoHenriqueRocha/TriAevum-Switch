@@ -194,6 +194,77 @@ NativeA32HostResult NativeA32CtrHostServices::OpenFsDirectory(
     return {NativeA32HostAction::Resume};
 }
 
+// Azahar SaveDataArchive::CreateDirectory: o estado do caminho decide o erro
+// (pasta ou arquivo já existente, arquivo no meio, pai ausente).
+NativeA32HostResult NativeA32CtrHostServices::CreateFsDirectory(
+    oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
+    const std::optional<std::string>& sessionType, uint32_t commandBuffer,
+    NativeA32CtrSvcEvent event) {
+    uint64_t archiveHandle = 0;
+    uint32_t pathType = 0, pathSize = 0, descriptor = 0, pathAddress = 0;
+    if (!memory.Read64(commandBuffer + 8U, &archiveHandle, nullptr) ||
+        !memory.Read32(commandBuffer + 16U, &pathType) ||
+        !memory.Read32(commandBuffer + 20U, &pathSize) ||
+        !memory.Read32(commandBuffer + 28U, &descriptor) ||
+        !memory.Read32(commandBuffer + 32U, &pathAddress) ||
+        (descriptor & 0x3FFU) != 2U || (descriptor >> 14U) != pathSize) {
+        return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                             kFsInvalidPath, "create-directory-path-descriptor");
+    }
+    const auto archive = std::find_if(mArchives.begin(), mArchives.end(),
+        [archiveHandle](const ArchiveRecord& record) { return record.Handle == archiveHandle; });
+    const bool diskArchive = archive != mArchives.end() && mConfig.Filesystem == nullptr &&
+                             !archive->Root.empty() &&
+                             (archive->Id == kFsSaveDataArchiveId || IsCtrExtDataArchiveId(archive->Id));
+    if (archive != mArchives.end() && !diskArchive) {
+        return FailFsRequest(state, memory, commandBuffer, sessionType, event,
+                             kFsNotImplemented, "create-directory-archive-without-disk-backend");
+    }
+    const auto relative = DecodeArchiveRelativePath(memory, pathType, pathSize, pathAddress);
+    uint32_t result = kFsInvalidArchiveHandle;
+    if (archive != mArchives.end()) {
+        result = kFsInvalidPath;
+        if (relative && CtrArchivePathContained(archive->Root, *relative)) {
+            const auto target = archive->Root / *relative;
+            std::error_code error;
+            const auto status = std::filesystem::symlink_status(target, error);
+            if (std::filesystem::exists(status)) {
+                result = kFsDirectoryAlreadyExists;
+            } else {
+                result = kResultSuccess;
+                auto prefix = archive->Root;
+                for (const auto& part : relative->parent_path()) {
+                    prefix /= part;
+                    std::error_code partError;
+                    const auto partStatus = std::filesystem::symlink_status(prefix, partError);
+                    if (std::filesystem::is_regular_file(partStatus)) {
+                        result = kFsUnexpectedFileOrDirectory;
+                        break;
+                    }
+                    if (!std::filesystem::is_directory(partStatus)) {
+                        result = kFsPathNotFound;
+                        break;
+                    }
+                }
+                if (result == kResultSuccess &&
+                    (!std::filesystem::create_directory(target, error) || error)) {
+                    result = kFsCommandNotAllowed;
+                }
+            }
+        }
+    }
+    if (!memory.Write32(commandBuffer, kFsCreateDirectoryResponse) ||
+        !memory.Write32(commandBuffer + 4U, result)) {
+        return {NativeA32HostAction::Fault, std::nullopt, 0U, "CreateDirectory reply write failed"};
+    }
+    state.r[0] = kResultSuccess;
+    event.Name += ":CreateDirectory:" + DescribeLowPath(memory, pathType, pathSize, pathAddress);
+    event.Detail = result;
+    event.Handled = true;
+    mSvcEvents.push_back(std::move(event));
+    return {NativeA32HostAction::Resume};
+}
+
 NativeA32HostResult NativeA32CtrHostServices::HandleDirectoryRequest(
     oot3d::recomp::a32::GuestState& state, NativeA32Memory& memory,
     const std::optional<std::string>& sessionType, uint32_t commandBuffer,

@@ -86,6 +86,7 @@ NativeA32HostResult NativeA32CtrHostServices::FailFsRequest(
         case kFsOpenFileDirectlyRequest: typeOffset = 20U; addressOffset = 48U; break;
         case kFsOpenArchiveRequest: typeOffset = 8U; addressOffset = 20U; break;
         case kFsOpenDirectoryRequest: typeOffset = 12U; addressOffset = 24U; break;
+        case kFsCreateDirectoryRequest: typeOffset = 16U; addressOffset = 32U; break;
         default: break;
         }
         uint32_t type = 0U, size = 0U, address = 0U;
@@ -637,6 +638,9 @@ NativeA32HostResult NativeA32CtrHostServices::HandleFsRequest(
     }
     if (event.Detail == kFsOpenDirectoryRequest) {
         return OpenFsDirectory(state, memory, sessionType, commandBuffer, std::move(event));
+    }
+    if (event.Detail == kFsCreateDirectoryRequest) {
+        return CreateFsDirectory(state, memory, sessionType, commandBuffer, std::move(event));
     }
     if (event.Detail == kFsOpenFileDirectlyRequest) {
         std::array<uint32_t, 12> words{};

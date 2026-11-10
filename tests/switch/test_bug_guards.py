@@ -868,6 +868,10 @@ GUARDS = [
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
           r'if \(event\.Detail == kFsOpenDirectoryRequest\) \{\s+return OpenFsDirectory\(',
           "oot3d_native_a32_ctr_host_tests (TestFsOpenDirectory)"),
+    Guard("MK7: fs:USER CreateDirectory sem HLE (err:f ao criar o save no primeiro A)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_fs.cpp",
+          r'if \(event\.Detail == kFsCreateDirectoryRequest\) \{\s+return CreateFsDirectory\(',
+          "oot3d_native_a32_ctr_host_tests (TestFsCreateDirectory)"),
     Guard("Listagem de diretório do save mostrava os arquivos do diário (.triaevum-*) ao jogo",
           "tools/oot3d/native_game_runtime/oot3d_native_a32_ctr_host_directory.cpp",
           r'if \(journal != nullptr && IsSaveJournalName\(name\.string\(\)\)\) continue;.*?'
