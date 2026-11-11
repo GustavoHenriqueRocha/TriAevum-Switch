@@ -128,6 +128,55 @@ add_executable(oot3d_landing_roll_tests EXCLUDE_FROM_ALL
 target_compile_features(oot3d_landing_roll_tests PRIVATE cxx_std_20)
 oot3d_target_defaults(oot3d_landing_roll_tests NO_WARNING_OVERRIDE FOLDER Tests)
 
+# Damage taken at Health_ChangeBy (config/damage_multiplier; header-only).
+add_executable(oot3d_damage_multiplier_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_damage_multiplier_tests.cpp
+)
+target_compile_features(oot3d_damage_multiplier_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_damage_multiplier_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
+# Quick put away at the item-use wait (config/quick_put_away; header-only).
+add_executable(oot3d_quick_put_away_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_quick_put_away_tests.cpp
+)
+target_compile_features(oot3d_quick_put_away_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_quick_put_away_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
+# Unmirrored Master Quest at the mirror reads (config/master_quest_unmirrored;
+# header-only).
+add_executable(oot3d_master_quest_mirror_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_master_quest_mirror_tests.cpp
+)
+target_compile_features(oot3d_master_quest_mirror_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_master_quest_mirror_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
+# Simple shadow: the game side at Player_DrawFeetShadow (config/simple_shadow;
+# oot3d_simple_shadow.h) and the renderer side's math and frame bridge
+# (fast/oot3d/player_shadow.h); header-only.
+add_executable(oot3d_simple_shadow_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_simple_shadow_tests.cpp
+)
+add_executable(oot3d_player_shadow_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_player_shadow_tests.cpp
+)
+foreach(target oot3d_simple_shadow_tests oot3d_player_shadow_tests)
+    target_include_directories(${target} PRIVATE
+        runtime/three_ds_recomp/include
+        tools/oot3d/native_a32_runtime/upstream)
+    target_compile_features(${target} PRIVATE cxx_std_20)
+    oot3d_target_defaults(${target} NO_WARNING_OVERRIDE FOLDER Tests)
+endforeach()
+
+# The game log line of those four options (oot3d_gameplay_options_log.h; header-only).
+add_executable(oot3d_gameplay_options_log_tests EXCLUDE_FROM_ALL
+    tools/oot3d/native_game_runtime/oot3d_gameplay_options_log_tests.cpp
+)
+target_include_directories(oot3d_gameplay_options_log_tests PRIVATE
+    runtime/three_ds_recomp/include
+    tools/oot3d/native_a32_runtime/upstream)
+target_compile_features(oot3d_gameplay_options_log_tests PRIVATE cxx_std_20)
+oot3d_target_defaults(oot3d_gameplay_options_log_tests NO_WARNING_OVERRIDE FOLDER Tests)
+
 # Roll dash (config/roll_dash): the zelda_link_ext.zar image and the runtime
 # at its block entries (oot3d_roll_dash_runtime.h; upstream 5acf8138, 54fe8edf).
 add_executable(oot3d_top_screen_link_ext_tests EXCLUDE_FROM_ALL

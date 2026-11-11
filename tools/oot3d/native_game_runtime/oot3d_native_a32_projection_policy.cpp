@@ -1,6 +1,9 @@
 // Block-entry policy of the A32 window: widescreen projection and guest observation hooks.
 #include "oot3d_native_a32_window_shared.h"
+#include "oot3d_damage_multiplier.h"
 #include "oot3d_landing_roll.h"
+#include "oot3d_master_quest_mirror.h"
+#include "oot3d_quick_put_away.h"
 
 namespace Oot3dA32Window {
 
@@ -561,6 +564,50 @@ void ApplyNativeWidescreenProjectionPolicy(
       Oot3dNativeGame::Oot3dWholeAotPluginObservableExit(exit.pc, state);
 #else
       Oot3dNativeGame::Oot3dWholeAotExitAt(exit.pc, state);
+#endif
+    }
+  }
+  // Damage multiplier (oot3d_damage_multiplier.h): Health_ChangeBy's change,
+  // before the game's Master Quest doubling and double defence.
+  if (pc == Oot3dNativeGame::kDamageMultiplierHookPc) {
+    const auto multiplier = Oot3dNativeGame::DamageMultiplier().load(std::memory_order_relaxed);
+    if (multiplier != Oot3dNativeGame::kDamageMultiplierNormal)
+      state.r[1] = static_cast<uint32_t>(Oot3dNativeGame::ScaleHealthChange(
+          static_cast<int32_t>(state.r[1]), multiplier));
+  }
+  // Quick put away (oot3d_quick_put_away.h): the block is `mov r0,#30; b`
+  // to the store, which gets one frame instead.
+  if (pc == Oot3dNativeGame::kQuickPutAwayHookPc && wholeAotExecutionActive &&
+      Oot3dNativeGame::QuickPutAwayEnabled().load(std::memory_order_relaxed)) {
+    state.r[0] = Oot3dNativeGame::kQuickPutAwayFrames;
+#if defined(OOT3D_NATIVE_DIRECT_AOT_PLUGIN)
+    Oot3dNativeGame::Oot3dWholeAotPluginObservableExit(Oot3dNativeGame::kQuickPutAwayStorePc, state);
+#else
+    Oot3dNativeGame::Oot3dWholeAotExitAt(Oot3dNativeGame::kQuickPutAwayStorePc, state);
+#endif
+  }
+  // Unmirrored Master Quest (oot3d_master_quest_mirror.h): the setting
+  // applies where the game reads the flag for its save copy; then the mirror
+  // reads see 0.
+  if (pc == Oot3dNativeGame::kMasterQuestMirrorApplyPc) {
+    Oot3dNativeGame::ApplyMasterQuestUnmirrored();
+  } else if (Oot3dNativeGame::MasterQuestUnmirrorApplied().load(std::memory_order_relaxed)) {
+    if (const auto *read = Oot3dNativeGame::FindMasterQuestMirrorRead(pc))
+      state.r[read->Register] = 0U;
+  }
+  // Simple shadow (oot3d_simple_shadow.h): the foot shadows at alpha 0, whose
+  // return re-enters the hook, which leaves the graph at Actor_Draw. Only
+  // while the renderer draws the body (deko3d, its program loaded).
+  if (pc == Oot3dNativeGame::kSimpleShadowHookPc && runtime.SimpleShadow != nullptr &&
+      (wholeAotExecutionActive || runtime.SimpleShadow->Pending())) {
+    const bool simpleShadow = Oot3dNativeGame::SimpleShadowEnabled().load(std::memory_order_relaxed) &&
+                              Fast::Oot3d::PlayerShadowBridge::Instance().RendererReady();
+    if (const auto exitPc =
+            runtime.SimpleShadow->Execute(state, memory, simpleShadow, wholeAotExecutionActive)) {
+#if defined(OOT3D_NATIVE_DIRECT_AOT_PLUGIN)
+      Oot3dNativeGame::Oot3dWholeAotPluginObservableExit(*exitPc, state);
+#else
+      Oot3dNativeGame::Oot3dWholeAotExitAt(*exitPc, state);
 #endif
     }
   }

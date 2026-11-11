@@ -1,5 +1,6 @@
 #include "oot3d_top_screen_camera_guest.h"
 
+#include "oot3d_master_quest_mirror.h"
 #include "oot3d_native_a32_memory.h"
 
 #include <algorithm>
@@ -298,7 +299,7 @@ bool PrepareTopScreenFreeCameraCollision(
   const auto orbit = BuildTopScreenFreeCameraOrbit(
       runtime->Camera,
       {position, currentAt, currentEye, linkAge != 0U,
-       (flags1 & 0x2000U) != 0U, masterQuest != 0U,
+       (flags1 & 0x2000U) != 0U, MasterQuestMirrorShown(masterQuest),
        runtime->RightStickX, runtime->RightStickY,
        runtime->RelativeInput});
   const auto atAddress = runtime->ScratchAddress + kAtScratchOffset;

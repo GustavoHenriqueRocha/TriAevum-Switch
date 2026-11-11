@@ -1,7 +1,11 @@
 #include "oot3d_native_block_entry_hooks.h"
 
+#include "oot3d_damage_multiplier.h"
 #include "oot3d_landing_roll.h"
+#include "oot3d_master_quest_mirror.h"
+#include "oot3d_quick_put_away.h"
 #include "oot3d_roll_dash.h"
+#include "oot3d_simple_shadow.h"
 #include "oot3d_native_a32_actor_visibility.h"
 #include "oot3d_native_a32_timing_probe.h"
 #include "oot3d_native_a32_window_guest_pcs.h"
@@ -45,6 +49,12 @@ std::vector<Oot3dBlockEntryHookSource> Oot3dNativeBlockEntryHookSources(
   // Roll dash (config/roll_dash, oot3d_roll_dash.h): always hooked, so the
   // menu turns it on at once; inert while it is off.
   add("roll_dash", kRollDashHookPcs);
+  // Damage multiplier, quick put away, unmirrored Master Quest and simple
+  // shadow (L3+R3 > Game > Gameplay): always hooked too; inert while off.
+  add("gameplay_options", std::array{kDamageMultiplierHookPc, kQuickPutAwayHookPc,
+                                     kMasterQuestMirrorApplyPc, kSimpleShadowHookPc});
+  for (const auto &read : kMasterQuestMirrorReads)
+    hooks.push_back({read.HookPc, "master_quest_mirror"});
   add("actor_visibility", NativeActorVisibilityHookPcs());
   add("pica_composition", Oot3dNativePicaCompositionHookPcs());
   if (options.PlayerTemporal)
@@ -155,6 +165,14 @@ Oot3dBlockEntryHookOptions Oot3dAllBlockEntryHookOptions() noexcept {
 
 std::vector<uint32_t> Oot3dNativeAllBlockEntryHookPcs() {
   return Oot3dNativeBlockEntryHookPcs(Oot3dAllBlockEntryHookOptions());
+}
+
+std::vector<uint32_t> Oot3dGameplayOptionBlockPcs() {
+  std::vector<uint32_t> pcs{kDamageMultiplierHookPc, kQuickPutAwayHookPc, kQuickPutAwayStorePc,
+                            kMasterQuestMirrorApplyPc, kSimpleShadowHookPc};
+  for (const auto &read : kMasterQuestMirrorReads) pcs.push_back(read.HookPc);
+  std::sort(pcs.begin(), pcs.end());
+  return pcs;
 }
 
 } // namespace Oot3dNativeGame

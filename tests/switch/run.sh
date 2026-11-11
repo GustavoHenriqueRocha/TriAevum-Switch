@@ -36,6 +36,12 @@ UNIT_TESTS=(
     oot3d_switch_launch_environment_tests
     oot3d_input_bench_tests
     oot3d_landing_roll_tests
+    oot3d_damage_multiplier_tests
+    oot3d_quick_put_away_tests
+    oot3d_master_quest_mirror_tests
+    oot3d_gameplay_options_log_tests
+    oot3d_simple_shadow_tests
+    oot3d_player_shadow_tests
     oot3d_native_a32_ctr_fs_tests
     oot3d_native_a32_ctr_host_tests
     oot3d_native_a32_romfs_overlay_tests

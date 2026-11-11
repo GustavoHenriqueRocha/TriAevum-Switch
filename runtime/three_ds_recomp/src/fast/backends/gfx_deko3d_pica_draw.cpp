@@ -223,6 +223,7 @@ void GfxRenderingAPIDeko3d::InitPica() {
     Deko3d::Log("pica: scanout shaders %s, cull invert %d, flip y %d, lean %d",
                 mScanoutVertex != nullptr && mScanoutFragment != nullptr ? "ready" : "MISSING",
                 mCullInvert ? 1 : 0, mFlipY ? 1 : 0, mPicaLean ? 1 : 0);
+    InitPlayerShadow(); // config/simple_shadow
 }
 
 void GfxRenderingAPIDeko3d::BindPicaTarget(PicaTarget& target) {
@@ -408,6 +409,7 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
     }
     EnsureFrame();
     Deko3d::GrassObserveDraw(draw, mDevice.Frame()); // config/grass
+    ObservePlayerShadowDraw(draw);                   // config/simple_shadow
 
     const PicaTargetKey key = MakePicaTargetKey(draw);
     bool created = false;
@@ -436,6 +438,9 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDraw(const GfxNativePicaDrawView& draw, st
         // dkperf opaque_ms: the frame's first translucent world draw (once
         // per frame), before grass.
         mDevice.MarkOpaqueEnd();
+    }
+    if (Oot3d::GrassDrawPointOf(draw.CompositionDomain, draw.Composition.Layer)) {
+        DrawPlayerShadow(*target); // config/simple_shadow, at the grass's points
     }
     if (mGrassDraws) {
         // config/grass = draw: before the first translucent world draw or the
@@ -714,6 +719,25 @@ bool GfxRenderingAPIDeko3d::RecordPicaDraw(const GfxNativePicaDrawView& draw, co
         }
         return false;
     }
+    // config/simple_shadow: one of Link's draws, with what it binds.
+    if (mPlayerShadow.Selected && draw.Composition.NativeActorGeometry &&
+        draw.Composition.NativeActorIdentity == Oot3d::PlayerShadowActorIdentity(mPlayerShadow.Selected->Actor)) {
+        PlayerShadowDraw bound;
+        bound.Attributes = attributes;
+        bound.Buffers = buffers;
+        bound.Extents = extents;
+        bound.Primitive = primitive;
+        bound.Indexed = draw.Indexed;
+        bound.Indices16 = draw.IndicesAre16Bit;
+        bound.IndexStream = res.IndexStream;
+        bound.IndexCount = draw.Indexed ? res.IndexBytes / indexSize : 0U;
+        bound.BaseVertex = draw.BaseVertex;
+        bound.VertexCount = draw.VertexCount;
+        bound.Viewport = viewport;
+        bound.Scissor = dkScissor;
+        bound.DepthCompare = DekoCompareOp(draw.DepthCompare);
+        CapturePlayerShadowDraw(draw, program, target, bound);
+    }
 
     // The frame's depth reset (gfx_deko3d_clear_draw.h): a depth-writing
     // draw that passes every depth test over the whole target. Planned (and
@@ -858,6 +882,7 @@ bool GfxRenderingAPIDeko3d::SubmitPicaDisplayTransfer(const GfxNativePicaDisplay
         }
         return reject("deko3d display image memory");
     }
+    DrawPlayerShadow(*source); // config/simple_shadow, before the copy reads the target
     if (mGrassDraws) {
         // config/grass = draw: a scene with neither a translucent world draw
         // nor an overlay after its grass sources gets its grass here, before
@@ -1011,6 +1036,7 @@ const char* GfxRenderingAPIDeko3d::CapturePicaTextureCopy(const GfxNativePicaDis
         return "no render target holds the copy's source";
     }
     EnsureFrame();
+    DrawPlayerShadow(*source); // config/simple_shadow
     if (mGrassDraws) {
         DrawGrass(*key, *source, Oot3d::GrassDrawPoint::Transfer);
     }
