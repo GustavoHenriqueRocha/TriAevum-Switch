@@ -2392,18 +2392,23 @@ GUARDS = [
           r'const bool rasterDepth = !draw\.WBuffering && draw\.DepthRange == -1\.0F && draw\.NearPlane == 0\.0F;\s+'
           r'if \(!draw\.DepthTestEnabled \|\| !draw\.DepthWriteEnabled \|\| !rasterDepth \|\|',
           "oot3d_player_shadow_tests (TestPatch)"),
-    Guard("Simple shadow: overlapping limbs darken a pixel once, and the borrowed stencil bit is cleared again",
+    Guard("Simple shadow: overlapping limbs darken a pixel once, and the borrowed stencil bit goes back to zero "
+          "(a second pass over the same meshes; a whole-target clear only once the game or a savestate may have "
+          "set it, since clearing one stencil bit rewrites the whole depth and stencil image)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'if \(stencil && shadow\.StencilShared && shadow\.StencilClean\.insert\(&target\)\.second\) \{.*?'
           r'dkCmdBufClearDepthStencil\(cmd, false, 0\.0F, kPlayerShadowStencilBit, 0U\);.*?'
-          r'stencilFrontPassOp = depthStencil\.stencilBackPassOp = DkStencilOp_Replace;\s+'
-          r'depthStencil\.stencilFrontCompareOp = depthStencil\.stencilBackCompareOp = DkCompareOp_NotEqual;.*?'
-          r'dkCmdBufClearDepthStencil\(cmd, false, 0\.0F, kPlayerShadowStencilBit, 0U\);',
+          r'depthStencil\.stencilFrontPassOp = depthStencil\.stencilBackPassOp = pass;\s+'
+          r'depthStencil\.stencilFrontCompareOp = depthStencil\.stencilBackCompareOp = compare;.*?'
+          r'drawMeshes\(DkStencilOp_Replace, DkCompareOp_NotEqual\);\s+if \(stencil\) \{.*?'
+          r'dkColorWriteStateSetMask\(&noColor, 0, 0\);.*?drawMeshes\(DkStencilOp_Zero, DkCompareOp_Always\);',
           "", forbid=r'depthWriteEnable = 1'),
     Guard("Simple shadow: a frame whose draws use the top stencil bit keeps it (the body drawn without it, "
           "not dropped: the foot shadows are hidden already)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
           r'if \(draw\.Stencil\.Enabled && \(\(draw\.Stencil\.WriteMask \| draw\.Stencil\.CompareMask\) & '
-          r'kPlayerShadowStencilBit\) != 0U\)\s+shadow\.StencilTaken = true;.*?'
+          r'kPlayerShadowStencilBit\) != 0U\) \{\s+shadow\.StencilTaken = shadow\.StencilShared = true;\s+'
+          r'shadow\.StencilClean\.clear\(\);.*?'
           r'const bool stencil = !shadow\.StencilTaken;.*?'
           r'depthStencil\.stencilTestEnable = stencil \? 1 : 0;',
           ""),

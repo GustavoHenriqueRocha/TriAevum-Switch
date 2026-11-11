@@ -30,6 +30,7 @@
 #include <span>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct ImDrawData;
@@ -454,6 +455,13 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
         // A draw of the frame tests or writes the top stencil bit, which the
         // shadow borrows: no shadow that frame.
         bool StencilTaken = false;
+        // Whether that bit can be set outside the shadow. Targets start with
+        // it zero and the shadow's second pass leaves it so; once a game draw
+        // uses it or a savestate restores stencil, a pass clears it over its
+        // whole target once, and the target counts as clean again.
+        bool StencilShared = false;
+        std::unordered_set<const Deko3d::PicaTarget*> StencilClean; // since the last share
+        uint64_t FullClears = 0;
         const DkShader* Fragment = nullptr;
         uint64_t Frames = 0;
         uint64_t Meshes = 0;

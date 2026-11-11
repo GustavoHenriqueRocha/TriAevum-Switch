@@ -1301,6 +1301,9 @@ bool GfxRenderingAPIDeko3d::RestorePicaColorTargets(
                 throw std::runtime_error(failure);
             }
         }
+        // The restored stencil can hold the game's top bit.
+        mPlayerShadow.StencilShared = true;
+        mPlayerShadow.StencilClean.clear();
         Deko3d::Log("savestate: restored %zu targets (%s)", snapshots.size(),
                     snapshots.front().RenderScalePermille == Renderer3ds::kPicaGuestExtentRenderScalePermille
                         ? "guest extent"

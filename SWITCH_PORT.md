@@ -4296,7 +4296,12 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   light, the mod's: the scene's directional lights weighted by their energy (under 0.02 ignored), tilted
   toward the vertical when the strongest is under 0.35 and as he rises from 40 to 140 units; the port keeps it
   at least 0.3 over the floor (the mod has no bound). One light and floor serve all of a frame's meshes
-  (taken at its first). Stencil bit `0x80` is cleared before and after the pass, each pixel darkens once; a
+  (taken at its first). Stencil bit `0x80` makes each pixel darken once: the shadow sets it where it lands, and a
+  second pass over the same meshes (no colour, stencil op zero) puts it back to zero on exactly those pixels.
+  Until 11/11 the bit was cleared over the whole target before and after the pass; clearing one stencil bit
+  rewrites the whole depth and stencil image (720x1280 at scale 3), twice a frame. A whole-target clear is now
+  made only once a game draw has used the bit or a savestate restored stencil, once per target until that
+  happens again (`StencilClean`; the `shadow:` line counts them as `full stencil clears`, 0 in normal play). A
   frame whose own draws use that bit (the Lens of Truth may) keeps it, and the body is drawn without it
   (overlapping limbs darker; logged once). Not ported: the mod's handling of water depth (actor +0x88); the
   shadow lies on the floor under the water. Known: like the game's own round shadow, it is flat, so past a

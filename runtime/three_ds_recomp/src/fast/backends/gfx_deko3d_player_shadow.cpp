@@ -2,7 +2,9 @@
 // "Simple shadow"): the opaque draws of Link's actor in a frame are drawn
 // again with his own PICA vertex program, their view rows patched to flatten
 // him onto the floor along the scene's light, in a translucent black that
-// darkens each pixel once (the top stencil bit, cleared before and after).
+// darkens each pixel once (the top stencil bit, set where the shadow lands and
+// zeroed again by a second pass over the same meshes; cleared first only once
+// the game or a savestate may have left it set).
 // They are taken only from draws that leave depth to the rasterizer and drawn
 // at the frame's first draw point after them (before a translucent world draw,
 // an overlay or the display transfer), with his draws' depth test and no
@@ -48,8 +50,10 @@ void GfxRenderingAPIDeko3d::ObservePlayerShadowDraw(const GfxNativePicaDrawView&
         shadow.Draws.clear();
         shadow.StencilTaken = false;
     }
-    if (draw.Stencil.Enabled && ((draw.Stencil.WriteMask | draw.Stencil.CompareMask) & kPlayerShadowStencilBit) != 0U)
-        shadow.StencilTaken = true;
+    if (draw.Stencil.Enabled && ((draw.Stencil.WriteMask | draw.Stencil.CompareMask) & kPlayerShadowStencilBit) != 0U) {
+        shadow.StencilTaken = shadow.StencilShared = true;
+        shadow.StencilClean.clear();
+    }
 }
 
 void GfxRenderingAPIDeko3d::CapturePlayerShadowDraw(const GfxNativePicaDrawView& draw, const PicaProgram& program,
@@ -126,10 +130,11 @@ void GfxRenderingAPIDeko3d::DrawPlayerShadow(PicaTarget& target) {
     DkCmdBuf cmd = mDevice.Cmd();
     BindPicaTarget(target);
     ++target.Version;
-    const DkScissor whole{0, 0, target.Extent.Width, target.Extent.Height};
-    if (stencil) {
+    if (stencil && shadow.StencilShared && shadow.StencilClean.insert(&target).second) {
+        const DkScissor whole{0, 0, target.Extent.Width, target.Extent.Height};
         dkCmdBufSetScissors(cmd, 0, &whole, 1);
         dkCmdBufClearDepthStencil(cmd, false, 0.0F, kPlayerShadowStencilBit, 0U);
+        ++shadow.FullClears;
     }
 
     DkColorState colorState;
@@ -154,52 +159,64 @@ void GfxRenderingAPIDeko3d::DrawPlayerShadow(PicaTarget& target) {
     rasterizer.depthClampEnable = 0;
     rasterizer.cullMode = DkFace_None; // flattening turns some triangles over
     dkCmdBufBindRasterizerState(cmd, &rasterizer);
-    // Drawn where the bit is clear, then set: each pixel darkens once.
     dkCmdBufSetStencil(cmd, DkFace_FrontAndBack, kPlayerShadowStencilBit, kPlayerShadowStencilBit,
                        kPlayerShadowStencilBit);
     dkCmdBufBindUniformBuffer(cmd, DkStage_Fragment, 0, color.Gpu, DK_UNIFORM_BUF_ALIGNMENT);
 
-    for (const PlayerShadowDraw& draw : draws) {
-        DkDepthStencilState depthStencil;
-        dkDepthStencilStateDefaults(&depthStencil);
-        depthStencil.depthTestEnable = 1;
-        depthStencil.depthWriteEnable = 0;
-        depthStencil.depthCompareOp = static_cast<DkCompareOp>(draw.DepthCompare);
-        depthStencil.stencilTestEnable = stencil ? 1 : 0;
-        depthStencil.stencilFrontFailOp = depthStencil.stencilBackFailOp = DkStencilOp_Keep;
-        depthStencil.stencilFrontDepthFailOp = depthStencil.stencilBackDepthFailOp = DkStencilOp_Keep;
-        depthStencil.stencilFrontPassOp = depthStencil.stencilBackPassOp = DkStencilOp_Replace;
-        depthStencil.stencilFrontCompareOp = depthStencil.stencilBackCompareOp = DkCompareOp_NotEqual;
-        dkCmdBufBindDepthStencilState(cmd, &depthStencil);
-        const DkShader* shaders[] = {draw.Vertex, shadow.Fragment};
-        dkCmdBufBindShaders(cmd, DkStageFlag_Vertex | DkStageFlag_Fragment, shaders, 2);
-        dkCmdBufBindUniformBuffer(cmd, DkStage_Vertex, 0, draw.Uniforms, draw.UniformBytes);
-        dkCmdBufBindVtxAttribState(cmd, draw.Attributes.data(), static_cast<uint32_t>(draw.Attributes.size()));
-        dkCmdBufBindVtxBufferState(cmd, draw.Buffers.data(), static_cast<uint32_t>(draw.Buffers.size()));
-        dkCmdBufBindVtxBuffers(cmd, 0, draw.Extents.data(), static_cast<uint32_t>(draw.Extents.size()));
-        ApplyDkViewport(cmd, static_cast<float>(draw.Viewport.X), static_cast<float>(draw.Viewport.Y),
-                        static_cast<float>(draw.Viewport.Width), static_cast<float>(draw.Viewport.Height));
-        dkCmdBufSetScissors(cmd, 0, &draw.Scissor, 1);
-        if (draw.Indexed) {
-            dkCmdBufBindIdxBuffer(cmd, draw.Indices16 ? DkIdxFormat_Uint16 : DkIdxFormat_Uint8, draw.IndexStream);
-            dkCmdBufDrawIndexed(cmd, draw.Primitive, draw.IndexCount, 1, 0, draw.BaseVertex, 0);
-        } else {
-            dkCmdBufDraw(cmd, draw.Primitive, draw.VertexCount, 1, 0, 0);
+    // Every mesh with his depth test; `pass` writes the bit where `compare` lets the pixel through.
+    const auto drawMeshes = [&](DkStencilOp pass, DkCompareOp compare) {
+        for (const PlayerShadowDraw& draw : draws) {
+            DkDepthStencilState depthStencil;
+            dkDepthStencilStateDefaults(&depthStencil);
+            depthStencil.depthTestEnable = 1;
+            depthStencil.depthWriteEnable = 0;
+            depthStencil.depthCompareOp = static_cast<DkCompareOp>(draw.DepthCompare);
+            depthStencil.stencilTestEnable = stencil ? 1 : 0;
+            depthStencil.stencilFrontFailOp = depthStencil.stencilBackFailOp = DkStencilOp_Keep;
+            depthStencil.stencilFrontDepthFailOp = depthStencil.stencilBackDepthFailOp = DkStencilOp_Keep;
+            depthStencil.stencilFrontPassOp = depthStencil.stencilBackPassOp = pass;
+            depthStencil.stencilFrontCompareOp = depthStencil.stencilBackCompareOp = compare;
+            dkCmdBufBindDepthStencilState(cmd, &depthStencil);
+            const DkShader* shaders[] = {draw.Vertex, shadow.Fragment};
+            dkCmdBufBindShaders(cmd, DkStageFlag_Vertex | DkStageFlag_Fragment, shaders, 2);
+            dkCmdBufBindUniformBuffer(cmd, DkStage_Vertex, 0, draw.Uniforms, draw.UniformBytes);
+            dkCmdBufBindVtxAttribState(cmd, draw.Attributes.data(), static_cast<uint32_t>(draw.Attributes.size()));
+            dkCmdBufBindVtxBufferState(cmd, draw.Buffers.data(), static_cast<uint32_t>(draw.Buffers.size()));
+            dkCmdBufBindVtxBuffers(cmd, 0, draw.Extents.data(), static_cast<uint32_t>(draw.Extents.size()));
+            ApplyDkViewport(cmd, static_cast<float>(draw.Viewport.X), static_cast<float>(draw.Viewport.Y),
+                            static_cast<float>(draw.Viewport.Width), static_cast<float>(draw.Viewport.Height));
+            dkCmdBufSetScissors(cmd, 0, &draw.Scissor, 1);
+            if (draw.Indexed) {
+                dkCmdBufBindIdxBuffer(cmd, draw.Indices16 ? DkIdxFormat_Uint16 : DkIdxFormat_Uint8,
+                                      draw.IndexStream);
+                dkCmdBufDrawIndexed(cmd, draw.Primitive, draw.IndexCount, 1, 0, draw.BaseVertex, 0);
+            } else {
+                dkCmdBufDraw(cmd, draw.Primitive, draw.VertexCount, 1, 0, 0);
+            }
         }
-    }
+    };
+    // Drawn where the bit is clear, then set: each pixel darkens once.
+    drawMeshes(DkStencilOp_Replace, DkCompareOp_NotEqual);
     if (stencil) {
-        dkCmdBufSetScissors(cmd, 0, &whole, 1);
-        dkCmdBufClearDepthStencil(cmd, false, 0.0F, kPlayerShadowStencilBit, 0U);
+        // The same meshes without colour put the bit back to zero on exactly
+        // the pixels the shadow set: clearing one stencil bit over the whole
+        // target rewrites all of its depth and stencil.
+        DkColorWriteState noColor;
+        dkColorWriteStateDefaults(&noColor);
+        dkColorWriteStateSetMask(&noColor, 0, 0);
+        dkCmdBufBindColorWriteState(cmd, &noColor);
+        drawMeshes(DkStencilOp_Zero, DkCompareOp_Always);
     }
     mDevice.Checkpoint("shadow");
     shadow.Meshes += draws.size();
     if (shadow.Frames++ % kPlayerShadowReportFrames == 0U) {
         Log("shadow: frame %llu %zu meshes opacity %.2f height %.0f | %llu frames, %llu meshes, %llu skipped, "
-            "%llu frames without the stencil bit",
+            "%llu frames without the stencil bit, %llu full stencil clears",
             static_cast<unsigned long long>(mDevice.Frame()), draws.size(), static_cast<double>(opacity),
             static_cast<double>(shadow.Selected->Height), static_cast<unsigned long long>(shadow.Frames),
             static_cast<unsigned long long>(shadow.Meshes), static_cast<unsigned long long>(shadow.Skipped),
-            static_cast<unsigned long long>(shadow.StencilFrames));
+            static_cast<unsigned long long>(shadow.StencilFrames),
+            static_cast<unsigned long long>(shadow.FullClears));
     }
 }
 
