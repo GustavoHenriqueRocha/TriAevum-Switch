@@ -627,6 +627,23 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   anyone shows Portuguese text; the menus are translated. Seen on the user's console with
   0.2.2-test.1 (11/10): the game runs, the file select's Start button reads "Iniciar".
 
+### RomFS mods: a mod folder without files says so (issue #12, 11/11)
+- **Seen:** a player put the Portuguese translation in `mods/ptbr/romfs/` (`actor`, `menu`, `message`,
+  `misc`, `scene`, `sound`; the screenshot's path suggests a USB (MTP) copy from a PC) and the game did not
+  use it. Their log, three starts in a row: `romfs mods: no file applies, 0 ignored`.
+- **What it means:** the scan found the `mods` folder but not one file in it. `ScanMods` kept regular files
+  only and passed over everything else in silence: empty folders, entries the console reads as neither a file
+  nor a folder, read errors. Folders without their files are what an interrupted copy leaves (the folders are
+  made first) [INFERENCE: the player's card was not checked].
+- **Change (`oot3d_romfs_mods.cpp`):** the scan keeps a note for a mod folder without any file ("no files in
+  this folder (an interrupted copy leaves its folders empty: copy the mod again)"), for an entry that is
+  neither a file nor a folder (with the system's error) and for a folder that could not be read to the end.
+  They count as ignored (`romfs mods: no file applies, 1 ignored`), each has its log line
+  (`romfs mods: ptbr/ ignored: ...`), and with nothing applied the Mods line in L3+R3 > Game > Gameplay adds
+  the first reason. They are added after the receipt is written, so a reused overlay does not count them twice.
+- **Test:** `oot3d_romfs_mods_tests` `TestUnread` (empty mod folders, the panel line, a dangling link beside
+  a mod that applies, a reuse). Not compiled yet (11/11).
+
 ### Chamber of Sages slowdown (logs29, 11/10)
 - **Report (Switch Lite handheld):** "more slowdowns in the sages realm place". Last session
   (23:09-23:30, Better Link v3 mod): Lighting Per-pixel, **Resolution at 60 FPS Full** for most of

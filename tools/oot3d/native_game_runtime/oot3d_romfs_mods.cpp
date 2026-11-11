@@ -194,39 +194,69 @@ std::int64_t MtimeOf(const fs::path &path) {
   return error ? 0 : static_cast<std::int64_t>(time.time_since_epoch().count());
 }
 
-std::vector<ScannedFile> ScanMods(const fs::path &mods) {
+// The mods folder as the console reads it: the files, and as ignored notes
+// what holds no file it can use (entries that are neither a file nor a
+// folder, read errors, mod folders without a single file). Without the
+// notes a mod copied as empty folders read "no file applies, 0 ignored".
+struct ModsScan {
+  std::vector<ScannedFile> Files;
+  std::vector<RomFsModNote> Unread;
+};
+
+constexpr const char *kNoFilesReason =
+    "no files in this folder (an interrupted copy leaves its folders empty: copy the mod again)";
+
+std::string NeitherReason(const std::error_code &error) {
+  std::string reason = "the console reads it as neither a file nor a folder";
+  if (error) reason += " (" + error.message() + ")";
+  return reason;
+}
+
+ModsScan ScanMods(const fs::path &mods) {
+  ModsScan scan;
   std::vector<fs::directory_entry> entries;
   std::error_code error;
   for (fs::directory_iterator it(mods, error), end; !error && it != end; it.increment(error))
     entries.push_back(*it);
+  if (error)
+    scan.Unread.push_back({std::string(), std::string(), "the mods folder could not be read (" + error.message() + ")"});
   std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
     return a.path().filename().generic_string() < b.path().filename().generic_string();
   });
-  std::vector<ScannedFile> files;
   for (const auto &entry : entries) {
     std::error_code kindError;
     const std::string name = entry.path().filename().generic_string();
     if (entry.is_regular_file(kindError)) {
-      files.push_back({std::string(), name, entry.path(), entry.file_size(kindError), MtimeOf(entry.path())});
+      scan.Files.push_back({std::string(), name, entry.path(), entry.file_size(kindError), MtimeOf(entry.path())});
       continue;
     }
-    if (!entry.is_directory(kindError)) continue;
+    if (!entry.is_directory(kindError)) {
+      scan.Unread.push_back({std::string(), name, NeitherReason(kindError)});
+      continue;
+    }
     std::vector<ScannedFile> modFiles;
     std::error_code walkError;
     for (fs::recursive_directory_iterator it(entry.path(), fs::directory_options::skip_permission_denied, walkError),
          end;
          !walkError && it != end; it.increment(walkError)) {
       std::error_code fileError;
-      if (!it->is_regular_file(fileError)) continue;
       // Lexical: canonical paths do not work with sdmc:/ (devoptab).
-      modFiles.push_back({name, it->path().lexically_relative(entry.path()).generic_string(), it->path(),
-                          it->file_size(fileError), MtimeOf(it->path())});
+      const std::string path = it->path().lexically_relative(entry.path()).generic_string();
+      if (it->is_regular_file(fileError))
+        modFiles.push_back({name, path, it->path(), it->file_size(fileError), MtimeOf(it->path())});
+      else if (!it->is_directory(fileError))
+        scan.Unread.push_back({name, path, NeitherReason(fileError)});
     }
+    if (walkError)
+      scan.Unread.push_back({name, std::string(), "could not be read to the end (" + walkError.message() + ")"});
+    else if (modFiles.empty())
+      scan.Unread.push_back({name, std::string(), kNoFilesReason});
     std::sort(modFiles.begin(), modFiles.end(),
               [](const ScannedFile &a, const ScannedFile &b) { return a.Path < b.Path; });
-    files.insert(files.end(), std::make_move_iterator(modFiles.begin()), std::make_move_iterator(modFiles.end()));
+    scan.Files.insert(scan.Files.end(), std::make_move_iterator(modFiles.begin()),
+                      std::make_move_iterator(modFiles.end()));
   }
-  return files;
+  return scan;
 }
 
 nlohmann::json Fingerprint(const RomFsServiceView &view, const std::vector<ScannedFile> &files) {
@@ -576,21 +606,26 @@ RomFsModsReport ComposeRomFsMods(const RomFsModsRequest &request) {
     return report;
   };
   try {
-    const std::vector<ScannedFile> files = ScanMods(request.ModsDirectory);
-    if (files.empty()) {
+    const ModsScan scan = ScanMods(request.ModsDirectory);
+    // After the receipt: a reused report comes from it and gets them again.
+    const auto finishWithUnread = [&](RomFsModsOutcome outcome) {
+      report.Ignored.insert(report.Ignored.end(), scan.Unread.begin(), scan.Unread.end());
+      return finish(outcome);
+    };
+    if (scan.Files.empty()) {
       RemoveOutputs(request);
-      return finish(RomFsModsOutcome::NoMods);
+      return finishWithUnread(RomFsModsOutcome::NoMods);
     }
-    const nlohmann::json inputs = Fingerprint(request.View, files);
-    if (Reuse(request, inputs, report)) return finish(RomFsModsOutcome::Reused);
+    const nlohmann::json inputs = Fingerprint(request.View, scan.Files);
+    if (Reuse(request, inputs, report)) return finishWithUnread(RomFsModsOutcome::Reused);
 
     const RomFsTable table = ReadRomFsTable(request.View);
-    const Plan plan = Classify(files, table);
+    const Plan plan = Classify(scan.Files, table);
     report.Ignored = plan.Ignored;
     report.Overridden = plan.Overridden;
     if (plan.Targets.empty()) {
       RemoveOutputs(request);
-      return finish(RomFsModsOutcome::NoMods);
+      return finishWithUnread(RomFsModsOutcome::NoMods);
     }
     std::set<std::string> mods;
     for (const auto &[target, entry] : plan.Targets) {
@@ -603,7 +638,7 @@ RomFsModsReport ComposeRomFsMods(const RomFsModsRequest &request) {
     report.OverlayBytes = built.OverlayBytes;
     report.AppendedBytes = built.AppendedBytes;
     WriteReceipt(request.ReceiptPath, {{"inputs", inputs}, {"report", ReportJson(report)}});
-    return finish(RomFsModsOutcome::Built);
+    return finishWithUnread(RomFsModsOutcome::Built);
   } catch (const std::exception &error) {
     RemoveOutputs(request);
     report = RomFsModsReport{};
@@ -696,6 +731,12 @@ RomFsModsStartupResult PrepareRomFsMods(const RomFsModsStartup &startup) {
   }
   const std::string summary = report.Summary();
   result.PanelLine = "At this start: " + summary.substr(std::strlen("romfs mods: ")) + ".";
+  // With nothing applied, the first reason too: the panel is where players look.
+  if (report.Applied.empty() && !report.Ignored.empty()) {
+    const RomFsModNote &first = report.Ignored.front();
+    result.PanelLine += " " + (first.Mod.empty() ? std::string() : first.Mod + "/") + first.Path + ": " +
+                        first.Reason + ".";
+  }
   return result;
 }
 

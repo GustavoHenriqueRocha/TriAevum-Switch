@@ -38,6 +38,15 @@ GUARDS = [
           r'mTargets\.ReadCopyRows\(\*source, key->Height, mFlipY, mCopyRgba, &readError\)',
           "oot3d_deko3d_backend_tests (TestRawTextureCopy)",
           forbid=r'mTargets\.ReadTarget\(\*source, mCopyRgba'),
+    Guard("a translation in mods/ptbr/romfs/ read 'romfs mods: no file applies, 0 ignored' with no reason "
+          "(issue #12): a mod folder without files, and entries the console reads as neither a file nor a "
+          "folder, are ignored notes with their reason (log line and panel)",
+          "tools/oot3d/native_game_runtime/oot3d_romfs_mods.cpp",
+          r'else if \(!it->is_directory\(fileError\)\)\s+scan\.Unread\.push_back\(\{name, path, NeitherReason\(fileError\)\}\);.*?'
+          r'else if \(modFiles\.empty\(\)\)\s+scan\.Unread\.push_back\(\{name, std::string\(\), kNoFilesReason\}\);.*?'
+          r'if \(scan\.Files\.empty\(\)\) \{\s+RemoveOutputs\(request\);\s+'
+          r'return finishWithUnread\(RomFsModsOutcome::NoMods\);',
+          "oot3d_romfs_mods_tests (TestUnread)"),
     # --- 11/09 (0.2.1): the TopScreen pause menu at 60 FPS, and a button piece beside Save/Quit ---
     Guard("the TopScreen pause menu animated janky at 60 FPS (interpolated positions with stepped alpha, "
           "~1 s of governor drops after each opening): with a pause page up the in-between frame shows "

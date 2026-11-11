@@ -449,6 +449,39 @@ void TestIgnored(const fs::path &root) {
   CHECK(!fs::exists(fixture.Request().OverlayPath) && !fs::exists(fixture.Request().ReceiptPath));
 }
 
+// Issue #12: a translation copied as folders without files read "no file
+// applies, 0 ignored". The folder and whatever the console cannot read are
+// now ignored notes, with the reason in the log line and on the panel.
+void TestUnread(const fs::path &root) {
+  const Fixture fixture = MakeFixture(root, GameFiles(), false);
+  fs::create_directories(fixture.Mods / "ptbr/romfs/actor");
+  fs::create_directories(fixture.Mods / "ptbr/romfs/message");
+  const RomFsModsReport empty = ComposeRomFsMods(fixture.Request());
+  CHECK(empty.Outcome == RomFsModsOutcome::NoMods && empty.Ignored.size() == 1U);
+  CHECK(!empty.Ignored.empty() && empty.Ignored.front().Mod == "ptbr" &&
+        HasNote(empty.Ignored, "", "no files in this folder"));
+  CHECK(empty.Summary() == "romfs mods: no file applies, 1 ignored");
+  const std::vector<std::string> lines = empty.LogLines();
+  CHECK(lines.size() == 2U && lines.back().rfind("romfs mods: ptbr/ ignored: no files in this folder", 0) == 0U);
+  const fs::path config = root / "config";
+  const RomFsModsStartup startup{config, fixture.Mods,
+                                 [&](std::string *) -> std::optional<RomFsServiceView> { return fixture.View; },
+                                 fixture.Request().OverlayPath, fixture.Request().ReceiptPath, {}};
+  const RomFsModsStartupResult result = PrepareRomFsMods(startup);
+  CHECK(result.BootStatus == "none" &&
+        result.PanelLine.rfind("At this start: no file applies, 1 ignored. ptbr/: no files in this folder", 0) == 0U);
+  // A dangling link reads as neither a file nor a folder; another mod still applies.
+  fs::create_symlink(fixture.Mods / "missing", fixture.Mods / "broken");
+  WriteFile(fixture.Mods / "vanilla_plus_link/romfs/actor/zelda_keep.zar", Filled(30, 92));
+  const RomFsModsReport mixed = ComposeRomFsMods(fixture.Request());
+  CHECK(mixed.Outcome == RomFsModsOutcome::Built && mixed.Applied.size() == 1U && mixed.Ignored.size() == 2U);
+  CHECK(HasNote(mixed.Ignored, "broken", "neither a file nor a folder"));
+  CHECK(mixed.Summary() == "romfs mods: 1 file from 1 mod (vanilla_plus_link), 2 ignored");
+  // Reused: the notes once, not again from the receipt.
+  const RomFsModsReport reused = ComposeRomFsMods(fixture.Request());
+  CHECK(reused.Outcome == RomFsModsOutcome::Reused && reused.Ignored.size() == 2U);
+}
+
 void TestReceipt(const fs::path &root) {
   const Fixture fixture = MakeFixture(root, GameFiles(), true);
   const fs::path link = fixture.Mods / "vanilla_plus_link/romfs/actor/zelda_link_boy_new.zar";
@@ -558,6 +591,7 @@ int main() {
   TestTwoModsSameFile(root);
   TestUsaPaths(root);
   TestIgnored(root);
+  TestUnread(root);
   TestReceipt(root);
   TestFailure(root);
   TestStartup(root);
