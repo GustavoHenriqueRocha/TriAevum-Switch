@@ -4,6 +4,7 @@
 #include "oot3d_native_launch_frame_rate.h"
 #include "oot3d_draw_distance_config.h"
 #include "oot3d_switch_performance.h"
+#include "oot3d_simple_shadow.h"
 #include "fast/backends/gfx_deko3d.h"
 #include "fast/backends/gfx_deko3d_lighting.h"
 #include "fast/oot3d/config_writer.h"
@@ -74,6 +75,9 @@ public:
     mGrassDistance = Fast::Oot3d::ReadGrassSwitchDistance(mConfig);
     mGrassLod = Fast::Oot3d::ReadGrassSwitchLod(mConfig);
     mGrassFill = Fast::Oot3d::ReadGrassSwitchFill(mConfig);
+#if defined(__SWITCH__)
+    SimpleShadowEnabled().store(ReadSimpleShadowEnabled(mConfig), std::memory_order_relaxed);
+#endif
     // config/cpu_performance, gpu_performance and memory_performance apply at
     // start (the panel is created once, at window setup); all Standard opens
     // no apm session and no clkrst.
@@ -160,6 +164,7 @@ public:
     DrawDrawDistance();
     DrawTexturePack();
     DrawGrass();
+    DrawSimpleShadow();
     DrawLighting();
   }
 
@@ -301,6 +306,25 @@ private:
                           "(the HUD stays at most 3x).",
                           mScaleMenuLargest);
     ImGui::TextDisabled("Applies at once. Larger sizes use more memory and GPU time.");
+  }
+
+  // config/simple_shadow (oot3d_simple_shadow.h): present = on, applied at
+  // once. Only the deko3d backend draws the body, so only the Switch has it.
+  void DrawSimpleShadow() {
+#if defined(__SWITCH__)
+    ImGui::Separator();
+    bool simpleShadow = SimpleShadowEnabled().load(std::memory_order_relaxed);
+    if (ImGui::Checkbox("Simple shadow", &simpleShadow)) {
+      SimpleShadowEnabled().store(simpleShadow, std::memory_order_relaxed);
+      Write(kSimpleShadowConfigName,
+            [config = mConfig, simpleShadow] { return SaveSimpleShadowEnabled(config, simpleShadow); });
+    }
+    if (Writer().Failed(kSimpleShadowConfigName))
+      ImGui::TextWrapped("Could not write config/%s.", kSimpleShadowConfigName);
+    ImGui::TextDisabled("Applies at once. Link's whole body casts his shadow along the scene's light, "
+                        "instead of the two spots under his feet (Single Screen Experience's Simple "
+                        "shadows). deko3d renderer only; drawing Link twice costs some GPU time.");
+#endif
   }
 
   // config/grass (SWITCH_PORT.md, "Grass on deko3d"): off, measure only

@@ -5,7 +5,6 @@
 #include "oot3d_quick_put_away.h"
 #include "oot3d_roll_dash.h"
 #include "oot3d_romfs_mods.h"
-#include "oot3d_simple_shadow.h"
 #include <imgui.h>
 namespace Oot3dNativeGame {
 namespace {
@@ -19,9 +18,6 @@ public:
     DamageMultiplier().store(ReadDamageMultiplier(mConfig), std::memory_order_relaxed);
     MasterQuestUnmirrored().store(ReadMasterQuestUnmirrored(mConfig), std::memory_order_relaxed);
     ApplyMasterQuestUnmirrored();
-#if defined(__SWITCH__)
-    SimpleShadowEnabled().store(ReadSimpleShadowEnabled(mConfig), std::memory_order_relaxed);
-#endif
   }
   const char *Label() const noexcept override { return "Gameplay"; }
   const char *Group() const noexcept override { return Fast::Oot3d::kGameSettingsGroup; }
@@ -94,18 +90,6 @@ public:
     if (mUnmirroredError)
       ImGui::TextWrapped("Could not write config/%s.", kMasterQuestUnmirroredConfigName);
 #if defined(__SWITCH__)
-    // Simple shadow (oot3d_simple_shadow.h): the deko3d backend draws the body.
-    ImGui::Separator();
-    bool simpleShadow = SimpleShadowEnabled().load(std::memory_order_relaxed);
-    if (ImGui::Checkbox("Simple shadow", &simpleShadow)) {
-      SimpleShadowEnabled().store(simpleShadow, std::memory_order_relaxed);
-      mSimpleShadowError = !SaveSimpleShadowEnabled(mConfig, simpleShadow);
-    }
-    ImGui::TextWrapped("Link's whole body casts its shadow on the floor, along the scene's light, "
-                       "instead of the two spots under his feet (Single Screen Experience's Simple "
-                       "shadows).");
-    if (mSimpleShadowError)
-      ImGui::TextWrapped("Could not write config/%s.", kSimpleShadowConfigName);
     // RomFS mods (oot3d_romfs_mods.h): read once at start-up, so the change
     // applies at the next start.
     ImGui::Separator();
@@ -130,7 +114,6 @@ private:
   bool mDamageError = false;
   bool mUnmirroredError = false;
 #if defined(__SWITCH__)
-  bool mSimpleShadowError = false;
   bool mRomFsMods = ReadRomFsModsEnabled(mConfig);
   bool mRomFsModsError = false;
 #endif

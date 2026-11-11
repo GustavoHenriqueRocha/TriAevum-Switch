@@ -4173,6 +4173,8 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
     enemies and switches in the unmirrored world.
   - "Simple shadow" (`config/simple_shadow`, present = on; **Switch only**: the deko3d backend draws it):
     Link's whole body flattened onto the floor along the scene's light, instead of his two foot spots.
+    Since 11/11 it is in L3+R3 > Video, after Grass, with the other renderer options (same file, still off
+    by default until it has been seen on a console and its GPU cost measured).
 - **Damage (EUR code.bin):** every change of Link's health goes through `Health_ChangeBy` (`0x00352DBC`,
   r1 = the change, a sign-extended s16, negative for damage; health in sixteenths of a heart at save context
   +0x44). After its entry the game doubles damage in Master Quest (flag read at `0x00352DCC`) and halves it
