@@ -748,7 +748,8 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(mCalls.CompletionsQueued),
                 static_cast<unsigned long long>(mCalls.CompletionsTaken));
     Deko3d::Log("pica (%s): draws issued=%llu skipped=%llu shadow_producers=%llu no_effect=%llu; transfers=%llu "
-                "repeated=%llu rejected=%llu texture_copies=%llu (reused %llu, failed %llu, sampled %llu) "
+                "repeated=%llu rejected=%llu texture_copies=%llu (reused %llu, failed %llu, sampled %llu, "
+                "%.1f ms each, max %.1f) "
                 "scanouts=%llu fills=%llu clears=%llu; targets=%llu (%llu MiB) displays=%llu failures=%llu",
                 when, static_cast<unsigned long long>(mCounters.PicaDrawsIssued),
                 static_cast<unsigned long long>(mCounters.PicaDrawsSkipped),
@@ -761,6 +762,10 @@ void GfxRenderingAPIDeko3d::LogPicaProgramCounters(const char* when) {
                 static_cast<unsigned long long>(mCounters.PicaTextureCopiesReused),
                 static_cast<unsigned long long>(mCounters.PicaTextureCopiesFailed),
                 static_cast<unsigned long long>(mResources.Stats().CopiedTextures),
+                mCounters.PicaTextureCopies == 0U
+                    ? 0.0
+                    : mCounters.PicaTextureCopyMilliseconds / static_cast<double>(mCounters.PicaTextureCopies),
+                mCounters.PicaTextureCopyMaxMilliseconds,
                 static_cast<unsigned long long>(mCounters.PicaScanouts),
                 static_cast<unsigned long long>(mCounters.PicaFills),
                 static_cast<unsigned long long>(mCounters.PicaClears),

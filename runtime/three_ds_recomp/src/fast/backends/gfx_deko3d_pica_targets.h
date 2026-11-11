@@ -118,6 +118,13 @@ class PicaTargets {
                     std::string* error);
     bool WriteTarget(PicaTarget& target, std::span<const uint8_t> rgba8, std::span<const uint32_t> depthStencil,
                      std::string* error);
+    // A raw TextureCopy's source (gfx_deko3d_pica_copies.h): the colour rows
+    // EncodePicaFramebuffer samples for a nativeHeight-row framebuffer, row r
+    // of `rgba8` (RGBA8, the target's width) for window row r. Records into the
+    // open frame, submits it and waits for the GPU like ReadTarget, but keeps
+    // its staging memory for the next copy.
+    bool ReadCopyRows(const PicaTarget& target, uint32_t nativeHeight, bool bottomRowFirst,
+                      std::vector<uint8_t>& rgba8, std::string* error);
     // The Z24S8 word layout the copy engine reads and writes, probed once on a
     // small compressed target like the real ones: a clear read back gives the
     // layout, a written pattern read back proves writes reach the image. Leaves
@@ -157,6 +164,8 @@ class PicaTargets {
     std::vector<Retired> mRetired;
     std::optional<DepthStencilWordLayout> mDepthStencilLayout;
     PicaTargetStats mStats{};
+    DkMemBlock mCopyStaging = nullptr; // ReadCopyRows; freed by Reset
+    uint32_t mCopyStagingBytes = 0;
 };
 
 } // namespace Fast::Deko3d

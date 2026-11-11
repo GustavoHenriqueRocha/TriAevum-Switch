@@ -4,10 +4,11 @@
 // defers such a copy to the backend and never reads guest memory where it
 // lands: a texture over those bytes arrives with zeros there and a
 // PicaTextureCopyReference to the copy (pica_native_state.h). Vulkan keeps a
-// GPU image per copy version; deko3d reads the source target back once,
-// encodes it as the guest's framebuffer bytes (EncodePicaFramebuffer) and keeps
-// each version's destination bytes: a texture takes them in place of the
-// zeros, and the guest gets them when the copy completes. Pure parts.
+// GPU image per copy version; deko3d reads back the source target's colour
+// rows that EncodePicaFramebuffer samples (PlanPicaCopyRowReads), encodes them
+// as the guest's framebuffer bytes and keeps each version's destination bytes:
+// a texture takes them in place of the zeros, and the guest gets them when the
+// copy completes. Pure parts.
 
 #include "fast/backends/gfx_deko3d_pica_pipeline.h"
 #include "fast/renderer3ds/pica_framebuffer_encode.h"
@@ -111,6 +112,41 @@ struct PicaRawCopyWalk {
         bytes.insert(bytes.end(), from, from + span.ByteCount);
     }
     return nullptr;
+}
+
+// The image row EncodePicaFramebuffer samples for window row `row` of a
+// nativeHeight-row framebuffer drawn imageHeight rows tall (rows counted from
+// NDC y -1). An image of just these rows, row r holding window row r's, encodes
+// to the same bytes with imageHeight = nativeHeight.
+[[nodiscard]] inline uint32_t PicaCopySourceRow(uint32_t row, uint32_t imageHeight, uint32_t nativeHeight) noexcept {
+    return static_cast<uint32_t>((uint64_t{row} * 2U + 1U) * imageHeight / (uint64_t{nativeHeight} * 2U));
+}
+
+// One copy-engine read of a raw copy's source: target rows [TargetRow,
+// TargetRow + Count) to output rows [Row, Row + Count).
+struct PicaCopyRowRead {
+    uint32_t Row = 0;
+    uint32_t TargetRow = 0;
+    uint32_t Count = 0;
+};
+
+// The reads that gather PicaCopySourceRow's rows, output row r for window row
+// r. bottomRowFirst: target row 0 holds NDC y -1 (config/deko3d_flip_y);
+// otherwise the rows are counted from the target's top, one read each.
+[[nodiscard]] inline std::vector<PicaCopyRowRead> PlanPicaCopyRowReads(uint32_t imageHeight, uint32_t nativeHeight,
+                                                                      bool bottomRowFirst) {
+    std::vector<PicaCopyRowRead> reads;
+    for (uint32_t row = 0U; row < nativeHeight;) {
+        const uint32_t first = PicaCopySourceRow(row, imageHeight, nativeHeight);
+        uint32_t count = 1U;
+        while (bottomRowFirst && row + count < nativeHeight &&
+               PicaCopySourceRow(row + count, imageHeight, nativeHeight) == first + count) {
+            ++count;
+        }
+        reads.push_back({row, bottomRowFirst ? first : imageHeight - 1U - first, count});
+        row += count;
+    }
+    return reads;
 }
 
 // Each captured copy version's destination bytes, by CompletionId.

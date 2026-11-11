@@ -972,11 +972,13 @@ bool GfxRenderingAPIDeko3d::SubmitPicaTextureCopy(const GfxNativePicaDisplayTran
                         transfer.InputPhysicalAddress, transfer.OutputPhysicalAddress, transfer.TextureCopyBytes);
         }
     } else {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        mCounters.PicaTextureCopyMilliseconds += ms;
+        mCounters.PicaTextureCopyMaxMilliseconds = std::max(mCounters.PicaTextureCopyMaxMilliseconds, ms);
         if (mCounters.PicaTextureCopies++ == 0U) {
             Deko3d::Log("pica: first texture copy (%u bytes in %zu spans, %08x -> %08x, %.1f ms)",
                         transfer.TextureCopyBytes, captured.Spans.size(), transfer.InputPhysicalAddress,
-                        transfer.OutputPhysicalAddress,
-                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
+                        transfer.OutputPhysicalAddress, ms);
         }
         version = &copies.Put(transfer.CompletionId, std::move(captured));
     }
@@ -1041,25 +1043,20 @@ const char* GfxRenderingAPIDeko3d::CapturePicaTextureCopy(const GfxNativePicaDis
         DrawGrass(*key, *source, Oot3d::GrassDrawPoint::Transfer);
     }
     // The read-back waits for everything the frame recorded; the present
-    // thread must not be using the queue then.
-    mDevice.WaitPresentIdle();
+    // thread must not be using the queue then. The mailbox's present thread
+    // has a queue of its own (Device::CreateMailbox), so it is not waited for.
+    if (!mDevice.Mailbox()) {
+        mDevice.WaitPresentIdle();
+    }
+    // config/deko3d_flip_y 0: target row 0 holds NDC y +1.
     std::string readError;
-    if (!mTargets.ReadTarget(*source, mCopyRgba, mCopyDepth, &readError)) {
+    if (!mTargets.ReadCopyRows(*source, key->Height, mFlipY, mCopyRgba, &readError)) {
         return "the copy's source could not be read back";
     }
     mBoundTarget = nullptr;
-    const uint32_t width = source->Extent.Width;
-    const uint32_t height = source->Extent.Height;
-    if (!mFlipY) {
-        // config/deko3d_flip_y 0: row 0 holds NDC y +1.
-        for (uint32_t row = 0U; row < height / 2U; ++row) {
-            std::swap_ranges(mCopyRgba.begin() + static_cast<std::ptrdiff_t>(row * width * 4U),
-                             mCopyRgba.begin() + static_cast<std::ptrdiff_t>((row + 1U) * width * 4U),
-                             mCopyRgba.begin() + static_cast<std::ptrdiff_t>((height - 1U - row) * width * 4U));
-        }
-    }
     version.Spans = std::move(walk.Spans);
-    return Deko3d::EncodePicaRawCopy(mCopyRgba, width, height, *key, version.Spans, version.Bytes);
+    return Deko3d::EncodePicaRawCopy(mCopyRgba, source->Extent.Width, key->Height, *key, version.Spans,
+                                     version.Bytes);
 }
 
 bool GfxRenderingAPIDeko3d::SetPinnedPicaTextureCopies(std::span<const Renderer3ds::PicaTextureCopyReference> copies,

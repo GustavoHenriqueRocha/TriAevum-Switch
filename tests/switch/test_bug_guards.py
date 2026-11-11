@@ -28,6 +28,16 @@ class Guard:
 
 
 GUARDS = [
+    # --- 11/11 (0.2.3-test.3): heavy lag at the final boss's light attack, raw texture copies ---
+    Guard("the final boss lagged badly at its light attack in 0.2.3-test.2 (player report): each raw texture "
+          "copy waited for the mailbox present thread, then read the whole source target back (colour and "
+          "depth, 7 MiB at scale 3); it now reads only the colour rows the encoder samples, and the mailbox "
+          "present thread (a queue of its own) is not waited for",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'if \(!mDevice\.Mailbox\(\)\) \{\s*mDevice\.WaitPresentIdle\(\);\s*\}.*?'
+          r'mTargets\.ReadCopyRows\(\*source, key->Height, mFlipY, mCopyRgba, &readError\)',
+          "oot3d_deko3d_backend_tests (TestRawTextureCopy)",
+          forbid=r'mTargets\.ReadTarget\(\*source, mCopyRgba'),
     # --- 11/09 (0.2.1): the TopScreen pause menu at 60 FPS, and a button piece beside Save/Quit ---
     Guard("the TopScreen pause menu animated janky at 60 FPS (interpolated positions with stepped alpha, "
           "~1 s of governor drops after each opening): with a pause page up the in-between frame shows "

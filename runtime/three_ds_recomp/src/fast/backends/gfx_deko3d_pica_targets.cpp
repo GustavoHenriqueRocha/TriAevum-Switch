@@ -3,6 +3,7 @@
 #if defined(__SWITCH__)
 #include "gfx_deko3d_pica_targets.h"
 
+#include "fast/backends/gfx_deko3d_pica_copies.h"
 #include "fast/backends/gl_pica_dynamic_scale.h"
 
 #include <algorithm>
@@ -130,6 +131,11 @@ void PicaTargets::Reset() noexcept {
         }
     }
     mRetired.clear();
+    if (mCopyStaging != nullptr) {
+        dkMemBlockDestroy(mCopyStaging);
+        mCopyStaging = nullptr;
+        mCopyStagingBytes = 0;
+    }
     mStats.TargetBytes = 0;
 }
 
@@ -340,6 +346,50 @@ bool PicaTargets::ReadTarget(const PicaTarget& target, std::vector<uint8_t>& rgb
     }
     dkMemBlockDestroy(staging);
     return done;
+}
+
+bool PicaTargets::ReadCopyRows(const PicaTarget& target, uint32_t nativeHeight, bool bottomRowFirst,
+                               std::vector<uint8_t>& rgba8, std::string* error) {
+    const auto fail = [error](const char* message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+    const uint32_t width = target.Extent.Width;
+    const uint64_t bytes64 = static_cast<uint64_t>(width) * nativeHeight * 4U;
+    if (bytes64 == 0U || target.Extent.Height == 0U || bytes64 > 0x3FFFFFFFULL) {
+        return fail("the copy's source has an invalid extent");
+    }
+    const auto bytes = static_cast<uint32_t>(bytes64);
+    if (mCopyStagingBytes < bytes) {
+        // Every read waited for the GPU: nothing writes the old block any more.
+        if (mCopyStaging != nullptr) {
+            dkMemBlockDestroy(mCopyStaging);
+        }
+        mCopyStaging = mDevice->MakeBlock(bytes, kStagingFlags, "texture copy read-back");
+        mCopyStagingBytes = mCopyStaging != nullptr ? bytes : 0U;
+        if (mCopyStaging == nullptr) {
+            return fail("no memory to read back the copy's source rows");
+        }
+    }
+    const DkGpuAddr gpu = dkMemBlockGetGpuAddr(mCopyStaging);
+    DkCmdBuf cmd = mDevice->Cmd();
+    dkCmdBufBarrier(cmd, DkBarrier_Full, 0);
+    for (const PicaCopyRowRead& read : PlanPicaCopyRowReads(target.Extent.Height, nativeHeight, bottomRowFirst)) {
+        const DkImageRect rect = {0U, read.TargetRow, 0U, width, read.Count, 1U};
+        const DkCopyBuf rows = {gpu + static_cast<uint64_t>(read.Row) * width * 4U, 0U, 0U};
+        dkCmdBufCopyImageToBuffer(cmd, &target.ColorView, &rect, &rows, 0U);
+    }
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
+    mDevice->Submit();
+    mDevice->WaitIdle();
+    if (dkQueueIsInErrorState(mDevice->Queue())) {
+        return fail("the deko3d queue failed during a texture copy read-back");
+    }
+    rgba8.resize(bytes);
+    std::memcpy(rgba8.data(), dkMemBlockGetCpuAddr(mCopyStaging), bytes);
+    return true;
 }
 
 bool PicaTargets::WriteTarget(PicaTarget& target, std::span<const uint8_t> rgba8,
