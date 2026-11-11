@@ -967,6 +967,34 @@ void TestRawTextureCopy() {
   const std::vector<Fast::Renderer3ds::PicaRawCopySpan> outside = {{0x180000F8U, 0x18100000U, 16U}};
   Require(EncodePicaRawCopy(rgba, 16U, 16U, key, outside, bytes) != nullptr, "a span past the target");
 
+  // Only the rows the encoder samples: an 8x8 framebuffer drawn 12x26 (3.25
+  // rows per native row, like 1280 for 400 at scale 3), read as
+  // PlanPicaCopyRowReads says, encodes like the whole read-back in every
+  // format, and the same from a target stored top row first.
+  std::vector<uint8_t> drawn(12U * 26U * 4U);
+  for (size_t i = 0; i < drawn.size(); ++i) drawn[i] = static_cast<uint8_t>(i * 13U + 5U);
+  std::vector<uint8_t> topFirst(drawn.size());
+  for (uint32_t row = 0U; row < 26U; ++row) {
+    std::copy_n(drawn.begin() + row * 48U, 48U, topFirst.begin() + (25U - row) * 48U);
+  }
+  const auto gather = [](const std::vector<uint8_t>& image, bool bottomRowFirst) {
+    std::vector<uint8_t> rows(12U * 8U * 4U);
+    for (const PicaCopyRowRead& read : PlanPicaCopyRowReads(26U, 8U, bottomRowFirst)) {
+      std::copy_n(image.begin() + read.TargetRow * 48U, read.Count * 48U, rows.begin() + read.Row * 48U);
+    }
+    return rows;
+  };
+  const auto sampled = gather(drawn, true);
+  Require(gather(topFirst, false) == sampled, "the rows of a target stored top row first");
+  for (uint8_t format = 0U; format <= 4U; ++format) {
+    Require(Fast::Renderer3ds::EncodePicaFramebuffer(sampled, 12U, 8U, 8U, 8U, format) ==
+                Fast::Renderer3ds::EncodePicaFramebuffer(drawn, 12U, 26U, 8U, 8U, format),
+            "the sampled rows encode like the whole read-back");
+  }
+  Require(PlanPicaCopyRowReads(26U, 8U, true).size() == 8U && PlanPicaCopyRowReads(8U, 8U, true).size() == 1U &&
+              PlanPicaCopyRowReads(8U, 8U, false).size() == 8U,
+          "adjacent rows share a read only when counted from the bottom");
+
   // A 32-byte texture at 0x2000: CPU-owned bytes there (0xAA), zeros where
   // copy 5 owns 0x2008..0x2018; copy 5 wrote 0x2004..0x200C and 0x200C..0x201C.
   PicaCopyStore store;

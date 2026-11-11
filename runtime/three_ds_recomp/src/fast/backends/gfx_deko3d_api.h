@@ -76,6 +76,8 @@ struct Deko3dBackendCounters {
     uint64_t PicaTextureCopies = 0;       // raw copies out of a GPU target, captured (gfx_deko3d_pica_copies.h)
     uint64_t PicaTextureCopiesReused = 0; // a replay of a captured copy
     uint64_t PicaTextureCopiesFailed = 0; // completed without bytes (logged)
+    double PicaTextureCopyMilliseconds = 0.0;    // the captures' time, summed
+    double PicaTextureCopyMaxMilliseconds = 0.0; // the longest capture
     uint64_t PicaScanouts = 0;
     uint64_t PicaFills = 0;
     uint64_t PicaClears = 0;
@@ -473,8 +475,7 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     // The copy's destination bytes, or why it has none.
     const char* CapturePicaTextureCopy(const GfxNativePicaDisplayTransferView& transfer,
                                        Deko3d::PicaCopyStore::Version& version);
-    std::vector<uint8_t> mCopyRgba;    // a raw copy's source target read back
-    std::vector<uint32_t> mCopyDepth;
+    std::vector<uint8_t> mCopyRgba;    // a raw copy's source rows read back
 };
 
 namespace Deko3d {

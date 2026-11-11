@@ -660,8 +660,9 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   backend's `mPhysicalMemoryComplete`), so the guest would have waited for ever.
 - **Fix (`gfx_deko3d_pica_copies.h`, `SubmitPicaTextureCopy`):** a TextureCopy no longer goes
   through the display transfer path. deko3d walks its spans (Vulkan's walk), picks FindColor's
-  target among those holding the whole input, reads it back (`PicaTargets::ReadTarget` after
-  `WaitPresentIdle`, one GPU wait), encodes it with `EncodePicaFramebuffer` and keeps the
+  target among those holding the whole input, reads back the colour rows the encoder samples
+  (`PicaTargets::ReadCopyRows`, one GPU wait; see "Cost" below), encodes them with
+  `EncodePicaFramebuffer` and keeps the
   destination bytes per `CompletionId`. The real execution (`MaterializeGuest`, a dependency
   flush) writes them into guest memory (`mPhysicalMemoryCommit`) and raises PPF; replays reuse
   the version. `Prepare` fills a texture's copy references from it (`PicaCopyStore::Fill`), so
@@ -669,7 +670,8 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   the rest. A copy that cannot be captured still completes (logged as `texture copy not
   captured: ...`), leaving the guest's bytes and the textures' zeros: the game never stops on it.
 - **Log:** `pica: first texture copy (... bytes in ... spans, ..., ... ms)`, and in `pica (...)`
-  `texture_copies=N (reused, failed, sampled)`.
+  `texture_copies=N (reused, failed, sampled, ... ms each, max ...)`: the captures' mean and longest
+  time since the start.
 - **Not covered:** a destination overlapping a live render target (the GPU target is not
   updated), and copy versions across a savestate restore (textures keep zeros until the next
   copy).
@@ -677,6 +679,19 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   bytes, texture fill, pin release).
 - **Seen on the console:** the player who reported it got past that cutscene with 0.2.3-test.2
   (built from `e1198bac`, 11/10).
+- **Cost (player report on 0.2.3-test.2, 11/11):** the final boss then lagged badly at each of its
+  light attacks. Every new copy version stalled the render thread: `WaitPresentIdle` polled until
+  the mailbox present thread had taken the last frame (up to one display refresh), then
+  `ReadTarget` made a staging block for the whole target, colour and depth (7 MiB at scale 3,
+  720x1280), waited for the GPU, copied all of it out of uncached memory and freed the block,
+  while the encoder samples 192,000 of its 921,600 pixels. Now `PicaTargets::ReadCopyRows` has
+  the copy engine read only the colour rows `EncodePicaFramebuffer` samples
+  (`PlanPicaCopyRowReads`: 400 rows of 720 pixels, 1.1 MiB) into staging kept between copies, and
+  the mailbox is not waited for: its present thread has a queue of its own
+  (`Device::CreateMailbox`). The other present modes still wait. The encoded bytes are the same
+  (`TestRawTextureCopy`). What remains is the GPU wait: a capture still waits for everything the
+  frame drew before it. [INFERENCE: the gain is not measured; the player's logs with this build
+  give the capture time.]
 
 ### D-pad items for child and adult Link (SingleScreen 3.2.2 buttons 6..9, 11/10)
 - **Asked:** the Single Screen photos show items on the D-pad. 3.2.2 lets each direction hold
