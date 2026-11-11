@@ -674,7 +674,9 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   updated), and copy versions across a savestate restore (textures keep zeros until the next
   copy).
 - **Test:** `oot3d_deko3d_backend_tests` `TestRawTextureCopy` (walk, source choice, encoded
-  bytes, texture fill, pin release). Console check: the player's save at that cutscene.
+  bytes, texture fill, pin release).
+- **Seen on the console:** the player who reported it got past that cutscene with 0.2.3-test.2
+  (built from `e1198bac`, 11/10).
 
 ## How to build (Linux)
 
