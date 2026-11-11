@@ -73,6 +73,7 @@
 #include "oot3d_top_screen_item_description_runtime.h"
 #include "oot3d_top_screen_wide_items_runtime.h"
 #include "oot3d_roll_dash_runtime.h"
+#include "oot3d_simple_shadow.h"
 #include "oot3d_native_a32_window_guest_pcs.h"
 #include "oot3d_native_whole_aot_runtime.h"
 #ifdef OOT3D_NATIVE_DIRECT_AOT_PLUGIN
@@ -406,6 +407,8 @@ struct NativeWidescreenProjectionState {
   // Roll dash (oot3d_roll_dash_runtime.h): run at its hook PCs, which leave
   // the compiled graph only while it is on (RollDashRuntime::ShouldObserve).
   Oot3dNativeGame::RollDashRuntime *RollDash = nullptr;
+  // Simple shadow (oot3d_simple_shadow.h): Player_DrawFeetShadow's entry.
+  Oot3dNativeGame::SimpleShadowRuntime *SimpleShadow = nullptr;
   std::span<const uint32_t> WholeAotObservableExitPcs;
   // Set to the pc of each observable exit this policy raises (see
   // NativeCandidateDispatchState::ObservedExitPc).

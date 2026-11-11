@@ -2,6 +2,7 @@
 // projection.
 #include "oot3d_top_screen_mod_profile_internal.h"
 #include "oot3d_top_screen_page_layout.h"
+#include "oot3d_master_quest_mirror.h"
 
 namespace Oot3dNativeGame {
 
@@ -907,7 +908,7 @@ bool ApplyTopScreenPauseProjection(NativeA32Memory &memory,
     const float configuredMargin = config != nullptr
                                        ? static_cast<float>(config->HudMarginX)
                                        : 4.0F;
-    const float compactInset = compactLayout != 0U ? 36.0F : 0.0F;
+    const float compactInset = MasterQuestMirrorShown(compactLayout) ? 36.0F : 0.0F;
     state.OffsetX = rightEdge - (nativeOffsetX + maximumExtent) -
                     compactInset - configuredMargin;
     projectedOffsetX = nativeOffsetX + state.OffsetX;

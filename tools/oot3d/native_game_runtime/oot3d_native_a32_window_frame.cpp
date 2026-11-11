@@ -4201,6 +4201,8 @@ void NativeA32WindowSession::PresentVisualFrame(
                 currentVisualFrame(std::move(*completedFrame));
             Fast::Oot3d::GrassInteractionBridge::Instance().PublishFrame(
                 currentVisualFrame->Sequence, frameActors);
+            Fast::Oot3d::PlayerShadowBridge::Instance().PublishFrame(
+                currentVisualFrame->Sequence, simpleShadow.TakeFrame());
             selectedNewVisualFrame = true;
             renderFrameKind =
                 static_cast<uint8_t>(Oot3dNativeGame::RenderFrameKind::Step);
@@ -5265,7 +5267,10 @@ void NativeA32WindowSession::ExecuteVisualSample(const Oot3dNativeGame::Oot3dPic
   // Only displayed samples advance the grass colliders: the authoritative
   // replay of a new frame is not shown, and taking it as the previous position
   // gave the next displayed sample a backward sweep.
-  if (present) Fast::Oot3d::GrassInteractionBridge::Instance().SelectSample(temporalSample);
+  if (present) {
+    Fast::Oot3d::GrassInteractionBridge::Instance().SelectSample(temporalSample);
+    Fast::Oot3d::PlayerShadowBridge::Instance().SelectSample(temporalSample);
+  }
   PinGpuCopyResources(sample);
   // config/gpu_timing: step/interp frame and canonical (hidden) draws.
   // A new guest frame is every kind but the repeated (in-between) sample:

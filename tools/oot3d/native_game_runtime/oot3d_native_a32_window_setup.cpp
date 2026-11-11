@@ -765,6 +765,24 @@ void NativeA32WindowSession::Setup() {
             Oot3dNativeGame::Oot3dLinkedWholeAotHookGates(), nativeBlockEntryPcs);
         !error.empty())
       throw std::runtime_error(error);
+#if defined(OOT3D_WHOLE_AOT_PRODUCT_MODE)
+    // A gate runs only where the title module starts a block.
+    const auto entries = Oot3dNativeGame::Oot3dWholeAotEntryPoints();
+    std::vector<uint32_t> sortedEntries(entries.begin(), entries.end());
+    std::sort(sortedEntries.begin(), sortedEntries.end());
+    std::string missing;
+    for (const uint32_t pc : Oot3dNativeGame::Oot3dGameplayOptionBlockPcs()) {
+      if (!std::binary_search(sortedEntries.begin(), sortedEntries.end(), pc)) {
+        char text[16];
+        std::snprintf(text, sizeof(text), " 0x%08X", pc);
+        missing += text;
+      }
+    }
+    if (!missing.empty())
+      throw std::runtime_error(
+          "the title module does not start a block at the gameplay option sites" + missing +
+          "; rebuild it with whole_aot_observed_sites.json");
+#endif
   }
   nativeCandidateDispatch = NativeCandidateDispatchState{
       guestProfiler.Active() ? &Oot3dNativeGame::GuestBlockProfiler::OnBlockEntry
@@ -1347,6 +1365,7 @@ void NativeA32WindowSession::Setup() {
   auto &rollDash = rollDashStorage.emplace(
       process.Memory(), rollDashConfig / Oot3dNativeGame::kRollDashAnimationsName);
   widescreenProjection.RollDash = &rollDash;
+  widescreenProjection.SimpleShadow = &simpleShadow;
   auto &uiRenderBackend = uiRenderBackendStorage.emplace(api);
   auto &n64UiRenderer = n64UiRendererStorage.emplace(uiRenderBackend,
                                                &ocarinaText);
@@ -2175,6 +2194,8 @@ void NativeA32WindowSession::UpdateRollDash() {
   // Game log: the Gameplay settings at start and on each change.
   if (auto line = rollDash.TakeSettingsLine(
           Oot3dNativeGame::LandingRollEnabled().load(std::memory_order_relaxed)))
+    Oot3dNativeGame::WriteGameLog(std::move(*line));
+  if (auto line = gameplayOptionsLog.Take())
     Oot3dNativeGame::WriteGameLog(std::move(*line));
 }
 

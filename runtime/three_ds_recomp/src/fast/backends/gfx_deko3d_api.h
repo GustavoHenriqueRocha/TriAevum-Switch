@@ -21,6 +21,7 @@
 #include "gfx_deko3d_shaders.h"
 #include "fast/backends/gfx_deko3d_ui_plan.h"
 #include "fast/oot3d/grass_draw_point.h"
+#include "fast/oot3d/player_shadow.h"
 
 #include <array>
 #include <cstdint>
@@ -419,6 +420,54 @@ class GfxRenderingAPIDeko3d final : public GfxRenderingAPI, public Renderer3ds::
     // Draws the culled tufts of this frame's sources into `target`, once per
     // target and frame, if its opaque world and sources were drawn this frame.
     void DrawGrass(const Deko3d::PicaTargetKey& key, Deko3d::PicaTarget& target, Oot3d::GrassDrawPoint point);
+
+    // config/simple_shadow (gfx_deko3d_player_shadow.cpp): Link's opaque draws
+    // of the frame, drawn again flattened onto the floor at the frame's first
+    // draw point after them (the grass's points).
+    struct PlayerShadowDraw {
+        const Deko3d::PicaTarget* Target = nullptr; // the frame's draws may go to several
+        const DkShader* Vertex = nullptr;
+        DkGpuAddr Uniforms = DK_GPU_ADDR_INVALID; // his uniforms with the flattening view rows
+        uint32_t UniformBytes = 0;
+        std::array<DkVtxAttribState, Deko3d::kPicaVertexAttributeCount> Attributes{};
+        std::array<DkVtxBufferState, Deko3d::kPicaVertexAttributeCount> Buffers{};
+        std::array<DkBufExtents, Deko3d::kPicaVertexAttributeCount> Extents{};
+        DkPrimitive Primitive = DkPrimitive_Triangles;
+        bool Indexed = false;
+        bool Indices16 = false;
+        DkGpuAddr IndexStream = DK_GPU_ADDR_INVALID;
+        uint32_t IndexCount = 0;
+        int32_t BaseVertex = 0;
+        uint32_t VertexCount = 0;
+        Deko3d::PicaRect Viewport;
+        DkScissor Scissor{};
+        uint8_t DepthCompare = 0;
+    };
+    struct PlayerShadowState {
+        uint64_t Frame = ~uint64_t{0}; // of Selected, Projection, Draws and StencilTaken
+        std::optional<Oot3d::PlayerShadowFrame> Selected;
+        // One light and floor for all of the frame's meshes (taken at its first).
+        std::optional<std::array<float, 16>> Projection;
+        std::vector<PlayerShadowDraw> Draws;
+        // A draw of the frame tests or writes the top stencil bit, which the
+        // shadow borrows: no shadow that frame.
+        bool StencilTaken = false;
+        const DkShader* Fragment = nullptr;
+        uint64_t Frames = 0;
+        uint64_t Meshes = 0;
+        uint64_t Skipped = 0;
+        uint64_t StencilFrames = 0;
+    };
+    PlayerShadowState mPlayerShadow;
+    // InitPica: the fragment program, and the bridge told whether it loaded.
+    void InitPlayerShadow();
+    // Every PICA draw, after EnsureFrame: the frame's shadow and stencil use.
+    void ObservePlayerShadowDraw(const GfxNativePicaDrawView& draw);
+    // RecordPicaDraw, with the state it bound, before the draw call.
+    void CapturePlayerShadowDraw(const GfxNativePicaDrawView& draw, const PicaProgram& program,
+                                 const Deko3d::PicaTarget& target, const PlayerShadowDraw& bound);
+    // At a draw point into `target`: the captured draws, once per frame.
+    void DrawPlayerShadow(Deko3d::PicaTarget& target);
     // SubmitPicaDisplayTransfer of a raw TextureCopy (TextureCopyBytes != 0).
     bool SubmitPicaTextureCopy(const GfxNativePicaDisplayTransferView& transfer, std::string* error);
     // The copy's destination bytes, or why it has none.

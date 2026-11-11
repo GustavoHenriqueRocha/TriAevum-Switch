@@ -14,6 +14,7 @@
 #include "oot3d_native_preparation_screen.h"
 #include "oot3d_input_bench.h"
 #include "oot3d_game_language_panel.h"
+#include "oot3d_gameplay_options_log.h"
 #include "oot3d_graphics_settings_schedule.h"
 #include "oot3d_scene_environment.h"
 #include "oot3d_savestate_library.h"
@@ -335,7 +336,7 @@ private:
   void UpdateScenePresentation();
   // Roll dash (oot3d_roll_dash_runtime.h), outside guest code at each host
   // frame and after a state load: the option of the frame, its guest
-  // regions, and the game log line of the Gameplay settings on a change.
+  // regions, and the game log lines of the Gameplay settings on a change.
   void UpdateRollDash();
   // The OpenGL widescreen moves the relocated lower menu's bottom corners to
   // the window's corners (TopScreen frontend menus); touch follows.
@@ -519,6 +520,10 @@ private:
   std::optional<Oot3dNativeGame::TopScreenItemDescriptionRuntime> itemDescriptionStorage;
   std::optional<Oot3dNativeGame::TopScreenWideItemsRuntime> wideItemsStorage;
   std::optional<Oot3dNativeGame::RollDashRuntime> rollDashStorage;
+  Oot3dNativeGame::GameplayOptionsLog gameplayOptionsLog;
+  // Simple shadow (oot3d_simple_shadow.h): its hook, and the shadow of each
+  // native frame for the deko3d backend (fast/oot3d/player_shadow.h).
+  Oot3dNativeGame::SimpleShadowRuntime simpleShadow;
   std::optional<oot3d::ui::Fast3dUiRenderBackend> uiRenderBackendStorage;
   std::optional<oot3d::ui::N64UiFast3dRenderer> n64UiRendererStorage;
   // The UI texture revision at which every HUD texture was asked for ahead

@@ -2266,6 +2266,142 @@ GUARDS = [
           r'!RollDashAnimationsInstalled\(Config\(\)\);\s+'
           r'if \(\(packExists && hdArtExists && !dashAnimationsMissing\) \|\| !romfsExists\) return true;',
           "oot3d_topscreen_import_tests (TestOffer)"),
+    # --- 11/10: Damage taken, Quick put away, Unmirrored Master Quest, L3+R3 > Game > Gameplay (issue #8) ---
+    # "OoT3D: Single Screen Experience" 3.2.2's options, off by default, always hooked and inert while
+    # off. The 33 mirror hooks are not block starts of a title module generated without
+    # whole_aot_observed_sites.json (check_master_quest_mirror_sites).
+    Guard("Damage taken: on by default would change the game (normal until config/damage_multiplier)",
+          "tools/oot3d/native_game_runtime/oot3d_damage_multiplier.h",
+          r'static std::atomic<std::uint8_t> multiplier\{kDamageMultiplierNormal\};.*?'
+          r'if \(!\(file >> word\)\) return kDamageMultiplierNormal;',
+          "oot3d_damage_multiplier_tests (TestConfig)"),
+    Guard("Quick put away: on by default would change the game (off until config/quick_put_away)",
+          "tools/oot3d/native_game_runtime/oot3d_quick_put_away.h",
+          r'QuickPutAwayEnabled\(\) noexcept \{\s+static std::atomic<bool> enabled\{false\};.*?'
+          r'return std::filesystem::exists\(config / kQuickPutAwayConfigName, error\);',
+          "oot3d_quick_put_away_tests"),
+    Guard("Unmirrored Master Quest: on by default would change the game (mirrored until "
+          "config/master_quest_unmirrored)",
+          "tools/oot3d/native_game_runtime/oot3d_master_quest_mirror.h",
+          r'MasterQuestUnmirrored\(\) noexcept \{\s+static std::atomic<bool> unmirrored\{false\};.*?'
+          r'return std::filesystem::exists\(config / kMasterQuestUnmirroredConfigName, error\);',
+          "oot3d_master_quest_mirror_tests (TestDecision, TestConfig)"),
+    Guard("Damage taken: Health_ChangeBy's change is scaled at its entry, before Master Quest's doubling",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'if \(pc == Oot3dNativeGame::kDamageMultiplierHookPc\) \{.*?'
+          r'state\.r\[1\] = static_cast<uint32_t>\(Oot3dNativeGame::ScaleHealthChange\(',
+          "oot3d_damage_multiplier_tests (TestWithTheGame)"),
+    Guard("Quick put away: the 30-frame wait becomes one by leaving the graph at its store",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'pc == Oot3dNativeGame::kQuickPutAwayHookPc && wholeAotExecutionActive &&.*?'
+          r'state\.r\[0\] = Oot3dNativeGame::kQuickPutAwayFrames;.*?'
+          r'Oot3dWholeAotExitAt\(Oot3dNativeGame::kQuickPutAwayStorePc, state\)',
+          "oot3d_quick_put_away_tests"),
+    Guard("Unmirrored Master Quest: a scene mixed both worlds (the setting applies at the game's own read, "
+          "then the mirror reads see 0)",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'if \(pc == Oot3dNativeGame::kMasterQuestMirrorApplyPc\) \{\s+'
+          r'Oot3dNativeGame::ApplyMasterQuestUnmirrored\(\);\s+'
+          r'\} else if \(Oot3dNativeGame::MasterQuestUnmirrorApplied\(\)\.load\(std::memory_order_relaxed\)\) \{\s+'
+          r'if \(const auto \*read = Oot3dNativeGame::FindMasterQuestMirrorRead\(pc\)\)\s+'
+          r'state\.r\[read->Register\] = 0U;',
+          "oot3d_master_quest_mirror_tests (TestDecision)"),
+    Guard("Unmirrored Master Quest: the TopScreen free camera inverted the stick in an unmirrored world",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_camera_guest.cpp",
+          r'\(flags1 & 0x2000U\) != 0U, MasterQuestMirrorShown\(masterQuest\),',
+          "oot3d_master_quest_mirror_tests (TestDecision)"),
+    Guard("Unmirrored Master Quest: the pause map kept the mirrored world's inset",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",
+          r'const float compactInset = MasterQuestMirrorShown\(compactLayout\) \? 36\.0F : 0\.0F;',
+          "oot3d_master_quest_mirror_tests (TestDecision)"),
+    Guard("Gameplay options: the hook PCs are block-entry hooks in every configuration (whole_aot_hook_gates.json)",
+          "tools/oot3d/native_game_runtime/oot3d_native_block_entry_hooks.cpp",
+          r'add\("gameplay_options", std::array\{kDamageMultiplierHookPc, kQuickPutAwayHookPc,\s+'
+          r'kMasterQuestMirrorApplyPc, kSimpleShadowHookPc\}\);\s+'
+          r'for \(const auto &read : kMasterQuestMirrorReads\)\s+'
+          r'hooks\.push_back\(\{read\.HookPc, "master_quest_mirror"\}\);',
+          "oot3d_native_block_entry_hooks_tests, whole_aot_hook_gates_census"),
+    Guard("Simple shadow: on by default would change the game (off until config/simple_shadow)",
+          "tools/oot3d/native_game_runtime/oot3d_simple_shadow.h",
+          r'SimpleShadowEnabled\(\) noexcept \{\s+static std::atomic<bool> enabled\{false\};.*?'
+          r'return std::filesystem::exists\(config / kSimpleShadowConfigName, error\);',
+          "oot3d_simple_shadow_tests (TestConfig)"),
+    Guard("Simple shadow: the foot shadows run at alpha 0 (their floor bookkeeping kept, as in the mod) and "
+          "return into the hook, which puts the alpha back",
+          "tools/oot3d/native_game_runtime/oot3d_simple_shadow.h",
+          r'if \(mFeetPending\) \{.*?memory\.Write8\(mActor \+ kSimpleShadowAlphaOffset, mAlpha\);\s+'
+          r'if \(state\.r\[14\] != mCaller\) \{\s+state\.r\[14\] = mCaller;\s+if \(compiled\) return mCaller;.*?'
+          r'state\.r\[index\] = mArguments\[index\];.*?if \(!enabled \|\| !compiled\) return std::nullopt;.*?'
+          r'memory\.Write8\(actor->Address \+ kSimpleShadowAlphaOffset, 0U\)\) return std::nullopt;.*?'
+          r'state\.r\[14\] = kSimpleShadowHookPc;',
+          "oot3d_simple_shadow_tests (TestHook)"),
+    Guard("Simple shadow: the policy leaves the graph where the hook says (whole-AOT execution only), and "
+          "hides the foot shadows only while the renderer can draw the body",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_projection_policy.cpp",
+          r'pc == Oot3dNativeGame::kSimpleShadowHookPc && runtime\.SimpleShadow != nullptr &&\s+'
+          r'\(wholeAotExecutionActive \|\| runtime\.SimpleShadow->Pending\(\)\)\) \{.*?'
+          r'SimpleShadowEnabled\(\)\.load\(std::memory_order_relaxed\) &&\s+'
+          r'Fast::Oot3d::PlayerShadowBridge::Instance\(\)\.RendererReady\(\);.*?'
+          r'Execute\(state, memory, simpleShadow, wholeAotExecutionActive\)\) \{.*?'
+          r'Oot3dWholeAotExitAt\(\*exitPc, state\);',
+          "oot3d_simple_shadow_tests (TestHook)"),
+    Guard("Simple shadow: deko3d says it can draw the body only once its program is loaded",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'PlayerShadowBridge::Instance\(\)\.SetRendererReady\(mPlayerShadow\.Fragment != nullptr\);',
+          "oot3d_player_shadow_tests (TestBridge)"),
+    Guard("Simple shadow: each target gets its own captured draws (a frame can draw Link into two)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'record\.Target = &target;.*?std::erase_if\(shadow\.Draws, \[&\]\(const PlayerShadowDraw& draw\) \{\s+'
+          r'if \(draw\.Target != &target\) return false;',
+          ""),
+    Guard("Simple shadow: a state saved between the foot shadows and their return would keep alpha 0",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_savestate.cpp",
+          r'if \(simpleShadow\.Pending\(\)\) return SaveStateOutcome::Deferred;.*?simpleShadow\.Reset\(\);',
+          "oot3d_simple_shadow_tests (TestHook)"),
+    Guard("Simple shadow: each native frame's shadow goes to the renderer with that frame, and the drawn sample "
+          "selects it",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_frame.cpp",
+          r'PlayerShadowBridge::Instance\(\)\.PublishFrame\(\s+currentVisualFrame->Sequence, '
+          r'simpleShadow\.TakeFrame\(\)\);.*?'
+          r'PlayerShadowBridge::Instance\(\)\.SelectSample\(temporalSample\);',
+          "oot3d_player_shadow_tests (TestBridge)"),
+    Guard("Simple shadow: taken only from Link's opaque scene draws whose depth is the rasterizer's (the floor "
+          "was tested with it)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'composition\.NativeActorIdentity != Oot3d::PlayerShadowActorIdentity\(shadow\.Selected->Actor\).*?'
+          r'composition\.Layer != Renderer3ds::PicaCompositionLayer::OpaqueWorld.*?'
+          r'const bool rasterDepth = !draw\.WBuffering && draw\.DepthRange == -1\.0F && draw\.NearPlane == 0\.0F;\s+'
+          r'if \(!draw\.DepthTestEnabled \|\| !draw\.DepthWriteEnabled \|\| !rasterDepth \|\|',
+          "oot3d_player_shadow_tests (TestPatch)"),
+    Guard("Simple shadow: overlapping limbs darken a pixel once, and the borrowed stencil bit is cleared again",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'dkCmdBufClearDepthStencil\(cmd, false, 0\.0F, kPlayerShadowStencilBit, 0U\);.*?'
+          r'stencilFrontPassOp = depthStencil\.stencilBackPassOp = DkStencilOp_Replace;\s+'
+          r'depthStencil\.stencilFrontCompareOp = depthStencil\.stencilBackCompareOp = DkCompareOp_NotEqual;.*?'
+          r'dkCmdBufClearDepthStencil\(cmd, false, 0\.0F, kPlayerShadowStencilBit, 0U\);',
+          "", forbid=r'depthWriteEnable = 1'),
+    Guard("Simple shadow: a frame whose draws use the top stencil bit keeps it (the body drawn without it, "
+          "not dropped: the foot shadows are hidden already)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_player_shadow.cpp",
+          r'if \(draw\.Stencil\.Enabled && \(\(draw\.Stencil\.WriteMask \| draw\.Stencil\.CompareMask\) & '
+          r'kPlayerShadowStencilBit\) != 0U\)\s+shadow\.StencilTaken = true;.*?'
+          r'const bool stencil = !shadow\.StencilTaken;.*?'
+          r'depthStencil\.stencilTestEnable = stencil \? 1 : 0;',
+          ""),
+    Guard("Simple shadow: drawn at the grass's points (after the opaque world, before translucent draws, "
+          "overlays and the display transfer)",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_pica_draw.cpp",
+          r'if \(Oot3d::GrassDrawPointOf\(draw\.CompositionDomain, draw\.Composition\.Layer\)\) \{\s+'
+          r'DrawPlayerShadow\(\*target\);.*?DrawPlayerShadow\(\*source\);.*?DrawPlayerShadow\(\*source\);',
+          ""),
+    Guard("Gameplay options: a product title module without a block at their PCs would never run them",
+          "tools/oot3d/native_game_runtime/oot3d_native_a32_window_setup.cpp",
+          r'#if defined\(OOT3D_WHOLE_AOT_PRODUCT_MODE\)\s+'
+          r'// A gate runs only where the title module starts a block\.\s+'
+          r'const auto entries = Oot3dNativeGame::Oot3dWholeAotEntryPoints\(\);.*?'
+          r'for \(const uint32_t pc : Oot3dNativeGame::Oot3dGameplayOptionBlockPcs\(\)\).*?'
+          r'throw std::runtime_error\(',
+          "oot3d_native_block_entry_hooks_tests"),
     # --- 11/08: N4 hook gates (--sparse-block-entries) ---
     # Sparse whole-AOT code calls the block-entry callback only at the PCs of
     # whole_aot_hook_gates.json, the census of Oot3dNativeBlockEntryHookPcs: a
@@ -2557,6 +2693,29 @@ def check_overrides() -> str | None:
     return None
 
 
+def check_master_quest_mirror_sites() -> str | None:
+    header = (ROOT / "tools/oot3d/native_game_runtime/oot3d_master_quest_mirror.h").read_text(encoding="utf-8")
+    table = re.search(r'kMasterQuestMirrorReads\{\{(.*?)\}\};', header, re.S)
+    if table is None:
+        return "kMasterQuestMirrorReads not found"
+    hooks = {int(pc, 16) for pc in re.findall(r'\{0x([0-9A-Fa-f]{8})U, \dU\}', table.group(1))}
+    catalog = json.loads((ROOT / "tools/oot3d/native_a32_runtime/whole_aot_observed_sites.json")
+                         .read_text(encoding="utf-8"))
+    sites = {int(site["pc"], 16) for site in catalog["sites"]}
+    missing = sorted(hooks - sites)
+    if len(hooks) != 33 or missing:
+        return f"{len(hooks)} mirror hooks; not in whole_aot_observed_sites.json: " + ", ".join(
+            f"0x{pc:08X}" for pc in missing)
+    return None
+
+
+CHECKS = [
+    ("overrides measured slower than the translation remain disabled", check_overrides),
+    ("the 33 unmirrored Master Quest hooks start blocks (whole_aot_observed_sites.json)",
+     check_master_quest_mirror_sites),
+]
+
+
 def main() -> int:
     if "--list" in sys.argv:
         for guard in GUARDS:
@@ -2567,11 +2726,12 @@ def main() -> int:
         error = check_guard(guard)
         print(("FAIL " if error else "ok   ") + guard.bug + (f"\n     {error}" if error else ""))
         failures += error is not None
-    error = check_overrides()
-    print(("FAIL " if error else "ok   ") + "overrides measured slower than the translation remain disabled"
-          + (f"\n     {error}" if error else ""))
-    failures += error is not None
-    print(f"{len(GUARDS) + 1 - failures}/{len(GUARDS) + 1} guards ok")
+    for name, check in CHECKS:
+        error = check()
+        print(("FAIL " if error else "ok   ") + name + (f"\n     {error}" if error else ""))
+        failures += error is not None
+    total = len(GUARDS) + len(CHECKS)
+    print(f"{total - failures}/{total} guards ok")
     return 1 if failures else 0
 
 

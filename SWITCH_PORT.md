@@ -4131,7 +4131,7 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
 - **Log:** game log line `gameplay: landing_roll=.. roll_dash=.. animations=ready|unavailable (reason)|-` at
   start and on each change; perf line `roll_dash: queries frames answers speed blends poses navi` per
   window while it is on.
-- **Not ported:** quick put-away, aiming reticle, 3D rain, upstream's 3.0 landing-roll fix and floor-web
+- **Not ported:** quick put-away (ported on its own since: next section), aiming reticle, 3D rain, upstream's 3.0 landing-roll fix and floor-web
   fix (this fork keeps its own N64 landing roll at `0x004BC080`, independent of the dash), the standard
   TopScreen profile (`10366406`), the `TRIAEVUM_DASH_TRACE` / `TRIAEVUM_SCENE_VIEW_TRACE` diagnostics.
 - **Check [not done on the console]:** Kokiri Forest, roll with A and keep A held → Link dashes (dash
@@ -4144,6 +4144,143 @@ Checked against deko3d 0.5.0's source (`source/maxwell/gpu_base.cpp`, `dk_queue.
   `oot3d_topscreen_import_tests` (extraction pins, install, offer rules; `--link-animations
   singlescreen_322.zip` checks the real archive), `oot3d_native_block_entry_hooks_tests`, the census
   check. Guards "Roll dash".
+
+### Damage taken, Quick put away, Unmirrored Master Quest, Simple shadow (11/10, issue #8)
+- **What:** the four options of "OoT3D: Single Screen Experience" 3.2.2 by M-1 asked for in issue #8, in
+  L3+R3 > Game > Gameplay, all **off by default** and applied at once (Unmirrored Master Quest at the game's
+  next read of the flag, below):
+  - "Damage taken" (`config/damage_multiplier`: `2` to `10` or `ohko`; no file = normal): Link's damage
+    times 2 to 10, or any hit fatal. Healing is unchanged; Master Quest still doubles the result and the
+    double defence still halves it, as in the mod.
+  - "Quick put away" (`config/quick_put_away`, present = on): after Link uses his sword or an item, A offers
+    Put Away one frame later instead of 30 (a second at 30 Hz).
+  - "Unmirrored Master Quest" (`config/master_quest_unmirrored`, present = on): Master Quest's dungeons,
+    enemies and switches in the unmirrored world.
+  - "Simple shadow" (`config/simple_shadow`, present = on; **Switch only**: the deko3d backend draws it):
+    Link's whole body flattened onto the floor along the scene's light, instead of his two foot spots.
+- **Damage (EUR code.bin):** every change of Link's health goes through `Health_ChangeBy` (`0x00352DBC`,
+  r1 = the change, a sign-extended s16, negative for damage; health in sixteenths of a heart at save context
+  +0x44). After its entry the game doubles damage in Master Quest (flag read at `0x00352DCC`) and halves it
+  with the double defence (+0x51). The hook at the entry multiplies a negative r1 before both, where the mod
+  does: at most -0x3FFF, so the doubling still fits the s16; "one hit" is -1025, more than 20 hearts (320)
+  after the halving (`oot3d_damage_multiplier.h`).
+- **Quick put away:** `Player_UpdateContextActionAndSequenceState` (`0x003C45F4`) gives Link a 30-frame wait
+  before the put-away action is offered: `mov r0, #30` at `0x003C49CC`, stored at player +0x21B by
+  `0x003C4B00`, which counts it down. The hook sets r0 to 1 and leaves the whole-AOT graph at the store
+  (`Oot3dWholeAotExitAt`), as upstream TriAevum's TopScreen gameplay option does (coccofresco,
+  `oot3d_top_screen_gameplay_runtime`, after the mod's 3.0; 3.2.2 also stores 1). Whole-AOT execution only,
+  always on in the product (`oot3d_quick_put_away.h`).
+- **Unmirrored Master Quest:** the game reads Master Quest (save context +0x0E, `0x00587966`) in about 90
+  places; most choose Master Quest's content, `Health_ChangeBy`'s doubling among them, the others mirror the
+  world (the frame's and the scene uniforms' setup, the cull mode, the camera, Link's turn, cutscene
+  transforms, three textbox paths, the pause maps, markers, cursors and icons, the motion sensors). The mod's
+  3.2.2 `code.ips` for the EUR game patches 25 of those `ldrb rX, [rY, #0x0E]` (a branch to a stub that loads
+  its copy of the flag into the same register), taken where `FileSelect_CopyActiveSaveBuffer` reads it (a
+  file load, the pause menu's close). Here a hook at the instruction after each read clears the register it
+  loaded (`kMasterQuestMirrorReads`, `oot3d_master_quest_mirror.h`), and the setting is taken at
+  `0x002EAFBC`, the `FileSelect_CopyActiveSaveBuffer` block that reads the flag. A change at the pause menu's
+  close takes effect whole: the reads that depend on the flag run every frame or every use, the cull mode
+  too (`0x0054CC30`, 0x901 normal, 0x900 mirrored, read by `CmbRenderer_SetRenderState` and
+  `PicaMaterialState_EmitCullMode`, written every frame by `GameRuntime_InitializeRenderSubsystemState`
+  inside `Graph_ThreadEntry`'s frame loop, `0x004162CC..0x004163C8`). **The table adds 8 reads the mod
+  leaves** (33 in all), each the same mirroring as a read the mod patches: the motion sensors
+  (`Graph_ThreadEntry` stores the flag at `0x005C594C` +160 every frame, and
+  `HidCalibration_UpdateMotionState` negates two of their axes when it is set: the Switch's gyro aim reaches
+  the game through that path, so without it the aim would turn the wrong way in the unmirrored world) and
+  seven pause reads that run the same arithmetic as the mod's read of their function on another branch
+  (`PauseTouchButtons_UpdateActionGridGeometry` twice: (s17 - x)·s20 - s18 and 320 - x;
+  `PauseRenderGroup_DrawAnimatedMask`: x reflected about 160; `PauseDetail_UpdateDungeonMapMarkers` twice:
+  116 - x; `PauseQuestPage_UpdateCursorGeometry`: s21 - x for each corner; `PauseDungeonItemPanel_SubmitModels`:
+  the left/right layout). Left as the mod leaves them, so the port does what the mod does: the analog
+  stick's x negation (`0x0041AB34`, in the stick pass that `Input_UpdateGlobalStateAndCopySnapshot`
+  tail-calls; the mod's input hook at `0x00416350` adds its D-pad-as-stick after it and negates that the
+  same way) and the mirror of a view built on `Gameplay_Draw`'s own stack
+  (`Gameplay_UpdateViewProjectionState`, `0x0046406C`: diag(-1, 1, 1) into its three matrices, as the mod's
+  read `0x004790A8` does to another view). The port's own Master Quest readers follow what the game runs with
+  (`MasterQuestMirrorShown`): the TopScreen free camera's horizontal inversion
+  (`oot3d_top_screen_camera_guest.cpp`) and the pause map's inset (`oot3d_top_screen_mod_profile_quest.cpp`).
+  The UI contract keeps the flag only as save content.
+- **Hooks and the title module:** all 37 are always in the block-entry list (sources `gameplay_options` and
+  `master_quest_mirror` of `oot3d_native_block_entry_hooks.cpp`), inert while their option is off:
+  `0x00352DBC`, `0x003C49CC`, `0x002EAFBC`, `0x00297E04` and the 33 mirror hooks. `whole_aot_hook_gates.json`
+  gates them (372 PCs, 37 new; the census check passes). The damage, put-away, apply and shadow PCs, the
+  put-away store and the shadow's return to Actor_Draw (`0x002D649C`) are already block starts and dispatch
+  entries of the current title module (`fork-gen-432c798dde-674182a5-pgo`);
+  the 33 mirror hooks fall inside blocks, so `whole_aot_observed_sites.json` lists them (80 sites, 33 new)
+  for the generator to start a block at each. No guest override covers a hook. **The next release needs the
+  whole-AOT code regenerated with both files:** the window refuses a hook its title module does not gate
+  (`Oot3dWholeAotHookGatesError`), and product builds refuse a title module that does not start a block at
+  every one of these PCs (`Oot3dGameplayOptionBlockPcs`, `oot3d_native_a32_window_setup.cpp`).
+- **Log:** game log line `gameplay: quick_put_away=.. damage=.. master_quest_unmirrored=.. simple_shadow=..`
+  at start and on each change, beside the Landing roll / Roll dash line (`oot3d_gameplay_options_log.h`);
+  "(applies at the next file load or pause menu close)" while the Master Quest setting waits for the game's
+  read. `logs/deko3d.txt`: `shadow: frame .. N meshes opacity .. height .. | frames, meshes, skipped, frames
+  without the stencil bit` at the first shadow frame and every 1800 after.
+- **Check [not done on the console; needs the regenerated title module]:** Damage taken 2x, then one hit:
+  an enemy's hit costs twice its usual damage, then any hit is fatal; a recovery heart still heals a heart.
+  Quick put away: swing the sword, A offers Put Away at once instead of a second later. Unmirrored Master
+  Quest: load a Master Quest file: the world and the pause maps unmirrored, the Deku Tree still Master
+  Quest's; pushing the stick right walks Link right (the mod leaves the stick's negation: this is where it
+  would show); aiming with the gyro turns the way the console turns; the pause screens'
+  cursors, touch buttons and dungeon map markers on the same side as their maps and icons; the sky and the
+  sun where they are in the normal game (the view the mod leaves); turning the option off in game mirrors the
+  world again when the pause menu closes. Simple shadow: Hyrule Field by day, Link's shadow is his body's
+  shape, away from the sun, and the sword's swing shows in it; jumping, it tilts under him and fades; on
+  Epona, only Epona's shadow; with the 60 FPS mode, it moves with him on every frame.
+- **Simple shadow, the game's side (`oot3d_simple_shadow.h`):** Link's shadow is `Player_DrawFeetShadow`
+  (`0x00297E04`), called by Actor_Draw through shape.shadowDraw (`blx` at `0x002D6498`): unless he rides Epona
+  (stateFlags1 `0x00800000`) it tail-calls `ActorShadow_DrawFeet` (`0x001D04F4`), the two foot spots below 200
+  units over the floor and, over 20, the round shadow at 0.3 of his shadow scale (adult 90, child 60). The
+  mod's 3.2.2 replaces that branch (payload `0x00600F88`): for the player, not on Epona, stateFlags2
+  `0x20000000` clear, with a floor whose normal is at least 0.3 (CollisionPoly normal: s16 x, y, z at
+  +0x0A/+0x0C/+0x0E in 1/32767, as the title's own readers load it), from 50 units under it to 1500 over it
+  and a shadow alpha, it draws its body shadow and runs the foot shadows at alpha 0, which keeps their floor
+  bookkeeping (feetFloorFlags). The hook at the entry decides the same, writes the alpha 0 and points r14 at
+  itself: ActorShadow_DrawFeet returns into the hook, which puts the alpha back and leaves the graph at the
+  caller (`0x002D649C`, a dispatch entry). It starts only from whole-AOT code and only while the renderer
+  says it draws the body (`PlayerShadowBridge::RendererReady`, set by deko3d once its program loads; never on
+  the PC renderers): otherwise the game keeps its foot shadows. A return that arrives outside compiled code
+  (it should not) runs the block again with the call's arguments: the foot shadows once more, visible, then
+  the caller. A new call while the hook still waits (r14 the caller's return, where the foot shadows' own
+  calls leave it inside them) puts the alpha back first. Savestates wait for the return; a load resets the
+  hook. The
+  frame's shadow (actor, the floor point under him and its normal, his height, the opacity) goes with the
+  native frame to the renderer (`PlayerShadowBridge`, as `GrassInteractionBridge` carries the grass
+  colliders; a 60 FPS in-between frame blends its two frames). Opacity, the mod's (`0x005FDC4C`): 180 at its
+  default darkness, times shadowAlpha/255, times the game's round-shadow fade 1 - min(h, 150)/350 that the
+  rise (a smoothstep from 40 to 140 units, `0x005F96F8`) undoes, times max(1 - h/60, rise), times 0.8, with
+  the payload's truncations (144/255 on the floor).
+- **Simple shadow, the renderer's side (deko3d, `gfx_deko3d_player_shadow.cpp`, `fast/oot3d/player_shadow.h`):**
+  the mod renders his silhouette into a small texture laid on the floor (soft edges); here his meshes are
+  projected (sharp edges). Each opaque scene draw of his actor (NativeActorIdentity) that leaves depth to the
+  rasterizer is captured with the state it bound and the target it went to (a frame can draw him into two:
+  the native-dependency replay and the presented one); at each target's first grass draw point after them
+  (before a translucent world draw, an overlay or the display transfer) they are drawn again with his own PICA vertex
+  program, its view rows f[4..6] replaced by V·S·V⁻¹·f[4..6] (V the draw's world-to-view, S the projection
+  along the light onto the floor plane lifted 0.75 units), in black at the opacity (`player_shadow_fsh.glsl`,
+  compiled by `tools/oot3d/deko3d_shadow/gen.py`), with his depth test, no depth write and no culling. The
+  light, the mod's: the scene's directional lights weighted by their energy (under 0.02 ignored), tilted
+  toward the vertical when the strongest is under 0.35 and as he rises from 40 to 140 units; the port keeps it
+  at least 0.3 over the floor (the mod has no bound). One light and floor serve all of a frame's meshes
+  (taken at its first). Stencil bit `0x80` is cleared before and after the pass, each pixel darkens once; a
+  frame whose own draws use that bit (the Lens of Truth may) keeps it, and the body is drawn without it
+  (overlapping limbs darker; logged once). Not ported: the mod's handling of water depth (actor +0x88); the
+  shadow lies on the floor under the water. Known: like the game's own round shadow, it is flat, so past a
+  ledge it hangs at the floor's height; in first person and wherever the game does not draw Link, there is
+  no body to project and the foot shadows stay hidden. The PC renderers do not draw it, so the menu has it
+  only on the Switch.
+- Tests: `oot3d_damage_multiplier_tests` (normal, 2x, 10x and above, healing, one hit, the clamp; with the
+  game's Master Quest doubling and double defence; the config file), `oot3d_quick_put_away_tests` (the
+  default, the config file), `oot3d_master_quest_mirror_tests` (the table sorted, found by its hook and not
+  by the read, `Health_ChangeBy`'s doubling not in it; the setting before and after the game's read; the
+  config file),   `oot3d_simple_shadow_tests` (the mod's conditions, the actor and floor reads, the foot
+  shadows at alpha 0 and their return, a change of option between the two, nothing started outside compiled
+  code, a return outside it, a new call before the return, a reset, the config file),
+  `oot3d_player_shadow_tests` (the opacity at known heights, the light direction, the projection onto flat
+  and sloped floors, the view-row patch with the camera in the rows or in the bones, the frame bridge),
+  `oot3d_gameplay_options_log_tests`, `oot3d_native_block_entry_hooks_tests` (the hooks in every
+  configuration), the census check. Guards "Damage taken", "Quick put away", "Unmirrored Master Quest",
+  "Simple shadow", "Gameplay options" and the observed-sites check of the 33 mirror hooks.
 
 ### Version, Exit game and OTA updates: L3+R3 > Updates
 - Version: CMake cache variables `OOT3D_RELEASE_VERSION` (semver, at most 15 characters, the NACP

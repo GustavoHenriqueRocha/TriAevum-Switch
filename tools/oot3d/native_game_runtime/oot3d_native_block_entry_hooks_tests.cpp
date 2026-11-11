@@ -3,8 +3,12 @@
 
 #include "oot3d_native_block_entry_hooks.h"
 
+#include "oot3d_damage_multiplier.h"
 #include "oot3d_landing_roll.h"
+#include "oot3d_master_quest_mirror.h"
+#include "oot3d_quick_put_away.h"
 #include "oot3d_roll_dash.h"
+#include "oot3d_simple_shadow.h"
 #include "oot3d_native_a32_actor_visibility.h"
 #include "oot3d_native_a32_timing_probe.h"
 #include "oot3d_native_a32_window_guest_pcs.h"
@@ -63,6 +67,14 @@ std::vector<uint32_t> PreviousInlineAssembly(const Oot3dBlockEntryHookOptions &o
   // Roll dash (11/09): always hooked, inert while config/roll_dash is off.
   blockEntryHooks.insert(blockEntryHooks.end(), Oot3dNativeGame::kRollDashHookPcs.begin(),
                          Oot3dNativeGame::kRollDashHookPcs.end());
+  // Damage multiplier, quick put away, unmirrored Master Quest (11/11): always
+  // hooked, inert while they are off.
+  blockEntryHooks.insert(blockEntryHooks.end(), {Oot3dNativeGame::kDamageMultiplierHookPc,
+                                                 Oot3dNativeGame::kQuickPutAwayHookPc,
+                                                 Oot3dNativeGame::kMasterQuestMirrorApplyPc,
+                                                 Oot3dNativeGame::kSimpleShadowHookPc});
+  for (const auto &read : Oot3dNativeGame::kMasterQuestMirrorReads)
+    blockEntryHooks.push_back(read.HookPc);
   const auto actorVisibilityHooks = Oot3dNativeGame::NativeActorVisibilityHookPcs();
   blockEntryHooks.insert(blockEntryHooks.end(), actorVisibilityHooks.begin(),
                          actorVisibilityHooks.end());
@@ -207,6 +219,16 @@ void TestEveryConfigurationMatchesThePreviousInlineAssembly() {
   for (const uint32_t pc : Oot3dNativeGame::kRollDashHookPcs)
     Expect(std::binary_search(minimalList.begin(), minimalList.end(), pc),
            "the Roll dash hooks are in every configuration (the menu turns it on at once)");
+  std::vector<uint32_t> gameplayOptions{Oot3dNativeGame::kDamageMultiplierHookPc,
+                                        Oot3dNativeGame::kQuickPutAwayHookPc,
+                                        Oot3dNativeGame::kMasterQuestMirrorApplyPc,
+                                        Oot3dNativeGame::kSimpleShadowHookPc};
+  for (const auto &read : Oot3dNativeGame::kMasterQuestMirrorReads)
+    gameplayOptions.push_back(read.HookPc);
+  for (const uint32_t pc : gameplayOptions)
+    Expect(std::binary_search(minimalList.begin(), minimalList.end(), pc) &&
+               std::binary_search(productList.begin(), productList.end(), pc),
+           "the gameplay option hooks are in every configuration (the menu turns them on at once)");
   Expect(std::binary_search(productList.begin(), productList.end(),
                             Oot3dNativeGame::kTopScreenInputUpdateBoundary),
          "the TopScreen input boundary is in the product list");

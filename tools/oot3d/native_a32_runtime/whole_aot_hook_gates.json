@@ -15,6 +15,7 @@
     "0x001B6028",
     "0x001B6074",
     "0x001B60E8",
+    "0x001C2538",
     "0x001DA4F4",
     "0x001DA9F8",
     "0x001E0474",
@@ -22,6 +23,7 @@
     "0x002029C4",
     "0x002033E4",
     "0x00213DFC",
+    "0x00228000",
     "0x0022C2C4",
     "0x0022C31C",
     "0x0022C32C",
@@ -31,6 +33,7 @@
     "0x0022CB48",
     "0x0022CF00",
     "0x0022D1E0",
+    "0x00230B60",
     "0x00234E38",
     "0x00235508",
     "0x00236CB8",
@@ -63,7 +66,9 @@
     "0x0025CB84",
     "0x00275F28",
     "0x00297508",
+    "0x00297E04",
     "0x002BE8B0",
+    "0x002C05A4",
     "0x002C3950",
     "0x002C3960",
     "0x002C3970",
@@ -87,6 +92,7 @@
     "0x002D84C8",
     "0x002D86F0",
     "0x002D89D0",
+    "0x002D8D24",
     "0x002D8E70",
     "0x002D8FB4",
     "0x002D9120",
@@ -115,20 +121,34 @@
     "0x002E6CD4",
     "0x002E7AE0",
     "0x002E9B4C",
+    "0x002EAFBC",
     "0x002EB05C",
     "0x002EBA9C",
     "0x002EC3E4",
+    "0x002EF028",
+    "0x002EF12C",
+    "0x002EF1B8",
+    "0x002F06F4",
+    "0x002F0A9C",
+    "0x002F0F44",
+    "0x002F1584",
+    "0x002F16C4",
+    "0x002F182C",
+    "0x002F19AC",
+    "0x002F2280",
     "0x002FADDC",
     "0x002FADF4",
     "0x002FAEC0",
     "0x002FAED8",
     "0x002FBC50",
+    "0x002FC37C",
     "0x002FDE9C",
     "0x002FEA68",
     "0x002FEA74",
     "0x002FEABC",
     "0x002FFA20",
     "0x002FFA40",
+    "0x002FFC9C",
     "0x002FFF7C",
     "0x003004E0",
     "0x0030051C",
@@ -168,6 +188,7 @@
     "0x0033C730",
     "0x0033D14C",
     "0x0033D174",
+    "0x00340B60",
     "0x00340F44",
     "0x00341CD8",
     "0x0034807C",
@@ -179,6 +200,7 @@
     "0x0034D1EC",
     "0x0034D268",
     "0x0034E854",
+    "0x00352DBC",
     "0x00353998",
     "0x00355830",
     "0x0035BBE0",
@@ -187,9 +209,11 @@
     "0x0035D190",
     "0x00372170",
     "0x00377A04",
+    "0x00381278",
     "0x003AEF48",
     "0x003B30AC",
     "0x003BC5DC",
+    "0x003C49CC",
     "0x003CC298",
     "0x003FB5EC",
     "0x003FB984",
@@ -205,8 +229,10 @@
     "0x003FE43C",
     "0x00415AE4",
     "0x0041633C",
+    "0x00416370",
     "0x00417014",
     "0x00417024",
+    "0x00419020",
     "0x0041952C",
     "0x00419824",
     "0x00419830",
@@ -218,6 +244,7 @@
     "0x0041988C",
     "0x00419890",
     "0x004198B0",
+    "0x00419904",
     "0x0041AFAC",
     "0x0041DDC8",
     "0x0041DEF0",
@@ -242,20 +269,26 @@
     "0x00427A3C",
     "0x00427CE4",
     "0x0042A278",
+    "0x0042AE20",
+    "0x0042B014",
     "0x0042B86C",
     "0x0042B884",
     "0x0042B9F4",
     "0x0042BF6C",
     "0x0042CB54",
     "0x0042CBCC",
+    "0x0042CF04",
+    "0x0042CF60",
     "0x0042D0E4",
     "0x0042DA14",
+    "0x0042DB18",
     "0x0042DDA8",
     "0x0042DF3C",
     "0x0042E644",
     "0x0042EC2C",
     "0x0042F5A8",
     "0x0042F5CC",
+    "0x0042F7DC",
     "0x0042F9A8",
     "0x004338EC",
     "0x00433AB4",
@@ -264,7 +297,10 @@
     "0x00434CDC",
     "0x00434D48",
     "0x00438740",
+    "0x0043920C",
     "0x004392C8",
+    "0x004419C0",
+    "0x00441E38",
     "0x004426B4",
     "0x004426D4",
     "0x00442704",
@@ -327,6 +363,7 @@
     "0x00477E30",
     "0x004788DC",
     "0x00478EB8",
+    "0x004790AC",
     "0x0047955C",
     "0x0047956C",
     "0x004795EC",
@@ -382,6 +419,9 @@
     "0x001B60E8": [
       "actor_visibility"
     ],
+    "0x001C2538": [
+      "master_quest_mirror"
+    ],
     "0x001DA4F4": [
       "extended_diagnostics"
     ],
@@ -403,6 +443,9 @@
     ],
     "0x00213DFC": [
       "pica_composition"
+    ],
+    "0x00228000": [
+      "master_quest_mirror"
     ],
     "0x0022C2C4": [
       "typed_gameplay_exits"
@@ -430,6 +473,9 @@
     ],
     "0x0022D1E0": [
       "typed_gameplay_exits"
+    ],
+    "0x00230B60": [
+      "master_quest_mirror"
     ],
     "0x00234E38": [
       "typed_gameplay_exits"
@@ -527,8 +573,14 @@
     "0x00297508": [
       "pica_composition"
     ],
+    "0x00297E04": [
+      "gameplay_options"
+    ],
     "0x002BE8B0": [
       "roll_dash"
+    ],
+    "0x002C05A4": [
+      "master_quest_mirror"
     ],
     "0x002C3950": [
       "top_screen_item_dispatch"
@@ -601,6 +653,9 @@
     ],
     "0x002D89D0": [
       "typed_gameplay_exits"
+    ],
+    "0x002D8D24": [
+      "master_quest_mirror"
     ],
     "0x002D8E70": [
       "typed_gameplay_exits"
@@ -687,6 +742,9 @@
     "0x002E9B4C": [
       "ui_lifecycle"
     ],
+    "0x002EAFBC": [
+      "gameplay_options"
+    ],
     "0x002EB05C": [
       "ui_lifecycle"
     ],
@@ -696,6 +754,39 @@
     "0x002EC3E4": [
       "ui_lifecycle",
       "top_screen_item_dispatch"
+    ],
+    "0x002EF028": [
+      "master_quest_mirror"
+    ],
+    "0x002EF12C": [
+      "master_quest_mirror"
+    ],
+    "0x002EF1B8": [
+      "master_quest_mirror"
+    ],
+    "0x002F06F4": [
+      "master_quest_mirror"
+    ],
+    "0x002F0A9C": [
+      "master_quest_mirror"
+    ],
+    "0x002F0F44": [
+      "master_quest_mirror"
+    ],
+    "0x002F1584": [
+      "master_quest_mirror"
+    ],
+    "0x002F16C4": [
+      "master_quest_mirror"
+    ],
+    "0x002F182C": [
+      "master_quest_mirror"
+    ],
+    "0x002F19AC": [
+      "master_quest_mirror"
+    ],
+    "0x002F2280": [
+      "master_quest_mirror"
     ],
     "0x002FADDC": [
       "pica_composition"
@@ -711,6 +802,9 @@
     ],
     "0x002FBC50": [
       "top_screen"
+    ],
+    "0x002FC37C": [
+      "master_quest_mirror"
     ],
     "0x002FDE9C": [
       "base"
@@ -729,6 +823,9 @@
     ],
     "0x002FFA40": [
       "typed_gameplay_exits"
+    ],
+    "0x002FFC9C": [
+      "master_quest_mirror"
     ],
     "0x002FFF7C": [
       "pica_composition"
@@ -848,6 +945,9 @@
     "0x0033D174": [
       "pica_composition"
     ],
+    "0x00340B60": [
+      "master_quest_mirror"
+    ],
     "0x00340F44": [
       "pica_composition"
     ],
@@ -881,6 +981,9 @@
     "0x0034E854": [
       "actor_visibility"
     ],
+    "0x00352DBC": [
+      "gameplay_options"
+    ],
     "0x00353998": [
       "ui_lifecycle"
     ],
@@ -906,6 +1009,9 @@
     "0x00377A04": [
       "ui_lifecycle"
     ],
+    "0x00381278": [
+      "master_quest_mirror"
+    ],
     "0x003AEF48": [
       "actor_visibility"
     ],
@@ -914,6 +1020,9 @@
     ],
     "0x003BC5DC": [
       "actor_visibility"
+    ],
+    "0x003C49CC": [
+      "gameplay_options"
     ],
     "0x003CC298": [
       "actor_visibility"
@@ -960,12 +1069,18 @@
     "0x0041633C": [
       "actor_visibility"
     ],
+    "0x00416370": [
+      "master_quest_mirror"
+    ],
     "0x00417014": [
       "base",
       "typed_gameplay_exits"
     ],
     "0x00417024": [
       "typed_gameplay_exits"
+    ],
+    "0x00419020": [
+      "master_quest_mirror"
     ],
     "0x0041952C": [
       "top_screen_source_port"
@@ -1000,6 +1115,9 @@
     ],
     "0x004198B0": [
       "top_screen_source_port"
+    ],
+    "0x00419904": [
+      "master_quest_mirror"
     ],
     "0x0041AFAC": [
       "pica_composition"
@@ -1079,6 +1197,12 @@
     "0x0042A278": [
       "pica_composition"
     ],
+    "0x0042AE20": [
+      "master_quest_mirror"
+    ],
+    "0x0042B014": [
+      "master_quest_mirror"
+    ],
     "0x0042B86C": [
       "top_screen"
     ],
@@ -1099,11 +1223,20 @@
     "0x0042CBCC": [
       "pica_composition"
     ],
+    "0x0042CF04": [
+      "master_quest_mirror"
+    ],
+    "0x0042CF60": [
+      "master_quest_mirror"
+    ],
     "0x0042D0E4": [
       "ui_lifecycle"
     ],
     "0x0042DA14": [
       "ui_lifecycle"
+    ],
+    "0x0042DB18": [
+      "master_quest_mirror"
     ],
     "0x0042DDA8": [
       "ui_lifecycle"
@@ -1122,6 +1255,9 @@
     ],
     "0x0042F5CC": [
       "top_screen_source_port"
+    ],
+    "0x0042F7DC": [
+      "master_quest_mirror"
     ],
     "0x0042F9A8": [
       "ui_lifecycle",
@@ -1148,8 +1284,17 @@
     "0x00438740": [
       "ui_lifecycle"
     ],
+    "0x0043920C": [
+      "master_quest_mirror"
+    ],
     "0x004392C8": [
       "ui_lifecycle"
+    ],
+    "0x004419C0": [
+      "master_quest_mirror"
+    ],
+    "0x00441E38": [
+      "master_quest_mirror"
     ],
     "0x004426B4": [
       "top_screen_map_icons"
@@ -1342,6 +1487,9 @@
     ],
     "0x00478EB8": [
       "top_screen_source_port"
+    ],
+    "0x004790AC": [
+      "master_quest_mirror"
     ],
     "0x0047955C": [
       "typed_gameplay_exits"
