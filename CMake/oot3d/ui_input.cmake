@@ -10,6 +10,7 @@ add_library(oot3d_ui_topscreen STATIC EXCLUDE_FROM_ALL
     tools/oot3d/ui_topscreen/oot3d_top_screen_controls.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_gameplay_actions.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_presentation.cpp
+    tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_items.cpp
     tools/oot3d/ui_topscreen/oot3d_host_menu_touch.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_hud_touch.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_items_hint.cpp
@@ -51,6 +52,7 @@ add_executable(oot3d_top_screen_mod_profile_tests EXCLUDE_FROM_ALL
     tools/oot3d/ui_topscreen/oot3d_top_screen_item_dispatch_tests.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_ocarina_tests.cpp
     tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_presentation_tests.cpp
+    tools/oot3d/ui_topscreen/oot3d_top_screen_dpad_items_tests.cpp
 )
 target_link_libraries(oot3d_top_screen_mod_profile_tests PRIVATE
     oot3d_ui_topscreen)

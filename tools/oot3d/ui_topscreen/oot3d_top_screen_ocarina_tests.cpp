@@ -31,6 +31,7 @@ Oot3dNativeGame::NativeA32Memory BuildOcarinaFixture() {
   Require(memory.Write32(0x005043D4U + 0x0CU, kScene) &&
               memory.Write32(0x0050AF68U, 2U) &&
               memory.Write8(kScene + 0x100U, 3U) &&
+              memory.Write8(kScene + 0x101U, 2U) &&
               memory.Write16(kScene + 0x2B82U, 0xFFU) &&
               memory.Write16(kScene + 0x2B80U, 1U) &&
               memory.Write32(kOcarina + 0x14U, 4U) &&

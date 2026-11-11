@@ -100,6 +100,30 @@ bool ReadDpadMapping(const nlohmann::json &document, std::string_view key,
   return true;
 }
 
+bool ReadDpadItemSlots(const nlohmann::json &document, std::string_view key,
+                       std::array<std::uint8_t, 4> *slots,
+                       std::string *error) {
+  const std::string name(key);
+  if (!document.contains(name)) {
+    return true;
+  }
+  const auto &array = document.at(name);
+  if (!array.is_array() || array.size() != slots->size()) {
+    SetError(error, "TopScreen " + name +
+                        " must contain Up, Down, Left and Right items");
+    return false;
+  }
+  for (std::size_t index = 0; index < slots->size(); ++index) {
+    if (!array.at(index).is_string() ||
+        !ParseTopScreenDpadItemSlot(array.at(index).get<std::string>(),
+                                    &(*slots)[index])) {
+      SetError(error, "TopScreen " + name + " contains an unknown item");
+      return false;
+    }
+  }
+  return true;
+}
+
 bool DecodeLegacyTopScreenUiConfig(const nlohmann::json &document,
                                    TopScreenUiConfig *config,
                                    std::string *error) {
@@ -404,6 +428,8 @@ const char *TopScreenDpadActionName(TopScreenDpadAction action) noexcept {
     return "tunic_toggle";
   case TopScreenDpadAction::ShieldToggle:
     return "shield_toggle";
+  case TopScreenDpadAction::Item:
+    return "item";
   }
   return "unknown";
 }
@@ -412,7 +438,8 @@ bool ParseTopScreenDpadAction(std::string_view value,
                               TopScreenDpadAction *action) noexcept {
   if (action == nullptr)
     return false;
-  constexpr std::array<TopScreenDpadAction, 14> kActions{
+  constexpr std::array<TopScreenDpadAction, 15> kActions{
+      TopScreenDpadAction::Item,
       TopScreenDpadAction::None,
       TopScreenDpadAction::View,
       TopScreenDpadAction::Ocarina,
@@ -436,6 +463,56 @@ bool ParseTopScreenDpadAction(std::string_view value,
     return false;
   *action = *iterator;
   return true;
+}
+
+bool IsTopScreenDpadItemSlot(std::uint8_t slot) noexcept {
+  return std::find(kTopScreenDpadItemSlots.begin(),
+                   kTopScreenDpadItemSlots.end(),
+                   slot) != kTopScreenDpadItemSlots.end();
+}
+
+const char *TopScreenDpadItemSlotName(std::uint8_t slot) noexcept {
+  switch (slot) {
+  case 0U: return "deku_stick";
+  case 1U: return "deku_nut";
+  case 2U: return "bomb";
+  case 3U: return "bow";
+  case 5U: return "dins_fire";
+  case 6U: return "slingshot";
+  case 7U: return "ocarina";
+  case 8U: return "bombchu";
+  case 9U: return "hookshot";
+  case 11U: return "farores_wind";
+  case 12U: return "boomerang";
+  case 13U: return "lens_of_truth";
+  case 14U: return "magic_bean";
+  case 15U: return "megaton_hammer";
+  case 17U: return "nayrus_love";
+  case 18U: return "bottle_1";
+  case 19U: return "bottle_2";
+  case 20U: return "bottle_3";
+  case 21U: return "bottle_4";
+  case 22U: return "adult_trade";
+  case 23U: return "child_trade";
+  default: return "none";
+  }
+}
+
+bool ParseTopScreenDpadItemSlot(std::string_view value,
+                                std::uint8_t *slot) noexcept {
+  if (slot == nullptr)
+    return false;
+  if (value == "none") {
+    *slot = kTopScreenDpadItemSlotNone;
+    return true;
+  }
+  for (const auto candidate : kTopScreenDpadItemSlots) {
+    if (value == TopScreenDpadItemSlotName(candidate)) {
+      *slot = candidate;
+      return true;
+    }
+  }
+  return false;
 }
 
 const char *TopScreenFreeCameraSmoothingName(
@@ -489,6 +566,85 @@ bool ParseTopScreenUiConfigText(std::string_view text,
   }
 }
 
+std::filesystem::path
+TopScreenDpadItemsPath(const std::filesystem::path &uiConfigPath) {
+  auto name = uiConfigPath.stem();
+  name += "_dpad_items.json";
+  return uiConfigPath.parent_path() / name;
+}
+
+bool ParseTopScreenDpadItemsText(std::string_view text,
+                                 TopScreenUiConfig *config,
+                                 std::string *error) {
+  if (config == nullptr) {
+    SetError(error, "TopScreen D-pad items output is null");
+    return false;
+  }
+  std::array<std::uint8_t, 4> child{};
+  std::array<std::uint8_t, 4> adult{};
+  child.fill(kTopScreenDpadItemSlotNone);
+  adult.fill(kTopScreenDpadItemSlotNone);
+  try {
+    const auto document = nlohmann::json::parse(text);
+    if (!document.is_object() || !document.contains("schema") ||
+        !document.at("schema").is_string() ||
+        document.at("schema").get<std::string>() != kTopScreenDpadItemsSchema) {
+      SetError(error, "TopScreen D-pad items schema is not " +
+                          std::string(kTopScreenDpadItemsSchema));
+      return false;
+    }
+    const std::set<std::string_view> allowed{"schema", "child", "adult"};
+    if (!HasOnlyFields(document, allowed, error) ||
+        !ReadDpadItemSlots(document, "child", &child, error) ||
+        !ReadDpadItemSlots(document, "adult", &adult, error)) {
+      return false;
+    }
+  } catch (const nlohmann::json::exception &exception) {
+    SetError(error, "cannot parse TopScreen D-pad items: " +
+                        std::string(exception.what()));
+    return false;
+  }
+  const auto apply = [](const std::array<std::uint8_t, 4> &slots,
+                        std::array<TopScreenDpadAction, 4> &actions,
+                        std::array<std::uint8_t, 4> &target) {
+    for (std::size_t direction = 0; direction < slots.size(); ++direction) {
+      if (slots[direction] == kTopScreenDpadItemSlotNone)
+        continue;
+      actions[direction] = TopScreenDpadAction::Item;
+      target[direction] = slots[direction];
+    }
+  };
+  apply(child, config->ChildDpad, config->ChildDpadItemSlots);
+  apply(adult, config->AdultDpad, config->AdultDpadItemSlots);
+  return true;
+}
+
+bool SerializeTopScreenDpadItemsText(const TopScreenUiConfig &config,
+                                     std::string *text,
+                                     std::string *error) {
+  if (text == nullptr) {
+    SetError(error, "TopScreen D-pad items text output is null");
+    return false;
+  }
+  const auto names = [](const std::array<TopScreenDpadAction, 4> &actions,
+                        const std::array<std::uint8_t, 4> &slots) {
+    nlohmann::json result = nlohmann::json::array();
+    for (std::size_t direction = 0; direction < slots.size(); ++direction)
+      result.push_back(TopScreenDpadItemSlotName(
+          actions[direction] == TopScreenDpadAction::Item
+              ? slots[direction]
+              : kTopScreenDpadItemSlotNone));
+    return result;
+  };
+  const nlohmann::json document{
+      {"schema", kTopScreenDpadItemsSchema},
+      {"child", names(config.ChildDpad, config.ChildDpadItemSlots)},
+      {"adult", names(config.AdultDpad, config.AdultDpadItemSlots)},
+  };
+  *text = document.dump(2) + "\n";
+  return true;
+}
+
 bool LoadTopScreenUiConfig(const std::filesystem::path &path,
                            TopScreenUiConfig *config, std::string *error) {
   Ship::RestoreInterruptedReplace(path);
@@ -499,7 +655,22 @@ bool LoadTopScreenUiConfig(const std::filesystem::path &path,
   }
   const std::string text((std::istreambuf_iterator<char>(stream)),
                          std::istreambuf_iterator<char>());
-  return ParseTopScreenUiConfigText(text, config, error);
+  TopScreenUiConfig loaded;
+  if (!ParseTopScreenUiConfigText(text, &loaded, error)) {
+    return false;
+  }
+  const auto itemsPath = TopScreenDpadItemsPath(path);
+  Ship::RestoreInterruptedReplace(itemsPath);
+  if (std::ifstream items(itemsPath, std::ios::binary); items) {
+    const std::string itemsText((std::istreambuf_iterator<char>(items)),
+                                std::istreambuf_iterator<char>());
+    TopScreenUiConfig withItems = loaded;
+    if (ParseTopScreenDpadItemsText(itemsText, &withItems)) {
+      loaded = withItems;
+    }
+  }
+  *config = loaded;
+  return true;
 }
 
 bool SerializeTopScreenUiConfigText(const TopScreenUiConfig &config,
@@ -509,6 +680,10 @@ bool SerializeTopScreenUiConfigText(const TopScreenUiConfig &config,
     SetError(error, "TopScreen UI config text output is null");
     return false;
   }
+  const auto action = [](TopScreenDpadAction value) {
+    return TopScreenDpadActionName(
+        value == TopScreenDpadAction::Item ? TopScreenDpadAction::None : value);
+  };
   const nlohmann::json document{
       {"schema", kTopScreenUiConfigSchema},
       {"hud_scale", config.HudScale},
@@ -524,15 +699,11 @@ bool SerializeTopScreenUiConfigText(const TopScreenUiConfig &config,
       {"camera_zoom_percent", config.CameraZoomPercent},
       {"camera_fov_percent", config.CameraFovPercent},
       {"dpad_child",
-       {TopScreenDpadActionName(config.ChildDpad[0]),
-        TopScreenDpadActionName(config.ChildDpad[1]),
-        TopScreenDpadActionName(config.ChildDpad[2]),
-        TopScreenDpadActionName(config.ChildDpad[3])}},
+       {action(config.ChildDpad[0]), action(config.ChildDpad[1]),
+        action(config.ChildDpad[2]), action(config.ChildDpad[3])}},
       {"dpad_adult",
-       {TopScreenDpadActionName(config.AdultDpad[0]),
-        TopScreenDpadActionName(config.AdultDpad[1]),
-        TopScreenDpadActionName(config.AdultDpad[2]),
-        TopScreenDpadActionName(config.AdultDpad[3])}},
+       {action(config.AdultDpad[0]), action(config.AdultDpad[1]),
+        action(config.AdultDpad[2]), action(config.AdultDpad[3])}},
       {"free_camera_enabled", config.FreeCameraEnabled},
       {"free_camera_speed_level", config.FreeCameraSpeedLevel},
       {"free_camera_smoothing",
@@ -551,31 +722,24 @@ bool SerializeTopScreenUiConfigText(const TopScreenUiConfig &config,
   return true;
 }
 
-bool SaveTopScreenUiConfig(const std::filesystem::path &path,
-                           const TopScreenUiConfig &config,
-                           std::string *error) {
-  if (path.empty()) {
-    SetError(error, "TopScreen UI config path is empty");
-    return false;
-  }
-  std::string text;
-  if (!SerializeTopScreenUiConfigText(config, &text, error)) {
-    return false;
-  }
+namespace {
 
+bool ReplaceConfigFile(const std::filesystem::path &path,
+                       const std::string &text, const std::string &label,
+                       std::string *error) {
   std::filesystem::path temporary = path;
   temporary += ".tmp";
   {
     std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
     if (!stream) {
-      SetError(error, "cannot open temporary TopScreen UI config: " +
+      SetError(error, "cannot open temporary " + label + ": " +
                           temporary.string());
       return false;
     }
     stream.write(text.data(), static_cast<std::streamsize>(text.size()));
     stream.flush();
     if (!stream) {
-      SetError(error, "cannot write temporary TopScreen UI config: " +
+      SetError(error, "cannot write temporary " + label + ": " +
                           temporary.string());
       stream.close();
       std::error_code ignored;
@@ -590,7 +754,7 @@ bool SaveTopScreenUiConfig(const std::filesystem::path &path,
     const auto code = static_cast<unsigned long>(GetLastError());
     std::error_code ignored;
     std::filesystem::remove(temporary, ignored);
-    SetError(error, "cannot replace TopScreen UI config (Windows error " +
+    SetError(error, "cannot replace " + label + " (Windows error " +
                         std::to_string(code) + "): " + path.string());
     return false;
   }
@@ -602,12 +766,28 @@ bool SaveTopScreenUiConfig(const std::filesystem::path &path,
   if (replaceError) {
     std::error_code ignored;
     std::filesystem::remove(temporary, ignored);
-    SetError(error, "cannot replace TopScreen UI config: " +
-                        replaceError.message());
+    SetError(error, "cannot replace " + label + ": " + replaceError.message());
     return false;
   }
 #endif
   return true;
+}
+
+} // namespace
+
+bool SaveTopScreenUiConfig(const std::filesystem::path &path,
+                           const TopScreenUiConfig &config,
+                           std::string *error) {
+  if (path.empty()) {
+    SetError(error, "TopScreen UI config path is empty");
+    return false;
+  }
+  std::string text, itemsText;
+  return SerializeTopScreenUiConfigText(config, &text, error) &&
+         SerializeTopScreenDpadItemsText(config, &itemsText, error) &&
+         ReplaceConfigFile(path, text, "TopScreen UI config", error) &&
+         ReplaceConfigFile(TopScreenDpadItemsPath(path), itemsText,
+                           "TopScreen D-pad items", error);
 }
 
 TopScreenUiConfigRuntime::TopScreenUiConfigRuntime(

@@ -899,6 +899,16 @@ std::size_t AppendTopScreenQuestBButtonCopiesPresentation(
   return output.size() - startSize;
 }
 
+std::size_t AppendTopScreenAmmoDigits(
+    std::uint32_t ownerAddress, std::uint32_t descriptorAddress,
+    std::uint32_t value, float originX, float originY, float scale,
+    const oot3d::ui::UiTextureIdentity &numberGlyphs,
+    std::vector<oot3d::ui::UiPrimitive> &output) {
+  return AppendTopScreenCounterDigits(ownerAddress, descriptorAddress, value, 0U,
+                                      originX, originY, scale, numberGlyphs,
+                                      output);
+}
+
 bool AppendTopScreenNativeCounters(
     NativeA32Memory &memory, const oot3d::ui::UiTextureIdentity &numberGlyphs,
     std::vector<oot3d::ui::UiPrimitive> &output, std::string *error,
@@ -1067,7 +1077,8 @@ bool AppendTopScreenNativeCounters(
 }
 
 TopScreenTouchLabelsGeometry
-BuildTopScreenTouchLabelsGeometry(float nativeAlpha) noexcept {
+BuildTopScreenTouchLabelsGeometry(float nativeAlpha, bool itemIZr,
+                                  bool itemIIZl) noexcept {
   const float alpha = std::clamp(nativeAlpha * 0.9F, 0.0F, 1.0F);
   // SingleScreen 3.0 hub 0x005DD0D8/0x005DD168 labels Item I "ZR" at
   // (364,31) with custom_ui01 rect 15 (47,231) and Item II "ZL" at (340,55)
@@ -1084,6 +1095,16 @@ BuildTopScreenTouchLabelsGeometry(float nativeAlpha) noexcept {
   result.Quads[1] = {alpha != 0.0F,  {347.6875F - 3.1875F, 55.0F},
                      {6.375F, 16.0F}, {253.0F, 227.0F},
                      {6.375F, 16.0F}, {1.0F, 1.0F, 1.0F, alpha}};
+  // After Controls > "Swap shoulders / triggers" the items are on ZR/ZL:
+  // 3.0's whole labels.
+  if (itemIZr)
+    result.Quads[0] = {alpha != 0.0F, {364.0F, 31.0F}, {16.0F, 16.0F},
+                       {47.0F, 231.0F}, {16.0F, 16.0F},
+                       {1.0F, 1.0F, 1.0F, alpha}};
+  if (itemIIZl)
+    result.Quads[1] = {alpha != 0.0F, {340.0F, 55.0F}, {16.0F, 16.0F},
+                       {245.0F, 227.0F}, {16.0F, 16.0F},
+                       {1.0F, 1.0F, 1.0F, alpha}};
   return result;
 }
 

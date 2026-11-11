@@ -105,6 +105,11 @@ public:
   void
   SetTopScreenInputFrame(const TopScreenExtendedInputFrame &input) noexcept;
   void SetTopScreenConfig(const TopScreenUiConfig &config) noexcept;
+  // Item I/II on ZR/ZL after Controls > "Swap shoulders / triggers": their
+  // touch labels read ZR/ZL instead of R/L.
+  void SetTopScreenSwappedItemLabels(bool itemIZr, bool itemIIZl) noexcept {
+    mTopScreenSwappedItemLabels = {itemIZr, itemIIZl};
+  }
   // Whether the TopScreen pack has custom_ui01 (kTopScreen30UiAtlasSemantic):
   // the button circles, D-pad cross, touch labels and tab hints draw from it
   // and are left out without it.
@@ -192,6 +197,7 @@ private:
   bool mVersionChoiceRevealRequired = false;
   bool mVersionChoiceRevealed = false;
   bool mTopScreenUiAtlasAvailable = false;
+  std::array<bool, 2> mTopScreenSwappedItemLabels{};
   TopScreenUiConfig mTopScreenConfig;
 };
 

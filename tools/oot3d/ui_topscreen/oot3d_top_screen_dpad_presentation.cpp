@@ -1,4 +1,6 @@
 #include "oot3d_top_screen_dpad_presentation.h"
+#include "oot3d_top_screen_controls.h"
+#include "oot3d_top_screen_dpad_items.h"
 #include "oot3d_top_screen_items_hint.h"
 
 #include "oot3d_native_a32_memory.h"
@@ -17,6 +19,12 @@ constexpr std::array<float, 4> kCenterX{30, 29, 9, 51};
 constexpr std::array<float, 4> kCenterY{45, 90, 67, 67};
 constexpr float kIconSize = 14.0F; // literal 005D7D14
 constexpr std::uint32_t kSave = 0x00587958U;
+// As the cross with a nested owner (3.0 0x005CCF6C).
+constexpr float kRefusedItemAlpha = 0.3F;
+// Two half-size ammo digits, right-aligned on the icon's lower half.
+constexpr float kAmmoScale = 0.5F;
+constexpr float kAmmoOffsetX = kIconSize / 2 - 21.0F * kAmmoScale;
+constexpr float kAmmoOffsetY = 1.0F;
 
 std::optional<ItemId> ResolveItem(TopScreenDpadAction action,
                                   const TopScreenDpadPresentationState &s) {
@@ -92,6 +100,12 @@ bool ReadTopScreenDpadPresentationState(NativeA32Memory &memory,
       !memory.Read8(kSave + 0x84, &result.ItemZl))
     return false;
   result.Child = age != 0;
+  for (std::size_t slot = 0; slot < result.Inventory.size(); ++slot)
+    if (!memory.Read8(kSave + 0x8C + slot, &result.Inventory[slot]))
+      return false;
+  for (std::size_t slot = 0; slot < result.Ammo.size(); ++slot)
+    if (!memory.Read8(kSave + 0xA6 + slot, &result.Ammo[slot]))
+      return false;
   const auto owns = [&](std::uint8_t item, bool *owned) {
     std::uint8_t slot = 0, stored = 0xFF;
     if (!memory.Read8(0x0053CC44U + item, &slot))
@@ -165,6 +179,7 @@ std::size_t AppendTopScreenDpadPresentation(
   // Unused 38..41 slots are parked at (500,300) with alpha 0 in the payload;
   // host presentation is rebuilt each frame, so simply omit those slots.
   if (!config.RenderDpadIcons) return output.size() - start;
+  const auto itemSlots = TopScreenDpadItemSlots(config, state.Child);
   for (std::size_t direction = 0; direction < actions.size(); ++direction) {
     if (actions[direction] == TopScreenDpadAction::View) continue;
     oot3d::ui::UiPrimitive p;
@@ -183,6 +198,9 @@ std::size_t AppendTopScreenDpadPresentation(
       p.color.alpha *= state.ItemOpacity.Ocarina;
     else
       p.color.alpha *= state.GroupAlpha;
+    if (itemSlots[direction] != kTopScreenDpadItemSlotNone &&
+        !state.ItemUsable[direction])
+      p.color.alpha *= kRefusedItemAlpha;
     p.destination = {kCenterX[direction] - kIconSize / 2,
                      kCenterY[direction] - kIconSize / 2, kIconSize, kIconSize};
     if (actions[direction] == TopScreenDpadAction::MinimapToggle) {
@@ -190,7 +208,16 @@ std::size_t AppendTopScreenDpadPresentation(
       p.texture = itemIcons;
       p.uv = {420.0F / 512, 380.0F / 512, 42.0F / 512, 42.0F / 512};
     } else {
-      const auto item = ResolveItem(actions[direction], state);
+      const auto &slots =
+          state.Child ? config.ChildDpadItemSlots : config.AdultDpadItemSlots;
+      const auto slotItem =
+          TopScreenDpadSlotItem(state.Inventory, slots[direction]);
+      const auto item =
+          actions[direction] != TopScreenDpadAction::Item
+              ? ResolveItem(actions[direction], state)
+          : slotItem != kTopScreenNoItem
+              ? std::optional<ItemId>(static_cast<ItemId>(slotItem))
+              : std::nullopt;
       const auto *region =
           item ? oot3d::ui::Oot3dItemIconAtlasRegion(*item) : nullptr;
       if (!region || !region->IsDrawable())
@@ -225,6 +252,42 @@ std::size_t AppendTopScreenDpadPresentation(
                      kCenterY[direction] - 8.0F, 14.0F, 14.0F};
     p.uv = {320.0F / 512, 3.0F / 256, 40.0F / 512, 40.0F / 256};
     output.push_back(std::move(p));
+  }
+  return output.size() - start;
+}
+
+std::size_t AppendTopScreenDpadItemAmmo(
+    const TopScreenUiConfig &config,
+    const TopScreenDpadPresentationState &state,
+    const TopScreenAuxiliaryTouchInputs &viewState, float alpha,
+    const oot3d::ui::UiTextureIdentity &numberGlyphs,
+    std::vector<oot3d::ui::UiPrimitive> &output) {
+  if (!config.RenderHud || !config.RenderDpadIcons || !(alpha > 0) ||
+      numberGlyphs.semantic_name.empty() ||
+      (viewState.PauseState >= 12U && viewState.PauseState <= 19U) ||
+      viewState.PauseState == 23U)
+    return 0;
+  // Slots 0, 1, 2, 3, 6, 8 and 14: the items with a native ammo counter.
+  constexpr std::uint32_t kAmmoSlots = 0x414FU;
+  const auto start = output.size();
+  const auto slots = TopScreenDpadItemSlots(config, state.Child);
+  for (std::size_t direction = 0; direction < slots.size(); ++direction) {
+    const auto slot = slots[direction];
+    if (slot > 14U || (kAmmoSlots & (1U << slot)) == 0U ||
+        TopScreenDpadSlotItem(state.Inventory, slot) == kTopScreenNoItem)
+      continue;
+    const auto first = output.size();
+    const auto ammo = state.Ammo[slot];
+    (void)AppendTopScreenAmmoDigits(
+        0x005D4A8CU, kSave + 0xA6U + slot, ammo,
+        kCenterX[direction] + kAmmoOffsetX, kCenterY[direction] + kAmmoOffsetY,
+        kAmmoScale, numberGlyphs, output);
+    // Grey when empty, as the native counters.
+    const float shade = ammo == 0U ? 100.0F / 255.0F : 1.0F;
+    const float opacity = std::clamp(alpha, 0.0F, 1.0F) * state.GroupAlpha *
+                          (state.ItemUsable[direction] ? 1.0F : kRefusedItemAlpha);
+    for (auto index = first; index < output.size(); ++index)
+      output[index].color = {shade, shade, shade, opacity};
   }
   return output.size() - start;
 }

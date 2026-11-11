@@ -125,6 +125,10 @@ struct TopScreenExtendedInputFrame {
   bool DpadRightPressed = false;
   bool DpadUpHeld = false;
   bool DpadUpPressed = false;
+  // D-pad item buttons 6..9 (Up, Down, Left, Right), only for directions set
+  // to an item: the scan hooks in oot3d_top_screen_item_dispatch.cpp.
+  std::array<bool, 4> DpadItemHeld{};
+  std::array<bool, 4> DpadItemPressed{};
 };
 
 bool HasTopScreenItemQueryOverrideInput(
@@ -398,6 +402,14 @@ bool AppendTopScreenNativeCounters(
     std::vector<oot3d::ui::UiPrimitive> &output,
     std::string *error = nullptr, const TopScreenUiConfig *config = nullptr);
 
+// Two ammo digits from the NumberGlyphs atlas, as the ordinary ammo counters
+// draw them; the digits' colour is the caller's.
+std::size_t AppendTopScreenAmmoDigits(
+    std::uint32_t ownerAddress, std::uint32_t descriptorAddress,
+    std::uint32_t value, float originX, float originY, float scale,
+    const oot3d::ui::UiTextureIdentity &numberGlyphs,
+    std::vector<oot3d::ui::UiPrimitive> &output);
+
 // The button labels (R/L here, X/Y/B in the auxiliary group) draw over the
 // item icons (layer 13), as on the mod's screenshots (GameBanana 695893:
 // "ZR" over the slingshot and the bow, "Y" and "X" over their items); a pack's
@@ -409,9 +421,11 @@ struct TopScreenTouchLabelsGeometry {
 };
 
 // Item I/II labels of the touch group produced by payload 0x005C9940, shown
-// as "R"/"L": the physical buttons that use those items on the Switch.
+// as "R"/"L": the physical buttons that use those items on the Switch; as
+// "ZR"/"ZL" for a lane the shoulders/triggers swap moved there.
 TopScreenTouchLabelsGeometry
-BuildTopScreenTouchLabelsGeometry(float nativeAlpha) noexcept;
+BuildTopScreenTouchLabelsGeometry(float nativeAlpha, bool itemIZr = false,
+                                  bool itemIIZl = false) noexcept;
 
 std::size_t AppendTopScreenTouchLabelsPresentation(
     const TopScreenTouchLabelsGeometry &geometry,
@@ -535,8 +549,10 @@ bool ApplyTopScreenSystemMenuLayerSuppression(
     std::string *error = nullptr);
 
 // Historical name: this is the suppression predicate (1.2: 0x005C9058,
-// 2.1.1: 0x005C9ED8), NOT positive free-play visibility. The ocarina guide
-// requires its negation plus its own native page/scene/transition contract.
+// 2.1.1: 0x005C9ED8, now 3.2.2's 0x005CD63C), NOT positive free-play
+// visibility. The ocarina guide requires its negation plus its own native
+// page/scene/transition contract. 3.2.2 keeps the guide at an ocarina spot
+// (the Great Fairy's Triforce, a song stone), which 2.1.1 hid.
 bool ReadTopScreenOcarinaUiActive(NativeA32Memory &memory, bool *active,
                                   std::string *error = nullptr);
 

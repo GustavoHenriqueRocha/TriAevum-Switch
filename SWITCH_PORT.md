@@ -676,6 +676,83 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
 - **Test:** `oot3d_deko3d_backend_tests` `TestRawTextureCopy` (walk, source choice, encoded
   bytes, texture fill, pin release). Console check: the player's save at that cutscene.
 
+### D-pad items for child and adult Link (SingleScreen 3.2.2 buttons 6..9, 11/10)
+- **Asked:** the Single Screen photos show items on the D-pad. 3.2.2 lets each direction hold
+  any item, on top of X, Y, ZR and ZL; the port only had the 14 fixed shortcut actions.
+- **Setting:** L3+R3 > Controls > Shortcuts, per age and direction: the new action "Item" and the
+  item under it (21 inventory slots: sticks to trade items, the four bottles; never the magic
+  arrows, which 3.2.2 refuses at `0x005D15F0`). Or 3.0's way, "Assign any item to the D-pad from
+  the ITEMS screen (Hold A)" (the mod's changelog): hold A over an item on the Items page and
+  press a direction. The port reads the hovered position `0x00506748` (3.2.2 records it after the
+  grid update, `0x005D3358`) through the age's grid (SaveContext `+0x138A` child, `+0x13A2`
+  adult, as `PauseItemsPage_CanSwapSelectedSlots`); A over such an item is kept from the game, as
+  3.2.2 takes the native A action (`0x0050AF18` bit 0, `0x005D3394`), and the D-pad from the
+  cursor while A is held. An item already on another direction of that age moves. The picker
+  saves like the menu, with a UI sound; 3.2.2's picker drawing is not ported.
+- **Files:** `topscreen_ui.json` keeps only what earlier builds accept, because they reject unknown
+  fields and actions and stop at launch (`LoadTopScreenUiConfig` throws in
+  `oot3d_native_game_bootstrap.cpp`): an Item direction is written there as `none`, and the slots
+  go to `topscreen_ui_dpad_items.json` next to it (`oot3d_topscreen_dpad_items_v1`, slot names
+  per age). Earlier builds never read it; a broken one is ignored rather than stopping a launch.
+- **How 3.2.2 does it (EUR code with the 3.2.2 patch, `issue8/scratch/eur_sse322.bin`):** the
+  D-pad is buttons 6..9 (Up, Down, Left, Right) of `Player_UpdateUpperBody`. Its press scan and
+  hold scan end at 6 without a native button; `0x005D2050` then returns the D-pad button (fresh
+  presses, not while an arrow is nocked or the pause controller is in states 7..9 or past 11;
+  the hold scan keeps the button the held item came from). The slot resolver `0x002C3970` is
+  replaced (`0x005D2178`): 6..9 resolve through `0x005D1748`. `Inventory_UpdateBottleItem` is
+  replaced (`0x005D05D8`): for 6..9 the direction's bottle slot gets the content, checked against
+  the bottle action (table `0x0060DF8A`). The held-item put-away (`0x0034D104`) and the mask
+  removal (`0x0034CF78`) keep an item a D-pad direction holds.
+- **Port (`oot3d_top_screen_dpad_items.h`, hooks in `oot3d_top_screen_item_dispatch.cpp`):** the
+  same six sites. The scan exits (`0x0034D1EC`, `0x0034D268`) set r4 to 6..9 and resume in place;
+  the resolver answers 6..9 only to the button a scan exit just chose, called from `0x0034D1F8`
+  or `0x0034D274` (its only two callers). The bottle update never runs natively for 6..9, which
+  would index the button slots out of range. The rules are 3.2.2's: the slot's item (bottle
+  slots a bottle item, trade slots a trade item other than SOLD OUT), the age table
+  `0x00506C58`, climbing, hanging, crawling and Epona, the ocarina-only mode (`0x00588EE2`),
+  Y/X/I/II all disabled by Link's state, and `0x005CAEC4`'s scene restrictions (bottles, trade
+  items, Hookshot, Farore's Wind, Din's Fire and Nayru's Love, all items except the Lens in the
+  Treasure Chest Shop; swimming, and deep water where only the Hookshot works from the floor in
+  Iron Boots). Aiming from a D-pad bow keeps the arrow chosen. Presses reach the game through
+  `TopScreenInputCadence`, once per native update. One addition over 3.2.2: a bottle update also
+  rewrites Y/X/I/II set to the same bottle, so an old copy of the content cannot be used again.
+- **HUD:** an Item direction draws its slot's item (bottle content, Longshot, trade item) with the
+  other D-pad icons, at 0.3 while the rules refuse it (`ReadTopScreenDpadItemUsability`, the same
+  rules as the hooks); sticks, nuts, bombs, the bow, the slingshot, bombchus and beans show their
+  ammo (SaveContext `+0xA6`) at the icon's bottom right with the NumberGlyphs digits, grey at 0.
+  The digits' place and size are the port's: 3.2.2's D-pad drawing is not read.
+- **Boomerang and Slingshot:** D-pad item buttons too, as 3.2.2's `0x005D16B0` makes actions 10
+  and 11 (the child only, slots 12 and 6). The frame no longer gives them to 2.1.1's direct item
+  on button I, whose code is unused for the D-pad until the console confirms the new path.
+- **Build:** four new hook pcs (`whole_aot_hook_gates.json`); the sites are already block starts,
+  so the observed-sites list is unchanged, but the game code must be regenerated.
+- **Test:** `oot3d_top_screen_mod_profile_tests` (`oot3d_top_screen_dpad_items_tests.cpp`: config,
+  slot items, rules, scans, bottles; the press scan, resolver, held item and bottle hooks on mapped
+  memory, whose code the hold scan and mask hooks share; both files on disk; the HUD's grey and
+  ammo; the picker's slot and assignment). Console check: Deku Nuts and a bottle on the child
+  D-pad, the hammer and the Hookshot on the adult D-pad; a fairy released and a bug caught from
+  the D-pad; Lens of Truth toggled once per press; a bow on the D-pad switching arrows while
+  aiming; nothing on Epona or while swimming, and the icons greyed there; the Boomerang and
+  Slingshot as a child; hold A on the Items page and press a direction; then start 0.2.2 once
+  with the same `config/` to see it still launches.
+
+### Ocarina song menu at ocarina spots, ZR/ZL labels after the swap (playtest, 11/11)
+- **Seen:** at the Great Fairy's Triforce and at a stone on Death Mountain the ocarina showed the
+  game's "play with ..., stop with B" prompt but not the song menu.
+- **Cause:** `ReadTopScreenOcarinaUiActive` was 2.1.1's rule: the menu hides for any ocarina
+  action past free play and for the Player's flag 0x01000000, which an ocarina spot sets.
+  3.2.2's `0x005CD63C` has three modes and its callers (`0x005D04F4`, `0x005E2D88`) hide only
+  mode 1: no gameplay state, teaching and playback (actions 2..27), actions 40 and 42..45, the
+  Skull Kid (NPC actor 0x115) at a spot, other actions past 1 and a pending song result. At a spot
+  (mode 2) the menu stays. Ported as such.
+- **Labels:** the text says L/R for the game's Z-target and shield, which the Switch defaults
+  put on ZL/ZR. Controls > Bindings > "Swap shoulders / triggers" moves them to L/R, so the
+  text is right; the touch labels then read 3.0's whole ZR/ZL for a lane whose item binding is a
+  shoulder (`SetTopScreenSwappedItemLabels`, from the controller bindings each refresh).
+- **Test:** `oot3d_top_screen_mod_profile_tests` (spot, Skull Kid, teaching; swapped labels) and
+  `oot3d_top_screen_ocarina_tests`. Console check: the Triforce in a Great Fairy Fountain and the
+  Death Mountain stone with the ocarina out; the swap, then a Navi tip and the ocarina prompt.
+
 ## How to build (Linux)
 
 1. devkitPro (`switch-dev switch-sdl2 switch-mesa switch-glad switch-zlib`), `cmake`, Python 3 with `capstone`.

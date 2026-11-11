@@ -16,7 +16,7 @@ enum class TopScreenDpadDirection : std::uint8_t {
 };
 
 inline constexpr std::size_t kTopScreenDpadDirectionCount = 4U;
-inline constexpr std::size_t kTopScreenDpadActionCount = 14U;
+inline constexpr std::size_t kTopScreenDpadActionCount = 15U;
 inline constexpr std::array<std::uint8_t, 7> kTopScreenCStickAimSpeeds{
     2U, 3U, 4U, 6U, 8U, 12U, 16U};
 
@@ -40,6 +40,27 @@ struct TopScreenDpadActionState {
 TopScreenDpadActionState ResolveTopScreenDpadActions(
     const TopScreenUiConfig &config,
     const TopScreenDpadPhysicalState &physical) noexcept;
+
+// Per direction, not per action: each Item direction is its own D-pad item
+// button (6 + direction), so two of them must stay distinguishable.
+struct TopScreenDpadItemLanes {
+  std::array<bool, kTopScreenDpadDirectionCount> Held{};
+};
+
+TopScreenDpadItemLanes ResolveTopScreenDpadItemLanes(
+    const TopScreenUiConfig &config,
+    const TopScreenDpadPhysicalState &physical) noexcept;
+
+// One age's slot for each D-pad item button: Item directions, and the
+// child's Boomerang and Slingshot; kTopScreenDpadItemSlotNone elsewhere.
+std::array<std::uint8_t, kTopScreenDpadDirectionCount>
+TopScreenDpadItemSlots(const TopScreenUiConfig &config,
+                       bool childLink) noexcept;
+
+// The Items-page picker: the direction takes the slot as an Item for that
+// age; another of that age's directions holding the slot gives it up.
+void AssignTopScreenDpadItem(TopScreenUiConfig &config, bool childLink,
+                             std::size_t direction, std::uint8_t slot) noexcept;
 
 struct TopScreenCStickAimPolicy {
   float SpeedMultiplier = 1.0F;

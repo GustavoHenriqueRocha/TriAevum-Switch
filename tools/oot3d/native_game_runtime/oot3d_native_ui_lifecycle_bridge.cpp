@@ -1,4 +1,6 @@
 #include "oot3d_native_ui_lifecycle_bridge.h"
+#include "oot3d_top_screen_controls.h"
+#include "oot3d_top_screen_dpad_items.h"
 #include "oot3d_top_screen_dpad_presentation.h"
 
 #include "oot3d_native_a32_input.h"
@@ -401,7 +403,10 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
             auxiliaryGeometry, uiAtlas, output);
       }
       (void)AppendTopScreenTouchLabelsPresentation(
-          BuildTopScreenTouchLabelsGeometry(touchState.Alpha), uiAtlas, output);
+          BuildTopScreenTouchLabelsGeometry(touchState.Alpha,
+                                            mTopScreenSwappedItemLabels[0],
+                                            mTopScreenSwappedItemLabels[1]),
+          uiAtlas, output);
       output.insert(output.end(),
                     std::make_move_iterator(itemIconCopies.begin()),
                     std::make_move_iterator(itemIconCopies.end()));
@@ -417,9 +422,18 @@ Oot3dNativeUiLifecycleBridge::BuildTopScreenPresentation(
       if (ReadTopScreenDpadPresentationState(mMemory, &dpadState)) {
         dpadState.ItemOpacity = itemOpacity;
         dpadState.GroupAlpha = dpadAlpha;
+        (void)ReadTopScreenDpadItemUsability(
+            mMemory, TopScreenDpadItemSlots(mTopScreenConfig, true),
+            TopScreenDpadItemSlots(mTopScreenConfig, false), &dpadState.ItemUsable);
         (void)AppendTopScreenDpadPresentation(
             mTopScreenConfig, dpadState, auxiliaryInputs, mTopScreenViewAlpha,
             itemIcons.value_or(oot3d::ui::UiTextureIdentity{}), uiAtlas, output);
+        if (const auto numberGlyphs = NativePauseSharedTextureIdentity(
+                oot3d::ui::UiPauseSharedTextureSlot::NumberGlyphs);
+            numberGlyphs.has_value())
+          (void)AppendTopScreenDpadItemAmmo(mTopScreenConfig, dpadState,
+                                            auxiliaryInputs, mTopScreenViewAlpha,
+                                            *numberGlyphs, output);
       }
       if (const auto numberGlyphs = NativePauseSharedTextureIdentity(
               oot3d::ui::UiPauseSharedTextureSlot::NumberGlyphs);

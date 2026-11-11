@@ -44,6 +44,59 @@ TopScreenDpadActionState ResolveTopScreenDpadActions(
   return resolved;
 }
 
+TopScreenDpadItemLanes ResolveTopScreenDpadItemLanes(
+    const TopScreenUiConfig &config,
+    const TopScreenDpadPhysicalState &physical) noexcept {
+  TopScreenDpadItemLanes lanes;
+  const auto slots = TopScreenDpadItemSlots(config, physical.ChildLink);
+  for (std::size_t direction = 0U; direction < slots.size(); ++direction) {
+    lanes.Held[direction] = slots[direction] != kTopScreenDpadItemSlotNone &&
+                            physical.Held[direction];
+  }
+  return lanes;
+}
+
+std::array<std::uint8_t, kTopScreenDpadDirectionCount>
+TopScreenDpadItemSlots(const TopScreenUiConfig &config,
+                       bool childLink) noexcept {
+  const auto &mapping = childLink ? config.ChildDpad : config.AdultDpad;
+  const auto &slots =
+      childLink ? config.ChildDpadItemSlots : config.AdultDpadItemSlots;
+  std::array<std::uint8_t, kTopScreenDpadDirectionCount> result{};
+  for (std::size_t direction = 0U; direction < result.size(); ++direction) {
+    const auto action = mapping[direction];
+    result[direction] = kTopScreenDpadItemSlotNone;
+    if (action == TopScreenDpadAction::Item &&
+        IsTopScreenDpadItemSlot(slots[direction]))
+      result[direction] = slots[direction];
+    // 3.2.2 0x005D16B0: the child's Boomerang and Slingshot are D-pad item
+    // buttons too (slots 12 and 6); the adult's are nothing.
+    else if (childLink && action == TopScreenDpadAction::Boomerang)
+      result[direction] = 12U;
+    else if (childLink && action == TopScreenDpadAction::Slingshot)
+      result[direction] = 6U;
+  }
+  return result;
+}
+
+void AssignTopScreenDpadItem(TopScreenUiConfig &config, bool childLink,
+                             std::size_t direction, std::uint8_t slot) noexcept {
+  auto &actions = childLink ? config.ChildDpad : config.AdultDpad;
+  auto &slots =
+      childLink ? config.ChildDpadItemSlots : config.AdultDpadItemSlots;
+  if (direction >= actions.size() || !IsTopScreenDpadItemSlot(slot))
+    return;
+  for (std::size_t other = 0U; other < slots.size(); ++other) {
+    if (other != direction && actions[other] == TopScreenDpadAction::Item &&
+        slots[other] == slot) {
+      actions[other] = TopScreenDpadAction::None;
+      slots[other] = kTopScreenDpadItemSlotNone;
+    }
+  }
+  actions[direction] = TopScreenDpadAction::Item;
+  slots[direction] = slot;
+}
+
 TopScreenCStickAimPolicy
 ResolveTopScreenCStickAimPolicy(const TopScreenUiConfig &config) noexcept {
   constexpr std::size_t kDefaultSpeedIndex = 3U;
