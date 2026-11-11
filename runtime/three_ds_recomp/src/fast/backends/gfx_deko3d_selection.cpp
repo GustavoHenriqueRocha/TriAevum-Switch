@@ -13,7 +13,7 @@ bool Deko3dRendererSelected() {
     static const bool selected = [] {
         std::ifstream file("sdmc:/switch/oot3dre/config/renderer");
         if (!file) {
-            return false;
+            return true;
         }
         const std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
         return Deko3dRendererConfigSelects(content);

@@ -9,7 +9,8 @@ Não integrar em `topscreen-3.0` nem enviar ao Switch antes de validar no consol
 
 Trocar o OpenGL/Mesa (nouveau) da thread de render por **deko3d** (API nativa da GPU do
 Switch), atrás de opção: `sdmc:/switch/oot3dre/config/renderer` com `deko3d` liga; arquivo
-ausente ou `gl` mantém o GL de hoje (o fallback continua sempre compilado e funcionando).
+ausente ou `gl` mantém o GL de hoje (o fallback continua sempre compilado e funcionando). Desde 11/11
+o deko3d é o padrão: só `gl` ou `opengl` na primeira linha do arquivo escolhe o GL.
 
 Por quê (A/B tour26 × tour27, `config/early_frame_slot`): as travadas de lógica caíram 201→115,
 mas as de render subiram 174→255. O gargalo é a thread de render (`pica_submit` 3–4 ms/quadro

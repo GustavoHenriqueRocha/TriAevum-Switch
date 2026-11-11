@@ -1,8 +1,8 @@
 #pragma once
 
-// deko3d rendering backend (Switch): selected at run time by
-// sdmc:/switch/oot3dre/config/renderer containing "deko3d". Without the file
-// (or with "gl") the OpenGL/Mesa backend stays in use, unchanged.
+// deko3d rendering backend (Switch): the default since 11/11. The first line of
+// sdmc:/switch/oot3dre/config/renderer saying "gl" or "opengl" selects the
+// OpenGL/Mesa backend instead; no file, or any other content, means deko3d.
 // docs/DEKO3D_PROGRESS.md has the design and the package status.
 
 #include <cctype>
@@ -16,7 +16,8 @@ namespace Fast {
 class GfxRenderingAPI;
 
 // Pure: the selection rule for the content of config/renderer (first line,
-// surrounding blanks ignored, case-insensitive). Unit-tested on the host.
+// surrounding blanks ignored, case-insensitive): false only for "gl" and
+// "opengl". Unit-tested on the host.
 inline bool Deko3dRendererConfigSelects(std::string_view content) {
     const size_t newline = content.find_first_of("\r\n");
     if (newline != std::string_view::npos) {
@@ -28,16 +29,18 @@ inline bool Deko3dRendererConfigSelects(std::string_view content) {
     while (!content.empty() && std::isspace(static_cast<unsigned char>(content.back()))) {
         content.remove_suffix(1);
     }
-    constexpr std::string_view kName = "deko3d";
-    if (content.size() != kName.size()) {
-        return false;
-    }
-    for (size_t index = 0; index < kName.size(); ++index) {
-        if (std::tolower(static_cast<unsigned char>(content[index])) != kName[index]) {
+    const auto is = [content](std::string_view name) {
+        if (content.size() != name.size()) {
             return false;
         }
-    }
-    return true;
+        for (size_t index = 0; index < name.size(); ++index) {
+            if (std::tolower(static_cast<unsigned char>(content[index])) != name[index]) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return !is("gl") && !is("opengl");
 }
 
 // Build tag written at the top of logs/deko3d.txt: tells which NRO a log

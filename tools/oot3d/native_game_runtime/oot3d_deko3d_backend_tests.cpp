@@ -38,11 +38,15 @@ void TestRendererConfigSelection() {
   Require(Deko3dRendererConfigSelects("deko3d\n"), "with line break");
   Require(Deko3dRendererConfigSelects("  DEKO3D \r\n"), "uppercase and spaces");
   Require(Deko3dRendererConfigSelects("deko3d\ngl"), "only the first line counts");
-  Require(!Deko3dRendererConfigSelects(""), "empty file = GL");
+  // deko3d by default (11/11): only "gl" and "opengl" choose GL.
+  Require(Deko3dRendererConfigSelects(""), "empty file = deko3d");
+  Require(Deko3dRendererConfigSelects("\ngl"), "empty first line = deko3d");
+  Require(Deko3dRendererConfigSelects("vulkan"), "another name = deko3d");
   Require(!Deko3dRendererConfigSelects("gl"), "gl = GL");
   Require(!Deko3dRendererConfigSelects("opengl"), "opengl = GL");
-  Require(!Deko3dRendererConfigSelects("deko3d2"), "name with suffix = GL");
-  Require(!Deko3dRendererConfigSelects("\ndeko3d"), "empty first line = GL");
+  Require(!Deko3dRendererConfigSelects("  GL \r\n"), "GL with blanks and case = GL");
+  Require(!Deko3dRendererConfigSelects("OpenGL\ndeko3d"), "the first line chooses GL");
+  Require(Deko3dRendererConfigSelects("gl2"), "a name that only starts with gl = deko3d");
   // Off the Switch it never selects (the file isn't even read).
   Require(!Fast::Deko3dRendererSelected(), "host: always GL");
 }

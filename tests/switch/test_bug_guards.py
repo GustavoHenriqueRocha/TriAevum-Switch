@@ -1274,10 +1274,16 @@ GUARDS = [
           "runtime/three_ds_recomp/src/fast/Fast3dGui.cpp",
           r'void Fast3dGui::ImGuiWMNewFrame\(\) \{\s+if \(Deko3dRendererSelected\(\)\) \{.*?FeedDeko3dGamepad\(io\);.*?return;'),
     # --- 24/10: deko3d backend (branch deko3d, docs/DEKO3D_PROGRESS.md) ---
-    Guard("[decision] deko3d only with config/renderer = deko3d; without the file, the usual GL",
+    Guard("[decision] deko3d by default (11/11): GL only when config/renderer's first line is gl or opengl, "
+          "and as the fallback when deko3d cannot start (a missing file used to mean GL, slower and without "
+          "the deko3d-only options)",
           "runtime/three_ds_recomp/src/fast/Fast3dWindow.cpp",
           r'if \(Deko3dRendererSelected\(\)\) \{\s+mRenderingApi = CreateDeko3dRenderingApi\(\);\s+\}\s+'
           r'if \(mRenderingApi == nullptr\) \{\s+mRenderingApi = new GfxRenderingAPIOGL\(\);',
+          "oot3d_deko3d_backend_tests (TestRendererConfigSelection)"),
+    Guard("[decision] deko3d by default: no config/renderer selects deko3d, and only gl/opengl choose GL",
+          "runtime/three_ds_recomp/src/fast/backends/gfx_deko3d_selection.cpp",
+          r'std::ifstream file\("sdmc:/switch/oot3dre/config/renderer"\);\s+if \(!file\) \{\s+return true;\s+\}',
           "oot3d_deko3d_backend_tests (TestRendererConfigSelection)"),
     Guard("[decision] deko3d: no SDL window (Switch SDL puts an EGL surface on the swapchain's native window)",
           "runtime/three_ds_recomp/src/fast/backends/gfx_sdl2.cpp",

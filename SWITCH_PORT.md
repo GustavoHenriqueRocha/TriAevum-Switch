@@ -627,6 +627,16 @@ pc=0x002C5074 detail=4`, a read of address 4 in `RendererModelResource_Construct
   anyone shows Portuguese text; the menus are translated. Seen on the user's console with
   0.2.2-test.1 (11/10): the game runs, the file select's Start button reads "Iniciar".
 
+### deko3d is the default renderer (11/11)
+- **Before:** deko3d ran only with `config/renderer` = `deko3d`; without the file (or with an empty one) the
+  game used the OpenGL renderer, much slower and without the deko3d-only options (grass, Simple shadow,
+  per-pixel lighting, the shader pack). The release zip ships the file, so only a deleted `config/` or a
+  hand-made install fell back, without a word.
+- **Now (`gfx_deko3d_selection.cpp`, `Deko3dRendererConfigSelects`):** no file, an empty one or any other
+  first line means deko3d; only `gl` or `opengl` (any case, blanks ignored) chooses OpenGL. No menu writes the
+  file. OpenGL also stays the fallback when deko3d cannot start (`Fast3dWindow.cpp`).
+- **Test:** `oot3d_deko3d_backend_tests` `TestRendererConfigSelection`.
+
 ### RomFS mods: a mod folder without files says so (issue #12, 11/11)
 - **Seen:** a player put the Portuguese translation in `mods/ptbr/romfs/` (`actor`, `menu`, `message`,
   `misc`, `scene`, `sound`; the screenshot's path suggests a USB (MTP) copy from a PC) and the game did not
