@@ -24,6 +24,10 @@ class TopScreenInputCadence {
         if (input.DpadRightHeld) held |= ButtonMask(Button::DpadRight);
         if (input.DpadUpHeld) held |= ButtonMask(Button::DpadUp);
         Guest.Observe(held);
+        uint32_t itemLanes = 0;
+        for (size_t lane = 0; lane < input.DpadItemHeld.size(); ++lane)
+            if (input.DpadItemHeld[lane]) itemLanes |= 1U << lane;
+        DpadItems.Observe(itemLanes);
     }
 
     TopScreenExtendedInputFrame Advance() noexcept {
@@ -35,19 +39,23 @@ class TopScreenInputCadence {
         result.DpadLeftPressed = (pressed & ButtonMask(Button::DpadLeft)) != 0;
         result.DpadRightPressed = (pressed & ButtonMask(Button::DpadRight)) != 0;
         result.DpadUpPressed = (pressed & ButtonMask(Button::DpadUp)) != 0;
+        const auto itemLanes = DpadItems.Consume().Pressed;
+        for (size_t lane = 0; lane < result.DpadItemPressed.size(); ++lane)
+            result.DpadItemPressed[lane] = (itemLanes & (1U << lane)) != 0;
         ++Updates;
         ZrPressUpdates += result.ZrPressed;
         ZlPressUpdates += result.ZlPressed;
         return result;
     }
 
-    void Reset() noexcept { Guest.Reset(); Latest = {}; }
+    void Reset() noexcept { Guest.Reset(); DpadItems.Reset(); Latest = {}; }
     uint64_t Updates = 0;
     uint64_t ZrPressUpdates = 0;
     uint64_t ZlPressUpdates = 0;
 
   private:
     ThreeDsRecomp::Input::DigitalInputAccumulator Guest;
+    ThreeDsRecomp::Input::DigitalInputAccumulator DpadItems;
     TopScreenExtendedInputFrame Latest;
 };
 

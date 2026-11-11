@@ -149,6 +149,20 @@ GUARDS = [
           r'p\.color\.alpha \*= state\.ItemOpacity\.Ocarina;\s+else\s+p\.color\.alpha \*= state\.GroupAlpha;.*?'
           r'std::clamp\(alpha, 0\.0F, 1\.0F\) \* state\.GroupAlpha',
           "oot3d_top_screen_mod_profile_tests (D-pad presentation)"),
+    # --- D-pad item buttons 6..9 (SingleScreen 3.2.2 action 14) ---
+    Guard("D-pad items: a scan exit changed r4 = 6 without a D-pad item, or the slot resolver answered "
+          "6..9 outside the two scan calls (0x0034D1F8 / 0x0034D274)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_item_dispatch.cpp",
+          r'state\.r\[4\] != kTopScreenNativeScanNoButton \|\|.*?'
+          r'state\.r\[14\] == kTopScreenDpadItemPressResolverReturn \|\|\s+'
+          r'state\.r\[14\] == kTopScreenDpadItemHoldResolverReturn',
+          "oot3d_top_screen_mod_profile_tests (D-pad items)"),
+    Guard("D-pad items: native Inventory_UpdateBottleItem ran for button 6..9 (it indexes the four "
+          "button slots with button - 1)",
+          "tools/oot3d/ui_topscreen/oot3d_top_screen_item_dispatch.cpp",
+          r'if \(pc == kTopScreenBottleUpdateEntry\)\s+return IsDpadItemButton\(state\.r\[2\]\);.*?'
+          r'if \(pc == kTopScreenBottleUpdateEntry\) \{.*?state\.r\[15\] = state\.r\[14\];\s+return true;',
+          "oot3d_top_screen_mod_profile_tests (D-pad items)"),
     Guard("A ring 13% and its label 40% larger than 3.0 (5da8aa7c: ring 32 px, label 0.68, label hidden "
           "in alternate HUD mode 1/4)",
           "tools/oot3d/ui_topscreen/oot3d_top_screen_mod_profile_quest.cpp",

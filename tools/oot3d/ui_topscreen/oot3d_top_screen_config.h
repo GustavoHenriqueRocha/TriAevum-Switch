@@ -54,11 +54,27 @@ enum class TopScreenDpadAction : std::uint8_t {
   Slingshot = 11,
   TunicToggle = 12,
   ShieldToggle = 13,
+  // SingleScreen 3.2.2 action 14: the item in the direction's inventory slot,
+  // used through D-pad item buttons 6..9 (oot3d_top_screen_dpad_items.h).
+  Item = 14,
 };
 
 const char *TopScreenDpadActionName(TopScreenDpadAction action) noexcept;
 bool ParseTopScreenDpadAction(std::string_view value,
                               TopScreenDpadAction *action) noexcept;
+
+// Inventory slots (SaveContext items[0..23]) an Item direction can hold. The
+// magic arrow slots are absent: 3.2.2 refuses them (0x005D15F0), the bow
+// switches arrows while aiming instead.
+inline constexpr std::uint8_t kTopScreenDpadItemSlotNone = 0xFFU;
+inline constexpr std::array<std::uint8_t, 21> kTopScreenDpadItemSlots{
+    0U,  1U,  2U,  3U,  5U,  6U,  7U,  8U,  9U,  11U, 12U,
+    13U, 14U, 15U, 17U, 18U, 19U, 20U, 21U, 22U, 23U};
+
+bool IsTopScreenDpadItemSlot(std::uint8_t slot) noexcept;
+const char *TopScreenDpadItemSlotName(std::uint8_t slot) noexcept;
+bool ParseTopScreenDpadItemSlot(std::string_view value,
+                                std::uint8_t *slot) noexcept;
 
 enum class TopScreenFreeCameraSmoothing : std::uint8_t {
   Off = 0,
@@ -101,6 +117,13 @@ struct TopScreenUiConfig {
       kTopScreenChildDpadDefaults;
   std::array<TopScreenDpadAction, 4> AdultDpad =
       kTopScreenAdultDpadDefaults;
+  // Slot of each direction set to TopScreenDpadAction::Item, none elsewhere.
+  std::array<std::uint8_t, 4> ChildDpadItemSlots{
+      kTopScreenDpadItemSlotNone, kTopScreenDpadItemSlotNone,
+      kTopScreenDpadItemSlotNone, kTopScreenDpadItemSlotNone};
+  std::array<std::uint8_t, 4> AdultDpadItemSlots{
+      kTopScreenDpadItemSlotNone, kTopScreenDpadItemSlotNone,
+      kTopScreenDpadItemSlotNone, kTopScreenDpadItemSlotNone};
   bool FreeCameraEnabled = false;
   std::uint8_t FreeCameraSpeedLevel = 3U;
   TopScreenFreeCameraSmoothing FreeCameraSmoothing =
@@ -114,15 +137,34 @@ struct TopScreenUiConfig {
   bool operator==(const TopScreenUiConfig &) const = default;
 };
 
+// The UI config text holds what builds without D-pad items accept: they
+// reject unknown fields and actions and stop at launch, so an Item direction
+// is written there as "none" and its slot goes to the D-pad items file.
 bool ParseTopScreenUiConfigText(std::string_view text,
                                 TopScreenUiConfig *config,
                                 std::string *error = nullptr);
-bool LoadTopScreenUiConfig(const std::filesystem::path &path,
-                           TopScreenUiConfig *config,
-                           std::string *error = nullptr);
 bool SerializeTopScreenUiConfigText(const TopScreenUiConfig &config,
                                     std::string *text,
                                     std::string *error = nullptr);
+
+inline constexpr std::string_view kTopScreenDpadItemsSchema =
+    "oot3d_topscreen_dpad_items_v1";
+// <UI config stem>_dpad_items.json, next to the UI config.
+std::filesystem::path
+TopScreenDpadItemsPath(const std::filesystem::path &uiConfigPath);
+// Sets the Item directions it names; the others keep their action.
+bool ParseTopScreenDpadItemsText(std::string_view text,
+                                 TopScreenUiConfig *config,
+                                 std::string *error = nullptr);
+bool SerializeTopScreenDpadItemsText(const TopScreenUiConfig &config,
+                                     std::string *text,
+                                     std::string *error = nullptr);
+
+// Both files. A D-pad items file that is missing or unreadable leaves the
+// directions as the UI config has them, so it never stops a launch.
+bool LoadTopScreenUiConfig(const std::filesystem::path &path,
+                           TopScreenUiConfig *config,
+                           std::string *error = nullptr);
 bool SaveTopScreenUiConfig(const std::filesystem::path &path,
                            const TopScreenUiConfig &config,
                            std::string *error = nullptr);

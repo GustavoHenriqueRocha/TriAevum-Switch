@@ -3,7 +3,9 @@
 #include "oot3d_top_screen_config.h"
 #include "oot3d_control_settings_widgets.h"
 #include <imgui.h>
+#include <algorithm>
 #include <array>
+#include <iterator>
 
 namespace Oot3dNativeGame {
 
@@ -15,6 +17,8 @@ inline void CopyTopScreenControlSettings(const TopScreenUiConfig& source, TopScr
     target.CameraFovPercent = source.CameraFovPercent;
     target.ChildDpad = source.ChildDpad;
     target.AdultDpad = source.AdultDpad;
+    target.ChildDpadItemSlots = source.ChildDpadItemSlots;
+    target.AdultDpadItemSlots = source.AdultDpadItemSlots;
     target.FreeCameraEnabled = source.FreeCameraEnabled;
     target.FreeCameraSpeedLevel = source.FreeCameraSpeedLevel;
     target.FreeCameraSmoothing = source.FreeCameraSmoothing;
@@ -68,23 +72,45 @@ inline bool DrawTopScreenStickAiming(TopScreenUiConfig& config) {
 inline bool DrawTopScreenActionBindings(TopScreenUiConfig& config) {
     constexpr const char* labels[]{"None", "View", "Ocarina", "Iron Boots", "Hover Boots",
         "Item ZR", "Item ZL", "Sword toggle", "All boots", "Minimap toggle", "Boomerang",
-        "Slingshot", "Tunic toggle", "Shield toggle"};
+        "Slingshot", "Tunic toggle", "Shield toggle", "Item"};
     constexpr const char* directions[]{"Up", "Down", "Left", "Right"};
+    constexpr const char* itemDirections[]{"Up item", "Down item", "Left item", "Right item"};
+    // None, then kTopScreenDpadItemSlots in order.
+    constexpr const char* itemLabels[]{"None", "Deku Sticks", "Deku Nuts", "Bombs", "Bow",
+        "Din's Fire", "Slingshot", "Ocarina", "Bombchus", "Hookshot", "Farore's Wind",
+        "Boomerang", "Lens of Truth", "Magic Beans", "Megaton Hammer", "Nayru's Love",
+        "Bottle 1", "Bottle 2", "Bottle 3", "Bottle 4", "Adult trade item",
+        "Child trade item or mask"};
+    static_assert(std::size(itemLabels) == kTopScreenDpadItemSlots.size() + 1);
     bool changed = false;
-    const auto draw = [&](const char* id, auto& bindings) {
+    const auto draw = [&](const char* id, auto& bindings, auto& slots) {
         ImGui::SeparatorText(id);
         ImGui::PushID(id);
         for (size_t i = 0; i < bindings.size(); ++i) {
             int action = static_cast<int>(bindings[i]);
-            if (ControlWidgets::Combo(directions[i], &action, labels, 14)) {
+            if (ControlWidgets::Combo(directions[i], &action, labels,
+                                      static_cast<int>(std::size(labels)))) {
                 bindings[i] = static_cast<TopScreenDpadAction>(action);
+                if (bindings[i] != TopScreenDpadAction::Item)
+                    slots[i] = kTopScreenDpadItemSlotNone;
+                changed = true;
+            }
+            if (bindings[i] != TopScreenDpadAction::Item) continue;
+            const auto found = std::find(kTopScreenDpadItemSlots.begin(),
+                                         kTopScreenDpadItemSlots.end(), slots[i]);
+            int item = found == kTopScreenDpadItemSlots.end()
+                ? 0 : static_cast<int>(found - kTopScreenDpadItemSlots.begin()) + 1;
+            if (ControlWidgets::Combo(itemDirections[i], &item, itemLabels,
+                                      static_cast<int>(std::size(itemLabels)))) {
+                slots[i] = item == 0 ? kTopScreenDpadItemSlotNone
+                                     : kTopScreenDpadItemSlots[static_cast<size_t>(item - 1)];
                 changed = true;
             }
         }
         ImGui::PopID();
     };
-    draw("Child D-pad", config.ChildDpad);
-    draw("Adult D-pad", config.AdultDpad);
+    draw("Child D-pad", config.ChildDpad, config.ChildDpadItemSlots);
+    draw("Adult D-pad", config.AdultDpad, config.AdultDpadItemSlots);
     int select = static_cast<int>(config.SelectAction);
     constexpr const char* actions[]{"Open Save screen", "Toggle minimap"};
     if (ControlWidgets::Combo("SELECT action", &select, actions, 2)) {

@@ -961,6 +961,17 @@ bool NativeA32WindowSession::RunFrame() {
   untimed.HeadCadence += std::chrono::duration<double>(headCadenceEnd - headAreaEnd).count();
   ApplyTopScreenConfigSnapshot();
   UpdateRollDash();
+  {
+    const auto controls = controlConfigRuntime->Snapshot();
+    const auto gamepad = [&](Oot3dNativeGame::NativeControlAction action) {
+      return controls.Config.Bindings[static_cast<std::size_t>(action)].Gamepad;
+    };
+    uiLifecycleBridge.SetTopScreenSwappedItemLabels(
+        gamepad(Oot3dNativeGame::NativeControlAction::Zr) ==
+            Oot3dNativeGame::NativeGamepadButton::RightShoulder,
+        gamepad(Oot3dNativeGame::NativeControlAction::Zl) ==
+            Oot3dNativeGame::NativeGamepadButton::LeftShoulder);
+  }
   uiLifecycleBridge.BeginHostFrame(
       static_cast<uint32_t>(presentationFrameCount));
   if (topScreenTextureOverrideRuntime.has_value()) {
@@ -2836,6 +2847,8 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
         return Oot3dNativeGame::NativeA32HidButtonMask(value);
       };
   Oot3dNativeGame::TopScreenDpadActionState topScreenDpadActions;
+  std::array<bool, Oot3dNativeGame::kTopScreenDpadDirectionCount>
+      topScreenDpadItemHeld{};
   Oot3dNativeGame::TopScreenOcarinaState ocarinaOwner;
   const bool ocarinaOwnsDpad = nativeCandidateDispatch.TopScreenUiProfile &&
       Oot3dNativeGame::ReadTopScreenOcarinaState(process.Memory(), &ocarinaOwner) &&
@@ -2866,6 +2879,8 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
     }
     topScreenDpadActions = Oot3dNativeGame::ResolveTopScreenDpadActions(
         activeTopScreenConfig, dpadPhysical);
+    topScreenDpadItemHeld = Oot3dNativeGame::ResolveTopScreenDpadItemLanes(
+        activeTopScreenConfig, dpadPhysical).Held;
   }
   const bool zrHeld = ThreeDsRecomp::Input::IsButtonHeld(
       inputFrame, ThreeDsRecomp::Input::Button::Zr);
@@ -2891,6 +2906,7 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
   sampledTopScreenInput.DpadUpHeld =
       (inputFrame.Hid.Buttons & topScreenButton(
           Oot3dNativeGame::NativeA32HidButton::DpadUp)) != 0U;
+  sampledTopScreenInput.DpadItemHeld = topScreenDpadItemHeld;
   if (ocarinaOwnsDpad) {
     inputFrame.Hid.Buttons &= ~(topScreenButton(Oot3dNativeGame::NativeA32HidButton::DpadLeft) |
                                (ocarinaOwner.Page == 12 ? topScreenButton(
@@ -2949,6 +2965,36 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
       if (selectPressed && Oot3dNativeGame::TopScreenItemDescriptionOwnsSelect(description)) {
         selectPressed = false;
         inputFrame.Hid.Buttons &= ~button(Oot3dNativeGame::NativeA32HidButton::Select);
+      }
+    }
+    // SingleScreen 3.0, Items page: A over an item a D-pad direction can
+    // hold is the picker's, not the game's; while it is held the D-pad gives
+    // the item to a direction (oot3d_top_screen_dpad_items.h).
+    const auto aMask = button(Oot3dNativeGame::NativeA32HidButton::A);
+    if (Oot3dNativeGame::TopScreenDpadItemPickerState picker;
+        (buttons & aMask) != 0U && topScreenConfigRuntime != nullptr &&
+        Oot3dNativeGame::ReadTopScreenDpadItemPickerState(process.Memory(), &picker)) {
+      const auto slot = Oot3dNativeGame::ResolveTopScreenDpadItemPickerSlot(picker);
+      if (slot != Oot3dNativeGame::kTopScreenDpadItemSlotNone) {
+        constexpr std::array<Oot3dNativeGame::NativeA32HidButton, 4> kPickerDirections{
+            Oot3dNativeGame::NativeA32HidButton::DpadUp,
+            Oot3dNativeGame::NativeA32HidButton::DpadDown,
+            Oot3dNativeGame::NativeA32HidButton::DpadLeft,
+            Oot3dNativeGame::NativeA32HidButton::DpadRight};
+        inputFrame.Hid.Buttons &= ~aMask;
+        for (std::size_t direction = 0U; direction < kPickerDirections.size(); ++direction) {
+          const auto mask = button(kPickerDirections[direction]);
+          inputFrame.Hid.Buttons &= ~mask;
+          if ((pressed & mask) == 0U) continue;
+          auto config = topScreenConfigRuntime->Snapshot().Config;
+          Oot3dNativeGame::AssignTopScreenDpadItem(config, picker.Age != 0U, direction, slot);
+          std::string pickerError;
+          if (!topScreenConfigRuntime->Apply(config, &pickerError))
+            topScreenConfigRuntime->Preview(config);
+          if (!Oot3dNativeGame::PlayTopScreenUiSound(process, 0x01000498U,
+                                                     kTopScreenDirectCallReturn, &pickerError))
+            throw std::runtime_error("TopScreen D-pad picker sound failed: " + pickerError);
+        }
       }
     }
     if (topScreenDpadActions.WasPressed(
@@ -3018,8 +3064,16 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
         throw std::runtime_error("TopScreen ocarina guide sound failed: " + gameplayActionError);
       }
     }
+    // Boomerang and Slingshot are D-pad item buttons now
+    // (TopScreenDpadItemSlots), not 2.1.1's direct item on button I.
+    auto consumedDpadActions = topScreenDpadActions;
+    for (const auto action : {Oot3dNativeGame::TopScreenDpadAction::Boomerang,
+                              Oot3dNativeGame::TopScreenDpadAction::Slingshot}) {
+      consumedDpadActions.Pressed[static_cast<std::size_t>(action)] = false;
+      consumedDpadActions.Held[static_cast<std::size_t>(action)] = false;
+    }
     if (!Oot3dNativeGame::ConsumeTopScreenGameplayActions(
-            process, topScreenDpadActions,
+            process, consumedDpadActions,
             nativeCandidateDispatch.TopScreenInput.ZrPressed ||
                 nativeCandidateDispatch.TopScreenInput.ZlPressed,
             kTopScreenDirectCallReturn,
@@ -3033,6 +3087,10 @@ bool NativeA32WindowSession::UpdateGuestServicesForRefresh(
     nativeCandidateDispatch.PreviousTopScreenButtons = buttons;
     nativeCandidateDispatch.TopScreenItems.DirectItemId =
         nativeCandidateDispatch.TopScreenGameplayActionRuntime.DirectItem.ActiveItemId;
+    nativeCandidateDispatch.TopScreenItems.ChildDpadItemSlots =
+        Oot3dNativeGame::TopScreenDpadItemSlots(activeTopScreenConfig, true);
+    nativeCandidateDispatch.TopScreenItems.AdultDpadItemSlots =
+        Oot3dNativeGame::TopScreenDpadItemSlots(activeTopScreenConfig, false);
     nativeCandidateDispatch.PauseTransaction->AgeUndelivered();
     Oot3dNativeGame::TopScreenPauseDrawInputs pauseInputs;
     if (!Oot3dNativeGame::ReadTopScreenPauseDrawInputs(process.Memory(),

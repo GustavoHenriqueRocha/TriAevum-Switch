@@ -164,12 +164,14 @@ void TestGearTextureFilters() {
 void RunTopScreenItemDispatchTests();
 void RunTopScreenOcarinaTests();
 void RunTopScreenDpadPresentationTests();
+void RunTopScreenDpadItemsTests();
 
 int main() {
   TestGearTextureFilters();
   RunTopScreenItemDispatchTests();
   RunTopScreenOcarinaTests();
   RunTopScreenDpadPresentationTests();
+  RunTopScreenDpadItemsTests();
   using namespace Oot3dNativeGame;
 
   Oot3dUiProfile profile = Oot3dUiProfile::Oot3d;
@@ -494,6 +496,17 @@ int main() {
               extendedButtonPresentation.front().texture.semantic_name ==
                   "oot3d/native/pause/item_icons",
           "extended item-button presenter lost its recovered ownership");
+
+  // After Controls > "Swap shoulders / triggers" a lane shows 3.0's whole
+  // label: ZR (rect 15) at (364,31), ZL (rect 14) at (340,55), 16 px.
+  const auto swappedLabels = BuildTopScreenTouchLabelsGeometry(0.5F, true, false);
+  Require(swappedLabels.Quads[0].Position.X == 364.0F &&
+              swappedLabels.Quads[0].Size.X == 16.0F &&
+              swappedLabels.Quads[0].AtlasOrigin.X == 47.0F &&
+              swappedLabels.Quads[1].AtlasOrigin.X == 253.0F &&
+              BuildTopScreenTouchLabelsGeometry(0.5F, false, true).Quads[1].AtlasOrigin.X ==
+                  245.0F,
+          "a swapped item lane did not read ZR/ZL");
 
   const auto touchLabels = BuildTopScreenTouchLabelsGeometry(0.5F);
   // The Item I/II lanes are labelled R/L, the physical buttons that use those
@@ -2484,10 +2497,30 @@ int main() {
                                    ocarinaSceneExtension) &&
           questModelMemory.Write32(ocarinaSceneExtension + 0x1714U,
                                    0x01000000U) &&
+          questModelMemory.Write16(questDrawScene + 0x2B80U, 30U) &&
+          ReadTopScreenOcarinaUiActive(questModelMemory, &ocarinaUiActive,
+                                      &error) &&
+          !ocarinaUiActive,
+      "3.2.2 hid the Ocarina guide at an ocarina spot (0x005CD63C mode 2)");
+  constexpr std::uint32_t ocarinaSkullKid = 0x0051C000U;
+  Require(
+      questModelMemory.Write32(questDrawScene + 0x20C4U, ocarinaSkullKid) &&
+          questModelMemory.Write16(ocarinaSkullKid, 0x0115U) &&
+          questModelMemory.Write32(ocarinaSkullKid + 0x130U, 0U) &&
           ReadTopScreenOcarinaUiActive(questModelMemory, &ocarinaUiActive,
                                       &error) &&
           ocarinaUiActive,
-      "TopScreen 1.2 Ocarina extension flag was not decoded");
+      "the Skull Kid's spot showed the Ocarina guide");
+  Require(
+      questModelMemory.Write32(questDrawScene + 0x20C4U, 0U) &&
+          questModelMemory.Write16(questDrawScene + 0x2B80U, 5U) &&
+          ReadTopScreenOcarinaUiActive(questModelMemory, &ocarinaUiActive,
+                                      &error) &&
+          ocarinaUiActive,
+      "teaching at a spot showed the Ocarina guide");
+  Require(questModelMemory.Write16(questDrawScene + 0x2B80U, 1U) &&
+              questModelMemory.Write32(ocarinaSceneExtension + 0x1714U, 0U),
+          "reset the Ocarina gate fixture");
 
   NativeA32Memory questStateMemory;
   Require(

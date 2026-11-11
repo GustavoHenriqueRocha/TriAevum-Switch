@@ -174,6 +174,10 @@
     "0x003494F4",
     "0x00349504",
     "0x0034BE04",
+    "0x0034CF78",
+    "0x0034D104",
+    "0x0034D1EC",
+    "0x0034D268",
     "0x0034E854",
     "0x00353998",
     "0x00355830",
@@ -862,6 +866,18 @@
     "0x0034BE04": [
       "ui_lifecycle"
     ],
+    "0x0034CF78": [
+      "top_screen_item_dispatch"
+    ],
+    "0x0034D104": [
+      "top_screen_item_dispatch"
+    ],
+    "0x0034D1EC": [
+      "top_screen_item_dispatch"
+    ],
+    "0x0034D268": [
+      "top_screen_item_dispatch"
+    ],
     "0x0034E854": [
       "actor_visibility"
     ],
@@ -1367,7 +1383,8 @@
       "typed_gameplay_exits"
     ],
     "0x004C1044": [
-      "ui_lifecycle"
+      "ui_lifecycle",
+      "top_screen_item_dispatch"
     ]
   }
 }

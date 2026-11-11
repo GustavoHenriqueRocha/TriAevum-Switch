@@ -321,39 +321,58 @@ bool ReadTopScreenOcarinaUiActive(NativeA32Memory &memory, bool *active,
     return true;
   }
 
-  std::uint16_t ocarinaResult = 0U;
-  std::uint32_t sceneExtension = 0U;
-  if (!memory.Read16(scene + 0x2B82U, &ocarinaResult) ||
-      !memory.Read32(scene + 0x20ACU, &sceneExtension)) {
+  std::uint8_t stateType = 0U, stateSubtype = 0U;
+  std::uint16_t ocarinaAction = 0U, ocarinaResult = 0U;
+  std::uint32_t player = 0U;
+  if (!memory.Read8(scene + 0x100U, &stateType) ||
+      !memory.Read8(scene + 0x101U, &stateSubtype) ||
+      !memory.Read16(scene + 0x2B80U, &ocarinaAction) ||
+      !memory.Read16(scene + 0x2B82U, &ocarinaResult) ||
+      !memory.Read32(scene + 0x20ACU, &player)) {
     if (error != nullptr)
       *error = "cannot read TopScreen Ocarina UI state";
     return false;
   }
-  if (ocarinaResult != 0x00FFU) {
+  // 3.2.2 0x005CD63C: the native UI owns teaching and playback (actions
+  // 2..27) and 40 and 42..45 (0x005CD5FC).
+  if (stateType != 3U || stateSubtype != 2U ||
+      (ocarinaAction >= 2U && ocarinaAction <= 27U) ||
+      (ocarinaAction >= 40U && ocarinaAction <= 45U && ocarinaAction != 41U)) {
     *active = true;
     return true;
   }
 
-  if (sceneExtension != 0U) {
-    std::uint32_t stateFlags = 0U;
-    if (!memory.Read32(sceneExtension + 0x1714U, &stateFlags)) {
-      if (error != nullptr)
-        *error = "cannot read TopScreen Ocarina state flags";
-      return false;
-    }
-    if ((stateFlags & 0x01000000U) != 0U) {
-      *active = true;
-      return true;
-    }
-  }
-
-  std::uint16_t ocarinaAction = 0U;
-  if (!memory.Read16(scene + 0x2B80U, &ocarinaAction)) {
+  std::uint32_t stateFlags = 0U;
+  if (player != 0U && !memory.Read32(player + 0x1714U, &stateFlags)) {
     if (error != nullptr)
-      *error = "cannot read TopScreen Ocarina action";
+      *error = "cannot read TopScreen Ocarina state flags";
     return false;
   }
-  *active = ocarinaAction > 1U;
+  if ((stateFlags & 0x01000000U) != 0U) {
+    // At an ocarina spot (the Player's flag 0x01000000) the guide stays,
+    // unless the Skull Kid (actor 0x115) is among the NPCs: his game.
+    std::uint32_t actor = 0U;
+    if (!memory.Read32(scene + 0x20C4U, &actor)) {
+      if (error != nullptr)
+        *error = "cannot read TopScreen Ocarina NPC list";
+      return false;
+    }
+    for (int remaining = 64; actor != 0U && remaining > 0; --remaining) {
+      std::uint16_t id = 0U;
+      if (!memory.Read16(actor, &id) || !memory.Read32(actor + 0x130U, &actor)) {
+        if (error != nullptr)
+          *error = "cannot read TopScreen Ocarina NPC";
+        return false;
+      }
+      if (id == 0x0115U) {
+        *active = true;
+        return true;
+      }
+    }
+    *active = false;
+    return true;
+  }
+  *active = ocarinaAction > 1U || ocarinaResult != 0x00FFU;
   return true;
 }
 

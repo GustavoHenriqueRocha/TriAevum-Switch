@@ -74,7 +74,7 @@ void RunTopScreenItemDispatchTests() {
     GuestState state{};
     state.r[14] = 0x123400U;
     const auto entries = TopScreenItemDispatchEntries();
-    Check(entries.size() == 7 && std::is_sorted(entries.begin(), entries.end()) &&
+    Check(entries.size() == 12 && std::is_sorted(entries.begin(), entries.end()) &&
           std::adjacent_find(entries.begin(), entries.end()) == entries.end(), "registry");
     Check(!IsTopScreenItemDispatchEntry(0x1234U), "unknown entry registered");
 
