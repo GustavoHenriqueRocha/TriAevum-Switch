@@ -219,7 +219,8 @@ ModsScan ScanMods(const fs::path &mods) {
   for (fs::directory_iterator it(mods, error), end; !error && it != end; it.increment(error))
     entries.push_back(*it);
   if (error)
-    scan.Unread.push_back({std::string(), std::string(), "the mods folder could not be read (" + error.message() + ")"});
+    scan.Unread.push_back(
+        {std::string(), std::string(), "the mods folder could not be read (" + error.message() + ")"});
   std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
     return a.path().filename().generic_string() < b.path().filename().generic_string();
   });
