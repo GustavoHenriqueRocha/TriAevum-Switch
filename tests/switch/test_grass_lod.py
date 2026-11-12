@@ -216,19 +216,37 @@ def near_segments():
     return shader, cpp
 
 
+def far_segments():
+    """GRASS_FAR_SEGMENTS of grass_lod_common.glsl and kGrassFarBladeSegments of the C++."""
+    shader = re.search(r"const uint GRASS_FAR_SEGMENTS = (\d+)u;", (GRASS / "grass_lod_common.glsl").read_text())
+    header = (REPO / "runtime/three_ds_recomp/include/fast/oot3d/grass_instance_stream.h").read_text()
+    cpp = re.search(r"kGrassFarBladeSegments = (\d+)U;", header)
+    return (int(shader.group(1)) if shader else None), (int(cpp.group(1)) if cpp else None)
+
+
 class GrassLodVertexIndex(unittest.TestCase):
     def test_the_shader_and_the_draw_agree_on_the_near_segments(self):
         shader, cpp = near_segments()
         self.assertEqual(shader, cpp)
         self.assertGreaterEqual(shader, 2)
 
+    def test_the_shader_and_the_draw_agree_on_the_far_segments(self):
+        # The far tufts' blades were one straight triangle each: pointed from a distance next to
+        # the curved near blades (Gustavo, 12/11). They are curved in segments too.
+        shader, cpp = far_segments()
+        self.assertEqual(shader, cpp)
+        self.assertGreaterEqual(shader or 0, 2)
+        vsh = (GRASS / "grass_lod_vsh.glsl").read_text()
+        self.assertIn("const uint bladeVertices = 6u * GRASS_FAR_SEGMENTS - 3u;", vsh)
+
     def test_every_vertex_finds_its_tuft_and_corner(self):
         # grass_lod_vsh.glsl: index = uint((float(v) + 0.5) * (1 / (vertices per tuft))) in
         # binary32; float(v) and + 0.5 are exact (v < 2^23), the product of two binary32 values
         # is exact in a double, so one rounding to binary32 (array('f')) is the GPU's FMUL.
-        # Far draws: 3 vertices per blade; the near draw: 6 x segments - 3 for each of 5 blades.
+        # Every draw: 6 x segments - 3 vertices per blade, 5, 3 or 1 blades far, 5 near.
         near = 5 * (6 * near_segments()[0] - 3)
-        for per in (15, 9, 3, near):
+        far = 6 * (far_segments()[0] or 1) - 3
+        for per in (5 * far, 3 * far, far, near):
             inverse = array.array("f", [1.0 / per])[0]
             vertices = 65536 * per
             products = array.array("f", ((v + 0.5) * inverse for v in range(vertices)))
@@ -266,15 +284,22 @@ class GrassNearBlade(unittest.TestCase):
         cls.program = common()
         cls.segments = near_segments()[0]
 
-    def row_side(self, k):
-        return tuple(self.program.call("grass_near_row_side", k).c)
+    def row_side(self, k, segments):
+        return tuple(self.program.call("grass_row_side", k, segments).c)
 
     def test_the_vertices_cover_every_segment_once(self):
-        per = 6 * self.segments - 3
-        rows = [r / self.segments for r in range(self.segments + 1)]
+        for segments in (self.segments, far_segments()[0]):
+            with self.subTest(segments=segments):
+                self.check_rows(segments)
+        for k in range(6 * self.segments - 3):
+            self.assertEqual(tuple(self.program.call("grass_near_row_side", k).c), self.row_side(k, self.segments))
+
+    def check_rows(self, segments):
+        per = 6 * segments - 3
+        rows = [r / segments for r in range(segments + 1)]
         triangles = []
         for first in range(0, per, 3):
-            corners = [self.row_side(first + c) for c in range(3)]
+            corners = [self.row_side(first + c, segments) for c in range(3)]
             for t, side in corners:
                 self.assertIn(min(rows, key=lambda r: abs(r - t)), rows)
                 self.assertAlmostEqual(t, min(rows, key=lambda r: abs(r - t)), delta=1.0e-6)
@@ -288,13 +313,13 @@ class GrassNearBlade(unittest.TestCase):
         self.assertEqual(len(windings), 1, "mixed winding")
         # Each segment's area (side from -1 to 1, so width 2 x its height) is covered once:
         # a quad for every segment but the last, a triangle to the tip for the last.
-        covered = [0.0] * self.segments
+        covered = [0.0] * segments
         for corners, area in triangles:
             low = min(t for t, _ in corners)
-            covered[round(low * self.segments)] += abs(area) / 2.0
-        height = 1.0 / self.segments
+            covered[round(low * segments)] += abs(area) / 2.0
+        height = 1.0 / segments
         for index, value in enumerate(covered):
-            want = 2.0 * height if index < self.segments - 1 else height
+            want = 2.0 * height if index < segments - 1 else height
             self.assertAlmostEqual(value, want, delta=1.0e-6, msg=index)
         # The tip is one point: side 0 at t = 1, and nothing else reaches t = 1.
         tips = [c for corners, _ in triangles for c in corners if c[0] == 1.0]
@@ -356,18 +381,28 @@ class GrassNearBlade(unittest.TestCase):
             for a, b in zip(left, right):
                 self.assertAlmostEqual(a, b, delta=1.0e-4)
 
-    def test_a_tuft_keeps_test9s_triangle(self):
-        # The near program draws the tufts of its ring with the same rows: at t = 0 and 1 the
-        # corners of grass_lod_blade's triangle (centre -+ half base at the root, the tip).
+    def test_a_tuft_blade_is_the_pc_curve_on_its_card(self):
+        # Every tuft blade (far draws and the near draw's ring) was grass_lod_blade's straight
+        # triangle: pointed from a distance (12/11). Now the root keeps that triangle's corners
+        # (centre -+ half base) and the rows follow the PC blade seen on the card: the centre line
+        # from the centre to the tip bent sideways by `curve` t^2, the height drooping as the PC's
+        # (t - droop t^3), the width narrowing as the PC's (1 - 0.75 t), one point at the tip.
+        droop = pc_preset_shape()[1]
         rng = random.Random(16)
-        for _ in range(100):
+        for _ in range(200):
             centre, half_base, tip = f32(rng.random()), f32(rng.uniform(0.0, 0.1)), f32(rng.random())
-            tip_y = f32(rng.uniform(0.7, 1.0))
-            for t, side, want in ((0.0, -1.0, (centre - half_base, 0.0)), (0.0, 1.0, (centre + half_base, 0.0)),
-                                  (1.0, 0.0, (tip, tip_y))):
-                got = self.program.call("grass_near_tuft_xy", centre, half_base, tip, tip_y, t, side).c
-                self.assertAlmostEqual(got[0], want[0], delta=1.0e-6)
-                self.assertAlmostEqual(got[1], want[1], delta=1.0e-6)
+            tip_y, curve = f32(rng.uniform(0.7, 1.0)), f32(rng.uniform(-0.5, 0.5))
+            t = f32(rng.choice([0.0, 0.5, 1.0 / 3.0, 2.0 / 3.0, 1.0, rng.random()]))
+            for side in (-1.0, 0.0, 1.0):
+                got = self.program.call("grass_tuft_xy", centre, half_base, tip, tip_y, curve, t, side).c
+                width = 0.0 if t >= 1.0 else 1.0 - 0.75 * t
+                want = (centre + (tip - centre) * t + curve * t * t + side * half_base * width,
+                        tip_y * (t - droop * t * t * t))
+                self.assertAlmostEqual(got[0], want[0], delta=2.0e-6)
+                self.assertAlmostEqual(got[1], want[1], delta=2.0e-6)
+        vsh = (GRASS / "grass_lod_vsh.glsl").read_text()
+        self.assertNotIn("corner == 2u ? tipX", vsh)
+        self.assertEqual(vsh.count("grass_tuft_xy("), 1, "one curved tuft for the far and near programs")
 
 
 class GrassLodColour(unittest.TestCase):

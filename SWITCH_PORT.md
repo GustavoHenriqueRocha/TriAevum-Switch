@@ -5365,6 +5365,18 @@ temple entry had `no shared placement 2` too.
 - **Log:** `sources ... (N published, M overlays; waiting W, overlaid O)`.
 - Tests: `oot3d_grass_switch_tests` (`Oot3dGrassOverlays`); guards in `test_bug_guards.py`.
 
+### Grass on deko3d: curved far tufts (12/11)
+- **Report:** after the curved near blades (f0ce6d09), the far grass still looked pointed, unlike the
+  curved grass near Link (print `curva-sessao/2026022801130900`).
+- **Now:** every tuft blade (far draws and the near draw's ring) is the PC curve seen on its card
+  (`grass_tuft_xy`): root at `grass_lod_blade`'s corners, centre line bent sideways by the PC
+  curvature x cos(phase) x height / card width, droop `t - 0.35 t^3`, width `1 - 0.75 t`, in
+  `GRASS_FAR_SEGMENTS` = `kGrassFarBladeSegments` = 2 segments (9 vertices instead of 3).
+- **Cost:** far tufts were 0.09-0.13 ms of GPU per frame in the "curva" session (blades 1.5-2.1 ms);
+  three times the vertices, measure in the next tour (`gpu ... tufts` in the grass log line).
+- Tests: `test_grass_lod.py` (`test_a_tuft_blade_is_the_pc_curve_on_its_card`, far segments, index
+  exact for 45/27/9 vertices per tuft), `oot3d_grass_switch_tests`.
+
 ### Mirror natives for the render loops (Profile18 items 2 and 5, 11/07)
 Guest replacements for the hottest loops of the game's CPU renderer, in the existing mechanism
 (`guest_overrides.json`, `apply_guest_overrides.py`, `oot3d_native_guest_overrides.cpp`), all with

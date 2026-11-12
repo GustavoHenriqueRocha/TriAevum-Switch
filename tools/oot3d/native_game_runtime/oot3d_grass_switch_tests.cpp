@@ -1684,11 +1684,13 @@ TEST(Oot3dGrassLod, LevelCoordinateSamples) {
     EXPECT_EQ(GrassLodBlades(GrassStreamKind::Tufts3), 3U);
     EXPECT_EQ(GrassLodTargetBlades(GrassStreamKind::Tufts3), 1U);
     EXPECT_EQ(GrassLodBlades(GrassStreamKind::Tufts1), 1U);
-    // Near blades are curved (kGrassNearBladeSegments quads and a tip), far ones one triangle.
+    // Every blade is curved: segments - 1 quads and a tip (kGrassNearBladeSegments near;
+    // far tufts kGrassFarBladeSegments, no longer one pointed triangle, 12/11).
     EXPECT_EQ(GrassLodVerticesPerBlade(GrassStreamKind::Blades), 6U * kGrassNearBladeSegments - 3U);
-    EXPECT_EQ(GrassLodVerticesPerBlade(GrassStreamKind::Tufts), 3U);
-    EXPECT_EQ(GrassLodVerticesPerBlade(GrassStreamKind::Tufts3), 3U);
-    EXPECT_EQ(GrassLodVerticesPerBlade(GrassStreamKind::Tufts1), 3U);
+    EXPECT_GE(kGrassFarBladeSegments, 2U);
+    EXPECT_EQ(GrassLodVerticesPerBlade(GrassStreamKind::Tufts), 6U * kGrassFarBladeSegments - 3U);
+    EXPECT_EQ(GrassLodVerticesPerBlade(GrassStreamKind::Tufts3), 6U * kGrassFarBladeSegments - 3U);
+    EXPECT_EQ(GrassLodVerticesPerBlade(GrassStreamKind::Tufts1), 6U * kGrassFarBladeSegments - 3U);
     // Single blades turn into tufts by 600; the levels start past that and
     // twice the cull margin there.
     const auto settings = GrassStreamSettingsFromProfile(SelectGrassSwitchProfile(true, GrassSwitchDistance::Near));

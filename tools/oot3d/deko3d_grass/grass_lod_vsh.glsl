@@ -3,19 +3,20 @@
 // per tuft"): the blades of the tufts grass_tuft_vsh.glsl prepared this
 // frame. No instancing: vertex v is vertex v % n of blade (v / n) % blades
 // of tuft v / (n x blades) (vertices of several tufts share a warp), read
-// from the tuft buffer bound at the draw's first tuft. n is 3 (a triangle)
-// for far draws and 6 x GRASS_NEAR_SEGMENTS - 3 for the near one.
+// from the tuft buffer bound at the draw's first tuft. n is 6 x segments - 3
+// (GRASS_FAR_SEGMENTS far, GRASS_NEAR_SEGMENTS near).
 // - Far draws (default): 5, 3 or 1 blades per tuft (1 / grass_lod_draw.x),
 //   turning into grass_lod_draw.y blades as the tuft's level coordinate
 //   passes grass_lod_draw.w (grass_lod_blade). Every tuft is a whole tuft
 //   (the cull worker leaves single blades and their turn into tufts to the
-//   near draw). The tuft's lit root and tip colours, fog per vertex.
+//   near draw). The tuft's lit root and tip colours, fog per vertex. Each
+//   blade is the PC's curve seen on the card (grass_tuft_xy).
 // - GRASS_LOD_NEAR: 5 blades, single blades within grass_distance.z turning
 //   into the tuft from there to grass_distance.w as grass_vsh.glsl does,
 //   their per-blade light per vertex (the instance read for its width
 //   axis, ground normal and colour). The blades are the PC's curved blade
 //   in GRASS_NEAR_SEGMENTS segments (grass_near_blade_point); the tufts of
-//   this ring are their triangles cut into the same rows.
+//   this ring are the far draws' curved tuft blades in the same rows.
 // The fragment programs are grass_fsh.glsl's.
 
 #include "grass_lod_common.glsl"
@@ -35,15 +36,17 @@ layout(location = 0) out vec4 grass_shade; // lit and fogged colour, alpha 1
 
 void main() {
     // v / (n x blades) in float: exact for every v of a draw (at most 65536
-    // tufts of 15 vertices far, 5 x (6 x GRASS_NEAR_SEGMENTS - 3) near;
+    // tufts of 5 x n vertices; 
     // test_grass_lod.py checks each one).
     uint vertex = uint(gl_VertexID);
     uint index = uint((float(vertex) + 0.5) * uintBitsToFloat(grass_lod_index.x));
     uint local = vertex - index * grass_lod_index.y;
 #ifdef GRASS_LOD_NEAR
     const uint bladeVertices = 6u * GRASS_NEAR_SEGMENTS - 3u;
+    const uint segments = GRASS_NEAR_SEGMENTS;
 #else
-    const uint bladeVertices = 3u;
+    const uint bladeVertices = 6u * GRASS_FAR_SEGMENTS - 3u;
+    const uint segments = GRASS_FAR_SEGMENTS;
 #endif
     uint blade = local / bladeVertices;
     uint corner = local - blade * bladeVertices;
@@ -59,15 +62,17 @@ void main() {
     float morph = clamp(tuft.tip_level.w - grass_lod_draw.w, 0.0, 1.0);
     float centre, halfBase, tipX;
     grass_lod_blade(b, grass_lod_draw.x, grass_lod_draw.y, grass_lod_draw.z, morph, random, centre, halfBase, tipX);
-#ifdef GRASS_LOD_NEAR
-    vec2 rowSide = grass_near_row_side(corner);
-    vec2 card = grass_near_tuft_xy(centre, halfBase, tipX, 0.7 + 0.3 * random.z, rowSide.x, rowSide.y);
+    vec2 rowSide = grass_row_side(corner, segments);
+    // The blade's own curve: its phase and random from the slot and lean
+    // randoms (as the near blade's); the PC curve turned by the phase, seen
+    // across the card (whose width is 2 |sideHalf|).
+    float phase = random.y * 6.2831853 + b;
+    float signedRandom = fract(random.x * 4.0 + random.y) * 2.0 - 1.0;
+    float cardWidth = max(2.0 * length(sideHalf), 1.0e-3);
+    float curve = GRASS_NEAR_SHAPE.x * (1.0 + signedRandom * GRASS_NEAR_SHAPE.z) * cos(phase) * height / cardWidth;
+    vec2 card = grass_tuft_xy(centre, halfBase, tipX, 0.7 + 0.3 * random.z, curve, rowSide.x, rowSide.y);
     float x = card.x;
     float y = card.y;
-#else
-    float x = corner == 2u ? tipX : centre + (corner == 0u ? -halfBase : halfBase);
-    float y = corner == 2u ? 0.7 + 0.3 * random.z : 0.0;
-#endif
     vec3 position = base + vec3(sideHalf.x, 0.0, sideHalf.y) * (x * 2.0 - 1.0) + vec3(0.0, height * y, 0.0);
     position.xz += bend * (height * y * y);
     position.y -= dot(bend, bend) * height * 0.3 * y * y;
@@ -92,9 +97,6 @@ void main() {
         float bladeHeight = height * (0.7 + 0.3 * random.z);
         vec2 lean = (random.yz - 0.5) * 0.35 + bend;
         vec3 root = base + vec3(offset.x, 0.0, offset.y);
-        // The blade's own curve: its phase and random from the slot and lean randoms.
-        float phase = random.y * 6.2831853 + b;
-        float signedRandom = fract(random.x * 4.0 + random.y) * 2.0 - 1.0;
         vec3 bladePosition = grass_near_blade_point(root, facing, halfWidth, bladeHeight, lean, phase, signedRandom,
                                                     rowSide.x, rowSide.y);
         vec3 bladeNormal = normalize(vec3(-facing.y, 0.6, facing.x));

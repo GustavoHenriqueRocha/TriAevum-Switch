@@ -224,7 +224,7 @@ uint32_t GrassLodBlades(GrassStreamKind kind) noexcept {
 }
 
 uint32_t GrassLodVerticesPerBlade(GrassStreamKind kind) noexcept {
-    return kind == GrassStreamKind::Blades ? 6U * kGrassNearBladeSegments - 3U : 3U;
+    return 6U * (kind == GrassStreamKind::Blades ? kGrassNearBladeSegments : kGrassFarBladeSegments) - 3U;
 }
 
 uint32_t GrassLodTargetBlades(GrassStreamKind kind) noexcept {

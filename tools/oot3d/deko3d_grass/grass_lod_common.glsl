@@ -125,14 +125,17 @@ void grass_lod_blade(float blade, float from, float target, float to, float morp
 // in grass_instance_stream.h is the same count (test_grass_lod.py).
 const uint GRASS_NEAR_SEGMENTS = 3u;
 const vec4 GRASS_NEAR_SHAPE = vec4(0.64, 0.35, 0.38, 2.4609142);
+// The far draws' tuft blades: the same curve on the card in fewer segments
+// (kGrassFarBladeSegments in grass_instance_stream.h).
+const uint GRASS_FAR_SEGMENTS = 2u;
 
-// Vertex k (0 .. 6 x segments - 4) of a segmented blade: its height along the
-// blade (0..1) and its side (-1, 1; 0 at the tip). Every segment but the last
-// is two triangles (row r left, r right, r+1 left; r+1 left, r right, r+1
-// right), the last one a triangle to the tip.
-vec2 grass_near_row_side(uint k) {
-    uint quads = GRASS_NEAR_SEGMENTS - 1u;
-    float segments = float(GRASS_NEAR_SEGMENTS);
+// Vertex k (0 .. 6 x count - 4) of a blade in `count` segments: its height
+// along the blade (0..1) and its side (-1, 1; 0 at the tip). Every segment
+// but the last is two triangles (row r left, r right, r+1 left; r+1 left,
+// r right, r+1 right), the last one a triangle to the tip.
+vec2 grass_row_side(uint k, uint count) {
+    uint quads = count - 1u;
+    float segments = float(count);
     if (k >= 6u * quads) {
         uint c = k - 6u * quads;
         if (c == 2u) return vec2(1.0, 0.0);
@@ -143,6 +146,10 @@ vec2 grass_near_row_side(uint k) {
     float up = (q == 2u || q == 3u || q == 5u) ? 1.0 : 0.0;
     float side = (q == 0u || q == 2u || q == 3u) ? -1.0 : 1.0;
     return vec2((float(quad) + up) / segments, side);
+}
+
+vec2 grass_near_row_side(uint k) {
+    return grass_row_side(k, GRASS_NEAR_SEGMENTS);
 }
 
 // grass_blade_shape of grass_blade_shape.h without its sin hash: the blade's
@@ -184,11 +191,15 @@ vec3 grass_near_blade_point(vec3 root, vec2 facing, float halfWidth, float heigh
     return position;
 }
 
-// A tuft's blade in the near draw's rows: grass_lod_blade's triangle (base
-// centre -+ half base, tip at tipY of the height), cut at height t. Card x
-// (0..1) and height y.
-vec2 grass_near_tuft_xy(float centre, float halfBase, float tip, float tipY, float t, float side) {
-    return vec2(mix(centre + side * halfBase, tip, t), t * tipY);
+// A tuft's blade on its card at height t (0..1) and side: the root at
+// grass_lod_blade's triangle corners (centre -+ half base), then the PC blade
+// seen on the card: the centre line to the tip bent sideways by `curve` t^2
+// (card widths), the height drooping (t - droop t^3, of tipY), the width
+// narrowing as the PC's (1 - 0.75 t, none at the tip). Card x and height y.
+vec2 grass_tuft_xy(float centre, float halfBase, float tip, float tipY, float curve, float t, float side) {
+    float width = t >= 1.0 ? 0.0 : 1.0 - 0.75 * t;
+    float x = mix(centre, tip, t) + curve * t * t + side * halfBase * width;
+    return vec2(x, tipY * (t - GRASS_NEAR_SHAPE.y * t * t * t));
 }
 
 // The PICA depth and fog of the native fragment program, per vertex (as grass_vsh.glsl).
