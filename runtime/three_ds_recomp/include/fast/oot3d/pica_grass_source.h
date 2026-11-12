@@ -90,6 +90,7 @@ class PicaGrassPlacements {
   private:
     GrassAsyncPlacementBuilder mBuilder;
     GrassLateOverlays mLateOverlays;
+    GrassShownPlacements mShown;
     std::vector<PicaGrassDrawable> mReady;
     PicaGrassPlacementStats mStats;
 };

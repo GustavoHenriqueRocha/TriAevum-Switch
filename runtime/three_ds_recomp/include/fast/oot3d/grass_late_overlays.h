@@ -8,6 +8,7 @@
 // frame, when all of its draws have been published to GrassSceneBridge, and
 // the next frame's placement requests use it.
 
+#include "fast/oot3d/grass_async_placement_builder.h"
 #include "fast/oot3d/grass_overlay_mask.h"
 #include "fast/oot3d/grass_scene_bridge.h"
 
@@ -43,6 +44,33 @@ class GrassLateOverlays {
     };
     std::unordered_map<uint64_t, Entry> mSets;
     std::unordered_map<uint64_t, uint64_t> mWaiting; // instance -> the frame it first waited in
+};
+
+// The placement last shown for each ground (its world identity). When the
+// overlays covering a ground change (a path the game stops drawing off
+// screen), its placement key changes and the new one builds for a while: the
+// ground keeps showing the last one meanwhile instead of blinking off (the
+// PC's GrassStaticPlacementCache::mShown).
+class GrassShownPlacements {
+  public:
+    // Everything of the request but its overlays: what must match to keep
+    // showing the last placement.
+    [[nodiscard]] static uint64_t Base(const GrassAsyncPlacementRequest& request);
+    // A ready placement is remembered; a pending result of the same base
+    // becomes the shown placement, ready.
+    void Resolve(uint64_t world, uint64_t base, uint64_t frame, GrassAsyncPlacementResult& result);
+    // Keeps the max(32, `keep`) most recently shown.
+    void Prune(size_t keep);
+    [[nodiscard]] size_t Size() const noexcept { return mShown.size(); }
+
+  private:
+    struct Shown {
+        uint64_t Base = 0;
+        std::shared_ptr<const GrassWorldPlacement> Placement;
+        double BuildMilliseconds = 0.0;
+        uint64_t LastFrame = 0;
+    };
+    std::unordered_map<uint64_t, Shown> mShown;
 };
 
 // Sets of sources not drawn for this many frames are dropped.

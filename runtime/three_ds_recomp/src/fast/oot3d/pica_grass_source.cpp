@@ -524,7 +524,6 @@ const std::vector<PicaGrassDrawable>& PicaGrassPlacements::Update(uint64_t frame
                 continue;
             }
             if (overlays.Set) ++mStats.Overlaid;
-            request.Overlays = overlays.Set;
             request.LazyMaskTexture = rule.Target.Rgba8Hash;
             request.LazyColorTexture = mesh.ObservedTextureHash;
             request.Rule = rule;
@@ -533,7 +532,12 @@ const std::vector<PicaGrassDrawable>& PicaGrassPlacements::Update(uint64_t frame
             request.ClusterSize = settings.CullingClusterSize;
             request.NormalOffset = rule.NormalOffset;
             request.HeightScale = settings.Appearance.HeightScale;
+            const uint64_t base = GrassShownPlacements::Base(request); // before its overlays
+            request.Overlays = overlays.Set;
+            const uint64_t world = request.WorldIdentity;
             auto result = mBuilder.ResolveOrQueue(std::move(request));
+            // Its new overlays still building: the grass it showed stays.
+            mShown.Resolve(world, base, frameId, result);
             if (result.Queued || result.State != GrassAsyncPlacementState::Ready) {
                 ++mStats.Queued;
             }
@@ -552,6 +556,7 @@ const std::vector<PicaGrassDrawable>& PicaGrassPlacements::Update(uint64_t frame
             }
         }
     }
+    mShown.Prune(mStats.Meshes);
     mStats.ResidentBytes = mBuilder.Stats().ResidentBytes;
     return mReady;
 }

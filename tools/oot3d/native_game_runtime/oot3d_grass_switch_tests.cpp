@@ -2727,6 +2727,50 @@ TEST(Oot3dGrassOverlays, AGroundHalfCoveredByALaterDrawGrowsGrassOnlyOnTheOtherH
     bridge.Clear();
 }
 
+// The grass blinked off once in the "mascara" build's tour (12/11): a change
+// of a ground's covering overlays changes its placement key, and nothing was
+// drawn for that ground while the new placement built.
+TEST(Oot3dGrassOverlays, AGroundKeepsItsShownGrassWhileItsNewOverlaysBuild) {
+    GrassShownPlacements shown;
+    const auto placement = std::make_shared<GrassWorldPlacement>();
+    GrassAsyncPlacementResult ready{GrassAsyncPlacementState::Ready, placement, false, 3.0};
+    shown.Resolve(5, 100, 10, ready);
+    EXPECT_TRUE(ready.Placement == placement);
+    GrassAsyncPlacementResult pending{GrassAsyncPlacementState::Pending, nullptr, true, 0.0};
+    shown.Resolve(5, 100, 11, pending);
+    EXPECT_EQ(pending.State, GrassAsyncPlacementState::Ready);
+    EXPECT_TRUE(pending.Placement == placement);
+    // Another ground, or the same one changed in anything but its overlays: no grass until built.
+    GrassAsyncPlacementResult otherWorld{GrassAsyncPlacementState::Pending, nullptr, true, 0.0};
+    shown.Resolve(6, 100, 11, otherWorld);
+    EXPECT_EQ(otherWorld.State, GrassAsyncPlacementState::Pending);
+    GrassAsyncPlacementResult otherBase{GrassAsyncPlacementState::Pending, nullptr, true, 0.0};
+    shown.Resolve(5, 101, 12, otherBase);
+    EXPECT_EQ(otherBase.State, GrassAsyncPlacementState::Pending);
+    EXPECT_TRUE(otherBase.Placement == nullptr);
+    // The base: the overlays do not count, the rest does.
+    GrassAsyncPlacementRequest request;
+    request.Budget = 1000;
+    const uint64_t base = GrassShownPlacements::Base(request);
+    request.Overlays = std::make_shared<GrassOverlaySet>();
+    EXPECT_EQ(GrassShownPlacements::Base(request), base);
+    request.Budget = 2000;
+    EXPECT_NE(GrassShownPlacements::Base(request), base);
+    request.Budget = 1000;
+    request.HeightScale = 2.0F;
+    EXPECT_NE(GrassShownPlacements::Base(request), base);
+    // The most recently shown stay.
+    for (uint64_t world = 100; world < 140; ++world) {
+        GrassAsyncPlacementResult r{GrassAsyncPlacementState::Ready, placement, false, 0.0};
+        shown.Resolve(world, 1, 20 + world, r);
+    }
+    shown.Prune(0);
+    EXPECT_EQ(shown.Size(), 32U);
+    GrassAsyncPlacementResult newest{GrassAsyncPlacementState::Pending, nullptr, true, 0.0};
+    shown.Resolve(139, 1, 200, newest);
+    EXPECT_EQ(newest.State, GrassAsyncPlacementState::Ready);
+}
+
 TEST(Oot3dGrassOverlays, ASourceWaitsOneFrameAtMostAndSetsOfOldSourcesGo) {
     GrassLateOverlays late;
     EXPECT_FALSE(late.Find(7, 10).Ready);
