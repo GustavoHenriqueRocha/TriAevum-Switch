@@ -43,6 +43,19 @@ título) nem mudar o OoT3D por acidente?
   O C++ foi regerado em `gen/cpp-john` com as mesmas flags do `cpp-lean` (sem `--sparse-block-entries`
   nem `--fold-vfp-literals`), o que também cumpre a decisão de 06/11 (regerar no próximo build).
 
+- Receita do C++ do jogo (de `tools/oot3d/native_a32_runtime`, venv `~/.venvs/triaevum`,
+  `OOT3D_OPERATIONAL_oot3dExtractRoot=~/oot3d-work/extract`):
+  `generate_whole_aot.py --output gen/aot_program-john.json --inventory-output gen/inventory-john.csv`;
+  `generate_whole_aot_cpp.py --program gen/aot_program-john.json --selection whole_aot_functions.json
+  --code extract/exefs/code.bin --output gen/cpp-john --shards 256 --shard-strategy affinity
+  --native-vfp-aarch64 --vfp-zero-aware --lean-stack --guest-overrides --giant-function-instructions 1000`;
+  `apply_guest_overrides.py --generated gen/cpp-john`; auditoria `audit_whole_aot_product.py` ok
+  (12439 funções, 162799 blocos). 246 de 256 shards diferem do `cpp-lean` da p7e.
+- Build no Ryzen: 890 passos (shards incluídos), NRO md5 377020c8dba7c7ace62c9cf43a4dd11e.
+- Testes: `test_bug_guards` 600/600; `tests/switch/run.sh` 94 ok, 1 skip (áudio sem romfs) e o
+  `oot3d_native_status_file_tests` instável (SIGPIPE de uma corrida do próprio teste com FIFO,
+  2 em 55 rodadas; já existia nos dois lados), corrigido em commit separado (0 em 200).
+
 ## Decisão
 Mesclar o `english` inteiro, com as junções acima. Guardas nossas sem par no dele foram
 mantidas (82); três foram reescritas para a estrutura nova sem afrouxar o que checam; duas saíram

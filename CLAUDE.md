@@ -149,6 +149,17 @@ Formato: sintoma → causa → o que fazer. Detalhe em `docs/pesquisas/` e nos c
   `rsync -a --bwlimit=9500 --rsync-path='wsl rsync'`, `scp -l 76000`, preservando
   `.ninja_log`/`.ninja_deps`. RAM já teve bit flips: confira md5 depois do relink. O WSL desliga
   quando a última sessão `wsl.exe` fecha: mantenha o `ssh ryzen wsl ...` aberto durante o build.
+- **Configure do NRO falha com "block count mismatch" ou link sem `Oot3dWholeAotHookGates` (12/11)** → desde a
+  mescla do `english` do John o manifesto do produto conta 162799 blocos e o runtime pede essa função no registro:
+  o `gen/cpp-lean` da p7e (e o `aot_program.json` antigo) não servem. → Regere os dois com o gerador da árvore
+  (`generate_whole_aot.py` e `generate_whole_aot_cpp.py` com as flags do manifesto, venv `~/.venvs/triaevum`;
+  receita em `docs/pesquisas/2026-11-12-mescla-english-john.md`) em pasta nova, audite com
+  `audit_whole_aot_product.py` e só então mande ao Ryzen (troca 246 de 256 shards: build longo).
+- **Configure pede libcurl/mbedcrypto (12/11)** → o atualizador e o download do HUD do John. → `dkp-pacman -S
+  switch-curl switch-mbedtls` (o WSL do Ryzen já tem; o notebook não).
+- **Mescla com add/add "pegar o dele" perdeu código nosso (12/11)** → arquivos que os dois lados criaram
+  (PRs do John em pt-BR + versão dele em inglês) tinham commits nossos depois. → Antes de escolher um lado,
+  compare os identificadores das duas versões (`comm -23`), não só o assunto dos commits.
 - **MTP não sobrescreve** → `gio copy` falha em arquivo existente. → `gio remove` antes, ou use o
   FTP (`curl -T` sobrescreve).
 
